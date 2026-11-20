@@ -12,6 +12,7 @@ import {
 	type PuppeteerBrowserHandle,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { waitForDetached } from "@oh-my-pi/pi-coding-agent/tools/browser/selector-wait";
 import type { ReadyInfo, WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import {
 	acquireTab,
@@ -148,6 +149,260 @@ describe("browser tab worker startup", () => {
 
 describe("OMP-owned browser evaluation", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps delayed-caught frame selector timeouts inside the run",
+		async () => {
+			const name = `frame-delayed-catch-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: 'data:text/html,<iframe name="child" srcdoc="<button>frame</button>"></iframe>',
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const frame = await tab.frame("child");
+					const pending = frame.waitForSelector("#missing", {timeout:50});
+					// This integration case requires the real Chromium timeout before attaching its catch.
+					await wait(150);
+					try { await pending; } catch (error) { return error.message.includes("timed out"); }
+					return false;
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toBe(true);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"completes public detached waits when navigation removes the element",
+		async () => {
+			const name = `selector-navigation-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: "data:text/html,<button id=present>old document</button>",
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const pending = tab.waitForSelector("#present", {state:"detached", timeout:2000});
+					await tab.evaluate("document.querySelector('#present').isConnected");
+					await page.goto("data:text/html,replacement-document");
+					return (await pending) === null;
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toBe(true);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"continues detached polling after a real document context replacement",
+		async () => {
+			const page = await headless().browser.newPage();
+			const queried = Promise.withResolvers<void>();
+			const replaced = Promise.withResolvers<void>();
+			let first = true;
+			try {
+				await page.setContent('<button id="present">old document</button>');
+				const frame = page.mainFrame();
+				const pending = waitForDetached(async () => {
+					if (!first) return frame.$("#present");
+					first = false;
+					const stale = await frame.$("#present");
+					if (!stale) throw new Error("Expected an old-document handle");
+					queried.resolve();
+					await replaced.promise;
+					try {
+						return (await stale.evaluateHandle(element => element)).asElement();
+					} finally {
+						await stale.dispose().catch(() => undefined);
+					}
+				}, new AbortController().signal).then(
+					value => ({ value }),
+					error => ({ error }),
+				);
+				await queried.promise;
+				await page.goto("data:text/html,new-document");
+				replaced.resolve();
+				expect(await pending).toEqual({ value: null });
+			} finally {
+				replaced.resolve();
+				await page.close().catch(() => undefined);
+			}
+		},
+		30_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"accepts selector wait states on tabs and frames",
+		async () => {
+			const name = `selector-states-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				const html =
+					'<button id="visible">shown</button><div id="hidden" style="display:none">hidden</div><iframe name="child" srcdoc="<div id=hidden style=display:none>hidden</div><div id=visible>shown</div>"></iframe>';
+				await acquireTab(name, headless(), {
+					url: `data:text/html,${encodeURIComponent(html)}`,
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const hidden = await tab.waitForSelector("#removed", {state:"hidden"});
+					const detached = await tab.waitForSelector("#removed", {state:"detached"});
+					const invisible = await tab.waitForSelector("#hidden", {state:"hidden"});
+					const attached = await tab.waitForSelector("#hidden", {state:"attached"});
+					const visible = await tab.waitForSelector("#visible", {state:"visible", timeout:Infinity});
+					const legacyHidden = await tab.waitForSelector("#removed", {hidden:true});
+					const legacyVisible = await tab.waitForSelector("#visible", {visible:true});
+					const frame = await tab.frame("child");
+					const frameHidden = await frame.waitForSelector("#removed", {state:"hidden"});
+					const frameDetached = await frame.waitForSelector("#removed", {state:"detached"});
+					const frameAttached = await frame.waitForSelector("#hidden", {state:"attached", timeout:Infinity});
+					const frameSnapshot = await frame.ariaSnapshot("#visible");
+					const frameRef = frameSnapshot.match(/ref=(e[0-9]+)/)?.[1];
+					if (!frameRef) throw new Error("Expected a frame element ref");
+					let frameRefAttached = "";
+					try { await frame.waitForSelector(frameRef, {state:"detached", timeout:50}); }
+					catch (e) { frameRefAttached = e.message; }
+					const frameRefVisible = await frame.waitForSelector(frameRef, {state:"visible"});
+					await frame.evaluate("document.querySelector('#visible').style.display = 'none'");
+					const frameRefHidden = await frame.waitForSelector(frameRef, {state:"hidden"});
+					let frameRefNotVisible = "";
+					try { await frame.waitForSelector(frameRef, {state:"visible", timeout:50}); }
+					catch (e) { frameRefNotVisible = e.message; }
+					await frame.evaluate("document.querySelector('#visible').remove()");
+					const frameRefDetached = await frame.waitForSelector(frameRef, {state:"detached"});
+					const frameRefRemovedHidden = await frame.waitForSelector(frameRef, {state:"hidden"});
+					let stillAttached = "";
+					try { await tab.waitForSelector("#hidden", {state:"detached", timeout:50}); }
+					catch (e) { stillAttached = e.message; }
+					const snapshot = await tab.ariaSnapshot("#visible");
+					const ref = snapshot.match(/ref=(e[0-9]+)/)?.[1];
+					if (!ref) throw new Error("Expected a visible element ref");
+					let attachedRef = "";
+					try { await tab.waitForSelector(ref, {state:"detached", timeout:50}); }
+					catch (e) { attachedRef = e.message; }
+					let visibleRefNotHidden = "";
+					try { await tab.waitForSelector(ref, {state:"hidden", timeout:50}); }
+					catch (e) { visibleRefNotHidden = e.message; }
+					await tab.evaluate("document.querySelector('#visible').style.display = 'none'");
+					let hiddenRefNotVisible = "";
+					try { await tab.waitForSelector(ref, {state:"visible", timeout:50}); }
+					catch (e) { hiddenRefNotVisible = e.message; }
+					const hiddenRef = await tab.waitForSelector(ref, {state:"hidden"});
+					const legacyHiddenRef = await tab.waitForSelector(ref, {hidden:true});
+					const pendingVisibleRef = tab.waitForSelector(ref, {state:"visible"});
+					await tab.evaluate("document.querySelector('#visible').style.display = ''");
+					const visibleRef = await pendingVisibleRef;
+					await Promise.all([hiddenRef.dispose(), legacyHiddenRef.dispose(), visibleRef.dispose()]);
+					await tab.evaluate("document.querySelector('#visible').remove()");
+					const detachedRef = await tab.waitForSelector(ref, {state:"detached"});
+					const removedHiddenRef = await tab.waitForSelector(ref, {state:"hidden"});
+					await Promise.all([attached.dispose(), invisible.dispose(), visible.dispose(), legacyVisible.dispose()]);
+					return { hidden, detached, invisible:!!invisible, attached:!!attached, visible:!!visible, legacyHidden,
+						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached, attachedRef, detachedRef,
+						visibleRefNotHidden, hiddenRefNotVisible, hiddenRef:!!hiddenRef, visibleRef:!!visibleRef, removedHiddenRef,
+						frameRefAttached, frameRefVisible, frameRefHidden, frameRefNotVisible, frameRefDetached, frameRefRemovedHidden };
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toMatchObject({
+					hidden: null,
+					detached: null,
+					invisible: true,
+					attached: true,
+					visible: true,
+					legacyHidden: null,
+					legacyVisible: true,
+					frameHidden: true,
+					frameDetached: true,
+					frameAttached: true,
+					stillAttached: expect.stringContaining("timed out"),
+					attachedRef: expect.stringContaining("timed out"),
+					detachedRef: null,
+					visibleRefNotHidden: expect.stringContaining("timed out"),
+					hiddenRefNotVisible: expect.stringContaining("timed out"),
+					hiddenRef: true,
+					visibleRef: true,
+					removedHiddenRef: null,
+					frameRefAttached: expect.stringContaining("timed out"),
+					frameRefVisible: true,
+					frameRefHidden: true,
+					frameRefNotVisible: expect.stringContaining("timed out"),
+					frameRefDetached: true,
+					frameRefRemovedHidden: true,
+				});
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"rejects unknown selector wait options instead of waiting",
+		async () => {
+			const name = `selector-options-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: "data:text/html,<div id=present>present</div>",
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const errors = [];
+					for (const opts of [{state:"gone"}, {visble:true}, {visible:"true"}, {hidden:1}, {timeout:"250"}, {visible:true, hidden:true}]) {
+						try { await tab.waitForSelector("#present", opts); errors.push("accepted"); }
+						catch (e) { errors.push(e.message); }
+					}
+					return errors;
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toEqual(
+					Array.from({ length: 6 }, () => expect.stringContaining("waitForSelector() accepts")),
+				);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"adopts isolated element arguments into the main world without consuming caller handles",
 		async () => {
 			const browser = headless();
@@ -235,6 +490,351 @@ describe("OMP-owned browser evaluation", () => {
 		},
 		45_000,
 	);
+	async function runPageContract(code: string): Promise<unknown> {
+		const name = `run-page-contract-${crypto.randomUUID()}`;
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+		} as unknown as ToolSession;
+		const fixture = `<script>
+			globalThis.__ompPageMarker = 47;
+			customElements.define("x-answer", class extends HTMLElement { get answer() { return 42; } });
+		</script><x-answer id="first"></x-answer><x-answer></x-answer>`;
+		try {
+			await acquireTab(name, headless(), {
+				url: `data:text/html,${encodeURIComponent(fixture)}`,
+				timeoutMs: 30_000,
+			});
+			return (await runInTab(name, { code, session, timeoutMs: 15_000 })).returnValue;
+		} finally {
+			await releaseTab(name, { kill: true });
+		}
+	}
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("runs page evaluation methods and chained calls in the main world", async () => {
+		expect(
+			await runPageContract(`
+			const first = await page.$("#first");
+			const marker = await page.evaluateHandle(() => globalThis.__ompPageMarker);
+			try {
+				return {
+					evaluate: await page.evaluate(() => globalThis.__ompPageMarker),
+					evaluateString: await page.evaluate("globalThis.__ompPageMarker"),
+					evaluateHandle: await marker.jsonValue(),
+					elementArgument: await page.evaluate(element => element.answer, first),
+					$eval: await page.$eval("#first", (element, add) => element.answer + add, 1),
+					$$eval: await page.$$eval("x-answer", elements => elements.map(element => element.answer)),
+					chained: await page.on("console", () => {}).evaluate(() => globalThis.__ompPageMarker),
+					registry: await page.evaluate(() => String(customElements)),
+				};
+			} finally { await Promise.all([first.dispose(), marker.dispose()]); }
+		`),
+		).toEqual({
+			evaluate: 47,
+			evaluateString: 47,
+			evaluateHandle: 47,
+			elementArgument: 42,
+			$eval: 43,
+			$$eval: [42, 42],
+			chained: 47,
+			registry: "[object CustomElementRegistry]",
+		});
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("reports a missing $eval selector", async () => {
+		expect(
+			await runPageContract(`
+			return page.$eval("#absent", element => element.answer).catch(error => error.message);
+		`),
+		).toContain('failed to find element matching selector "#absent"');
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("bounds false and never-settling predicates by the wait deadline", async () => {
+		expect(
+			await runPageContract(`
+			const timedOut = await page.waitForFunction(() => false, { timeout: 200 })
+				.then(() => "resolved", error => error.name);
+			const stalled = await page.waitForFunction(() => Promise.withResolvers().promise, { timeout: 200 })
+				.then(() => "resolved", error => error.name);
+			return { timedOut, stalled };
+		`),
+		).toEqual({ timedOut: "TimeoutError", stalled: "TimeoutError" });
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("observes a transient DOM mutation without leaking query bindings", async () => {
+		expect(
+			await runPageContract(`
+			const pending = page.waitForFunction(() => {
+				globalThis.__ompChecks = (globalThis.__ompChecks ?? 0) + 1;
+				return document.querySelector("#flash")?.id;
+			}, { polling: "mutation" });
+			await page.waitForFunction(() => globalThis.__ompChecks >= 1);
+			await page.evaluate(() => {
+				const flash = document.createElement("i");
+				flash.id = "flash";
+				document.body.append(flash);
+				Promise.resolve().then(() => Promise.resolve()).then(() => flash.remove());
+			});
+			const handle = await pending;
+			try {
+				return {
+					value: await handle.jsonValue(),
+					leaked: await page.evaluate(() => Object.keys(globalThis).filter(key => /puppeteer|QuerySelector/.test(key))),
+				};
+			} finally { await handle.dispose(); }
+		`),
+		).toEqual({ value: "flash", leaked: [] });
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("runs numeric polling on the page interval", async () => {
+		expect(
+			await runPageContract(`
+			const clock = await page.createCDPSession();
+			await clock.send("Emulation.setVirtualTimePolicy", { policy: "pause" });
+			const advance = async budget => {
+				const elapsed = Promise.withResolvers();
+				clock.once("Emulation.virtualTimeBudgetExpired", elapsed.resolve);
+				await clock.send("Emulation.setVirtualTimePolicy", { policy: "advance", budget });
+				await elapsed.promise;
+			};
+			const pending = page.waitForFunction(() => {
+				globalThis.__ompNumericChecks = (globalThis.__ompNumericChecks ?? 0) + 1;
+				return globalThis.__ompNumericChecks === 3;
+			}, { polling: 17, timeout: 0 });
+			try {
+				const ready = await page.waitForFunction(() => globalThis.__ompNumericChecks >= 1, { polling: "mutation" });
+				await ready.dispose();
+				const checks = [await page.evaluate(() => globalThis.__ompNumericChecks)];
+				for (const budget of [16, 1, 17]) {
+					await advance(budget);
+					checks.push(await page.evaluate(() => globalThis.__ompNumericChecks));
+				}
+				const handle = await pending;
+				await handle.dispose();
+				return checks;
+			} finally {
+				await clock.detach();
+			}
+		`),
+		).toEqual([1, 1, 2, 3]);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("rejects unsupported polling values before evaluating the predicate", async () => {
+		expect(
+			await runPageContract(`
+			return Promise.all(["rafx", true].map(polling =>
+				page.waitForFunction(() => { throw new Error("predicate ran"); }, { polling, timeout: 0 })
+					.then(() => "resolved", error => error.message)));
+		`),
+		).toEqual(["Unknown polling option: rafx", "Unknown polling option: true"]);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("preserves abort reasons and stops the page poller", async () => {
+		expect(
+			await runPageContract(`
+			const reason = new Error("caller stopped waiting");
+			const preAborted = new AbortController();
+			preAborted.abort(reason);
+			const pre = await page.waitForFunction(() => false, { signal: preAborted.signal })
+				.then(() => false, error => error === reason);
+			const cancelled = [];
+			for (const polling of ["raf", "mutation"]) {
+				await page.evaluate(() => { globalThis.__ompAbortChecks = 0; });
+				const controller = new AbortController();
+				const pending = page.waitForFunction(() => {
+					globalThis.__ompAbortChecks++;
+					return false;
+				}, { polling, timeout: 0, signal: controller.signal }).then(() => false, error => error === reason);
+				await page.waitForFunction(() => globalThis.__ompAbortChecks > 0);
+				controller.abort(reason);
+				const identity = await pending;
+				await page.evaluate(() => {
+					const { promise, resolve } = Promise.withResolvers();
+					requestAnimationFrame(resolve);
+					return promise;
+				});
+				const before = await page.evaluate(() => globalThis.__ompAbortChecks);
+				await page.evaluate(() => { document.body.append(document.createElement("b")); });
+				await page.evaluate(() => {
+					const { promise, resolve } = Promise.withResolvers();
+					requestAnimationFrame(resolve);
+					return promise;
+				});
+				cancelled.push({ identity, stopped: before === await page.evaluate(() => globalThis.__ompAbortChecks) });
+			}
+			return { pre, cancelled };
+		`),
+		).toEqual({
+			pre: true,
+			cancelled: [
+				{ identity: true, stopped: true },
+				{ identity: true, stopped: true },
+			],
+		});
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("disposes the specific result returned after host cancellation", async () => {
+		expect(
+			await runPageContract(`
+			const realm = page.mainFrame().mainRealm();
+			const originalEvaluateHandle = realm.evaluateHandle;
+			const sample = await page.evaluateHandle(() => ({}));
+			const prototype = Object.getPrototypeOf(sample);
+			const originalDispose = prototype.dispose;
+			const controller = new AbortController();
+			const release = Promise.withResolvers();
+			const disposed = Promise.withResolvers();
+			let lateHandle;
+			prototype.dispose = function() {
+				if (this === lateHandle) disposed.resolve();
+				return originalDispose.call(this);
+			};
+			realm.evaluateHandle = async function(fn, ...args) {
+				const handle = await originalEvaluateHandle.call(this, fn, ...args);
+				if (String(fn).includes("held.promise")) {
+					lateHandle = handle;
+					controller.abort();
+					await release.promise;
+				}
+				return handle;
+			};
+			try {
+				const outcome = await page.waitForFunction(() => ({ late: true }), { signal: controller.signal })
+					.then(() => "resolved", error => error.name);
+				release.resolve();
+				await disposed.promise;
+				return outcome;
+			} finally {
+				release.resolve();
+				realm.evaluateHandle = originalEvaluateHandle;
+				prototype.dispose = originalDispose;
+				await sample.dispose();
+			}
+		`),
+		).toBe("AbortError");
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("cancels a wait whose poller cleanup never settles", async () => {
+		expect(
+			await runPageContract(`
+			const sample = await page.evaluateHandle(() => ({}));
+			const prototype = Object.getPrototypeOf(sample);
+			const originalDispose = prototype.dispose;
+			const controller = new AbortController();
+			prototype.dispose = function() {
+				queueMicrotask(() => controller.abort());
+				return originalDispose.call(this).then(() => Promise.withResolvers().promise);
+			};
+			try {
+				return await page.waitForFunction(() => true, { timeout: 0, signal: controller.signal })
+					.then(() => "resolved", error => error.name);
+			} finally {
+				prototype.dispose = originalDispose;
+				await sample.dispose();
+			}
+		`),
+		).toBe("AbortError");
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("bounds the truthiness protocol call by timeout and cancellation", async () => {
+		expect(
+			await runPageContract(`
+			const outcomes = [];
+			for (const cancellation of ["timeout", "signal"]) {
+				const realm = page.mainFrame().mainRealm();
+				const originalEvaluate = realm.evaluate;
+				const controller = new AbortController();
+				realm.evaluate = function(fn, ...args) {
+					if (!String(fn).includes("!!held")) return originalEvaluate.call(this, fn, ...args);
+					if (cancellation === "signal") controller.abort();
+					return originalEvaluate.call(this, held => {
+						const { promise, resolve } = Promise.withResolvers();
+						globalThis.__ompTruthinessRelease = () => resolve(!!held);
+						return promise;
+					}, ...args);
+				};
+				try {
+					outcomes.push(await page.waitForFunction(() => true, {
+						timeout: cancellation === "timeout" ? 50 : 0, signal: controller.signal,
+					}).then(async handle => { await handle.dispose(); return "resolved"; }, error => error.name));
+				} finally {
+					realm.evaluate = originalEvaluate;
+					await originalEvaluate.call(realm, () => globalThis.__ompTruthinessRelease?.());
+				}
+			}
+			return outcomes;
+		`),
+		).toEqual(["TimeoutError", "AbortError"]);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("accepts concise predicates despite page Promise and Boolean shims", async () => {
+		expect(
+			await runPageContract(`
+			await page.evaluate(() => {
+				globalThis.__ompOriginalPromise = Promise;
+				globalThis.__ompOriginalBoolean = Boolean;
+				class LegacyPromise extends Promise {}
+				Object.defineProperty(LegacyPromise, "withResolvers", { value: undefined });
+				globalThis.Promise = LegacyPromise;
+				globalThis.Boolean = () => false;
+			});
+			const values = [];
+			try {
+				for (const polling of [100, "raf", "mutation"]) {
+					const method = polling === "raf"
+						? { ready() { return globalThis.__ompPageMarker; } }.ready
+						: new class { async ready() { return globalThis.__ompPageMarker; } }().ready;
+					const handle = await page.waitForFunction(method, { polling });
+					values.push(await handle.jsonValue());
+					await handle.dispose();
+				}
+				return values;
+			} finally {
+				await page.evaluate(() => {
+					globalThis.Promise = globalThis.__ompOriginalPromise;
+					globalThis.Boolean = globalThis.__ompOriginalBoolean;
+				});
+			}
+		`),
+		).toEqual([47, 47, 47]);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("reports predicate rejection without a page unhandled rejection", async () => {
+		expect(
+			await runPageContract(`
+			await page.evaluate(() => {
+				globalThis.__ompUnhandledWaits = 0;
+				addEventListener("unhandledrejection", event => {
+					if (String(event.reason).includes("expected poller rejection")) globalThis.__ompUnhandledWaits++;
+				});
+			});
+			const thrown = [];
+			for (const polling of ["raf", "mutation"]) {
+				thrown.push(await page.waitForFunction(() => { throw new Error("expected poller rejection"); }, { polling })
+					.then(() => "resolved", error => error.message));
+			}
+			return { thrown, unhandled: await page.evaluate(() => globalThis.__ompUnhandledWaits) };
+		`),
+		).toEqual({ thrown: ["expected poller rejection", "expected poller rejection"], unhandled: 0 });
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"retries a navigation context error without waiting for the polling interval",
+		async () => {
+			expect(
+				await runPageContract(`
+			const handle = await page.waitForFunction(() => {
+				if (globalThis.__ompRetriedContext) return "retried";
+				globalThis.__ompRetriedContext = true;
+				throw new Error("Execution context was destroyed, most likely because of a navigation.");
+			}, { polling: 5_000, timeout: 2_000 });
+			try { return await handle.jsonValue(); } finally { await handle.dispose(); }
+		`),
+			).toBe("retried");
+		},
+	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"tells a caller running calls on one tab together to await each one or use one run",
 		async () => {
@@ -257,6 +857,44 @@ describe("OMP-owned browser evaluation", () => {
 				expect(refused).toContain("is busy");
 				expect(refused).toContain("Await each call before starting the next");
 				expect(refused).toContain("tab.run(");
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"says where run code runs when it reaches for a page global, and not when the page throws",
+		async () => {
+			const browser = headless();
+			const name = `run-page-global-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			const failure = async (code: string): Promise<string> => {
+				try {
+					await runInTab(name, { code, timeoutMs: 10_000, session });
+				} catch (error) {
+					return error instanceof Error ? `${error.stack}` : String(error);
+				}
+				throw new Error(`Expected ${code} to fail`);
+			};
+			try {
+				// The page deletes its own `CSS`, so reading it in the page fails with the same name.
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent("<script>delete window.CSS</script>")}`,
+					timeoutMs: 30_000,
+				});
+				const reached = await failure("return document.title;");
+				expect(reached).toStartWith("ReferenceError: document is not defined: ");
+				expect(reached).toContain("tab.evaluate(");
+				expect(await failure("return await tab.evaluate(() => CSS.escape('a'));")).toStartWith(
+					"ReferenceError: CSS is not defined\n",
+				);
+				expect(await failure("return cellVariable;")).toStartWith("ReferenceError: cellVariable is not defined\n");
 			} finally {
 				await releaseTab(name, { kill: true });
 			}
@@ -300,6 +938,88 @@ describe("OMP-owned browser input", () => {
 				} finally {
 					await foreground.close();
 				}
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"waits for a hover target's layout box, then hovers it as Puppeteer does",
+		async () => {
+			const browser = headless();
+			const name = `hover-layout-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			const mark = `onmouseover="this.dataset.hovered = 'yes'"`;
+			// Responsive markup: the first `.menu` is the hidden desktop copy. A row's actions show only on hover.
+			const fixture = `<style>.del { opacity: 0 } .row:hover .del { opacity: 1 }
+				.edit { visibility: hidden } #edit-row:hover .edit { visibility: visible }
+				@keyframes drift { from { transform: translateX(0) } to { transform: translateX(200px) } }</style>
+				<a class="menu" href="#" style="display:none">Menu</a>
+				<a class="menu" id="mobile" href="#" ${mark}>Menu</a>
+				<div class="row">Row <button class="del" ${mark}>Delete</button></div>
+				<div id="edit-row">Row <button class="edit">Edit</button></div>
+				<span id="icon-host" ${mark}><svg id="icon" width="20" height="20" style="pointer-events:none"><rect width="20" height="20"/></svg></span>
+				<div><button id="drifting" style="animation: drift 1s linear infinite" ${mark}>Drifting</button></div>
+				<div style="margin-top:1500px"><button id="low" ${mark}>Low</button></div>
+				<div style="margin-top:2000px"><button id="far" ${mark}>Far</button></div>
+				<nav id="drawer" style="position:fixed;left:-300px;top:0;width:200px;height:100px">Drawer</nav>`;
+			try {
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent(fixture)}`,
+					timeoutMs: 30_000,
+				});
+				const run = async (code: string, timeoutMs = 10_000): Promise<unknown> =>
+					(
+						await runInTab(name, {
+							code: `try { ${code} } catch (error) { return error instanceof Error ? error.message : String(error); }`,
+							timeoutMs,
+							session,
+						})
+					).returnValue;
+
+				// A hidden match waits for a box, then says why it never got one, through a handle too.
+				expect(await run(`await tab.hover(".menu"); return "hovered";`, 3_000)).toContain(
+					"never became clickable (last check: display:none; selector matches 2 element(s))",
+				);
+				const viaHandle = await run(`await (await tab.waitForSelector(".menu")).hover(); return "hovered";`, 3_000);
+				expect(viaHandle).toContain("handle.hover() timed out");
+				expect(viaHandle).toContain("never became clickable (last check: display:none)");
+				// So does a copy parked off-canvas, where no scroll can bring it into view.
+				expect(await run(`await tab.hover("#drawer"); return "hovered";`, 3_000)).toContain(
+					"never became clickable (last check: off-viewport; selector matches 1 element(s))",
+				);
+				// What hovering may reveal is hovered at once.
+				expect(await run(`await tab.hover("#mobile"); return await tab.attr("#mobile", "data-hovered");`)).toBe(
+					"yes",
+				);
+				expect(await run(`await tab.hover(".del"); return await tab.attr(".del", "data-hovered");`)).toBe("yes");
+				expect(await run(`await tab.hover(".edit"); return await tab.isVisible(".edit");`)).toBe(true);
+				expect(await run(`await tab.hover("#icon"); return await tab.attr("#icon-host", "data-hovered");`)).toBe(
+					"yes",
+				);
+				// A target that keeps moving is not held back until it stops.
+				expect(await run(`await tab.hover("#drifting"); return "hovered";`)).toBe("hovered");
+				// Puppeteer scrolls only a target that is not fully in view, through a handle too.
+				expect(
+					await run(`const before = await tab.evaluate(() => {
+						const low = document.querySelector("#low");
+						window.scrollTo(0, low.offsetTop + low.offsetHeight + 8 - innerHeight);
+						return scrollY;
+					});
+					await tab.hover("#low");
+					return (await tab.evaluate(() => scrollY)) === before && before > 0;`),
+				).toBe(true);
+				expect(
+					await run(`await tab.evaluate(() => window.scrollTo(0, 0));
+					await (await tab.waitForSelector("#far")).hover();
+					return [await tab.attr("#far", "data-hovered"), await tab.evaluate(() => scrollY > 0)];`),
+				).toEqual(["yes", true]);
 			} finally {
 				await releaseTab(name, { kill: true });
 			}

@@ -6,7 +6,13 @@ import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/t
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { formatContent, INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
-import type { Diagnostic, LinterClient, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import {
+	type Diagnostic,
+	FileChangeType,
+	type LinterClient,
+	type LspClient,
+	type ServerConfig,
+} from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
@@ -147,11 +153,7 @@ describe("LSP diagnostics freshness", () => {
 
 		expect(result.finalContent).toBe(".section {}\n");
 		expect(await Bun.file(filePath).text()).toBe(".section {}\n");
-		expect(notify).toHaveBeenCalledWith(
-			tempDir.path(),
-			[{ filePath, type: lspClient.FileChangeType.Created }],
-			undefined,
-		);
+		expect(notify).toHaveBeenCalledWith(tempDir.path(), [{ filePath, type: FileChangeType.Created }], undefined);
 	});
 
 	it("does not start an LSP server just to notify existing clients when write-time features are disabled", async () => {
@@ -171,11 +173,7 @@ describe("LSP diagnostics freshness", () => {
 
 		expect(result.finalContent).toBe("export const value = 1;\n");
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
-		expect(notify).toHaveBeenCalledWith(
-			tempDir.path(),
-			[{ filePath, type: lspClient.FileChangeType.Created }],
-			undefined,
-		);
+		expect(notify).toHaveBeenCalledWith(tempDir.path(), [{ filePath, type: FileChangeType.Created }], undefined);
 		expect(loadConfig).not.toHaveBeenCalled();
 		expect(getServers).not.toHaveBeenCalled();
 		expect(getOrCreate).not.toHaveBeenCalled();
@@ -466,7 +464,7 @@ describe("LSP diagnostics freshness", () => {
 		});
 
 		expect(result.diagnostics?.summary).toBe("no issues");
-		expect(events[0]).toBe(`watched:probe.module.scss:${lspClient.FileChangeType.Created}`);
+		expect(events[0]).toBe(`watched:probe.module.scss:${FileChangeType.Created}`);
 		expect(notifySignals.some(signal => signal instanceof AbortSignal)).toBe(true);
 		expect(events).toContain("sync:probe.tsx");
 	});

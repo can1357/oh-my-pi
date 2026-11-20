@@ -100,7 +100,7 @@ Breadcrumb writes are best-effort and non-fatal.
 
 Both modes follow the session's continuations: when its conversation went on in a sibling file whose header names it in `continuationOf`, the copy with the newest turn opens instead (unless the named file has turns that copy lacks) and a notice names both files. A file that no longer holds the session its generated name records was replaced under that session; it is followed by that name's id when it no longer parses, or, for a resume key that matched only the file name, when it holds another session.
 
-If a matched session's recorded cwd no longer exists, CLI prompts `Move (re-root) it into the current directory? [Y/n]`. Acceptance opens it and `moveTo(cwd)` relocates it; decline exits cleanly. A non-TTY cannot answer and raises `SessionResolutionError`.
+If a matched session's recorded cwd no longer exists, CLI prompts `Move (re-root) it into the current directory? [Y/n]`. Acceptance opens it and `moveTo(cwd)` relocates it; decline exits cleanly. A non-TTY cannot answer and raises `SessionResolutionError`. Under `--mode rpc`, `--mode rpc-ui` and `--mode acp` no question is asked, with or without a TTY: the session opens where it is stored, with the launch directory as its working directory. A session recorded in a since-removed worktree of the launch checkout's repository is moved into the launch directory without a question, in every mode.
 
 Otherwise the session is opened in its recorded project, including global matches; startup switches process cwd, reloads project-scoped settings/plugins, and re-resolves enabled models before constructing the agent. It does **not** fork merely because the match is cross-project.
 
@@ -133,7 +133,7 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 - Tab toggles current-folder / all-projects scope; the all-projects list is loaded lazily or supplied preloaded
 - search combines session metadata/prefix text with prompt-history matches from `history.db` after a short debounce
 - mouse wheel changes selection and left click selects in the fullscreen picker
-- Delete, or Backspace with an empty search, opens confirmation and deletes the JSONL plus session artifacts
+- `app.session.delete` (Backspace or Delete by default) opens confirmation and deletes the JSONL plus session artifacts; a bound key that also deletes backward edits a typed search first
 
 ## Interactive in-session picker (`SelectorController.showSessionSelector`)
 
@@ -154,7 +154,7 @@ Flow:
 
 - Up/Down and Page Up/Page Down navigation (clamped, not wrapped)
 - Enter to select
-- Delete, or Backspace on an empty search, to delete after confirmation
+- `app.session.delete` (Backspace or Delete by default; Backspace edits a typed search first) to delete after confirmation
 - Esc to cancel; Ctrl+C to exit
 - Tab to toggle current-folder / all-projects scope
 - mouse wheel/click in the fullscreen picker

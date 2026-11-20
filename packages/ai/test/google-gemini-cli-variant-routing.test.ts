@@ -254,56 +254,110 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 		}
 	});
 
-	it("discovers one Gemini 4 Argon model and sends each thinking level to its served SKU", async () => {
-		const tiers = [Effort.Low, Effort.Medium, Effort.High] as const;
+	it("discovers one model per Gemini 4 family and sends each thinking level to that family's served SKU", async () => {
+		const threeTiers = [Effort.Low, Effort.Medium, Effort.High] as const;
+		const families: Record<string, readonly Effort[]> = {
+			"gemini-4-argon": threeTiers,
+			"gemini-4-carbon": threeTiers,
+			"gemini-4-hydrogen": [...threeTiers, Effort.XHigh],
+			"gemini-4-neon": [...threeTiers, Effort.XHigh],
+		};
+		// `fetchAvailableModels` numbers the SKU levels; the Hydrogen and Neon `-xhigh` SKUs report 100.
+		const advertisedLevel: Partial<Record<Effort, number>> = {
+			[Effort.Low]: 1,
+			[Effort.Medium]: 2,
+			[Effort.High]: 3,
+			[Effort.XHigh]: 100,
+		};
 		const result = await fetchAntigravityDiscoveryModels({
 			token: "token",
 			userAgent: "test",
 			fetcher: async () =>
 				Response.json({
 					models: Object.fromEntries(
-						tiers.map((tier, index) => [
-							`gemini-4-argon-${tier}`,
-							{
-								supportsThinking: true,
-								supportsImages: true,
-								maxTokens: 1_048_576,
-								maxOutputTokens: 65_536,
-								// Argon advertises both; the level wins like in the native client.
-								thinkingBudget: -1,
-								thinkingLevel: index + 1,
-							},
-						]),
+						Object.entries(families).flatMap(([family, tiers]) =>
+							tiers.map(tier => [
+								`${family}-${tier}`,
+								{
+									supportsThinking: true,
+									supportsImages: true,
+									maxTokens: 1_048_576,
+									maxOutputTokens: 65_536,
+									// Gemini 4 advertises both; the level wins like in the native client.
+									thinkingBudget: -1,
+									thinkingLevel: advertisedLevel[tier],
+								},
+							]),
+						),
 					),
 				}),
 		});
 		if (!result || result.rejectedStatus !== undefined) throw new Error("discovery failed");
-		expect(result.models.map(spec => spec.id)).toEqual(["gemini-4-argon"]);
-		const model = buildModel(result.models[0]);
+		expect(result.models.map(spec => spec.id).sort()).toEqual(Object.keys(families));
 
-		for (const tier of tiers) {
-			expect(resolveVariantSelector("google-antigravity", `gemini-4-argon-${tier}`)).toBe("gemini-4-argon");
-			const request = await captureRequest(model, tier);
-			expect(request.body.model).toBe(`gemini-4-argon-${tier}`);
-			expect(request.attributedModel).toBe("gemini-4-argon");
-			expect(request.body.request?.generationConfig?.thinkingConfig).toEqual({
-				includeThoughts: true,
-				thinkingLevel: tier.toUpperCase(),
-			});
+		for (const [family, tiers] of Object.entries(families)) {
+			const model = buildModel(result.models.find(spec => spec.id === family)!);
+			for (const tier of tiers) {
+				expect(resolveVariantSelector("google-antigravity", `${family}-${tier}`)).toBe(family);
+				const request = await captureRequest(model, tier);
+				expect(request.body.model).toBe(`${family}-${tier}`);
+				expect(request.attributedModel).toBe(family);
+				expect(request.body.request?.generationConfig?.thinkingConfig).toEqual({
+					includeThoughts: true,
+					// Google documents the extra level in lowercase (`xhigh`).
+					thinkingLevel: tier === Effort.XHigh ? "xhigh" : tier.toUpperCase(),
+				});
+			}
+
+			// Gemini 4 always thinks: off and external scratchpads keep the low SKU
+			// instead of sending the unserved logical id.
+			for (const [reasoning, options] of [
+				[undefined, {}],
+				[Effort.High, { forceReasoningOff: true }],
+			] as const) {
+				const request = await captureRequest(model, reasoning, options);
+				expect(request.body.model).toBe(`${family}-low`);
+				expect(request.body.request?.generationConfig?.thinkingConfig).toEqual({
+					includeThoughts: true,
+					thinkingLevel: "LOW",
+				});
+			}
 		}
+	});
 
-		// Argon always thinks: off and external scratchpads keep the low SKU
-		// instead of sending the unserved logical id.
-		for (const [reasoning, options] of [
-			[undefined, {}],
-			[Effort.High, { forceReasoningOff: true }],
-		] as const) {
-			const request = await captureRequest(model, reasoning, options);
-			expect(request.body.model).toBe("gemini-4-argon-low");
-			expect(request.body.request?.generationConfig?.thinkingConfig).toEqual({
-				includeThoughts: true,
-				thinkingLevel: "LOW",
-			});
+	it("drops Hydrogen's monitor slot and folds its tiered SKUs into the Hydrogen row", async () => {
+		const sku = (thinkingLevel: number, maxOutputTokens: number, displayName?: string) => ({
+			...(displayName === undefined ? {} : { displayName }),
+			supportsThinking: true,
+			supportsImages: true,
+			maxTokens: 1_048_576,
+			maxOutputTokens,
+			thinkingLevel,
+		});
+		const result = await fetchAntigravityDiscoveryModels({
+			token: "token",
+			userAgent: "test",
+			fetcher: async () =>
+				Response.json({
+					models: {
+						"gemini-4-hydrogen-low": sku(1, 262_144, "Gemini 4 Hydrogen (Low)"),
+						"gemini-4-hydrogen-medium": sku(2, 262_144, "Gemini 4 Hydrogen (Medium)"),
+						"gemini-4-hydrogen-high": sku(3, 262_144, "Gemini 4 Hydrogen (High)"),
+						"gemini-4-hydrogen-xhigh": sku(100, 262_144, "Gemini 4 Hydrogen (XHigh)"),
+						"gemini-4-hydrogen-tiered-high": sku(3, 262_144, "Gemini 4 Hydrogen (High)"),
+						"gemini-4-hydrogen-tiered-xhigh": sku(100, 262_144, "Gemini 4 Hydrogen (XHigh)"),
+						"gemini-4-hydrogen-sonar": sku(1, 65_536),
+					},
+				}),
+		});
+		if (!result || result.rejectedStatus !== undefined) throw new Error("discovery failed");
+		expect(result.models.map(spec => spec.id)).toEqual(["gemini-4-hydrogen"]);
+		expect(resolveVariantSelector("google-antigravity", "gemini-4-hydrogen-tiered-xhigh")).toBe("gemini-4-hydrogen");
+
+		const model = buildModel(result.models[0]!);
+		for (const tier of [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]) {
+			const request = await captureRequest(model, tier);
+			expect(request.body.model).toBe(`gemini-4-hydrogen-${tier}`);
 		}
 	});
 

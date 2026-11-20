@@ -149,7 +149,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
 	"omit-reasoning-effort": wire("omitReasoningEffort", OAI),
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
-	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id"]),
+	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id", "x-session-id"]),
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
 	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
 	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
@@ -189,6 +189,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
 	"supports-steering": wire("supportsSteering", ["openai-responses"]),
+	"uncached-instructions": wire("uncachedInstructions", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
@@ -289,6 +290,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
+	"temperature-floor": wire("temperatureFloor", ["devin"]),
 	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
@@ -598,6 +600,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * `compat/prompt-cache-persistent.ts`. Unassigned: entries expire.
 	 */
 	"prompt-cache-persistent": { key: "promptCachePersistent", set: "catalog", shape: "scalar", values: [true, false] },
+	/**
+	 * The provider's own endpoint accepts a `max_tokens: 0` pre-warm request
+	 * (Anthropic Messages): it reads the prompt, writes or refreshes the cache at
+	 * its breakpoints, and returns usage with no output billed. The coding
+	 * agent's cache warmer refreshes entries with it instead of a one-token
+	 * replay. Read through `compat/prompt-cache-prewarm.ts`. Unassigned: no
+	 * pre-warm request.
+	 */
+	"prompt-cache-prewarm": { key: "promptCachePrewarm", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**

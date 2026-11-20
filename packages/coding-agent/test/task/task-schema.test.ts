@@ -4,12 +4,10 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
-import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { cfgTaskPerCallModel, cfgTaskPerCallModelAllow } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
-import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
-import * as seanceModule from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -18,9 +16,6 @@ let taskSchemaSessionIndex = 0;
 
 function createSession(
 	options: {
-		parentSpawns?: string;
-		disabledAgents?: string[];
-		planMode?: boolean;
 		settings?: Record<string, unknown>;
 	} = {},
 ): ToolSession {
@@ -30,16 +25,13 @@ function createSession(
 		settings: Settings.isolated({
 			"task.isolation.enabled": false,
 			"task.batch": false,
-			"task.disabledAgents": options.disabledAgents ?? [],
 			...options.settings,
 		}),
 		getSessionFile: () => null,
-		getSessionSpawns: () => options.parentSpawns ?? "*",
-		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
+		getSessionSpawns: () => "*",
 	} as unknown as ToolSession;
 }
 
-const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
 // `outputSchema` and its validation mode. The batch shape (`tasks[]` + shared
@@ -47,45 +39,22 @@ const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it("requires task", () => {
-		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
-		expect(parsed instanceof type.errors).toBe(true);
-	});
-
-	it.each([false, true])("advertises taskFile only while task.file is on (batch=%s)", batchEnabled => {
+	it.each([false, true])("advertises only the source task.steps selects (batch=%s)", batchEnabled => {
 		// Enabled first: the disabled schema must not reuse the enabled one from the cache.
-		for (const file of [true, false]) {
-			const schema = getTaskSchema({
-				batchEnabled,
-				isolationEnabled: false,
-				structured: false,
-				file,
-				perCallModel: true,
-			});
-			const item = {
-				taskFile: "local://assignment.md",
-				model: "mock/file-worker",
-				solutionSpace: "one defined change",
-			};
+		for (const steps of [true, false]) {
+			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, steps });
+			const item = steps
+				? { steps: ["Add the parser.", "Wire it in."], solutionSpace: "one defined change" }
+				: { task: "Add the parser.", solutionSpace: "one defined change" };
 			const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : item);
+			if (parsed instanceof type.errors) throw new Error(parsed.summary);
+			expect(parsed).toMatchObject(batchEnabled ? { tasks: [item] } : item);
 			const wire = schema.toJsonSchema();
 			const tasks = isRecord(wire.properties) ? wire.properties.tasks : undefined;
 			const itemWire = batchEnabled && isRecord(tasks) ? tasks.items : wire;
 			if (!isRecord(itemWire)) throw new Error("Expected an object schema for task input");
-			if (file) {
-				if (parsed instanceof type.errors) throw new Error(parsed.summary);
-				expect(parsed).toMatchObject(
-					batchEnabled
-						? { tasks: [{ taskFile: item.taskFile, model: item.model }] }
-						: { taskFile: item.taskFile, model: item.model },
-				);
-				expect(itemWire.required).not.toContain("task");
-				expect(itemWire.properties).toHaveProperty("model");
-			} else {
-				expect(parsed instanceof type.errors).toBe(true);
-				expect(itemWire.properties).not.toHaveProperty("taskFile");
-				expect(itemWire.required).toContain("task");
-			}
+			expect(itemWire.required).toContain(steps ? "steps" : "task");
+			expect(itemWire.properties).not.toHaveProperty(steps ? "task" : "steps");
 		}
 	});
 
@@ -132,57 +101,13 @@ describe("task schema (single-spawn)", () => {
 	});
 });
 
-describe("task schema seance fields", () => {
-	it("accepts source and model selectors in every flat/batch isolation mode", () => {
-		for (const batchEnabled of [false, true]) {
-			for (const isolationEnabled of [false, true]) {
-				const schema = getTaskSchema({
-					batchEnabled,
-					isolationEnabled,
-					evalToolsEnabled: false,
-					seanceFields: seanceTaskSchemaFields,
-				});
-				const modelSelector = batchEnabled
-					? ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]
-					: "anthropic/claude-sonnet-4-5";
-				const item = {
-					agent: "seance",
-					task: "Read historical context.",
-					solutionSpace: "focused read-only inspection",
-					sourceSession: "/sessions/source.jsonl",
-					model: modelSelector,
-					...(isolationEnabled ? { isolated: false } : {}),
-				};
-				const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : { ...item });
-				expect(parsed instanceof type.errors).toBe(false);
-				if (parsed instanceof type.errors) continue;
-				if (!parsed || typeof parsed !== "object") {
-					expect(parsed).toBeTruthy();
-					continue;
-				}
-				let parsedItem: unknown = parsed;
-				if (batchEnabled) {
-					if (!("tasks" in parsed) || !Array.isArray(parsed.tasks)) {
-						expect(parsed).toHaveProperty("tasks");
-						continue;
-					}
-					parsedItem = parsed.tasks[0];
-				}
-				expect(parsedItem).toMatchObject({
-					sourceSession: "/sessions/source.jsonl",
-					model: modelSelector,
-				});
-			}
-		}
-	});
-	it("omits seance fields when they are not enabled", () => {
+describe("task schema per-call model field", () => {
+	it("advertises model only as one string when per-call model is enabled", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
-				expect(wireSchema).not.toContain('"sourceSession"');
 				expect(wireSchema).not.toContain('"model"');
-				// Per-call model alone advertises one string, never the seance selector list.
 				const perCall = JSON.stringify(
 					getTaskSchema({ batchEnabled, isolationEnabled, perCallModel: true }).toJsonSchema(),
 				);
@@ -201,61 +126,6 @@ describe("task schema seance fields", () => {
 		expect(JSON.stringify(tool.parameters.toJsonSchema()).includes('"model"')).toBe(advertised);
 	});
 
-	it("advertises fields only when bundled seance is spawnable", async () => {
-		const discovery = vi
-			.spyOn(discoveryModule, "discoverAgents")
-			.mockResolvedValue({ agents: [bundledSeance], projectAgentsDir: null });
-
-		const allowed = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
-		expect(JSON.stringify(allowed.parameters.toJsonSchema())).toContain('"sourceSession"');
-
-		const policyDenied = await TaskTool.create(createSession({ parentSpawns: "task" }));
-		expect(JSON.stringify(policyDenied.parameters.toJsonSchema())).not.toContain('"sourceSession"');
-
-		const agentDisabled = await TaskTool.create(
-			createSession({ parentSpawns: "task,seance", disabledAgents: ["seance"] }),
-		);
-		expect(JSON.stringify(agentDisabled.parameters.toJsonSchema())).not.toContain('"sourceSession"');
-
-		discovery.mockResolvedValue({ agents: [], projectAgentsDir: null });
-		const absentFromCatalogue = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
-		expect(JSON.stringify(absentFromCatalogue.parameters.toJsonSchema())).not.toContain('"sourceSession"');
-
-		const customSeance = parseAgent(
-			"project-seance.md",
-			`---
-name: seance
-description: Custom historical agent.
----
-Custom prompt.`,
-			"project",
-		);
-		expect(isBundledSeance(customSeance)).toBe(false);
-		discovery.mockResolvedValue({ agents: [customSeance], projectAgentsDir: null });
-		const overridden = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
-		expect(JSON.stringify(overridden.parameters.toJsonSchema())).not.toContain('"sourceSession"');
-	});
-
-	it("hides seance fields, listing, and guidance in plan mode", async () => {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-			agents: [bundledSeance],
-			projectAgentsDir: null,
-		});
-		const planMode = await TaskTool.create(createSession({ parentSpawns: "task,seance", planMode: true }));
-		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
-		expect(planSchema).not.toContain('"sourceSession"');
-		expect(planSchema).not.toContain("seance");
-		expect(planSchema).not.toContain('"model"');
-		expect(planMode.description).not.toContain("seance");
-		expect(planMode.description).not.toContain("Historical consults");
-
-		const ordinary = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
-		const ordinarySchema = JSON.stringify(ordinary.parameters.toJsonSchema());
-		expect(ordinarySchema).toContain('"sourceSession"');
-		expect(ordinarySchema).toContain('"model"');
-		expect(ordinary.description).toContain("`seance`");
-		expect(ordinary.description).toContain("Historical consults");
-	});
 	afterEach(() => vi.restoreAllMocks());
 });
 
@@ -282,11 +152,22 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
+
+	it.each([
+		{
+			label: "both task and steps",
+			params: { agent: "scout", task: "Map auth.", steps: ["Map auth."] },
+			refusal: "takes `task` or `steps`, not both",
+		},
+		{ label: "empty steps", params: { agent: "scout", steps: [] }, refusal: "invalid `steps`" },
+		{ label: "a blank step", params: { agent: "scout", steps: ["Map auth.", "  "] }, refusal: "invalid `steps`" },
+	])("refuses $label", async ({ params, refusal }) => {
+		expect(await executeText({ ...params, solutionSpace: "c" })).toContain(refusal);
+	});
 	it("rejects a model override for an ordinary task while task.perCallModel is off", async () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
-			seanceFields: seanceTaskSchemaFields,
 		});
 		const params = {
 			agent: "scout",
@@ -297,7 +178,7 @@ describe("task spawn validation", () => {
 		expect(schema(params) instanceof type.errors).toBe(false);
 		const scout = loadBundledAgents().find(agent => agent.name === "scout");
 		if (!scout) throw new Error("Expected the bundled scout agent");
-		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
+		expect(await executeText(params, [scout])).toContain("task.perCallModel: off");
 	});
 
 	it("advertises approved selectors only while task.perCallModel is on", async () => {
@@ -430,35 +311,5 @@ describe("task spawn validation", () => {
 
 		cfgTaskPerCallModel.override(session.settings, "off");
 		expect(tool.description).not.toContain("mock/replacement");
-	});
-
-	it("keys the seance model exemption on the resolved agent, not the raw `agent` value", async () => {
-		const seen: unknown[] = [];
-		vi.spyOn(seanceModule, "prepareSeance").mockImplementation(async context => {
-			seen.push(context.model);
-			throw new Error("stop after seance received its selectors");
-		});
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-			agents: [bundledSeance],
-			projectAgentsDir: null,
-		});
-		const selectors = ["anthropic/claude-sonnet-4-5", "openai/gpt-5"];
-		const run = async (batch: boolean, params: Record<string, unknown>) => {
-			const tool = await TaskTool.create(
-				createSession({ parentSpawns: "seance", settings: { "task.perCallModel": "off", "task.batch": batch } }),
-			);
-			const result = await tool.execute("tool-call", params);
-			return result.content.find(part => part.type === "text")?.text ?? "";
-		};
-		const flat = { task: "What was decided?", sourceSession: "/tmp/source.jsonl", model: selectors };
-		const item = { task: "What was decided?", sourceSession: "/tmp/source.jsonl", model: selectors };
-		const texts = [
-			await run(false, flat),
-			await run(false, { ...flat, agent: " seance " }),
-			await run(true, { context: "c", tasks: [item] }),
-			await run(true, { context: "c", tasks: [{ ...item, agent: " seance " }] }),
-		];
-		for (const text of texts) expect(text).not.toContain("invalid `model` value");
-		expect(seen).toEqual([selectors, selectors, selectors, selectors]);
 	});
 });

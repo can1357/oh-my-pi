@@ -142,7 +142,7 @@ function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined
 type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
 
 /** Optional kinds of the host's vocabulary the describe hooks branch on. */
-type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json" | "shell">>;
+type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json" | "shell" | "tray">>;
 
 class SafeToolRendererComponent implements Component {
 	#toolName: string;
@@ -461,6 +461,7 @@ export class ToolExecutionComponent extends Container {
 	// Memoized #getTextOutput(), keyed by every input it reads: the result
 	// (versioned by #resultVersion), #showImages, and the image protocol.
 	#textOutput = "";
+	#textOutputTrimmed: string | undefined;
 	#textOutputKey: string | undefined;
 	#tool?: AgentTool;
 	#renderer?: ToolRenderer;
@@ -551,7 +552,7 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
-		shellPresentation?: ShellVizPresentation;
+		readonly shellPresentation?: ShellVizPresentation;
 		shellTrace?: ShellTrace;
 		shellReplayEpoch?: number;
 		/** Live: read at render time, so a ticking spinner advances it. */
@@ -575,6 +576,10 @@ export class ToolExecutionComponent extends Container {
 		super();
 		Object.defineProperty(this.#renderState, "elapsedMs", {
 			get: () => this.#elapsedMs(this.#nativeStatus()),
+			enumerable: true,
+		});
+		Object.defineProperty(this.#renderState, "shellPresentation", {
+			get: () => (this.#toolName === "bash" ? this.#getShellPresentation() : undefined),
 			enumerable: true,
 		});
 		ensureThemeSync();
@@ -666,6 +671,7 @@ export class ToolExecutionComponent extends Container {
 			this.#shellPreferences,
 			this.#shellTrace,
 			this.#result ? resultText(this.#result) : undefined,
+			!this.#shellTrace && !this.#argsComplete,
 		);
 		this.#shellPresentationKey = key;
 		return this.#shellPresentation;
@@ -1314,6 +1320,7 @@ export class ToolExecutionComponent extends Container {
 			media: cx?.supports("media") === true,
 			json: cx?.supports("json") === true,
 			shell: cx?.supports("shell") === true,
+			tray: cx?.feature("tray") === true,
 		};
 		const presentation = this.#presentation.draw();
 		const key = [
@@ -1333,6 +1340,7 @@ export class ToolExecutionComponent extends Container {
 			host.media,
 			host.json,
 			host.shell,
+			host.tray,
 			getThemeEpoch(),
 			presentation,
 		];
@@ -1357,13 +1365,15 @@ export class ToolExecutionComponent extends Container {
 
 	/**
 	 * The native `collapsed` prop: the transcript's expand state, except that a
-	 * view that asks to be {@link NativeToolView.open} never starts folded, and
+	 * view that asks to be {@link NativeToolView.open} never starts folded, one
+	 * that asks to be {@link NativeToolView.folded} always does, and
 	 * a call streaming its body (edit, write) stays open until it settles, then
 	 * folds like a finished thought. The user's own toggle still wins meanwhile:
 	 * the terminal keeps local collapse state until this prop changes.
 	 */
 	#nativeCollapsed(status: TspCardStatus, view: NativeToolView): boolean {
 		if (view.open) return false;
+		if (view.folded) return true;
 		const live = status === "pending" || status === "running";
 		return !this.#expanded && !(live && streamsBody(this.#toolName));
 	}
@@ -1559,6 +1569,7 @@ export class ToolExecutionComponent extends Container {
 				tone: resultView.tone ?? callView.tone,
 				preview: resultView.preview ?? callView.preview,
 				open: resultView.open ?? callView.open,
+				folded: resultView.folded ?? callView.folded,
 				inline: resultView.inline ?? callView.inline,
 				tools: resultView.tools ?? callView.tools,
 			};
@@ -1635,6 +1646,18 @@ export class ToolExecutionComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		this.#updateDisplay();
+	}
+
+	override releaseRenderCaches(): void {
+		super.releaseRenderCaches();
+		this.#textOutput = "";
+		this.#textOutputTrimmed = undefined;
+		this.#textOutputKey = undefined;
+		this.#shellPresentation = undefined;
+		this.#shellPresentationKey = undefined;
+		this.#shellPendingTrace = undefined;
+		this.#shellPendingScript = undefined;
+		this.#lateDiagnosticsBlock?.block.releaseRenderCaches();
 	}
 
 	#updateDisplay(): void {
@@ -2186,22 +2209,25 @@ export class ToolExecutionComponent extends Container {
 			context.rawDetails = this.#rawDetails;
 		}
 		if (this.#toolName === "bash") {
-			this.#renderState.shellPresentation = this.#getShellPresentation();
 			this.#renderState.shellTrace = this.#shellTrace;
 			this.#renderState.shellReplayEpoch = this.#shellReplayEpoch;
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
 			// plus this context to keep the inline command preview visible while tool-call JSON is still streaming.
 			if (this.#result) {
 				// Pass raw output and expanded state - renderer handles width-aware truncation
-				const output = this.#getTextOutput().trimEnd();
-				context.output = output;
+				Object.defineProperty(context, "output", {
+					get: () => this.#getTrimmedTextOutput(),
+					enumerable: true,
+				});
 			}
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
-			const output = this.#getTextOutput().trimEnd();
-			context.output = output;
+			Object.defineProperty(context, "output", {
+				get: () => this.#getTrimmedTextOutput(),
+				enumerable: true,
+			});
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 		} else if (this.#toolName === "task") {
@@ -2277,7 +2303,14 @@ export class ToolExecutionComponent extends Container {
 
 		this.#textOutputKey = key;
 		this.#textOutput = output;
+		this.#textOutputTrimmed = undefined;
 		return output;
+	}
+
+	#getTrimmedTextOutput(): string {
+		const output = this.#getTextOutput();
+		this.#textOutputTrimmed ??= output.trimEnd();
+		return this.#textOutputTrimmed;
 	}
 
 	/** Re-tint (only when the tint changed) and reformat the generic #contentText card. */

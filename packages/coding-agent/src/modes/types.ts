@@ -32,6 +32,7 @@ import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
+import type { BlockedKind } from "../utils/run-status";
 import type { DroppedPrompt } from "../session/agent-session-types";
 import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
@@ -41,7 +42,7 @@ import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import type { DictationTarget } from "../stt";
-import type { SessionContinuation, SessionInfo } from "../session/session-listing";
+import type { SessionContinuation } from "../session/session-listing";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "../tools";
@@ -107,6 +108,12 @@ export type SubmittedUserInput = {
 	started: boolean;
 };
 
+/** A dialog that hands typing to the composer: registered by the ExtensionUiController approval, form and ask presenters, read by InputController's image and HTML paste routing. */
+export interface ComposerOwner {
+	component: Component;
+	owns(): boolean;
+}
+
 export interface InteractiveModeInitOptions {
 	suppressWelcomeIntro?: boolean;
 	clearInitialTerminalHistory?: boolean;
@@ -118,8 +125,6 @@ export interface InteractiveModeInitOptions {
 
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions &
 	Pick<HookSelectorOptions, "disabledIndices" | "inline">;
-
-export type SessionPickHandler = (session: SessionInfo) => void | Promise<void>;
 
 /** How {@link InteractiveModeContext.handleResumeSession} picks the file it opens. */
 export interface ResumeSessionOptions {
@@ -163,17 +168,12 @@ export interface ShowStatusOptions {
 	action?: StatusNoticeAction;
 }
 
-export interface SelectOnlyModelSelectorOptions {
-	/** Use the selected `provider/id` for the caller's operation without mutating session defaults. */
-	onSelect: (selector: string) => void | Promise<void>;
-	/** `provider/id` initially highlighted in the picker. */
-	currentSelector?: string;
-}
-
 export interface AgentHubOpenOptions {
 	requireContent?: boolean;
 	armCloseTap?: boolean;
 	initialSection?: "agents" | "activity";
+	/** The agents-hub key: on a native host showing tray cards, focus moves into the tray instead. */
+	trayFirst?: boolean;
 }
 
 export interface InteractiveModeContext {
@@ -183,6 +183,8 @@ export interface InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
+	/** The ask waiting for answers above the composer: natively at the transcript's end, in rows just over it. */
+	askContainer: Container;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
@@ -225,6 +227,8 @@ export interface InteractiveModeContext {
 	readonly focusedAgentId: string | undefined;
 	/** Set while a tool-approval dialog owns the composer: its drafts steer the main session awaiting that approval, even from a focused agent's view. */
 	approvalOwnsComposer?: boolean;
+	/** The mounted dialog that currently hands typing to the composer, if any. */
+	composerOwner?: ComposerOwner;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */
 	focusAgentSession(id: string): Promise<void>;
 	/** Focus the focused agent's parent session, falling back to main (delegates to focusParent). */
@@ -365,6 +369,8 @@ export interface InteractiveModeContext {
 	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[];
 	pythonComponent: EvalExecutionComponent | undefined;
 	isPythonMode: boolean;
+	/** The draft starts with `?`, the `/btw` shortcut. */
+	isBtwMode: boolean;
 	streamingComponent: AssistantMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
 	/**
@@ -609,7 +615,6 @@ export interface InteractiveModeContext {
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome>;
-	handleHandoffCommand(customInstructions?: string): Promise<void>;
 	handleShakeCommand(mode: ShakeMode): Promise<void>;
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	/** `/wt`: fork the checkout into a new worktree (keeping changes unless `keepChanges` is false) and move there. */
@@ -647,16 +652,16 @@ export interface InteractiveModeContext {
 	showAgentsDashboard(): void;
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;
-	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void;
+	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
-	showPluginSelector(mode?: "install" | "uninstall"): void;
+	showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
 	showUserMessageSelector(startAt?: string): void;
 	showCopySelector(): void;
 	showTreeSelector(): void;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;
-	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void;
+	showSessionSelector(source?: ForeignSessionSource): void;
 	/** Settle side requests before replacing the session or deleting its artifacts. */
 	prepareSessionSwitch(): Promise<void>;
 	handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void>;
@@ -694,6 +699,12 @@ export interface InteractiveModeContext {
 	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
+	/** Gives the keys to the ask waiting above the composer; false when none waits. */
+	focusAsk(): boolean;
+	/** The composer talks to a `/btw` note (Tern): plain drafts go to its topic as follow-ups. */
+	readonly isBtwFocused: boolean;
+	/** Sends a draft to the focused `/btw` note's topic; false when no follow-up started. */
+	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean>;
 	handleBtwBranchKey(): Promise<boolean>;
 	canBranchBtw(): boolean;
 	handlesBtwBranchKey(): boolean;
@@ -723,7 +734,8 @@ export interface InteractiveModeContext {
 	 */
 	showCommandReport(options: { title: string; head?: TspText; body: Component }): void;
 	/** The live background-jobs sheet (the jobs pill's). */
-	showJobsSheet(): void;
+	/** The jobs sheet, on job `selected` when it lists it. */
+	showJobsSheet(selected?: string): void;
 	/** Clear the docked command report; false when none was shown (Esc falls through). */
 	dismissCommandReport(): boolean;
 	/** Screen rows a report above the editor may take (all of them but the editor and the chrome under it). */
@@ -777,6 +789,7 @@ export interface InteractiveModeContext {
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
+		extra?: { kind?: BlockedKind },
 	): Promise<string | undefined>;
 	hideHookSelector(): void;
 	showHookInput(title: string, placeholder?: string): Promise<string | undefined>;

@@ -4,9 +4,15 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
+import {
+	isVertexAnthropicRawPredictUrl,
+	isVertexExpressOpenAIUrl,
+	isVertexRawPredictUrl,
+	resolveVertexEndpointHost,
+} from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
+	GOOGLE_THINKING_BUDGETS,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
 	requireSupportedEffort,
@@ -23,6 +29,7 @@ import {
 	resolveNextAuthRetryKey,
 } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
+import { withProbedThinking } from "./thinking-probe";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
@@ -31,6 +38,7 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-lim
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import { reachesOfficialEndpoint } from "./providers/anthropic-state";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AntigravityCliOptions } from "./providers/antigravity-cli";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
@@ -42,12 +50,14 @@ import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
 	streamAnthropic,
+	streamAntigravityCli,
 	streamAppleFoundationModels,
 	streamAzureOpenAIResponses,
 	streamBedrock,
@@ -56,6 +66,7 @@ import {
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
+	streamKiro,
 	streamOllama,
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
@@ -79,6 +90,7 @@ import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
+import { withResolvedHeaders } from "./utils/model-headers";
 import { withOpenCodeGateShape } from "./utils/opencode-gate";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
@@ -86,7 +98,8 @@ import { withTransportFetch } from "./utils/transport-fetch";
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
 		model.provider === "google-vertex" &&
-		((model.api === "openai-completions" && isVertexExpressOpenAIUrl(model.baseUrl)) ||
+		((model.api === "openai-completions" &&
+			(isVertexExpressOpenAIUrl(model.baseUrl) || isVertexRawPredictUrl(model.baseUrl))) ||
 			(model.api === "anthropic-messages" && isVertexRawPredictUrl(model.baseUrl)))
 	);
 }
@@ -264,7 +277,14 @@ async function releaseProviderInFlightStaleLock(lockDir: string, stale: Provider
 		const stat = await fs.stat(lockDir);
 		if (stat.mtimeMs !== stale.mtimeMs || Date.now() - stat.mtimeMs <= PROVIDER_INFLIGHT_LOCK_STALE_MS) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		// A concurrent reclaimer removing the stale dir first is expected, not a failure.
+		if (isEnoent(error)) return;
+		logger.warn("ai: failed to remove stale provider in-flight lock", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 // Best-effort token-checked release. A token mismatch means another process has
@@ -274,7 +294,12 @@ async function releaseProviderInFlightLock(lockDir: string, token: string): Prom
 		const info = await readProviderInFlightInfo(path.join(lockDir, "info.json"));
 		if (!info || info.token !== token) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		logger.warn("ai: failed to release provider in-flight lock", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 async function releaseProviderInFlightLockDirIfSame(
@@ -286,7 +311,15 @@ async function releaseProviderInFlightLockDirIfSame(
 		const current = await readProviderInFlightLockIdentity(lockDir);
 		if (!isSameProviderInFlightLock(current, identity)) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch (error) {
+		// Normal contention: another process removed the lock dir between our write
+		// and this cleanup, which the caller already handles by retrying.
+		if (isEnoent(error)) return;
+		logger.warn("ai: failed to release provider in-flight lock dir", {
+			lockDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 // On Windows, mkdir on a lock directory another process is concurrently deleting
@@ -459,7 +492,12 @@ async function signalProviderInFlightWaitersInDir(dir: string): Promise<void> {
 	try {
 		await fs.mkdir(dir, { recursive: true });
 		await Bun.write(path.join(dir, ".wakeup"), String(Date.now()));
-	} catch {}
+	} catch (error) {
+		logger.warn("ai: failed to signal provider in-flight waiters", {
+			dir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 async function signalProviderInFlightWaiters(provider: string): Promise<void> {
@@ -727,7 +765,9 @@ function createVertexAuthenticatedFetch(options: StreamOptions | undefined): Fet
 		headers.set("Authorization", `Bearer ${token}`);
 		const rewritten = resolveVertexRequest(input);
 		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
-		if (isVertexRawPredictUrl(url)) {
+		// Partner publishers other than Anthropic (e.g. Mistral) take OpenAI-shaped
+		// bodies, where `model` is required and `anthropic_version` is rejected.
+		if (isVertexAnthropicRawPredictUrl(url)) {
 			const bodyText = await readVertexRequestBody(rewritten, init);
 			const transformed = transformVertexAnthropicBody(bodyText);
 			return baseFetch(url, {
@@ -787,7 +827,9 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 					.replaceAll("{location}", encodeURIComponent(location))
 					.replaceAll("%7Blocation%7D", encodeURIComponent(location))
 			: url;
-		return rewritten.replace(":streamRawPredict/v1/messages", ":streamRawPredict");
+		return rewritten
+			.replace(":streamRawPredict/v1/messages", ":streamRawPredict")
+			.replace(":streamRawPredict/chat/completions", ":streamRawPredict");
 	};
 
 	if (input instanceof Request) {
@@ -806,15 +848,12 @@ function withResolvedModelHeaders<TApi extends Api>(
 	signal: AbortSignal | undefined,
 	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	const resolveHeaders = model.resolveHeaders;
-	if (!resolveHeaders) return run(model);
+	if (!model.resolveHeaders) return run(model);
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		try {
-			const headers = await untilAborted(signal, () => resolveHeaders(signal));
-			signal?.throwIfAborted();
-			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			const inner = run(await withResolvedHeaders(model, signal));
 			for await (const event of inner) {
 				outer.push(event);
 				if (outer.done) return;
@@ -985,11 +1024,21 @@ function streamDispatch<TApi extends Api>(
 		case "ollama-chat":
 			return streamOllama(providerModel as Model<"ollama-chat">, context, providerOptions as OllamaChatOptions);
 
+		case "kiro-api":
+			return streamKiro(providerModel as Model<"kiro-api">, context, providerOptions as KiroOptions);
+
 		case "cursor-agent":
 			return streamCursor(providerModel as Model<"cursor-agent">, context, providerOptions as CursorOptions);
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+
+		case "antigravity-acp":
+			return streamAntigravityCli(
+				providerModel as Model<"antigravity-acp">,
+				context,
+				providerOptions as AntigravityCliOptions,
+			);
 
 		case "apple-foundation-models":
 			return streamAppleFoundationModels(
@@ -1086,19 +1135,20 @@ function isRetryableUpstreamError(
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
-	// `cyber_policy` are likewise rotatable. The exact ChatGPT-account model
-	// denial is rotatable only when its provider and requested model match.
+	// `cyber_policy` are likewise rotatable. A denial of only the requested
+	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404)
+	// is rotatable when its provider and requested model match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
 	// without transient rate-limit wording mean this account is parked but a
 	// sibling credential can usually pick the request up. Both are rotatable
-	// via `onAuthError` — the auth-gateway maps hard auth failures to
-	// `invalidateCredentialMatching` and temporary account constraints to a
-	// credential block. Transient 429s ("Too many requests", per-minute caps)
-	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
-	// provider's own backoff layer instead of burning siblings.
-	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
+	// via `onAuthError`, whose resolver hands the error to `limits.rotate` to
+	// choose between a credential block and invalidation. Transient 429s
+	// ("Too many requests", per-minute caps) classify as RATE_LIMIT_EXCEEDED in
+	// `parseRateLimitReason` and stay in the provider's own backoff layer
+	// instead of burning siblings.
+	if (AIError.isModelEntitlementDenial(error, model.provider, model.id)) return true;
 	if (
 		status === 401 ||
 		(status === 403 &&
@@ -1122,14 +1172,9 @@ function createAssistantAuthError(message: AssistantMessage): Error {
 }
 
 function contextualizeAuthRetryError(model: Model<Api>, error: unknown): unknown {
-	if (
-		!error ||
-		typeof error !== "object" ||
-		!AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)
-	) {
-		return error;
-	}
-	return AIError.attach(error, AIError.create(AIError.Flag.AccountPolicy | AIError.Flag.ContentBlocked));
+	if (!error || typeof error !== "object" || AIError.isAccountPolicyError(error)) return error;
+	const kinds = AIError.modelEntitlementDenialKinds(error, model.provider, model.id);
+	return kinds === 0 ? error : AIError.attach(error, AIError.create(kinds));
 }
 
 function emitBufferedEvents(stream: AssistantMessageEventStream, events: AssistantMessageEvent[]): void {
@@ -1185,8 +1230,7 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
-	// Unverified thinking is opt-in: without a requested effort the request is
-	// byte-identical to a non-reasoning model's.
+	// Requests without an effort keep unknown thinking controls off the wire.
 	const effortRequested =
 		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
 	if (!effortRequested) model = withoutUnverifiedThinking(model);
@@ -1392,6 +1436,14 @@ function streamSimpleRequest<TApi extends Api>(
 		);
 	}
 
+	return withProbedThinking(model, context, requestOptions, streamSimpleDispatch);
+}
+
+function streamSimpleDispatch<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	requestOptions: SimpleStreamOptions,
+): AssistantMessageEventStream {
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
 	// the gateway resolves provider + credential server-side, so we don't
 	// need an `apiKey` from `getEnvApiKey` here — `options.apiKey` carries
@@ -1567,15 +1619,6 @@ export const ANTHROPIC_THINKING: Record<Effort, number> = {
 	max: 32768,
 };
 
-const GOOGLE_THINKING: Record<Effort, number> = {
-	minimal: 1024,
-	low: 4096,
-	medium: 8192,
-	high: 16384,
-	xhigh: 24575,
-	max: 32768,
-};
-
 /**
  * Estimated thinking spend for an effort, used to size Google's
  * `maxOutputTokens` (Gemini counts thinking against it). Level mode and the
@@ -1586,7 +1629,7 @@ function googleThinkingHeadroom(model: Model<Api>, effort: Effort, customBudgets
 	const custom = customBudgets?.[effort];
 	if (custom !== undefined && custom > 0) return custom;
 	const catalog = model.thinking?.effortBudgets?.[effort];
-	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING[effort];
+	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING_BUDGETS[effort];
 }
 
 /**
@@ -1813,6 +1856,8 @@ function mapOptionsForApi<TApi extends Api>(
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
 		repetitionPenalty: options?.repetitionPenalty,
+		stopSequences: options?.stopSequences,
+		frequencyPenalty: options?.frequencyPenalty,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 		signal: options?.signal,
 		maxHttpAttempts: options?.maxHttpAttempts,
@@ -1846,9 +1891,11 @@ function mapOptionsForApi<TApi extends Api>(
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		omitDemotedReasoning: options?.omitDemotedReasoning,
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
+		prewarm: options?.prewarm,
 		...simpleProviderOptions,
 	};
 
@@ -2211,7 +2258,9 @@ function mapOptionsForApi<TApi extends Api>(
 				}
 
 				let thinkingBudget =
-					options.thinkingBudgets?.[effort] ?? model.thinking?.effortBudgets?.[effort] ?? GOOGLE_THINKING[effort];
+					options.thinkingBudgets?.[effort] ??
+					model.thinking?.effortBudgets?.[effort] ??
+					GOOGLE_THINKING_BUDGETS[effort];
 
 				// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
 				const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
@@ -2324,6 +2373,14 @@ function mapOptionsForApi<TApi extends Api>(
 				toolChoice: options?.toolChoice,
 			});
 
+		case "kiro-api":
+			return castApi<"kiro-api">({
+				...base,
+				reasoning: options?.reasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				hideThinkingSummary: options?.hideThinkingSummary,
+			});
+
 		case "cursor-agent": {
 			const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
 			const onToolResult = options?.cursorOnToolResult ?? execHandlers?.onToolResult;
@@ -2384,6 +2441,14 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
+		}
+		case "antigravity-acp": {
+			const agyModel = model as Model<"antigravity-acp">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && agyModel.reasoning
+					? requireSupportedEffort(agyModel, options.reasoning)
+					: undefined;
+			return castApi<"antigravity-acp">({ ...base, cwd: options?.cwd, reasoning });
 		}
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);

@@ -320,6 +320,7 @@ export async function callRemoteLlm(
 	temperature = 0.3,
 	options: RemoteLlmOptions = {},
 ): Promise<string | null> {
+	if (activeLlmOptions()?.allowRemote?.() === false) return null;
 	const baseUrl = llmBaseUrl();
 	if (baseUrl === "") {
 		return null;
@@ -347,7 +348,10 @@ export async function callRemoteLlm(
 				headers,
 				body,
 				signal: AbortSignal.timeout(60000),
-				fetch: fetchImpl,
+				fetch: (input, init) => {
+					if (activeLlmOptions()?.allowRemote?.() === false) throw new Error("Remote LLM is not allowed");
+					return fetchImpl(input, init);
+				},
 			});
 			if (res.status === 401) {
 				throw new ProviderHttpError("mnemopi remote LLM request unauthorized (401)", 401, { headers: res.headers });

@@ -1106,6 +1106,19 @@ describe("advisor", () => {
 			expect(delivered).toEqual(["Queued but never flushed."]);
 		});
 
+		it("emits nothing from a cancelled review", async () => {
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note));
+			const cancelled = new AbortController();
+			cancelled.abort();
+			tool.beginUpdate(false);
+			await tool.execute("x-0", { note: "Stale finding.", severity: "blocker" }, cancelled.signal);
+			expect(delivered).toEqual([]);
+			// Nothing was admitted either: a later review may raise it.
+			await tool.execute("x-1", { note: "Stale finding.", severity: "blocker" });
+			expect(delivered).toEqual(["Stale finding."]);
+		});
+
 		it("validates parameters using ArkType", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
@@ -2092,6 +2105,43 @@ describe("advisor", () => {
 			expect(updateStates).toEqual([false]);
 		});
 
+		it("supersede cancels the review in flight and holds its update for the next dispatch", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const firstStarted = Promise.withResolvers<void>();
+			const firstRelease = Promise.withResolvers<void>();
+			const secondStarted = Promise.withResolvers<void>();
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					if (promptInputs.length === 1) {
+						firstStarted.resolve();
+						await firstRelease.promise;
+					} else {
+						secondStarted.resolve();
+					}
+				},
+				abort: () => firstRelease.resolve(),
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "handoff", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages });
+
+			runtime.onTurnEnd(messages);
+			await firstStarted.promise;
+			expect(runtime.supersede()).toBe(true);
+			// The cancelled review no longer counts as backlog.
+			expect(await runtime.waitForCatchup(1_000, 1)).toBe(true);
+			expect(promptInputs).toHaveLength(1);
+
+			messages.push({ role: "user", content: "fix", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await secondStarted.promise;
+			const second = promptText(promptInputs[1]!);
+			expect(second).toContain("handoff");
+			expect(second).toContain("fix");
+		});
+
 		it("sends the batch when context maintenance fails", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
@@ -2226,6 +2276,62 @@ describe("advisor", () => {
 			expect(block?.type).toBe("toolCall");
 			expect(JSON.stringify(block?.type === "toolCall" ? block.arguments : {})).not.toContain(secret);
 			expect(block?.type === "toolCall" ? block.thoughtSignature : "kept").toBeUndefined();
+		});
+
+		it("drops a chat-completions reasoning_details envelope when it rewrites a later thinking block", async () => {
+			const secret = "ADVISOR_DETAILS_SECRET_123";
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			// The first thinking block holds the turn's received `reasoning_details`,
+			// which carry the second block's raw text.
+			const assistant = {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: "Plan.",
+						thinkingSignature: JSON.stringify({
+							reasoningDetails: [{ type: "reasoning.text", text: `Plan.Use ${secret} now.`, index: 0 }],
+							field: "reasoning",
+						}),
+					},
+					{ type: "text", text: "Working." },
+					{ type: "thinking", thinking: `Use ${secret} now.`, thinkingSignature: "reasoning" },
+				],
+				api: "openai-completions",
+				provider: "openrouter",
+				model: "google/gemini-3-pro-preview",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 1,
+			} as AssistantMessage;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [assistant] as AgentMessage[] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [{ role: "user", content: "go on", timestamp: 2 } as AgentMessage],
+				obfuscator,
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			runtime.onTurnEnd();
+			await Promise.resolve();
+
+			expect(JSON.stringify(agent.state.messages)).not.toContain(secret);
+			const first = (agent.state.messages[0] as AssistantMessage).content[0];
+			expect(first).toMatchObject({ type: "thinking", thinking: "Plan.", thinkingSignature: "reasoning" });
 		});
 
 		it("falls back to one redacted update when a regex secret spans source messages", async () => {
@@ -5695,6 +5801,38 @@ describe("advisor", () => {
 			expect(error.message).toBe("provider failed");
 			expect(events).toEqual(["prompt:1", "hook:provider failed", "prompt:2"]);
 			expect(runtime.backlog).toBe(0);
+		});
+
+		it("backs off between consecutive failures and honors a provider retry hint", async () => {
+			const promptTimes: number[] = [];
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					promptTimes.push(performance.now());
+					// The 1st failure carries a 150 ms hint (above the 40 ms base); the 2nd has none.
+					state.error = promptTimes.length === 1 ? "429 rate limited retry-after-ms=150" : "provider failed";
+				},
+				abort: () => {},
+				reset: () => {
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
+			const failures: unknown[] = [];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				notifyFailure: error => failures.push(error),
+			};
+			const runtime = new AdvisorRuntime(agent, host, 40);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => failures.length >= 1 && runtime.backlog === 0);
+
+			expect(promptTimes).toHaveLength(3);
+			// Hint wins over the 40 ms jittered base; the second wait is 80 ms doubled, minus at most 25% jitter.
+			expect(promptTimes[1] - promptTimes[0]).toBeGreaterThanOrEqual(145);
+			expect(promptTimes[2] - promptTimes[1]).toBeGreaterThanOrEqual(58);
 		});
 
 		it("calls onTurnError for each consecutive failure including the dropped third turn", async () => {

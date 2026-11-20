@@ -215,7 +215,6 @@ describe("AgentSession plan-mode convergence", () => {
 			setPendingFullWriteDescription: enabled => {
 				pendingFullWriteDescription = enabled;
 			},
-			advisorTools: [],
 			advisorStreamFn,
 			sideStreamFn,
 			planYolo: options?.planYolo ? { target: model } : undefined,
@@ -263,6 +262,19 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(advisorCards.length).toBeGreaterThanOrEqual(1);
 		expect(harness.mock.calls.length).toBe(0);
 		expect(harness.advisorMock?.calls.length ?? 0).toBeGreaterThanOrEqual(1);
+	});
+
+	it("accepts a proposal while plan mode is active without an installed handler", async () => {
+		const harness = await createPlanSession([]);
+		const planPath = resolveLocalUrlToPath("local://handlerless-plan.md", {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		});
+		await Bun.write(planPath, "# Handlerless plan\n\nDo it.\n");
+		const handler = harness.session.peekPlanProposalHandler();
+		if (!handler) throw new Error("Expected a proposal handler while plan mode is active");
+		const result = await handler("handlerless");
+		expect(result.details).toMatchObject({ planFilePath: "local://handlerless-plan.md", planExists: true });
 	});
 
 	it("T2: an idle IRC message does not wake an autonomous turn in plan mode", async () => {

@@ -11,6 +11,8 @@ const MESSAGES = { color: "userMessageText", symbol: "context.messages" } as con
 const OUTPUT = { color: "muted", symbol: "context.messages" } as const;
 export const CONTEXT_PRESENTATION = {
 	"system-prompt": SYSTEM,
+	// Shares the Tool Output color (the theme has too few distinct colors); the content glyph tells them apart in the map.
+	"instruction-files": { color: "muted", symbol: "context.content" },
 	skills: SKILLS,
 	"built-in-tools": TOOLS,
 	"custom-tools": DETAILS,

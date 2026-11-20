@@ -88,12 +88,18 @@ export type FormBlock =
 	| { kind: "image"; src: string; alt: string }
 	/** An inline `<svg>`, serialized whole. */
 	| { kind: "svg"; markup: string; alt: string }
-	| { kind: "field"; field: FormField };
+	/**
+	 * A field. A radio/checkbox group whose later options come after other blocks of its section
+	 * (text between options) has `optionsEnd`: the index just past the last of those blocks.
+	 */
+	| { kind: "field"; field: FormField; optionsEnd?: number };
 
 /** A `<fieldset>` (titled by its `<legend>`) or loose content between fieldsets (untitled). */
 export interface FormSection {
 	title: FormSpan[];
 	blocks: FormBlock[];
+	/** A top-level `<fieldset>`, legend or not; `false` for loose content between fieldsets. */
+	fieldset: boolean;
 }
 
 /** A parsed form: what to draw, the fields in document order, and `<input type="hidden">` pairs. */
@@ -210,11 +216,14 @@ class FormBuilder {
 	readonly #sections: FormSection[] = [];
 	readonly #fields: FormField[] = [];
 	readonly #hidden: [string, string][] = [];
-	/** Radio/checkbox groups by `type\0name`. */
-	readonly #groups = new Map<string, ChoiceField>();
+	/** Radio/checkbox groups by `type\0name`, with the section and block of their first option. */
+	readonly #groups = new Map<
+		string,
+		{ field: ChoiceField; section: FormSection; block: Extract<FormBlock, { kind: "field" }> }
+	>();
 	/** `<label for>` elements by the id of the control they name. */
 	readonly #labelFor = new Map<string, Element>();
-	#section: FormSection = { title: [], blocks: [] };
+	#section: FormSection = { title: [], blocks: [], fieldset: false };
 	#inline: FormSpan[] = [];
 	#fieldsetDepth = 0;
 
@@ -374,7 +383,7 @@ class FormBuilder {
 			// Nested fieldsets stay in the outer section; their legend becomes a heading.
 			if (legend) this.#walk(legend, undefined);
 		} else {
-			this.#startSection(legend ? this.#spansOf(legend) : []);
+			this.#startSection(legend ? this.#spansOf(legend) : [], true);
 		}
 		this.#fieldsetDepth++;
 		for (const child of fieldset.childNodes) {
@@ -382,15 +391,16 @@ class FormBuilder {
 		}
 		this.#flush(false);
 		this.#fieldsetDepth--;
-		if (this.#fieldsetDepth === 0) this.#startSection([]);
+		if (this.#fieldsetDepth === 0) this.#startSection([], false);
 	}
 
-	#startSection(title: FormSpan[]): void {
+	#startSection(title: FormSpan[], fieldset: boolean): void {
 		if (this.#section.blocks.length === 0 && this.#section.title.length === 0) {
 			this.#section.title = title;
+			this.#section.fieldset = fieldset;
 			return;
 		}
-		this.#section = { title, blocks: [] };
+		this.#section = { title, blocks: [], fieldset };
 		this.#sections.push(this.#section);
 	}
 
@@ -520,8 +530,11 @@ class FormBuilder {
 			const key = `${type}\0${name}`;
 			const group = this.#groups.get(key);
 			if (group) {
-				group.options.push(option);
-				group.required ||= required;
+				group.field.options.push(option);
+				group.field.required ||= required;
+				if (group.section === this.#section && this.#section.blocks.at(-1) !== group.block) {
+					group.block.optionsEnd = this.#section.blocks.length;
+				}
 				return;
 			}
 			const field: ChoiceField = {
@@ -534,8 +547,7 @@ class FormBuilder {
 				options: [option],
 				required,
 			};
-			this.#groups.set(key, field);
-			this.#addField(field);
+			this.#groups.set(key, { field, section: this.#section, block: this.#addField(field) });
 			return;
 		}
 		this.#addField({
@@ -561,8 +573,10 @@ class FormBuilder {
 		return name ? [{ text: name.replace(/[_-]+/g, " ") }] : [];
 	}
 
-	#addField(field: FormField): void {
+	#addField(field: FormField): Extract<FormBlock, { kind: "field" }> {
+		const block: Extract<FormBlock, { kind: "field" }> = { kind: "field", field };
 		this.#fields.push(field);
-		this.#section.blocks.push({ kind: "field", field });
+		this.#section.blocks.push(block);
+		return block;
 	}
 }

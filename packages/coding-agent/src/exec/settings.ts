@@ -13,6 +13,18 @@ export interface BashInterceptorRule {
 	allowSubcommands?: string[];
 }
 
+export type BashPatternApproval = "allow" | "deny" | "prompt";
+
+/** One bash approval pattern rule (`bash.patterns`). */
+export interface BashApprovalPatternRule {
+	match: string;
+	approval: BashPatternApproval;
+	/** Leading env assignment names this `allow` rule strips before matching. */
+	env?: string[];
+}
+
+const EMPTY_BASH_PATTERNS: BashApprovalPatternRule[] = [];
+
 const EMPTY_STRING_ARRAY: string[] = [];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
@@ -156,13 +168,28 @@ export const cfgBashGitGuard = register({
 export const cfgBashPatterns = register({
 	id: "bash.patterns",
 	type: "array",
-	default: [],
+	default: EMPTY_BASH_PATTERNS,
+	pathScoped: { valuesKey: "patterns", itemType: "object" },
+	merge: "prepend",
 	ui: {
 		tab: "shell",
 		group: "Bash",
 		label: "Bash Approval Patterns",
 		description:
 			"Ordered bash command approval rules. Each item has match and approval fields; only '*' wildcards are supported.",
+	},
+});
+
+export const cfgBashAllowedEnvVars = register({
+	id: "bash.allowedEnvVars",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Bash Allowed Environment Variables",
+		description:
+			"Exact environment variable names allowed as leading KEY=VALUE prefixes when matching bash.patterns allow rules (no wildcards). Any value is accepted, so list only benign build/test variables; execution-altering variables (PATH, LD_PRELOAD, BASH_ENV, *_RUNNER, *_WRAPPER) allow arbitrary command execution.",
 	},
 });
 
@@ -183,6 +210,8 @@ export const cfgBashInterceptorPatterns = register({
 	id: "bashInterceptor.patterns",
 	type: "array",
 	default: DEFAULT_BASH_INTERCEPTOR_RULES,
+	pathScoped: { valuesKey: "patterns", itemType: "object" },
+	merge: "prepend",
 });
 
 export const cfgBashDirenv = register({

@@ -57,7 +57,8 @@ describe("auth-gateway stdio transport", () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-stdio-keyless-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		const apple = createMockModel({ provider: "apple", id: "on-device" });
-		const required = createMockModel({ provider: "openrouter", id: "missing-key" });
+		// Unregistered provider: no env-var fallback, so a host `~/.env` key cannot satisfy it.
+		const required = createMockModel({ provider: "keyed-test", id: "missing-key" });
 		const router = createAuthGatewayRouter({
 			storage,
 			resolveModel: id => (id === "apple/on-device" ? apple.model : required.model),
@@ -65,7 +66,7 @@ describe("auth-gateway stdio transport", () => {
 		try {
 			apple.push({ content: ["ok"] });
 			const output = await serve(
-				["apple/on-device", "openrouter/missing-key"].map((model, id) =>
+				["apple/on-device", "keyed-test/missing-key"].map((model, id) =>
 					JSON.stringify({
 						id,
 						path: "/v1/chat/completions",

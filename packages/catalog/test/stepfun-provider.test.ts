@@ -108,17 +108,17 @@ describe("StepFun provider support", () => {
 
 	test("a discovered model with no bundled reference still gets StepFun's advertised reasoning dial", async () => {
 		// `mapWithBundledReference` starts an unbundled row from the generic
-		// defaults (`reasoning: false`, no thinking), and `mergeDynamicModels`
-		// adds it verbatim — so a model StepFun ships after this snapshot would
-		// otherwise never send `reasoning_effort`.
+		// defaults (no reasoning evidence, no thinking), and `mergeDynamicModels`
+		// adds it verbatim — so only the advertised tiers can give a model StepFun
+		// ships after this snapshot its real vocabulary.
 		const fetchMock: FetchImpl = vi.fn(
 			async () =>
 				new Response(
 					JSON.stringify({
 						data: [
 							{ id: "step-6-preview", reasoning_effort_support_list: ["low", "medium", "high"] },
-							// Advertises no tiers: must stay non-reasoning rather than
-							// inherit a fabricated ladder.
+							// Advertises no tiers: stays neutral rather than inherit a
+							// fabricated ladder.
 							{ id: "step-8-chat" },
 						],
 					}),
@@ -136,7 +136,7 @@ describe("StepFun provider support", () => {
 		expect(future?.thinking).toEqual({ mode: "effort", efforts: STEPFUN_LADDER });
 
 		const unreasoned = models?.find(model => model.id === "step-8-chat");
-		expect(unreasoned?.reasoning).toBe(false);
+		expect(unreasoned?.reasoning).toBeUndefined();
 		expect(unreasoned?.thinking).toBeUndefined();
 	});
 

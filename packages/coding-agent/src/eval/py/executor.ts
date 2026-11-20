@@ -9,6 +9,7 @@ import {
 	buildManagedKernelEnv,
 	buildManagedKernelEnvPatch,
 	createCancelledKernelResult,
+	type DisposeByOwnerOptions,
 	EvalKernelNotRunningError,
 	executeWithKernelBase,
 	getExecutionDeadlineMs,
@@ -56,6 +57,7 @@ export interface PythonToolInvokeOptions {
 	interpreter?: string;
 	kernelOwnerId?: string;
 	toolSession: ToolSession;
+	parentToolCallId?: string;
 	signal?: AbortSignal;
 }
 
@@ -116,6 +118,7 @@ export interface PythonExecutorOptions {
 	 * not injected and any `tool.foo(...)` raises in Python.
 	 */
 	toolSession?: ToolSession;
+	parentToolCallId?: string;
 	/** Callback for status events emitted by tool bridge invocations. */
 	emitStatus?: (event: JsStatusEvent) => void;
 	/**
@@ -266,6 +269,7 @@ async function startKernel(cwd: string, options: PythonExecutorOptions): Promise
 		signal: options.signal,
 		deadlineMs: options.deadlineMs,
 		interpreter: options.interpreter,
+		sessionId: options.toolSession?.getSessionId?.() ?? undefined,
 	});
 }
 
@@ -520,6 +524,7 @@ async function invokePythonToolRequest(
 	const runId = Snowflake.next();
 	const unregister = registerPyToolBridge(options.sessionId, runId, {
 		toolSession: options.toolSession,
+		parentToolCallId: options.parentToolCallId,
 		signal: options.signal,
 		emitStatus: undefined,
 	});
@@ -576,8 +581,8 @@ export async function disposeAllKernelSessions(): Promise<void> {
 	await sessionRegistry.disposeAll();
 }
 
-export async function disposeKernelSessionsByOwner(ownerId: string): Promise<void> {
-	await sessionRegistry.disposeByOwner(ownerId);
+export async function disposeKernelSessionsByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void> {
+	await sessionRegistry.disposeByOwner(ownerId, options);
 }
 
 /** Projects against an already-retained, idle Python session without starting a kernel. */

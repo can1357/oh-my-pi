@@ -4,7 +4,7 @@
  * Extends the base AgentMessage type with coding-agent specific message types,
  * and provides a transformer to convert them to LLM-compatible messages.
  */
-import { type AgentMessage, isProviderRefusalMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, toProviderReplayMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	isUserInterruptAbort,
 	isCustomMessageContent,
@@ -46,6 +46,7 @@ export {
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
+import { calculateContextTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
@@ -424,6 +425,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				role: message.role,
 				customType: message.customType,
 				content: normalizeProviderReplayValue(message.content),
+				excludeFromContext: message.role === "custom" ? message.excludeFromContext : undefined,
 			};
 		case "branchSummary":
 			return { role: message.role, summary: message.summary };
@@ -670,6 +672,42 @@ export function assistantTurnProducedOutput(message: Pick<AssistantMessage, "sto
  */
 export function assistantTurnDelivered(message: Pick<AssistantMessage, "content">): boolean {
 	return message.content.some(isDeliverableContent);
+}
+
+/**
+ * Occupied context tokens carried by a usage record, using the same accounting
+ * as session compaction ({@link calculateContextTokens}): a provider-reported
+ * `contextTokens` wins; otherwise the billable `totalTokens` (or the bucket
+ * sum when no total is reported) minus provider-side orchestration tokens.
+ * Live `message.usage` payloads and persisted transcript records are loosely
+ * typed, so numeric fields are validated here. Returns 0 when the record
+ * carries no usage signal.
+ */
+export function usageContextTokens(raw: unknown): number {
+	if (!isRecord(raw)) return 0;
+	const field = (record: Record<string, unknown>, key: string): number => {
+		const value = record[key];
+		return typeof value === "number" && Number.isFinite(value) ? value : 0;
+	};
+	const contextTokens = raw.contextTokens;
+	const orchestration = isRecord(raw.orchestration) ? raw.orchestration : undefined;
+	return calculateContextTokens({
+		input: field(raw, "input"),
+		output: field(raw, "output"),
+		cacheRead: field(raw, "cacheRead"),
+		cacheWrite: field(raw, "cacheWrite"),
+		totalTokens: field(raw, "totalTokens"),
+		...(typeof contextTokens === "number" && Number.isFinite(contextTokens) ? { contextTokens } : {}),
+		...(orchestration
+			? {
+					orchestration: {
+						input: field(orchestration, "input"),
+						cacheRead: field(orchestration, "cacheRead"),
+						output: field(orchestration, "output"),
+					},
+				}
+			: {}),
+	});
 }
 
 /** Extract the optional `__queueChipText` field from a CustomMessage's
@@ -1183,17 +1221,20 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			return out;
 		}
 		case "custom": {
-			if (!isCustomMessageContent(m.content)) return [];
+			if (m.excludeFromContext || !isCustomMessageContent(m.content)) return [];
 			if (isSteeringUserMessage(m)) {
 				const converted = convertMessageToLlm(wrapSteeringUserMessage(m));
 				return converted ? [converted] : [];
 			}
-			if (isUserInvokedSkillPrompt(m)) {
+			// A user-invoked skill is the user's own turn. An agent message is a user turn
+			// authored by that agent: never tool output, never developer or system authority.
+			const ircIncoming = m.customType === "irc:incoming";
+			if (ircIncoming || isUserInvokedSkillPrompt(m)) {
 				return [
 					{
 						role: "user",
 						content: customMessageContentToLlmContent(m.content),
-						attribution: "user",
+						attribution: ircIncoming ? "agent" : "user",
 						timestamp: m.timestamp,
 					},
 				];
@@ -1275,9 +1316,9 @@ export interface ContextViewMessage {
  * and array conversion caches. Steering messages show the envelope
  * {@link wrapSteeringForModel} sends (sharing its wrapper cache); it maps
  * one-to-one, so source indices hold. Mirrors the {@link convertToLlm} loop
- * through {@link convertMessageAt}, then drops API-level provider refusals
- * like the send path's `filterProviderReplayMessages`, since they are never
- * replayed.
+ * through {@link convertMessageAt}, then applies the send path's replay policy
+ * (`toProviderReplayMessage`): provider refusals are dropped and provider-error
+ * tool placeholders lose the provider's error text.
  *
  * Kept separate from `convertToLlm` because the viewer needs source indices:
  * reporting them from `convertToLlm` would add a per-message callback and
@@ -1289,8 +1330,8 @@ export function convertMessagesForContextView(messages: AgentMessage[]): Context
 	const result: ContextViewMessage[] = [];
 	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
 		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
-			if (message.role === "assistant" && isProviderRefusalMessage(message)) continue;
-			result.push({ message, sourceIndex, convertedIndex: result.length });
+			const replay = toProviderReplayMessage(message);
+			if (replay) result.push({ message: replay, sourceIndex, convertedIndex: result.length });
 		}
 	}
 	return result;

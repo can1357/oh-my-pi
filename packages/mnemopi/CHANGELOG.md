@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a failing embedding provider (`embeddings.provider` or `setEmbeddingProvider`) leaving no trace: when its `embed()` or `available()` throws, the failure is now logged with the error, at debug level or at warn with runtime debug on, like local model failures; embedding still falls back to `null` as before
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed embedding requests failing when oversized inputs were clipped in the middle of an emoji or other Unicode character.
+
+## [18.21.0] - 2026-11-16
+
+### Changed
+
+- Improved file memory bank performance by reducing unnecessary disk synchronization during checkpointing, lowering per-turn I/O overhead for banks shared across multiple processes.
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added configurable embedding query prefixes and input types for instruction-tuned and asymmetric embedding models, including Qwen3-Embedding, E5, and NVIDIA NIM.
+- Added the `embeddings.onRequestFailed` callback, allowing hosts to handle and surface failed embedding API requests.
+
+## [18.20.0] - 2026-11-12
+
+### Fixed
+
+- Fixed fact extraction storing decimals, prices, and IP-address fragments as `version` facts and leaving symbols such as `→` in `metric` fact keys ([#18886](https://github.com/can1357/oh-my-pi/issues/18886))
+
 ## [18.18.4] - 2026-11-09
 
 ### Fixed

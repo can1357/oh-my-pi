@@ -19,7 +19,7 @@ import {
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "./debugger-ownership";
 import { DownloadPairing } from "./download-pairing";
-import { pastForeignFrames } from "./foreign-frames";
+import { onForeignFramesHidden, pastForeignFrames } from "./foreign-frames";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -225,7 +225,9 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
 		reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
-		downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
+		// A degraded worker (no downloads API) omits the capability, so the relay answers lookups with
+		// the actionable "predates download tracking" error instead of a generic not-found.
+		downloadsProtocol: chrome.downloads === undefined ? undefined : DOWNLOADS_PROTOCOL_VERSION,
 		tabs: snapshots,
 		attachedTabIds,
 	};
@@ -280,6 +282,8 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
 			return {};
 		case "findDownload": {
+			// With no downloads API there is nothing to pair against; answer "not found" instead of throwing mid-RPC.
+			if (chrome.downloads === undefined) return null;
 			const id = downloads.idFor(msg.guid);
 			const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
 			if (item && item.state !== "in_progress") downloads.forget(msg.guid);
@@ -357,8 +361,10 @@ async function connect(): Promise<void> {
 /** Pairs the downloads driven tabs' pages report with Chrome's download items. */
 const downloads = new DownloadPairing();
 
-chrome.downloads.onCreated.addListener(item => downloads.created(item.id, item.finalUrl));
-chrome.downloads.onChanged.addListener(delta => {
+// A browser that runs this script without having granted `downloads` exposes no API here (the permission set
+// rides the loaded manifest, the script re-reads from disk); degrade to no download pairing, never to a dead worker.
+chrome.downloads?.onCreated.addListener(item => downloads.created(item.id, item.finalUrl));
+chrome.downloads?.onChanged.addListener(delta => {
 	const state = delta.state?.current;
 	if (state === "complete" || state === "interrupted") downloads.finished(delta.id, state);
 });
@@ -378,6 +384,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
+
+onForeignFramesHidden((tabId, frames) => post({ t: "framesHidden", tabId, frames }));
 
 chrome.tabs.onCreated.addListener(tab => {
 	const snap = snapshot(tab);

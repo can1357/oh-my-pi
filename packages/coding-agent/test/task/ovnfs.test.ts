@@ -13,7 +13,8 @@ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import * as daemon from "../../src/ovnfs/daemon";
 import { ISOLATION_OWNER_FILE } from "../../src/task/isolation-ownership";
 import * as isolationRunner from "../../src/task/isolation-runner";
-import { OVNFS_CHECKOUT_FILE, ovnfsWorkspace, releaseOvnfsCheckout } from "../../src/task/ovnfs";
+import { OVNFS_CHECKOUT_FILE, releaseOvnfsCheckout } from "../../src/ovnfs/task-record";
+import { ovnfsWorkspace } from "../../src/task/ovnfs";
 import * as executorModule from "../../src/task/executor";
 import * as worktreeModule from "../../src/task/worktree";
 import { taskIsolationBaseDir } from "../../src/task/worktree";
@@ -54,7 +55,7 @@ describe("ovnfs checkout recovery", () => {
 	});
 
 	function mockDaemon(handle: (op: DaemonOp) => unknown): void {
-		vi.spyOn(daemon, "startDaemon").mockResolvedValue({ socket: "/tmp/ovnfs-test.sock", mount: "/mnt/ovnfs" });
+		vi.spyOn(daemon, "startDaemon").mockResolvedValue({ socket: "/tmp/ovnfs-test.sock" });
 		vi.spyOn(client, "callSocket").mockImplementation(
 			async <T>(_socket: string, op: string, args: object): Promise<T> => {
 				const record = args as { checkout?: unknown; name?: unknown; base?: unknown };

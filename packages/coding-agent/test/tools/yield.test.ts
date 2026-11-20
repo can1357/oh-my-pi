@@ -103,7 +103,6 @@ describe("YieldTool", () => {
 		expect(completed.details.complete).toBe(true);
 		const assembled = assembleYieldResult(
 			[failed.details, completed.details],
-			undefined,
 			yieldSectionShapes(buildWorkPoolOutputSchema(items)),
 		);
 		expect(assembled?.data).toEqual({
@@ -126,11 +125,11 @@ describe("YieldTool", () => {
 			type: ["review#1"],
 			complete: true,
 		});
-		expect(
-			assembleYieldResult([failed.details], undefined, yieldSectionShapes(buildWorkPoolOutputSchema(items)))?.data,
-		).toEqual({
-			"review#1": { error: "review unavailable" },
-		});
+		expect(assembleYieldResult([failed.details], yieldSectionShapes(buildWorkPoolOutputSchema(items)))?.data).toEqual(
+			{
+				"review#1": { error: "review unavailable" },
+			},
+		);
 	});
 
 	it("assembles per-key workpool yields into the batch output schema", () => {
@@ -144,7 +143,6 @@ describe("YieldTool", () => {
 				{ status: "success", type: ["review#1"], data: { outcome: "one" } },
 				{ status: "success", type: ["review#2"], data: { outcome: "two" }, complete: true },
 			],
-			undefined,
 			yieldSectionShapes(schema),
 		);
 		expect(assembled?.data).toEqual({
@@ -212,22 +210,9 @@ describe("YieldTool", () => {
 		expect(result.details).toEqual({ data: undefined, status: "aborted", error: "blocked" });
 	});
 
-	it("accepts typed success without data as a last-turn result", async () => {
-		const tool = new YieldTool(createSession());
-		const result = await tool.execute("call-last-turn", { type: "summary" } as never);
-		expect(result.details).toEqual({
-			data: undefined,
-			status: "success",
-			error: undefined,
-			type: "summary",
-			useLastTurn: true,
-		});
-	});
-	it("rejects a schema-bound last-turn finalize with no accumulated sections as retryable", async () => {
-		// Instruction-followed punt observed in Gemini traces: `{type:"result"}`
-		// with a declared output schema. Accepting it terminates the child and
-		// finalization then fails post-mortem with an uncorrectable
-		// schema_violation; the tool must bounce it in-band instead.
+	it("rejects a data-less terminal type with no submitted sections as retryable", async () => {
+		// `{type:"result"}` with nothing to finalize used to terminate the child and
+		// fail the run post-mortem with a null-data warning it could no longer fix.
 		const tool = new YieldTool(
 			createSession({
 				outputSchema: {
@@ -237,44 +222,20 @@ describe("YieldTool", () => {
 				},
 			}),
 		);
-		await expect(tool.execute("call-schema-punt", { type: "result" } as never)).rejects.toThrow(
-			/structured output matching the declared schema/,
-		);
-	});
-	it("rejects a data-less useLastTurn finalize when the last turn carries no text", async () => {
-		// Thinking-only final turn: `useLastTurn` extraction resolves to empty, so
-		// finalization would fail the run post-mortem with a null-data warning and
-		// no retry. The free-form analog of the schema guard bounces it in-band.
-		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
-		await expect(tool.execute("call-empty-last-turn", { type: "result" } as never)).rejects.toThrow(
-			/no text \(thinking only\)/,
-		);
-	});
-
-	it("rejects an empty incremental last-turn yield before it can mask an empty finalize", async () => {
-		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
-		await expect(tool.execute("call-empty-section", { type: ["notes"] } as never)).rejects.toThrow(
-			/no text \(thinking only\)/,
-		);
 		await expect(tool.execute("call-empty-finalize", { type: "result" } as never)).rejects.toThrow(
-			/no text \(thinking only\)/,
+			/only finalizes previously submitted sections, and none were submitted/,
 		);
 	});
 
-	it("accepts a data-less useLastTurn finalize when the last turn has text", async () => {
-		const tool = new YieldTool(createSession({ getLastAssistantText: () => "the actual answer" }));
-		const result = await tool.execute("call-text-last-turn", { type: "result" } as never);
-		expect(result.details).toEqual({
-			data: undefined,
-			status: "success",
-			error: undefined,
-			type: "result",
-			useLastTurn: true,
-		});
+	it("rejects an incremental section without data", async () => {
+		const tool = new YieldTool(createSession());
+		await expect(tool.execute("call-empty-section", { type: ["notes"] } as never)).rejects.toThrow(
+			/Section "notes" carries no `data`/,
+		);
 	});
 
-	it("aborts a persistently empty last-turn finalize instead of retrying forever", async () => {
-		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
+	it("aborts a persistently empty finalize instead of retrying forever", async () => {
+		const tool = new YieldTool(createSession());
 		for (let attempt = 0; attempt < 3; attempt++) {
 			await expect(tool.execute("call-empty-retry", { type: "result" } as never)).rejects.toThrow(
 				/retries remaining before abort/,
@@ -282,7 +243,7 @@ describe("YieldTool", () => {
 		}
 		const aborted = await tool.execute("call-empty-final", { type: "result" } as never);
 		expect(aborted.details?.status).toBe("aborted");
-		expect(aborted.details?.error).toMatch(/empty last-turn result after \d+ consecutive attempt/);
+		expect(aborted.details?.error).toMatch(/stayed empty after \d+ consecutive attempt/);
 	});
 
 	it("accepts a data-less finalize after incremental sections even when schema-bound", async () => {
@@ -306,8 +267,25 @@ describe("YieldTool", () => {
 			status: "success",
 			error: undefined,
 			type: "result",
-			useLastTurn: true,
 		});
+	});
+
+	it("treats an array-wrapped `result` type as the finalize marker", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { findings: { type: "array", items: { type: "string" } } },
+					required: ["findings"],
+				},
+			}),
+		);
+		await expect(
+			tool.execute("call-whole-array", { type: ["findings"], data: ["one", "two"] } as never),
+		).rejects.toThrow("Send one element per call.");
+		await tool.execute("call-section", { type: ["findings"], data: "one finding" } as never);
+		const finalize = await tool.execute("call-finalize", { type: ["result"] } as never);
+		expect(finalize.details).toMatchObject({ status: "success", type: "result" });
 	});
 
 	it("parses JSON-string data when the schema rejects the string form", async () => {
@@ -425,7 +403,6 @@ describe("YieldTool", () => {
 			status: "success",
 			error: undefined,
 			type: ["findings"],
-			useLastTurn: undefined,
 			schemaOverridden: undefined,
 		});
 	});
@@ -493,7 +470,6 @@ describe("YieldTool", () => {
 			status: "success",
 			error: undefined,
 			type: ["overall_correctness"],
-			useLastTurn: undefined,
 			schemaOverridden: undefined,
 		});
 	});
@@ -590,18 +566,6 @@ describe("YieldTool", () => {
 				/Section "findings" uses unknown incremental yield label\(s\): "findings"\. Resubmit with one of the schema's labels: "issue_key", "verdict", "blockers", "non_blocking_notes"\./,
 			);
 		}
-
-		// The last-turn short-circuit (`type: ["findings"]`) MUST also reject
-		// the unknown label. Otherwise the stale section silently accepts the last assistant
-		// text and rides along when a sibling section trips MAX_SCHEMA_RETRIES and
-		// schemaOverridden in finalization (issue #3927 follow-up review).
-		await expect(
-			tool.execute("call-native-reviewer-label-last-turn", {
-				type: ["findings"],
-			} as never),
-		).rejects.toThrow(
-			/Section "findings" uses unknown incremental yield label\(s\): "findings"\. Resubmit with one of the schema's labels: "issue_key", "verdict", "blockers", "non_blocking_notes"\./,
-		);
 
 		// Schema-retry budget intact: a separate, shape-only mismatch still fires the
 		// first-attempt retry hint (`2 retry attempt(s) remain`), proving the unknown-label
@@ -1057,19 +1021,13 @@ describe("YieldTool", () => {
 			status: "success",
 			error: undefined,
 			type: undefined,
-			useLastTurn: undefined,
 			schemaOverridden: undefined,
 		});
 
 		const untyped = new YieldTool(createSession());
-		const lastTurn = await untyped.execute("call-null-data", { type: "summary", data: null, error: null } as never);
-		expect(lastTurn.details).toEqual({
-			data: undefined,
-			status: "success",
-			error: undefined,
-			type: "summary",
-			useLastTurn: true,
-		});
+		await expect(
+			untyped.execute("call-null-data", { type: "summary", data: null, error: null } as never),
+		).rejects.toThrow(/none were submitted/);
 	});
 
 	it("omits nested strict-mode null optionals while retaining explicit nullable values", async () => {
@@ -1778,6 +1736,82 @@ describe("YieldTool", () => {
 		expect(override.content).toEqual([
 			{ type: "text", text: "Result submitted (schema validation overridden after 4 failed attempt(s))." },
 		]);
+	});
+
+	it("reports the decoded summary limit without changing the schema retry budget", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { summary: { type: "string", maxLength: 1200 } },
+					required: ["summary"],
+				},
+			}),
+		);
+		const data = JSON.stringify({ summary: "x".repeat(1228) });
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			const submission = tool.execute(`call-decoded-summary-${attempt}`, { data });
+			await expect(submission).rejects.toThrow(
+				/Output does not match schema: summary: must be at most 1200 characters/,
+			);
+			await expect(submission).rejects.toThrow(/`data`.*decoded value.*not a JSON string/);
+			await expect(submission).rejects.toThrow(
+				attempt < 3 ? `${3 - attempt} retry attempt(s) remain` : "this is the final retry",
+			);
+		}
+		const overridden = await tool.execute("call-decoded-summary-override", { data });
+		expect(overridden.details).toMatchObject({ data, status: "success", schemaOverridden: true });
+		expect(overridden.content).toEqual([
+			{ type: "text", text: "Result submitted (schema validation overridden after 4 failed attempt(s))." },
+		]);
+	});
+
+	it("reports decoded nested constraints for incremental section payloads", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: {
+						findings: {
+							type: "array",
+							items: {
+								type: "object",
+								properties: {
+									review: {
+										type: "object",
+										properties: { summary: { type: "string", maxLength: 3 } },
+										required: ["summary"],
+									},
+								},
+								required: ["review"],
+							},
+						},
+					},
+				},
+			}),
+		);
+		const invalid = tool.execute("call-decoded-section-invalid", {
+			type: ["findings"],
+			data: JSON.stringify({ review: { summary: "four" } }),
+		});
+		await expect(invalid).rejects.toThrow(
+			/Section "findings" does not match schema: review\/summary: must be at most 3 characters/,
+		);
+		await expect(invalid).rejects.toThrow(/`data`.*decoded value.*not a JSON string/);
+	});
+
+	it("keeps a string section's own violations when its text happens to parse as JSON", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { notes: { type: "array", items: { type: "string", maxLength: 5 } } },
+				},
+			}),
+		);
+		const invalid = tool.execute("call-json-looking-note", { type: ["notes"], data: "[1,2,3]" });
+		await expect(invalid).rejects.toThrow(/Section "notes" does not match schema: must be at most 5 characters/);
+		await expect(invalid).rejects.not.toThrow(/decoded value/);
 	});
 
 	it("recovers double-encoded JSON primitives only when raw validation fails", async () => {

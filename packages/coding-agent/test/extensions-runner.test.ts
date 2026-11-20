@@ -9,12 +9,18 @@ import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
+import {
+	isPerCallContextMessage,
+	kCursorExecResolved,
+	kStreamingBlockIndex,
+} from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeVmContextsByOwner } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { disposeKernelSessionsByOwner } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -27,12 +33,16 @@ import type {
 	Extension,
 	ExtensionError,
 	ExtensionUIContext,
+	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -1736,6 +1746,75 @@ describe("ExtensionRunner", () => {
 			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
 		};
 
+		for (const language of ["js", "py"] as const) {
+			it.skipIf(language === "py" && Bun.env.PI_PYTHON_INTEGRATION !== "1")(
+				`links both extension hooks to the invoking ${language} eval or kernel-defined tool, not the retained kernel`,
+				async () => {
+					const runner = await runnerFor(`
+						export default function(pi) {
+							const starts = new Map();
+							pi.on("tool_call", e => { starts.set(e.toolCallId, e.parentToolCallId ?? null); });
+							pi.on("tool_result", e => ({
+								content: [{ type: "text", text: JSON.stringify([e.toolCallId, starts.get(e.toolCallId), e.parentToolCallId ?? null]) }],
+							}));
+						}
+					`);
+					const child = new ExtensionToolWrapper<TSchema>({ ...flaggedTool, parameters: Type.Object({}) }, runner);
+					const owner = sessionManager.getSessionId();
+					const context = { ...runner.createContext(), hasQueuedMessages: () => false };
+					const session: ToolSession = {
+						cwd: tempDir.path(),
+						hasUI: false,
+						settings: Settings.isolated({ "eval.autoBackground.enabled": false }),
+						getSessionFile: () => null,
+						getSessionSpawns: () => null,
+						getEvalSessionId: () => owner,
+						getEvalKernelOwnerId: () => owner,
+						getToolByName: name => (name === child.name ? child : undefined),
+						getToolContext: () => context,
+					};
+					const tool = new EvalTool(session);
+					const ids = new Set<string>();
+					try {
+						for (const parent of ["first-eval", "second-eval"]) {
+							const line = `print((await tool.flagged({}))["text"])`;
+							const result = await tool.execute(parent, { language, code: `${line}\n${line}` });
+							expect(result.isError).not.toBe(true);
+							const lines = result.details?.cells?.[0].output.trim().split("\n");
+							expect(lines).toHaveLength(2);
+							for (const text of lines!) {
+								const [id, start, end] = JSON.parse(text);
+								expect([start, end]).toEqual([parent, parent]);
+								expect(id).not.toBe(parent);
+								ids.add(id);
+							}
+						}
+						expect(ids.size).toBe(4);
+						const code =
+							language === "js"
+								? "tool(async function probe() { return (await tool.flagged({})).text; });"
+								: "@tool\nasync def probe() -> str:\n    return (await tool.flagged({}))['text']";
+						const definition = await tool.execute("define-probe", { language, code });
+						expect(definition.isError).not.toBe(true);
+						const [probe] = createEvalCustomTools(session, await describeEvalTools(session, ["probe"]));
+						for (const parent of ["first-probe", "second-probe"]) {
+							const result = await probe.execute(parent, {}, undefined, context);
+							const [id, start, end] = JSON.parse(firstText(result)!);
+							expect([start, end]).toEqual([parent, parent]);
+							expect(id).not.toBe(parent);
+							ids.add(id);
+						}
+						expect(ids.size).toBe(6);
+						const direct = await child.execute("direct", {}, undefined, undefined, context);
+						expect(firstText(direct)).toBe('["direct",null,null]');
+					} finally {
+						if (language === "js") await disposeVmContextsByOwner(owner);
+						else await disposeKernelSessionsByOwner(owner);
+					}
+				},
+			);
+		}
+
 		it("surfaces replacement content while keeping the call an error", async () => {
 			const runner = await runnerFor(`
 				export default function(pi) {
@@ -2790,7 +2869,11 @@ describe("ExtensionRunner", () => {
 	describe("tool approval lifecycle", () => {
 		const initializeRunner = (
 			runner: ExtensionRunner,
-			select: (title: string, options: string[]) => Promise<string | undefined>,
+			select: (
+				title: string,
+				options: string[],
+				dialogOptions?: ExtensionUIDialogOptions,
+			) => Promise<string | undefined>,
 		) => {
 			runner.initialize(
 				{
@@ -2909,11 +2992,12 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
-				"Approve dangerous_tool for this session",
-				"Deny",
-			]);
+			// No abort signal reached the call, so the prompt gets no dialog options.
+			expect(select).toHaveBeenCalledWith(
+				expect.stringContaining("Allow tool: dangerous_tool"),
+				["Approve", "Approve dangerous_tool for this session", "Deny"],
+				undefined,
+			);
 			delete globalState.__approvalEvents;
 		});
 
@@ -2949,7 +3033,7 @@ describe("ExtensionRunner", () => {
 			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
 			select.mockImplementationOnce(async () => "Approve");
 			await run(critical, "call-critical");
-			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"]);
+			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], undefined);
 			// A new session starts without the grant.
 			await sessionManager.newSession();
 			await run(approvalTool, "call-new-session");
@@ -3119,6 +3203,78 @@ describe("ExtensionRunner", () => {
 			]);
 			delete globalState.__deniedApprovalEvents;
 		});
+
+		it("writes each approval wait to a fresh session's file before the prompt opens, with no extension listening", async () => {
+			// No assistant message yet: the session would otherwise not create its file at all.
+			const persistent = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "approval-sessions"));
+			const records = () => {
+				const file = persistent.getSessionFile();
+				if (!file || !fs.existsSync(file)) return [];
+				return fs
+					.readFileSync(file, "utf8")
+					.split("\n")
+					.filter(line => line.length > 0)
+					.map(line => JSON.parse(line))
+					.filter(entry => entry.type === "custom" && entry.customType.startsWith("tool_approval_"))
+					.map(entry => ({ customType: entry.customType, ...entry.data }));
+			};
+			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), persistent, modelRegistry);
+			const onDiskAtPrompt: unknown[][] = [];
+			const answers = ["Approve", "Deny"];
+			initializeRunner(runner, async () => {
+				onDiskAtPrompt.push(records());
+				return answers.shift();
+			});
+			const wrapper = new ExtensionToolWrapper({ ...approvalTool, parameters: Type.Object({}) }, runner);
+			const context = () => ({
+				sessionManager: persistent,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+			});
+
+			await wrapper.execute("call-approved", {}, undefined, undefined, context());
+			// Dispatched from an eval: readers close this request once the eval call's result lands.
+			await expect(
+				wrapper.execute("call-denied", {}, undefined, undefined, { ...context(), parentToolCallId: "eval-call" }),
+			).rejects.toThrow("Tool call denied by user: dangerous_tool");
+
+			const approvedRequest = expect.objectContaining({
+				customType: "tool_approval_requested",
+				toolCallId: "call-approved",
+				toolName: "dangerous_tool",
+				approvalMode: "always-ask",
+				requestedAt: expect.any(String),
+			});
+			const approvedResolution = expect.objectContaining({
+				customType: "tool_approval_resolved",
+				toolCallId: "call-approved",
+				approved: true,
+				resolvedAt: expect.any(String),
+			});
+			const deniedRequest = expect.objectContaining({
+				customType: "tool_approval_requested",
+				toolCallId: "call-denied",
+				parentToolCallId: "eval-call",
+			});
+			expect(onDiskAtPrompt).toEqual([[approvedRequest], [approvedRequest, approvedResolution, deniedRequest]]);
+			expect(records()).toEqual([
+				approvedRequest,
+				approvedResolution,
+				deniedRequest,
+				expect.objectContaining({
+					customType: "tool_approval_resolved",
+					toolCallId: "call-denied",
+					approved: false,
+					reason: "denied by user",
+				}),
+			]);
+			expect(records()[0]).not.toHaveProperty("parentToolCallId");
+		});
+
 		it("emits resolved false when the approval prompt throws", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string }> = [];
 			const extCode = `
@@ -3169,6 +3325,44 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_resolved", approved: false, reason: "dialog aborted" },
 			]);
 			delete globalState.__thrownApprovalEvents;
+		});
+		it("closes the open approval prompt and rejects when the tool call is aborted", async () => {
+			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
+			const shown = Promise.withResolvers<void>();
+			let promptClosed = false;
+			// Like a prompt hidden behind another surface: nothing answers it, only its signal closes it.
+			initializeRunner(runner, (_title, _options, dialogOptions) => {
+				const closed = Promise.withResolvers<string | undefined>();
+				dialogOptions?.signal?.addEventListener(
+					"abort",
+					() => {
+						promptClosed = true;
+						closed.resolve(undefined);
+					},
+					{ once: true },
+				);
+				shown.resolve();
+				return closed.promise;
+			});
+			const executed = vi.fn(approvalTool.execute);
+			const controller = new AbortController();
+			const execution = (
+				new ExtensionToolWrapper({ ...approvalTool, execute: executed }, runner) as ExtensionToolWrapper<any>
+			).execute("call-aborted", {}, controller.signal, undefined, {
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+			});
+			await shown.promise;
+			controller.abort();
+
+			await expect(execution).rejects.toThrow();
+			expect(promptClosed).toBe(true);
+			expect(executed).not.toHaveBeenCalled();
 		});
 		it("emits lifecycle events when partial context has no session manager", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string; sessionId?: string }> = [];
@@ -5171,6 +5365,141 @@ describe("ExtensionRunner", () => {
 				);
 			});
 			expect(cachedTexts).toEqual(["persisted user", "persisted assistant"]);
+		});
+
+		const createRewritingRunner = async (prefix: string) => {
+			const extensionCode = `
+				export default function(pi) {
+					let calls = 0;
+					pi.on("context", async event => {
+						calls++;
+						const tag = ${prefix};
+						return {
+							messages: event.messages.map(message => {
+								if (typeof message.content === "string") return { ...message, content: tag + message.content };
+								if (!Array.isArray(message.content)) return message;
+								return {
+									...message,
+									content: message.content.map(block => (block.type === "text" ? { ...block, text: tag + block.text } : block)),
+								};
+							}),
+						};
+					});
+				}
+			`;
+			await Bun.write(path.join(extensionsDir, "rewrite.ts"), extensionCode);
+			const result = await loadTestExtensions();
+			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
+		};
+
+		const toolLoopStep = (id: string, timestamp: number): AgentMessage[] => [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id, name: "lookup", arguments: {} }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp,
+			},
+			{
+				role: "toolResult",
+				toolCallId: id,
+				toolName: "lookup",
+				content: [{ type: "text", text: `result ${id}` }],
+				isError: false,
+				timestamp: timestamp + 1,
+			},
+		];
+
+		const captureAnthropicBody = async (transformed: AgentMessage[]): Promise<MessageCreateParams> => {
+			const model = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic model to exist");
+			let body: MessageCreateParams | undefined;
+			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				return new Response(
+					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				);
+			}) as typeof fetch;
+			await streamAnthropic(
+				model,
+				{
+					systemPrompt: ["system"],
+					messages: convertToLlm(wrapSteeringForModel(transformed)),
+					tools: [
+						{
+							name: "lookup",
+							description: "Lookup a value",
+							parameters: { type: "object", properties: {}, additionalProperties: false },
+						},
+					],
+				},
+				{ apiKey: "sk-ant-api-test", fetch: fetchMock },
+			)
+				.result()
+				.catch(() => undefined);
+			if (!body) throw new Error("Expected Anthropic wire body");
+			return body;
+		};
+
+		it("advances the tail breakpoint through a tool loop when a hook rewrites history the same way every call", async () => {
+			const runner = await createRewritingRunner(`"[tag] "`);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "task", timestamp: 1 },
+				...toolLoopStep("toolu_1", 2),
+			];
+			await runner.emitContext(messages);
+			messages.push(...toolLoopStep("toolu_2", 4));
+
+			const transformed = await runner.emitContext(messages);
+			expect(transformed.some(message => isPerCallContextMessage(message))).toBe(false);
+			const body = await captureAnthropicBody(transformed);
+			const tail = body.messages.at(-1)?.content;
+			if (!Array.isArray(tail)) throw new Error("Expected a structured tail message");
+			const last = tail.at(-1);
+			expect(last).toMatchObject({ type: "tool_result", tool_use_id: "toolu_2" });
+			expect(last !== undefined && "cache_control" in last && last.cache_control != null).toBe(true);
+		});
+
+		it("still marks a hook rewrite per-call once it differs from the previous call", async () => {
+			const runner = await createRewritingRunner(`"[" + calls + "] "`);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "task", timestamp: 1 },
+				...toolLoopStep("toolu_1", 2),
+			];
+
+			const first = await runner.emitContext(messages);
+			expect(first.some(message => isPerCallContextMessage(message))).toBe(false);
+			const second = await runner.emitContext(messages);
+			expect(second.map(message => isPerCallContextMessage(message))).toEqual([true, false, true]);
+		});
+
+		it("does not mark a streamed assistant per-call when a hook leaves its content as is", async () => {
+			// streamAnthropic leaves `kStreamingBlockIndex` on every block it streams; structuredClone
+			// drops it, so the clone a hook hands back never deep-equals the in-memory history message.
+			const runner = await createRewritingRunner(`""`);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "task", timestamp: 1 },
+				...toolLoopStep("toolu_1", 2),
+			];
+			const assistant = messages[1];
+			if (assistant?.role !== "assistant") throw new Error("Expected the streamed assistant");
+			assistant.content.forEach((block, index) => Object.assign(block, { [kStreamingBlockIndex]: index }));
+
+			for (let pass = 0; pass < 2; pass++) {
+				const transformed = await runner.emitContext(messages);
+				expect(transformed.some(message => isPerCallContextMessage(message))).toBe(false);
+			}
 		});
 	});
 });

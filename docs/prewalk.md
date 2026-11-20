@@ -51,13 +51,15 @@ At startup, OMP resolves the target with the normal model-role and model-matchin
 
 Any model or thinking-level change made after the handoff counts as a replacement, including the switches plan mode makes on entry and exit. Automatic retry fallback, fallback restoration, and context promotion do not; if the session is back on the handoff model and thinking level when you run `/new`, it still restores the planning model.
 
+A model or thinking-level selection made while the handoff is still switching wins, and the handoff is not recorded, so neither `/new` nor the next task returns to the planning model. If your selection lands before the target model is in place, the switch is cancelled with a `Prewalk: cancelled …` notice and the session stays on your selection. If the target model is already in place (for example, you picked a thinking level), the session stays on the target with your selection and still receives the implementation checklist. Returning from an automatic handoff likewise never overrides a selection made while the planning model loads.
+
 ## Handoff trigger
 
 An armed prewalk injects a planning nudge. When the `todo` tool is active, any successful `todo` call—including the read-only `view` operation—opens the handoff gate. Without an active `todo` tool, the gate is already open.
 
 OMP switches at the completed assistant-turn boundary containing the first eligible `edit` or `write` result, after persisting that turn's assistant message and tool results. Unlike the todo gate, the edit/write trigger does not require a successful result.
 
-Calls to other tools do not trigger the handoff. A read-only `xd://` device request routed through `write`, such as LSP navigation, also does not count; only device operations classified as workspace writes or execution count.
+Calls to other tools do not trigger the handoff. Neither do `write` calls that change no files: messages to `agent://` peers, replies, and `proc://` stdin, mode, or kill writes. An `xd://` device request routed through `write` counts only when the device operation is classified as a workspace write; read-only requests such as LSP navigation, and execution-tier requests such as a test runner or remote command, do not, just as calling `bash` directly does not.
 
 The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model and effective thinking configuration already match, prewalk disarms without switching.
 
@@ -79,7 +81,7 @@ Run these slash commands without restarting OMP:
 
 `/prewalk` arms a one-shot handoff from the active model to `into` (any model pattern or role; default `prewalk.into`).
 
-`/prewalk off` cancels a pending handoff and clears its planning steering without changing the active model, saved configuration, or already-delivered continuation history. It is safe to run when already off or after a handoff; it does not switch back to the planning model. Cancellation applies only to the current session: `/new` re-arms prewalk when the configured setting is enabled. It also keeps [auto-prewalk](#auto-prewalk) from arming again until `/new`.
+`/prewalk off` cancels a pending handoff and clears its planning steering without changing the active model, saved configuration, or already-delivered continuation history. Run while the handoff is switching, it cancels that switch. It is safe to run when already off or after a handoff; it does not switch back to the planning model itself, although the next task still returns from an [automatic handoff](#one-task-at-a-time). Cancellation applies only to the current session: `/new` re-arms prewalk when the configured setting is enabled. It also keeps [auto-prewalk](#auto-prewalk) from arming again until `/new`.
 
 After a handoff, `/prewalk restart` immediately returns the session to `from` and re-arms the handoff to `into`; omitted arguments use `prewalk.from` and `prewalk.into`. Arguments apply to that command only and are not remembered. Selectors are resolved when the command runs, so role reassignments take effect, and neither role's persisted configuration changes.
 
@@ -100,8 +102,8 @@ prewalk:
 
 | `prewalk.auto`  | Behavior                                                                                                                                                                                             |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `off` (default) | No classification; nothing changes.                                                                                                                                                                  |
-| `suggest`       | Classifies each new task and reports the decision only. Never arms prewalk or switches models.                                                                                                       |
+| `off` (default) | No classification. An earlier automatic handoff is still returned from at the next task.                                                                                                             |
+| `suggest`       | Classifies each new task and reports the decision only. Never arms prewalk; an earlier automatic handoff is still returned from at the next task.                                                    |
 | `on`            | Classifies each new task. When the judge is confident the task fits and the target resolves with a usable credential, arms a handoff from the active model to the target; otherwise nothing changes. |
 
 Run `suggest` for a while to see how it judges your prompts, then set `auto: on`. To plan on a stronger model, make it your active (`@default`) model; auto-prewalk hands off from whatever you are on.
@@ -137,13 +139,13 @@ Under `on`, a confident decision shows the usual `Prewalk: armed for …` notice
 
 ### One task at a time
 
-An automatic handoff belongs to the task that armed it. When the next task starts, OMP returns to the model and thinking level that task planned on, then judges the new task, so a `primary` task is never left on the handoff target. `/new` does the same. An auto arm that its task never used is dropped at the next task, which is judged on its own.
+An automatic handoff belongs to the task that armed it. When the next task starts, OMP returns to the model and thinking level that task planned on, then judges the new task, so a `primary` task is never left on the handoff target. `/new` does the same. This return happens whatever `prewalk.auto` is set to by then, including after `/prewalk off`. An auto arm that its task never used is dropped at the next task, which is judged on its own.
 
-An explicit model or thinking-level selection after the handoff takes ownership: the session stays where you put it. Handoffs made by `/prewalk`, `--prewalk`, or `prewalk.enabled` are never restored by auto-prewalk.
+An explicit model or thinking-level selection after the handoff takes ownership: the session stays where you put it. Such a selection also cancels a pending auto arm before it switches; this includes the switches plan mode makes on entry and exit, model presets, and extension or ACP selections. Pending arms made by `/prewalk`, `--prewalk`, or `prewalk.enabled` stay armed, and their handoffs are never restored by auto-prewalk.
 
 ### What is classified
 
-Only new, user-authored tasks in the top-level session: typed prompts, user-invoked `/skill:` prompts, and queued follow-ups when they are delivered. Steering is never classified, since it amends the task already running. Acknowledgements such as `ok` or `thanks`, synthetic continuation turns, agent-attributed messages, subagents, plan mode, and tasks where prewalk is already armed are skipped.
+Only new, user-authored tasks in the top-level session: typed prompts, user-invoked `/skill:` prompts, and queued follow-ups when they are delivered. Steering is never classified, since it amends the task already running. Acknowledgements such as `ok` or `thanks`, synthetic continuation turns, agent-attributed messages, subagents, plan mode, and tasks where prewalk is already armed are skipped. Subagents have their own per-agent control; see [Subagent prewalk](#subagent-prewalk).
 
 The judge runs alongside the rest of prompt setup (memory recall, hooks, auto thinking), and its decision is applied just before the request is sent, so it adds latency only when it is the slowest setup step.
 
@@ -162,3 +164,20 @@ Auto-prewalk is an optimization and fails open. A missing native judge, a judge 
 ## Subagent prewalk
 
 Task subagents have separate prewalk controls: agent frontmatter, `task.prewalk`, and per-agent `task.agentPrewalk` overrides. See [Task agent discovery](./task-agent-discovery.md) for their precedence and target selection.
+
+Those controls arm unconditionally. `task.agentPrewalkAuto` lets the judge decide per assignment instead:
+
+```yaml
+task:
+   agentPrewalkAuto:
+      task: "on"
+      builder: "openai/gpt-5-mini"
+```
+
+Each entry maps an agent name to `"on"` (hand off to `prewalk.autoTarget`), `"off"`, or a target model pattern or role. A missing entry behaves like `"off"`.
+
+The judgment happens once at spawn, on the assignment text, with the same native judge, routes, and fixed 0.70 threshold as Auto-prewalk (see [What it decides](#what-it-decides) and [Requirements](#requirements)). When it arms, the subagent gets the same handoff an unconditional subagent prewalk would; otherwise it runs without prewalk.
+
+An unconditional arm from agent frontmatter, `task.prewalk`, or `task.agentPrewalk` wins and is never judged. Per-call-model and restricted-tool (plan mode) spawns are skipped without a judgment, as are spawns whose target is unavailable or equals the starting model and effort.
+
+Subagent auto-prewalk fails open: a missing native judge, a judge error, the timeout, or a low-signal assignment leaves the spawn without prewalk. It is independent of `prewalk.auto`. A kept-alive subagent keeps its spawn decision for follow-ups. Once the subagent session starts, the judgment is recorded as model usage on it under the purpose `auto-prewalk`.

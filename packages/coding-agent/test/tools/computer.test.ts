@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
+import type { EvalPreludeDefinition, HostEvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
+import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { computerApproval, createComputerPrelude } from "@oh-my-pi/pi-coding-agent/tools/computer";
@@ -16,8 +17,10 @@ import {
 	type ComputerWorkerOutbound,
 	type ComputerWorkerTransport,
 	ESCAPE_AFTER_CALL_MESSAGE,
+	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
-	SCREEN_LOCKED_CAPTURE_NOTE,
+	screenLockedCaptureNotice,
+	screenStateNotice,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
 import {
 	beginComputerTurnForOwner,
@@ -31,6 +34,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
+import { DesktopKeyboardReturn } from "@oh-my-pi/pi-natives";
 import type {
 	ApplicationOpenOptions,
 	AxNode,
@@ -46,6 +50,7 @@ import type {
 	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
+	DesktopTypeResult,
 	DesktopWindow,
 	HoldOptions as NativeHoldOptions,
 	PointerOptions,
@@ -80,6 +85,7 @@ const capabilities: DesktopCapabilities = {
 	spaces: true,
 	screenLocked: false,
 	displayAsleep: false,
+	secureInput: false,
 };
 
 const display: DesktopDisplay = {
@@ -130,8 +136,15 @@ class FakeNativeSession implements NativeDesktopSession {
 	/** Lock and sleep state reported by captures, capabilities and screenState, as the native session reads it live. */
 	screenLocked = false;
 	displayAsleep = false;
+	/** The app holding macOS secure input, reported by capabilities; unset while it is off. */
+	secureInputApp: string | undefined;
 	get capabilities(): DesktopCapabilities {
-		return { ...capabilities, screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
+		return {
+			...capabilities,
+			...this.screenState,
+			secureInput: this.secureInputApp !== undefined,
+			secureInputApp: this.secureInputApp,
+		};
 	}
 	get screenState(): DesktopScreenState {
 		return { screenLocked: this.screenLocked, displayAsleep: this.displayAsleep };
@@ -256,7 +269,7 @@ class FakeNativeSession implements NativeDesktopSession {
 		_dy: number,
 		_opts?: PointerOptions | null,
 	): Promise<void> {}
-	async typeText(_target: string, _text: string, _opts?: PointerOptions | null): Promise<void> {}
+	async typeText(_target: string, _text: string, _opts?: PointerOptions | null): Promise<DesktopTypeResult | void> {}
 	async keyChord(_target: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
 	async raiseWindow(_windowId: string): Promise<void> {}
 	async axSnapshot(_target: string, _opts?: AxSnapshotOptions | null): Promise<{ text: string }> {
@@ -292,7 +305,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async axFocus(_ref: string): Promise<void> {}
 	async axClick(_ref: string, _opts?: PointerOptions | null): Promise<void> {}
-	async axType(_ref: string, _text: string, _opts?: PointerOptions | null): Promise<void> {}
+	async axType(_ref: string, _text: string, _opts?: PointerOptions | null): Promise<DesktopTypeResult | void> {}
 	async axKeyChord(_ref: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
 	async close(): Promise<void> {
 		this.closeCount += 1;
@@ -443,7 +456,7 @@ function toolSession(): ToolSession {
 }
 
 /** Exercise the shipped host approval/call rendering and worker, with only native OS work substituted. */
-function workerPrelude(session: ToolSession, native: NativeDesktopSession): EvalPreludeDefinition {
+function workerPrelude(session: ToolSession, native: NativeDesktopSession): HostEvalPreludeDefinition {
 	const transport = new MemoryTransport();
 	new ComputerWorkerCore(transport, () => native);
 	return createComputerPrelude(session, () => ({
@@ -458,11 +471,13 @@ function workerPrelude(session: ToolSession, native: NativeDesktopSession): Eval
 		async capabilities() {
 			return native.capabilities;
 		},
-		async close() {
-			transport.inbound({ type: "close" });
-			await transport.waitFor(message => message.type === "closed");
-		},
+		reset: closeWorker,
+		close: closeWorker,
 	}));
+	async function closeWorker(): Promise<void> {
+		transport.inbound({ type: "close" });
+		await transport.waitFor(message => message.type === "closed");
+	}
 }
 
 afterAll(async () => {
@@ -470,6 +485,100 @@ afterAll(async () => {
 });
 
 describe("computer prelude", () => {
+	it("returns the failure name and message in direct computer tool content after partial output", async () => {
+		const session = toolSession();
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(new FakeNativeSession()),
+			undefined,
+			undefined,
+			{ read: () => 0, forget: () => {} },
+		);
+		const tool = createComputerPrelude(session, () => supervisor);
+		try {
+			const result = await tool.invoke(
+				{
+					action: "run",
+					code: `console.log("MARK"); await desktop.screenshot(); const error = new Error("the user changed the target"); error.name = "UserIntervened"; throw error;`,
+				},
+				{ session, toolCallId: "direct-failure" },
+			);
+			expect(result.isError).toBe(true);
+			expect(result.content).toContainEqual({ type: "text", text: expect.stringContaining("MARK") });
+			expect(result.content).toContainEqual(expect.objectContaining({ type: "image" }));
+			expect(result.content).toContainEqual({
+				type: "text",
+				text: "UserIntervened: the user changed the target",
+			});
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it("keeps partial failure evidence through JavaScript Eval", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(new FakeNativeSession()),
+			undefined,
+			undefined,
+			{ read: () => 0, forget: () => {} },
+		);
+		const prelude = createComputerPrelude(session, () => supervisor);
+		definitions = [prelude];
+		const statuses: unknown[] = [];
+		try {
+			const result = await executeJs(
+				`await computer.run("console.log('MARK'); await desktop.screenshot(); throw new TypeError('stop after act')");`,
+				{
+					session,
+					sessionId: crypto.randomUUID(),
+					cwd: process.cwd(),
+					onStatus: event => {
+						statuses.push(event);
+					},
+				},
+			);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("MARK");
+			expect(result.output).toContain("TypeError: stop after act");
+			// The partial output is logged without the failure line the direct result appends; only the thrown error shows it.
+			expect(result.output.split("TypeError: stop after act")).toHaveLength(2);
+			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
+			expect(statuses).toContainEqual(expect.objectContaining({ op: "computer", error: "stop after act" }));
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it("keeps partial failure evidence through Python Eval", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(new FakeNativeSession()),
+			undefined,
+			undefined,
+			{ read: () => 0, forget: () => {} },
+		);
+		definitions = [createComputerPrelude(session, () => supervisor)];
+		try {
+			const result = await executePython(
+				`await computer.run("console.log('MARK'); await desktop.screenshot(); throw new TypeError('stop after act')")`,
+				{ toolSession: session, sessionId: crypto.randomUUID(), cwd: process.cwd(), kernelMode: "per-call" },
+			);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("MARK");
+			expect(result.output).toContain("RuntimeError: stop after act");
+			expect(result.output.split("RuntimeError: stop after act")).toHaveLength(2);
+			expect(result.output).not.toContain("TypeError: stop after act");
+			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
+		} finally {
+			await supervisor.close();
+		}
+	});
+
 	it("validates action shapes and maps explicitly read-only runs to read approval", async () => {
 		const prelude = createComputerPrelude(toolSession(), () => ({
 			async run() {
@@ -478,6 +587,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const context = { session: toolSession(), toolCallId: "computer-validation" };
@@ -533,14 +643,45 @@ describe("computer prelude", () => {
 		await prelude.invoke({ action: "close" }, context);
 	});
 
-	it("routes run, capabilities, images, cancellation inputs, and close through one host controller", async () => {
+	it("keeps text it types, sets or copies out of status lines", () => {
+		const prelude = createComputerPrelude(toolSession(), () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async reset() {},
+			async close() {},
+		}));
+		const done = { content: [] };
+		const status = (chain: Array<{ method: string; args: unknown[] }>) =>
+			prelude.status?.({ action: "call", chain }, done);
+		const secret = "sentinel-password-4f9Q";
+		const lines = [
+			status([
+				{ method: "ref", args: ["e5"] },
+				{ method: "setValue", args: [secret] },
+			]),
+			status([
+				{ method: "window", args: [42] },
+				{ method: "type", args: [secret, { delayMs: 5 }] },
+			]),
+			status([{ method: "clipboard.write", args: [secret] }]),
+		];
+
+		expect(lines.join("\n")).not.toContain(secret);
+		expect(lines[0]).toBe('desktop.ref("e5").setValue(<hidden>)');
+		expect(status([{ method: "press", args: ["cmd+s"] }])).toBe('desktop.press("cmd+s")');
+	});
+
+	it("routes run, capabilities, images, and cancellation inputs through one host controller", async () => {
 		const calls: Array<{
 			code: string;
 			timeoutMs: number;
 			snapshot: ComputerSessionSnapshot;
 			signal?: AbortSignal;
 		}> = [];
-		let closeCount = 0;
 		const controller: ComputerController = {
 			async run(code: string, timeoutMs: number, runSnapshot: ComputerSessionSnapshot, signal?: AbortSignal) {
 				calls.push({ code, timeoutMs, snapshot: runSnapshot, signal });
@@ -557,9 +698,8 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return capabilities;
 			},
-			async close() {
-				closeCount += 1;
-			},
+			async reset() {},
+			async close() {},
 		};
 		const session = toolSession();
 		const prelude = createComputerPrelude(session, () => controller);
@@ -607,7 +747,7 @@ describe("computer prelude", () => {
 		);
 		await prelude.invoke({ action: "call", chain: [{ method: "press", args: ["cmd+s"] }], timeout: 9 }, context);
 		expect(calls[2]).toMatchObject({
-			code: 'return await (await desktop.window("42")).ax({"maxDepth":3});',
+			code: 'return await desktop.windowAccess("42").ax({"maxDepth":3});',
 			snapshot: { readOnly: true },
 		});
 		expect(calls[3]).toMatchObject({
@@ -628,12 +768,6 @@ describe("computer prelude", () => {
 
 		const capabilityResult = await prelude.invoke({ action: "capabilities" }, context);
 		expect(capabilityResult.details).toEqual(capabilities);
-		await prelude.invoke({ action: "close" }, context);
-		await prelude.invoke({ action: "close" }, context);
-		expect(closeCount).toBe(1);
-		await expect(prelude.invoke({ action: "run", code: "await desktop.windows()" }, context)).rejects.toThrow(
-			"Computer session is closed",
-		);
 	});
 
 	it("installs a frozen JavaScript facade with handle proxies, runs, direct values, and display text", async () => {
@@ -645,6 +779,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const calls: unknown[] = [];
@@ -703,12 +838,7 @@ describe("computer prelude", () => {
 		expect(
 			await runInContext("computer.run(fn, { args: [7, /save/gi, argFn], read_only: true, timeout: 5 })", realm),
 		).toBe(42);
-		expect(
-			await runInContext(
-				'computer.run("41 + 1", { timeout: 2, action: "close", code: "old", fn: "old", unexpected: true })',
-				realm,
-			),
-		).toBe(42);
+		expect(await runInContext('computer.run("41 + 1", { timeout: 2 })', realm)).toBe(42);
 		expect(await runInContext("computer.capabilities()", realm)).toEqual(capabilities);
 
 		expect(
@@ -819,6 +949,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const calls: unknown[] = [];
@@ -831,6 +962,20 @@ describe("computer prelude", () => {
 		});
 		runInContext(prelude.javascript, realm);
 
+		await expect(
+			runInContext('computer.run("return 1;", { timeouts: 3, readOnly: true })', realm),
+		).rejects.toMatchObject({
+			name: "ToolError",
+			message: expect.stringContaining("readOnly: did you mean read_only"),
+		});
+		for (const key of ["a", "read", "out", ""]) {
+			await expect(
+				runInContext(`computer.run("return 1;", { ${JSON.stringify(key)}: true })`, realm),
+			).rejects.toMatchObject({
+				name: "ToolError",
+				message: expect.not.stringContaining("did you mean"),
+			});
+		}
 		await expect(
 			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
 		).rejects.toThrow("computer.run() args must be an array of the function's arguments after its scope");
@@ -906,6 +1051,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const callValues: Record<string, unknown> = {
@@ -1310,7 +1456,7 @@ describe("computer prelude", () => {
 				`(async () => {
 					const win = await computer.window(42);
 					await win.ref("e1").doubleClick({ button: "right" });
-					await (await win.ref("e1")).doubleClick({ count: 3 });
+					await (await win.ref("e1")).doubleClick();
 					const found = await win.find({ role: "button" });
 					await found[0].doubleClick();
 					await computer.run(async ({ desktop }) => {
@@ -1418,6 +1564,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 		definitions = [
@@ -1451,6 +1598,7 @@ describe("computer prelude", () => {
 			async capabilities() {
 				return undefined;
 			},
+			async reset() {},
 			async close() {},
 		}));
 
@@ -1461,6 +1609,108 @@ describe("computer prelude", () => {
 });
 
 describe("computer worker round trips", () => {
+	it("rejects unknown computer options and forwards drag buttons", async () => {
+		class OptionsSession extends FakeNativeSession {
+			readonly draggedButtons: Array<string | undefined> = [];
+			override async axNode(ref: string): Promise<AxNode> {
+				if (ref === "e9") throw new Error("stale ref");
+				return super.axNode(ref);
+			}
+			override async drag(target: string, points: DesktopPoint[], options?: PointerOptions | null) {
+				this.draggedButtons.push(options?.button);
+				return super.drag(target, points, options);
+			}
+		}
+		const transport = new MemoryTransport();
+		const native = new OptionsSession();
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"strict-options",
+			`
+			const win = await desktop.window("42");
+			const el = await win.ref("e1");
+			const screen = await desktop.display("active");
+			const failures = [];
+			const check = async (name, call, invalid = { unexpected: true }) => {
+				let error;
+				try { await call(invalid); } catch (caught) { error = caught; }
+				if (!error) {
+					failures.push(name + " accepted " + Object.keys(invalid).join(", "));
+				} else if (error.name !== "ToolError" || !error.message.includes(name) || !error.message.includes("Valid names:")) {
+					failures.push(name + ": " + error.message);
+				} else {
+					for (const key of Object.keys(invalid)) assert(error.message.includes(key), error.message);
+					if (!invalid.max_depth) assert(!error.message.includes("did you mean"), error.message);
+					if (invalid.max_depth && !error.message.includes("max_depth: did you mean maxDepth")) failures.push("ax missing max_depth spelling hint");
+				}
+			};
+			await check("ax", o => win.ax(o), { depth: 3, max_depth: 3 });
+			await check("wait", o => wait(() => true, o), { timeoutMs: 10 });
+			await check("wait", o => wait(0, o), { timeout: 10, interval: 10 });
+			await check("observe", o => win.observe(o));
+			await check("find", o => win.find(o));
+			await check("windows", o => desktop.windows(o), { includeOffscreen: true });
+			await check("windows", o => desktop.windows(o), { wait: 5000 });
+			await check("windows", o => desktop.windows(o), { d: true });
+			await check("click", o => win.click(1, 2, o), { on: true });
+			await check("control.acquire", o => desktop.control.acquire(o), { "": true });
+			await check("window", o => desktop.window(o));
+			await check("apps.list", o => desktop.apps.list(o));
+			await check("apps.open", o => desktop.apps.open("test.editor", o));
+			await check("selectText", o => el.selectText("Save", o));
+			await check("perform", o => el.perform("press", o));
+			await check("press", o => el.press(o));
+			await check("press", o => el.press("enter", o));
+			await check("press", o => el.press(undefined, o), { takeover: true });
+			await check("press", o => el.press({ menu: ["Save"] }, o), { takeover: true });
+			await check("press", o => desktop.ref("e9").press(undefined, o), { takeover: true });
+			await check("press", o => desktop.ref("e9").press({ menu: ["Save"] }, o), { takeover: true });
+			await check("type", o => el.type("Save", o));
+			await check("click", o => el.click(o));
+			await check("doubleClick", o => el.doubleClick(o), { count: 3 });
+			await check("screenshot", o => win.screenshot(o));
+			await check("zoom", o => win.zoom({ x: 0, y: 0, width: 1, height: 1 }, o));
+			await check("doubleClick", o => win.doubleClick(1, 2, o));
+			await check("move", o => win.move(1, 2, o));
+			await check("drag", o => win.drag([[1, 2], [3, 4]], o));
+			await check("scroll", o => win.scroll(1, 2, o), { x: 1, y: 2, dx: 3 });
+			await check("type", o => win.type("Save", o));
+			await check("press", o => win.press("enter", o));
+			await check("holdKeys", o => win.holdKeys(["shift"], o));
+			await check("holdMouse", o => win.holdMouse(1, 2, o));
+			for (const target of [win, screen, desktop]) {
+				await target.drag([[1, 2], [3, 4]], { button: "middle" });
+			}
+			assert(failures.length === 0, failures.join("; "));
+		`,
+		);
+		if (!result.ok) throw new Error(result.error.message);
+		expect(native.draggedButtons).toEqual(["middle", "middle", "middle"]);
+	});
+
+	it("keeps partial failure evidence in a worker result", async () => {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new FakeNativeSession());
+		const result = await runWorker(
+			transport,
+			"partial-failure",
+			"console.log('MARK'); await desktop.screenshot(); throw new Error('stop after act')",
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error("Expected failed run");
+		expect(result.error.message).toBe("stop after act");
+		expect(result).toMatchObject({
+			output: {
+				displays: expect.arrayContaining([
+					{ type: "text", text: expect.stringContaining("MARK") },
+					expect.objectContaining({ type: "image" }),
+				]),
+				screenshots: [expect.objectContaining({ width: 64, height: 32 })],
+			},
+		});
+	});
+
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();
@@ -1515,6 +1765,23 @@ describe("computer worker round trips", () => {
 		});
 	});
 
+	it("reports Windows unavailable desktops without claiming macOS lock-screen contents", () => {
+		const state = { screenLocked: true, displayAsleep: false };
+		for (const notice of [screenLockedCaptureNotice("win32"), screenStateNotice(state, "win32")]) {
+			expect(notice).toContain("Windows reports a locked or disconnected session");
+			expect(notice).not.toContain("macOS");
+			expect(notice).not.toContain("unlocks the Mac");
+		}
+		expect(screenStateNotice({ screenLocked: false, displayAsleep: false }, "win32")).toBeUndefined();
+	});
+
+	it("keeps the macOS capture and display-sleep explanations", () => {
+		expect(screenLockedCaptureNotice("darwin")).toContain("macOS is showing its lock screen");
+		expect(screenStateNotice({ screenLocked: false, displayAsleep: true }, "darwin")).toContain(
+			"Nothing on that display can be captured or clicked until it wakes.",
+		);
+	});
+
 	it("marks a screenshot taken behind the lock screen, and only then", async () => {
 		for (const locked of [true, false]) {
 			const transport = new MemoryTransport();
@@ -1529,7 +1796,7 @@ describe("computer worker round trips", () => {
 			const lines = caption?.type === "text" ? caption.text.split("\n") : [];
 			if (locked) {
 				expect(lines).toHaveLength(2);
-				expect(lines[1]).toBe(SCREEN_LOCKED_CAPTURE_NOTE);
+				expect(lines[1]).toBe(screenLockedCaptureNotice());
 				expect(result.payload.screenshots[0]?.screenLocked).toBe(true);
 				expect(result.payload.returnValue).toMatchObject({ screenLocked: true });
 			} else {
@@ -1555,7 +1822,7 @@ describe("computer worker round trips", () => {
 			if (locked) {
 				expect(result.content[0]).toMatchObject({
 					type: "text",
-					text: expect.stringMatching(/^Note: when this run ended the screen is locked\. /),
+					text: expect.stringMatching(/^Note: when this run ended the screen is locked\.\s/),
 				});
 			} else {
 				expect(notes).toEqual([]);
@@ -1579,7 +1846,7 @@ describe("computer worker round trips", () => {
 			if (result.ok) return;
 			const [first, ...rest] = result.error.message.split("\n");
 			expect(first).toBe("verification failed");
-			if (locked) expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\. /);
+			if (locked) expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\.\s/);
 			else expect(rest).toEqual([]);
 		}
 	});
@@ -1595,9 +1862,38 @@ describe("computer worker round trips", () => {
 		);
 		const [note] = result.content;
 		const text = note?.type === "text" ? note.text : "";
-		expect(text).toMatch(/^Note: when this run ended the session's display is asleep\. /);
+		expect(text).toMatch(/^Note: when this run ended the session's display is asleep\.\s/);
 		expect(text).toContain("Nothing on that display can be captured or clicked until it wakes.");
 		expect(text).toContain("`computer.display`");
+	});
+
+	it("names the app holding secure input in a run's note, and leaves the note out while locked", async () => {
+		const session = toolSession();
+		const native = new FakeNativeSession();
+		const prelude = workerPrelude(session, native);
+		const run = async () => {
+			const result = await prelude.invoke(
+				{ action: "run", code: "await desktop.click(1, 2)" },
+				{ session, toolCallId: "secure-run", signal: new AbortController().signal },
+			);
+			return result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		};
+
+		native.secureInputApp = "SecurityAgent";
+		const held = await run();
+		expect(held).toContain("secure input");
+		expect(held).toContain("held by `SecurityAgent`");
+
+		// The lock screen's own password field holds it: the lock note already says keys fail.
+		native.screenLocked = true;
+		native.secureInputApp = "loginwindow";
+		const locked = await run();
+		expect(locked).toContain("the screen is locked");
+		expect(locked).not.toContain("secure input");
+
+		native.screenLocked = false;
+		native.secureInputApp = undefined;
+		expect(await run()).not.toContain("secure input");
 	});
 
 	it("adds the lock state to a run timed out by a hung native call without reading capabilities", async () => {
@@ -1629,7 +1925,7 @@ describe("computer worker round trips", () => {
 		if (result.ok) return;
 		const [first, ...rest] = result.error.message.split("\n");
 		expect(first).toBe("Computer code execution timed out after 50ms");
-		expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\. /);
+		expect(rest.join("\n")).toMatch(/^Note: when this run ended the screen is locked\.\s/);
 		expect(native.blockingReads).toBe(0);
 	});
 
@@ -2134,6 +2430,38 @@ describe("computer worker round trips", () => {
 			const result = await runWorker(transport, "numeric-miss", `await desktop.window(${id})`);
 			expect(result.ok).toBe(false);
 			if (!result.ok) expect(result.error.message.split("\n")[0]).toBe(`no window matches ${id}`);
+		});
+	});
+
+	it("prefers exact app names across all windows and keeps substring ambiguity otherwise", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.listWindows = async () => [
+			{ ...windowFixture, app: "Google Chrome", title: "Home" },
+			{ ...windowFixture, id: "7", app: "Google Chrome for Testing", title: "Report" },
+			{ ...windowFixture, id: "8", app: "Google Chrome Canary", title: "Report" },
+		];
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"exact-app",
+			`const listed = await desktop.windows({ app: "gOoGlE cHrOmE" });
+			const selected = await desktop.window({ app: "GOOGLE CHROME", wait: 100 });
+			const titled = await desktop.windows({ app: "Google Chrome", title: "Report" });
+			let miss; try { await desktop.window({ app: "Google Chrome", title: "Report" }); } catch (error) { miss = error.message; }
+			const partial = await desktop.windows({ app: "Chrome" });
+			let ambiguous; try { await desktop.window({ app: "Chrome" }); } catch (error) { ambiguous = error.message; }
+			return { listed: listed.map(w => w.id), selected: selected.id, titled, miss, partial: partial.length, ambiguous };`,
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).toMatchObject({
+			listed: ["42"],
+			selected: "42",
+			titled: [],
+			miss: expect.stringContaining("no window matches"),
+			partial: 3,
+			ambiguous: expect.stringContaining("multiple windows match"),
 		});
 	});
 
@@ -2882,6 +3210,24 @@ describe("expanded computer APIs", () => {
 		});
 	});
 
+	it("reopens the desktop session after computer.close(), still refusing calls after the user's Escape", async () => {
+		const { native, prelude, context, close } = escapeHarness();
+		try {
+			await prelude.invoke(CLICK, context);
+			await prelude.invoke({ action: "close" }, context);
+			expect(native.closeCount).toBe(1);
+			await prelude.invoke(CLICK, context);
+			expect(native.clickCount).toBe(2);
+
+			native.escapeStops += 1;
+			await prelude.invoke({ action: "close" }, context);
+			await expect(prelude.invoke(CLICK, context)).rejects.toThrow(ESCAPE_REFUSED_MESSAGE);
+			expect(native.clickCount).toBe(2);
+		} finally {
+			await close();
+		}
+	});
+
 	it("reports what the stopped operation said, such as a failed restoration, ahead of the stop", async () => {
 		const { native, prelude, context, close } = escapeHarness();
 		try {
@@ -3135,45 +3481,77 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
-	it("keeps the worker's own error ahead of the stop it reports", async () => {
-		let stops = 0;
-		const partial = "type: 3 of 10 characters were sent before the input was cancelled";
-		const supervisor = new ComputerSupervisor(
-			toolSession(),
-			() => {
-				const handlers = new Set<(message: ComputerWorkerOutbound) => void>();
-				const emit = (message: ComputerWorkerOutbound) => {
-					for (const handler of handlers) handler(message);
-				};
-				return {
-					send: message => {
-						if (message.type === "close") queueMicrotask(() => emit({ type: "closed" }));
-						if (message.type !== "run") return;
-						stops += 1;
-						const error = { name: "ToolError", message: partial, isToolError: true, isAbort: false };
-						queueMicrotask(() => emit({ type: "result", id: message.id, ok: false, error }));
-					},
-					onMessage: handler => {
-						handlers.add(handler);
-						queueMicrotask(() => emit({ type: "ready" }));
-						return () => handlers.delete(handler);
-					},
-					onError: () => () => {},
-					terminate: async () => {},
-				};
-			},
-			{ startMs: 200, closeMs: 200 },
-			undefined,
-			{ read: () => stops, forget: () => {} },
-		);
-		try {
-			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(
-				`${partial}\n\n${ESCAPE_STOPPED_MESSAGE}`,
+	it.each(["no output", "partial error", "partial abort", "reported stop"])(
+		"keeps the worker's own error ahead of the stop it reports: %s",
+		async mode => {
+			let stops = 0;
+			const partial = "type: 3 of 10 characters were sent before the input was cancelled";
+			const output = {
+				displays: [{ type: "text" as const, text: "MARK" }],
+				screenshots: [],
+				returnValue: undefined,
+			};
+			const supervisor = new ComputerSupervisor(
+				toolSession(),
+				() => {
+					const handlers = new Set<(message: ComputerWorkerOutbound) => void>();
+					const emit = (message: ComputerWorkerOutbound) => {
+						for (const handler of handlers) handler(message);
+					};
+					return {
+						send: message => {
+							if (message.type === "close") queueMicrotask(() => emit({ type: "closed" }));
+							if (message.type !== "run") return;
+							stops += 1;
+							const isAbort = mode === "partial abort";
+							const error = {
+								name: isAbort ? "ToolAbortError" : "ToolError",
+								message: mode === "reported stop" ? ESCAPE_STOPPED_MESSAGE : partial,
+								isToolError: !isAbort,
+								isAbort,
+							};
+							queueMicrotask(() =>
+								emit({
+									type: "result",
+									id: message.id,
+									ok: false,
+									error,
+									...(mode === "no output" ? {} : { output }),
+								}),
+							);
+						},
+						onMessage: handler => {
+							handlers.add(handler);
+							queueMicrotask(() => emit({ type: "ready" }));
+							return () => handlers.delete(handler);
+						},
+						onError: () => () => {},
+						terminate: async () => {},
+					};
+				},
+				{ startMs: 200, closeMs: 200 },
+				undefined,
+				{ read: () => stops, forget: () => {} },
 			);
-		} finally {
-			await supervisor.close();
-		}
-	});
+			try {
+				if (mode === "no output") {
+					await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(
+						`${partial}\n\n${ESCAPE_STOPPED_MESSAGE}`,
+					);
+				} else {
+					const result = await supervisor.run("1", 1_000, snapshot());
+					expect(result.displays).toEqual(output.displays);
+					if (mode === "partial error") expect(result.error?.message).toStartWith(partial);
+					else expect(result.error?.message).toBe(ESCAPE_STOPPED_MESSAGE);
+					expect(result.error?.isAbort).toBe(false);
+					expect(result.error?.name).toBe("ToolError");
+					expect(result.error?.message).toContain(ESCAPE_STOPPED_MESSAGE);
+				}
+			} finally {
+				await supervisor.close();
+			}
+		},
+	);
 
 	it("delivers the user's message and keeps the stop when the native count cannot be read", async () => {
 		let stops = 0;
@@ -3459,8 +3837,17 @@ describe("expanded computer APIs", () => {
 		const native = new ArgumentSession();
 		new ComputerWorkerCore(transport, () => native);
 		for (const [code, message] of [
-			['await desktop.ref("e1").setValue()', "setValue(value) requires a string, got undefined"],
-			['await desktop.ref("e1").setValue(42)', "setValue(value) requires a string, got number"],
+			['await desktop.ref("e1").setValue()', "setValue(value) requires a string or a finite number, got undefined"],
+			['await desktop.ref("e1").setValue(NaN)', "setValue(value) requires a string or a finite number, got NaN"],
+			[
+				'await desktop.ref("e1").setValue(Infinity)',
+				"setValue(value) requires a string or a finite number, got Infinity",
+			],
+			[
+				'await desktop.ref("e1").setValue(true)',
+				"setValue(value) requires a string or a finite number, got boolean",
+			],
+			['await desktop.ref("e1").setValue({})', "setValue(value) requires a string or a finite number, got object"],
 			['await desktop.ref("e1").selectText()', "selectText(text) requires a string, got undefined"],
 			['await desktop.ref("e1").selectText(["cat"])', "selectText(text) requires a string, got an array"],
 			['await desktop.ref("e1").perform("")', 'perform(action) requires a non-empty string, got ""'],
@@ -3517,7 +3904,7 @@ describe("expanded computer APIs", () => {
 		runInContext(prelude.javascript, realm);
 		try {
 			await expect(runInContext('computer.ref("e1").setValue()', realm)).rejects.toThrow(
-				"setValue(value) requires a string, got undefined",
+				"setValue(value) requires a string or a finite number, got undefined",
 			);
 			await expect(runInContext('computer.ref("e1").perform()', realm)).rejects.toThrow(
 				"perform(action) requires a non-empty string, got undefined",
@@ -3529,6 +3916,63 @@ describe("expanded computer APIs", () => {
 			await prelude.invoke({ action: "close" }, context);
 		}
 		expect(native.calls).toEqual([]);
+	});
+
+	it("writes a finite number given to setValue as its decimal text, and a string unchanged", async () => {
+		class ValueSession extends FakeNativeSession {
+			readonly values: string[] = [];
+			override async axSetValue(_ref: string, value: string): Promise<void> {
+				this.values.push(value);
+			}
+		}
+		const transport = new MemoryTransport();
+		const native = new ValueSession();
+		new ComputerWorkerCore(transport, () => native);
+		for (const code of [
+			'await desktop.ref("e1").setValue(75)',
+			'await desktop.ref("e1").setValue(-2.5)',
+			'await desktop.ref("e1").setValue(" 007 ")',
+			// The element a ref resolves to, as `find()` returns it, converts too.
+			'await (await desktop.ref("e1")).setValue(75)',
+		]) {
+			const result = await runWorker(transport, `value-${code}`, code);
+			expect(result.ok ? undefined : result.error).toBeUndefined();
+		}
+		const refused = await runWorker(
+			transport,
+			"value-element-boolean",
+			'await (await desktop.ref("e1")).setValue(true)',
+		);
+		expect(refused.ok ? undefined : refused.error).toMatchObject({
+			isToolError: true,
+			message: "setValue(value) requires a string or a finite number, got boolean",
+		});
+		// A whole number past 2^53 has lost digits already, as a Python int has crossing the eval bridge; a
+		// number that prints with an exponent is not text a number control takes. Nothing is sent for either.
+		for (const [code, message] of [
+			[
+				'await desktop.ref("e1").setValue(9007199254740993)',
+				'setValue(value) got 9007199254740992, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"',
+			],
+			[
+				'await desktop.ref("e1").setValue(-1e21)',
+				'setValue(value) got -1e+21, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"',
+			],
+			[
+				'await (await desktop.ref("e1")).setValue(1e-7)',
+				'setValue(value) got 1e-7, a number that prints with an exponent; pass it as text in digits, such as "0.0000001"',
+			],
+		]) {
+			const result = await runWorker(transport, `value-${code}`, code);
+			expect(result.ok ? undefined : result.error).toMatchObject({ isToolError: true, message });
+		}
+		const edges = await runWorker(
+			transport,
+			"value-edges",
+			'await desktop.ref("e1").setValue(9007199254740991); await desktop.ref("e1").setValue(0.000001)',
+		);
+		expect(edges.ok ? undefined : edges.error).toBeUndefined();
+		expect(native.values).toEqual(["75", "-2.5", " 007 ", "75", "9007199254740991", "0.000001"]);
 	});
 
 	it("leaves a printed observe() tree out of the JavaScript value's echo, but keeps ax readable", async () => {
@@ -3919,6 +4363,7 @@ describe("display hold follows the agent turn", () => {
 			releaseDisplay(turn) {
 				releases.push(turn);
 			},
+			async reset() {},
 			async close() {},
 		}));
 		const context = { session, toolCallId: "computer-turn", signal: new AbortController().signal };
@@ -4010,6 +4455,216 @@ describe("display hold follows the agent turn", () => {
 	});
 });
 
+describe("retained window menu", () => {
+	it.each(["menu.items", "menu.select"])(
+		"passes %s the original id after its window leaves the listing",
+		async (method: string) => {
+			const native = new FakeNativeSession();
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => native);
+			const handle = await runWorker(
+				transport,
+				"get-window",
+				renderComputerCall([{ method: "window", args: ["42"] }]),
+			);
+			if (!handle.ok) throw new Error(handle.error.message);
+			const { id } = handle.payload.returnValue as { id: string };
+			native.listWindows = async () => [{ ...windowFixture, id: "43" }];
+			const unavailable = (target: string): never => {
+				throw new Error(`WindowUnavailable: window '${target}' is minimized`);
+			};
+			native.menuItems = async target => unavailable(target);
+			native.menuSelect = async target => unavailable(target);
+			const chain = [
+				{ method: "window", args: [id] },
+				{ method, args: [["Window"]] },
+			];
+			const result = await runWorker(
+				transport,
+				"held-menu",
+				renderComputerCall(chain),
+				isReadOnlyComputerCall(chain),
+			);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error.message).toContain("WindowUnavailable: window '42' is minimized");
+		},
+	);
+
+	it("propagates loss of the window while expanding a submenu", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		native.menuItems = async (id, path = []) => {
+			if (path.length > 1) throw new Error(`WindowUnavailable: window '${id}' is minimized`);
+			return [{ title: "Tabs", path: [...path, "Tabs"], enabled: true, checked: false, hasSubmenu: true }];
+		};
+		const chain = [
+			{ method: "window", args: ["42"] },
+			{ method: "menu.items", args: [["Window"]] },
+		];
+		const result = await runWorker(transport, "menu-tree", renderComputerCall(chain));
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.message).toContain("WindowUnavailable: window '42' is minimized");
+	});
+
+	it("keeps the retained window's AX reads working without admitting pointer input", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const root = { method: "window", args: ["42"] };
+		const handle = await runWorker(transport, "get-window", renderComputerCall([root]));
+		expect(handle.ok).toBe(true);
+		native.listWindows = async () => [{ ...windowFixture, id: "43" }];
+		native.axSnapshot = async id => ({ text: `AX root ${id}` });
+		native.axQuery = async id => [{ ...axNode, title: `AX child ${id}` }];
+		const read = await runWorker(transport, "snapshot", renderComputerCall([root, { method: "ax", args: [] }]), true);
+		expect(read.ok && read.payload.returnValue).toBe("AX root 42");
+		// `computer.window` also takes the id as a number.
+		const numbered = renderComputerCall([
+			{ method: "window", args: [42] },
+			{ method: "ax", args: [] },
+		]);
+		const byNumber = await runWorker(transport, "snapshot-number", numbered, true);
+		expect(byNumber.ok && byNumber.payload.returnValue).toBe("AX root 42");
+		const find = await runWorker(transport, "find", renderComputerCall([root, { method: "find", args: [{}] }]), true);
+		expect(find.ok && find.payload.returnValue).toMatchObject([{ title: "AX child 42" }]);
+		const click = await runWorker(transport, "click", renderComputerCall([root, { method: "click", args: [1, 2] }]));
+		expect(click.ok).toBe(false);
+		expect(native.clickCount).toBe(0);
+	});
+});
+
+describe("menu.items beneath a named menu", () => {
+	class MenuSession extends FakeNativeSession {
+		readonly read: string[] = [];
+		override async menuItems(_target: string, path: string[] = []) {
+			this.read.push(path.join("/") || "<bar>");
+			const item = (title: string, hasSubmenu = false, enabled = true) => ({
+				title,
+				path: [...path, title],
+				enabled,
+				checked: false,
+				hasSubmenu,
+			});
+			switch (path.join("/")) {
+				case "":
+					return [item("Edit", true), item("View", true)];
+				case "Edit":
+					return [
+						item("Undo"),
+						item("List", true),
+						item("Speech", true, false),
+						item("Services", true),
+						item("Help", true),
+					];
+				case "Edit/List":
+					return [item("Local", true)];
+				case "Edit/List/Local":
+					return [item("Groceries"), item("Errands")];
+				default:
+					throw new Error(`AxFailed: menu ${path.join("/")} has no items until it opens`);
+			}
+		}
+	}
+
+	async function items(native: FakeNativeSession, code: string): Promise<string[]> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const message = await runWorker(transport, crypto.randomUUID(), code);
+		if (!message.ok) throw new Error(`menu run failed: ${JSON.stringify(message)}`);
+		return (message.payload.returnValue as Array<{ path: string[] }>).map(entry => entry.path.join("/"));
+	}
+
+	it("lists descendants depth-first and stops expansion after an unreadable submenu, retaining siblings", async () => {
+		const native = new MenuSession();
+		expect(await items(native, 'return await (await desktop.window("42")).menu.items("Edit")')).toEqual([
+			"Edit/Undo",
+			"Edit/List",
+			"Edit/List/Local",
+			"Edit/List/Local/Groceries",
+			"Edit/List/Local/Errands",
+			"Edit/Speech",
+			"Edit/Services",
+			"Edit/Help",
+		]);
+		expect(native.read).toEqual(["Edit", "Edit/List", "Edit/List/Local", "Edit/Services"]);
+	});
+
+	it("keeps the menu bar one level", async () => {
+		const bar = new MenuSession();
+		expect(await items(bar, 'return await (await desktop.window("42")).menu.items()')).toEqual(["Edit", "View"]);
+		expect(bar.read).toEqual(["<bar>"]);
+	});
+
+	it("leaves oversized submenus unexpanded without dropping sibling commands", async () => {
+		class LargeMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 149 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new LargeMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(149);
+		expect(paths[0]).toBe("Edit/0");
+		expect(paths[148]).toBe("Edit/148");
+	});
+
+	it("expands a submenu that exactly fills the remaining budget", async () => {
+		class ExactMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 148 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new ExactMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(150);
+		expect(paths.slice(0, 3)).toEqual(["Edit/0", "Edit/0/0", "Edit/0/1"]);
+		expect(paths[149]).toBe("Edit/147");
+	});
+
+	it("keeps an unexposed Windows submenu available for an explicit path read", async () => {
+		class UnexposedMenuSession extends MenuSession {
+			override async menuItems(target: string, path: string[] = []) {
+				if (path.join("/") === "Edit/Services") throw new Error("BackgroundUnavailable: menu is unexposed");
+				return await super.menuItems(target, path);
+			}
+		}
+		expect(
+			await items(new UnexposedMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")'),
+		).toContain("Edit/Services");
+	});
+
+	it("propagates UserIntervened during expansion without reading another submenu", async () => {
+		class FailingMenuSession extends MenuSession {
+			override async menuItems(target: string, path: string[] = []) {
+				if (path.join("/") === "Edit/List") throw new Error("UserIntervened: submenu read failed");
+				return await super.menuItems(target, path);
+			}
+		}
+		const native = new FailingMenuSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const message = await runWorker(
+			transport,
+			crypto.randomUUID(),
+			'return await (await desktop.window("42")).menu.items("Edit")',
+		);
+		expect(message.ok).toBe(false);
+		expect(message.ok ? undefined : message.error.message).toContain("UserIntervened:");
+		expect(native.read).toEqual(["Edit"]);
+	});
+});
+
 describe("computer background fallback", () => {
 	const reason = "window 42 (Wish) reads the hardware pointer for button presses";
 	const ran = `click ran in takeover because ${reason}; the input was delivered, and `;
@@ -4053,25 +4708,37 @@ describe("computer background fallback", () => {
 		return text.slice(ran.length);
 	}
 
-	async function run(
+	/** Runs code on one worker, so state the worker keeps across runs (its desktop session) carries over. */
+	function worker(
+		native: NativeDesktopSession,
+	): (
+		code: string,
+		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
+	) => Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		return async (code, backgroundFallback) => {
+			const id = crypto.randomUUID();
+			transport.inbound({
+				type: "run",
+				id,
+				code,
+				timeoutMs: 2_000,
+				session: snapshot(false, undefined, backgroundFallback),
+				escape: escapeScope(),
+			});
+			const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+			if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+			return message;
+		};
+	}
+
+	function run(
 		native: NativeDesktopSession,
 		code: string,
 		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
 	): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
-		const transport = new MemoryTransport();
-		new ComputerWorkerCore(transport, () => native);
-		const id = crypto.randomUUID();
-		transport.inbound({
-			type: "run",
-			id,
-			code,
-			timeoutMs: 2_000,
-			session: snapshot(false, undefined, backgroundFallback),
-			escape: escapeScope(),
-		});
-		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
-		if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
-		return message;
+		return worker(native)(code, backgroundFallback);
 	}
 
 	function texts(result: Extract<ComputerWorkerOutbound, { type: "result" }>): string[] {
@@ -4101,6 +4768,117 @@ describe("computer background fallback", () => {
 			native.refusal = `BackgroundUnavailable: ${reason}${unsent}`;
 			const result = await run(native, clickTarget, "takeover");
 			expect(texts(result), unsent).toEqual([`${ran}focus returned to Notes`]);
+		}
+	});
+
+	it("says when typed text went out but the target was not seen reading it, through the fallback and directly", async () => {
+		const unconfirmed =
+			"window 42 had not read all the typed text 5 s after it was sent; the rest may reach whichever window is in front next";
+		/** Refuses background typing; takeover typing resolves to `result`. */
+		class TypingSession extends RefusingSession {
+			result: DesktopTypeResult = { unconfirmed, focusReturn: this.report ?? undefined };
+			override async typeText(
+				_target: string,
+				_text: string,
+				opts?: PointerOptions | null,
+			): Promise<DesktopTypeResult> {
+				this.sent.push(opts);
+				if (opts?.takeover !== true) throw new Error(this.refusal);
+				return this.result;
+			}
+			override async axType(_ref: string, _text: string, opts?: PointerOptions | null): Promise<DesktopTypeResult> {
+				this.sent.push(opts);
+				return this.result;
+			}
+		}
+		const said = `type sent the text but could not confirm it arrived: ${unconfirmed}`;
+		const native = new TypingSession();
+		const typed = await run(native, 'await (await desktop.window("42")).type("hi")', "takeover");
+		expect(texts(typed)).toEqual([
+			`type ran in takeover because ${reason}; the input was sent, and focus returned to Notes`,
+			said,
+		]);
+		const element = await run(native, 'await (await desktop.ref("e1")).type("hi", { takeover: true })', "takeover");
+		expect(texts(element)).toEqual([said]);
+
+		// Negative control: confirmed text adds nothing, and the fallback says it
+		// was delivered.
+		native.result = { focusReturn: native.report ?? undefined };
+		expect(texts(await run(native, 'await (await desktop.ref("e1")).type("hi")', "takeover"))).toEqual([]);
+		expect(texts(await run(native, 'await (await desktop.window("42")).type("hi")', "takeover"))).toEqual([
+			`type ran in takeover because ${reason}; the input was delivered, and focus returned to Notes`,
+		]);
+	});
+
+	it("says once per desktop session that a macOS background move gives no hover, and only then", async () => {
+		class MoveSession extends RefusingSession {
+			constructor(readonly backend: string) {
+				super();
+			}
+			override get capabilities(): DesktopCapabilities {
+				return { ...super.capabilities, backend: this.backend };
+			}
+			override async moveMouse(
+				_target: string,
+				_x: number,
+				_y: number,
+				opts?: PointerOptions | null,
+			): Promise<void> {
+				this.sent.push(opts);
+				if (this.refuseMove && opts?.takeover !== true) throw new Error(this.refusal);
+			}
+			refuseMove = false;
+		}
+		const win = 'const w = await desktop.window("42");';
+		const hover = "move ran in the background, which gives the app no hover";
+		// Negative controls first, on one worker: runs with no background move (a requested takeover move, a
+		// silent screenshot, desktop and display moves, which drive the user's pointer) and a fallback rerun in
+		// takeover print no note and do not use it up.
+		const mac = new MoveSession("quartz");
+		const runMac = worker(mac);
+		expect(texts(await runMac(`${win} await w.move(1, 2, { takeover: true });`, "takeover"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.screenshot({ silent: true });`, "takeover"))).toEqual([]);
+		expect(
+			texts(
+				await runMac(
+					'await desktop.move(1, 2); await (await desktop.display("display-1")).move(1, 2);',
+					"takeover",
+				),
+			),
+		).toEqual([]);
+		mac.refuseMove = true;
+		const fellBack = texts(await runMac(`${win} await w.move(1, 2);`, "takeover"));
+		expect(fellBack).toHaveLength(1);
+		expect(fellBack[0]).toStartWith("move ran in takeover because");
+		mac.refuseMove = false;
+		// A run that fails after a background move delivers only its error, so it leaves the note unspent.
+		const failed = await runMac(`${win} await w.move(1, 2); assert(false, "stop");`, "takeover");
+		expect(failed.ok).toBe(false);
+		// Background moves, with and without `takeover: false`, in one run and then as separate runs (as eval
+		// sends each window call), print one note for the whole session.
+		mac.sent.length = 0;
+		const [note, ...rest] = texts(
+			await runMac(`${win} await w.move(1, 2); await w.move(3, 4, { takeover: false });`, "takeover"),
+		);
+		expect(rest).toEqual([]);
+		expect(note).toStartWith(hover);
+		expect(note).toEndWith("click it with { takeover: true }");
+		expect(texts(await runMac(`${win} await w.move(5, 6);`, "takeover"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.move(7, 8);`, "takeover"))).toEqual([]);
+		expect(mac.sent).toEqual([{}, { takeover: false }, {}, {}]);
+		// Under refuse, the note names no takeover, which the setting would refuse.
+		const [refused, ...more] = texts(await run(mac, `${win} await w.move(1, 2); await w.move(3, 4);`, "refuse"));
+		expect(more).toEqual([]);
+		expect(refused).toStartWith(hover);
+		expect(refused).not.toContain("takeover: true");
+		expect(refused).toContain("the user's setting refuses takeover");
+		// Background moves on Linux and Windows print nothing.
+		for (const backend of ["x11", "wayland", "win32"]) {
+			const other = new MoveSession(backend);
+			expect(texts(await run(other, `${win} await w.move(1, 2); await w.move(3, 4);`, "takeover")), backend).toEqual(
+				[],
+			);
+			expect(other.sent, backend).toEqual([{}, {}]);
 		}
 	});
 
@@ -4918,7 +5696,7 @@ describe("computer background fallback", () => {
 		});
 	});
 
-	it("never forwards a model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
+	it("rejects model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
 		const native = new RefusingSession();
 		const holds: NativeHoldOptions[] = [];
 		native.holdKeys = async (_target: string, _keys: string[], options: NativeHoldOptions) => {
@@ -4928,13 +5706,49 @@ describe("computer background fallback", () => {
 		native.holdMouse = async (_target: string, _x: number, _y: number, options: NativeHoldOptions) => {
 			holds.push(options);
 		};
+		const rejected = await run(
+			native,
+			'const win = await desktop.window("42"); await win.holdMouse(1, 2, { duration: 0, returnFocus: true });',
+			"takeover",
+		);
+		expect(rejected.ok).toBe(false);
+		if (!rejected.ok) expect(rejected.error.message).toContain("unknown option(s): returnFocus");
+		expect(holds).toEqual([]);
 		const code = [
 			'const win = await desktop.window("42");',
-			"await win.holdMouse(1, 2, { duration: 0, takeover: true, returnFocus: true });",
-			"await win.holdKeys(['a'], { duration: 0, returnFocus: true });",
+			"await win.holdMouse(1, 2, { duration: 0, takeover: true });",
+			"await win.holdKeys(['a'], { duration: 0 });",
 		].join("\n");
 		await run(native, code, "takeover");
 		expect(holds.map(options => options.returnFocus)).toEqual([undefined, undefined, true]);
+	});
+
+	it("says what a macOS takeover did with the user's keyboard, never that focus returned", async () => {
+		const said = async (keyboard: DesktopKeyboardReturn, frontPid = 300, handedBack = true) => {
+			const native = new RefusingSession();
+			native.report = {
+				handedBack,
+				previousPid: 300,
+				frontPid,
+				keyboard,
+			};
+			return notice(await run(native, clickTarget, "takeover"));
+		};
+		expect(await said(DesktopKeyboardReturn.HandedBack)).toEndWith("handed the keyboard back to Notes's window");
+		expect(await said(DesktopKeyboardReturn.HandedBack, 400)).toEndWith(
+			"handed the keyboard back to Notes's window, but Mail is now front",
+		);
+		expect(await said(DesktopKeyboardReturn.LeftAsChosen)).toEndWith("focus is on Notes, left as the user chose");
+		expect(await said(DesktopKeyboardReturn.LeftAsChosen, 400)).toEndWith("focus is on Mail, left as the user chose");
+		expect(await said(DesktopKeyboardReturn.NotSent)).toContain("not its window's keyboard");
+		// WindowServer refused the hand-back: nothing was sent, and the notice does not claim one.
+		expect(await said(DesktopKeyboardReturn.NotSent, 300, false)).toEndWith(
+			"focus is on Notes; macOS refused the hand-back or the user's last input was still being read, so nothing was sent to its window",
+		);
+		expect(await said(DesktopKeyboardReturn.FrontOnly)).toEndWith(
+			"handed the front back to Notes, which shows no window",
+		);
+		expect(await said(DesktopKeyboardReturn.Kept)).toEndWith("focus is on Notes");
 	});
 
 	it("reports where native saw focus end, not the window list's focused flag", async () => {

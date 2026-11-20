@@ -36,13 +36,17 @@ import {
 } from "../handle-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
-import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
+import { isEvalBridgeToolCallable, withEvalBridgeToolCall } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
+import {
+	EVAL_MCP_BRIDGE_NAME,
+	isEvalNamespaceTool,
+	type MCPNamespaceValue,
+	mcpNamespaceValue,
+	parseMCPNamespaceCall,
+} from "../../mcp/eval-namespaces";
 import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
-
-/** These tools await delegated subagents/jobs, not the cell runtime's own work. */
-const DELEGATED_WORK_TOOLS = new Set(["task", "wait"]);
 
 const NO_REPLY_SINK =
 	"out:// replies do not reach the user from here; write to out:// from a foreground eval cell or reply in your final message.";
@@ -51,7 +55,10 @@ export type { JsStatusEvent } from "./shared/types";
 
 export interface ToolBridgeOptions {
 	session: ToolSession;
+	parentToolCallId?: string;
 	signal?: AbortSignal;
+	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
+	cellTimeoutMs?: number;
 	emitStatus?: (event: JsStatusEvent) => void;
 	identity?: RuntimeCallIdentity;
 	shadowCell?: EvalShadowCellSession;
@@ -73,6 +80,7 @@ type ToolValue =
 	| EvalJudgmentBatchResult
 	| EvalHandleSnapshot
 	| EvalWorkpoolResult
+	| MCPNamespaceValue
 	| { items: EvalHandleSnapshot[] }
 	| { cancelled: boolean }
 	| {
@@ -164,7 +172,11 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
  */
 function summarizePreludeResult(session: ToolSession): StatusSummarizer {
 	return (name, args, result, text, hasError) => {
-		if (hasError) return { op: name, error: text.slice(0, 500) };
+		if (hasError) {
+			const details = isRecord(result.details) ? result.details : {};
+			const error = isRecord(details.error) ? details.error : {};
+			return { op: name, error: (typeof error.message === "string" ? error.message : text).slice(0, 500) };
+		}
 		const detail = findEnabledEvalPrelude(session, name)?.status?.(args, result);
 		return detail === undefined ? undefined : { op: name, detail };
 	};
@@ -222,7 +234,11 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
-export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+	return withEvalBridgeToolCall(options.session.xdev, () => dispatchSessionTool(name, args, options));
+}
+
+async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
 		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;
@@ -236,6 +252,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 					session: options.session,
 					toolCallId,
 					signal: options.signal,
+					cellTimeoutMs: options.cellTimeoutMs,
 					context: options.session.getToolContext?.(),
 				}),
 			);
@@ -284,14 +301,46 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_WORKPOOL_BRIDGE_NAME) {
 		return await runEvalWorkpool(args, options);
 	}
-	const tool = getTool(options.session, name);
+	if (name === EVAL_MCP_BRIDGE_NAME) {
+		return await runEvalMcpCall(args, options);
+	}
+	const call = await runSessionTool(getTool(options.session, name), args, options);
+	return bridgeValueFromToolResult(call.name, call.args, call.result, options.emitStatus);
+}
+
+/** An MCP eval namespace method (`github.search(…)`): the tool's own call, mapped by `mcpNamespaceValue`. */
+async function runEvalMcpCall(args: unknown, options: ToolBridgeOptions): Promise<MCPNamespaceValue> {
+	const request = parseMCPNamespaceCall(args);
+	const tool = getTool(options.session, request.tool);
+	if (!isEvalNamespaceTool(tool)) throw new ToolError(`${request.label} is not an MCP namespace method`);
+	const { result } = await runSessionTool(tool, request.args, options);
+	try {
+		const value = await mcpNamespaceValue(request.label, result, options.session.localProtocolOptions ?? {});
+		options.emitStatus?.({ op: request.label });
+		return value;
+	} catch (error) {
+		options.emitStatus?.({ op: request.label, error: error instanceof Error ? error.message : String(error) });
+		throw error;
+	}
+}
+
+/**
+ * Validate, authorize and run one session tool for a cell, as its direct call
+ * would; reports failures as status events. Returns the canonical name and the
+ * validated args with the result.
+ */
+async function runSessionTool(
+	tool: AgentTool,
+	args: unknown,
+	options: ToolBridgeOptions,
+): Promise<{ name: string; args: unknown; result: AgentToolResult }> {
 	// Wire aliases share every guard, status and bookkeeping path with the canonical tool.
-	name = tool.name;
+	const name = tool.name;
 	if (!isEvalBridgeToolCallable(tool)) {
-		// The session recognizes checkpoint/rewind only as direct toolResult
-		// messages; a bridged call would report success without taking effect.
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
+	// FREEFORM tools (e.g. `edit`) take their raw text as `{ input }`, as providers deliver it.
+	if (typeof args === "string" && tool.customFormat) args = { input: args };
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	// A schema-owned name stays tool data across alternatives. Deleting an
 	// invalid value to make another branch match could select a different operation.
@@ -331,11 +380,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			options.signal,
 		);
 		options.signal?.throwIfAborted();
-		if (claimed) return bridgeValueFromToolResult(name, validatedArgs, claimed, options.emitStatus);
+		if (claimed) return { name, args: validatedArgs, result: claimed };
 	}
 	let settled = false;
+	const isMcpTool = "mcpServerName" in tool && typeof tool.mcpServerName === "string";
 	const onUpdate: AgentToolUpdateCallback | undefined =
-		options.emitStatus && "mcpServerName" in tool && typeof tool.mcpServerName === "string"
+		options.emitStatus && isMcpTool
 			? partial => {
 					if (settled || !isRecord(partial.details)) return;
 					const progress = parseMCPProgress(partial.details.progress);
@@ -343,24 +393,25 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 				}
 			: undefined;
 	try {
-		// A delegated-work tool pauses only the cell's runtime-work watchdog; the turn's
-		// signal still reaches it. Without a status sink the pause wrapper is a no-op.
-		const result = await withBridgeTimeoutPause(
-			DELEGATED_WORK_TOOLS.has(name) ? options.emitStatus : undefined,
-			async () => {
-				try {
-					return await tool.execute(
-						toolCallId,
-						validatedArgs,
-						options.signal,
-						onUpdate,
-						options.session.getToolContext?.(),
-					);
-				} finally {
-					settled = true;
-				}
-			},
-		);
+		// An omp session tool bounds its own work (bash/task/wait carry timeouts), so it pauses the cell's
+		// runtime-work watchdog instead of letting a slow call kill the VM; an external MCP server may never
+		// answer, so its calls stay charged to the cell. The turn's signal reaches both. Without a status
+		// sink the pause wrapper is a no-op.
+		const result = await withBridgeTimeoutPause(isMcpTool ? undefined : options.emitStatus, async () => {
+			try {
+				// The script parses the result, so it gets the whole result, not the model's display of it.
+				const context = options.session.getToolContext?.();
+				return await tool.execute(
+					toolCallId,
+					validatedArgs,
+					options.signal,
+					onUpdate,
+					context && { ...context, programmatic: true, parentToolCallId: options.parentToolCallId },
+				);
+			} finally {
+				settled = true;
+			}
+		});
 		if (name === "todo") {
 			// A bridged call emits no `todo` toolResult entry, the only thing branch
 			// rehydration reads; without this the in-memory update is lost on the
@@ -373,7 +424,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			if (!options.onReply) throw new ToolError(NO_REPLY_SINK);
 			for (const text of replies) options.onReply(text);
 		}
-		return bridgeValueFromToolResult(name, validatedArgs, result, options.emitStatus);
+		return { name, args: validatedArgs, result };
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,

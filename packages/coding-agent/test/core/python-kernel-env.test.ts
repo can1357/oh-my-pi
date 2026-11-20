@@ -98,7 +98,7 @@ describe("enumeratePythonRuntimes", () => {
 		expect(resolvePythonRuntime(path.join(path.sep, "work"), {}).pythonPath).toBe(systemPy);
 	});
 
-	it("enumerates every python and python3 on PATH so a broken first shim cannot hide a working interpreter", () => {
+	it("enumerates every python3, then python, on PATH so a broken first shim cannot hide a working interpreter", () => {
 		const shimDir = path.join(path.sep, "home", "u", ".local", "share", "mise", "shims");
 		const shimPy = path.join(shimDir, "python");
 		const shimPy3 = path.join(shimDir, "python3");
@@ -111,7 +111,7 @@ describe("enumeratePythonRuntimes", () => {
 
 		const runtimes = enumeratePythonRuntimes(path.join(path.sep, "work"), {});
 
-		expect(runtimes.map(r => r.pythonPath)).toEqual([shimPy, shimPy3, brewPy3, systemPy]);
+		expect(runtimes.map(r => r.pythonPath)).toEqual([shimPy3, brewPy3, systemPy, shimPy]);
 	});
 
 	it("resolves an explicit interpreter without falling through to discovery", () => {

@@ -9,7 +9,8 @@ import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
 import { InternalUrlRouter } from "../internal-urls";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
-import { encodeLocalPath, sessionLocalProtocolOptions } from "../modes/local-file-editor";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
+import { encodeLocalPath } from "../modes/local-file-editor";
 import { createModelBrowserSource } from "../modes/model-browser-source";
 import {
 	createModelMentionSource,
@@ -140,7 +141,7 @@ const MCP_DISABLED_CONFIG_ELIGIBLE_SUBCOMMANDS: Readonly<Record<string, true>> =
  * followed by a space. `remove` gets its own scope-aware completions (see
  * {@link buildMcpRemoveCompletions}) since — unlike the others —
  * it only ever succeeds against a config-file entry. Subcommands with a
- * different argument shape (add, smithery-search, ...) get no argument
+ * different argument shape (add, ...) get no argument
  * completion.
  */
 export function buildMcpArgumentCompletions(
@@ -308,6 +309,8 @@ export function buildModelSelectorCompletions(
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
 			});
+			// Later keystrokes list whatever a retry of failed provider discovery recovers.
+			void rankModels.retryDiscovery?.();
 			for (const { selector, model } of rankModels(query)) {
 				matches.push({ value: `${selector}${suffix} `, label: selector, description: model.name });
 			}

@@ -139,7 +139,18 @@ describe("prefixed tool rows", () => {
 		const rows = plain(
 			askToolRenderer
 				.renderResult(
-					{ content: [], details: { answers: [{ name: "choice", question: "Pick?", answer }] } },
+					{
+						content: [],
+						details: {
+							answers: [
+								{
+									name: "choice",
+									question: "Which of these longer alternatives should be selected for the next deployment?",
+									answer,
+								},
+							],
+						},
+					},
 					{ expanded: false, isPartial: false },
 					theme,
 				)
@@ -151,25 +162,36 @@ describe("prefixed tool rows", () => {
 		expect(rows[answerRow + 1]).toContain("information important");
 	});
 
-	it("hangs Ask option labels beneath their marker and wraps LSP hover code", async () => {
+	it("renders selected Ask option notes beneath the matching answer", async () => {
 		const theme = (await getThemeByName("dark"))!;
-		const label = "This detailed option label is long enough to require a second row inside the narrow card.";
-		const ask = plain(
+		const rows = plain(
 			askToolRenderer
-				.renderCall(
+				.renderResult(
 					{
-						html: `<form><p>Pick?</p><label><input type="radio" name="pick" value="a" checked> ${label}</label></form>`,
+						content: [],
+						details: {
+							answers: [
+								{ name: "unrelated", question: "Unrelated?", answer: "First" },
+								{ name: "db", question: "Database?", answer: "First" },
+							],
+							notes: [
+								{ name: "db", question: "Database?", option: "Second", value: "second", text: "Team standard" },
+							],
+						},
 					},
-					{ expanded: false, isPartial: true },
+					{ expanded: false, isPartial: false },
 					theme,
 				)
 				.render(width),
 		);
-		const option = ask.findIndex(row => row.includes("◉ This detailed"));
-		expect(option).toBeGreaterThan(0);
-		expect(ask[option + 1]).toStartWith("│    ");
-		expect(ask[option + 1]).toContain("card.");
+		const note = rows.findIndex(row => row.includes("✎ Second: Team standard"));
+		expect(note).toBeGreaterThan(rows.findIndex(row => row.includes("Database?")));
+		expect(rows[note - 1]).toContain("First");
+		expect(rows.filter(row => row.includes("Team standard"))).toHaveLength(1);
+	});
 
+	it("wraps LSP hover code", async () => {
+		const theme = (await getThemeByName("dark"))!;
 		for (const expanded of [true, false]) {
 			const hover = plain(
 				renderLspResult(

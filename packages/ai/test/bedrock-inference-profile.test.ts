@@ -319,6 +319,18 @@ describe("Bedrock cross-region inference-profile geo routing", () => {
 describe("Bedrock custom baseUrl", () => {
 	const NO_AMBIENT = { AWS_REGION: undefined, AWS_DEFAULT_REGION: undefined } as const;
 
+	test("uses a configured regional host when no ambient region is set", async () => {
+		await withEnv({ ...NO_AMBIENT, AWS_PROFILE: undefined, AWS_SDK_LOAD_CONFIG: undefined }, async () => {
+			expect(
+				await capturedRequestUrl(
+					bedrockModel("global.anthropic.claude-fable-5", "https://bedrock-runtime.us-west-2.amazonaws.com"),
+				),
+			).toBe(
+				"https://bedrock-runtime.us-west-2.amazonaws.com/model/global.anthropic.claude-fable-5/converse-stream",
+			);
+		});
+	});
+
 	test("re-points AWS's own regional host at the resolved region", async () => {
 		await withEnv({ AWS_REGION: "eu-central-1", AWS_DEFAULT_REGION: undefined }, async () => {
 			expect(await capturedRequestUrl(bedrockModel("global.anthropic.claude-opus-4-8"))).toBe(

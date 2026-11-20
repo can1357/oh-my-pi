@@ -92,7 +92,7 @@ const CONVENTIONAL_PREFIX = /^[a-z]+(\([^)]+\))?!?: (.+)$/;
  * `type(scope)!:` prefix, ≤72 chars total, description starting lowercase,
  * no trailing period. (Past tense is not machine-checkable.)
  */
-export function isCompliantSubject(subject: string): boolean {
+function isCompliantSubject(subject: string): boolean {
 	const m = CONVENTIONAL_PREFIX.exec(subject);
 	if (!m) return false;
 	const desc = m[2];

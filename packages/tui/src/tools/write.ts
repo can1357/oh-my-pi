@@ -83,7 +83,7 @@ export interface WriteToolDetails {
 	message?: CoordinationDetails;
 	proc?: ProcWriteDetails;
 	cfg?: CfgWriteDetails;
-	/** Set when the write touched no files: a peer message, a reply, or a background-work cancellation. */
+	/** Set when the write touched no files: a peer message, a reply, process stdin, or background-work control. */
 	touchesNoFiles?: boolean;
 }
 

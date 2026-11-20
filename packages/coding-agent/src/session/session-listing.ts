@@ -550,21 +550,19 @@ async function scanSessionFile(
 	}
 }
 
-async function collectSessionsFromFileStride(
-	files: string[],
-	storage: SessionStorage,
-	startIndex: number,
-	stride: number,
-	withStatus: boolean,
-): Promise<SessionInfo[]> {
-	const sessions: SessionInfo[] = [];
-
-	for (let i = startIndex; i < files.length; i += stride) {
-		const session = await scanSessionFile(files[i], storage, withStatus);
-		if (session) sessions.push(session);
-	}
-
-	return sessions;
+/**
+ * `visit` applied to each of `files`, results in `files` order. Large lists
+ * are split across {@link getSessionListWorkerCount} interleaved workers.
+ */
+async function mapSessionFiles<T>(files: string[], visit: (file: string) => Promise<T>): Promise<T[]> {
+	const workerCount = getSessionListWorkerCount(files.length);
+	const results: T[] = [];
+	await Promise.all(
+		Array.from({ length: workerCount }, async (_, worker) => {
+			for (let i = worker; i < files.length; i += workerCount) results[i] = await visit(files[i]);
+		}),
+	);
+	return results;
 }
 
 async function collectSessionsFromFiles(
@@ -572,19 +570,8 @@ async function collectSessionsFromFiles(
 	storage: SessionStorage,
 	withStatus: boolean,
 ): Promise<SessionInfo[]> {
-	const workerCount = getSessionListWorkerCount(files.length);
-	const sessions =
-		workerCount === 1
-			? await collectSessionsFromFileStride(files, storage, 0, 1, withStatus)
-			: (
-					await Promise.all(
-						Array.from({ length: workerCount }, (_, workerIndex) =>
-							collectSessionsFromFileStride(files, storage, workerIndex, workerCount, withStatus),
-						),
-					)
-				).flat();
-
-	return sessions.sort(compareNewestFirst);
+	const sessions = await mapSessionFiles(files, file => scanSessionFile(file, storage, withStatus));
+	return sessions.filter(session => session !== undefined).sort(compareNewestFirst);
 }
 
 /** Newest `modified` first; ties break on `created`, then path, so every listing orders alike. */
@@ -1327,13 +1314,50 @@ async function continuationsAfter(
 		return name !== undefined && name.createdAt >= after && path.resolve(file) !== self;
 	});
 	const continuations = new Map<string, SessionInfo[]>();
-	for (const session of await collectSessionsFromFiles(later, storage, false)) {
+	const linked = await filterContinuationFiles(later, storage);
+	for (const session of await collectSessionsFromFiles(linked, storage, false)) {
 		if (!session.continuationOf) continue;
 		const siblings = continuations.get(session.continuationOf);
 		if (siblings) siblings.push(session);
 		else continuations.set(session.continuationOf, [session]);
 	}
 	return continuations;
+}
+
+/**
+ * The files among `files` whose header names a session in `continuationOf`.
+ * Reads only the prefix {@link scanSessionFile} takes the header from, never
+ * the rest of the file. A file found not to continue anything is cached under
+ * its stat identity.
+ */
+async function filterContinuationFiles(files: string[], storage: SessionStorage): Promise<string[]> {
+	const cache = getSessionScanCache(storage);
+	const continues = async (file: string): Promise<boolean> => {
+		let stat: SessionStorageStat;
+		try {
+			stat = storage.statSync(file);
+		} catch {
+			return false;
+		}
+		for (const key of [`h\0${file}`, `s\0${file}`, `c\0${file}`]) {
+			const cached = cache.get(key);
+			if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+				return cached.info?.continuationOf !== undefined;
+			}
+		}
+		let content: string;
+		try {
+			[content] = await storage.readTextSlices(file, SESSION_LIST_PREFIX_BYTES, 0);
+		} catch {
+			return false;
+		}
+		const header = parseSessionListHeader(content, parseJsonlLenient<Record<string, unknown>>(content));
+		if (header?.continuationOf !== undefined) return true;
+		cache.set(`c\0${file}`, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
+		return false;
+	};
+	const keep = await mapSessionFiles(files, continues);
+	return files.filter((_, i) => keep[i]);
 }
 
 /** {@link lastActivity}, read once per session file. */

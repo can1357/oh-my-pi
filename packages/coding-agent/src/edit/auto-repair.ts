@@ -16,8 +16,10 @@
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, editDiffString, parseCodeStatus } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { WritethroughCallback } from "../lsp";
+import { journalCompletion } from "../session/model-usage-journal";
 import type { ToolSession } from "../tools";
 import repairPromptSource from "./auto-repair.md" with { type: "text" };
 import type { AppliedEditSnapshot } from "./blackbox";
@@ -345,7 +347,15 @@ export async function attemptEditAutoRepair(options: {
 	if (!cfgEditAutoRepairEnabled.get(session.settings)) return undefined;
 	const registry = session.modelRegistry;
 	if (!registry) return undefined;
-	const model = resolveRoleSelection(["smol"], session.settings, registry.getAvailable())?.model;
+	const offline = cfgOffline.get(session.settings);
+	const activeProvider = session.getActiveModel?.()?.provider;
+	if (offline && !activeProvider) return undefined;
+	const availableModels = registry.getAvailable();
+	const model = resolveRoleSelection(
+		["smol"],
+		session.settings,
+		offline ? availableModels.filter(candidate => candidate.provider === activeProvider) : availableModels,
+	)?.model;
 	if (!model) return undefined;
 	const sessionId = session.getSessionId?.() ?? undefined;
 	// Resolve the key eagerly so the session-sticky credential is recorded and
@@ -371,6 +381,7 @@ export async function attemptEditAutoRepair(options: {
 	const timeout = AbortSignal.timeout(REPAIR_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 	const complete = async (builtPrompt: string): Promise<string> => {
+		const journal = journalCompletion(session.sessionManager, { purpose: "edit-repair", role: "smol" });
 		const response = await retryTransientCompletion(
 			async () => {
 				session.costGate?.admit();
@@ -386,6 +397,7 @@ export async function attemptEditAutoRepair(options: {
 					},
 				);
 				session.costGate?.record(attempt.usage.cost.total);
+				journal?.(attempt, builtPrompt);
 				return attempt;
 			},
 			{ signal, provider: model.provider },
@@ -408,7 +420,8 @@ export async function attemptEditAutoRepair(options: {
 	const repair = await repairParseRegression({ ...snapshot, next: current }, complete);
 	if (!repair) return undefined;
 
-	await writethrough(snapshot.path, repair.content, options.signal, Bun.file(snapshot.path));
+	const written = await writethrough(snapshot.path, repair.content, options.signal, Bun.file(snapshot.path));
+	session.recordFileChange?.({ path: snapshot.path, tool: "edit", before: current, after: written.finalContent });
 	logger.debug("Edit auto-repair applied", {
 		path: snapshot.path,
 		attempts: repair.attempts,

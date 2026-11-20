@@ -307,6 +307,18 @@ describe("--restore", () => {
 		]);
 	});
 
+	it("restores the session --session names, before or after a bare --restore", () => {
+		for (const argv of [
+			["--session", "sid", "--restore"],
+			["--restore", "--session", "sid"],
+		]) {
+			const args = parseArgs(argv);
+			expect(args.resume).toBe("sid");
+			expect(args.restore).toBe(true);
+		}
+		expect(parseArgs(["--session", "a", "--restore", "b"]).resume).toBe("b");
+	});
+
 	it("needs the interactive TUI, one existing session, and no prompt", () => {
 		expect(() => validateRestoreLaunch(parseArgs(["--restore", "a"]), false)).toThrow(CliUsageError);
 		expect(() => validateRestoreLaunch(parseArgs(["--restore", "a", "--fork", "b"]), true)).toThrow(CliUsageError);

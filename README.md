@@ -44,7 +44,7 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 curl -fsSL https://omp.sh/install | sh
 ```
 
-Without a usable bun (or with `--binary`), the install scripts fetch the prebuilt binary from `build.stencil.so` and check its SHA-256 before installing it. Pin a release with `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` (PowerShell: `-Binary -Ref v<version>`).
+The install scripts fetch the prebuilt binary from `build.stencil.so` and check its SHA-256 before installing it; pass `--source` (PowerShell: `-Source`) to install the package with bun instead. Pin a release with `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` (PowerShell: `-Binary -Ref v<version>`).
 
 > **Alpine / musl:** the prebuilt musl binary links `libstdc++`/`libgcc` dynamically, which stock Alpine does not ship. Install them first: `apk add libstdc++ libgcc`.
 
@@ -194,7 +194,7 @@ _[Watch the capture ↗](https://omp.sh/clips/collab.mp4)_
 
 ### 08 · Read a pdf on arxiv, why not?
 
-web_search chains twenty-four ranked providers and hands whatever URLs it finds straight to read. Arxiv PDFs, GitHub pages, Stack Overflow threads come back as structured markdown with anchors intact — the same tool surface you use on local files. Cite, follow, quote, never lose where you came from.
+web_search chains twenty-five ranked providers and hands whatever URLs it finds straight to read. Arxiv PDFs, GitHub pages, Stack Overflow threads come back as structured markdown with anchors intact — the same tool surface you use on local files. Cite, follow, quote, never lose where you came from.
 
 ![omp TUI: web_search returns 10 ranked Perplexity sources for inference-time compute scaling, the agent picks an arxiv paper, calls read https://arxiv.org/pdf/2604.10739v1, and summarizes the paper's headline result with real numbers.](https://omp.sh/clips/web-poster.webp)
 
@@ -292,7 +292,7 @@ Core tools live in the same namespace as `read` and `bash`. Pin the active set w
 - `task` — fan out subagents in parallel, optionally workspace-isolated.
 - `wait` — block until the next background result, peer message, or steering interrupt; message peers and control jobs via `agent://` and `proc://`.
 - `todo` — ordered mutations over the session todo list with phase tracking.
-- `ask` — structured follow-up questions for interactive runs.
+- `ask` — HTML form follow-ups (radios, checkboxes, selects, text) for interactive runs.
 
 **Desktop & web**
 
@@ -346,19 +346,19 @@ Auth tags below: `oauth` signs in with your provider account, `plan` routes thro
 
 Direct APIs and gateways. Mix providers per role.
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · Chutes · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
 
 ### Coding plans
 
 Subscription-routed. `/login` attaches the session.
 
-Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
+Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kiro `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
 
 ### Run it yourself
 
 OpenAI-compatible `/v1/models`. Local instances skip the key.
 
-Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM
+Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM · Bifrost
 
 ### Custom OpenAI-compatible providers
 
@@ -395,13 +395,13 @@ modelRoles:
 
 Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs/providers).
 
-## Twenty-four backends. _One tool the agent already knows_.
+## Twenty-five backends. _One tool the agent already knows_.
 
-`web_search` is built in, not bolted on. `auto` walks a twenty-four-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
+`web_search` is built in, not bolted on. `auto` walks a twenty-five-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
 
 ### Search providers
 
-Twenty-four backends. Pin one, or let `auto` walk the chain in order.
+Twenty-five backends. Pin one, or let `auto` walk the chain in order.
 
 | provider     | auth                                      |
 | ------------ | ----------------------------------------- |
@@ -415,6 +415,7 @@ Twenty-four backends. Pin one, or let `auto` walk the chain in order.
 | `exa`        | `EXA_API_KEY` (or mcp)                    |
 | `tinyfish`   | `TINYFISH_API_KEY`                        |
 | `keenable`   | `KEENABLE_API_KEY` (keyless fallback)     |
+| `sofya`      | `SOFYA_API_KEY`                           |
 | `jina`       | `JINA_API_KEY`                            |
 | `kagi`       | `KAGI_API_KEY`                            |
 | `tavily`     | `TAVILY_API_KEY`                          |
@@ -459,21 +460,21 @@ Vuln lookups answer with vendor data, not blog summaries.
 
 Six crates, one platform-tagged N-API addon. Search, shell, AST, highlight, PTY, desktop control, image decode, BPE counting — all in-process on the libuv pool. No fork/exec on the hot path. The shell is our own bash 5.3 engine, and 58 command-line utilities — coreutils, findutils, sed, jq, ripgrep-backed grep, fd, diff, moreutils — are ported into the builtins crate and compiled straight into the shell.
 
-- Crates: `pi-natives`, `pi-shell`, `pi-ast`, `pi-iso`, `pi-voice`, `pi-walker`
+- Crates: `omp-natives`, `omp-shell`, `omp-ast`, `omp-iso`, `omp-voice`, `omp-xfs`
 - Platforms: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`, `win32-arm64` — x64 ships dual AVX2 and baseline binaries
 
 Per crate, code lines only:
 
 | Crate      | What it does                                                                           |   ~LoC |
 | ---------- | -------------------------------------------------------------------------------------- | -----: |
-| pi-shell   | Embedded bash engine · persistent sessions · in-process coreutils dispatch · minimizer | 38,000 |
-| pi-natives | The N-API surface — every module in the table below                                    | 25,000 |
-| pi-walker  | Parallel walker · listing cache · glob · regex search for natives and shell rg/grep/fd | 11,400 |
-| pi-iso     | Workspace isolation · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |  3,300 |
-| pi-ast     | tree-sitter + ast-grep matching, block resolution, structural summaries                |  2,900 |
-| pi-voice   | Audio capture/playback · Opus · live WebRTC                                            |  1,000 |
+| omp-shell   | Embedded bash engine · persistent sessions · in-process coreutils dispatch · minimizer | 38,000 |
+| omp-natives | The N-API surface — every module in the table below                                    | 25,000 |
+| omp-xfs  | Parallel walker · listing cache · glob · regex search for natives and shell rg/grep/fd | 11,400 |
+| omp-iso     | Workspace isolation · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |  3,300 |
+| omp-ast     | tree-sitter + ast-grep matching, block resolution, structural summaries                |  2,900 |
+| omp-voice   | Audio capture/playback · Opus · live WebRTC                                            |  1,000 |
 
-Inside `pi-natives`, the per-module breakdown (glue and tests omitted):
+Inside `omp-natives`, the per-module breakdown (glue and tests omitted):
 
 | Module        | What it does                                                                      | Powered by                                |   ~LoC |
 | ------------- | --------------------------------------------------------------------------------- | ----------------------------------------- | -----: |
@@ -507,11 +508,11 @@ Same engine, four wrappers. `omp` runs the TUI. `omp -p` answers a single prompt
 
 ### Interactive — when in doubt, the agent asks
 
-The TUI is the default surface. Tool calls render as cards, edits preview before they land, and ambiguity routes through the `ask` tool — a structured option picker the agent can call mid-turn. The keyboard handles the rest.
+The TUI is the default surface. Tool calls render as cards, edits preview before they land, and ambiguity routes through the `ask` tool — a form the agent can put up mid-turn, with its recommendation preselected. The keyboard handles the rest.
 
-The same prompt cards surface over ACP, so editors get the picker without writing one.
+The same forms surface over ACP as elicitations, so editors get them without writing a dialog.
 
-![omp TUI showing a multi-select question from the ask tool.](assets/ask.webp)
+![omp TUI showing a multi-select field of an ask form.](assets/ask.webp)
 
 ### SDK — embed in Node
 
@@ -625,7 +626,7 @@ bun setup
 bun dev
 ```
 
-Build and smoke-test the distributable Nix package with `nix build .#omp`. Wayland screencast support is off by default (linking libpipewire adds ~750 MB of runtime closure); enable it with `omp.override { withWaylandScreencast = true; }`. Release builds link `pi-natives` with fat LTO; `omp.override { withFatLto = false; }` uses thin LTO for much faster local rebuilds. Rust dependencies and the native addon build in separate derivations, so Rust edits reuse compiled dependencies and TypeScript edits reuse the addon. `nix/bun.nix` is generated only when `bun.lock` changes; releases regenerate it automatically. For dependency changes, run:
+Build and smoke-test the distributable Nix package with `nix build .#omp`. Wayland screencast support is off by default (putting libpipewire on the addon's library path adds ~750 MB of runtime closure); enable it with `omp.override { withWaylandScreencast = true; }`. Release builds link `omp-natives` with fat LTO; `omp.override { withFatLto = false; }` uses thin LTO for much faster local rebuilds. Rust dependencies and the native addon build in separate derivations, so Rust edits reuse compiled dependencies and TypeScript edits reuse the addon. `nix/bun.nix` is generated only when `bun.lock` changes; releases regenerate it automatically. For dependency changes, run:
 
 ```sh
 bun run gen:nix
@@ -638,6 +639,15 @@ For a non-interactive smoke check:
 ```sh
 bun dev -- --version
 ```
+
+#### Apple Silicon Nix builds
+
+On Apple Silicon, `nix build .#omp` compiles the Apple Foundation Models bridge
+with nixpkgs' Swift compiler and `apple-sdk_27`; host Xcode or Command Line Tools
+are never used, and the build fails rather than shipping without the bridge.
+Both are build-only dependencies. Using the models still requires macOS 27+, an
+eligible device, and Apple Intelligence enabled. To build without the bridge, use
+`omp.override { withAppleFm = false; }`.
 
 ### Debug Command
 
@@ -672,14 +682,14 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 
 | Crate                                      | Description                                                                                              |
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| **[pi-natives](crates/pi-natives)**        | Core Rust native addon (N-API `cdylib`) used by `@oh-my-pi/pi-natives`; aggregates the crates below      |
-| **[pi-shell](crates/pi-shell)**            | Embedded bash 5.3 engine (parser, VM, process spawning, sessions), PTY, and process management           |
-| **[pi-ast](crates/pi-ast)**                | tree-sitter-based code summarizer and AST utilities (50+ language grammars)                              |
-| **[pi-iso](crates/pi-iso)**                | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy               |
-| **[pi-voice](crates/pi-voice)**            | Audio capture/playback, Opus codecs, and live WebRTC streaming primitives                                |
-| **[pi-walker](crates/pi-walker)**          | Parallel ignore-aware walker, directory-listing cache, glob, and content search for natives + shell      |
-| **[pi-edit](crates/pi-edit)**              | Edit engine behind the `edit` tool: line-anchored patch/hashline modes, streaming previews, atomic apply |
-| **[pi-builtins](crates/pi-builtins)**      | 67 in-process command-line utilities plus process builtins (ps, top, pgrep, pkill, …)                    |
+| **[omp-natives](crates/natives)**        | Core Rust native addon (N-API `cdylib`) used by `@oh-my-pi/pi-natives`; aggregates the crates below      |
+| **[omp-shell](crates/shell)**            | Embedded bash 5.3 engine (parser, VM, process spawning, sessions), PTY, and process management           |
+| **[omp-ast](crates/ast)**                | tree-sitter-based code summarizer and AST utilities (50+ language grammars)                              |
+| **[omp-iso](crates/iso)**                | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy               |
+| **[omp-voice](crates/voice)**            | Audio capture/playback, Opus codecs, and live WebRTC streaming primitives                                |
+| **[omp-xfs](crates/xfs)**          | Parallel ignore-aware walker, directory-listing cache, glob, and content search for natives + shell      |
+| **[omp-edit](crates/edit)**              | Edit engine behind the `edit` tool: line-anchored patch/hashline modes, streaming previews, atomic apply |
+| **[omp-builtins](crates/builtins)**      | 67 in-process command-line utilities plus process builtins (ps, top, pgrep, pkill, …)                    |
 
 ## Contributing
 
@@ -695,7 +705,7 @@ guidelines on contributing.
 OMP is licensed under the [MIT License](LICENSE).
 
 Third-party and vendored code, including the third-party portions identified
-in `crates/pi-builtins/LICENSE`, remains under its respective upstream license.
+in `crates/builtins/LICENSE`, remains under its respective upstream license.
 Each shipped component carries its own `THIRD-PARTY-NOTICES.txt`: the CLI
 (`packages/coding-agent`), the native addon (`packages/natives`), and robomp
 (`python/robomp`). `omp --license` prints the CLI's and the addon's.

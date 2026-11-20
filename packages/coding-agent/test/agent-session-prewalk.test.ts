@@ -7,7 +7,8 @@ import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mo
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
-import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -133,6 +134,7 @@ describe("AgentSession prewalk", () => {
 			armed?: boolean;
 			agentKind?: "main" | "sub";
 			sessionManager?: SessionManager;
+			extendedContext?: boolean;
 			target?: Model;
 			startupTarget?: Model;
 			tools?: AgentTool[];
@@ -143,6 +145,7 @@ describe("AgentSession prewalk", () => {
 		const target = options.target ?? modelOrThrow("claude-sonnet-4-6");
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
+			extendedContext: options.extendedContext ?? false,
 			"prewalk.enabled": options.enabled ?? true,
 		});
 		// Resolution must honor role fallback lists and the target effort suffix.
@@ -217,6 +220,144 @@ describe("AgentSession prewalk", () => {
 			created.target.id,
 		]);
 		expect(created.nudges[boundary]).not.toContain("prewalk-checklist");
+	});
+
+	it("journals a session-fitted prewalk target and restores its source and effort on /new", async () => {
+		const row = modelRegistry.find("openai", "gpt-5.6-terra");
+		if (!row) throw new Error("Expected bundled gpt-5.6-terra");
+		const target = { ...row, baseUrl: "https://prewalk.example/v1", requestModelId: "routed-terra" };
+		authStorage.keys.setRuntime("openai", "test-key");
+		const created = createLifecycleSession(
+			[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+			{ target, extendedContext: true },
+		);
+		// Match the SDK's adoption path rather than mocking or copying a fitted model.
+		created.session.agent.setModelResolver(model => modelRegistry.fitContextWindow(model, created.settings));
+		const fitted = modelRegistry.fitContextWindow(target, created.settings);
+		expect(fitted).not.toBe(target);
+		expect(fitted.contextWindow).toBeGreaterThan(target.contextWindow ?? 0);
+
+		await created.session.prompt("task");
+
+		expect(created.session.model).toBe(fitted);
+		expect(created.session.model?.baseUrl).toBe(target.baseUrl);
+		expect(created.session.model?.requestModelId).toBe(target.requestModelId);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+		expect(created.session.sessionManager.getSessionLocalModelChange()).toMatchObject({
+			model: `${target.provider}/${target.id}`,
+			role: "prewalk",
+		});
+		expect(created.nudges.at(-1)).toContain("prewalk-checklist");
+
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+	});
+
+	it("a selection made while a configured handoff loads consumes the arm and reports the cancelled switch", async () => {
+		const created = createLifecycleSession([
+			toolCall("todo", "todo"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+			toolCall("later-write", "write"),
+			{ content: ["later done"] },
+		]);
+		const notices: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
+		});
+		const loading = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+			if (model.id === created.target.id) {
+				loading.resolve();
+				await release.promise;
+			}
+			return model;
+		});
+		const task = created.session.prompt("task");
+		await loading.promise;
+		const manual = modelOrThrow("claude-opus-4-6");
+		try {
+			await created.session.setModel(manual);
+		} finally {
+			release.resolve();
+		}
+		await task;
+
+		expect(created.session.model?.id).toBe(manual.id);
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		expect(created.nudges.flat()).not.toContain("prewalk-checklist");
+		expect(notices.filter(message => message.startsWith("Prewalk: cancelled the switch"))).toHaveLength(1);
+		expect(notices.some(message => message.startsWith("Prewalk: switched"))).toBe(false);
+		// The consumed arm does not fire again on a later implementation action.
+		const boundary = created.requested.length;
+		await created.session.prompt("later task");
+		expect(created.requested.slice(boundary)).toEqual([manual.id, manual.id]);
+	});
+
+	it("/prewalk off while the handoff loads cancels the switch with only the disarm notice", async () => {
+		const created = createLifecycleSession([
+			toolCall("todo", "todo"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+		]);
+		const notices: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
+		});
+		const loading = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+			if (model.id === created.target.id) {
+				loading.resolve();
+				await release.promise;
+			}
+			return model;
+		});
+		const task = created.session.prompt("task");
+		await loading.promise;
+		created.session.disarmPrewalk();
+		release.resolve();
+		await task;
+
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+		expect(created.nudges.flat()).not.toContain("prewalk-checklist");
+		expect(notices.filter(message => message.startsWith("Prewalk: disarmed"))).toHaveLength(1);
+		expect(notices.some(message => /^Prewalk: (switched|cancelled)/.test(message))).toBe(false);
+	});
+
+	it("/new keeps a selection made while the planning model loads instead of restoring over it", async () => {
+		const created = createLifecycleSession([
+			toolCall("todo", "todo"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+		]);
+		await created.session.prompt("task");
+		expect(created.session.model?.id).toBe(created.target.id);
+		const loading = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+			if (model.id === created.primary.id) {
+				loading.resolve();
+				await release.promise;
+			}
+			return model;
+		});
+		const reset = created.session.newSession();
+		await loading.promise;
+		const manual = modelOrThrow("claude-opus-4-6");
+		try {
+			await created.session.setModel(manual);
+			created.session.setThinkingLevel(Effort.Medium);
+		} finally {
+			release.resolve();
+		}
+		expect(await reset).toBe(true);
+
+		expect(created.session.model?.id).toBe(manual.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Medium);
 	});
 
 	it("resumes on the handoff target while retry-role lookup keeps the assigned role", async () => {
@@ -867,69 +1008,76 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(primary.id);
 	});
 
-	it("does not switch on a read-only xd:// device dispatched through write (issue #7312)", async () => {
-		const primary = modelOrThrow("claude-sonnet-4-5");
-		const target = modelOrThrow("claude-sonnet-4-6");
+	it.each([
+		{ tier: "read", tool: "lsp" },
+		{ tier: "exec", tool: "bun-test" },
+	])(
+		"does not switch on a $tier-tier xd:// device dispatched through write (issues #7312, #19002)",
+		async ({ tier, tool }) => {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const target = modelOrThrow("claude-sonnet-4-6");
 
-		// A read-only lsp navigation is dispatched as `write xd://lsp`; the write
-		// result carries the wrapped tool's read tier. Like a bash step, it must
-		// not arm the hand-off — the model keeps reasoning about code shape on the
-		// strong model. Mirrors the bounded-continuation flow: one continuation,
-		// four turns, all primary, then a clean stop.
-		const readDeviceWrite: AgentTool<typeof writeToolSchema, { xdev: { tool: string; mode: string; tier: string } }> =
-			{
-				name: "write",
-				label: "Write",
-				description: "Dispatch a read-only device",
-				parameters: writeToolSchema,
-				async execute() {
-					return {
-						content: [{ type: "text", text: "references" }],
-						details: { xdev: { tool: "lsp", mode: "execute", tier: "read" } },
-					};
+			// A read-only lsp navigation or an exec-tier test run is dispatched as
+			// `write xd://<device>`; the write result carries the wrapped tool's tier.
+			// Like a direct bash step, neither mutates the workspace through `write`,
+			// so neither may arm the hand-off — the model keeps investigating on the
+			// strong model. Mirrors the bounded-continuation flow: one continuation,
+			// four turns, all primary, then a clean stop.
+			const deviceWrite: AgentTool<typeof writeToolSchema, { xdev: { tool: string; mode: string; tier: string } }> =
+				{
+					name: "write",
+					label: "Write",
+					description: "Dispatch a non-mutating device",
+					parameters: writeToolSchema,
+					async execute() {
+						return {
+							content: [{ type: "text", text: "device output" }],
+							details: { xdev: { tool, mode: "execute", tier } },
+						};
+					},
+				};
+			const mock = createMockModel({
+				responses: [
+					toolCall("t1", "record"),
+					toolCall("t2", "write"),
+					{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
+					{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
+				],
+			});
+			const requested: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: [recordTool as AgentTool, deviceWrite as AgentTool],
+					messages: [],
+					thinkingLevel: Effort.Medium,
 				},
-			};
-		const mock = createMockModel({
-			responses: [
-				toolCall("t1", "record"),
-				toolCall("t2", "write"),
-				{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
-				{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
-			],
-		});
-		const requested: string[] = [];
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: {
-				model: primary,
-				systemPrompt: ["Test"],
-				tools: [recordTool as AgentTool, readDeviceWrite as AgentTool],
-				messages: [],
-				thinkingLevel: Effort.Medium,
-			},
-			convertToLlm,
-			streamFn: (model, context, options) => {
-				requested.push(`${model.provider}/${model.id}`);
-				return mock.stream(model, context, options);
-			},
-		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([
-				[recordTool.name, recordTool as AgentTool],
-				[readDeviceWrite.name, readDeviceWrite as AgentTool],
-			]),
-			prewalk: { target },
-		});
+				convertToLlm,
+				streamFn: (model, context, options) => {
+					requested.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([
+					[recordTool.name, recordTool as AgentTool],
+					[deviceWrite.name, deviceWrite as AgentTool],
+				]),
+				prewalk: { target },
+			});
 
-		await session.prompt("investigate the code shape");
+			await session.prompt("investigate the code shape");
 
-		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
-		expect(session.model?.id).toBe(primary.id);
-	});
+			expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
+			expect(session.model?.id).toBe(primary.id);
+		},
+	);
 
 	it.each([
 		{ readOnlyHint: true, thirdTurnModel: "claude-sonnet-4-5" },
@@ -937,13 +1085,21 @@ describe("AgentSession prewalk", () => {
 	])(
 		"keeps write approval while honoring MCP readOnlyHint=$readOnlyHint at the prewalk gate",
 		async ({ readOnlyHint, thirdTurnModel }) => {
-			const mcp = new DeferredMCPTool(
-				"memory",
-				{ name: "list_projects", inputSchema: { type: "object" }, annotations: { readOnlyHint } },
-				async () => {
-					throw new Error("MCP connection is not used by this write fixture");
-				},
-			);
+			const unused = async (): Promise<never> => {
+				throw new Error("MCP connection is not used by this write fixture");
+			};
+			const connection: MCPServerConnection = {
+				name: "memory",
+				config: { command: "unused" },
+				transport: { connected: true, request: unused, notify: unused, close: unused },
+				serverInfo: { name: "memory", version: "1" },
+				capabilities: {},
+			};
+			const mcp = new MCPTool(connection, {
+				name: "list_projects",
+				inputSchema: { type: "object" },
+				annotations: { readOnlyHint },
+			});
 			const xdevState: XdevState = {
 				tools: new Map([
 					[

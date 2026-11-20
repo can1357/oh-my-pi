@@ -667,6 +667,23 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("runs a subagent on its parent's model when its deferred pattern matches nothing", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildSessionOptions("missing-provider/missing-model"),
+			modelPatternParentFallback: "runtime-provider/runtime-model",
+		});
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(modelFallbackMessage).toBe(
+				'Model "missing-provider/missing-model" not found. Using parent model runtime-provider/runtime-model',
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("names the provider's near ids when a deferred provider-qualified pattern stays unresolved", async () => {
 		const { session, modelFallbackMessage } = await createAgentSession(
 			buildSessionOptions("runtime-provider/runtime-modl"),
@@ -686,7 +703,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const { session, modelFallbackMessage } = await createAgentSession({
 			...buildSessionOptions("runtime-provider/runtime-model"),
 			settings,
-			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
+			modelPatternParentFallback: "runtime-provider/runtime-fallback-model",
 		});
 
 		try {
@@ -798,7 +815,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			preloadedCustomToolPaths: [],
 			toolNames: ["read"],
 			modelPattern: "runtime-provider/runtime-model",
-			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
+			modelPatternParentFallback: `${parentModel.provider}/${parentModel.id}`,
 		});
 
 		try {
@@ -1858,6 +1875,38 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			}
 		},
 	);
+
+	test.each([
+		{ name: "drops the level a retry-fallback hop applied", userPick: undefined, expected: Effort.High },
+		{ name: "keeps a level the user picked during the fallback", userPick: Effort.Low, expected: Effort.Low },
+	])("resumes the primary after a retry fallback and $name", async ({ userPick, expected }) => {
+		const transcript = () => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendModelChange("anthropic/claude-sonnet-4-5");
+			sessionManager.appendThinkingLevelChange(Effort.High);
+			// A `:xhigh` chain entry: the hop records the fallback model, then the entry's level.
+			sessionManager.appendModelChange("openai-codex/gpt-5.6-sol", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			sessionManager.appendThinkingLevelChange(Effort.XHigh, Effort.XHigh);
+			if (userPick) sessionManager.appendThinkingLevelChange(userPick, userPick);
+			sessionManager.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+			return sessionManager;
+		};
+		// Bare resume, and a subagent revival that re-supplies its role selector.
+		for (const modelPattern of [undefined, "anthropic/claude-sonnet-4-5:high"]) {
+			const { session } = await createAgentSession({
+				...buildResumeOptions(),
+				sessionManager: transcript(),
+				settings: Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5:high" } }),
+				...(modelPattern ? { modelPattern } : {}),
+			});
+			try {
+				expect(`${session.model?.provider}/${session.model?.id}`).toBe("anthropic/claude-sonnet-4-5");
+				expect(session.configuredThinkingLevel()).toBe(expected);
+			} finally {
+				await session.dispose();
+			}
+		}
+	});
 
 	test("restores an extension-discovered session model before rejecting headless resume", async () => {
 		const options = buildResumeOptions();

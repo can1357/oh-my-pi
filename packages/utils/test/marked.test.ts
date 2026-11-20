@@ -241,6 +241,20 @@ describe("marked compatibility", () => {
 		]);
 	});
 
+	// Korean, Japanese and Chinese put no space after a parenthesized URL, so the unbalanced ")" before the next word
+	// ends the URL. Balanced parentheses and ASCII after an unbalanced ")" keep the GFM rule.
+	test("bare URLs end at an unbalanced ) followed by non-ASCII text", () => {
+		const links = (source: string) =>
+			Lexer.lexInline(source).flatMap(token => (token.type === "link" ? [token.href] : []));
+		expect(links("F09(https://github.com/a/b/pull/12686)가 계약")).toEqual(["https://github.com/a/b/pull/12686"]);
+		expect(links("（https://x.y/a.)が")).toEqual(["https://x.y/a"]);
+		expect(links("https://x.y/w_(가)나 다")).toEqual(["https://x.y/w_(가)나"]);
+		expect(links("https://ko.wikipedia.org/wiki/서울 문서")).toEqual(["https://ko.wikipedia.org/wiki/서울"]);
+		expect(links("www.google.com/search?q=(business))+ok")).toEqual([
+			"http://www.google.com/search?q=(business))+ok",
+		]);
+	});
+
 	test("an inline extension's startFrom hint tokenizes like its start hint", () => {
 		const dollar = (src: string, from: number) => {
 			const index = src.indexOf("$", from);
@@ -516,8 +530,9 @@ describe("marked compatibility", () => {
 	// A code span closes at the next run of exactly as many backticks as its opener: a longer run is no closer, and
 	// backslash escapes do not apply inside a code span, so a backslash right before the closing backtick is content
 	// rather than something that moves the closer along. A URL autolink ends at the first " " or ">" after its scheme,
-	// past any "<". Inside emphasis or a link label, a closer past its end closes nothing.
-	test("closes code spans at the next run of exactly their width, and autolinks past other openers, but not past a nested end", () => {
+	// past any "<". A code span takes precedence over emphasis and link labels, so a marker or "]" inside it closes
+	// nothing outside it.
+	test("closes code spans at the next run of exactly their width, and autolinks past other openers, ahead of emphasis and labels", () => {
 		expect(shape(Lexer.lexInline("``a\\```b`` c\\````d``"))).toEqual([
 			["codespan", "``a\\```b``"],
 			["text", " c"],
@@ -535,12 +550,12 @@ describe("marked compatibility", () => {
 			["text", " c"],
 		]);
 		expect(shape(Lexer.lexInline("*a `b* c`"))).toEqual([
-			["em", "*a `b*", [["text", "a `b"]]],
-			["text", " c`"],
+			["text", "*a "],
+			["codespan", "`b* c`"],
 		]);
 		expect(shape(Lexer.lexInline("[a `b](u) c`"))).toEqual([
-			["link", "[a `b](u)", [["text", "a `b"]]],
-			["text", " c`"],
+			["text", "[a "],
+			["codespan", "`b](u) c`"],
 		]);
 		expect(shape(Lexer.lexInline("*<http://a* b> <https://c<http://d> <x@y>"))).toEqual([
 			[
@@ -555,6 +570,99 @@ describe("marked compatibility", () => {
 			["link", "<https://c<http://d>", [["text", "https://c<http://d"]]],
 			["text", " "],
 			["link", "<x@y>", [["text", "x@y"]]],
+		]);
+	});
+
+	// CommonMark takes code spans, autolinks, inline HTML and a link's destination and title before emphasis and
+	// link labels, so their markers and brackets are content: an enclosing emphasis or label closes past them.
+	test("closes emphasis and link labels past delimiters a code span, autolink, tag or link destination holds", () => {
+		expect(shape(Lexer.lexInline("*use `*` as the marker*"))).toEqual([
+			[
+				"em",
+				"*use `*` as the marker*",
+				[
+					["text", "use "],
+					["codespan", "`*`"],
+					["text", " as the marker"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline("**see `**.md` files**"))).toEqual([
+			[
+				"strong",
+				"**see `**.md` files**",
+				[
+					["text", "see "],
+					["codespan", "`**.md`"],
+					["text", " files"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline("***a `***` b***"))).toEqual([
+			[
+				"em",
+				"***a `***` b***",
+				[
+					[
+						"strong",
+						"**a `***` b**",
+						[
+							["text", "a "],
+							["codespan", "`***`"],
+							["text", " b"],
+						],
+					],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline("[a `]` b](u)"))).toEqual([
+			[
+				"link",
+				"[a `]` b](u)",
+				[
+					["text", "a "],
+					["codespan", "`]`"],
+					["text", " b"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline('*a <b x="*"> c*'))).toEqual([
+			[
+				"em",
+				'*a <b x="*"> c*',
+				[
+					["text", "a "],
+					["html", '<b x="*">'],
+					["text", " c"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline("*a <http://x*y> b*"))).toEqual([
+			[
+				"em",
+				"*a <http://x*y> b*",
+				[
+					["text", "a "],
+					["link", "<http://x*y>", [["text", "http://x*y"]]],
+					["text", " b"],
+				],
+			],
+		]);
+		expect(shape(Lexer.lexInline('*a [l](u "*") c*'))).toEqual([
+			[
+				"em",
+				'*a [l](u "*") c*',
+				[
+					["text", "a "],
+					["link", '[l](u "*")', [["text", "l"]]],
+					["text", " c"],
+				],
+			],
+		]);
+		// Parentheses that hold no destination and title are text, and the markers in them delimit as usual.
+		expect(shape(Lexer.lexInline("*a [l](u *b c) d*"))).toEqual([
+			["text", "*a [l](u "],
+			["em", "*b c) d*", [["text", "b c) d"]]],
 		]);
 	});
 

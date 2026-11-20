@@ -66,6 +66,15 @@ export class IrcBridge {
 		return this.#asides.length > 0;
 	}
 
+	/**
+	 * Whether a queued record wakes a turn once the session idles. Parked deferred wakes do
+	 * not: they wait for a turn of their own after the driven run or pooled contract that
+	 * parked them.
+	 */
+	hasWakeable(): boolean {
+		return this.#interrupts.length > 0 || this.#asides.length > 0;
+	}
+
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
@@ -174,59 +183,6 @@ export class IrcBridge {
 		const records = this.#deferredWakes;
 		this.#deferredWakes = [];
 		return records;
-	}
-
-	/** Surfaces and consumes every queued incoming record before automatic injection; with
-	 *  `ifAny`, takes nothing unless at least one of them satisfies it. */
-	drainInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
-		const messages: IrcMessage[] = [];
-		const remainingInterrupts: AgentMessage[] = [];
-		const remainingAsides: AgentMessage[] = [];
-		const queues = [
-			{ records: this.#interrupts, remaining: remainingInterrupts },
-			{ records: this.#asides, remaining: remainingAsides },
-		];
-		for (const queue of queues) {
-			for (const record of queue.records) {
-				if (record.role !== "custom") {
-					queue.remaining.push(record);
-					continue;
-				}
-				if (record.customType !== "irc:incoming") {
-					queue.remaining.push(record);
-					continue;
-				}
-				const details = record.details;
-				if (!details || typeof details !== "object") {
-					queue.remaining.push(record);
-					continue;
-				}
-				const id = Reflect.get(details, "id");
-				const from = Reflect.get(details, "from");
-				const body = Reflect.get(details, "message");
-				const replyTo = Reflect.get(details, "replyTo");
-				const broadcast = Reflect.get(details, "broadcast") === true;
-				const progress = Reflect.get(details, "progress") === true;
-				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
-					queue.remaining.push(record);
-					continue;
-				}
-				messages.push({
-					id,
-					from,
-					to: agentId,
-					body,
-					ts: record.timestamp,
-					...(typeof replyTo === "string" ? { replyTo } : {}),
-					...(broadcast ? { broadcast: true } : {}),
-					...(progress ? { progress: true } : {}),
-				});
-			}
-		}
-		if (opts?.ifAny && !messages.some(opts.ifAny)) return [];
-		this.#interrupts = remainingInterrupts;
-		this.#asides = remainingAsides;
-		return messages;
 	}
 
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */

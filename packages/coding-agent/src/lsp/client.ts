@@ -10,20 +10,34 @@ import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
-import { connectSharedLspTransport } from "./mux/daemon";
-import { MUX_RESTART_METHOD } from "./mux/protocol";
-import type {
-	DocumentBuildStatus,
-	LspClient,
-	LspJsonRpcId,
-	LspJsonRpcNotification,
-	LspJsonRpcRequest,
-	LspJsonRpcResponse,
-	LspTransport,
-	LspWriteSink,
-	PublishDiagnosticsParams,
-	ServerConfig,
-	WorkspaceEdit,
+import { daemonClient } from "../daemon/client";
+import type { DaemonTunnel } from "../daemon/protocol";
+import { workerEnvFromParent } from "../subprocess/worker-client";
+import {
+	LSP_ACQUIRE_METHOD,
+	LSP_MODULE_KIND,
+	LSP_MODULE_VERSION,
+	LSP_UNRESERVE_METHOD,
+	type LspAcquireResult,
+	type LspUnitParams,
+	MUX_RESTART_METHOD,
+	MUX_SERVER_EXIT_STDERR_BYTES,
+	type MuxServerExit,
+	parseMuxServerExit,
+} from "./mux/protocol";
+import {
+	type DocumentBuildStatus,
+	FileChangeType,
+	type LspClient,
+	type LspJsonRpcId,
+	type LspJsonRpcNotification,
+	type LspJsonRpcRequest,
+	type LspJsonRpcResponse,
+	type LspTransport,
+	type LspWriteSink,
+	type PublishDiagnosticsParams,
+	type ServerConfig,
+	type WorkspaceEdit,
 } from "./types";
 import {
 	detectLanguageId,
@@ -33,6 +47,7 @@ import {
 	readTextFromDisk,
 	uriToFile,
 } from "./utils";
+import { WATCHED_FILES_METHOD, WatchedFilesForwarder } from "./watched-files";
 
 /**
  * A JSON-RPC error response to one of our requests. The message keeps the code, so
@@ -95,10 +110,10 @@ let idleTimeoutMs: number | null = null;
 let idleCheckInterval: NodeJS.Timeout | null = null;
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 
-// Broker-shared server mode: language servers hosted by the per-project LSP mux
-// daemon, one per connection; a released server lingers for reuse while the mux runs.
+// Shared server mode: language servers hosted by the omp daemon's `lsp` module, one
+// per attached client; a released server lingers for reuse until its idle policy stops it.
 // The newest hold decides; with none it is off, so embedders and tests that drive
-// getOrCreateClient directly never touch the daemon broker. Each process-binding SDK
+// getOrCreateClient directly never touch the daemon. Each process-binding SDK
 // session holds it from its `lsp.shared` setting until disposed, then hands it back to
 // the previous holder. Only consulted at cold-start, so running clients keep their transport.
 interface SharedLspHold {
@@ -107,7 +122,7 @@ interface SharedLspHold {
 const sharedLspHolds: SharedLspHold[] = [];
 const sharedLspListeners = new Set<(enabled: boolean) => void>();
 
-/** Whether a client cold start attaches to a broker-shared language server. */
+/** Whether a client cold start attaches to a daemon-shared language server. */
 export function isSharedLspEnabled(): boolean {
 	return sharedLspHolds.at(-1)?.enabled ?? false;
 }
@@ -158,6 +173,138 @@ function updateSharedLspHolds(mutate: () => void): void {
 		} catch (error) {
 			logger.warn("Shared LSP mode listener threw", { error });
 		}
+	}
+}
+
+/** Final tunnel bytes kept to find the daemon's server-exit frame; well above its size. */
+const EXIT_TAIL_BYTES = 4 * MUX_SERVER_EXIT_STDERR_BYTES;
+
+/**
+ * Wrap an attached `lsp` unit tunnel as an {@link LspTransport}. Tunnel close
+ * maps to a "process exit" so the crash-recovery path treats a dead daemon
+ * exactly like a dead server: with the server's real exit code and stderr
+ * when the final frame reports them, else code 0 (the daemon went away).
+ * `release` drops the unit lease once the tunnel is gone.
+ */
+function tunnelTransport(tunnel: DaemonTunnel, release: () => void): LspTransport {
+	const exited = Promise.withResolvers<number>();
+	let exitCode: number | null = null;
+	let serverExit: MuxServerExit | undefined;
+	let needDrain = false;
+	let closed = false;
+	const tail: Uint8Array[] = [];
+	let tailBytes = 0;
+	const stdout = new ReadableStream<Uint8Array>({
+		start(controller) {
+			tunnel.start(
+				chunk => {
+					controller.enqueue(chunk);
+					tail.push(chunk);
+					tailBytes += chunk.byteLength;
+					while (tail.length > 1 && tailBytes - tail[0]!.byteLength >= EXIT_TAIL_BYTES) {
+						tailBytes -= tail.shift()!.byteLength;
+					}
+				},
+				() => {
+					closed = true;
+					try {
+						controller.close();
+					} catch {
+						// already errored/closed
+					}
+					serverExit = parseMuxServerExit(Buffer.concat(tail).toString("utf-8"));
+					tail.length = 0;
+					release();
+					exitCode = serverExit?.code ?? 0;
+					exited.resolve(exitCode);
+				},
+			);
+		},
+	});
+	const stdin: LspWriteSink = {
+		write(data) {
+			needDrain = !tunnel.send(data);
+			return typeof data === "string" ? Buffer.byteLength(data, "utf-8") : data.byteLength;
+		},
+		flush() {
+			if (!needDrain || closed) return;
+			return tunnel.drained().then(() => {
+				needDrain = false;
+			});
+		},
+	};
+	return {
+		stdin,
+		stdout,
+		exited: exited.promise,
+		get exitCode() {
+			return exitCode;
+		},
+		pid: tunnel.unit.pids[0],
+		sharedMux: true,
+		kill() {
+			tunnel.close();
+		},
+		peekStderr() {
+			return serverExit?.stderr ?? "";
+		},
+	};
+}
+
+/**
+ * Attach to a daemon-shared language server: reserve a free instance of the
+ * server identity, open (find-or-start) its unit, and tunnel to it. Returns
+ * null (after a debug log) when the daemon is unavailable or lacks the `lsp`
+ * module, so the caller falls back to a process-local spawn.
+ */
+async function connectSharedLspTransport(opts: {
+	command: string;
+	args: string[];
+	cwd: string;
+	env?: Record<string, string>;
+	initializationOptions: unknown;
+	signal?: AbortSignal;
+}): Promise<LspTransport | null> {
+	try {
+		const daemon = await daemonClient();
+		if (daemon.welcome.caps[LSP_MODULE_KIND] !== LSP_MODULE_VERSION) return null;
+		const params: LspUnitParams = {
+			command: opts.command,
+			args: opts.args,
+			cwd: opts.cwd,
+			env: opts.env,
+			initializationOptions: opts.initializationOptions,
+			spawnEnv: workerEnvFromParent(opts.env),
+		};
+		// `acquire` and `open` are quick and not abortable: an abandoned answer would leave a
+		// reservation or lease this process can never drop. Abort is checked between steps.
+		const reservation = await daemon.call<LspAcquireResult>(LSP_MODULE_KIND, LSP_ACQUIRE_METHOD, params);
+		const { scope, key, token } = reservation;
+		let lease: string | undefined;
+		const release = () => {
+			if (lease) void daemon.release(lease).catch(() => {});
+			lease = undefined;
+		};
+		try {
+			opts.signal?.throwIfAborted();
+			const opened = await daemon.open({ kind: LSP_MODULE_KIND, scope, key, params });
+			lease = opened.lease;
+			opts.signal?.throwIfAborted();
+			return tunnelTransport(await daemon.attach(opened.unit.id, token, opts.signal), release);
+		} catch (error) {
+			release();
+			// Without this the instance stays reserved and the next acquire starts a duplicate server.
+			void daemon.call(LSP_MODULE_KIND, LSP_UNRESERVE_METHOD, reservation).catch(() => {});
+			throw error;
+		}
+	} catch (error) {
+		if (opts.signal?.aborted) throw error;
+		logger.debug("Shared LSP transport unavailable; falling back to local spawn", {
+			command: opts.command,
+			cwd: opts.cwd,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return null;
 	}
 }
 
@@ -375,12 +522,20 @@ const CLIENT_CAPABILITIES = {
 	},
 };
 
-/** LSP `FileChangeType` values for workspace/didChangeWatchedFiles notifications. */
-export enum FileChangeType {
-	Created = 1,
-	Changed = 2,
-	Deleted = 3,
-}
+/**
+ * Capabilities for servers that hand file watching to the client (every server
+ * unless configured with `watchFiles: false`): the client watches the files
+ * they register (see watched-files.ts) instead of their own watcher, which can
+ * fail in ways the client cannot contain (tsgo re-arms in a tight loop on SMB
+ * drives, and does not watch at all on Linux).
+ */
+const WATCHING_CLIENT_CAPABILITIES = {
+	...CLIENT_CAPABILITIES,
+	workspace: {
+		...CLIENT_CAPABILITIES.workspace,
+		didChangeWatchedFiles: { dynamicRegistration: true, relativePatternSupport: true },
+	},
+};
 
 /** Filesystem change authored by the harness and announced to active LSP clients. */
 export interface WatchedFileChange {
@@ -583,16 +738,11 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								const params = message.params as { token: string | number; value?: { kind?: string } };
 								if (params.value?.kind === "begin") {
 									client.activeProgressTokens.add(params.token);
+									clearTimeout(projectQuietTimers.get(client));
 									countFolderLoad(client, -1);
 								} else if (params.value?.kind === "end") {
 									client.activeProgressTokens.delete(params.token);
-									// After a folder add, only progress that began since ends the load.
-									if (
-										client.activeProgressTokens.size === 0 &&
-										!workspaceFolderStates.get(client)?.pendingLoads
-									) {
-										client.resolveProjectLoaded();
-									}
+									if (client.activeProgressTokens.size === 0) settleProjectLoadWhenQuiet(client);
 								}
 							} else if (message.method === "textDocument/clangd.fileStatus" && message.params) {
 								const params = message.params as { uri: string; state?: string };
@@ -698,6 +848,28 @@ function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: 
 	return [client.cwd, ...(workspaceFolderStates.get(client)?.added.keys() ?? [])].map(workspaceFolder);
 }
 
+/**
+ * How long a server must report no progress after its last task ends before its
+ * project load counts as done. Indexers run in phases (rust-analyzer: fetching,
+ * loading, indexing; clangd: background index) with gaps between them, and
+ * the first gap is not the end of the load.
+ */
+const PROJECT_LOAD_QUIET_MS = 500;
+const projectQuietTimers = new WeakMap<LspClient, NodeJS.Timeout>();
+
+function settleProjectLoadWhenQuiet(client: LspClient): void {
+	clearTimeout(projectQuietTimers.get(client));
+	const timer = setTimeout(() => {
+		projectQuietTimers.delete(client);
+		// After a folder add, only progress that began since ends the load.
+		if (client.activeProgressTokens.size === 0 && !workspaceFolderStates.get(client)?.pendingLoads) {
+			client.resolveProjectLoaded();
+		}
+	}, PROJECT_LOAD_QUIET_MS);
+	timer.unref?.();
+	projectQuietTimers.set(client, timer);
+}
+
 function countFolderLoad(client: LspClient, delta: number): void {
 	const state = workspaceFolderStates.get(client);
 	if (state) state.pendingLoads = Math.max(0, state.pendingLoads + delta);
@@ -717,6 +889,22 @@ async function realPathOf(filePath: string): Promise<string> {
  */
 async function workspaceFolderToAdd(client: LspClient, filePath: string): Promise<string | undefined> {
 	if (!client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
+	return foreignCheckout(client, filePath);
+}
+
+/**
+ * The checkout holding `filePath` when the server cannot be told about it: it is
+ * not the checkout of the client's root and the server does not accept
+ * `workspace/didChangeWorkspaceFolders`. Its answers for the file then come from
+ * the root's checkout index.
+ */
+export async function unservedCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
+	if (client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
+	return foreignCheckout(client, filePath);
+}
+
+/** The checkout holding `filePath` when it differs from the one holding the client's root. */
+async function foreignCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
 	const checkout = await findRepoRoot(path.dirname(await realPathOf(filePath)));
 	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
@@ -789,6 +977,7 @@ async function addWorkspaceFolders(
 		undoLoad();
 		throw err;
 	}
+	void client.watchedFiles?.refresh();
 	rustAnalyzerReadyClients.delete(client);
 }
 
@@ -950,12 +1139,34 @@ export async function applyWorkspaceEditWithLsp(
 interface DynamicCapabilityRegistration {
 	id?: unknown;
 	method?: unknown;
+	registerOptions?: unknown;
 }
 
 interface DynamicCapabilityParams {
 	registrations?: DynamicCapabilityRegistration[];
 	unregisterations?: DynamicCapabilityRegistration[];
 	unregistrations?: DynamicCapabilityRegistration[];
+}
+
+/**
+ * The watcher of a server this client spawned and asked to hand watching over
+ * (`watchFiles`). A mux-shared server's watcher belongs to the mux, which
+ * outlives and is shared by every attached client.
+ */
+function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
+	// `watchFiles` is on unless configured `false`.
+	if (client.proc.sharedMux || client.config.watchFiles === false) return undefined;
+	client.watchedFiles ??= new WatchedFilesForwarder({
+		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
+		send: changes =>
+			sendNotification(
+				client,
+				WATCHED_FILES_METHOD,
+				{ changes },
+				AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
+			),
+	});
+	return client.watchedFiles;
 }
 
 function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest): void {
@@ -970,6 +1181,9 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 		for (const registration of params.registrations) {
 			if (typeof registration.id === "string" && typeof registration.method === "string") {
 				registrations.set(registration.id, registration.method);
+				if (registration.method === WATCHED_FILES_METHOD) {
+					void ownWatchedFiles(client)?.register(registration.id, registration.registerOptions);
+				}
 			}
 		}
 		return;
@@ -982,21 +1196,28 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 	for (const registration of unregistrations) {
 		if (typeof registration.id === "string") {
 			registrations.delete(registration.id);
+			void client.watchedFiles?.unregister(registration.id);
 		}
 	}
 }
 
-/** Whether the server advertised LSP 3.17 document diagnostic pulls statically or through registration. */
-export function supportsDocumentDiagnostics(client: LspClient): boolean {
-	const staticProvider = client.serverCapabilities?.diagnosticProvider;
-	if (staticProvider) return true;
-
+/**
+ * Whether the server handles `method`: its `capability` provider is set in the
+ * initialize result, or it registered the method dynamically.
+ */
+export function supportsMethod(client: LspClient, capability: string, method: string): boolean {
+	if (client.serverCapabilities?.[capability]) return true;
 	const registrations = client.dynamicCapabilityRegistrations;
 	if (!registrations) return false;
-	for (const method of registrations.values()) {
-		if (method === "textDocument/diagnostic") return true;
+	for (const registered of registrations.values()) {
+		if (registered === method) return true;
 	}
 	return false;
+}
+
+/** Whether the server advertised LSP 3.17 document diagnostic pulls statically or through registration. */
+export function supportsDocumentDiagnostics(client: LspClient): boolean {
+	return supportsMethod(client, "diagnosticProvider", "textDocument/diagnostic");
 }
 
 /**
@@ -1405,8 +1626,8 @@ export async function getOrCreateClient(
 	const clientPromise = (async () => {
 		const baseCommand = config.resolvedCommand ?? config.command;
 		const baseArgs = config.args ?? [];
-		// Sent in both the mux handshake and `initialize`: a reused shared server
-		// answers `initialize` from cache, so the mux keys servers on these options.
+		// Sent in both the daemon open params and `initialize`: a reused shared server
+		// answers `initialize` from cache, so the daemon keys servers on these options.
 		// clangd reports per-document build status only when asked; diagnostics waits use it
 		// to tell a finished rebuild from one still running. User options take precedence.
 		const initializationOptions = isClangdConfig(config)
@@ -1418,9 +1639,9 @@ export async function getOrCreateClient(
 			? await getLspmuxCommand(baseCommand, baseArgs)
 			: { command: baseCommand, args: baseArgs };
 
-		// Prefer the broker-shared server unless an external lspmux wrapper is
+		// Prefer the daemon-shared server unless an external lspmux wrapper is
 		// already multiplexing this command. Any shared-path failure falls back
-		// to a private spawn so LSP never regresses on broker trouble.
+		// to a private spawn so LSP never regresses on daemon trouble.
 		let proc: LspTransport | null = null;
 		if (isSharedLspEnabled() && command === baseCommand) {
 			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
@@ -1461,6 +1682,7 @@ export async function getOrCreateClient(
 			maybeStopIdleChecker();
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
+			client.watchedFiles?.close();
 
 			// Reject any pending requests — the server is gone, they will never complete.
 			if (client.pendingRequests.size > 0) {
@@ -1496,7 +1718,7 @@ export async function getOrCreateClient(
 					processId: process.pid,
 					rootUri: fileToUri(cwd),
 					rootPath: cwd,
-					capabilities: CLIENT_CAPABILITIES,
+					capabilities: client.config.watchFiles === false ? CLIENT_CAPABILITIES : WATCHING_CLIENT_CAPABILITIES,
 					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},
@@ -2092,7 +2314,10 @@ export async function notifyWorkspaceWatchedFiles(
 					return { uri, type: change.type };
 				});
 			if (clientChanges.length === 0) return;
-			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+			const params = { changes: clientChanges };
+			// The watcher sees these writes too; it skips echoing them (the mux does this for shared servers).
+			client.watchedFiles?.announced(params);
+			await sendNotification(client, WATCHED_FILES_METHOD, params, sendSignal);
 			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
 			await refreshOpenFiles(client, sendSignal);
 		}),
@@ -2339,7 +2564,7 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 /**
  * Tear down a client together with the language-server process behind it.
  *
- * A broker-shared link's own `shutdown`/`exit` only detaches it: the mux answers
+ * A daemon-shared link's own `shutdown`/`exit` only detaches it: the daemon answers
  * both and keeps the server idle for reuse. When the server must not survive —
  * a restart, or a superseded configuration that no reconnect will ask for —
  * ask the mux to kill the link's server first (best-effort: the link may be the

@@ -26,6 +26,7 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
+    "bzip2-1.0.6",
     "CC0-1.0",
     "ISC",
     "MIT",
@@ -38,7 +39,7 @@ allow = [
 # (packages/natives/THIRD-PARTY-NOTICES.txt) rather than globally admitting
 # copyleft dependencies.
 exceptions = [
-    # uluru (via pi-vcs → jj-lib → gix → gix-pack) is MPL-2.0: file-level
+    # uluru (via omp-vcs → jj-lib → gix → gix-pack) is MPL-2.0: file-level
     # copyleft, satisfied by upstream source availability; no obligations
     # attach to our unmodified use.
     { allow = ["MPL-2.0"], crate = "uluru@3.1.0" },

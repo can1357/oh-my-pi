@@ -27,6 +27,7 @@ import {
 	type CreateFile,
 	type DeleteFile,
 	type Diagnostic,
+	FileChangeType,
 	type LspClient,
 	lspSchema,
 	type RenameFile,
@@ -2669,7 +2670,7 @@ describe("lsp regressions", () => {
 
 			await Bun.write(modulePath, "export class MissingClass {}\n");
 			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
-				{ filePath: modulePath, type: lspClient.FileChangeType.Created },
+				{ filePath: modulePath, type: FileChangeType.Created },
 			]);
 
 			expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
@@ -4533,11 +4534,11 @@ describe("lsp regressions", () => {
 				]);
 
 				await lspClient.notifyWorkspaceWatchedFiles(sessionRoot, [
-					{ filePath: siblingFile, type: lspClient.FileChangeType.Changed },
+					{ filePath: siblingFile, type: FileChangeType.Changed },
 				]);
 				const watched = await server.waitFor(message => message.method === "workspace/didChangeWatchedFiles");
 				expect(watched.params).toEqual({
-					changes: [{ uri: fileToUri(siblingFile), type: lspClient.FileChangeType.Changed }],
+					changes: [{ uri: fileToUri(siblingFile), type: FileChangeType.Changed }],
 				});
 			} finally {
 				configCache.delete(sessionRoot);
@@ -4556,6 +4557,69 @@ describe("lsp regressions", () => {
 				expect(server.received.some(message => message.method === "workspace/didChangeWorkspaceFolders")).toBe(
 					false,
 				);
+			} finally {
+				configCache.delete(sessionRoot);
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("watches the files a watchFiles server registers and reports changes made outside omp", async () => {
+			const { tempDir, sessionRoot } = await makeCheckouts("@omp-lsp-watched-files-");
+			try {
+				const { server } = useServer({}, undefined, { watchFiles: true });
+				await references(new LspTool(makeLspSession(sessionRoot)), path.join(sessionRoot, "src", "target.py"));
+				const initialize = await server.waitFor(message => message.method === "initialize");
+				expect(initialize.params).toMatchObject({
+					capabilities: { workspace: { didChangeWatchedFiles: { dynamicRegistration: true } } },
+				});
+
+				server.send({
+					jsonrpc: "2.0",
+					id: 9101,
+					method: "client/registerCapability",
+					params: {
+						registrations: [
+							{
+								id: "py-files",
+								method: "workspace/didChangeWatchedFiles",
+								registerOptions: {
+									watchers: [{ globPattern: { baseUri: fileToUri(sessionRoot), pattern: "**/*.py" } }],
+								},
+							},
+						],
+					},
+				});
+				await server.waitFor(message => message.id === 9101 && message.method === undefined);
+
+				// The watch is armed shortly after the registration is acknowledged; wait until a
+				// probe file is reported, then check the exact notification for a fresh file.
+				const deadline = Date.now() + 5_000;
+				for (let attempt = 0; ; attempt++) {
+					const probe = path.join(sessionRoot, "src", `probe-${attempt}.py`);
+					await Bun.write(probe, "");
+					const seen = await server
+						.waitFor(
+							message =>
+								message.method === "workspace/didChangeWatchedFiles" &&
+								JSON.stringify(message.params).includes(fileToUri(probe)),
+							300,
+						)
+						.catch(() => undefined);
+					if (seen) break;
+					if (Date.now() > deadline) throw new Error("the watch never reported a probe file");
+				}
+
+				// Written behind the client's back, as a shell command or another editor would.
+				const created = path.join(sessionRoot, "src", "created.py");
+				await Bun.write(created, "value = 2\n");
+				const watched = await server.waitFor(
+					message =>
+						message.method === "workspace/didChangeWatchedFiles" &&
+						JSON.stringify(message.params).includes(fileToUri(created)),
+					5_000,
+				);
+				expect(watched.params).toEqual({ changes: [{ uri: fileToUri(created), type: FileChangeType.Created }] });
 			} finally {
 				configCache.delete(sessionRoot);
 				await lspClient.shutdownAll();
@@ -5782,7 +5846,7 @@ describe("lsp regressions", () => {
 
 			await fsp.unlink(consumer);
 			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
-				{ filePath: consumer, type: lspClient.FileChangeType.Deleted },
+				{ filePath: consumer, type: FileChangeType.Deleted },
 			]);
 
 			const closed = server.received
@@ -6490,6 +6554,112 @@ describe("lsp regressions", () => {
 
 		expect(output).toContain("rust-analyzer (configured, not started)");
 		expect(output).toContain("typescript-language-server (ready)");
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"status reports a rustup proxy whose toolchain lacks the component",
+		async () => {
+			const cargoHome = TempDir.createSync("@omp-cargo-home-");
+			const previousCargoHome = process.env.CARGO_HOME;
+			try {
+				const proxy = path.join(cargoHome.path(), "bin", "rust-analyzer");
+				fs.mkdirSync(path.dirname(proxy), { recursive: true });
+				fs.writeFileSync(
+					proxy,
+					"#!/bin/sh\necho \"error: Unknown binary 'rust-analyzer' in official toolchain 'stable'\" >&2\nexit 1\n",
+					{ mode: 0o755 },
+				);
+				process.env.CARGO_HOME = cargoHome.path();
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+					servers: {
+						"rust-analyzer": {
+							command: "rust-analyzer",
+							resolvedCommand: proxy,
+							fileTypes: [".rs"],
+							rootMarkers: ["Cargo.toml"],
+						},
+					},
+					idleTimeoutMs: undefined,
+				});
+				vi.spyOn(lspClient, "getActiveClients").mockReturnValue([]);
+
+				const tool = new LspTool(makeLspSession(cargoHome.path()));
+				const result = await tool.execute("status-rustup", { action: "status" });
+				const output = result.content
+					.filter(block => block.type === "text")
+					.map(block => block.text)
+					.join("\n");
+
+				expect(output).toContain("rust-analyzer (unusable: error: Unknown binary 'rust-analyzer'");
+			} finally {
+				if (previousCargoHome === undefined) delete process.env.CARGO_HOME;
+				else process.env.CARGO_HOME = previousCargoHome;
+				configCache.delete(cargoHome.path());
+				vi.restoreAllMocks();
+				cargoHome.removeSync();
+			}
+		},
+	);
+
+	it("routes position actions to a server that advertises them and explains when none does", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-capability-routing-");
+		try {
+			const file = path.join(tempDir.path(), "app.py");
+			await Bun.write(file, "def target():\n    return 1\n");
+			const ruff: ServerConfig = { command: "ruff", fileTypes: [".py"], rootMarkers: [] };
+			const pyright: ServerConfig = { command: "pyright", fileTypes: [".py"], rootMarkers: [] };
+			const makeClient = (config: ServerConfig, serverCapabilities: LspClient["serverCapabilities"]): LspClient => ({
+				name: config.command,
+				cwd: tempDir.path(),
+				config,
+				proc: { stdin: { write() {}, flush: async () => {} } } as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+				serverCapabilities,
+			});
+			const clients = new Map([
+				[ruff, makeClient(ruff, { codeActionProvider: true })],
+				[pyright, makeClient(pyright, { referencesProvider: true })],
+			]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config => clients.get(config)!);
+			vi.spyOn(lspClient, "reconcileFileFromDisk").mockResolvedValue(false);
+			const requests: string[] = [];
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (client, method) => {
+				requests.push(`${client.name} ${method}`);
+				if (client.name === "ruff") throw new lspClient.LspResponseError(-32601, undefined, "Unknown request");
+				return [];
+			});
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const references = { action: "references", file, line: 1, symbol: "target" } as const;
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { ruff, pyright }, idleTimeoutMs: undefined });
+			configCache.delete(tempDir.path());
+			await tool.execute("routed", references);
+			expect(requests).toContain("pyright textDocument/references");
+			expect(requests).not.toContain("ruff textDocument/references");
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { ruff }, idleTimeoutMs: undefined });
+			configCache.delete(tempDir.path());
+			const text = textResult(await tool.execute("unsupported", references));
+			expect(text).toContain("No configured language server for .py supports references");
+			expect(text).toContain("ruff: does not implement textDocument/references");
+		} finally {
+			configCache.delete(tempDir.path());
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
 	});
 
 	it("reload * invalidates the per-cwd config cache so newly written .omp/lsp.json is observed", async () => {

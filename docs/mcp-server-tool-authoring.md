@@ -9,9 +9,10 @@ Config sources (.omp/.claude/.cursor/.vscode/mcp.json, mcp.json, etc.)
   -> discovery providers normalize to canonical MCPServer
   -> loadAllMCPConfigs supplies scope filters and user enablement suppression
   -> capability loader dedupes by server name and equivalent connection (higher priority wins)
-  -> MCPManager connects/listTools (with auth/header/env resolution)
+  -> MCPManager attaches to the MCP host for each server (auth/header/env resolved first) and lists tools
+  -> the host (omp daemon, or in-process) owns the server process or connection and shares it between sessions
   -> manager best-effort loads resources/prompts and subscribes to resource updates when enabled
-  -> MCPTool/DeferredMCPTool bridge exposes tools as mcp__<server>_<tool>
+  -> MCPTool bridge exposes tools as mcp__<server>_<tool>
   -> AgentSession.refreshMCPTools replaces live MCP tools immediately
 ```
 
@@ -238,7 +239,7 @@ assume that every field present in the model-generated call reaches the server.
 
 ### Execution mapping
 
-`MCPTool.execute()` / `DeferredMCPTool.execute()`:
+`MCPTool.execute()`:
 
 - calls MCP `tools/call`
 - combines text/resource content while preserving image blocks
@@ -246,7 +247,7 @@ assume that every field present in the model-generated call reaches the server.
 - preserves `structuredContent` in details and adds a fenced JSON text block unless an existing text block already contains the same JSON value
 - maps server-reported `isError` to an `Error:` prefix and `isError: true`
 - handles an `isError` result with `_meta["mcp/www_authenticate"]` by reconnecting with the auth challenge and retrying once when a reconnect callback exists
-- attempts reconnect + one retry for retriable connection errors; deferred tools can also reconnect after initial connection lookup fails
+- attempts reconnect + one retry for failures the host marks retryable (the request never reached the server)
 - formats caught transport/runtime failures as `MCP failure` with server/tool, transport, stage, failure, retryability, message, and next-step fields
 - preserves abort semantics by translating AbortError into `ToolAbortError`
 
@@ -265,7 +266,6 @@ Supported operations:
 - `reconnect`
 - `reload`
 - `resources`, `prompts`, `notifications`
-- Smithery search/login/logout flows
 
 Config writes are atomic (`writeMCPConfigFile`: unique temp file + rename), and
 read-modify-write operations hold a per-file lock.
@@ -322,6 +322,15 @@ For robust MCP authoring in this codebase:
 5. For remote OAuth servers, a valid explicit `credentialId` is optional: a definition-only `http`/`sse` entry can use the active profile's credential bound to the same URL. Use an explicit `Authorization` header when that URL-keyed fallback must be suppressed.
 6. If using command-based secret resolution (`!cmd`), verify command output is stable and non-empty.
 
+## 8) What the protocol revision of your server changes
+
+OMP probes each server once: a server that answers `server/discover` is treated as MCP 2026-07-28, anything else as handshake-era (see [`mcp-protocol-transports.md`](./mcp-protocol-transports.md)).
+
+- A 2026-07-28 server runs as **one process for all of a user's sessions** with the same configuration, is started on first use, and is stopped after `mcp.idleStopMinutes` idle. It must keep no per-connection state: return explicit handles from tools and accept them as arguments, as the specification requires. State kept in process memory is lost on an idle stop and is visible to every session sharing the process.
+- Declare honest `ttlMs` on `tools/list`, `prompts/list` and `resources/list`. OMP serves those lists from its store for that long without starting your server; `ttlMs: 0` makes every new session start it.
+- Send `notifications/tools/list_changed` on a `subscriptions/listen` stream when your tool set changes; OMP fans it out to every attached session.
+- A handshake-era server gets one process per session and is never idle-stopped, so in-process state keeps working, at the cost of one process per session that calls it.
+
 ## Implementation files
 
 - [`src/mcp/types.ts`](../packages/coding-agent/src/mcp/types.ts)
@@ -331,6 +340,8 @@ For robust MCP authoring in this codebase:
 - [`src/discovery/mcp-json.ts`](../packages/coding-agent/src/discovery/mcp-json.ts)
 - [`src/modes/controllers/mcp-command-controller.ts`](../packages/coding-agent/src/modes/controllers/mcp-command-controller.ts)
 - [`src/mcp/manager.ts`](../packages/coding-agent/src/mcp/manager.ts)
+- [`src/mcp/host/endpoint.ts`](../packages/coding-agent/src/mcp/host/endpoint.ts)
+- [`src/mcp/host/peers.ts`](../packages/coding-agent/src/mcp/host/peers.ts)
 - [`src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`src/config/resolve-config-value.ts`](../packages/coding-agent/src/config/resolve-config-value.ts)
 - [`src/mcp/loader.ts`](../packages/coding-agent/src/mcp/loader.ts)

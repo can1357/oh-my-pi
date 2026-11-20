@@ -1,0 +1,11 @@
+// Nace serves the Drex decision models under `/v1`.
+auth "nace" {
+	name "Nace"
+	env "NACE_API_KEY"
+	login "api-key" {
+		auth-url "https://console.nace.ai/dashboard/api-keys"
+		instructions "Create an API key under API Keys in the Nace console."
+		prompt "Paste your Nace API key" placeholder="nace_sk_..."
+		validate "models-endpoint" label="Nace" url="https://console.nace.ai/v1/models"
+	}
+}

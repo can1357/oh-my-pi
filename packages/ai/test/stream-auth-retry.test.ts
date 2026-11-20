@@ -103,6 +103,57 @@ describe("streamSimple resolver auth retry", () => {
 		unregisterCustomApis(SOURCE_ID);
 	});
 
+	it("surfaces an exact Anthropic model 404 after text without replaying partial output", async () => {
+		const keys: unknown[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const requestedModel = { ...model(), provider: "anthropic", id: "claude-mythos-5-2" };
+		const failure = {
+			...assistantError(
+				`404 ${JSON.stringify({
+					type: "error",
+					error: { type: "not_found_error", message: `model: ${requestedModel.id}` },
+				})}`,
+				404,
+			),
+			provider: requestedModel.provider,
+			model: requestedModel.id,
+			content: [{ type: "text" as const, text: "partial" }],
+		};
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "partial",
+						partial: { ...failure, stopReason: "stop" },
+					});
+					stream.push({ type: "error", reason: "error", error: failure });
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(requestedModel, context, {
+			apiKey: ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? "denied-key" : "sibling-key";
+			},
+		});
+		const deltas: string[] = [];
+		for await (const event of stream) {
+			if (event.type === "text_delta") deltas.push(event.delta);
+		}
+		expect(await stream.result()).toEqual(failure);
+		expect(deltas).toEqual(["partial"]);
+		expect(keys).toEqual(["denied-key"]);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false]);
+	});
+
 	it("retries with a refreshed key when a 401 is thrown before the first event", async () => {
 		const keys: unknown[] = [];
 		const contexts: ApiKeyResolveContext[] = [];

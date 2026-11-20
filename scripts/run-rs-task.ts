@@ -20,7 +20,7 @@ const TRUNKS = ["upstream/main", "origin/main"] as const satisfies readonly stri
 // (path-patch rendering is machine-local), but cargo dev tasks keep their
 // historical scope: the forks are not held to workspace format/lint/test gates.
 //
-// pi-builtins is NOT excluded. It is first-party, and although it opts out of
+// omp-builtins is NOT excluded. It is first-party, and although it opts out of
 // the workspace's pedantic/nursery lints in its own manifest (most of it is
 // ported third-party code), it is held to default clippy and to zero rustc
 // warnings like everything else.
@@ -29,6 +29,10 @@ const VENDORED_FORK_EXCLUDES = [
 	"cfg_aliases",
 	"--exclude",
 	"jaq-core",
+	"--exclude",
+	"jaq-json",
+	"--exclude",
+	"jaq-std",
 	"--exclude",
 	"napi",
 ] as const satisfies readonly string[];
@@ -74,8 +78,8 @@ const TASK_COMMANDS = {
 		// nextest cannot run doctests (no stable libtest-json interface for
 		// them), so they need their own libtest pass. It runs every runnable
 		// doctest in the workspace's lib crates; today that is tree-sitter-go's
-		// one example, since pi-natives is a `cdylib`, which rustdoc refuses to
-		// collect doctests from, and pi-builtins' 16 examples are `ignore`d
+		// one example, since omp-natives is a `cdylib`, which rustdoc refuses to
+		// collect doctests from, and omp-builtins' 16 examples are `ignore`d
 		// vendored uutils docs. `--doc` overrides a crate's own
 		// `doctest = false`, so a vendored crate whose examples do not compile
 		// (napi-rs's) has to be in VENDORED_FORK_EXCLUDES.
@@ -232,13 +236,31 @@ async function resolveCargoBinary(): Promise<string> {
 	// On macOS runners, Homebrew's `rustup-init` binary is on PATH before the
 	// rustup proxies in `$CARGO_HOME/bin`, and invoking it as `cargo` falls
 	// through to its installer mode ("unexpected argument 'nextest' found").
-	// Ask rustup directly for the cargo binary in the active toolchain.
-	const result = await $`rustup which cargo`.cwd(repoRoot).quiet().nothrow();
+	// Ask rustup directly for the cargo binary of the repository's toolchain.
+	// rustup lets RUSTUP_TOOLCHAIN override `rust-toolchain.toml`, and a
+	// caller's shell can carry one (mise exports its global rust pin into every
+	// shell it starts), so it is left out here: the gates are the pinned
+	// toolchain's, whatever toolchain the caller's shell names.
+	const env: Record<string, string | undefined> = { ...process.env };
+	delete env.RUSTUP_TOOLCHAIN;
+	const result = await $`rustup which cargo`.cwd(repoRoot).env(env).quiet().nothrow();
 	if (result.exitCode === 0) {
 		const resolved = result.stdout.toString().trim();
 		if (resolved !== "") return resolved;
 	}
 	return "cargo";
+}
+
+/**
+ * The rustup toolchain a resolved cargo belongs to, read from its path
+ * (`<RUSTUP_HOME>/toolchains/<toolchain>/bin/cargo`), or `undefined` when the
+ * cargo is not a rustup toolchain's own binary.
+ */
+function toolchainOfCargo(cargo: string): string | undefined {
+	const bin = path.dirname(cargo);
+	const toolchainDir = path.dirname(bin);
+	if (path.basename(bin) !== "bin" || path.basename(path.dirname(toolchainDir)) !== "toolchains") return undefined;
+	return path.basename(toolchainDir);
 }
 
 async function runCommand(command: readonly string[]): Promise<number> {
@@ -254,6 +276,15 @@ async function runCommand(command: readonly string[]): Promise<number> {
 		const pathSep = process.platform === "win32" ? ";" : ":";
 		const currentPath = env.PATH ?? env.Path ?? "";
 		env.PATH = currentPath === "" ? toolchainBin : `${toolchainBin}${pathSep}${currentPath}`;
+		// cargo looks for its `fmt` and `clippy` subcommands in `$CARGO_HOME/bin`
+		// before PATH when PATH does not name that directory, and the rustup
+		// proxies there take their toolchain from RUSTUP_TOOLCHAIN when it is
+		// set. A caller's RUSTUP_TOOLCHAIN (mise exports its global rust pin into
+		// every shell it starts) then runs another toolchain's rustfmt and clippy
+		// than the cargo resolved above. Name that cargo's own toolchain, so one
+		// toolchain runs the whole task.
+		const toolchain = toolchainOfCargo(cargoBinary);
+		if (toolchain !== undefined) env.RUSTUP_TOOLCHAIN = toolchain;
 	}
 	const proc = Bun.spawn(argv, {
 		cwd: repoRoot,

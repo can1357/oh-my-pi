@@ -4,15 +4,12 @@
  * model writes it once per job, from the command and the intent it was
  * started with; it never sees the job's output.
  */
-import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { UserMessage } from "@oh-my-pi/pi-ai";
-import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { shortenEmbeddedPaths } from "@oh-my-pi/pi-tui/render/render-utils";
 import { prompt, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-caption-system.md" with { type: "text" };
 import userPrompt from "../prompts/system/job-caption-user.md" with { type: "text" };
-import { type ModelJobWidgetAuthorOptions, redactWidgetSample, resolveWidgetModel } from "./author";
+import { completeWidgetRequest, type ModelJobWidgetAuthorOptions, redactWidgetSample } from "./author";
 import type { JobWidgetBrief } from "./types";
 
 /**
@@ -66,45 +63,22 @@ export function normalizeJobCaption(reply: string): string | undefined {
 /** A {@link JobCaptionWriter} backed by the `widget` model role. */
 export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions): JobCaptionWriter {
 	return async ({ command, intent, timeoutSec }, signal) => {
-		const sessionId = options.sessionId();
-		const model = await resolveWidgetModel(options.settings, options.modelRegistry, sessionId, signal);
-		if (!model) return undefined;
-		const costGate = options.costGate?.();
-		costGate?.admit();
 		const obfuscate = options.obfuscate?.();
 		const redact = (text: string): string => redactWidgetSample(text, obfuscate);
-		const message: UserMessage = {
-			role: "user",
-			content: [
-				{
-					type: "text",
-					text: prompt.render(userPrompt, {
-						intent: intent ? truncate(redact(intent), MAX_INTENT_CHARS) : undefined,
-						command: truncate(redact(command.trim()), MAX_COMMAND_CHARS),
-						timeoutSec,
-					}),
-				},
-			],
-			timestamp: Date.now(),
-		};
-		// The system prompt is the reusable prefix; the command never repeats.
-		markPerCallContextMessage(message);
-		const response = await instrumentedCompleteSimple(
-			model,
-			{ systemPrompt: [systemPrompt], messages: [message] },
+		const response = await completeWidgetRequest(
+			options,
 			{
-				apiKey: options.modelRegistry.resolver(model, sessionId),
-				signal,
-				disableReasoning: true,
+				systemPrompt,
+				prompt: prompt.render(userPrompt, {
+					intent: intent ? truncate(redact(intent), MAX_INTENT_CHARS) : undefined,
+					command: truncate(redact(command.trim()), MAX_COMMAND_CHARS),
+					timeoutSec,
+				}),
 				maxTokens: MAX_CAPTION_TOKENS,
+				oneshotKind: "job_caption",
 			},
-			{ telemetry: resolveTelemetry(options.telemetry?.(), sessionId), oneshotKind: "job_caption" },
+			signal,
 		);
-		costGate?.record(response.usage.cost.total);
-		options.onUsage?.(response);
-		if (response.stopReason === "error" || response.stopReason === "aborted") {
-			throw new Error(response.errorMessage ?? `job caption request ${response.stopReason}`);
-		}
-		return extractTextContent(response);
+		return response && extractTextContent(response);
 	};
 }

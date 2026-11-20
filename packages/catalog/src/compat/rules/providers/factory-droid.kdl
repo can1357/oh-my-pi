@@ -33,6 +33,12 @@ provider "factory-droid" {
 	// zero here because Factory bills credits; `list-price-from` supplies the
 	// upstream list price shown beside the credit rate.
 	seed api="factory-droid-agent" base-url="https://api.factory.ai" bundle="never" {
+		model "claude-fable-5.2" name="Fable 5.2" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
 		model "claude-fable-5.1" name="Fable 5.1" {
 			reasoning #true
 			input "text" "image"
@@ -279,6 +285,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=1000000 max-tokens=65536
 		}
+		model "gemini-4-carbon" name="Gemini 4 Carbon" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=934464 max-tokens=65536
+		}
 		model "gemini-4-argon" name="Gemini 4 Argon" {
 			reasoning #true
 			input "text" "image"
@@ -363,6 +375,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=393216 max-tokens=131072
 		}
+		model "kimi-k3.1-pro" name="Kimi K3.1 Pro" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=868928 max-tokens=131072
+		}
 		model "kimi-k3" name="Kimi K3" {
 			reasoning #true
 			input "text" "image"
@@ -401,7 +419,7 @@ provider "factory-droid" {
 		}
 		model "muse-spark-1.3" name="Muse Spark 1.3" {
 			reasoning #true
-			input "text"
+			input "text" "image"
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=908928 max-tokens=131072
 		}
@@ -479,6 +497,18 @@ provider "factory-droid" {
 		}
 		// `generate_image` models, in the CLI's tool preference order. GPT Image 2
 		// is retired from the CLI's selectable chain and is not listed.
+		model "gpt-image-2.6-sunburst" name="GPT Image 2.6" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "gpt-image-2.6-flare" name="GPT Image 2.6 Flare" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
 		model "gpt-image-2.5-sunburst" name="GPT Image 2.5" {
 			reasoning #false
 			input "text" "image"
@@ -516,11 +546,27 @@ provider "factory-droid" {
 	// promotion is two dated `effective-rates` cards copied from the droid
 	// release's model registry: the discounted `input` from its start and the
 	// base again from its end.
+	// Launches on the first-party Anthropic upstream only, with no EU route.
+	models "claude-fable-5.2" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic"
+		region-upstreams-eu
+		credit-rates { input 3.2; output 5 }
+		list-price-from "anthropic" "claude-fable-5-2"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement {
+			feature-flag "claude_fable_5_2"
+			requires-explicit-opt-in #true
+		}
+	}
 	models "claude-fable-5.1" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
 		region-upstreams-eu "vertex_anthropic"
 		credit-rates { input 4; output 5; cache-read 0.025 }
+		list-price-from "anthropic" "claude-fable-5-1"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
 		thinking-default-level "high"
@@ -949,12 +995,54 @@ provider "factory-droid" {
 		thinking-default-level "high"
 		entitlement { feature-flag "garnet_0715" }
 	}
+	// Like Argon: Global-only, and promoted at half its input rate for launch.
+	// Its list price is the Gemini API row's, where the Gemini class rules
+	// (classes/gemini.kdl) carry Google's $2/$10 until 2026-11-30, then $4/$20.
+	models "gemini-4-carbon" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates {
+			input 1.6
+			output 5
+			cache-read 0.05
+			effective-rates {
+				promotion {
+					effective-from "2026-11-10T16:00:00Z"
+					input 0.8
+				}
+				standard {
+					effective-from "2026-12-01T08:00:00Z"
+					input 1.6
+				}
+			}
+		}
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement { feature-flag "gemini_4_carbon" }
+	}
 	// Launches Global-only: Factory serves it from neither US nor EU inference.
 	models "gemini-4-argon" {
 		routing-family "google"
 		upstream-rotation "google"
 		region-upstreams-us
-		credit-rates { input 1.6; output 5; cache-read 0.05 }
+		credit-rates {
+			input 1.6
+			output 5
+			cache-read 0.05
+			effective-rates {
+				promotion {
+					effective-from "2026-10-13T16:00:00Z"
+					input 0.8
+				}
+				standard {
+					effective-from "2026-12-01T08:00:00Z"
+					input 1.6
+				}
+			}
+		}
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true
@@ -1052,7 +1140,7 @@ provider "factory-droid" {
 	// `imageGenerationAllowedModelIds` managed settings gate them
 	// (discovery/factory-droid.ts), not feature flags. Credits follow the CLI's
 	// image registry: OpenAI output is image tokens at 6x input, Gemini's 60x.
-	models "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" {
+	models "gpt-image-2.6-sunburst" "gpt-image-2.6-flare" "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" {
 		kind "image"
 		routing-family "openai"
 		upstream-rotation "openai"
@@ -1133,11 +1221,22 @@ provider "factory-droid" {
 		routing-family "factory"
 		upstream-rotation "baseten"
 		credit-rates { input 0.84; output 3.2 }
+		list-price-from "fireworks"
 		policy-aliases "glm-5p2-fast"
 		thinking-efforts "high" "max"
 		thinking-requires-effort #false
 		thinking-default-level "high"
 		entitlement { feature-flag "glm_5_2_fast"; base-variant "glm-5.2" }
+	}
+	models "kimi-k3.1-pro" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten" "databricks"
+		credit-rates { input 0.8; output 5 }
+		list-price-from "kimi-code" "k3.1-pro"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+		thinking-default-level "max"
+		entitlement { feature-flag "kimi_k3_1_pro" }
 	}
 	models "kimi-k3" {
 		routing-family "factory"
@@ -1180,6 +1279,7 @@ provider "factory-droid" {
 		routing-family "factory"
 		upstream-rotation "baseten"
 		credit-rates { input 0.5; output 3.4; cache-read 0.12 }
+		list-price-from "meta" "muse-spark-1.2"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #true
 		thinking-default-level "high"
@@ -1206,7 +1306,6 @@ provider "factory-droid" {
 		thinking-efforts "low" "medium" "high" "xhigh"
 		thinking-requires-effort #true
 		thinking-default-level "high"
-		entitlement { feature-flag "muse_spark_1_3" }
 	}
 	models "beam-1.0" {
 		routing-family "factory"
@@ -1363,7 +1462,7 @@ provider "factory-droid" {
 			completions-reasoning-history "omit"
 		}
 	}
-	models "kimi-k3" {
+	models "kimi-k3.1-pro" "kimi-k3" {
 		requires-tool-result-name #true
 	}
 	models "nemotron-3-ultra" {
@@ -1466,7 +1565,7 @@ provider "factory-droid" {
 		anthropic-thinking "budget-effort"
 	}
 	// Always-thinking models keep adaptive thinking on disabled turns, on every upstream.
-	models "claude-fable-5.1" "claude-opus-5-5" "claude-opus-5-5-fast" {
+	models "claude-fable-5.2" "claude-fable-5.1" "claude-opus-5-5" "claude-opus-5-5-fast" {
 		disabled-thinking "adaptive"
 	}
 	// Sonnet 5.5 rejects `disabled`: Off is `between_tools`, pinned to high
@@ -1494,11 +1593,11 @@ provider "factory-droid" {
 	on-upstream "bedrock_anthropic" {
 		anthropic-tool-streaming-beta #true
 	}
-	// Azure Foundry enforces the preserved-thinking prefix check on Factory's
-	// account, so prefix-bound models (`thinking-prefix-binding`) ask it to drop
-	// stale signed blocks instead of failing. The other Anthropic upstreams
-	// predate default enforcement; the field would opt them into it.
-	on-upstream "azure_anthropic" {
+	// Azure Foundry and the Claude API run the preserved-thinking prefix check
+	// for prefix-bound models (`thinking-prefix-binding`), so those requests
+	// ask to drop stale signed blocks instead of failing. Vertex and Bedrock
+	// keep stale blocks; the field would opt them into enforcement.
+	on-upstream "anthropic" "azure_anthropic" {
 		supports-thinking-binding-controls #true
 	}
 	// xAI and Google sessions lock their upstream.
@@ -1516,8 +1615,11 @@ provider "factory-droid" {
 		reasoning-disable-mode "omit"
 		responses-cache-retention #false
 		responses-parallel-tool-calls #true
+		// Bedrock's and Snowflake's Responses endpoints reject `configuration_update`
+		// input items, so GPT-6 effort changes stay on the request level there.
 		on-upstream "bedrock_openai" "snowflake" {
 			reasoning-disable-mode "none-effort"
+			supports-configuration-update #false
 		}
 	}
 	// GPT models whose ladder has an Off/None rung send the literal `none`
@@ -1564,12 +1666,13 @@ provider "factory-droid" {
 		omit-max-output-tokens #true
 		google-thinking "level"
 	}
-	models "gemini-4-argon" "gemini-3.1-pro-preview" "gemini-3.7-flash" "gemini-3.8-flash" {
+	models "gemini-4-carbon" "gemini-4-argon" "gemini-3.1-pro-preview" "gemini-3.7-flash" "gemini-3.8-flash" {
 		google-thinking "level-medium"
 	}
-	// Argon's request policy: no sampling parameters, the output cap pinned
-	// to the model maximum, and its own model turns replayed as Gemini sent them.
-	models "gemini-4-argon" {
+	// Argon's and Carbon's request policy: no sampling parameters, the output
+	// cap pinned to the model maximum, and their own model turns replayed as
+	// Gemini sent them.
+	models "gemini-4-carbon" "gemini-4-argon" {
 		google-omit-sampling #true
 		google-pin-max-output-tokens #true
 		google-native-replay #true

@@ -43,6 +43,8 @@ function makeSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,

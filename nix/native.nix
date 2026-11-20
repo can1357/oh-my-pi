@@ -1,16 +1,18 @@
 {
+  apple-sdk_27 ? null,
   cmake,
   craneLib,
+  darwin,
   lib,
   ninja,
-  pipewire,
   pkg-config,
   rustPlatform,
   source,
   stdenv,
+  swiftPackages,
   writeText,
-  withWaylandScreencast ? false,
   withFatLto ? true,
+  withAppleFm ? stdenv.hostPlatform.system == "aarch64-darwin",
 }:
 let
   rootCargoToml = builtins.readFile (source + "/Cargo.toml");
@@ -63,14 +65,14 @@ let
     };
 
     cargoVendorDir = craneLib.vendorCargoDeps { cargoLockContents = lockText; };
-    cargoExtraArgs = "--locked -p pi-natives ${lib.optionalString withWaylandScreencast "--features wayland-pipewire"}";
+    cargoExtraArgs = "--locked -p omp-natives";
     nativeBuildInputs = [
       cmake
       ninja
       pkg-config
       rustPlatform.bindgenHook
     ];
-    buildInputs = lib.optionals withWaylandScreencast [ pipewire ];
+    buildInputs = lib.optional withAppleFm apple-sdk_27;
     strictDeps = true;
     doCheck = false;
     # Stamping, patching, and signing belong to the downstream package.
@@ -206,10 +208,26 @@ let
     }
   );
 in
+assert lib.assertMsg (
+  withAppleFm -> apple-sdk_27 != null
+) "Apple Foundation Models requires apple-sdk_27; provide it or set withAppleFm = false.";
 craneLib.buildPackage (
   commonArgs
   // {
     cargoArtifacts = dependencyArtifacts;
+    # Only real sources compile the bridge; Swift must not invalidate the
+    # dummy dependency artifacts. Darwin builds always state their choice:
+    # build.rs fails instead of substituting a host Xcode/CLT compiler for
+    # this one, and OMP_APPLEFM_DISABLE keeps an opted-out build from probing
+    # host toolchains at all.
+    env =
+      commonArgs.env
+      // (
+        if withAppleFm then
+          { OMP_APPLEFM_SWIFTC = lib.getExe' swiftPackages.swift "swiftc"; }
+        else
+          lib.optionalAttrs stdenv.hostPlatform.isDarwin { OMP_APPLEFM_DISABLE = "1"; }
+      );
     passthru = {
       inherit platform dependencyArtifacts;
     };
@@ -217,4 +235,9 @@ craneLib.buildPackage (
       install -Dm755 "target/release/${platform.nativeLibrary}" "$out/lib/${platform.nativeLibrary}"
     '';
   }
+  # The final package gzip-embeds the addon, which hides its references from
+  # Nix's scanner; here it is still uncompressed, embedded bridge and helpers
+  # included. libiconv is the only legitimate one: package.nix repoints it at
+  # the system copy.
+  // lib.optionalAttrs stdenv.hostPlatform.isDarwin { allowedReferences = [ darwin.libiconv ]; }
 )

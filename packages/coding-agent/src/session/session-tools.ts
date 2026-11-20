@@ -26,13 +26,16 @@ import {
 } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { isEvalNamespaceTool } from "../mcp/eval-namespaces";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
-import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { invalidateToolSchemaMetadata, type SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
+import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
+import evalPreludeGuidePrompt from "../prompts/tools/eval-prelude-first-call.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
 import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
@@ -69,7 +72,9 @@ import {
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
-import { toolReadsSkillUris } from "../system-prompt";
+import { type BuildSystemPromptResult, toolReadsSkillUris } from "../system-prompt";
+import { matchModelPattern } from "../utils/model-patterns";
+import { resolveToolWireName } from "../utils/tool-wire-name";
 
 import type { CustomMessage } from "./messages";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
@@ -77,7 +82,13 @@ import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
-import { cfgExternalThinking, cfgIncludeModelInPrompt, cfgInlineToolDescriptors, cfgSkillful } from "./settings";
+import {
+	cfgExternalThinking,
+	cfgIncludeModelInPrompt,
+	cfgInlineToolDescriptors,
+	cfgSkillful,
+	systemPromptTemplatePatterns,
+} from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import {
 	cfgToolsApproval,
@@ -167,7 +178,7 @@ export type SystemPromptRebuilder = (
 	toolNames: string[],
 	tools: Map<string, AgentTool>,
 	xdev: XdevState | undefined,
-) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+) => Promise<BuildSystemPromptResult>;
 
 interface SessionToolsOptions {
 	autoApprove?: boolean;
@@ -192,9 +203,17 @@ interface SessionToolsOptions {
 	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
 	rebuildSystemPrompt?: SystemPromptRebuilder;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/**
+	 * Whether enabled MCP tools present as eval namespaces (`mcp.evalNamespaces`)
+	 * while `eval` is top-level; read at every apply.
+	 */
+	bindsMcpToEval?: () => boolean;
+	/** Eval-bound names of the construction slate ({@link SessionTools.getEvalBoundToolNames}). */
+	evalBoundToolNames?: Iterable<string>;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
+	systemPromptSources?: SystemPromptSources;
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
 	skillsSettings?: SkillsSettings;
@@ -285,6 +304,7 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 const TOOL_ROSTER_NOTICE_MESSAGE_TYPE = "tool-roster-notice";
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
+const EVAL_PRELUDE_GUIDE_MESSAGE_TYPE = "eval-prelude-guide";
 const SKILL_NOTICE_MESSAGE_TYPE = "skill-notice";
 
 /** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
@@ -338,6 +358,11 @@ interface EvalPreludeNoticeDetails {
 	removed: string[];
 }
 
+/** Preludes whose first-call guide one hidden {@link EVAL_PRELUDE_GUIDE_MESSAGE_TYPE} message carries. */
+interface EvalPreludeGuideDetails {
+	names: string[];
+}
+
 /** Skills one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message announced or withdrew. */
 interface SkillNoticeDetails {
 	announced: Array<{ name: string; description: string }>;
@@ -365,6 +390,8 @@ interface PromptSurface {
 	sessionAgents: readonly AgentDefinition[];
 	/** Tool names the eval description lists as callable from cells. */
 	evalToolNames: readonly string[];
+	/** Per-call model roles the task/eval descriptions advertise (mid-session role edits). */
+	perCallModelAdvertisement: PerCallModelAdvertisement;
 }
 
 /**
@@ -452,6 +479,7 @@ export class SessionTools {
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
+	#systemPromptSources: SystemPromptSources | undefined;
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
 	 * ("replace the system prompt for this turn"). While set, base-prompt
@@ -470,6 +498,9 @@ export class SessionTools {
 	#promptRosterHeld = false;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
+	/** Enabled MCP tools presented only as eval namespace methods: neither top-level nor `xd://`. */
+	#evalBoundNames = new Set<string>();
+	#bindsMcpToEval: SessionToolsOptions["bindsMcpToEval"];
 	/**
 	 * `xd://` device names the current base system prompt renders in its catalog
 	 * (the last rebuild's {@link BuildSystemPromptResult.xdevCatalogNames}). Consulted
@@ -497,6 +528,8 @@ export class SessionTools {
 	#promptModelKey: string | undefined;
 	/** Inline-descriptor decision of the model the base prompt was rendered for. */
 	#promptInlineDescriptors: boolean | undefined;
+	/** `systemPromptTemplates` path selected for the model the base prompt was rendered for. */
+	#promptTemplate: string | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	/**
@@ -577,6 +610,7 @@ export class SessionTools {
 		this.#reconcileSettingsGatedTools = options.reconcileSettingsGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
+		this.#bindsMcpToEval = options.bindsMcpToEval;
 		this.#xdev = options.xdev;
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
@@ -584,6 +618,7 @@ export class SessionTools {
 		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
+		this.#systemPromptSources = options.systemPromptSources;
 		const restoredReply = this.#latestReply();
 		const restoredPromptDigest = restoredReply && this.recordedPromptDigest();
 		this.#restoredTranscript =
@@ -603,10 +638,15 @@ export class SessionTools {
 		// no tools and the prompt rebuild without `read` empties the skill list.
 		for (const tool of host.agent.state.tools) this.#enabledToolNames.add(tool.name);
 		for (const name of this.#xdev?.mountedNames ?? []) this.#enabledToolNames.add(name);
+		for (const name of options.evalBoundToolNames ?? []) {
+			this.#evalBoundNames.add(name);
+			this.#enabledToolNames.add(name);
+		}
 		this.#promptSurface = this.#derivePromptSurface();
 		this.#basePromptRoutedXdevNames = this.#routedSummaryXdevNames();
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+		this.#promptTemplate = this.#currentPromptTemplate();
 	}
 
 	/** Mutable registry shared with controller hosts that inspect available tools. */
@@ -619,9 +659,19 @@ export class SessionTools {
 		return this.#baseSystemPrompt;
 	}
 
-	/** Replaces the controller-owned base prompt without applying it to the agent. */
-	setBaseSystemPrompt(prompt: string[]): void {
+	/**
+	 * Replaces the controller-owned base prompt and its sources without applying them to the agent.
+	 * Pass the sources built with `prompt`; a prompt built before an appended memory promotion keeps
+	 * the current sources, since promotion only appends a block.
+	 */
+	restoreBaseSystemPrompt(prompt: string[], sources: SystemPromptSources | undefined): void {
 		this.#baseSystemPrompt = prompt;
+		this.#systemPromptSources = sources;
+	}
+
+	/** Sources committed with the base prompt; appended blocks (memory promotion) keep them valid. */
+	get systemPromptSources(): SystemPromptSources | undefined {
+		return this.#systemPromptSources;
 	}
 
 	/**
@@ -785,6 +835,13 @@ export class SessionTools {
 	get advertisedSessionAgents(): readonly AgentDefinition[] {
 		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).sessionAgents;
 	}
+	/**
+	 * Per-call model roles the task/eval descriptions advertise (see
+	 * {@link #promptSurface}); the candidate inside a rebuild frame.
+	 */
+	get advertisedPerCallModel(): PerCallModelAdvertisement {
+		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).perCallModelAdvertisement;
+	}
 
 	/**
 	 * Tool names the eval description advertises (see {@link #promptSurface});
@@ -801,7 +858,13 @@ export class SessionTools {
 			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && this.#promptSkills.length > 0,
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
-			evalToolNames: this.getEvalBridgeToolNames(),
+			// Eval-bound tools stay callable by name; their namespaces advertise them.
+			evalToolNames: this.getEvalBridgeToolNames().filter(name => !this.#evalBoundNames.has(name)),
+			perCallModelAdvertisement: getPerCallModelAdvertisement(
+				this.#host.settings,
+				this.#host.model(),
+				this.#host.modelRegistry,
+			),
 		};
 	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
@@ -842,6 +905,11 @@ export class SessionTools {
 		return [...(this.#xdev?.mountedNames ?? [])];
 	}
 
+	/** Enabled MCP tools presented as eval namespace methods (`mcp.evalNamespaces`); the SDK builds their preludes. */
+	getEvalBoundToolNames(): string[] {
+		return [...this.#evalBoundNames];
+	}
+
 	/** Whether the edit tool is registered. */
 	get hasEditTool(): boolean {
 		return this.#toolRegistry.has("edit");
@@ -877,7 +945,7 @@ export class SessionTools {
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		const bareName = stripXdUrlPrefix(name);
 		const enabled = new Set(this.getEnabledToolNames());
-		const named = this.#resolveToolWireName(bareName);
+		const named = resolveToolWireName(this.#toolRegistry, bareName);
 		// A registered name never falls through to an alias guess, even when disabled.
 		if (named) return enabled.has(named.name) ? this.#wrapToolForAcpPermission(named) : undefined;
 		const alias = resolveMCPToolAlias(bareName, candidate =>
@@ -893,24 +961,11 @@ export class SessionTools {
 			const tool = this.#toolRegistry.get(name);
 			if (!tool || !isEvalBridgeToolCallable(tool)) continue;
 			names.add(name);
-			if (tool.customWireName && this.#resolveToolWireName(tool.customWireName) === tool) {
+			if (tool.customWireName && resolveToolWireName(this.#toolRegistry, tool.customWireName) === tool) {
 				names.add(tool.customWireName);
 			}
 		}
 		return [...names];
-	}
-
-	/** Exact registry names shadow wire aliases, including when the exact tool is disabled. */
-	#resolveToolWireName(name: string): AgentTool | undefined {
-		const exact = this.#toolRegistry.get(name);
-		if (exact) return exact;
-		let resolved: AgentTool | undefined;
-		for (const tool of this.#toolRegistry.values()) {
-			if (tool.customWireName !== name) continue;
-			if (resolved) return undefined;
-			resolved = tool;
-		}
-		return resolved;
 	}
 
 	/**
@@ -924,7 +979,7 @@ export class SessionTools {
 	 * tool with that name wins and the alias no longer counts as built-in.
 	 */
 	hasBuiltInTool(name: string): boolean {
-		const tool = this.#resolveToolWireName(name);
+		const tool = resolveToolWireName(this.#toolRegistry, name);
 		return tool !== undefined && this.#builtInToolNames.has(tool.name);
 	}
 
@@ -1016,7 +1071,7 @@ export class SessionTools {
 				origin: "top-level",
 			};
 			const info: ToolInfo = { name, description: tool.description, parameters: tool.parameters, sourceInfo };
-			// MCP-backed tools (MCPTool, DeferredMCPTool and their adapters) carry the
+			// MCP-backed tools (MCPTool and its adapters) carry the
 			// server, original name and read-only annotation; expose them so
 			// extensions can act on the hint the runtime already keeps.
 			const mcp = tool as { mcpServerName?: unknown; mcpToolName?: unknown; mcpReadOnlyHint?: unknown };
@@ -1114,6 +1169,13 @@ export class SessionTools {
 		return shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(this.#host.settings), activeModel.id);
 	}
 
+	/** `systemPromptTemplates` path the active model selects; a change replaces the whole instruction block. */
+	#currentPromptTemplate(): string | undefined {
+		const activeModel = this.#host.model();
+		if (!activeModel) return undefined;
+		return matchModelPattern(systemPromptTemplatePatterns.get(this.#host.settings), formatModelString(activeModel));
+	}
+
 	#currentPromptModelKey(): string | undefined {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
@@ -1130,21 +1192,25 @@ export class SessionTools {
 	 * Delegation wording the prompt was rendered with: re-rendering them changed the prompt's bytes,
 	 * and the provider then wrote the whole cached conversation again on every hop. It still rebuilds
 	 * when the hop changes what the request must carry for the new model: the edit-mode policy
-	 * (#11983), or the inline-descriptor decision, which also turns provider-side description pruning
-	 * on or off (#14200). The kept key makes a later switch back to the rendered model a no-op, and a
-	 * deliberate switch (`/model`, `setModel`) compares against the model the prompt describes.
+	 * (#11983), the inline-descriptor decision, which also turns provider-side description pruning
+	 * on or off (#14200), or the `systemPromptTemplates` entry the model selects. The kept key makes a
+	 * later switch back to the rendered model a no-op, and a deliberate switch (`/model`, `setModel`)
+	 * compares against the model the prompt describes.
 	 */
 	async syncAfterModelChange(previousEditMode: EditModeSetting, options?: { retryFallback?: boolean }): Promise<void> {
 		const currentEditMode = this.resolveActiveEditMode();
+		const templateChanged = this.#currentPromptTemplate() !== this.#promptTemplate;
 		if (options?.retryFallback) {
 			const inlineDescriptorsChanged = this.#currentInlineDescriptors() !== this.#promptInlineDescriptors;
-			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged) await this.refreshBaseSystemPrompt();
+			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged || templateChanged) {
+				await this.refreshBaseSystemPrompt();
+			}
 			return;
 		}
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
-		if (editModeChanged || modelChanged) {
+		if (editModeChanged || modelChanged || templateChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
 	}
@@ -1457,11 +1523,19 @@ export class SessionTools {
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		// The setting, not a pin, decides MCP presentation: eval namespaces replace
+		// both surfaces whenever `eval` (essential, so never mounted) is selected.
+		const evalBound = new Set(
+			this.#bindsMcpToEval?.() === true && selectedTools.some(({ name }) => name === "eval")
+				? selectedTools.filter(({ tool }) => isEvalNamespaceTool(tool)).map(({ name }) => name)
+				: [],
+		);
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
 				this.#xdev !== undefined &&
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
+				!evalBound.has(name) &&
 				!isPresentationPinned(name) &&
 				isMountableUnderXdev(tool),
 		);
@@ -1469,7 +1543,7 @@ export class SessionTools {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const { name, tool } of selectedTools) {
-			if (mountNames.has(name)) continue;
+			if (mountNames.has(name) || evalBound.has(name)) continue;
 			tools.push(this.#wrapToolForAcpPermission(tool));
 			validToolNames.push(name);
 		}
@@ -1518,11 +1592,14 @@ export class SessionTools {
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const previousEnabledToolNames = this.#enabledToolNames;
-		this.#enabledToolNames = new Set([...validToolNames, ...mountNames]);
+		const previousEvalBoundNames = this.#evalBoundNames;
+		this.#enabledToolNames = new Set([...validToolNames, ...mountNames, ...evalBound]);
+		this.#evalBoundNames = evalBound;
 		this.#setMountedNames(mountNames);
 		this.#setActiveToolNames?.(validToolNames);
 
 		let rebuiltSystemPrompt: string[] | undefined;
+		let rebuiltSources: SystemPromptSources | undefined;
 		let rebuiltSignature: string | undefined;
 		let frozenSignature: string | undefined;
 		// Trigger of an implicit (non-forced) rebuild, rechecked at commit.
@@ -1549,8 +1626,8 @@ export class SessionTools {
 					this.#promptSurfaceScope.run(surface, () =>
 						this.#computeAppliedToolSignature(validToolNames, tools, mountedSignatureTools),
 					);
-				// Eval-prelude, eval tool-name and model-mention changes alone never
-				// trigger a rebuild: they ride their hidden notices. The trigger keeps
+				// Eval-prelude, eval tool-name, model-mention and per-call-model advertisement
+				// changes alone never trigger a rebuild: they ride their hidden notices. The trigger keeps
 				// the committed sets; a rebuild caused by anything else absorbs the
 				// live ones.
 				const triggerSignature = computeSignature({
@@ -1558,6 +1635,7 @@ export class SessionTools {
 					evalPreludes: this.#promptSurface.evalPreludes,
 					sessionAgents: this.#promptSurface.sessionAgents,
 					evalToolNames: this.#promptSurface.evalToolNames,
+					perCallModelAdvertisement: this.#promptSurface.perCallModelAdvertisement,
 				});
 				const freezeImplicitPromptRefresh =
 					!forcePromptRefresh &&
@@ -1574,6 +1652,7 @@ export class SessionTools {
 						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
+					rebuiltSources = built.sources;
 					if (!forcePromptRefresh) implicitRebuildSignature = triggerSignature;
 					rebuiltSignature = signature;
 					rebuiltXdevCatalogNames = built.xdevCatalogNames;
@@ -1587,6 +1666,7 @@ export class SessionTools {
 			this.#setMountedNames(previousMounted);
 			this.#setActiveToolNames?.(previousActiveToolNames);
 			this.#enabledToolNames = previousEnabledToolNames;
+			this.#evalBoundNames = previousEvalBoundNames;
 			throw error;
 		}
 
@@ -1596,6 +1676,7 @@ export class SessionTools {
 			this.#setMountedNames(previousMounted);
 			this.#setActiveToolNames?.(previousActiveToolNames);
 			this.#enabledToolNames = previousEnabledToolNames;
+			this.#evalBoundNames = previousEvalBoundNames;
 			return;
 		}
 
@@ -1626,6 +1707,7 @@ export class SessionTools {
 					this.#host.clearInheritedProviderPromptCacheKey();
 				}
 				this.#baseSystemPrompt = rebuiltSystemPrompt;
+				this.#systemPromptSources = rebuiltSources;
 				this.#host.clearMemoryPromotionSnapshot();
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
@@ -1633,6 +1715,7 @@ export class SessionTools {
 				this.#recordPromptRoster(validToolNames);
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+				this.#promptTemplate = this.#currentPromptTemplate();
 				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
 				// The rebuilt prompt is a fresh roster snapshot. Keep the complete
 				// pending delta for a turn override that hides it, while separately
@@ -2012,27 +2095,38 @@ export class SessionTools {
 	 * the live set), compaction (which drops old notices), and resume.
 	 */
 	takeEvalPreludeNotice(): CustomMessage<EvalPreludeNoticeDetails> | undefined {
-		const known = new Set(this.#promptSurface.evalPreludes.map(definition => definition.name));
+		const base = this.#baseSystemPrompt.join("\n\n");
+		const known = new Map(this.#promptSurface.evalPreludes.map(definition => [definition.name, base]));
 		for (const message of this.#host.agent.state.messages) {
 			if (message.role !== "custom" || message.customType !== EVAL_PRELUDE_NOTICE_MESSAGE_TYPE) continue;
 			const details = message.details;
 			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
-			for (const name of details.added) if (typeof name === "string") known.add(name);
+			for (const name of details.added) if (typeof name === "string") known.set(name, String(message.content));
 			for (const name of details.removed) if (typeof name === "string") known.delete(name);
 		}
 		const live = this.#host.evalPreludes();
 		const liveNames = new Set(live.map(definition => definition.name));
-		const added = live.filter(definition => !known.has(definition.name));
-		const removed = [...known].filter(name => !liveNames.has(name));
+		const added = live.filter(
+			definition =>
+				!known.has(definition.name) ||
+				(Boolean(definition.guidance) && !known.get(definition.name)?.includes(definition.guidance!.trim())),
+		);
+		const removed = [...known.keys()].filter(name => !liveNames.has(name));
 		if (added.length === 0 && removed.length === 0) return undefined;
 		// Topic docs are served through `read`; sessions without it get them inline,
 		// matching the eval description's `inlineTopics` fallback.
 		const canRead = this.getActiveToolNames().includes("read");
+		const entries = added.map(definition => ({
+			name: definition.name,
+			summary: evalPreludeSummary(definition),
+			firstCall: canRead && Boolean(definition.firstCallDocumentation?.trim()),
+		}));
 		return {
 			role: "custom",
 			customType: EVAL_PRELUDE_NOTICE_MESSAGE_TYPE,
 			content: prompt.render(evalPreludeNoticePrompt, {
-				added: added.map(definition => ({ name: definition.name, summary: evalPreludeSummary(definition) })),
+				added: entries,
+				anyFirstCall: entries.some(entry => entry.firstCall),
 				removed,
 				canRead,
 				sections: added.flatMap(definition => [
@@ -2047,6 +2141,83 @@ export class SessionTools {
 		};
 	}
 
+	/** Preludes with a first-call guide that this conversation has called; cleared when the conversation changes. */
+	#evalPreludesCalled = new Set<string>();
+	#evalPreludeGuideHits = new Map<string, { index: number; message: CustomMessage; content: string; guide: string }>();
+
+	noteEvalPreludeCall(name: string): void {
+		this.#evalPreludesCalled.add(name);
+	}
+
+	clearEvalPreludeCalls(): void {
+		this.#evalPreludesCalled.clear();
+		this.#evalPreludeGuideHits.clear();
+	}
+
+	/**
+	 * Builds the hidden message carrying the first-call guide of each prelude
+	 * this conversation has called, unless a guide message still in context
+	 * holds that guide whole. Like {@link takeEvalPreludeNotice}, what was sent
+	 * is read from the transcript's own typed messages, never from tool output
+	 * or a delivery flag: a message the loop discarded, or a compaction, rewind
+	 * or shake that dropped or shortened a guide, sends it again at the next
+	 * delivery point, and a resumed session does not repeat it.
+	 */
+	takeEvalPreludeGuide(): CustomMessage<EvalPreludeGuideDetails> | undefined {
+		const called = this.#evalPreludesCalled;
+		if (called.size === 0 || !this.getActiveToolNames().includes("read")) return undefined;
+		const messages = this.#host.agent.state.messages;
+		const definitions = this.#host.evalPreludes();
+		const guides: Array<{ name: string; guide: string }> = [];
+		for (const definition of definitions) {
+			const guide = called.has(definition.name) ? definition.firstCallDocumentation?.trim() : undefined;
+			if (!guide) continue;
+			const hit = this.#evalPreludeGuideHits.get(definition.name);
+			if (
+				hit &&
+				messages[hit.index] === hit.message &&
+				hit.message.customType === EVAL_PRELUDE_GUIDE_MESSAGE_TYPE &&
+				hit.message.content === hit.content &&
+				hit.guide === guide
+			) {
+				continue;
+			}
+			let found = false;
+			for (let index = messages.length - 1; index >= 0; index--) {
+				const message = messages[index];
+				if (message.role !== "custom" || message.customType !== EVAL_PRELUDE_GUIDE_MESSAGE_TYPE) continue;
+				const details = message.details;
+				if (!isRecord(details) || !Array.isArray(details.names) || !details.names.includes(definition.name))
+					continue;
+				const expected = details.names.flatMap(name => {
+					const prelude = definitions.find(candidate => candidate.name === name);
+					const text = prelude?.firstCallDocumentation?.trim();
+					return prelude && text ? [{ name: prelude.name, guide: text }] : [];
+				});
+				if (expected.length !== details.names.length) continue;
+				const content = prompt.render(evalPreludeGuidePrompt, { guides: expected });
+				if (message.content !== content) continue;
+				this.#evalPreludeGuideHits.set(definition.name, { index, message, content, guide });
+				found = true;
+				break;
+			}
+			if (!found) {
+				this.#evalPreludeGuideHits.delete(definition.name);
+				guides.push({ name: definition.name, guide });
+			}
+		}
+		if (guides.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: EVAL_PRELUDE_GUIDE_MESSAGE_TYPE,
+			content: prompt.render(evalPreludeGuidePrompt, { guides }),
+			details: { names: guides.map(guide => guide.name) },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
 	/**
 	 * Builds the hidden notice reconciling the user-tagged model agents the task
 	 * description advertises with the live set. Delivered with the next user
@@ -2054,21 +2225,29 @@ export class SessionTools {
 	 * mid-session keeps the provider cache prefix intact.
 	 *
 	 * Known agents are the committed base snapshot, then every agent notice still
-	 * in context, applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 * in context, then every notice in `ahead` (messages queued to reach the model
+	 * before this one), applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 * `only` limits the notice to announcing those agents, leaving every other
+	 * change to the message that carries it.
 	 */
-	takeSessionAgentNotice(): CustomMessage<SessionAgentNoticeDetails> | undefined {
+	takeSessionAgentNotice(
+		ahead: Iterable<AgentMessage> = [],
+		only?: ReadonlySet<string>,
+	): CustomMessage<SessionAgentNoticeDetails> | undefined {
 		const known = new Set(this.#promptSurface.sessionAgents.map(agent => agent.name));
-		for (const message of this.#host.agent.state.messages) {
-			if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
-			const details = message.details;
-			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
-			for (const name of details.added) if (typeof name === "string") known.add(name);
-			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		for (const messages of [this.#host.agent.state.messages, ahead]) {
+			for (const message of messages) {
+				if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
+				const details = message.details;
+				if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+				for (const name of details.added) if (typeof name === "string") known.add(name);
+				for (const name of details.removed) if (typeof name === "string") known.delete(name);
+			}
 		}
 		const live = this.#host.sessionAgents();
 		const liveNames = new Set(live.map(agent => agent.name));
-		const added = live.filter(agent => !known.has(agent.name));
-		const removed = [...known].filter(name => !liveNames.has(name));
+		const added = live.filter(agent => !known.has(agent.name) && (!only || only.has(agent.name)));
+		const removed = only ? [] : [...known].filter(name => !liveNames.has(name));
 		if (added.length === 0 && removed.length === 0) return undefined;
 		return {
 			role: "custom",
@@ -2550,6 +2729,7 @@ export class SessionTools {
 				// snapshot, so only carry the prompt forward.
 				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
 				this.#baseSystemPrompt = built.systemPrompt;
+				this.#systemPromptSources = built.sources;
 				this.#promptSurface = candidate;
 				this.#setBasePromptXdevNames(built.xdevCatalogNames);
 				this.#host.clearMemoryPromotionSnapshot();
@@ -2565,6 +2745,7 @@ export class SessionTools {
 				this.#pendingToolRosterDeltaAfterBase = undefined;
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+				this.#promptTemplate = this.#currentPromptTemplate();
 				this.#lastAppliedToolSignature = signature;
 				this.#recordPromptRoster(activeToolNames);
 				return true;
@@ -2589,6 +2770,7 @@ export class SessionTools {
 		const candidate: PromptSurface = {
 			...this.#derivePromptSurface(),
 			evalToolNames: this.#promptSurface.evalToolNames,
+			perCallModelAdvertisement: this.#promptSurface.perCallModelAdvertisement,
 		};
 		const built = await this.#promptSurfaceScope.run(candidate, () =>
 			rebuildSystemPrompt(roster.toolNames, roster.tools, roster.xdev),
@@ -2764,11 +2946,10 @@ export class SessionTools {
 	}
 
 	/**
-	 * Replace MCP tools in the registry and enable them immediately. Refreshes
-	 * are serialized so an older asynchronous prompt rebuild cannot commit
-	 * after a newer catalog snapshot. Every connected MCP tool becomes available
-	 * (mounted under `xd://` when that transport is active, else top-level);
-	 * while vibe mode is active, activation waits for vibe exit.
+	 * Replace MCP tools in the registry, enabling newly discovered manager tools
+	 * while preserving the selection of existing ones. Refreshes are serialized
+	 * so an older asynchronous prompt rebuild cannot commit after a newer catalog
+	 * snapshot. During vibe mode, new tools wait for vibe exit.
 	 */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		const snapshot = [...mcpTools];
@@ -2783,7 +2964,7 @@ export class SessionTools {
 			if (isMCPToolName(name)) previousMcpTools.set(name, tool);
 		}
 		const previousMcpManagerToolNames = new Set(this.#mcpManagerToolNames);
-		const previousActiveMcpToolNames = this.getEnabledToolNames().filter(isMCPToolName);
+		const previousActiveMcpToolNames = new Set(this.getEnabledToolNames().filter(isMCPToolName));
 		const restorePreviousMcpTools = () => {
 			for (const name of this.#toolRegistry.keys()) {
 				if (isMCPToolName(name)) this.#toolRegistry.delete(name);
@@ -2811,21 +2992,20 @@ export class SessionTools {
 			if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
 		}
 
-		// Connected manager tools become active immediately, except while vibe
-		// narrows the active set to the director's tools: then every MCP tool keeps
-		// its prior selection and vibe exit activates the manager set. Extension-owned
-		// MCP tools always retain their prior selection while both share one registry.
+		// Refresh replaces implementations, not an extension's selection. Walk
+		// the new registry in order so catalog reordering still updates the prompt.
+		// Names previously supplied by extensions keep their selection if ownership changes.
 		const vibeActive = this.#installedVibeToolNames.size > 0;
-		const retainedActiveMcpToolNames = previousActiveMcpToolNames.filter(
-			name => (vibeActive || this.#extensionMcpTools.has(name)) && this.#toolRegistry.has(name),
-		);
-		const nextActive = [
-			...new Set([
-				...this.#getActiveNonMCPToolNames(),
-				...(vibeActive ? [] : this.#mcpManagerToolNames),
-				...retainedActiveMcpToolNames,
-			]),
-		];
+		const nextActive = this.#getActiveNonMCPToolNames();
+		for (const name of this.#toolRegistry.keys()) {
+			if (
+				isMCPToolName(name) &&
+				(previousActiveMcpToolNames.has(name) ||
+					(!vibeActive && this.#mcpManagerToolNames.has(name) && !previousMcpTools.has(name)))
+			) {
+				nextActive.push(name);
+			}
+		}
 		try {
 			await this.#applyActiveToolsByName(nextActive);
 			if (this.#host.isDisposed()) {

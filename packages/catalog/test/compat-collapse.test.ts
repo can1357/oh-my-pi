@@ -1751,6 +1751,78 @@ describe("antigravity discovery collapsing", () => {
 		expect(models?.some(model => model.id === "gemini-3.1-flash-lite")).toBe(true);
 	});
 
+	it("folds Gemini 4 Hydrogen's four SKUs into one row that routes xhigh to the -xhigh SKU", async () => {
+		const fetcher = Object.assign(
+			(input: string | URL | Request, _init?: RequestInit) =>
+				Promise.resolve(
+					String(input).includes(":fetchAvailableModels")
+						? Response.json({
+								models: Object.fromEntries(
+									["low", "medium", "high", "xhigh"].map(tier => [
+										`gemini-4-hydrogen-${tier}`,
+										{ displayName: `Gemini 4 Hydrogen (${tier})`, supportsThinking: true },
+									]),
+								),
+							})
+						: new Response("version: 2.19.1\n"),
+				),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const models = (await fetchAntigravityDiscoveryModels({ token: "t", fetcher }))?.models;
+
+		expect(models?.filter(model => model.id.includes("hydrogen")).map(model => model.id)).toEqual([
+			"gemini-4-hydrogen",
+		]);
+		const hydrogen = models?.find(model => model.id === "gemini-4-hydrogen");
+		expect(hydrogen?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(hydrogen?.thinking?.effortRouting?.[Effort.XHigh]).toBe("gemini-4-hydrogen-xhigh");
+		expect(hydrogen?.thinking?.effortRouting?.[Effort.Low]).toBe("gemini-4-hydrogen-low");
+	});
+
+	it("collapses Gemini 4 SKUs on the google-gemini-cli manager path into one hydrogen row", async () => {
+		// The `google-gemini-cli` model manager injects its own reviewed
+		// collapse table (not the `google-antigravity` one discovery specs
+		// carry), so that table must declare the Gemini 4 families too;
+		// otherwise the four hydrogen tier SKUs pass through as raw rows and
+		// `gemini-4-hydrogen` never appears in the picker.
+		const fetcher = Object.assign(
+			(input: string | URL | Request, _init?: RequestInit) =>
+				Promise.resolve(
+					String(input).includes(":fetchAvailableModels")
+						? Response.json({
+								models: Object.fromEntries(
+									["low", "medium", "high", "xhigh"].map(tier => [
+										`gemini-4-hydrogen-${tier}`,
+										{
+											displayName: `Gemini 4 Hydrogen (${tier})`,
+											supportsThinking: true,
+											thinkingLevel: { low: 1, medium: 2, high: 3, xhigh: 100 }[tier],
+											thinkingBudget: -1,
+											maxTokens: 1_048_576,
+											maxOutputTokens: 65_536,
+										},
+									]),
+								),
+							})
+						: new Response("version: 2.19.1\n"),
+				),
+			{ preconnect: fetch.preconnect },
+		);
+		const options = googleGeminiCliModelManagerOptions({ oauthToken: "t", fetch: fetcher });
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models?.filter(model => model.id.includes("hydrogen")).map(model => model.id)).toEqual([
+			"gemini-4-hydrogen",
+		]);
+		const hydrogen = models?.find(model => model.id === "gemini-4-hydrogen");
+		expect(hydrogen?.provider).toBe("google-gemini-cli");
+		expect(hydrogen?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(hydrogen?.thinking?.effortRouting?.[Effort.XHigh]).toBe("gemini-4-hydrogen-xhigh");
+		expect(hydrogen?.thinking?.effortRouting?.[Effort.Low]).toBe("gemini-4-hydrogen-low");
+		expect(resolveWireModelId(hydrogen!, Effort.XHigh)).toBe("gemini-4-hydrogen-xhigh");
+	});
+
 	it("drops bundled rows the account roster does not serve, and keeps them when discovery fails", async () => {
 		const roster = {
 			models: {

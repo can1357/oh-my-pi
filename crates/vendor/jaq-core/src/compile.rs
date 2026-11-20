@@ -94,12 +94,18 @@ pub(crate) enum Term<T = TermId> {
     Int(isize),
     Num(String),
     Str(String),
+    Bool(bool),
+    Null,
+    /// Error with a message, such as for an unknown format
+    Fail(String),
     /// Array construction (`[f]`)
     Arr(T),
     /// Empty object (`{}`)
     ObjEmpty,
     /// Singleton object (`{f: g}`)
     ObjSingle(T, T),
+    /// Union of objects (`{f: g, h: i}`), the left one varying slowest
+    ObjCat(T, T),
 
     /// Bound variable (`$x`), label (`label $x`), or filter argument (`a`)
     Var(VarId),
@@ -116,6 +122,9 @@ pub(crate) enum Term<T = TermId> {
     /// Variable binding (`f as $x | g`) if identifier (`x`) is given, otherwise
     /// application (`f | g`)
     Pipe(T, Option<Pattern<T>>, T),
+    /// Destructuring alternatives (`f as p1 ?// p2 | g`): for every output of `f`,
+    /// the number of variables to bind to null, the pattern, and `g` compiled for it
+    PipeAlt(T, Box<[(usize, Pattern<T>, T)]>),
     /// Concatenation (`f, g`)
     Comma(T, T),
     /// Assignment (`f = g`)
@@ -173,39 +182,15 @@ pub(crate) enum Fold<T> {
 pub(crate) enum Pattern<F> {
     Var,
     Idx(Vec<(F, Self)>),
+    /// bind the value to a variable and destructure it
+    Both(Box<Self>),
 }
 
-/// Compilation error.
-pub type Error<S> = (S, Undefined);
+/// Compilation error: where it occurred and jq's message, such as `$x is not defined`.
+pub type Error<S> = (S, String);
 
 /// Compilation errors.
 pub type Errors<S, P> = load::Errors<S, P, Vec<Error<S>>>;
-
-/// Type of an undefined symbol.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Undefined {
-    /// module
-    Mod,
-    /// variable
-    Var,
-    /// label variable
-    Label,
-    /// filter with arity
-    Filter(Arity),
-}
-
-impl Undefined {
-    /// String representation of an unexpected symbol type.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Var => "variable",
-            Self::Mod => "module",
-            Self::Label => "label",
-            Self::Filter(_arity) => "filter",
-        }
-    }
-}
 
 /// jq program compiler.
 ///
@@ -223,6 +208,9 @@ pub struct Compiler<S, F> {
     imported_vars: Vec<(S, ModId)>,
 
     locals: Locals<S>,
+
+    /// file name that `$__loc__` reports in the module being compiled
+    loc_file: String,
 
     errs: Vec<Error<S>>,
 }
@@ -242,6 +230,7 @@ impl<S, F> Default for Compiler<S, F> {
             global_vars: Vec::new(),
             imported_vars: Vec::new(),
             locals: Locals::default(),
+            loc_file: String::new(),
             errs: Vec::new(),
         }
     }
@@ -499,7 +488,7 @@ impl<'s, F> Compiler<&'s str, F> {
     }
 
     /// Compile the given modules.
-    pub fn compile<P>(
+    pub fn compile<P: load::FileName>(
         mut self,
         mods: load::Modules<&'s str, P>,
     ) -> Result<Filter<F>, Errors<&'s str, P>> {
@@ -511,21 +500,17 @@ impl<'s, F> Compiler<&'s str, F> {
 
         let mut errs = Vec::new();
         for (file, module) in mods.deps {
+            self.loc_file = file.path.file_name();
             let defs = self.open_module(module);
             let defs = self.module(defs);
             self.mod_map.push(defs);
             self.close_module(file, &mut errs)
         }
         let (file, module) = mods.main;
+        self.loc_file = "<top-level>".into();
         let main = self.open_module(module);
         let id = self.iterm(main);
         self.close_module(file, &mut errs);
-
-        /*
-        for (i, t) in self.lut.terms.iter().enumerate() {
-            std::println!("{i} -> {t:?}");
-        }
-        */
 
         let lut = self.lut.map_funs(|(_sig, f)| f);
         errs.is_empty().then(|| Filter { id, lut }).ok_or(errs)
@@ -568,6 +553,7 @@ impl<'s, F> Compiler<&'s str, F> {
     }
 
     fn open_def(&mut self, def: parse::Def<&'s str>, tr: &Tr) -> (&'s str, usize) {
+        let def = param_filters(def);
         let args: Box<[_]> = def.args.iter().map(|a| bind_from(a, *a)).collect();
         let arity = args.len();
         let (sig, def, tr_) = self.def(def, tr);
@@ -633,10 +619,20 @@ impl<'s, F> Compiler<&'s str, F> {
         let t = match t {
             Id => Term::Id,
             Recurse => Term::Recurse,
+            Bool(b) => Term::Bool(b),
+            Null => Term::Null,
+            Loc(line) => {
+                let file = Term::Str(self.loc_file.clone());
+                let line = Term::Int(line as isize);
+                let pairs = [("file", file), ("line", line)].map(|(k, v)| {
+                    Term::ObjSingle(self.lut.insert_term(Term::Str(k.into())), self.lut.insert_term(v))
+                });
+                self.obj_cat(pairs.into())
+            }
             Arr(t) => Term::Arr(self.iterm(t.map_or_else(|| Call("!empty", Vec::new()), |t| *t))),
             Neg(t) => Term::Neg(self.iterm(*t)),
             Label(x, t) => Term::Label(self.with_label(x, |c| c.iterm(*t))),
-            Break(x) => self.break_(x),
+            Break(s) => self.break_(s),
             IfThenElse(if_thens, else_) => {
                 let f = |(if_, then_)| (self.iterm(if_), self.iterm_tr(then_, tr));
                 let if_thens: Vec<_> = if_thens.into_iter().map(f).collect();
@@ -650,8 +646,8 @@ impl<'s, F> Compiler<&'s str, F> {
             Var(x) => self.var(x),
             Call(name, args) => {
                 let args: Box<[_]> = args.into_iter().map(|t| self.iterm(t)).collect();
-                if let Some((module, name)) = name.split_once("::") {
-                    self.call_mod(module, name, &args)
+                if let Some((module, fname)) = name.split_once("::") {
+                    self.call_mod(name, module, fname, &args)
                 } else {
                     return self.call(name, &args, tr);
                 }
@@ -670,13 +666,22 @@ impl<'s, F> Compiler<&'s str, F> {
                 let catch = catch.map_or_else(|| Call("!empty", Vec::new()), |t| *t);
                 Term::TryCatch(self.iterm(*try_), self.iterm(catch))
             }
-            Fold(name, xs, pat, args) => {
+            Fold(name, xs, mut pats, args) => {
                 use self::Fold::{Foreach, Reduce};
-                let arity = args.len();
+                // `reduce xs as p1 ?// p2 (...)` binds the variables of all alternatives,
+                // so it is `reduce (xs as p1 ?// p2 | [$v1, ...]) as [$v1, ...] (...)`
+                let (xs, pat) = if pats.len() > 1 {
+                    let vars = alt_vars(&pats);
+                    let arr = vars.iter().map(|v| Var(*v)).reduce(|l, r| BinOp(Box::new(l), parse::BinaryOp::Comma, Box::new(r)));
+                    let arr = Arr(arr.map(Box::new));
+                    let xs = BinOp(xs, parse::BinaryOp::Pipe(Some(pats)), Box::new(arr));
+                    (Box::new(xs), parse::Pattern::Arr(vars.into_iter().map(parse::Pattern::Var).collect()))
+                } else {
+                    (xs, pats.pop().unwrap_or(parse::Pattern::Arr(Vec::new())))
+                };
                 let mut args = args.into_iter();
-                let (init, update) = match (args.next(), args.next()) {
-                    (Some(init), Some(update)) => (init, update),
-                    _ => return (self.fail(name, Undefined::Filter(arity)), Tr::new()),
+                let (Some(init), Some(update)) = (args.next(), args.next()) else {
+                    return (Term::Id, Tr::new());
                 };
                 let vars: Vec<_> = pat.vars().copied().collect();
                 let xs = self.iterm(*xs);
@@ -684,17 +689,19 @@ impl<'s, F> Compiler<&'s str, F> {
                 let init = self.iterm(init);
                 let update = self.with_vars(&vars, |c| c.iterm(update));
 
-                match (name, args.next(), args.next()) {
-                    ("reduce", None, None) => Term::Fold(xs, pat, init, update, Reduce),
-                    ("foreach", proj, None) => {
-                        let (proj, tr_) = proj
-                            .map(|p| self.with_vars(&vars, |c| c.iterm_tr(p, tr)))
-                            .unzip();
-                        let tr_ = tr_.unwrap_or_default();
-                        return (Term::Fold(xs, pat, init, update, Foreach(proj)), tr_);
-                    }
-                    _ => self.fail(name, Undefined::Filter(arity)),
+                if name == "reduce" {
+                    Term::Fold(xs, pat, init, update, Reduce)
+                } else {
+                    let (proj, tr_) = args
+                        .next()
+                        .map(|p| self.with_vars(&vars, |c| c.iterm_tr(p, tr)))
+                        .unzip();
+                    let tr_ = tr_.unwrap_or_default();
+                    return (Term::Fold(xs, pat, init, update, Foreach(proj)), tr_);
                 }
+            }
+            BinOp(l, parse::BinaryOp::Pipe(Some(pats)), r) if pats.len() > 1 => {
+                return self.pipe_alt(*l, pats, *r, tr);
             }
             BinOp(l, op, r) => {
                 use parse::BinaryOp::*;
@@ -707,13 +714,13 @@ impl<'s, F> Compiler<&'s str, F> {
                     Alt => (self.iterm(*l), self.iterm_tr(*r, tr)),
                     Pipe(ref pat) => {
                         let l = self.iterm(*l);
-                        let vars: Vec<_> = pat.iter().flat_map(|p| p.vars()).copied().collect();
+                        let vars: Vec<_> = pat.iter().flatten().flat_map(|p| p.vars()).copied().collect();
                         (l, self.with_vars(&vars, |c| c.iterm_tr(*r, tr)))
                     }
                     _ => (self.iterm(*l), (self.iterm(*r), Tr::new())),
                 };
                 let t = match op {
-                    Pipe(pat) => Term::Pipe(l, pat.map(|pat| self.pattern(pat)), r),
+                    Pipe(pat) => Term::Pipe(l, pat.and_then(|mut p| p.pop()).map(|pat| self.pattern(pat)), r),
                     Comma => Term::Comma(l, r),
                     Math(op) => Term::Math(l, op, r),
                     Assign => Term::Assign(l, r),
@@ -739,20 +746,70 @@ impl<'s, F> Compiler<&'s str, F> {
                     Some(fmt) => self.iterm(Call(fmt, Vec::new())),
                     None => self.lut.insert_term(Term::ToString),
                 };
-                let parts = parts.into_iter().map(|part| match part {
-                    StrPart::Str(s) => Term::Str(s.into()),
-                    StrPart::Char(c) => Term::Str(c.into()),
-                    StrPart::Term(f) => Term::Pipe(self.iterm(f), None, fmt),
-                });
-                let parts = parts.collect();
-                self.sum_or(|| Term::Str(String::new()), parts)
+                let mut out: Vec<Term> = Vec::new();
+                for part in parts {
+                    let lit = match part {
+                        StrPart::Str(s) => s.into(),
+                        StrPart::Char(c) => String::from(c),
+                        StrPart::Term(f) => {
+                            out.push(Term::Pipe(self.iterm(f), None, fmt));
+                            continue;
+                        }
+                    };
+                    match out.last_mut() {
+                        Some(Term::Str(s)) => s.push_str(&lit),
+                        _ => out.push(Term::Str(lit)),
+                    }
+                }
+                // `"a\(f)b\(g)"` is `(("a" + f) + "b") + g`, as jq builds it,
+                // so that the last interpolation varies slowest
+                let mut out = out.into_iter();
+                let first = out.next().unwrap_or_else(|| Term::Str(String::new()));
+                out.fold(first, |acc, x| {
+                    Term::Math(self.lut.insert_term(acc), ops::Math::Add, self.lut.insert_term(x))
+                })
             }
             Obj(o) => {
                 let kvs = o.into_iter().map(|(k, v)| self.obj_entry(k, v)).collect();
-                self.sum_or(|| Term::ObjEmpty, kvs)
+                self.obj_cat(kvs)
             }
         };
         (t, Tr::new())
+    }
+
+    /// `l as p1 ?// p2 ?// ... | r`, as jq's `bind_alternation_matchers`:
+    /// every alternative binds the variables of all alternatives,
+    /// those not in its pattern to null.
+    fn pipe_alt(
+        &mut self,
+        l: parse::Term<&'s str>,
+        pats: Vec<parse::Pattern<&'s str>>,
+        r: parse::Term<&'s str>,
+        tr: &Tr,
+    ) -> (Term, Tr) {
+        let all = alt_vars(&pats);
+        let l = self.iterm(l);
+        let mut tr_ = Tr::new();
+        let alts = pats.into_iter().map(|pat| {
+            let own: Vec<_> = pat.vars().copied().collect();
+            let mut vars: Vec<_> = all.iter().copied().filter(|v| !own.contains(v)).collect();
+            let nulls = vars.len();
+            vars.extend(own);
+            let pat = self.pattern(pat);
+            let (r, trr) = self.with_vars(&vars, |c| c.iterm_tr(r.clone(), tr));
+            tr_.extend(trr);
+            (nulls, pat, r)
+        });
+        let alts = alts.collect();
+        (Term::PipeAlt(l, alts), tr_)
+    }
+
+    fn obj_cat(&mut self, terms: Vec<Term>) -> Term {
+        let mut iter = terms.into_iter().rev();
+        let last = iter.next().unwrap_or(Term::ObjEmpty);
+        iter.fold(last, |acc, x| {
+            Term::ObjCat(self.lut.insert_term(x), self.lut.insert_term(acc))
+        })
     }
 
     /// Compile a term in a context that does *not* permit tail-recursion.
@@ -784,11 +841,12 @@ impl<'s, F> Compiler<&'s str, F> {
                 let iter = o.into_iter().map(|(k, p)| (self.iterm(k), self.pattern(p)));
                 Pattern::Idx(iter.collect())
             }
+            parse::Pattern::Both(_, p) => Pattern::Both(Box::new(self.pattern(*p))),
         }
     }
 
-    fn fail(&mut self, name: &'s str, undef: Undefined) -> Term {
-        self.errs.push((name, undef));
+    fn fail(&mut self, at: &'s str, msg: String) -> Term {
+        self.errs.push((at, msg));
         Term::default()
     }
 
@@ -806,16 +864,16 @@ impl<'s, F> Compiler<&'s str, F> {
     }
 
     /// Resolve call to `mod::filter(a1, ..., an)`.
-    fn call_mod(&mut self, module: &'s str, name: &'s str, args: &[TermId]) -> Term {
-        let mut imported_mods = self.imported_mods.iter().rev();
-        let mid = match imported_mods.find(|(_mid, module_)| module == *module_) {
-            Some((mid, _module)) => mid,
-            None => return self.fail(module, Undefined::Mod),
-        };
-        if let Some(call) = self.call_mod_id(*mid, name, args) {
-            return call;
+    ///
+    /// Modules imported under the same name are searched from the last import on.
+    fn call_mod(&mut self, full: &'s str, module: &'s str, name: &'s str, args: &[TermId]) -> Term {
+        let mids: Vec<_> = self.imported_mods.iter().rev().filter(|(_, m)| *m == module).map(|(mid, _)| *mid).collect();
+        for mid in mids {
+            if let Some(call) = self.call_mod_id(mid, name, args) {
+                return call;
+            }
         }
-        self.fail(name, Undefined::Filter(args.len()))
+        self.fail(full, alloc::format!("{full}/{} is not defined", args.len()))
     }
 
     /// Resolve call to `filter(a1, ..., an)`.
@@ -833,8 +891,13 @@ impl<'s, F> Compiler<&'s str, F> {
                 return (Term::Native(nid, binds(&sig.args, args)), Tr::new());
             }
         }
+        // jq resolves formats at runtime, failing for unknown ones
+        if let (Some(fmt), []) = (name.strip_prefix('@'), args) {
+            return (Term::Fail(alloc::format!("{fmt} is not a valid format")), Tr::new());
+        }
 
-        (self.fail(name, Undefined::Filter(args.len())), Tr::new())
+        let msg = alloc::format!("{name}/{} is not defined", args.len());
+        (self.fail(name, msg), Tr::new())
     }
 
     fn var(&mut self, x: &'s str) -> Term {
@@ -843,8 +906,13 @@ impl<'s, F> Compiler<&'s str, F> {
         if let Some(v) = self.locals.vars.bound.get_last(&Bind::Var(x)) {
             return Term::Var(i - v);
         }
+        // data imported as `$d` is also bound as `$d::d`
+        let data = match x.split_once("::") {
+            Some((m, n)) if m.strip_prefix('$') == Some(n) => m,
+            _ => x,
+        };
         for (x_, mid) in self.imported_vars.iter().rev() {
-            if x == *x_ && *mid == self.mod_map.len() {
+            if data == *x_ && *mid == self.mod_map.len() {
                 return Term::Var(i);
             } else {
                 i += 1;
@@ -857,14 +925,17 @@ impl<'s, F> Compiler<&'s str, F> {
                 i += 1;
             }
         }
-        self.fail(x, Undefined::Var)
+        self.fail(x, alloc::format!("{x} is not defined"))
     }
 
-    fn break_(&mut self, x: &'s str) -> Term {
+    /// `break $x`, where `s` spans the whole expression.
+    fn break_(&mut self, s: &'s str) -> Term {
+        let x = s.find('$').map_or(s, |i| &s[i..]);
         if let Some(l) = self.locals.vars.bound.get_last(&Bind::Label(x)) {
             return Term::Var(self.locals.vars.total - l);
         }
-        self.fail(x, Undefined::Label)
+        // jq binds labels as variables with names that cannot be written
+        self.fail(s, alloc::format!("$*label-{} is not defined", &x[1..]))
     }
 
     fn obj_entry(&mut self, k: parse::Term<&'s str>, v: Option<parse::Term<&'s str>>) -> Term {
@@ -885,22 +956,40 @@ impl<'s, F> Compiler<&'s str, F> {
         Term::ObjSingle(k, v)
     }
 
-    fn sum_or(&mut self, f: impl FnOnce() -> Term, terms: Vec<Term>) -> Term {
-        use ops::Math::Add;
-        let mut iter = terms.into_iter().rev();
-        let last = iter.next().unwrap_or_else(f);
-        iter.fold(last, |acc, x| {
-            Term::Math(self.lut.insert_term(x), Add, self.lut.insert_term(acc))
-        })
+}
+
+/// Variables bound by any of the alternatives `p1 ?// p2 ?// ...`, without duplicates,
+/// in order of first appearance.
+fn alt_vars<'s>(pats: &[parse::Pattern<&'s str>]) -> Vec<&'s str> {
+    let mut vars = Vec::new();
+    for x in pats.iter().flat_map(|p| p.vars()) {
+        if !vars.contains(x) {
+            vars.push(*x);
+        }
     }
+    vars
+}
+
+/// A parameter `$x` of a definition binds both `$x` and the filter `x`:
+/// `def f($x): g;` is `def f(x): x as $x | g;`, as in jq's `gen_function`.
+fn param_filters(mut def: parse::Def<&str>) -> parse::Def<&str> {
+    use parse::{BinaryOp, Pattern, Term};
+    for arg in def.args.iter_mut().rev() {
+        if let Some(name) = arg.strip_prefix('$') {
+            let call = Term::Call(name, Vec::new());
+            let pat = BinaryOp::Pipe(Some(Vec::from([Pattern::Var(*arg)])));
+            def.body = Term::BinOp(Box::new(call), pat, Box::new(def.body));
+            *arg = name;
+        }
+    }
+    def
 }
 
 /// Tail Call Optimisation.
 #[test]
 fn tco() {
     let calls_in = |filter| -> Vec<CallType> {
-        let tk = lex::Lexer::new(filter).lex().unwrap();
-        let tm = parse::Parser::new(&tk).term().unwrap();
+        let tm = parse::Parser::new(filter).term().unwrap();
         let mut c = Compiler::<_, ()>::default();
         let _id = c.iterm(tm);
         let calls = c.lut.terms.iter().filter_map(|tm| match tm {

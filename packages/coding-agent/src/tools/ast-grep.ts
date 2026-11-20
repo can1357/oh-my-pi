@@ -18,7 +18,7 @@ import { ensureGrammar, missingGrammarsNote, rerunWithGrammars } from "../utils/
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
-import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
+import { createFileRecorder, formatResultPath, resultSnapshotPath, targetResultBase } from "./file-recorder";
 import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
 
@@ -121,8 +121,9 @@ async function runMultiTargetAstGrep(
 		limitReached = limitReached || targetResult.limitReached;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
+		const resultBase = await targetResultBase(target.basePath);
 		for (const match of targetResult.matches) {
-			const absolute = resolveSearchResultPath(target.basePath, match.path);
+			const absolute = resolveSearchResultPath(resultBase, match.path);
 			const rebased = relativeSearchResultPath(options.commonBasePath, absolute);
 			retainAstFindMatch(retainedMatches, retainedCapacity, { ...match, path: rebased });
 		}
@@ -152,7 +153,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			entry => parseSearchPath(entry).basePath,
 		);
 	readonly label = "AST Grep";
-	readonly summary = "Search code with AST patterns (structural grep)";
+	readonly summary = "Search code with AST patterns (SHOULD be preferred for structural search)";
 	get description(): string {
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
 		const scoutAvailable = isScoutSpawnable(

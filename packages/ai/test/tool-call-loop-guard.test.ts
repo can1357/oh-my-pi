@@ -408,6 +408,53 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		});
 	});
 
+	test("reports the non-exempt call in a batch containing an exempt alias", () => {
+		const guard = new ToolCallLoopGuard({
+			threshold: 2,
+			exemptTools: ["poll"],
+			exemptionAlias: call => call.arguments.target as string,
+		});
+		const calls = [toolCall("dispatch", { target: "poll" }), toolCall("dispatch", { target: "edit" })];
+		expect(guard.recordTurn(turn(calls))).toBeNull();
+		expect(guard.recordTurn(turn(calls))).toMatchObject({
+			toolName: "dispatch",
+			count: 2,
+			argumentsSummary: '{"target":"edit"}',
+		});
+	});
+
+	test.each([true, false])("preserves idle-poll counting for an alias with useless=%s", useless => {
+		const guard = new ToolCallLoopGuard({
+			threshold: 2,
+			exemptTools: ["poll"],
+			exemptionAlias: call => (call.name === "dispatch" ? "poll" : undefined),
+		});
+		const repeated = turn([toolCall("bash", { command: "pytest" })]);
+		const poll = toolCall("dispatch", {});
+		expect(guard.recordTurn(repeated)).toBeNull();
+		expect(
+			guard.recordTurn(
+				turn(
+					[poll],
+					[
+						{
+							role: "toolResult",
+							toolCallId: poll.id,
+							toolName: poll.name,
+							content: [{ type: "text", text: "Poll completed" }],
+							isError: false,
+							useless,
+							timestamp: Date.now(),
+						},
+					],
+				),
+			),
+		).toBeNull();
+		const detection = guard.recordTurn(repeated);
+		if (useless) expect(detection).toMatchObject({ toolName: "bash", count: 2 });
+		else expect(detection).toBeNull();
+	});
+
 	test("treats reordered parallel calls as the same batch", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
 		expect(

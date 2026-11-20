@@ -64,7 +64,7 @@ export class DownloadManager {
 	#onFrame?: () => void;
 	readonly #pending = new Map<string, PendingDownload>();
 	readonly #completed: BrowserDownload[] = [];
-	/** Completed downloads no wait has taken yet, and relay downloads whose saved file could not be found. */
+	/** Completed downloads no wait has taken yet, and downloads whose saved file could not be found. */
 	readonly #unclaimed: Array<BrowserDownload | ToolError> = [];
 	readonly #waiters: DownloadWaiter[] = [];
 	/** Ended downloads, settled one after another. */
@@ -263,24 +263,18 @@ export class DownloadManager {
 				source = await this.#savedPath(pending.guid);
 			} catch (error) {
 				// A relay tab tracks downloads from the moment it opens, so this can fail before any wait: keep it for the next.
-				const failure = new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`);
-				const waiter = this.#waiters.shift();
-				if (!waiter) {
-					this.#unclaimed.push(failure);
-					return;
-				}
-				if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-				waiter.reject(failure);
+				this.#settleFailure(new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`));
 				return;
 			}
 		}
-		for (let attempt = 0; attempt < 100; attempt++) {
-			try {
-				await fs.stat(source);
-				break;
-			} catch {
-				await Bun.sleep(10);
-			}
+		// Chromium saves on its own machine: a browser reached through an `app` CDP URL may run on another one.
+		if (!(await savedFileAppears(source))) {
+			this.#settleFailure(
+				new ToolError(
+					`Download failed: ${pending.url}: the browser finished it, but no file is at ${source} on this machine`,
+				),
+			);
+			return;
 		}
 		const name = typeof pending.suggestedFilename === "string" ? path.basename(pending.suggestedFilename) : "";
 		const target = path.join(directory, name);
@@ -314,6 +308,17 @@ export class DownloadManager {
 		waiter.resolve({ ...download });
 	}
 
+	/** Fail the next wait with `failure`, or keep it for the next wait when none is waiting yet. */
+	#settleFailure(failure: ToolError): void {
+		const waiter = this.#waiters.shift();
+		if (!waiter) {
+			this.#unclaimed.push(failure);
+			return;
+		}
+		if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+		waiter.reject(failure);
+	}
+
 	#rejectNext(error: ToolError): void {
 		const waiter = this.#waiters.shift();
 		if (!waiter) return;
@@ -325,6 +330,22 @@ export class DownloadManager {
 		const index = this.#waiters.indexOf(waiter);
 		if (index >= 0) this.#waiters.splice(index, 1);
 	}
+}
+
+/**
+ * Whether a regular file shows at `file` within about a second, the time Chromium's rename into place can take.
+ * Anything else already there, such as a directory, is no download.
+ */
+async function savedFileAppears(file: string): Promise<boolean> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			return (await fs.stat(file)).isFile();
+		} catch (error) {
+			if (!isEnoent(error)) return false;
+		}
+		await Bun.sleep(10);
+	}
+	return false;
 }
 
 /**

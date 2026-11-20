@@ -134,6 +134,7 @@ describe("AgentSession computer display hold per turn", () => {
 			resumeDisplay(from, turn) {
 				resumes.push(`${from}->${turn}`);
 			},
+			async reset() {},
 			async close() {},
 		});
 		return session;

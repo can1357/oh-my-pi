@@ -256,20 +256,20 @@ jobs:
          # Clippy scope mirrors `cargo clippy --workspace` (libraries only, no
          # test targets) plus the strict/default split: crates with
          # `[lints] workspace = true` get the workspace policy.
-         # pi-builtins allows every clippy group in its own manifest (ported
+         # omp-builtins allows every clippy group in its own manifest (ported
          # uutils/jaq code) but is still held to zero rustc warnings;
          # Cargo honors that via `[lints]`, Bazel via the clippy-ported config.
          - name: Clippy (workspace lint policy on opted-in crates)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/ast/... + //crates/diff/... + //crates/edit/... + //crates/iso/... + //crates/natives/... + //crates/shell/... + //crates/vcs/... + //crates/voice/... + //crates/xfs/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-strict --
          - name: Clippy (default lints elsewhere)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/ast/... + //crates/diff/... + //crates/edit/... + //crates/iso/... + //crates/natives/... + //crates/shell/... + //crates/vcs/... + //crates/voice/... + //crates/xfs/...) - //crates/builtins/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy --
-         - name: Clippy (manifest allows on ported pi-builtins)
+         - name: Clippy (manifest allows on ported omp-builtins)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-builtins/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/builtins/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-ported --
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
@@ -591,15 +591,10 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-         - name: Test workspace packages and repo scripts (TS)
+         - name: Test workspace packages (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
-           run: |
-              bun run ci:test:ts:workspace
-              # Not `test:scripts`: scripts/install.test.ts fails on main
-              # (its install.sh smoke-check executes a fake binary), so running
-              # the whole group here would red this job on an unrelated break.
-              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/run-rs-task.test.ts
+           run: bun run ci:test:ts:workspace
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)

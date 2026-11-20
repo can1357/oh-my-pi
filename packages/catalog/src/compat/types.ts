@@ -332,6 +332,8 @@ export interface CompiledPricingPeer {
 /** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
 export interface CompiledRetryResetTimezone {
 	provider: string;
+	/** Exact upstream endpoint whose custom provider IDs inherit this offset. */
+	baseUrl?: string;
 	offset: string;
 }
 
@@ -400,6 +402,8 @@ export type CompiledAuthValidation =
 			url: string;
 			/** Env var holding an alternate base URL; `baseUrlPath` is appended to it. */
 			baseUrlEnv?: string;
+			/** Path segment ensured on the `baseUrlEnv` value (appended when absent) before `baseUrlPath` is applied — e.g. `/v1` for bases that may be bare origins. */
+			baseUrlAppend?: string;
 			/** Path appended to the `baseUrlEnv` value (default `/models`), for bases that exclude the API version. */
 			baseUrlPath?: string;
 			/** Hook returning extra request headers (may throw a configuration error). */
@@ -584,6 +588,8 @@ export interface CompiledAuthProvider {
 	showInLoginList?: boolean;
 	/** Why the provider is turned off: no login, and no credential of any source reaches it. */
 	disabled?: string;
+	/** Account risk a user must accept (by typing "yes") before a new login starts. */
+	loginWarning?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;

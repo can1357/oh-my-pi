@@ -37,11 +37,13 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { isEvalBridgeToolCall, isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
+import { resolveToolWireName } from "../utils/tool-wire-name";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
-import type { Tool } from "./index";
+import type { Tool, ToolSession } from "./index";
 import { renderError, ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -85,6 +87,14 @@ export type XdevDocsMode = "inline" | "builtins" | "catalog";
 export function isMountableUnderXdev(tool: { name: string; loadMode?: ToolLoadMode }): boolean {
 	if (tool.name in XDEV_TRANSPORT_TOOLS || tool.name in XDEV_KEEP_TOP_LEVEL) return false;
 	return tool.loadMode === "discoverable";
+}
+
+/**
+ * Whether the session can open `xd://<tool>/<topic>` doc topics: `read` is their only
+ * transport. A tool whose description links a topic inlines it instead when this is false.
+ */
+export function docTopicsReadable(session: Pick<ToolSession, "isToolActive">): boolean {
+	return session.isToolActive?.("read") !== false;
 }
 
 /** Dispatch metadata carried on write-tool details for renderer delegation. */
@@ -252,10 +262,11 @@ export const XDEV_DOCS_PER_DEVICE_CAP = 10_000;
 /** Description cap for external mounted tools; their full docs remain readable on demand. */
 export const XDEV_EXTERNAL_DESCRIPTION_CAP = 200;
 
-/** Resolve any enabled tool through the canonical session map. */
+/** Resolve enabled canonical names or unambiguous wire aliases through the session map. */
 export function resolveXdevTool(state: XdevState, name: string): Tool | undefined {
-	if (!state.mountedNames.has(name) && !state.isActive(name)) return undefined;
-	return state.tools.get(name);
+	const resolved = resolveToolWireName(state.tools, name);
+	if (!resolved || (!state.mountedNames.has(resolved.name) && !state.isActive(resolved.name))) return undefined;
+	return resolved;
 }
 
 /**
@@ -364,7 +375,7 @@ export function planXdevPromptDocs(
 export function renderXdevPromptDocs(docs: XdevPromptDocs, listedElsewhere?: ReadonlySet<string>): string {
 	const lines: string[] = [];
 	for (const [name, summary] of docs.catalog) {
-		if (!listedElsewhere?.has(name)) lines.push(`- ${XD_URL_PREFIX}${name} — ${summary}`);
+		if (!listedElsewhere?.has(name)) lines.push(`- ${name} — ${summary}`);
 	}
 	if (lines.length === 0) return docs.sections.join("\n\n");
 	const catalogSection = [
@@ -448,6 +459,12 @@ export async function dispatchXdevTool(
 				result: { content: [{ type: "text", text: renderDocs(canonical) }] },
 				xdev: { tool: name, mode: "help" },
 			};
+		}
+
+		if (isEvalBridgeToolCall(state) && !isEvalBridgeToolCallable(canonical)) {
+			throw new ToolError(
+				`\`${canonical.name}\` cannot run through the eval bridge; call the direct \`${canonical.name}\` tool.`,
+			);
 		}
 
 		const validated = parseDeviceArgs(canonical, content, toolCallId, () => renderDocs(canonical));

@@ -1,7 +1,10 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { getKeybindings, setKeybindings } from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import { OverlayPanel } from "../src/chrome/overlay-box";
 import { TextFormField } from "../src/components/form";
+import { formatKeyHint } from "../src/key-hint-format";
 import type { DescribeContext, NativeNode } from "../src/native/node";
 import { type HistorySearchEntry, HistorySearchComponent } from "../src/overlays/history-search";
 import { type SessionSelectorEntry, SessionSelectorComponent } from "../src/overlays/session-selector";
@@ -16,9 +19,15 @@ const withPicker: DescribeContext = {
 };
 const withoutPicker: DescribeContext = { ...withPicker, supports: kind => kind !== "picker" };
 
+const previousKeybindings = getKeybindings();
+
 beforeAll(async () => {
 	await initTheme(false);
+	// The app installs its keymap before any picker opens; `getKeybindings()` alone knows only `tui.*` actions.
+	setKeybindings(KeybindingsManager.inMemory());
 });
+
+afterAll(() => setKeybindings(previousKeybindings));
 
 const HOUR = 3_600_000;
 
@@ -163,6 +172,60 @@ describe("session selector picker", () => {
 			{ t: "other", s: "path" },
 		]);
 	});
+
+	it("keeps Backspace editing a typed query, then deletes once the query is empty", () => {
+		const selector = make();
+		type(selector, "ga");
+		selector.handleInput("\x7f");
+		expect(props(selector.describe(withPicker)).query).toBe("g");
+		expect(props(selector.describe(withPicker)).confirm).toBeNull();
+		selector.handleInput("\x7f");
+		selector.handleInput("\x7f");
+		expect(props(selector.describe(withPicker)).confirm?.act).toBe("delete-confirm");
+	});
+
+	describe("with app.session.delete remapped", () => {
+		afterEach(() => setKeybindings(KeybindingsManager.inMemory()));
+
+		it("deletes on the configured key and shows it, replacing Delete and Backspace", () => {
+			setKeybindings(KeybindingsManager.inMemory({ "app.session.delete": "ctrl+d" }));
+			const selector = make();
+			selector.handleInput("\x1b[3~");
+			selector.handleInput("\x7f");
+			expect(props(selector.describe(withPicker)).confirm).toBeNull();
+			expect(props(selector.describe(withPicker)).actions?.find(a => a.id === "delete")?.keys).toEqual([
+				"ctrl",
+				"d",
+			]);
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain(`[${formatKeyHint("ctrl+d")} delete · `);
+			// Ctrl+D reaches the action before the search Input's forward delete, even mid-query.
+			type(selector, "ga");
+			selector.handleInput("\x04");
+			expect(props(selector.describe(withPicker)).confirm?.act).toBe("delete-confirm");
+		});
+
+		it("keeps a bound word-delete key editing a typed query, then deletes once the query is empty", () => {
+			setKeybindings(KeybindingsManager.inMemory({ "app.session.delete": "ctrl+w" }));
+			const selector = make();
+			type(selector, "ga");
+			selector.handleInput("\x17");
+			expect(props(selector.describe(withPicker)).query).toBe("");
+			expect(props(selector.describe(withPicker)).confirm).toBeNull();
+			selector.handleInput("\x17");
+			expect(props(selector.describe(withPicker)).confirm?.act).toBe("delete-confirm");
+		});
+
+		it("drops the shortcut and its hint when unbound", () => {
+			setKeybindings(KeybindingsManager.inMemory({ "app.session.delete": [] }));
+			const selector = make();
+			selector.handleInput("\x1b[3~");
+			selector.handleInput("\x7f");
+			const picker = props(selector.describe(withPicker));
+			expect(picker.confirm).toBeNull();
+			expect(picker.actions?.find(a => a.id === "delete")?.keys).toBeUndefined();
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).not.toContain("delete ·");
+		});
+	});
 });
 
 describe("session selector rename", () => {
@@ -290,12 +353,16 @@ describe("session selector rename", () => {
 describe("history search picker", () => {
 	const now = Math.floor(Date.now() / 1000);
 	const entries: HistorySearchEntry[] = [
-		{ prompt: "deploy the release\nwith notes", created_at: now - 60, cwd: "/work/app" },
-		{ prompt: "routine status", created_at: now - 7200 },
+		{ id: 1, prompt: "deploy the release\nwith notes", created_at: now - 60, cwd: "/work/app" },
+		{ id: 2, prompt: "routine status", created_at: now - 7200 },
 	];
 	const source = {
 		getRecent: (limit: number) => entries.slice(0, limit),
 		search: (query: string) => entries.filter(e => e.prompt.includes(query)),
+		delete: (id: number) => {
+			const index = entries.findIndex(entry => entry.id === id);
+			if (index >= 0) entries.splice(index, 1);
+		},
 	};
 
 	it("hoists a keyed md picker from the dock and inserts on activate", () => {

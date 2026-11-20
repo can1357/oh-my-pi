@@ -316,10 +316,11 @@ function nextTopLevelToken(input: string, start: number): string {
 	return input.slice(start);
 }
 
+/** Whether the comma at `commaIndex` sits inside the current part's line selector (`a.ts:1-5,10-20`, `a.ts:20:40,85:100`). */
 function commaContinuesLineRangeSelector(input: string, partStart: number, commaIndex: number): boolean {
-	const currentPart = input.slice(partStart, commaIndex).trim();
-	if (!splitPathAndSel(currentPart).sel) return false;
-	return selectorChunkIsLineRangeList(nextTopLevelToken(input, commaIndex + 1));
+	const next = nextTopLevelToken(input, commaIndex + 1);
+	const split = splitPathAndSel(input.slice(partStart, commaIndex + 1 + next.length));
+	return split.sel !== undefined && split.path.length < commaIndex - partStart;
 }
 
 function splitReadDisplayPathSpecs(rawPath: string): string[] {

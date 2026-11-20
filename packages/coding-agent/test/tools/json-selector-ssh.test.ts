@@ -115,7 +115,7 @@ describe("JSON selectors over SSH resources", () => {
 		await using scratch = await TempDir.create("@omp-json-error-test-");
 		vi.spyOn(TempDir, "create").mockResolvedValue(scratch);
 		await expect(tool.execute("ssh-invalid-json", { path: "ssh://HOST/tmp/a.json?q=." })).rejects.toThrow(
-			/Failed to execute JSON query:.*failed to parse/i,
+			/Failed to execute JSON query: jq: parse error:/,
 		);
 		await expect(fs.stat(scratch.path())).rejects.toMatchObject({ code: "ENOENT" });
 	});

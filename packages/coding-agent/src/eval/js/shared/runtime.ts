@@ -569,11 +569,22 @@ export class JsRuntime {
 						const finalValue = context.finalExpressionValue;
 						context.finalExpressionSet = false;
 						context.finalExpressionValue = undefined;
-						return await awaitMaybePromise(finalValue);
+						const settled = await awaitMaybePromise(finalValue);
+						return wrapped.finalExpressionSuppressed ? undefined : settled;
 					}
 					return awaited;
 				}
-				return await awaitMaybePromise(value);
+				// Classification is best-effort; keep the engine's completion for valid syntax
+				// the parser does not understand rather than silently dropping its result.
+				if (wrapped.finalExpressionReturned === null) return await awaitMaybePromise(value);
+				// The async wrapper's value is an explicit top-level `return`. A plain script's completion
+				// value is whatever statement ran last (an `if` body, the expression before a trailing
+				// `const`); as in Python, that is not the cell's result.
+				if (wrapped.asyncWrapped) return await awaitMaybePromise(value);
+				// Discard the displayed value, not its failure: assigned promises must still
+				// settle inside this run instead of rejecting unhandled in a persistent worker.
+				await awaitMaybePromise(value);
+				return undefined;
 			});
 		} finally {
 			this.#recordGlobals();
@@ -755,6 +766,11 @@ export class JsRuntime {
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		// Disposal releases realm run ownership, so a run abandoned by timeout cannot hold it forever.
+		if (activeGlobalRunOwner === this.#globalOwner) {
+			activeGlobalRunOwner = null;
+			activeGlobalRunDepth = 0;
+		}
 		RUN_HOOK_RESOLVERS.delete(this.#runHookResolver);
 		for (const key of this.#ownedGlobalKeys) releaseGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.clear();
@@ -862,6 +878,8 @@ function enterGlobalRun(owner: symbol, action: string): () => void {
 	return () => {
 		if (left) return;
 		left = true;
+		// A disposed owner's late leave must not touch another owner's depth.
+		if (activeGlobalRunOwner !== owner) return;
 		activeGlobalRunDepth--;
 		if (activeGlobalRunDepth === 0) activeGlobalRunOwner = null;
 	};

@@ -13,7 +13,6 @@ default = ["std"]
 std = []
 
 [dependencies]
-arbitrary = { version = "1.4", optional = true }
 dyn-clone = "1.0"
 once_cell = { version = "1.16.0", default-features = false }
 typed-arena = { version = "2.0.2", default-features = false }

@@ -71,6 +71,8 @@ export interface GrepToolDetails {
 	 * skipped these and continued with the surviving entries; surfaced as a
 	 * non-fatal warning in the renderer and in the model-facing text. */
 	missingPaths?: string[];
+	/** Files skipped as binary although their content matches (cwd-relative display paths). */
+	binaryMatches?: string[];
 }
 
 // =============================================================================
@@ -224,15 +226,23 @@ export const grepToolRenderer = {
 			missingPathsList.length > 0
 				? uiTheme.fg("warning", `skipped missing: ${missingPathsList.join(", ")}`)
 				: undefined;
+		const binaryNote = details?.binaryMatches?.length
+			? uiTheme.fg("warning", `binary matches: ${formatCount("file", details.binaryMatches.length)}`)
+			: undefined;
+		const extraLines = compact([missingNote, binaryNote]);
 
 		if (matchCount === 0) {
 			const header = renderStatusLine(
-				{ icon: "warning", title: "Grep", titleColor: "toolTitle", description, meta: ["0 matches"] },
+				{
+					icon: "warning",
+					title: "Grep",
+					titleColor: "toolTitle",
+					description,
+					meta: [uiTheme.fg("warning", "0 matches")],
+				},
 				uiTheme,
 			);
-			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
-			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 0, 0);
+			return new Text([header, ...extraLines].join("\n"), 0, 0);
 		}
 
 		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
@@ -273,9 +283,6 @@ export const grepToolRenderer = {
 			? matchGroups.map(group => group.filter(index => contexts[index]!.kind === "file" || isMatch(index)))
 			: matchGroups;
 
-		const extraLines: string[] = [];
-		if (missingNote) extraLines.push(missingNote);
-
 		return createCachedComponent(
 			() => options.expanded,
 			width => {
@@ -314,6 +321,9 @@ export const grepToolRenderer = {
 		const textContent = details?.displayContent ?? resultText(result);
 		const missing = details?.missingPaths ?? [];
 		const missingNote = missing.length > 0 ? `skipped missing: ${missing.join(", ")}` : undefined;
+		const binaryNote = details?.binaryMatches?.length
+			? `binary matches: ${formatCount("file", details.binaryMatches.length)}`
+			: undefined;
 		const scope = details?.scopePath ? `in ${details.scopePath}` : undefined;
 		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
 		const matchCount = details?.matchCount ?? 0;
@@ -321,7 +331,7 @@ export const grepToolRenderer = {
 			(!hasDetailedData && (!textContent || textContent === "No matches found")) ||
 			(hasDetailedData && matchCount === 0)
 		) {
-			const foot = footnoteText(compact([missingNote]));
+			const foot = footnoteText(compact([missingNote, binaryNote]));
 			return {
 				tool: grepNativeHead(args, compact([scope, "0 matches"])),
 				tone: "warning",
@@ -343,7 +353,7 @@ export const grepToolRenderer = {
 		const head = grepNativeHead(args, compact([scope, counts]));
 		const hiddenFiles = options.expanded ? 0 : Math.max(0, fileCount - NATIVE_COLLAPSED_FILES);
 		const foot = footnoteText(
-			compact([hiddenFiles > 0 && formatCount("more file", hiddenFiles), missingNote]),
+			compact([hiddenFiles > 0 && formatCount("more file", hiddenFiles), missingNote, binaryNote]),
 			details?.meta,
 		);
 		return {

@@ -80,6 +80,13 @@ impl<'a, V: ValT + 'a> Path<V> {
     }
 
     pub(crate) fn paths(self, vp: (V, RcList<V>)) -> ValRs<'a, (V, RcList<V>), V> {
+        // a value that is not at a path cannot be indexed in a path expression,
+        // even optionally, as jq's `path_intact` checks
+        if vp.1.is_invalid() {
+            if let Some((part, _)) = self.0.first() {
+                return box_once(Err(part.not_at_path(&vp.0)));
+            }
+        }
         run(self.0.into_iter(), vp, |part, vp| part.paths(vp))
     }
 
@@ -124,6 +131,15 @@ where
 }
 
 impl<'a, V: ValT + 'a> Part<V> {
+    /// Error of applying the part to `v` in a path expression where `v` is not at a path.
+    pub(crate) fn not_at_path(&self, v: &V) -> crate::Error<V> {
+        match self {
+            Self::Index(idx) => crate::Error::path_access(idx, v),
+            Self::Range(None, None) => crate::Error::path_iter(v),
+            Self::Range(from, upto) => crate::Error::path_access(&V::from(from.clone()..upto.clone()), v),
+        }
+    }
+
     fn run(&self, v: V) -> ValRs<'a, V> {
         match self {
             Self::Index(idx) => box_once(v.index(idx)),

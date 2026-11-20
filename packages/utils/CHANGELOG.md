@@ -2,6 +2,77 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getCodexClientVersionPath()` for the Codex client version cache record, resolving under `$XDG_CACHE_HOME/omp` when that root is initialized ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added utilities for formatting and parsing session spill URLs using the `local://N.log` format.
+- Added `postmortem.exitCleanlyOnStopSignals()` so long-running services exit successfully after completing cleanup on SIGINT or SIGTERM.
+
+### Fixed
+
+- Fixed Windows shell discovery incorrectly selecting the WSL `bash.exe` launcher, which could cause services to run under WSL.
+- Fixed archive opening so the extraction-size limit is enforced when an oversized member is read rather than preventing access to the entire archive.
+- Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
+- Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
+
+## [18.21.0] - 2026-11-16
+
+### Fixed
+
+- Fixed bare URLs swallowing the following word when Korean, Japanese, or Chinese text follows a parenthesized URL without a space.
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Fixed HTML-to-Markdown conversion for fetched and pasted HTML to preserve whitespace in inline elements, maintain code indentation in preformatted blocks, and avoid inserting stray blank lines between block elements.
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added a profile-aware data directory for managed Antigravity CLI installations and isolated account state.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added `mixHex` for blending two hexadecimal colors.
+
+### Fixed
+
+- Improved extraction of Cloud Code Assist quota reset information, including compound durations and reset timestamps, to provide more accurate retry guidance.
+
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added browser utilities exposing trusted browser archive extraction limits and the installed WebKit host executable path.
+
+## [18.18.9] - 2026-11-11
+
+### Added
+
+- Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+- Added `prompt.closeCodeFence`: closes a code fence a text leaves open, by the same rule `prompt.format` uses ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+
+## [18.18.8] - 2026-11-11
+
+### Removed
+
+- Removed `getConfigAgentDirName()`; use `getAgentDir()`, which also honors `PI_CODING_AGENT_DIR` ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

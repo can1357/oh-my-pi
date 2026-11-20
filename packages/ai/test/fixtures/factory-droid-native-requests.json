@@ -7,9 +7,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -29,9 +29,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -58,9 +58,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -79,9 +79,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -107,9 +107,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -128,9 +128,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -156,9 +156,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -177,9 +177,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -198,6 +198,57 @@
 		]
 	},
 	{
+		"model": "kimi-k3.1-pro",
+		"upstream": "fireworks",
+		"effort": "max",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "fireworks",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "kimi-k3.1-pro",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "max",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "fireworks",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "kimi-k3.1-pro",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "max",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
 		"model": "nemotron-3-ultra",
 		"upstream": "baseten",
 		"effort": "high",
@@ -205,9 +256,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -228,9 +279,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -258,9 +309,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -281,9 +332,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -311,9 +362,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -333,9 +384,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -362,9 +413,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -384,9 +435,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -413,9 +464,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -434,9 +485,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -462,9 +513,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -483,9 +534,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -511,9 +562,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -533,9 +584,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -562,9 +613,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -583,9 +634,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -611,9 +662,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "mistral",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -632,9 +683,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "mistral",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -660,9 +711,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "mistral",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -681,9 +732,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "mistral",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -710,9 +761,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "mistral",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -731,9 +782,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "mistral",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -759,9 +810,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -780,9 +831,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -808,9 +859,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -830,9 +881,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -859,9 +910,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -881,9 +932,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -911,9 +962,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -932,9 +983,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -961,9 +1012,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -982,9 +1033,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1010,9 +1061,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1032,9 +1083,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1062,9 +1113,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1084,9 +1135,9 @@
 			{
 				"path": "/api/llm/o/v1/chat/completions",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "baseten",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1113,9 +1164,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1146,9 +1197,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1186,9 +1237,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1215,9 +1266,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1251,9 +1302,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1283,9 +1334,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1322,9 +1373,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "snowflake",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1350,9 +1401,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "snowflake",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1385,9 +1436,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "bedrock_openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1413,9 +1464,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "bedrock_openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1448,9 +1499,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1482,9 +1533,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1523,9 +1574,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1550,9 +1601,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1584,9 +1635,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1611,9 +1662,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1645,9 +1696,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1673,9 +1724,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1708,9 +1759,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1741,9 +1792,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1781,9 +1832,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1815,9 +1866,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1856,9 +1907,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -1886,9 +1937,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "openai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1923,9 +1974,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "xai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1950,9 +2001,9 @@
 			{
 				"path": "/api/llm/o/v1/responses",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "xai",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -1985,9 +2036,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2011,9 +2062,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2044,9 +2095,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "bedrock_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2068,9 +2119,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "bedrock_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2099,9 +2150,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2122,9 +2173,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2152,9 +2203,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "bedrock_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2173,9 +2224,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "bedrock_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2201,9 +2252,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2220,9 +2271,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2246,9 +2297,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2271,9 +2322,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2303,9 +2354,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "vertex_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2329,9 +2380,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "vertex_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2362,9 +2413,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2384,9 +2435,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2414,9 +2465,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2444,9 +2495,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2470,9 +2521,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2502,9 +2553,9 @@
 			{
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "snowflake",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2521,9 +2572,9 @@
 			{
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "snowflake",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2548,9 +2599,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2573,9 +2624,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2605,9 +2656,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "bedrock_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2628,9 +2679,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "effort-2025-11-24,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "bedrock_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2658,9 +2709,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2687,9 +2738,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "azure_anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2722,10 +2773,10 @@
 			{
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
-					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01",
-					"user-agent": "factory-cli/1.1.0",
+					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2734,7 +2785,10 @@
 					"max_tokens": 128000,
 					"thinking": {
 						"type": "adaptive",
-						"display": "summarized"
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
 					},
 					"output_config": {
 						"effort": "high"
@@ -2753,10 +2807,10 @@
 			{
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
-					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01",
-					"user-agent": "factory-cli/1.1.0",
+					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2765,7 +2819,10 @@
 					"max_tokens": 128000,
 					"thinking": {
 						"type": "adaptive",
-						"display": "summarized"
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
 					},
 					"output_config": {
 						"effort": "high"
@@ -2784,6 +2841,276 @@
 		]
 	},
 	{
+		"model": "claude-haiku-5-5",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "claude-haiku-5-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "claude-haiku-5-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-sonnet-5-5",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "claude-sonnet-5-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "claude-sonnet-5-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-fable-5.1",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "claude-fable-5.1",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"fallbacks": [
+						{
+							"model": "claude-opus-5"
+						}
+					],
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "claude-fable-5.1",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"fallbacks": [
+						{
+							"model": "claude-opus-5"
+						}
+					],
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-fable-5.2",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "claude-fable-5.2",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "claude-fable-5.2",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
 		"model": "claude-fable-5",
 		"upstream": "anthropic",
 		"effort": "high",
@@ -2792,9 +3119,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2823,9 +3150,9 @@
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
 					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01",
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2860,10 +3187,10 @@
 			{
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
-					"anthropic-beta": "fast-mode-2026-02-01,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"anthropic-beta": "fast-mode-2026-02-01,fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2872,7 +3199,10 @@
 					"max_tokens": 128000,
 					"thinking": {
 						"type": "adaptive",
-						"display": "summarized"
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
 					},
 					"output_config": {
 						"effort": "high"
@@ -2887,10 +3217,10 @@
 			{
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
-					"anthropic-beta": "fast-mode-2026-02-01,fine-grained-tool-streaming-2025-05-14",
-					"user-agent": "factory-cli/1.1.0",
+					"anthropic-beta": "fast-mode-2026-02-01,fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "anthropic",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2899,7 +3229,10 @@
 					"max_tokens": 128000,
 					"thinking": {
 						"type": "adaptive",
-						"display": "summarized"
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
 					},
 					"output_config": {
 						"effort": "high"
@@ -2921,9 +3254,9 @@
 			{
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "configured_order"
 				},
@@ -2944,9 +3277,9 @@
 			{
 				"path": "/api/llm/a/v1/messages",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "fireworks",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2974,9 +3307,9 @@
 			{
 				"path": "/api/llm/g/v1/generate",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "google",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -2997,9 +3330,9 @@
 			{
 				"path": "/api/llm/g/v1/generate",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "google",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -3027,9 +3360,9 @@
 			{
 				"path": "/api/llm/g/v1/generate",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "google",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -3050,9 +3383,9 @@
 			{
 				"path": "/api/llm/g/v1/generate",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "google",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -3080,9 +3413,9 @@
 			{
 				"path": "/api/llm/g/v1/generate",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "google",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -3103,9 +3436,9 @@
 			{
 				"path": "/api/llm/g/v1/generate",
 				"headers": {
-					"user-agent": "factory-cli/1.1.0",
+					"user-agent": "factory-cli/1.7.1",
 					"x-api-provider": "google",
-					"x-client-version": "1.1.0",
+					"x-client-version": "1.7.1",
 					"x-factory-client": "cli",
 					"x-provider-routing-source": "session_lock"
 				},
@@ -3118,6 +3451,104 @@
 						"thinkingConfig": {
 							"includeThoughts": true,
 							"thinkingLevel": "LOW"
+						}
+					},
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "gemini-4-argon",
+		"upstream": "google",
+		"effort": "medium",
+		"requests": [
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "google",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-4-argon",
+					"generationConfig": {
+						"maxOutputTokens": 65536,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "MEDIUM"
+						}
+					},
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "google",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-4-argon",
+					"generationConfig": {
+						"maxOutputTokens": 65536,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "MEDIUM"
+						}
+					},
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "gemini-4-carbon",
+		"upstream": "google",
+		"effort": "medium",
+		"requests": [
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "google",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-4-carbon",
+					"generationConfig": {
+						"maxOutputTokens": 65536,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "MEDIUM"
+						}
+					},
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "google",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-4-carbon",
+					"generationConfig": {
+						"maxOutputTokens": 65536,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "MEDIUM"
 						}
 					},
 					"<tool-keys>": []

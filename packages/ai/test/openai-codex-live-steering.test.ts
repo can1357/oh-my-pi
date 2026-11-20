@@ -682,6 +682,10 @@ describe("codex live steering", () => {
 		expect(steers()).toHaveLength(1);
 		expect(creates()[1]?.previous_response_id).toBeUndefined();
 		expect(creates()[1]?.input).toEqual([
+			expect.objectContaining({
+				role: "developer",
+				internal_chat_message_metadata_passthrough: { content_item_kinds: ["model.base_instructions"] },
+			}),
 			{ role: "user", content: [{ type: "input_text", text: "Hello" }] },
 			{ role: "user", content: [{ type: "input_text", text: "one more thing" }] },
 		]);

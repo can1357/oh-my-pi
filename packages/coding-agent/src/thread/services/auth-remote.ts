@@ -515,16 +515,24 @@ class RemoteUsage implements UsageApi {
 		return this.#remote.callSync("usage.reportingModelIds", provider, modelIds, reports);
 	}
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void {
-		// The main thread calls these hooks synchronously while ranking and ingesting headers.
-		if (usageProvider.parseRateLimitHeaders || usageProvider.supports) {
-			throw new Error(
-				`Usage provider ${provider} has synchronous hooks and must be registered on the main thread, not a subagent worker`,
-			);
-		}
+		assertWorkerUsageProvider(provider, usageProvider);
 		this.#remote.notify("usage.setProvider", provider, usageProvider, apiKey);
 	}
 	removeProvider(provider: Provider): void {
 		this.#remote.notify("usage.removeProvider", provider);
+	}
+	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void {
+		for (const [provider, usageProvider] of providers) assertWorkerUsageProvider(provider, usageProvider);
+		this.#remote.notify("usage.replaceConfiguredProviders", [...providers]);
+	}
+}
+
+/** The main thread calls these hooks synchronously while ranking and ingesting headers. */
+function assertWorkerUsageProvider(provider: Provider, usageProvider: UsageProvider): void {
+	if (usageProvider.parseRateLimitHeaders || usageProvider.supports) {
+		throw new Error(
+			`Usage provider ${provider} has synchronous hooks and must be registered on the main thread, not a subagent worker`,
+		);
 	}
 }
 

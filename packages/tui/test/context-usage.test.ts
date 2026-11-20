@@ -21,7 +21,6 @@ import {
 	type NonMessageTokenSource,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
-	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	getToolSchemaMetadataRevision,
 	invalidateToolSchemaMetadata,
@@ -278,82 +277,64 @@ describe("computeNonMessageTokens / computeNonMessageBreakdown memoization", () 
 });
 
 /**
- * Contract: the Skills category counts only skills actually rendered into the
- * system prompt (mirroring `buildSystemPrompt`'s filter) — hidden/explicit-only
- * skills, and every skill when the `read` tool is absent, contribute zero. The
- * System-prompt subtraction must not be inflated by unrendered skill metadata
- * and clamped to 0 (issue #6498).
+ * Contract: Skills and Instruction files count exactly the source ranges the prompt build recorded,
+ * through the same attribution `/context` uses; a source whose block changed after the build is
+ * counted with its block instead.
  */
-describe("computeNonMessageBreakdown skills filtering", () => {
-	const readTool = { name: "read", description: "read files", parameters: {} };
-	const hidden = { name: "hidden-skill", description: "X".repeat(4000), filePath: "/s/h.md", hide: true };
-	const visible = { name: "vis", description: "small visible skill", filePath: "/s/v.md" };
-	// First prompt block as rendered: only the visible skill appears.
-	const renderedPrompt = "You are an agent.\nSkills:\n- vis: small visible skill\n";
+describe("computeNonMessageBreakdown prompt sources", () => {
+	const skillLine = "- vis: small visible skill";
+	const file = '<file path="/r/AGENTS.md">\nRules\n</file>';
+	const blocks = [`You are an agent.\n${skillLine}\nEnd.`, `Context:\n${file}`];
+	const systemPromptSources = {
+		blocks,
+		sources: [
+			{ id: "skill-0", kind: "skills" as const, label: "vis", block: 0, start: 18, end: 18 + skillLine.length },
+			{
+				id: "instruction-0",
+				kind: "instruction-files" as const,
+				label: "/r/AGENTS.md",
+				block: 1,
+				start: 9,
+				end: 9 + file.length,
+			},
+		],
+	};
+	const session = (systemPrompt: string[]) =>
+		({ systemPrompt, agent: { state: { tools: [] } }, systemPromptSources }) as never;
 
-	function session(tools: unknown[], skills: unknown[]) {
-		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills } as never;
-	}
-
-	it("excludes hidden skills and does not clamp System prompt to 0", () => {
-		const b = computeNonMessageBreakdown(session([readTool], [hidden, visible]), tokenizer);
-		// Only the visible skill is counted, not the large hidden one.
-		expect(b.skillsTokens).toBe(computeNonMessageBreakdown(session([readTool], [visible]), tokenizer).skillsTokens);
-		expect(b.skillsTokens).toBeLessThan(100);
-		expect(b.systemPromptTokens).toBeGreaterThan(0);
+	it("counts recorded sources apart from their blocks", () => {
+		const b = computeNonMessageBreakdown(session(blocks), tokenizer);
+		expect(b).toMatchObject({
+			skillsTokens: tokenizer.countTokens(skillLine),
+			instructionFilesTokens: tokenizer.countTokens(file),
+			systemPromptTokens: tokenizer.countTokens("You are an agent.\n\nEnd."),
+			systemContextTokens: tokenizer.countTokens("Context:\n"),
+		});
 	});
 
-	it("counts zero Skills tokens when the read tool is unavailable", () => {
-		const b = computeNonMessageBreakdown(session([], [hidden, visible]), tokenizer);
+	it("counts a source with its block once that block changed after the build", () => {
+		const changed = [`${blocks[0]}\nhook addition`, blocks[1]!];
+		const b = computeNonMessageBreakdown(session(changed), tokenizer);
 		expect(b.skillsTokens).toBe(0);
-		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
-	});
-
-	it("counts frozen rendered descriptions, not full source descriptions", () => {
-		const full = { ...visible, description: "Use this skill for browser tasks. ".repeat(50) };
-		const rendered = { ...visible, description: "Use for interactive browser tasks." };
-		const promptText = `You are an agent.\nSkills:\n- vis: ${rendered.description}\n`;
-		const source = {
-			systemPrompt: [promptText],
-			agent: { state: { tools: [readTool] } },
-			skills: [full],
-			renderedSkills: [rendered],
-		};
-		const b = computeNonMessageBreakdown(source as never, tokenizer);
-		expect(b.skillsTokens).toBe(estimateSkillsTokens([rendered], tokenizer));
-		expect(b.skillsTokens).toBeLessThan(estimateSkillsTokens([full], tokenizer));
-		expect(b.systemPromptTokens + b.skillsTokens).toBe(tokenizer.countTokens(promptText));
+		expect(b.systemPromptTokens).toBe(tokenizer.countTokens(changed[0]!));
+		expect(b.instructionFilesTokens).toBe(tokenizer.countTokens(file));
 	});
 });
 
 /**
- * Contract: a tool, skill, or system-prompt section with a missing
- * (`undefined`) description/text must not crash the token estimate. Extensions
- * can contribute tools whose `description` is absent at runtime (the field is
- * typed `string` but the extension API does not enforce it); before the guard,
- * the `undefined` fragment reached the tokenizer and threw, killing every
- * subagent before its first turn (issue #9331). Each path must instead yield a
- * finite, non-negative estimate.
+ * Contract: a tool or system-prompt section with a missing (`undefined`) description/text must not
+ * crash the token estimate. Extensions can contribute tools whose `description` is absent at runtime
+ * (the field is typed `string` but the extension API does not enforce it); before the guard, the
+ * `undefined` fragment reached the tokenizer and threw, killing every subagent before its first turn
+ * (issue #9331). Each path must instead yield a finite, non-negative estimate.
  */
 describe("non-message estimates tolerate a missing description", () => {
 	const readTool = { name: "read", description: "read files", parameters: {} };
-
-	it("computeNonMessageBreakdown does not throw on an undefined skill description", () => {
-		const session = {
-			systemPrompt: ["You are an agent."],
-			agent: { state: { tools: [readTool] } },
-			skills: [{ name: "lens", description: undefined, filePath: "/s/l.md" }],
-		} as never;
-		const b = computeNonMessageBreakdown(session, tokenizer);
-		expect(Number.isFinite(b.skillsTokens)).toBe(true);
-		expect(b.skillsTokens).toBeGreaterThanOrEqual(0);
-	});
 
 	it("computeNonMessageBreakdown does not throw on an undefined system-context section", () => {
 		const session = {
 			systemPrompt: ["primary prompt", undefined, "trailing context"],
 			agent: { state: { tools: [readTool] } },
-			skills: [],
 		} as never;
 		const b = computeNonMessageBreakdown(session, tokenizer);
 		expect(Number.isFinite(b.systemContextTokens)).toBe(true);

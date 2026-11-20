@@ -122,32 +122,68 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 	"i",
 );
 
+const BARE_LINE_RE = /^\d+$/;
+// A comma list whose chunks carry their own `raw` (`:1-32:raw,48-50:raw`, `:raw:5,raw:9-12`).
+const RAW_CHUNK_SRC = `(?:raw:)?${LIST_CHUNK_SRC}(?::raw)?`;
+const PER_CHUNK_RAW_LIST_RE = new RegExp(`:(${RAW_CHUNK_SRC}(?:,${RAW_CHUNK_SRC})+)$`, "i");
+
+/** Rewrite a list with per-chunk `raw` to its one-raw form: `a:1-3:raw,9:raw` → `a:1-3,9:raw`. */
+function hoistChunkRaw(rawPath: string): string {
+	const match = PER_CHUNK_RAW_LIST_RE.exec(rawPath);
+	if (!match || !/raw/i.test(match[1])) return rawPath;
+	const chunks = match[1].split(",").map(chunk => chunk.replace(/^raw:|:raw$/gi, ""));
+	return `${rawPath.slice(0, match.index)}:${chunks.join(",")}:raw`;
+}
+
 /**
- * Fold the list chunks that repeat the selector colon after a comma (`a:1-30,:-30`)
- * into the `list` that follows them, so the pair reads as `a:1-30,-30`. Only
- * colons at or after `minColon` count. Each chunk is tested once.
+ * Fold the list chunks split off by a colon inside one comma list into the `list`
+ * that follows them. Two shapes put a colon there: the selector colon repeated
+ * after a comma (`a:1-30,:-30` reads as `a:1-30,-30`) and a colon written as the
+ * range dash (`a:20:40,85:100` reads as `a:20-40,85-100`). The dash shape folds
+ * only into a list that has a comma, so `clip.mp4:1:30` (a timestamp) and
+ * `a.ts:12:5` (line:column) keep their colons. Only colons at or after
+ * `minColon` count. Each chunk is tested once.
  */
-function foldRepeatedListColons(basePath: string, list: string, minColon: number): { basePath: string; list: string } {
-	const chunks = [list];
-	while (basePath.endsWith(",")) {
-		const colon = basePath.lastIndexOf(":");
-		const chunk = basePath.slice(colon + 1, -1);
-		if (colon < minColon || !FILE_LINE_RANGE_ONLY_RE.test(chunk)) break;
-		chunks.push(chunk);
-		basePath = basePath.slice(0, colon);
+function foldListColons(basePath: string, list: string, minColon: number): { basePath: string; list: string } {
+	// Comma chunks, last first: the list's first chunk is always `chunks.at(-1)`.
+	const chunks = list.split(",").reverse();
+	let base = basePath;
+	let dashed = false;
+	while (true) {
+		const colon = base.lastIndexOf(":");
+		if (colon < minColon) break;
+		const head = base.slice(colon + 1);
+		if (head.endsWith(",")) {
+			const repeated = head.slice(0, -1);
+			if (!FILE_LINE_RANGE_ONLY_RE.test(repeated)) break;
+			chunks.push(...repeated.split(",").reverse());
+		} else {
+			const headChunks = head.split(",");
+			const start = headChunks.pop()!;
+			const end = chunks.at(-1)!;
+			if (!BARE_LINE_RE.test(start) || !BARE_LINE_RE.test(end)) break;
+			if (headChunks.length > 0 && !FILE_LINE_RANGE_ONLY_RE.test(headChunks.join(","))) break;
+			chunks[chunks.length - 1] = `${start}-${end}`;
+			chunks.push(...headChunks.reverse());
+			dashed = true;
+		}
+		base = base.slice(0, colon);
 	}
-	return { basePath, list: chunks.reverse().join(",") };
+	if (dashed && chunks.length === 1) return { basePath, list };
+	return { basePath: base, list: chunks.reverse().join(",") };
 }
 
 /**
  * Split a filesystem path from its trailing read selector. `foldListColons: false`
- * keeps a colon repeated inside a list as part of the path (`a:1-30,:-30` peels
- * only `:-30`), for callers checking whether that shorter split names a real file.
+ * keeps a colon inside a list as part of the path (`a:1-30,:-30` peels only
+ * `:-30`, `a:20:40,85:100` only `:100`), for callers checking whether that
+ * shorter split names a real file.
  */
 export function splitPathAndSel(
 	rawPath: string,
 	options?: { foldListColons?: boolean },
 ): { path: string; sel?: string } {
+	rawPath = hoistChunkRaw(rawPath);
 	const colon = rawPath.lastIndexOf(":");
 	if (colon <= 0) return { path: rawPath };
 
@@ -173,7 +209,7 @@ export function splitPathAndSel(
 	}
 	if (list === undefined) return { path: basePath, sel: candidate };
 
-	if (options?.foldListColons !== false) ({ basePath, list } = foldRepeatedListColons(basePath, list, 1));
+	if (options?.foldListColons !== false) ({ basePath, list } = foldListColons(basePath, list, 1));
 	if (!rawSuffix) {
 		const innerColon = basePath.lastIndexOf(":");
 		const innerCandidate = basePath.slice(innerColon + 1);
@@ -192,7 +228,7 @@ export function splitPathAndSel(
  * grammar. That rule is right for filesystem paths (a file named `a:1-50` is
  * legal) but wrong for internal URLs, where any trailing `:<chunk>` after the
  * scheme is unambiguously a read-tool selector — even if malformed (e.g.
- * `artifact://3:raw:-100-5`).
+ * `local://3.log:raw:-100-5`).
  *
  * This function iteratively peels selector-shaped chunks (well-formed plus
  * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
@@ -219,24 +255,27 @@ export function splitInternalUrlSel(
 	if (spec.portAuthority && !url.rest.includes("/")) return { path: rawPath };
 
 	const schemeEnd = rawPath.length - url.rest.length;
+	rawPath = hoistChunkRaw(rawPath);
 	let path = rawPath;
 	const chunks: string[] = [];
 	while (true) {
 		const colon = path.lastIndexOf(":");
 		// Stop before crossing into the scheme separator `://`.
 		if (colon < schemeEnd) break;
-		const tail = path.slice(colon + 1);
-		if (INTERNAL_URL_SELECTOR_PART_RE.test(tail)) {
-			chunks.unshift(tail);
-			path = path.slice(0, colon);
-			continue;
+		// `local://7.log:1-30,:-30`, `local://7.log:20:40,85:100`: chunks split off
+		// by a colon inside one list join the list peeled after them.
+		if (chunks.length > 0 && FILE_LINE_RANGE_ONLY_RE.test(chunks[0])) {
+			const folded = foldListColons(path, chunks[0], schemeEnd);
+			if (folded.basePath !== path) {
+				chunks[0] = folded.list;
+				path = folded.basePath;
+				continue;
+			}
 		}
-		// `artifact://7:1-30,:-30`: a list chunk ending in a comma joins the list peeled after it.
-		if (chunks.length === 0 || !FILE_LINE_RANGE_ONLY_RE.test(chunks[0])) break;
-		const folded = foldRepeatedListColons(path, chunks[0], schemeEnd);
-		if (folded.basePath === path) break;
-		chunks[0] = folded.list;
-		path = folded.basePath;
+		const tail = path.slice(colon + 1);
+		if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
+		chunks.unshift(tail);
+		path = path.slice(0, colon);
 	}
 	if (chunks.length === 0) return { path: rawPath };
 	return { path, sel: chunks.join(":") };

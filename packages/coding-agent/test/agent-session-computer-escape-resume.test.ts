@@ -60,6 +60,7 @@ describe("AgentSession computer use after the user's Escape", () => {
 		const unregister = registerComputerController(current.getEvalKernelOwnerId(), {
 			run: async () => ({ displays: [], returnValue: undefined, screenshots: [] }),
 			capabilities: async () => undefined,
+			reset: async () => {},
 			close: async () => {},
 			resumeAfterEscape: () => {
 				resumes += 1;
