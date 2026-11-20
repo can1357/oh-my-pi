@@ -1,10 +1,11 @@
 use std::{
+	cmp::Ordering,
 	ptr::with_exposed_provenance_mut,
 	time::{Duration, Instant},
 };
 
 use uiautomation::{
-	UIAutomation, UIElement,
+	UIAutomation, UIElement, UITreeWalker,
 	patterns::{
 		UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern, UIScrollItemPattern,
 		UIScrollPattern, UISelectionItemPattern, UITogglePattern, UIValuePattern,
@@ -233,21 +234,24 @@ impl Win32Ax {
 							pattern.is_vertically_scrollable()
 						}
 					})? {
-					found = bind_scroll_candidate(pattern, root.expose_provenance(), || {
-						let raw: isize = run.call(|| element.get_native_window_handle())?.into();
-						if raw != 0 {
-							return Ok(Some(
-								window::root(with_exposed_provenance_mut(raw as usize)).expose_provenance(),
-							));
-						}
-						let Ok(parent) =
-							run.call(|| Ok::<_, DesktopError>(walker.get_parent(&element)))?
-						else {
-							return Ok(Some(0));
-						};
-						element = parent;
-						Ok(None)
-					})?;
+					let container = run.call(|| Ok::<_, DesktopError>(element.clone()))?;
+					found =
+						bind_scroll_candidate((pattern, container), root.expose_provenance(), || {
+							let raw: isize = run.call(|| element.get_native_window_handle())?.into();
+							if raw != 0 {
+								return Ok(Some(
+									window::root(with_exposed_provenance_mut(raw as usize))
+										.expose_provenance(),
+								));
+							}
+							let Ok(parent) =
+								run.call(|| Ok::<_, DesktopError>(walker.get_parent(&element)))?
+							else {
+								return Ok(Some(0));
+							};
+							element = parent;
+							Ok(None)
+						})?;
 					break;
 				}
 				let raw: isize = run.call(|| element.get_native_window_handle())?.into();
@@ -260,14 +264,15 @@ impl Win32Ax {
 				};
 				element = parent;
 			}
-			let Some(pattern) = found else {
+			let Some((pattern, container)) = found else {
 				continue;
 			};
 			eligible = true;
+			let mut anchor = None;
 			for _ in 0..steps {
 				if !run.step(
 					notches > 0,
-					|run| {
+					|run, fresh| {
 						let position = run.call(|| {
 							if across {
 								pattern.get_horizontal_scroll_percent()
@@ -275,20 +280,28 @@ impl Win32Ax {
 								pattern.get_vertical_scroll_percent()
 							}
 						})?;
-						let view = run.call(|| {
-							if across {
-								pattern.get_horizontal_view_size()
-							} else {
-								pattern.get_vertical_view_size()
-							}
-						})?;
+						if fresh {
+							anchor = content_child(run, &automation, &walker, &container, point)?;
+						}
+						let offset = match &anchor {
+							Some(anchor) => {
+								let rect = run.call(|| anchor.get_bounding_rectangle())?;
+								let edge = if across {
+									rect.get_left()
+								} else {
+									rect.get_top()
+								};
+								(rect.get_width() > 0 && rect.get_height() > 0).then(|| -f64::from(edge))
+							},
+							None => None,
+						};
 						if !window::owns_foreground(root) || !shows_at(root, point) {
 							return Err(run.failure(
 								ErrorCode::BackgroundUnavailable,
 								"the WPF window is no longer in front under the point",
 							));
 						}
-						Ok(Sample { position, view })
+						Ok(Sample { position, offset })
 					},
 					|| {
 						if across {
@@ -320,41 +333,49 @@ fn bind_scroll_candidate<T>(
 	Ok(None)
 }
 
-#[derive(Clone, Copy)]
-struct Sample {
-	position: f64,
-	view:     f64,
+/// The most ancestors walked from a hit-tested element to its container.
+const MAX_ANCHOR_DEPTH: usize = 8;
+
+/// The container's child under `point`: content that a scroll moves by what
+/// it moves the view, and that rows added or removed past it and a resized
+/// view leave in place. `None` when the point shows no such content, such as
+/// the container's own scroll bar or a column header, which do not scroll.
+fn content_child<N: Fn() -> Instant>(
+	run: &ScrollRun<N>,
+	automation: &UIAutomation,
+	walker: &UITreeWalker,
+	container: &UIElement,
+	point: POINT,
+) -> CoreResult<Option<UIElement>> {
+	let Ok(mut element) = run.call(|| {
+		Ok::<_, DesktopError>(automation.element_from_point(Point::new(point.x, point.y)))
+	})?
+	else {
+		return Ok(None);
+	};
+	for _ in 0..MAX_ANCHOR_DEPTH {
+		let Ok(parent) = run.call(|| Ok::<_, DesktopError>(walker.get_parent(&element)))? else {
+			return Ok(None);
+		};
+		if run.call(|| automation.compare_elements(&parent, container))? {
+			let kind = run.call(|| element.get_control_type())?;
+			return Ok(
+				(!matches!(kind, ControlType::ScrollBar | ControlType::Header)).then_some(element)
+			);
+		}
+		element = parent;
+	}
+	Ok(None)
 }
 
-impl Sample {
-	/// `100 * offset / extent`, from `position = 100 * offset / (extent -
-	/// viewport)` and `view = 100 * viewport / extent`: every step moves it,
-	/// and so do rows added or removed.
-	fn of_extent(self) -> f64 {
-		self.position * (100.0 - self.view) / 100.0
-	}
-
-	/// `100 * offset / viewport`: rows added or removed while the same rows
-	/// stay in view leave it where it was.
-	fn of_viewport(self) -> f64 {
-		if self.view > 0.0 {
-			self.position * (100.0 - self.view) / self.view
-		} else {
-			self.position
-		}
-	}
-
-	/// Whether `after` shows a step the requested way. A list that scrolls by
-	/// item can show a different number of rows after each step, changing
-	/// `view`; a step that changes `view` must also move the offset per
-	/// viewport, which rows added or removed do not.
-	fn moved_to(self, after: Self, forward: bool) -> bool {
-		let changed = |from: f64, to: f64| (to - from).abs() > 1e-9 * from.abs().max(1.0);
-		let (from, to) = (self.of_extent(), after.of_extent());
-		changed(from, to)
-			&& (to > from) == forward
-			&& (!changed(self.view, after.view) || changed(self.of_viewport(), after.of_viewport()))
-	}
+#[derive(Clone, Copy)]
+struct Sample {
+	/// `ScrollPattern`'s percent, read only to skip a step at the end: rows
+	/// added or removed and a resized view move it too.
+	position: f64,
+	/// How far the step's anchor moved back: its leading edge, negated, so a
+	/// forward step raises it. `None` with no anchor or an anchor not drawn.
+	offset:   Option<f64>,
 }
 
 /// Every provider call, including lookups and each property read, shares
@@ -366,13 +387,16 @@ struct ScrollRun<N> {
 }
 
 impl<N: Fn() -> Instant> ScrollRun<N> {
+	/// An unsent failure ends with the closing clause `worker.ts` drops when it
+	/// reruns a `BackgroundUnavailable` refusal in takeover.
 	fn failure(&self, code: ErrorCode, reason: impl std::fmt::Display) -> DesktopError {
-		let (code, delivery) = if self.sent {
-			(ErrorCode::AxUnconfirmed, "scroll sent, not confirmed")
-		} else {
-			(code, "nothing was sent")
-		};
-		DesktopError::new(code, format!("{reason}; {delivery}; inspect before retrying"))
+		if self.sent {
+			return DesktopError::new(
+				ErrorCode::AxUnconfirmed,
+				format!("{reason}; scroll sent, not confirmed; inspect before retrying"),
+			);
+		}
+		DesktopError::new(code, format!("{reason}; nothing was sent"))
 	}
 
 	fn finish(&self, eligible: bool) -> CoreResult<bool> {
@@ -404,12 +428,12 @@ impl<N: Fn() -> Instant> ScrollRun<N> {
 	fn step(
 		&mut self,
 		forward: bool,
-		mut sample: impl FnMut(&Self) -> CoreResult<Sample>,
+		mut sample: impl FnMut(&Self, bool) -> CoreResult<Sample>,
 		send: impl FnOnce() -> uiautomation::Result<()>,
 		mut wait: impl FnMut(Duration) -> CoreResult<()>,
 	) -> CoreResult<bool> {
 		self.check()?;
-		let before = sample(self)?;
+		let before = sample(self, true)?;
 		self.check()?;
 		if before.position < 0.0 {
 			return Err(self.failure(ErrorCode::BackgroundUnavailable, "no WPF scroll position"));
@@ -421,17 +445,32 @@ impl<N: Fn() -> Instant> ScrollRun<N> {
 		let result = send();
 		self.check()?;
 		result.map_err(|error| self.failure(ErrorCode::AxFailed, error))?;
+		let Some(from) = before.offset.filter(|from| from.is_finite()) else {
+			return Err(self.failure(ErrorCode::AxUnconfirmed, "no scroll offset to read back"));
+		};
 		let until = (self.now)() + Duration::from_millis(500);
 		loop {
-			let after = sample(self)?;
+			let after = sample(self, false)?;
 			self.check()?;
-			if after.position >= 0.0 && before.moved_to(after, forward) {
-				return Ok(true);
+			match after
+				.offset
+				.filter(|to| to.is_finite())
+				.map(|to| to.total_cmp(&from))
+			{
+				Some(Ordering::Equal) => {},
+				Some(Ordering::Greater) if forward => return Ok(true),
+				Some(Ordering::Less) if !forward => return Ok(true),
+				_ => {
+					return Err(self.failure(
+						ErrorCode::AxUnconfirmed,
+						"the scroll offset read back moved the other way or could not be read",
+					));
+				},
 			}
 			let now = (self.now)();
 			if now >= until {
 				return Err(DesktopError::input_failed(
-					"a sent scroll step did not move; inspect before retrying",
+					"a sent scroll step left the scroll offset where it was; inspect before retrying",
 				));
 			}
 			let end = self.cutoff.map_or(until, |cutoff| cutoff.min(until));
@@ -944,28 +983,80 @@ mod tests {
 			.call(|| Err::<(), _>("provider disappeared"))
 			.unwrap_err();
 		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		// `worker.ts` drops this closing clause from the takeover notice.
+		assert!(error.message.ends_with("; nothing was sent"), "{error}");
 	}
 
 	#[test]
-	fn wpf_scroll_deadline_and_position_readback() {
+	fn wpf_scroll_deadline_and_offset_readback() {
 		use std::cell::Cell;
 
 		use super::super::super::error::ErrorCode::{AxUnconfirmed, InputFailed, Timeout};
 
-		// A list that scrolls by item, in rows: (offset, rows shown, rows).
-		let sample = |(offset, shown, rows): (f64, f64, f64)| Sample {
-			position: 100.0 * offset / (rows - shown),
-			view:     100.0 * shown / rows,
-		};
-		let top = (2.0, 4.0, 400.0);
+		// A list that scrolls by item, in rows: (offset, rows shown, rows). A
+		// reading takes `ScrollPattern`'s percent from one layout, and the view
+		// size from another, as separate getters can; then how far the anchor
+		// row moved back, which is the offset in rows, if there is an anchor.
+		type Layout = (f64, f64, f64);
+		let coherent = |layout: Layout| (layout, layout, Some(layout.0));
+		let percent = |(offset, shown, rows): Layout| 100.0 * offset / (rows - shown);
+		let top = coherent((2.0, 4.0, 400.0));
 		// The anchor is arbitrary; all decisions use the injected clock.
 		let start = Instant::now();
 		for (case, before, after, expected, reads, sends) in [
 			("expired", top, top, Err(Timeout), 0, 0),
-			("late", top, (3.0, 5.0, 400.0), Err(AxUnconfirmed), 3, 1),
-			("rows removed", top, (2.0, 4.0, 200.0), Err(InputFailed), 6, 1),
-			("moved, one more row shown", (9.0, 4.0, 400.0), (10.0, 5.0, 400.0), Ok(true), 4, 1),
-			("end", (396.0, 4.0, 400.0), top, Err(InputFailed), 2, 0),
+			("late", top, coherent((3.0, 4.0, 400.0)), Err(AxUnconfirmed), 3, 1),
+			// A tall row leaves and five short rows fit: the same percent and view
+			// size as the removal below.
+			(
+				"moved, one more row shown",
+				coherent((4.0, 4.0, 400.0)),
+				coherent((5.0, 5.0, 400.0)),
+				Ok(true),
+				4,
+				1,
+			),
+			(
+				"rows removed",
+				coherent((4.0, 4.0, 400.0)),
+				coherent((4.0, 4.0, 320.0)),
+				Err(InputFailed),
+				6,
+				1,
+			),
+			(
+				"rows removed, view shrank",
+				coherent((10.0, 4.0, 400.0)),
+				coherent((10.0, 3.0, 200.0)),
+				Err(InputFailed),
+				6,
+				1,
+			),
+			(
+				"torn: rows appended between the getters",
+				coherent((10.0, 4.0, 400.0)),
+				((10.0, 4.0, 400.0), (10.0, 4.0, 800.0), Some(10.0)),
+				Err(InputFailed),
+				6,
+				1,
+			),
+			(
+				"offset moved back",
+				coherent((5.0, 4.0, 400.0)),
+				coherent((4.0, 4.0, 400.0)),
+				Err(AxUnconfirmed),
+				4,
+				1,
+			),
+			(
+				"no anchor",
+				((2.0, 4.0, 400.0), (2.0, 4.0, 400.0), None),
+				((3.0, 4.0, 400.0), (3.0, 4.0, 400.0), None),
+				Err(AxUnconfirmed),
+				1,
+				1,
+			),
+			("end", coherent((396.0, 4.0, 400.0)), top, Err(InputFailed), 2, 0),
 		] {
 			let cutoff = start + Duration::from_secs(1);
 			let clock = Cell::new(if case == "expired" { cutoff } else { start });
@@ -973,17 +1064,19 @@ mod tests {
 			let mut run = ScrollRun { cutoff: Some(cutoff), now: || clock.get(), sent: false };
 			let result = run.step(
 				true,
-				|run| {
-					let shown = sample(if run.sent { after } else { before });
-					let mut values = [shown.position, shown.view].into_iter();
-					let mut read = || {
+				|run, _anchor| {
+					let (position, _view, offset) = if run.sent { after } else { before };
+					let read = |value: f64| {
 						read_count.set(read_count.get() + 1);
 						if run.sent && case == "late" {
 							clock.set(cutoff);
 						}
-						Ok::<_, DesktopError>(values.next().unwrap())
+						Ok::<_, DesktopError>(value)
 					};
-					Ok(Sample { position: run.call(&mut read)?, view: run.call(read)? })
+					Ok(Sample {
+						position: run.call(|| read(percent(position)))?,
+						offset:   offset.map(|offset| run.call(|| read(offset))).transpose()?,
+					})
 				},
 				|| {
 					send_count.set(send_count.get() + 1);

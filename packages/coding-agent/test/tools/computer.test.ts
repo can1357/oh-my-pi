@@ -4825,6 +4825,33 @@ describe("computer background fallback", () => {
 		}
 	});
 
+	it("drops the unsent clause of a WPF scroll refused before its first step", async () => {
+		/** Refuses the background scroll as Windows' WPF scroll route does before it sends a step. */
+		class ScrollSession extends RefusingSession {
+			override refusal = "BackgroundUnavailable: UI Automation unavailable (provider gone); nothing was sent";
+			override async scroll(
+				_target: string,
+				_x: number,
+				_y: number,
+				_dx: number,
+				_dy: number,
+				opts?: PointerOptions | null,
+			): Promise<void> {
+				this.sent.push(opts);
+				if (opts?.takeover !== true) throw new Error(this.refusal);
+			}
+		}
+		const native = new ScrollSession();
+		const result = await run(native, 'await (await desktop.window("42")).scroll(1, 2, { dy: 3 })', "takeover");
+		const [text, ...rest] = texts(result);
+		expect(rest).toEqual([]);
+		expect(text).toStartWith(
+			"scroll ran in takeover because UI Automation unavailable (provider gone); the input was delivered, and ",
+		);
+		expect(text).not.toContain("was sent");
+		expect(native.sent).toEqual([{}, { takeover: true, returnFocus: true }]);
+	});
+
 	it("says when typed text went out but the target was not seen reading it, through the fallback and directly", async () => {
 		const unconfirmed =
 			"window 42 had not read all the typed text 5 s after it was sent; the rest may reach whichever window is in front next";
