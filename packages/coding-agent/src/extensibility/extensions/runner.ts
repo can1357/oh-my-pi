@@ -678,8 +678,9 @@ export class ExtensionRunner {
 	/**
 	 * The list the backend last took, which is not sent again, and the registration that took it:
 	 * an id can pass to another extension, which has not seen that list. `undefined` while a call
-	 * runs and after one failed, so the next list is sent whatever it holds; `"none"` until the
-	 * first call, when an empty list has nothing to tell a backend.
+	 * runs, after one failed, and after an `apply` accepted a change to a list the backend did not
+	 * hold, so the next list is sent whatever it holds; `"none"` until the first call, when an
+	 * empty list has nothing to tell a backend.
 	 */
 	#todoSent: { list: TodoBackendList; definition: TodoBackendDefinition } | "none" | undefined = "none";
 	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
@@ -1825,7 +1826,7 @@ export class ExtensionRunner {
 			// waiting for another backend gives way, as it would to a commit: that one is not selected.
 			const resync = () => {
 				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
-				if (this.getTodoBackends().get(backend)?.definition !== definition) return;
+				if (this.getTodoBackends().get(backend)?.extension !== extension) return;
 				this.#todoStale = true;
 				if (this.#todoPending?.backend !== backend)
 					this.#todoPending = this.#todoCorrection = { backend, sessionId, phases: current() };
@@ -1864,8 +1865,9 @@ export class ExtensionRunner {
 				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
 				// A correction queued while this call was with the backend would go out before the tool
 				// commits `next`, and take the change back from the backend that just accepted it. The
-				// list that commit sends is the correction.
-				if (this.#todoPending === this.#todoCorrection) this.#todoPending = undefined;
+				// list that commit sends is the correction; a list that changed meanwhile is not committed.
+				if (this.#todoPending === this.#todoCorrection && Bun.deepEquals(current(), change.previous))
+					this.#todoPending = undefined;
 				// `next` is recorded as held only when this backend held `previous`. After a failed call,
 				// or when it was selected or took the id over since, the commit's list still goes out.
 				const held =

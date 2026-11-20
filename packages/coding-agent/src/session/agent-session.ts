@@ -1183,8 +1183,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	/**
-	 * `todo` calls of this run that a backend refused or the user aborted while they waited for it:
-	 * not payloads to fix and retry. A call made from an eval cell has no result that takes its id out.
+	 * `todo` calls of this run whose failure is not a payload to fix and retry: the backend refused
+	 * or did not answer in time, the session was closing, or the user aborted the call while it
+	 * waited for the backend. A call made from an eval cell has no result that takes its id out.
 	 */
 	#todoTurnedDown = new Set<string>();
 	/** Rows kept out of context that arrived while a run was live; drawn and saved once it ends or the next prompt starts. */
@@ -4934,8 +4935,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// turn) so planned-but-aborted or permission-denied calls never count,
 		// and only successful mutating tools tick — read-only exploration is
 		// not progress an agent could mark done.
+		let todoTurnedDown = false;
 		if (event.type === "message_end" && event.message.role === "toolResult") {
 			this.#todo.onToolResult(event.message.toolName, event.message.isError);
+			// Also before any await: a new run's `agent_start` clears the set, and can come while
+			// this handler waits on extensions or persistence.
+			todoTurnedDown = this.#todoTurnedDown.delete(event.message.toolCallId);
 		}
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
@@ -5256,7 +5261,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				if (toolName === "todo" && isError && !this.#todoTurnedDown.delete(toolCallId)) {
+				if (toolName === "todo" && isError && !todoTurnedDown) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the

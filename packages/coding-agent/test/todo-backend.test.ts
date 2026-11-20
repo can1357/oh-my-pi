@@ -556,7 +556,7 @@ describe("todo backend", () => {
 			expect(tasksOf(fresh)).toEqual([["a", "b"]]);
 		});
 
-		it("calls the backend refused, and one the user aborted while it decided, leave no reminder to retry them", async () => {
+		it("of the todo calls that fail with a backend, only one whose list changed leaves a reminder to retry it", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker", {
 				model: getBundledModel("anthropic", "claude-sonnet-4-5"),
@@ -564,29 +564,43 @@ describe("todo backend", () => {
 			const calls = (...ids: string[]): MockResponse => ({
 				content: ids.map(id => ({ type: "toolCall", id, name: "todo", arguments: { op: "init", items: [id] } })),
 			});
+			const ok = { content: ["ok"] };
 			const mock = createMockModel({
-				responses: [calls("first", "second"), { content: ["ok"] }, calls("aborted"), { content: ["ok"] }],
+				responses: [calls("changed"), ok, calls("refused", "refused too"), ok, calls("aborted"), ok],
 			});
 			session.agent.streamFn = mock.stream;
 			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+			const held = (): { asked: Promise<void>; release: () => void } => {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				backend.applyHold = promise;
+				return { asked: backend.entered(), release: resolve };
+			};
 
+			const edited = held();
+			const changed = session.prompt("plan");
+			await edited.asked;
+			// A phase without tasks: a list with open tasks would make omp prompt the model to go on.
+			session.commitTodoPhases(list());
+			edited.release();
+			await changed;
+			backend.applyHold = undefined;
 			backend.error = new Error("not this week");
-			await session.prompt("plan");
+			await session.prompt("plan again");
 			backend.error = undefined;
-			const hold = Promise.withResolvers<void>();
-			backend.applyHold = hold.promise;
-			const deciding = backend.entered();
-			const aborted = session.prompt("plan again");
-			await deciding;
+			const cancelled = held();
+			const aborted = session.prompt("and again");
+			await cancelled.asked;
 			await session.abort();
 			await aborted.catch(() => {});
-			hold.resolve();
+			cancelled.release();
 			await session.waitForIdle();
 			await session.prompt("next");
 
-			expect(backend.asked.map(change => change.op)).toEqual(["init", "init", "init"]);
-			// A reminder would reach the model as a developer message with the next prompt.
-			expect(mock.calls.at(-1)?.context.messages.filter(message => message.role === "developer")).toEqual([]);
+			expect(backend.asked.map(change => change.op)).toEqual(["init", "init", "init", "init"]);
+			const reminders = session.messages.filter(
+				message => message.role === "custom" && message.customType === "todo-error-reminder",
+			);
+			expect(reminders).toMatchObject([{ details: { attemptedArgs: { items: ["changed"] } } }]);
 		});
 
 		it("an edit that lands while the backend decides fails the call, keeps the edit and reaches the backend", async () => {
@@ -717,36 +731,44 @@ describe("todo backend", () => {
 			expect(tasksOf(backend)).toEqual([["a"], ["a", "c"], ["a", "c"]]);
 		});
 
-		it("a late acceptance while another call is with the backend is followed by the committed list only", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension], "tracker");
-			session.commitTodoPhases(list("a"));
-			await settled(session);
-			// The handler budget is a real timer inside the runner.
-			testSetExtensionHandlerTimeoutMs(30);
-			const late = Promise.withResolvers<void>();
-			backend.applyHold = late.promise;
-			const timedOut = await todo(session, { op: "append", phase: "Work", items: ["b"] });
-			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
-			const gate = Promise.withResolvers<void>();
-			backend.applyHold = gate.promise;
+		it("a late acceptance while another call is with the backend is followed by the committed list only, or by omp's list when that call then fails", async () => {
+			for (const edited of [false, true]) {
+				const backend = tracker("tracker", true);
+				const { session } = await open([backend.extension], "tracker");
+				session.commitTodoPhases(list("a"));
+				await settled(session);
+				// The handler budget is a real timer inside the runner.
+				testSetExtensionHandlerTimeoutMs(30);
+				const late = Promise.withResolvers<void>();
+				backend.applyHold = late.promise;
+				const timedOut = await todo(session, { op: "append", phase: "Work", items: ["b"] });
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+				const gate = Promise.withResolvers<void>();
+				backend.applyHold = gate.promise;
 
-			const deciding = backend.entered();
-			// With a signal, as the agent loop calls the tool, the commit comes a step after the backend's answer.
-			const retry = todo(session, { op: "append", phase: "Work", items: ["c"] }, new AbortController().signal);
-			await deciding;
-			late.resolve();
-			// The backend's late answer is handled in a continuation of its own promise.
-			await Bun.sleep(0);
-			gate.resolve();
-			const accepted = await retry;
-			await settled(session);
+				const deciding = backend.entered();
+				// With a signal, as the agent loop calls the tool, the commit comes a step after the backend's answer.
+				const retry = todo(session, { op: "append", phase: "Work", items: ["c"] }, new AbortController().signal);
+				await deciding;
+				if (edited) {
+					// An edit made while no backend is selected queues no list of its own.
+					cfgTodoBackend.override(session.settings, "native");
+					session.commitTodoPhases(list("a", "e"));
+					cfgTodoBackend.override(session.settings, "tracker");
+				}
+				late.resolve();
+				// The backend's late answer is handled in a continuation of its own promise.
+				await Bun.sleep(0);
+				gate.resolve();
+				const accepted = await retry;
+				await settled(session);
 
-			expect(timedOut.isError).toBe(true);
-			expect(accepted.isError).not.toBe(true);
-			// The backend took both changes; omp committed only the second and says so once: it is never
-			// sent the list without the task it just accepted.
-			expect(tasksOf(backend)).toEqual([["a"], ["a", "c"]]);
+				expect(timedOut.isError).toBe(true);
+				expect(accepted.isError === true).toBe(edited);
+				// The backend took both changes. When omp commits the second, it says so once and never
+				// sends the list without the task just accepted; when it commits neither, its own list follows.
+				expect(tasksOf(backend)).toEqual([["a"], edited ? ["a", "e"] : ["a", "c"]]);
+			}
 		});
 
 		it("a backend that accepts after the session changed, after it was deselected or after it lost its id is sent nothing for it, and neither is the id's next owner", async () => {

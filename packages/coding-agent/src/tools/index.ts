@@ -521,8 +521,8 @@ export interface ToolSession {
 	 * Returns `undefined` at once when no backend decides (native todos); otherwise resolves to
 	 * the reason the change is not accepted, or to `undefined` once it is accepted or when no
 	 * backend decides any more by the call's turn, and rejects when `signal` aborts. `toolCallId`
-	 * names the call: one that is aborted, or not accepted for a reason other than a changed list,
-	 * gets no reminder to retry it.
+	 * names the call: one that is aborted, or not accepted for a reason other than a changed list
+	 * or session, gets no reminder to retry it.
 	 */
 	applyTodoBackend?: (
 		change: TodoBackendChange,
