@@ -1777,7 +1777,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
-		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
+		if (activityGist && activeSession) AgentRegistry.global().setActivity(id, activityGist, activeSession);
 		const progressPayload = {
 			index,
 			agent: agent.name,
