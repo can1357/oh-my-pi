@@ -383,8 +383,15 @@ export class HookRunner {
 					const event: ContextEvent = { type: "context", messages: currentMessages };
 					const handlerResult = await handler(event, ctx);
 
-					if (handlerResult && (handlerResult as ContextEventResult).messages) {
-						currentMessages = (handlerResult as ContextEventResult).messages!;
+					// An absent or empty `messages` means the handler chose not to
+					// override. `[]` is truthy, so a bare check treated "no messages"
+					// as a valid override and wiped the LLM context, which providers
+					// reject with "messages is required".
+					if (handlerResult) {
+						const result = handlerResult as ContextEventResult;
+						if (result.messages && result.messages.length > 0) {
+							currentMessages = result.messages;
+						}
 					}
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);

@@ -2533,19 +2533,26 @@ export class ExtensionRunner {
 					signal,
 				);
 
-				if (handlerResult && (handlerResult as ContextEventResult).messages) {
-					const nextMessages = (handlerResult as ContextEventResult).messages!;
-					for (let index = 0; index < nextMessages.length; index++) {
-						const message = nextMessages[index];
-						if (!message || getContextHistoryIndex(message) !== undefined) continue;
-						const previousMessage = currentMessages[index];
-						if (!previousMessage) continue;
-						const historyIndex = getContextHistoryIndex(previousMessage);
-						if (historyIndex === undefined) continue;
-						setContextHistoryIndex(message, historyIndex);
-						if (!Bun.deepEquals(message, previousMessage)) clearContextHistoryIndex(message);
+				// An absent or empty `messages` means the handler chose not to
+				// override. `[]` is truthy, so a bare check treated "no messages" as
+				// a valid override and wiped the LLM context, which providers reject
+				// with "messages is required".
+				if (handlerResult) {
+					const result = handlerResult as ContextEventResult;
+					if (result.messages && result.messages.length > 0) {
+						const nextMessages = result.messages;
+						for (let index = 0; index < nextMessages.length; index++) {
+							const message = nextMessages[index];
+							if (!message || getContextHistoryIndex(message) !== undefined) continue;
+							const previousMessage = currentMessages[index];
+							if (!previousMessage) continue;
+							const historyIndex = getContextHistoryIndex(previousMessage);
+							if (historyIndex === undefined) continue;
+							setContextHistoryIndex(message, historyIndex);
+							if (!Bun.deepEquals(message, previousMessage)) clearContextHistoryIndex(message);
+						}
+						currentMessages = nextMessages;
 					}
-					currentMessages = nextMessages;
 				}
 			}
 		}

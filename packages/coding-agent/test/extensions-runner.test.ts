@@ -500,6 +500,86 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("context event override", () => {
+		const makeUserMsg = (id: string) => ({ role: "user" as const, content: `msg-${id}`, timestamp: Date.now() });
+
+		const runContextHandler = async (handlerSource: string, input: AgentMessage[]) => {
+			fs.writeFileSync(path.join(extensionsDir, "context-handler.ts"), handlerSource);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			return runner.emitContext(input);
+		};
+
+		// emitContext clones the input before any handler runs, so content-preserving
+		// assertions compare deeply rather than by reference.
+		it("keeps the original messages when a handler returns { messages: [] }", async () => {
+			const input = [makeUserMsg("u1"), makeUserMsg("u2")];
+			const result = await runContextHandler(
+				`export default function(pi) { pi.on("context", async () => ({ messages: [] })); }`,
+				input,
+			);
+			expect(result).toEqual(input);
+		});
+
+		it("keeps the original messages when a handler returns { messages: undefined }", async () => {
+			const input = [makeUserMsg("u1")];
+			const result = await runContextHandler(
+				`export default function(pi) { pi.on("context", async () => ({ messages: undefined })); }`,
+				input,
+			);
+			expect(result).toEqual(input);
+		});
+
+		it("keeps the original messages when a handler returns nothing", async () => {
+			const input = [makeUserMsg("u1")];
+			const result = await runContextHandler(
+				`export default function(pi) { pi.on("context", async () => undefined); }`,
+				input,
+			);
+			expect(result).toEqual(input);
+		});
+
+		it("applies the override when a handler returns a non-empty array", async () => {
+			const override = [makeUserMsg("override")];
+			const result = await runContextHandler(
+				`export default function(pi) { pi.on("context", async () => ({ messages: ${JSON.stringify(override)} })); }`,
+				[makeUserMsg("original")],
+			);
+			// The runner stamps an overridden message as per-call context, so compare
+			// the payload rather than deep-equality against the symbol.
+			expect(JSON.parse(JSON.stringify(result))).toEqual(JSON.parse(JSON.stringify(override)));
+		});
+
+		it("keeps the first handler's override when a second handler returns an empty array", async () => {
+			const override = [makeUserMsg("first")];
+			fs.writeFileSync(
+				path.join(extensionsDir, "ctx-1.ts"),
+				`export default function(pi) { pi.on("context", async () => ({ messages: ${JSON.stringify(override)} })); }`,
+			);
+			fs.writeFileSync(
+				path.join(extensionsDir, "ctx-2.ts"),
+				`export default function(pi) { pi.on("context", async () => ({ messages: [] })); }`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const output = await runner.emitContext([makeUserMsg("original")]);
+			expect(JSON.parse(JSON.stringify(output))).toEqual(JSON.parse(JSON.stringify(override)));
+		});
+	});
+
 	describe("message renderers", () => {
 		it("gets message renderer by type", async () => {
 			const extCode = `
