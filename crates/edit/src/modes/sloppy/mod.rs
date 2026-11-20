@@ -1,6 +1,7 @@
-//! `sloppy` mode: `*** Find` anchors with `*** Replace` replacements or
-//! `*** Insert Before`/`*** Insert After` insertions inside `*** Edit File:`
-//! file sections, with tolerant matching.
+//! `sloppy` mode: `*** Find` anchors with `*** Replace` replacements,
+//! `*** Insert Before`/`*** Insert After` insertions, or `*** Cut` and
+//! `*** Paste Before`/`*** Paste After` moves inside `*** Edit File:` file
+//! sections, with tolerant matching.
 
 pub mod apply;
 pub mod parse;
@@ -41,7 +42,7 @@ impl SloppyEngine {
 		} else {
 			input
 		};
-		split_sloppy_sections(input)
+		parse::split_sloppy_sections_for_preview(input, streaming)
 	}
 
 	fn missing_target(args: &ArgSnapshot) -> bool {
@@ -227,10 +228,11 @@ impl ModeEngine for SloppyEngine {
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
-		// An unparseable payload targets nothing; `preview` and `stage` surface
-		// the error.
-		let sections =
-			split_sloppy_sections(args.input.as_deref().unwrap_or_default()).unwrap_or_default();
+		let input = args.input.as_deref().unwrap_or_default();
+		let sections = split_sloppy_sections(input).unwrap_or_default();
+		if sections.is_empty() {
+			return Inspection { paths: parse::declared_paths(input), ..Inspection::default() };
+		}
 		Inspection {
 			paths:    sections
 				.iter()
