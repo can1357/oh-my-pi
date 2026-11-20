@@ -180,9 +180,10 @@ const SHIFT_RESCUE_SIMILAR_MIN_RATIO: f64 = 0.7;
 /// line of the file: a near-twin within this margin could be the line the row
 /// was written from.
 const SHIFT_RESCUE_SIMILAR_MARGIN: f64 = 0.1;
-/// Ceiling on one row's whole-file comparison, in LCS cells (file tokens ×
-/// row tokens). Past it the similarity path is skipped and the anchor goes to
-/// the reveal, so a huge file cannot make one edit slow.
+/// Ceiling on one rescue call's whole-file comparisons, in LCS cells (file
+/// tokens × row tokens, summed over every scanned row). Once spent, the
+/// similarity path is skipped and the anchor goes to the reveal, so a huge
+/// file or payload cannot make one edit slow.
 const SHIFT_RESCUE_SIMILAR_LCS_BUDGET: usize = 40_000_000;
 
 /// One replacement op's anchors plus its payload body lines.
@@ -312,17 +313,35 @@ fn token_ratio_bound(a: usize, b: usize) -> f64 {
 }
 
 /// The current file split into lines, tokenized on first use: only an end
-/// without exact evidence pays for the whole-file comparison. One per section,
-/// shared by its replacement groups.
+/// without exact evidence pays for the whole-file comparison. One per rescue
+/// call, shared by every row of every replacement group, so the LCS budget
+/// bounds the whole call.
 struct CurrentLines<'a> {
 	lines:  &'a [&'a str],
 	/// Per-line tokens plus their total count.
 	tokens: std::cell::OnceCell<(Vec<Vec<&'a str>>, usize)>,
+	/// LCS cells left for whole-file similarity scans.
+	budget: std::cell::Cell<usize>,
 }
 
 impl<'a> CurrentLines<'a> {
 	const fn new(lines: &'a [&'a str]) -> Self {
-		Self { lines, tokens: std::cell::OnceCell::new() }
+		Self {
+			lines,
+			tokens: std::cell::OnceCell::new(),
+			budget: std::cell::Cell::new(SHIFT_RESCUE_SIMILAR_LCS_BUDGET),
+		}
+	}
+
+	/// Take `cost` cells from the budget; false (and nothing taken) when too
+	/// few are left.
+	fn charge(&self, cost: usize) -> bool {
+		let left = self.budget.get();
+		if cost > left {
+			return false;
+		}
+		self.budget.set(left - cost);
+		true
 	}
 
 	fn tokens(&self) -> &(Vec<Vec<&'a str>>, usize) {
@@ -363,8 +382,10 @@ impl<'a> EndEvidence<'a> {
 
 	/// True when `row` names this line: it carries the line's content
 	/// ([`line_carries`]), or it is similar enough to the line (a mid-line
-	/// modification) and the line is the file's clear best match for it, so a
-	/// near-twin elsewhere cannot be the line the row was written from.
+	/// modification) and the line is the only one in the file that similar,
+	/// with every other line also scoring clearly lower. Another line at the
+	/// threshold could be the one the row was written from (a stale number
+	/// plus a rename), so it identifies nothing.
 	fn identified_by(&self, row: &str, current: &CurrentLines<'a>) -> bool {
 		if self
 			.exact
@@ -384,15 +405,15 @@ impl<'a> EndEvidence<'a> {
 			return false;
 		}
 		let (lines, total) = current.tokens();
-		if total.saturating_mul(row.len()) > SHIFT_RESCUE_SIMILAR_LCS_BUDGET {
+		if !current.charge(total.saturating_mul(row.len())) {
 			return false;
 		}
 		let ceiling = score - SHIFT_RESCUE_SIMILAR_MARGIN;
+		let rivals = |ratio: f64| ratio > ceiling || ratio >= SHIFT_RESCUE_SIMILAR_MIN_RATIO;
 		lines.iter().enumerate().all(|(index, other)| {
 			index == self.index
-				|| token_ratio_bound(row.len(), other.len()) <= ceiling
-				|| (other.len() <= SHIFT_RESCUE_SIMILAR_MAX_TOKENS
-					&& token_ratio(&row, other) <= ceiling)
+				|| !rivals(token_ratio_bound(row.len(), other.len()))
+				|| (other.len() <= SHIFT_RESCUE_SIMILAR_MAX_TOKENS && !rivals(token_ratio(&row, other)))
 		})
 	}
 }
@@ -1175,6 +1196,22 @@ mod tests {
 	}
 
 	#[test]
+	fn lcs_budget_is_shared_across_one_rescue_call() {
+		let filler = ";".repeat(SHIFT_RESCUE_SIMILAR_MAX_TOKENS + 10);
+		let mut file = vec!["var key = t.FullName;", "use super::format::render;"];
+		// Each scan (9 or 13 row tokens) costs about 0.56 or 0.81 of the
+		// budget: each fits alone, but not both.
+		let filler_lines = SHIFT_RESCUE_SIMILAR_LCS_BUDGET / 16 / SHIFT_RESCUE_SIMILAR_MAX_TOKENS;
+		file.extend(std::iter::repeat_n(filler.as_str(), filler_lines));
+		let first = body(&["var key = t.FullName + CtxKey;"]);
+		let second = body(&["use super::{format::render, parse};"]);
+		assert!(body_targets(&second, &file, 2, 2), "the second row fits a fresh budget");
+		let shared = CurrentLines::new(&file);
+		assert!(super::body_targets(&first, &shared, 1, 1));
+		assert!(!super::body_targets(&second, &shared, 2, 2), "the first scan spent the budget");
+	}
+
+	#[test]
 	fn body_targets_needs_exact_content_on_lines_with_few_tokens() {
 		// `let v0018 = 18;` has five tokens: a modified row must carry it whole.
 		let file = ["let v0017 = 17;", "let v0018 = 18;", "fn other() {}"];
@@ -1890,10 +1927,11 @@ mod lifecycle {
 		assert_eq!(ctx.text("carry.ts").lines().count(), 16);
 	}
 
-	/// Rows long enough for similarity evidence: eleven tokens each, two of
-	/// them differing from the neighbouring rows.
+	/// Rows long enough for similarity evidence: eleven tokens each, four of
+	/// them differing from every other row, so a mid-line change of one row
+	/// stays below the similarity threshold against the rest.
 	fn long_row(i: usize) -> String {
-		format!("    total_{i:04} = compute(items, {i}, scale);")
+		format!("    total_{i:04} = compute(items_{i}, {i}, scale_{i});")
 	}
 
 	fn long_fixture(ctx: &Lifecycle, file: &str, lines: usize) {
@@ -1918,12 +1956,15 @@ mod lifecycle {
 		long_fixture(&ctx, "mid.ts", 30);
 		let tag1 = read_and_shift(&ctx, "mid.ts", 30).await;
 		ctx.edit(&format!(
-			"[mid.ts#{tag1}]\nPUT 20.=20:\n+    total_0018 = compute(items, 18, scale * 2);\n"
+			"[mid.ts#{tag1}]\nPUT 20.=20:\n+    total_0018 = compute(items_18, 18, scale_18 * 2);\n"
 		))
 		.await
 		.unwrap();
 		let text = ctx.text("mid.ts");
-		assert_eq!(text.lines().nth(19), Some("    total_0018 = compute(items, 18, scale * 2);"));
+		assert_eq!(
+			text.lines().nth(19),
+			Some("    total_0018 = compute(items_18, 18, scale_18 * 2);")
+		);
 		assert_eq!(text.lines().nth(17), Some(long_row(16).as_str()));
 	}
 
@@ -1937,8 +1978,8 @@ mod lifecycle {
 		let before = ctx.text("mid-stale.ts");
 		let err = ctx
 			.edit(&format!(
-				"[mid-stale.ts#{tag1}]\nPUT 18.=18:\n+    total_0018 = compute(items, 18, scale * \
-				 2);\n"
+				"[mid-stale.ts#{tag1}]\nPUT 18.=18:\n+    total_0018 = compute(items_18, 18, scale_18 \
+				 * 2);\n"
 			))
 			.await
 			.unwrap_err();
@@ -1965,14 +2006,42 @@ mod lifecycle {
 		assert!(versions.iter().all(|version| *version.text != *read), "the read is evicted");
 		// Old line 25 sits at 30 after five single-row inserts.
 		ctx.edit(&format!(
-			"[evict.ts#{tag}]\nPUT 30.=30:\n+    total_0025 = compute(items, 25, scale, true);\n"
+			"[evict.ts#{tag}]\nPUT 30.=30:\n+    total_0025 = compute(items_25, 25, scale_25, \
+			 true);\n"
 		))
 		.await
 		.unwrap();
 		assert_eq!(
 			ctx.text("evict.ts").lines().nth(29),
-			Some("    total_0025 = compute(items, 25, scale, true);")
+			Some("    total_0025 = compute(items_25, 25, scale_25, true);")
 		);
+	}
+
+	/// A stale number plus a rename: the model meant old line 10 (`gamma
+	/// delta`, now 12) and renamed it to old line 8's name, but anchored the
+	/// stale number 10, which now holds old line 8. Line 10 scores 0.933 and
+	/// line 12 0.8, a gap past the margin, but line 12 also clears the
+	/// threshold, so the row names neither and the edit is rejected.
+	#[tokio::test]
+	async fn stale_number_with_a_similar_second_line_stays_rejected() {
+		let ctx = Lifecycle::new("rename.ts", 20);
+		let text: String = (1..=20)
+			.map(|i| match i {
+				8 => "alpha beta = compute(a,b,c,d);\n".to_owned(),
+				10 => "gamma delta = compute(a,b,c,d);\n".to_owned(),
+				_ => format!("let v{i:04} = {i};\n"),
+			})
+			.collect();
+		ctx.write_text("rename.ts", &text);
+		let tag1 = read_and_shift(&ctx, "rename.ts", 20).await;
+		assert_eq!(ctx.text("rename.ts").lines().nth(9), Some("alpha beta = compute(a,b,c,d);"));
+		let before = ctx.text("rename.ts");
+		let err = ctx
+			.edit(&format!("[rename.ts#{tag1}]\nPUT 10.=10:\n+alpha beta = compute(a,b,c,d,e);\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("which an earlier change moved"), "unexpected error: {err}");
+		assert_eq!(ctx.text("rename.ts"), before);
 	}
 
 	/// Rows that differ in a single token score within the margin of each
@@ -2052,7 +2121,7 @@ mod lifecycle {
 			.unwrap();
 		let tag1 = ctx.head_tag("replay.ts");
 		let before = ctx.text("replay.ts");
-		let modified = "    total_0201 = compute(items, 201, scale.max(1));";
+		let modified = "    total_0201 = compute(items_201, 201, scale_201.max(1));";
 		let err = ctx
 			.edit(&format!("[replay.ts#{tag1}]\nPUT 201.=201:\n+{modified}\n"))
 			.await
