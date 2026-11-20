@@ -168,8 +168,9 @@ export interface ShowStatusOptions {
 	action?: StatusNoticeAction;
 	/**
 	 * Names a status that updates in place (the MCP startup line): a later status with the same key rewrites
-	 * that line while only notices sit below it, so unrelated notices in between survive. Keyed statuses
-	 * never collapse with unkeyed ones.
+	 * that line while it is still mutable and only notices sit below it. Otherwise it appends a fresh line,
+	 * preserving both unrelated notices and status updates after the original line enters scrollback.
+	 * Keyed statuses never collapse with unkeyed ones.
 	 */
 	key?: string;
 	/**

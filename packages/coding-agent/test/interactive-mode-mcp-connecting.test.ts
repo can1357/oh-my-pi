@@ -197,6 +197,33 @@ describe("InteractiveMode MCP connection status", () => {
 		expect(transcript).not.toContain("Connecting to MCP servers");
 	});
 
+	it("appends the completed MCP status after its connecting line retired into scrollback", () => {
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connecting",
+			serverNames: ["alpha"],
+		} satisfies McpConnectionStatusEvent);
+		const connecting = mode.chatContainer.children.at(-1);
+		mode.showHookNotify("A loaded", "info");
+		mode.showHookNotify("B loaded", "info");
+
+		const batch = mode.chatContainer.peekFinalizedBatch(120, 2);
+		if (!batch) throw new Error("Expected startup notices to retire the connecting status");
+		expect(batch.rows.join("\n")).toContain("Connecting to MCP servers: alpha");
+		expect(batch.rows.join("\n")).toContain("A loaded");
+		mode.chatContainer.acknowledgeFinalizedBatch(batch.id);
+		expect(mode.chatContainer.children).toContain(connecting);
+		expect(mode.chatContainer.canRemoveBlock(connecting!)).toBe(false);
+
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connected",
+			serverName: "alpha",
+		} satisfies McpConnectionStatusEvent);
+		const visible = mode.chatContainer.renderViewport(120, 10, { tick: 0, now: 0 }).join("\n");
+		expect(visible).not.toContain("Connecting to MCP servers");
+		expect(visible).toContain("B loaded");
+		expect(visible).toContain("Connected to MCP server: alpha.");
+	});
+
 	it("rejects a malformed mcp:connection-status payload via the guard instead of letting it throw", () => {
 		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});

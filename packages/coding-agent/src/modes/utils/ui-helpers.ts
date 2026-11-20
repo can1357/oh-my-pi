@@ -277,7 +277,7 @@ export class UiHelpers {
 
 		if (key !== undefined) {
 			const keyed = this.#keyedStatuses.get(key);
-			if (keyed && this.#onlyNoticesBelow(keyed)) {
+			if (keyed && this.ctx.chatContainer.canRemoveBlock(keyed) && this.#onlyNoticesBelow(keyed)) {
 				keyed.setMessage(message, notice);
 				this.ctx.ui.requestRender();
 				return;

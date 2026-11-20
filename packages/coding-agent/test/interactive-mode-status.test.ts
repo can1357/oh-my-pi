@@ -6,6 +6,7 @@ import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -155,7 +156,7 @@ describe("InteractiveMode.showStatus", () => {
 
 	test("a keyed status updates its line across notices but appends once other content follows", () => {
 		const ctx = {
-			chatContainer: new Container(),
+			chatContainer: new TranscriptContainer(),
 			ui: { requestRender: vi.fn() },
 			present: (content: Component | readonly Component[]) => {
 				const items = Array.isArray(content) ? content : [content];
