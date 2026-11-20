@@ -233,6 +233,7 @@ describe("openai-completions compatibility", () => {
 			rejectRootObjectUnion: false,
 			retryWithoutStrictOnGrammarError: false,
 			supportsPromptCacheKey: false,
+			foldUserAfterToolResult: false,
 		} satisfies ResolvedOpenAICompat;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
