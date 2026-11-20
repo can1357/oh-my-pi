@@ -1820,12 +1820,14 @@ export class ExtensionRunner {
 			if (!Bun.deepEquals(current(), change.previous)) return TODO_LIST_CHANGED_ERROR;
 			// The backend holds a change omp did not commit: omp's list follows, also when it equals
 			// the last one sent. Not as the session closes, nor once it has changed: the backend
-			// keeps that change for a session omp is no longer in. Nor once it is no longer selected:
-			// omp has stopped mirroring changes to it.
+			// keeps that change for a session omp is no longer in. Nor once it is no longer selected,
+			// or its extension no longer holds the id: omp has stopped mirroring changes to it. A list
+			// waiting for another backend gives way, as it would to a commit: that one is not selected.
 			const resync = () => {
 				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
+				if (this.getTodoBackends().get(backend)?.definition !== definition) return;
 				this.#todoStale = true;
-				if (!this.#todoPending)
+				if (this.#todoPending?.backend !== backend)
 					this.#todoPending = this.#todoCorrection = { backend, sessionId, phases: current() };
 				this.#queueTodoBackendCall();
 			};
@@ -1864,9 +1866,14 @@ export class ExtensionRunner {
 				// commits `next`, and take the change back from the backend that just accepted it. The
 				// list that commit sends is the correction.
 				if (this.#todoPending === this.#todoCorrection) this.#todoPending = undefined;
-				// After a failed call the backend may never have held `previous`. `next` is recorded only
-				// when omp knew what it held, so that otherwise the commit's list still goes out.
-				if (sent !== undefined) this.#todoSent = { list: { backend, sessionId, phases: change.next }, definition };
+				// `next` is recorded as held only when this backend held `previous`. After a failed call,
+				// or when it was selected or took the id over since, the commit's list still goes out.
+				const held =
+					sent === "none"
+						? change.previous.length === 0
+						: sent?.definition === definition &&
+							Bun.deepEquals(sent.list, { backend, sessionId, phases: change.previous });
+				if (held) this.#todoSent = { list: { backend, sessionId, phases: change.next }, definition };
 				return undefined;
 			}
 			// Accepted in the moment omp stopped waiting.

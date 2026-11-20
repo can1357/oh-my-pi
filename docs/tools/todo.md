@@ -81,7 +81,7 @@ The TUI renderer (`todoToolRenderer`) merges call and result into one transcript
 7. `execute(...)` stores the updated phases with `session.setTodoPhases?.(...)` only when the op produced no errors and was not a `view`; a failed op is discarded. `storage` is `"session"` when `session.getSessionFile()` exists, else `"memory"`.
 8. `getCompletionTransitions(...)` compares the previous and updated phases (skipped for failed or `view` calls); newly completed tasks are returned in `details.completedTasks`.
 9. Details include the resolved `op` on success or op-specific failure, including an op inferred from omitted input. A payload that cannot be schema-validated returns before an op is available.
-10.   The agent runtime watches `todo` tool results in `packages/coding-agent/src/session/agent-session.ts`; successful results refresh cached todos, failed results inject a hidden next-turn reminder telling the model that todo progress is not visible until it retries.
+10.   The agent runtime watches `todo` tool results in `packages/coding-agent/src/session/agent-session.ts`; successful results refresh cached todos, failed results inject a hidden next-turn reminder telling the model that todo progress is not visible until it retries (see Side Effects for the todo backend cases that inject none).
 11.   The event controller updates the visible todo UI from `result.details.phases` on success, or shows a warning on error (`packages/coding-agent/src/modes/controllers/event-controller.ts`).
 
 ## Modes / Variants
@@ -122,7 +122,7 @@ The same file also exposes non-tool helpers used by `/todo`:
    - `storage` reports whether the session has a backing session file, but the tool does not append a custom session entry itself.
    - Successful state-changing tool-result messages carry `details.phases`; `getLatestTodoPhasesFromEntries(...)` restores the latest canonical snapshot. Failed and pure-`view` results are skipped.
    - Eval callers use `committedTodoPhases(...)` to persist mutations separately when there is no direct `todo` tool-result entry.
-   - Failed `todo` results cause `agent-session` to enqueue a hidden next-turn reminder (`customType: "todo-error-reminder"`), except for a call a todo backend did not accept or that was aborted while the backend decided.
+   - Failed `todo` results cause `agent-session` to enqueue a hidden next-turn reminder (`customType: "todo-error-reminder"`). With a todo backend that defines `apply`, there is none for a call the backend refused or did not answer in time, one whose turn came as the session closed, or one aborted while it waited for the backend.
    - With `todo.backend` set to an extension's backend, every committed change to the main session's list is then handed to it as a whole list (`docs/extensions.md`, Todo backends). That call comes after the commit and cannot refuse it.
    - Once the session has started, a selected backend that defines `apply` is asked before a `todo` call's change is committed; when it throws, the call returns an error (`Todo backend "<id>" did not accept this change: …`) and the list is unchanged. Without such a backend the call commits before it first yields, as it always did.
 - User-visible prompts / interactive UI
@@ -157,7 +157,7 @@ The same file also exposes non-tool helpers used by `/todo`:
    - `Missing items for append operation`
    - `Task "..." already exists`
 - A `todo` call carries a single op; any error in it discards every mutation the op made.
-- Runtime-level tool failure is handled outside the tool body: `agent-session` injects a hidden reminder and the event controller warns the user that visible progress may be stale.
+- Runtime-level tool failure is handled outside the tool body: `agent-session` injects a hidden reminder (not for a call aborted while it waited for a todo backend) and the event controller warns the user that visible progress may be stale.
 - Idempotency is op-specific:
    - `init` is a full replacement; replaying the same payload yields the same state.
    - `start`, `done`, and `drop` are effectively idempotent on an existing target state, though `start` also demotes another active task.

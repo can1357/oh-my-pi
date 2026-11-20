@@ -1861,11 +1861,11 @@ export interface TodoBackendDefinition {
 	id: string;
 	/**
 	 * Called in the main session with the whole todo list after omp committed a change to it:
-	 * a `todo` call (unless this backend's `apply` accepted it), a `/todo` edit, RPC `set_todos`,
-	 * `/new`, or a resume, rewind, branch, fork or move to another session file that left another
-	 * list or session id. An empty list is sent only once omp has called a todo backend for this
-	 * session; `/new`, a resume, a branch and a fork carry that over. Tasks carry `content` and
-	 * `status` only.
+	 * a `todo` call (unless this backend's `apply` accepted it as a change to the list it held), a
+	 * `/todo` edit, RPC `set_todos`, `/new`, or a resume, rewind, branch, fork or move to another
+	 * session file that left another list or session id. An empty list is sent only once omp has
+	 * called a todo backend for this session; `/new`, a resume, a branch and a fork carry that
+	 * over. Tasks carry `content` and `status` only.
 	 * One call runs at a time, and lists that change meanwhile collapse into the newest. A throw,
 	 * or no answer within the extension handler timeout, is reported as an extension error and
 	 * leaves omp's list as it is; the next change sends the whole list again, even while a call
@@ -1877,11 +1877,13 @@ export interface TodoBackendDefinition {
 	 * `todo` tool call makes; nothing else reaches it. Throw to refuse the change: the call fails,
 	 * naming the backend and the error's message, and the list stays as it was, as it does when no
 	 * answer comes within the extension handler timeout. A change accepted here is not passed to
-	 * `replace` as well, unless this backend's last call failed. When `apply` accepts after omp
-	 * stopped waiting (a timeout or an abort), omp's list is sent through `replace` once more,
-	 * unless by then the session has changed or is closing, or this backend is no longer selected.
-	 * Edits the user or a client makes (`/todo`, RPC `set_todos`) and resets cannot be refused;
-	 * they only reach `replace`.
+	 * `replace` as well when this backend held `previous`; when it did not (its last call failed,
+	 * or it was selected or took the id over since the list last went out), the committed list
+	 * follows. When `apply` accepts after omp stopped waiting (a timeout or an abort), omp's list
+	 * is sent through `replace` once more, unless by then the session has changed or is closing,
+	 * or this backend is no longer selected or its extension no longer holds the id. Edits the
+	 * user or a client makes (`/todo`, RPC `set_todos`) and resets cannot be refused; they only
+	 * reach `replace`.
 	 */
 	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
 }

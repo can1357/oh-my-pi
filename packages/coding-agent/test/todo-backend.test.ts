@@ -162,7 +162,7 @@ describe("todo backend", () => {
 			settings: session.settings,
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
-			applyTodoBackend: (change, signal) => session.applyTodoBackend(change, signal),
+			applyTodoBackend: (change, signal, id) => session.applyTodoBackend(change, signal, id),
 		});
 
 	const settled = (session: AgentSession) => session.extensionRunner?.todoBackendSettled();
@@ -533,31 +533,39 @@ describe("todo backend", () => {
 			expect(errors).toEqual([]);
 		});
 
-		it("after a failed replace, an accepted call is still followed by the whole list", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension], "tracker");
-			backend.error = new Error("store is down");
+		it("an accepted call is followed by the whole list when the backend did not hold the list it changed", async () => {
+			const failed = tracker("tracker", true);
+			const afterFailure = await open([failed.extension], "tracker");
+			failed.error = new Error("store is down");
+			afterFailure.session.commitTodoPhases(list("a"));
+			await settled(afterFailure.session);
+			failed.error = undefined;
+			await todo(afterFailure.session, { op: "append", phase: "Work", items: ["b"] });
+			await settled(afterFailure.session);
+
+			// Selected once the session had a list, so it was never sent one.
+			const fresh = tracker("tracker", true);
+			const { session } = await open([fresh.extension]);
 			session.commitTodoPhases(list("a"));
+			cfgTodoBackend.override(session.settings, "tracker");
+			// From the second call on it holds the list each change is made to.
+			for (const task of ["b", "c", "d"]) await todo(session, { op: "append", phase: "Work", items: [task] });
 			await settled(session);
-			backend.error = undefined;
 
-			await todo(session, { op: "append", phase: "Work", items: ["b"] });
-			await settled(session);
-
-			// The backend never took ["a"], so accepting the change does not stand in for the list.
-			expect(tasksOf(backend)).toEqual([["a"], ["a", "b"]]);
+			expect(tasksOf(failed)).toEqual([["a"], ["a", "b"]]);
+			expect(tasksOf(fresh)).toEqual([["a", "b"]]);
 		});
 
-		it("a call the backend refused, or the user aborted while it decided, leaves no reminder to retry it", async () => {
+		it("calls the backend refused, and one the user aborted while it decided, leave no reminder to retry them", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker", {
 				model: getBundledModel("anthropic", "claude-sonnet-4-5"),
 			});
-			const call = (id: string): MockResponse => ({
-				content: [{ type: "toolCall", id, name: "todo", arguments: { op: "init", items: [id] } }],
+			const calls = (...ids: string[]): MockResponse => ({
+				content: ids.map(id => ({ type: "toolCall", id, name: "todo", arguments: { op: "init", items: [id] } })),
 			});
 			const mock = createMockModel({
-				responses: [call("refused"), { content: ["ok"] }, call("aborted"), { content: ["ok"] }],
+				responses: [calls("first", "second"), { content: ["ok"] }, calls("aborted"), { content: ["ok"] }],
 			});
 			session.agent.streamFn = mock.stream;
 			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
@@ -565,16 +573,18 @@ describe("todo backend", () => {
 			backend.error = new Error("not this week");
 			await session.prompt("plan");
 			backend.error = undefined;
-			backend.applyHold = Promise.withResolvers<void>().promise;
+			const hold = Promise.withResolvers<void>();
+			backend.applyHold = hold.promise;
 			const deciding = backend.entered();
 			const aborted = session.prompt("plan again");
 			await deciding;
 			await session.abort();
 			await aborted.catch(() => {});
+			hold.resolve();
 			await session.waitForIdle();
 			await session.prompt("next");
 
-			expect(backend.asked.map(change => change.op)).toEqual(["init", "init"]);
+			expect(backend.asked.map(change => change.op)).toEqual(["init", "init", "init"]);
 			// A reminder would reach the model as a developer message with the next prompt.
 			expect(mock.calls.at(-1)?.context.messages.filter(message => message.role === "developer")).toEqual([]);
 		});
@@ -739,14 +749,22 @@ describe("todo backend", () => {
 			expect(tasksOf(backend)).toEqual([["a"], ["a", "c"]]);
 		});
 
-		it("a backend that accepts after the session changed, or after it was deselected, is sent nothing for it", async () => {
+		it("a backend that accepts after the session changed, after it was deselected or after it lost its id is sent nothing for it, and neither is the id's next owner", async () => {
 			const left: Array<[(session: AgentSession) => unknown, string[][]]> = [
 				[session => session.newSession(), [["a"], []]],
 				[session => cfgTodoBackend.override(session.settings, "native"), [["a"]]],
+				[
+					session => {
+						const holder = session.extensionRunner?.getTodoBackends().get("tracker")?.extension;
+						session.extensionRunner?.setSuspendedExtensions(extension => extension === holder);
+					},
+					[["a"]],
+				],
 			];
 			for (const [leave, sentBefore] of left) {
 				const backend = tracker("tracker", true);
-				const { session } = await open([backend.extension], "tracker");
+				const heir = tracker();
+				const { session } = await open([backend.extension, heir.extension], "tracker");
 				session.commitTodoPhases(list("a"));
 				await settled(session);
 				const late = Promise.withResolvers<void>();
@@ -765,6 +783,7 @@ describe("todo backend", () => {
 				// The backend's late answer is handled in a continuation of its own promise.
 				await Bun.sleep(0);
 				await settled(session);
+				const heirSent = tasksOf(heir);
 				// After a session change the backend holds the new session's list: setting it again
 				// tells it nothing. (Once deselected it is not told anyway.)
 				session.commitTodoPhases(session.getTodoPhases());
@@ -772,7 +791,40 @@ describe("todo backend", () => {
 
 				expect(beforeLateAnswer).toEqual(sentBefore);
 				expect(tasksOf(backend)).toEqual(sentBefore);
+				expect(heirSent).toEqual([]);
 			}
+		});
+
+		it("a late acceptance by a backend selected again takes the place of a list waiting for another backend", async () => {
+			const backend = tracker("tracker", true);
+			const other = tracker("other");
+			const { session } = await open([backend.extension, other.extension], "tracker");
+			session.commitTodoPhases(list("a"));
+			await settled(session);
+			const late = Promise.withResolvers<void>();
+			backend.applyHold = late.promise;
+			const deciding = backend.entered();
+			const abort = new AbortController();
+			const call = todo(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
+			await deciding;
+			abort.abort();
+			await expect(call).rejects.toThrow();
+
+			cfgTodoBackend.override(session.settings, "other");
+			const slow = Promise.withResolvers<void>();
+			other.hold = slow.promise;
+			const delivering = other.entered();
+			session.commitTodoPhases(list("a", "c"));
+			await delivering;
+			session.commitTodoPhases(list("a", "d"));
+			cfgTodoBackend.override(session.settings, "tracker");
+			late.resolve();
+			await Bun.sleep(0);
+			slow.resolve();
+			await settled(session);
+
+			expect(tasksOf(backend)).toEqual([["a"], ["a", "d"]]);
+			expect(tasksOf(other)).toEqual([["a", "c"]]);
 		});
 
 		it("as the session closes, a todo call fails without asking and a late acceptance is sent nothing", async () => {

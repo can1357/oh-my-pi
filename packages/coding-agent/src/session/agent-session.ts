@@ -625,6 +625,7 @@ import {
 	cfgTodoEnabled,
 	NATIVE_TODO_BACKEND,
 	cfgToolsApproval,
+	TODO_LIST_CHANGED_ERROR,
 } from "../tools/settings";
 import { cfgTtsrJudge } from "../export/ttsr-settings";
 
@@ -1181,8 +1182,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
-	/** The `todo` call a backend did not accept or the user aborted while it decided: not a payload to fix and retry. */
-	#todoTurnedDown: string | undefined;
+	/**
+	 * `todo` calls of this run that a backend refused or the user aborted while they waited for it:
+	 * not payloads to fix and retry. A call made from an eval cell has no result that takes its id out.
+	 */
+	#todoTurnedDown = new Set<string>();
 	/** Rows kept out of context that arrived while a run was live; drawn and saved once it ends or the next prompt starts. */
 	#pendingExcludedRows: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
@@ -4901,6 +4905,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
 			this.#activeAgentPromptGeneration = eventPromptGeneration;
+			this.#todoTurnedDown.clear();
 			// A run resumed from an unpaired assistant tail (retry of a failed tool
 			// batch) executes that turn's calls without a new message_end.
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
@@ -5251,7 +5256,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				if (toolName === "todo" && isError && toolCallId !== this.#todoTurnedDown) {
+				if (toolName === "todo" && isError && !this.#todoTurnedDown.delete(toolCallId)) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the
@@ -12137,13 +12142,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			() => this.#todo.phases,
 			signal,
 		);
-		return deciding?.then(
+		if (!deciding || toolCallId === undefined) return deciding;
+		return deciding.then(
 			why => {
-				if (why !== undefined) this.#todoTurnedDown = toolCallId;
+				// A list that changed under the call is worth the retry the reminder asks for.
+				if (why !== undefined && why !== TODO_LIST_CHANGED_ERROR) this.#todoTurnedDown.add(toolCallId);
 				return why;
 			},
 			(error: unknown) => {
-				this.#todoTurnedDown = toolCallId;
+				this.#todoTurnedDown.add(toolCallId);
 				throw error;
 			},
 		);
