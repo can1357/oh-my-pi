@@ -18,6 +18,7 @@ import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
+import astEditPhpMemberHint from "../prompts/tools/ast-edit-php-member-hint.md" with { type: "text" };
 
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { missingGrammarsNote, rerunWithGrammars } from "../utils/grammars";
@@ -38,6 +39,9 @@ import {
 import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
+
+// A PHP class member parses only inside a class body, so its pattern matches nothing at top level.
+const PHP_MEMBER_PATTERN = /^\s*(?:(?:public|protected|private|static|abstract|final)\s+)+function\b/;
 
 const astEditOpSchema = type({
 	pat: type("string").describe("ast pattern"),
@@ -358,7 +362,12 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
 					: "";
 				const grammarMessage = grammarNote ? `\n${grammarNote}` : "";
-				return toolResult(baseDetails).text(`No replacements made${parseMessage}${grammarMessage}`).done();
+				const wrapperMessage = ops.some(([pat]) => PHP_MEMBER_PATTERN.test(pat))
+					? `\n${prompt.render(astEditPhpMemberHint)}`
+					: "";
+				return toolResult(baseDetails)
+					.text(`No replacements made${wrapperMessage}${parseMessage}${grammarMessage}`)
+					.done();
 			}
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;

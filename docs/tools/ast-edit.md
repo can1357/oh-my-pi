@@ -42,7 +42,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
    - Each change renders as two lines. Hashline mode uses `-LINE:before` / `+LINE:after` under a `[PATH#TAG]` header; plain mode uses `-LINE:COLUMN before` / `+LINE:COLUMN after`.
    - Only the first line of each `before`/`after` snippet is shown, truncated to 120 characters in the wrapper.
    - `Limit reached; narrow paths.` and formatted parse issues are appended when applicable.
-- If no rewrites match, text is `No replacements made` plus formatted parse issues when present.
+- If no rewrites match, text is `No replacements made`, then for a pattern shaped like a PHP method with a modifier (such as `public function $NAME(...)`) one line naming the `class $CLS { … }` wrapper and the classes it does not match, then formatted parse issues when present.
 - `details` includes aggregate preview metadata:
    - `totalReplacements`, `filesTouched`, `filesSearched`, `applied`, `limitReached`
    - optional `parseErrors`, `parseErrorsTotal`, `scopePath`, `files`, `fileReplacements`, `displayContent`, `searchPath`, `cwd`, `meta`

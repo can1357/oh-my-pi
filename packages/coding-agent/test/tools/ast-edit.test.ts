@@ -319,4 +319,84 @@ describe("ast_edit tool schema", () => {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	// Failure mode: a PHP member pattern matches nothing at top level, and the
+	// caller reads the empty result as "no occurrences" instead of a pattern that
+	// needs a class wrapper.
+	it("hints the class wrapper when a PHP member pattern matches nothing", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-member-"));
+		try {
+			const filePath = path.join(tempDir, "Greeter.php");
+			await Bun.write(
+				filePath,
+				"<?php\nclass Greeter {\n    public function greet($name) {\n        return $name;\n    }\n}\n",
+			);
+			const queue = new ToolChoiceQueue();
+			const tools = await createTools(
+				createTestSession(tempDir, {
+					getToolChoiceQueue: () => queue,
+					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+					steer: () => {},
+				}),
+				["ast_edit"],
+			);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const member = await tool!.execute("ast-edit-php-member", {
+				ops: [
+					{ pat: "public function $NAME($$$ARGS) { $$$BODY }", out: "public function $NAME($$$ARGS) { $$$BODY }" },
+				],
+				paths: [filePath],
+			});
+			const memberText = member.content.find(content => content.type === "text")?.text ?? "";
+
+			expect((member.details as { totalReplacements?: number } | undefined)?.totalReplacements).toBe(0);
+			expect(memberText).toContain("No replacements made");
+			expect(memberText).toContain("class $CLS {");
+
+			// The wrapper the hint names rewrites the one-member class and keeps its name.
+			const wrapped = await tool!.execute("ast-edit-php-wrapper", {
+				ops: [
+					{
+						pat: "class $CLS { public function $NAME($$$ARGS) { $$$BODY } }",
+						out: "class $CLS { public function renamed($$$ARGS) { $$$BODY } }",
+					},
+				],
+				paths: [filePath],
+			});
+			expect((wrapped.details as { totalReplacements?: number } | undefined)?.totalReplacements).toBe(1);
+
+			const invoker = queue.peekPendingInvoker()!;
+			await invoker({ action: "apply", reason: "apply PHP class wrapper edit" });
+			const applied = await Bun.file(filePath).text();
+			expect(applied).toContain("class Greeter {");
+			expect(applied).toContain("public function renamed($name)");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	// Failure mode: the PHP wrapper hint leaks onto an ordinary zero-match pattern
+	// and sends the caller to rewrite a pattern that was never a class member.
+	it("does not hint a PHP class wrapper for an ordinary zero-match pattern", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-no-php-hint-"));
+		try {
+			const filePath = path.join(tempDir, "client.ts");
+			await Bun.write(filePath, "function other(a: number) {\n\treturn a;\n}\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-no-php-hint", {
+				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+				paths: [filePath],
+			});
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+
+			expect(text).toBe("No replacements made");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
 });
