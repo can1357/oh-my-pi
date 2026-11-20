@@ -162,17 +162,40 @@ const WHOLE = new RegExp(String.raw`^(?:${INTEGER})$`);
 /** The first number of a figure, its whole part and its decimals apart. */
 const WRITTEN = new RegExp(String.raw`(${INTEGER})(?:\.(\d+))?`);
 const CELL = new RegExp(
-	String.raw`^(?<approx>~|≈|<=|>=|<|>|≤|≥)?\s*(?<sign>[+\-−±])?\s*(?<cur>[$€£¥])?\s*(?<num>${NUMBER})(?<plus>\+(?=\s*[A-Za-zµμ%]))?\s*(?<unit>%|[A-Za-zµμ×]+(?:\/[A-Za-z]+)?|\/s)?(?<rest>.*)$`,
+	String.raw`^(?<approx>~|≈|<=|>=|<|>|≤|≥)?\s*(?<sign>[+\-−±])?\s*(?<cur>[$€£¥])?\s*(?<num>${NUMBER})(?<plus>\+(?=\s*[\p{L}%]))?\s*(?<unit>%|[\p{L}×]+(?:\/\p{L}+)?|\/s)?(?<rest>.*)$`,
+	"u",
 );
 const FRACTION = new RegExp(String.raw`^(${NUMBER})\s*\/\s*(${NUMBER})(?![\d/])(.*)$`);
-const RANGE_TAIL = new RegExp(String.raw`^[-–—]\s*[~≈]?\s*[$€£¥]?\s*(${NUMBER})\s*(%|[A-Za-zµμ×]+)?`);
-const ARROW_TAIL = new RegExp(String.raw`^(?:→|->|⇒)\s*[~≈]?\s*([+\-−])?\s*[$€£¥]?\s*(${NUMBER})\s*(%|[A-Za-zµμ×]+)?`);
+const RANGE_TAIL = new RegExp(String.raw`^[-–—]\s*[~≈]?\s*[$€£¥]?\s*(${NUMBER})\s*(%|[\p{L}×]+)?`, "u");
+const ARROW_TAIL = new RegExp(
+	String.raw`^(?:→|->|⇒)\s*[~≈]?\s*([+\-−])?\s*[$€£¥]?\s*(${NUMBER})\s*(%|[\p{L}×]+)?`,
+	"u",
+);
 /** The stated spread after a value: `± 0.69`, `±.074`, `(±0.16)`, `± 2.9 t/s`. */
-const ERROR_TAIL = new RegExp(String.raw`^\(?\s*±\s*(${NUMBER})\s*(%|[A-Za-zµμ]+(?:\/[A-Za-z]+)?)?\s*\)?$`);
+const ERROR_TAIL = new RegExp(String.raw`^\(?\s*±\s*(${NUMBER})\s*(%|\p{L}+(?:\/\p{L}+)?)?\s*\)?$`, "u");
 const COMPOUND_DURATION =
 	/^(?:(\d+(?:\.\d+)?)\s*d)?\s*(?:(\d+(?:\.\d+)?)\s*h)?\s*(?:(\d+(?:\.\d+)?)\s*m(?:in)?)?\s*(?:(\d+(?:\.\d+)?)\s*s)?$/;
 const DATE =
 	/^\d{4}-\d{2}(?:-\d{2})?(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?\b|^\d{1,2}\/\d{1,2}\/\d{2,4}$|^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b/i;
+/**
+ * Month names a day-first date writes, as whole words: English, Polish, German and French, full and abbreviated. Polish
+ * takes the genitive a dated day uses (`9 października`).
+ */
+const DAY_FIRST_MONTHS = [
+	"january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec", // English
+	"sty|lut|kwi|maj|cze|lip|sie|wrz|paź|lis|gru|stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|września|października|listopada|grudnia", // Polish
+	"januar|februar|märz|mai|juni|juli|oktober|dezember|mär|okt|dez", // German
+	"janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre|janv|févr|avr|juil|déc", // French
+].join("|");
+/**
+ * A day-first date: a day or a day range, a month name as a whole word, then the end, a bracket or comma, a second
+ * date or a year (`9 Oct`, `31 paź – 1 lis`, `5 lis (zmiana), potem 14–15 lis`, `9 października 2026`). Other prose after
+ * the month (`3 may fail`) leaves a count.
+ */
+const DAY_FIRST = new RegExp(
+	String.raw`^\d{1,2}\.?(?:\s*[-–—]\s*\d{1,2}\.?)?(?:\.\s*|\s+)(?:${DAY_FIRST_MONTHS})\.?(?=$|\s*[(,;]|\s*[-–—]\s*\d|\s+\d{4}(?!\d))`,
+	"iu",
+);
 const TIME = /^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\s*(?:am|pm)?$/i;
 const VERSION = /^v?\d+\.\d+\.\d+|^v\d/i;
 /** `#12`, a bare hex hash, a hash leading its subject (`42e18af0 (Responses API)`), `PR #3`, `L42`. */
@@ -180,8 +203,8 @@ const IDENTIFIER =
 	/^(?:#\d+|[0-9a-f]{7,40}$|(?=[0-9a-f]{7,40}\s)(?=\d*[a-f])(?=[a-f]*\d)[0-9a-f]{7,40}\s|PR\s*#?\d+|L\d+\b)/i;
 /** One number of a slash list or a sum, as written: estimate mark, sign, currency, number, unit or noun. */
 const ITEM = new RegExp(
-	String.raw`(?<approx>[~≈])?\s*(?<sign>[+\-−])?\s*(?<cur>[$€£¥])?\s*(?<num>${NUMBER})\s*(?<unit>%|[A-Za-zµμ×]+(?:\/[A-Za-z]+)?)?`,
-	"y",
+	String.raw`(?<approx>[~≈])?\s*(?<sign>[+\-−])?\s*(?<cur>[$€£¥])?\s*(?<num>${NUMBER})\s*(?<unit>%|[\p{L}×]+(?:\/\p{L}+)?)?`,
+	"uy",
 );
 /** Between the items of a slash list (`79 / 124 µs`, `9/47/85`). */
 const LIST_SEPARATOR = /\s*\/\s*/y;
@@ -274,8 +297,9 @@ const STATUS_MARKS: readonly (readonly [RegExp, Status])[] = [
 	[/^[⚠🟡]/u, "warn"],
 	[/^[⏳🕐]/u, "pending"],
 ];
+/** A leading status word; `ok.` before a number (`ok. 5–6 gru`, Polish "about") is not a verdict. */
 const STATUS_WORD = new RegExp(
-	String.raw`^(?:${Object.keys(STATUS_WORDS)
+	String.raw`^(?!ok\.\s*\d)(?:${Object.keys(STATUS_WORDS)
 		.sort((a, b) => b.length - a.length)
 		.join("|")})(?![\w-])`,
 	"i",
@@ -416,7 +440,7 @@ export function parseCell(markdown: string): Cell {
 	const emphasis = plain.emphasis;
 	const other = (kind: OtherCell["kind"]): OtherCell => ({ kind, text: plain.text, emphasis });
 	if (Object.hasOwn(MISSING, text.toLowerCase())) return other("missing");
-	if (DATE.test(text)) return other("date");
+	if (DATE.test(text) || DAY_FIRST.test(text)) return other("date");
 	if (TIME.test(text)) return other("time");
 	if (VERSION.test(text)) return other("version");
 	if (IDENTIFIER.test(text) || ZERO_PADDED.test(text)) return other("id");
@@ -526,7 +550,7 @@ export function parseCell(markdown: string): Cell {
 		const to = sign * toNumber(arrow[2]!) * tailFactor(arrow[3], factor);
 		return { ...cell, fit: "arrow", to, toFigure: arrow[0].replace(/^(?:→|->|⇒)\s*/, "").trim() };
 	}
-	if (/^\(.*\)$/.test(rest) || /^[A-Za-z][\w-]{0,11}$/.test(rest)) return { ...cell, fit: "note" };
+	if (SHORT_NOTE.test(rest)) return { ...cell, fit: "note" };
 	return { ...cell, fit: "prose" };
 }
 
@@ -616,8 +640,8 @@ function itemUnits(items: readonly Item[]): { dim: Dimension; factors: number[];
 	return { dim: dim ?? "count", factors, unit: lead?.currency || lead?.unit || "" };
 }
 
-/** Text after a list or a sum that only annotates it: nothing, a parenthetical, or one short word (`(45 total)`, `pass`). */
-const SHORT_NOTE = /^$|^\(.*\)$|^[A-Za-z][\w-]{0,11}$/;
+/** Text after a value, a list or a sum that only annotates it: nothing, a parenthetical, or one short word (`(45 total)`, `pass`). */
+const SHORT_NOTE = /^$|^\(.*\)$|^\p{L}[\p{L}\d_-]{0,11}$/u;
 /** What a list or sum cell shares with any cell: its text and emphasis. */
 type CellBase = Pick<NumberCell, "emphasis" | "text">;
 
@@ -1187,7 +1211,7 @@ const MIN_LISTS = 2;
 /** A spaced slash between list items. */
 const LIST_SLASH = /\s+\/\s+/;
 /** A list item that is one number, as written (`12`, `~1,400`, `3.5 ms`, `40%`). */
-const LISTED_NUMBER = new RegExp(String.raw`^[~≈]?[$€£¥]?(?:${INTEGER})(?:\.\d+)?\s*(?:%|[A-Za-zµμ]+)?$`);
+const LISTED_NUMBER = new RegExp(String.raw`^[~≈]?[$€£¥]?(?:${INTEGER})(?:\.\d+)?\s*(?:%|\p{L}+)?$`, "u");
 
 /**
  * Rows folding several rows into one (`response anthropic / chat / responses /
@@ -1398,7 +1422,7 @@ function resolveMinutes(cells: Cell[]): Cell[] {
 }
 
 /** The word a bare count names after its figure (`4 new (45 total)` → `new`, `371 entries`). */
-const COUNTED_NOUN = /^\s*([A-Za-z][A-Za-z-]*)/;
+const COUNTED_NOUN = /^\s*(\p{L}[\p{L}-]*)/u;
 
 /**
  * Counts of another thing than most of the column's (`371 entries` among `4

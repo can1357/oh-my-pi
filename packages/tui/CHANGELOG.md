@@ -28,6 +28,7 @@
 - Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there
 - `ask` HTML forms keep a prefilled or hidden control named `__proto__` in their default data, so a timed-out form no longer drops it ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
 - An ask form with one question submits on one Enter instead of stopping on Submit first
+- Fixed table charts plotting day numbers from day-first dates (`9 Oct`, `3–4 paź`) as measures: such columns now read as dates, units and nouns with non-ASCII letters (`zł`) stay whole, and `ok. 5–6 gru` no longer reads as a passing status ([#16331](https://github.com/can1357/oh-my-pi/issues/16331))
 
 ## [19.0.1] - 2026-11-19
 
