@@ -713,6 +713,32 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get(id)).not.toBe(ref);
 	});
 
+	it("rejects park waiters and new callers while a plain release disposes the session", async () => {
+		const id = "RemoveWhileParking";
+		const disposing = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const original = makeSessionStub(() => {
+			disposing.resolve();
+			return finish.promise;
+		});
+		const ref = registerIdleSub(id, original.session);
+		lifecycle.adopt(id, { idleTtlMs: 0 }, ref);
+
+		const parking = lifecycle.park(id);
+		const waiter = lifecycle.ensureLive(id);
+		const removing = lifecycle.release(id, ref);
+		try {
+			await expect(waiter).rejects.toThrow(/changed while waiting/);
+			await disposing.promise;
+			await expect(lifecycle.ensureLive(id)).rejects.toThrow(/still shutting down/);
+		} finally {
+			finish.resolve();
+			await Promise.all([parking, removing]);
+		}
+		expect(original.disposeCalls()).toBe(1);
+		expect(registry.get(id)).toBeUndefined();
+	});
+
 	it("a kill waiting for a detached park does not fence a replacement with the same id", async () => {
 		const id = "KillReplacedPark";
 		const disposing = Promise.withResolvers<void>();
