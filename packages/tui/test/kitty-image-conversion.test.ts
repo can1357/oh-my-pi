@@ -4,6 +4,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { Image } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
@@ -278,5 +279,25 @@ describe("Kitty PNG conversion cache", () => {
 		expect(assistant.isTranscriptBlockPending()).toBe(false);
 		const batch = transcript.peekFinalizedBatch(80, 5);
 		expect(batch?.rows.join("\n")).toContain("\x1b_G");
+	});
+});
+
+describe("Image component Kitty format", () => {
+	afterEach(() => {
+		setTerminalImageProtocol(originalProtocol);
+	});
+
+	it("sends a non-PNG source as PNG, not raw bytes Kitty cannot decode", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const webp = (await new Bun.Image(Buffer.from(IMAGE.data, "base64")).resize(7, 5).webp().bytes()).toBase64();
+		const landed = Promise.withResolvers<void>();
+		// No budget: a direct `a=T` placement, as extensions build it.
+		const image = new Image(webp, "image/webp", { fallbackColor: text => text }, { requestRender: landed.resolve });
+
+		expect(image.render(80).join("")).not.toContain("\x1b_G");
+		await landed.promise;
+		const drawn = image.render(80).join("");
+		expect(drawn).toContain("\x1b_Ga=T,f=100");
+		expect(drawn).toContain(";iVBORw0KGgo");
 	});
 });
