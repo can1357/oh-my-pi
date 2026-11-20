@@ -134,6 +134,7 @@ import lengthStopRetryTemplate from "../prompts/system/length-stop-retry.md" wit
 
 import {
 	type CompactionSettings,
+	cfgAutoCompactionEnabled,
 	cfgCompactionAutoContinue,
 	cfgCompactionEnabled,
 	cfgCompactionMethodOrder,
@@ -6999,9 +7000,6 @@ export class SessionMaintenance {
 
 	/** Whether automatic maintenance has an enabled method to run. */
 	get autoCompactionEnabled(): boolean {
-		return (
-			cfgCompactionEnabled.get(this.#host.settings) &&
-			resolveCompactionMethodOrder(cfgCompactionMethodOrder.get(this.#host.settings)).length > 0
-		);
+		return cfgAutoCompactionEnabled.get(this.#host.settings);
 	}
 }

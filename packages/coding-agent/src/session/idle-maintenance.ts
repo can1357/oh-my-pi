@@ -25,8 +25,10 @@ import {
 } from "./context-settings";
 import { isSessionSettled, type SessionSettleState } from "./session-settle";
 
-/** Probes the owner of the session supplies. Both are re-read whenever work could start. */
+/** Owner controls for autonomous idle work. Probes are re-read whenever work could start. */
 export interface IdleMaintenanceOptions {
+	/** Set false to disable idle recaps while retaining idle compaction. Defaults to true. */
+	recap?: boolean;
 	/** True while the owner does not want autonomous work (a draft being composed, the view left, startup unfinished). */
 	isBlocked?: () => boolean;
 	/** True while the owner has decided to start a turn it has not yet admitted (for example a scheduled goal continuation). */
@@ -139,8 +141,11 @@ export class IdleMaintenance {
 				break;
 			case "agent_end":
 				this.invalidate();
-				// Nothing was generated to recap: the stretch owes no recap, however its blockers change later.
-				this.#pending = { recap: priorMessageWasGenerated(event.messages), compaction: true };
+				// A generated reply owes a recap only when the owner enables recaps for this scheduler.
+				this.#pending = {
+					recap: this.#options.recap !== false && priorMessageWasGenerated(event.messages),
+					compaction: true,
+				};
 				this.#schedule();
 				break;
 		}
@@ -170,7 +175,7 @@ export class IdleMaintenance {
 	}
 
 	#recapWanted(): boolean {
-		return cfgRecap.get(this.#session.settings).enabled && !this.#isBlocked() && this.#isSettled();
+		return cfgRecap.get(this.#session.settings).enabled && !this.#isBlocked() && !this.#isSettled();
 	}
 
 	#contextTokens(): number {

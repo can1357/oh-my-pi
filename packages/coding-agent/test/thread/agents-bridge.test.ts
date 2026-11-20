@@ -242,6 +242,21 @@ describe("agent bridging across subagent workers", () => {
 		await remote.dispose();
 	});
 
+	it("honors the recap opt-out through a worker-backed session handle", async () => {
+		const { probe } = await startWorker();
+		await probe.open("idle", { idleMaintenance: true });
+		const remote = mirrorOf(liveRef("idle").session);
+		remote.enableIdleMaintenance({ recap: false });
+		let compactionStarts = 0;
+		remote.subscribe(event => {
+			if (event.type === "auto_compaction_start") compactionStarts++;
+		});
+		await remote.prompt("first");
+		await remote.prompt("second");
+		await waitFor(() => compactionStarts > 0);
+		expect(await probe.recapCalls("idle")).toBe(0);
+	});
+
 	it("parks a worker-homed session and warm-revives it through the worker's reviver", async () => {
 		const { worker, probe } = await startWorker();
 		const key = await probe.open("W1", { sessionFile: "/tmp/agents-bridge-revive.jsonl" });

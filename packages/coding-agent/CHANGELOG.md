@@ -84,6 +84,7 @@
 - In native terminal hosts such as Tern, clicking the usage segment in the composer's status bar (the 5h/7d limits) opens `/usage`
 - Turning Tern's Agents tray setting off (or on) switches running sessions between the tray's cards and the running agents and jobs counters over the composer at once, without restarting omp
 - `snapcompactShape` on `models.yml` models, `modelOverrides` and extension `registerProvider` models sets that model's snapcompact frame shape ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
+- Added support for the `compaction.idle*` settings in RPC sessions, so idle compaction can run after a session settles. In RPC, `set_auto_compaction(false)` disables both threshold and idle automatic compaction without aborting a run already in progress ([#19820](https://github.com/can1357/oh-my-pi/pull/19820) by [@thmtz](https://github.com/thmtz))
 
 ### Fixed
 
