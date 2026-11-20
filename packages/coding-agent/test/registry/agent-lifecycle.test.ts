@@ -372,6 +372,37 @@ describe("AgentLifecycleManager", () => {
 		expect(revived.disposeCalls()).toBe(1);
 	});
 
+	it("keeps the replacement agent parkable when a stale cold-revive factory finishes", async () => {
+		const id = "ReplacedDuringColdRevive";
+		registry.register({
+			id,
+			displayName: id,
+			kind: "sub",
+			status: "parked",
+			sessionFile: "/old.jsonl",
+			session: null,
+		});
+		const ready = Promise.withResolvers<void>();
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				await ready.promise;
+				return async () => makeSessionStub().session;
+			},
+			() => 0,
+		);
+
+		const stale = lifecycle.ensureLive(id);
+		const live = makeSessionStub();
+		const replacement = registerIdleSub(id, live.session);
+		lifecycle.adopt(id, { idleTtlMs: 0 }, replacement);
+		ready.resolve();
+
+		await expect(stale).rejects.toThrow(/changed/);
+		await lifecycle.park(id);
+		expect(replacement.status).toBe("parked");
+		expect(live.disposeCalls()).toBe(1);
+	});
+
 	it("a persisted factory that declines leaves the parked ref transcript-only", async () => {
 		registry.register({
 			id: "7-Sub",
