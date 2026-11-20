@@ -40,8 +40,6 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
   - macOS dates are local ISO-8601, the form `setValue` takes.
   - A macOS slider, stepper or other number control takes `setValue(75)` or `setValue("0.5")` (plain decimal); when the app clamps or rounds it,
     the call throws `AxFailed` naming the value it settled on. One whose value is not settable names the `AXIncrement`/`AXDecrement` actions to step it.
-  - On Windows, a windowless slider takes `setValue("0.5")` with plain decimal text within its range; a combo box or list takes an exact exposed item name.
-    Its window must already be in front; `setValue` does not take over. A multiple-selection list refuses if selecting would replace other selected items; press the item or select via click instead.
   - A letter sent to a focused macOS popup button may choose an option without opening the menu; the next read of that popup waits up to 1.5 s
     for it. To choose an option, use `menu:`; when the user's setting refuses takeover, it refuses `menu:` too (below).
   - On macOS a long value shows its first 200 characters and ends `… (+N chars; (await computer.ref("eN")).value())`; that call returns it whole.
@@ -234,7 +232,7 @@ await win.click(120, 48, button="right")
 - Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it.
 - When the user's setting refuses takeover, `perform("open")`, `perform("showMenu")`
   and every other spelling `perform()` takes for `AXOpen` and `AXShowMenu` are refused too.
-- On macOS or Windows, `AxUnconfirmed` means an AX action may already have taken effect.
+- On macOS, `AxUnconfirmed` means an AX action may already have taken effect.
   Inspect fresh AX or a screenshot before repeating it; NEVER retry blindly.
 - `UserIntervened` (macOS or X11): the user kept typing or clicking until the takeover's admission deadline, so no takeover started;
   on macOS they also came to that app, or typed or clicked in it; on X11 they pressed a key or button during takeover.
