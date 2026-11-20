@@ -747,7 +747,7 @@ describe("computer prelude", () => {
 		);
 		await prelude.invoke({ action: "call", chain: [{ method: "press", args: ["cmd+s"] }], timeout: 9 }, context);
 		expect(calls[2]).toMatchObject({
-			code: 'return await (await desktop.window("42")).ax({"maxDepth":3});',
+			code: 'return await desktop.windowAccess("42").ax({"maxDepth":3});',
 			snapshot: { readOnly: true },
 		});
 		expect(calls[3]).toMatchObject({
@@ -4452,6 +4452,78 @@ describe("display hold follows the agent turn", () => {
 		await run;
 		expect(native.displayHolds).toEqual(["turn"]);
 		await supervisor.close();
+	});
+});
+
+describe("retained window menu", () => {
+	it.each(["menu.items", "menu.select"])(
+		"passes %s the original id after its window leaves the listing",
+		async (method: string) => {
+			const native = new FakeNativeSession();
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => native);
+			const handle = await runWorker(
+				transport,
+				"get-window",
+				renderComputerCall([{ method: "window", args: ["42"] }]),
+			);
+			if (!handle.ok) throw new Error(handle.error.message);
+			const { id } = handle.payload.returnValue as { id: string };
+			native.listWindows = async () => [{ ...windowFixture, id: "43" }];
+			const unavailable = (target: string): never => {
+				throw new Error(`WindowUnavailable: window '${target}' is minimized`);
+			};
+			native.menuItems = async target => unavailable(target);
+			native.menuSelect = async target => unavailable(target);
+			const chain = [
+				{ method: "window", args: [id] },
+				{ method, args: [["Window"]] },
+			];
+			const result = await runWorker(
+				transport,
+				"held-menu",
+				renderComputerCall(chain),
+				isReadOnlyComputerCall(chain),
+			);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error.message).toContain("WindowUnavailable: window '42' is minimized");
+		},
+	);
+
+	it("propagates loss of the window while expanding a submenu", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		native.menuItems = async (id, path = []) => {
+			if (path.length > 1) throw new Error(`WindowUnavailable: window '${id}' is minimized`);
+			return [{ title: "Tabs", path: [...path, "Tabs"], enabled: true, checked: false, hasSubmenu: true }];
+		};
+		const chain = [
+			{ method: "window", args: ["42"] },
+			{ method: "menu.items", args: [["Window"]] },
+		];
+		const result = await runWorker(transport, "menu-tree", renderComputerCall(chain));
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.message).toContain("WindowUnavailable: window '42' is minimized");
+	});
+
+	it("keeps the retained window's AX reads working without admitting pointer input", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const root = { method: "window", args: ["42"] };
+		const handle = await runWorker(transport, "get-window", renderComputerCall([root]));
+		expect(handle.ok).toBe(true);
+		native.listWindows = async () => [{ ...windowFixture, id: "43" }];
+		native.axSnapshot = async id => ({ text: `AX root ${id}` });
+		native.axQuery = async id => [{ ...axNode, title: `AX child ${id}` }];
+		const read = await runWorker(transport, "snapshot", renderComputerCall([root, { method: "ax", args: [] }]), true);
+		expect(read.ok && read.payload.returnValue).toBe("AX root 42");
+		const find = await runWorker(transport, "find", renderComputerCall([root, { method: "find", args: [{}] }]), true);
+		expect(find.ok && find.payload.returnValue).toMatchObject([{ title: "AX child 42" }]);
+		const click = await runWorker(transport, "click", renderComputerCall([root, { method: "click", args: [1, 2] }]));
+		expect(click.ok).toBe(false);
+		expect(native.clickCount).toBe(0);
 	});
 });
 

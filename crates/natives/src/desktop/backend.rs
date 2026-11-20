@@ -258,6 +258,15 @@ pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>>;
+	/// A minimized window's exact accessibility root, for inspection only.
+	/// This never adds a window to the roster used for input or menu dispatch.
+	fn minimized_root(
+		&mut self,
+		_id: &str,
+		_retained: Option<&AxHandle>,
+	) -> CoreResult<Option<super::ax::WindowRoot>> {
+		Ok(None)
+	}
 	/// The process owning window `id`, found even when the window is off the
 	/// current Space, without listing every window.
 	#[cfg(target_os = "macos")]

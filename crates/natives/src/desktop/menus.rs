@@ -15,6 +15,12 @@ pub struct DesktopMenuItem {
 	pub shortcut:    Option<String>,
 }
 
+pub(super) fn minimized_window(id: &str) -> DesktopError {
+	DesktopError::window_unavailable(format!(
+		"window '{id}' is minimized; its menu requires a visible window"
+	))
+}
+
 pub(crate) fn validate_path(path: &[String], allow_empty: bool) -> CoreResult<()> {
 	if (!allow_empty && path.is_empty()) || path.len() > 32 {
 		return Err(DesktopError::invalid_target("menu path must contain 1..32 labels"));

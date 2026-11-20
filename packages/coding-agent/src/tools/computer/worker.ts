@@ -1186,8 +1186,86 @@ class ElRef implements PromiseLike<El> {
 	}
 }
 
-class Win {
+/** Methods whose native target is the exact window id, not the result of a new visible-window search. */
+class WindowAccess {
 	readonly id: string;
+	readonly #session: NativeDesktopSession;
+	readonly #getContext: RunContextAccessor;
+
+	constructor(session: NativeDesktopSession, getContext: RunContextAccessor, id: string) {
+		this.#session = session;
+		this.#getContext = getContext;
+		this.id = id;
+	}
+
+	get menu() {
+		return {
+			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
+				const context = this.#getContext();
+				// On macOS the read makes the window key first, so it is not inspection-only.
+				guardRun(context, "menu.items");
+				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
+				const segments =
+					path.length <= 1 && path[0] === undefined
+						? undefined
+						: menuPath("menu.items", path, { allowEmpty: true });
+				const items = await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+				return segments?.length ? await this.#menuTree(items, context.signal) : items;
+			},
+			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
+				const context = this.#getContext();
+				guardRun(context, "menu.select");
+				const segments = menuPath("menu.select", path);
+				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
+			},
+		};
+	}
+
+	async #menuTree(items: MenuItem[], signal: AbortSignal): Promise<MenuItem[]> {
+		const listed: MenuItem[] = [];
+		let budget = MENU_TREE_LIMIT - items.length;
+		const visit = async (level: MenuItem[]): Promise<void> => {
+			for (const item of level) {
+				listed.push(item);
+				if (!item.hasSubmenu || !item.enabled || budget <= 0) continue;
+				let children: MenuItem[];
+				try {
+					children = await nativeCall(signal, () => this.#session.menuItems(this.id, item.path));
+				} catch (error) {
+					// A refusal or AX timeout stops expansion, but keeps discovered paths available.
+					if (error instanceof ToolError && MENU_TREE_SKIPPABLE.some(code => error.message.startsWith(code))) {
+						budget = 0;
+						continue;
+					}
+					throw error;
+				}
+				if (children.length > budget) continue;
+				budget -= children.length;
+				await visit(children);
+			}
+		};
+		await visit(items);
+		return listed;
+	}
+
+	async ax(options?: AxOptions): Promise<string> {
+		strictOptions(options, axOptionsKeys, "ax");
+		const { signal } = this.#getContext();
+		return (await nativeCall(signal, () => this.#session.axSnapshot(this.id, options))).text;
+	}
+
+	async find(query: AxQuery): Promise<El[]> {
+		strictOptions(query, axQueryKeys, "find");
+		const { signal } = this.#getContext();
+		return foundElements(
+			(await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
+				node => new El(this.#session, this.#getContext, node),
+			),
+		);
+	}
+}
+
+class Win extends WindowAccess {
 	readonly app: string;
 	readonly title: string;
 	readonly pid?: number;
@@ -1197,9 +1275,9 @@ class Win {
 	readonly #getContext: RunContextAccessor;
 
 	constructor(session: NativeDesktopSession, getContext: RunContextAccessor, window: DesktopWindow) {
+		super(session, getContext, window.id);
 		this.#session = session;
 		this.#getContext = getContext;
-		this.id = window.id;
 		this.app = window.app;
 		this.title = window.title;
 		this.pid = window.pid;
@@ -1435,56 +1513,6 @@ class Win {
 		};
 	}
 
-	get menu() {
-		return {
-			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
-				const context = this.#getContext();
-				// On macOS the read makes the window key first, so it is not inspection-only.
-				guardRun(context, "menu.items");
-				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
-				const segments =
-					path.length <= 1 && path[0] === undefined
-						? undefined
-						: menuPath("menu.items", path, { allowEmpty: true });
-				const items = await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
-				return segments?.length ? await this.#menuTree(items, context.signal) : items;
-			},
-			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
-				const context = this.#getContext();
-				guardRun(context, "menu.select");
-				const segments = menuPath("menu.select", path);
-				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
-			},
-		};
-	}
-
-	async #menuTree(items: MenuItem[], signal: AbortSignal): Promise<MenuItem[]> {
-		const listed: MenuItem[] = [];
-		let budget = MENU_TREE_LIMIT - items.length;
-		const visit = async (level: MenuItem[]): Promise<void> => {
-			for (const item of level) {
-				listed.push(item);
-				if (!item.hasSubmenu || !item.enabled || budget <= 0) continue;
-				let children: MenuItem[];
-				try {
-					children = await nativeCall(signal, () => this.#session.menuItems(this.id, item.path));
-				} catch (error) {
-					// A refusal or AX timeout stops expansion, but keeps discovered paths available.
-					if (error instanceof ToolError && MENU_TREE_SKIPPABLE.some(code => error.message.startsWith(code))) {
-						budget = 0;
-						continue;
-					}
-					throw error;
-				}
-				if (children.length > budget) continue;
-				budget -= children.length;
-				await visit(children);
-			}
-		};
-		await visit(items);
-		return listed;
-	}
-
 	async bringToCurrentSpace(): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "bringToCurrentSpace");
@@ -1502,22 +1530,6 @@ class Win {
 			`window ${this.id}`,
 		);
 		await nativeCall(context.signal, () => this.#session.raiseWindow(this.id));
-	}
-
-	async ax(options?: AxOptions): Promise<string> {
-		strictOptions(options, axOptionsKeys, "ax");
-		const { signal } = this.#getContext();
-		return (await nativeCall(signal, () => this.#session.axSnapshot(this.id, options))).text;
-	}
-
-	async find(query: AxQuery): Promise<El[]> {
-		strictOptions(query, axQueryKeys, "find");
-		const { signal } = this.#getContext();
-		return foundElements(
-			(await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
-				node => new El(this.#session, this.#getContext, node),
-			),
-		);
 	}
 
 	ref(ref: string): ElRef {
@@ -2005,6 +2017,13 @@ export class ComputerWorkerCore {
 			focused: false,
 		});
 		return {
+			// Direct helpers from both preludes already carry the id from a resolved handle.
+			windowAccess: (id: string): WindowAccess => {
+				validateString(id, "window id", { nonEmpty: true });
+				if (id.toLowerCase() === "desktop" || id.startsWith("display:"))
+					throw new ToolError("Expected a window id");
+				return new WindowAccess(session, getContext, id);
+			},
 			capabilities: (): DesktopCapabilities => {
 				const { signal } = getContext();
 				throwIfAborted(signal);
