@@ -26,9 +26,11 @@ export class SentToolDefinitions {
 	/**
 	 * `context` with {@link Context.inactiveTools} set to the definitions for names the latest
 	 * `requestControls.tools.declared` in its messages holds that are not in its `tools`; cleared when
-	 * there are none or the request declares no tools. Names never sent by this Agent are skipped: the
-	 * provider drops them from the declaration. Before any request declared tools, `standby` (minus
-	 * active names) stands in, so the first declaration already holds tools that may activate later.
+	 * there are none or the request declares no tools. A declared name this Agent never sent takes its
+	 * `standby` definition (a resumed transcript declares standby tools a fresh process has not sent);
+	 * names with neither are skipped, and the provider drops them from the declaration. Before any
+	 * request declared tools, `standby` (minus active names) stands in, so the first declaration
+	 * already holds tools that may activate later.
 	 */
 	withInactiveTools(context: Context, standby?: readonly Tool[]): Context {
 		const inactiveTools = context.tools?.length
@@ -52,7 +54,7 @@ export class SentToolDefinitions {
 		if (declared) {
 			for (const name of declared) {
 				if (activeNames.has(name)) continue;
-				const tool = this.#byName.get(name);
+				const tool = this.#byName.get(name) ?? standby?.find(candidate => candidate.name === name);
 				if (tool) inactive.push(tool);
 			}
 		} else if (standby) {

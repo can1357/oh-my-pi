@@ -98,6 +98,32 @@ describe("Agent — inactive tool definitions", () => {
 		expect(transformed[2]?.inactiveTools).toEqual([sentGrep]);
 	});
 
+	it("re-declares a standby tool a resumed transcript declared, though this Agent never sent it", async () => {
+		const contexts: Context[] = [];
+		const agent = new Agent({
+			initialState: {
+				model: createMockModel({ responses: [] }),
+				systemPrompt: ["system"],
+				tools: [agentTool("read")],
+				messages: [
+					{ role: "user", content: "earlier", timestamp: 1 },
+					reply({ messageIndex: 1, tools: { declared: ["read", "goal"], deferred: ["goal"], active: ["read"] } }),
+				],
+			},
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: reply() }));
+				return stream;
+			},
+		});
+		agent.setStandbyTools([agentTool("goal")]);
+
+		await agent.prompt("resumed");
+
+		expect(contexts[0]?.inactiveTools?.map(tool => tool.name)).toEqual(["goal"]);
+	});
+
 	it("supplies a standby tool before the first declaration, then sends it once active as it was declared", async () => {
 		const contexts: Context[] = [];
 		const declared = { declared: ["read", "goal"], deferred: ["goal"], active: ["read"] };

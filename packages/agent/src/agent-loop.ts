@@ -2059,11 +2059,11 @@ async function prepareProviderCall(
 			tools: normalizeTools(context.tools, toolOptions),
 		};
 	}
-	// Normalized like `tools`, so a standby tool's definition matches the one it is sent with once active.
-	const standbyTools = normalizeTools(context.standbyTools, toolOptions);
 	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
-	// re-declares; recomputed below against what the transform returns.
+	// re-declares; recomputed below against what the transform returns. Standby tools are normalized like
+	// `tools`, so a standby tool's definition matches the one it is sent with once active.
 	if (config.sentToolDefinitions) {
+		const standbyTools = normalizeTools(context.standbyTools, toolOptions);
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, standbyTools);
 	}
 	if (config.transformProviderContext) {
