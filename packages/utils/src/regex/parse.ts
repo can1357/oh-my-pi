@@ -22,6 +22,7 @@ import {
 	type UnitSet,
 	unitRange,
 } from "./alphabet";
+import { StringAtom } from "./string-atom";
 
 /** A zero-width assertion an automaton can check from the neighbouring code units. */
 export type AssertKind = "start" | "end" | "word" | "nonword" | "boundary";
@@ -33,6 +34,8 @@ export type RegexNode =
 	 * the exact code unit of a literal, which needs no oracle without `i`.
 	 */
 	| { type: "unit"; source: string; code?: number; ignoreCase?: boolean; dotAll?: boolean; set?: UnitSet }
+	/** A `v` property of strings or a class using one. */
+	| { type: "string"; atom: StringAtom }
 	| { type: "seq"; items: RegexNode[] }
 	| { type: "alt"; options: RegexNode[] }
 	/** `max` is `Infinity` for unbounded quantifiers. */
@@ -63,6 +66,8 @@ export function nullable(node: RegexNode): boolean {
 	switch (node.type) {
 		case "unit":
 			return false;
+		case "string":
+			return node.atom.nullable;
 		case "seq":
 			return node.items.every(nullable);
 		case "alt":
@@ -298,12 +303,13 @@ function readUnicodeEscape(source: string, start: number, unicode: boolean): { c
 }
 
 /** Only `v` recognizes properties of strings. Use the engine's property names, not a Unicode snapshot. */
-function requireCodePointProperty(source: string): void {
+function isStringProperty(source: string): boolean {
 	try {
 		new RegExp(source, "u");
+		return false;
 	} catch (error) {
 		if (!(error instanceof SyntaxError)) throw error;
-		throw new UnsupportedPatternError(`v-mode property of strings: ${source}`);
+		return true;
 	}
 }
 
@@ -364,8 +370,9 @@ function readClassString(
  * Projection distributes over set operations, so preserving the syntax leaves the engine in
  * charge of deciding membership. Without string properties, any other member must originate
  * in a `\q` operand; intersection and subtraction cannot create new strings.
+ * A string property makes the projection incomplete, so leave the atom intact.
  */
-function inspectUnicodeSet(source: string): { points: string; strings?: Map<string, number> } {
+function inspectUnicodeSet(source: string): { points: string; strings?: Map<string, number> } | undefined {
 	let strings: Map<string, number> | undefined;
 	let points = "";
 	let copied = 0;
@@ -374,7 +381,7 @@ function inspectUnicodeSet(source: string): { points: string; strings?: Map<stri
 		const escape = source[++index];
 		if (escape === "p" || escape === "P") {
 			const end = source.indexOf("}", index + 2);
-			requireCodePointProperty(source.slice(index - 1, end + 1));
+			if (isStringProperty(source.slice(index - 1, end + 1))) return undefined;
 			index = end;
 		} else if (escape === "q") {
 			const start = index - 1;
@@ -545,10 +552,10 @@ class Parser {
 			if (this.#unicodeSets && source[0] === "[") {
 				node = this.#lowerSet(source, flags);
 			} else {
-				if (this.#unicodeSets && (source.startsWith("\\p{") || source.startsWith("\\P{"))) {
-					requireCodePointProperty(source);
-				}
-				node = lowerUnit(source, flags, code);
+				node =
+					this.#unicodeSets && (source.startsWith("\\p{") || source.startsWith("\\P{")) && isStringProperty(source)
+						? { type: "string", atom: new StringAtom(source, flags) }
+						: lowerUnit(source, flags, code);
 			}
 			this.#lowered.set(key, node);
 		}
@@ -556,7 +563,9 @@ class Parser {
 	}
 
 	#lowerSet(source: string, flags: string): RegexNode {
-		const { points, strings } = inspectUnicodeSet(source);
+		const inspected = inspectUnicodeSet(source);
+		if (!inspected) return { type: "string", atom: new StringAtom(source, flags) };
+		const { points, strings } = inspected;
 		const single = lowerUnit(points, flags, undefined);
 		if (!strings) return single;
 

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+	compileAsciiKernel,
 	compileKernel,
 	FIND,
 	load,
@@ -30,6 +31,28 @@ test("a fragmented ASCII self-loop stops before the first FIND match or unknown 
 			expect(runKernel(kernel, layout, FIND, 0, at, 0, undefined, 0)).toBe(at);
 			expect(stoppedState()).toBe(0);
 		}
+	}
+});
+
+test("an ASCII projection preserves high class IDs, branch state, and unknown transitions", () => {
+	const width = 2_205;
+	const classes = new Uint16Array(128).fill(2_200);
+	classes[0x40] = 2_201; // '@' moves to state 1.
+	classes[0x21] = 2_202; // '!' is unknown in either state.
+	const transitions = new Int32Array(2 * width).fill(-1);
+	transitions[2_200] = 0;
+	transitions[2_201] = 2;
+	transitions[width + 2_200] = 1;
+	const kernel = compileAsciiKernel(FIND, 2, width, transitions, classes);
+	const prefix = "ordinary prose ".repeat(20);
+	for (const suffix of ["@x", "@!"]) {
+		const text = prefix + suffix;
+		const layout = load(text, text.length);
+		if (layout === -1 || !kernel.supports(layout)) throw new Error("Expected an ASCII layout");
+		const at = prefix.length + 1;
+		const hit = suffix === "@x";
+		expect(runKernel(kernel, layout, FIND, 0, text.length, 0, undefined, 0)).toBe(hit ? ~at : at);
+		if (!hit) expect(stoppedState()).toBe(1);
 	}
 });
 

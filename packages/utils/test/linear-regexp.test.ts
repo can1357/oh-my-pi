@@ -685,16 +685,90 @@ describe("LinearRegExp covers the RegExp surface", () => {
 		expect(sticky.lastIndex).toBe(0);
 	});
 
-	it("keeps native fallback for unsupported string properties and complex oversized repeats", () => {
-		for (const [source, flags, text] of [
-			[String.raw`\p{RGI_Emoji}`, "v", "a👨‍👩‍👧‍👦b"],
-			[String.raw`[\p{RGI_Emoji}]`, "v", "a👨‍👩‍👧‍👦b"],
-			["(?:ab|cd){20000}", "", "abc"],
-		] as const) {
-			const linear = new LinearRegExp(source, flags);
-			expect(linear.stream()).toBeUndefined();
-			expect(linear.exec(text)).toEqual(new RegExp(source, flags).exec(text));
+	it("keeps Unicode string-property capture order and can retry the shorter atom in either direction", () => {
+		const family = "👨‍👩‍👧‍👦";
+		const cases = [
+			[String.raw`(?<emoji>\p{RGI_Emoji})`, `a${family}👍🏽b`],
+			[String.raw`(?<emoji>[\p{RGI_Emoji}--\q{👨‍👩‍👧‍👦}])+`, `a${family}👍🏽b`],
+			[String.raw`^(?<emoji>\p{RGI_Emoji})🏽x$`, "👍🏽x"],
+			[String.raw`(?<=👨‍👩‍👧‍(?<emoji>\p{RGI_Emoji}))x`, `${family}x`],
+			[String.raw`^(?<emoji>\p{RGI_Emoji})‍👩‍👧‍👦x$`, `${family}x`],
+			[String.raw`^([\p{RGI_Emoji}\q{xyz|x}])yz$`, "xyz"],
+			[String.raw`(?<=^x([\p{RGI_Emoji}\q{xyz|yz}]))!`, "xyz!"],
+			[String.raw`^(?:[\p{RGI_Emoji}\q{|a}])*b$`, "ab"],
+			[String.raw`^([[\p{RGI_Emoji}]&&\q{👩‍🚀|x}])+!$`, "👩‍🚀👩‍🚀!"],
+		] as const;
+		for (const [source, text] of cases) {
+			const linear = new LinearRegExp(source, "dgv");
+			const native = new RegExp(source, "dgv");
+			const stream = linear.stream()!;
+			expect(linear.streamsExactly).toBe(false);
+			for (let index = 0; index <= text.length; index++) {
+				linear.lastIndex = native.lastIndex = index;
+				expect(linear.exec(text)).toEqual(native.exec(text));
+				expect(linear.lastIndex).toBe(native.lastIndex);
+				if (index > 0) stream.push(text[index - 1]!);
+				native.lastIndex = 0;
+				if (native.test(text.slice(0, index))) expect(stream.matched).toBe(true);
+			}
 		}
+	});
+
+	it("rejects an ambiguous string-property repetition on a long failing input", () => {
+		const source = String.raw`^(?:\p{RGI_Emoji}+|\p{RGI_Emoji})+$`;
+		const regex = new LinearRegExp(source, "v");
+		expect(regex.test(`${"😀".repeat(2_000)}!`)).toBe(false);
+		expect(regex.test("😀".repeat(2_000))).toBe(true);
+	});
+
+	it("handles many nonliteral alphabet classes without incorrect ASCII or UTF-16 transitions", () => {
+		const variants = Array.from({ length: 2_200 }, (_, index) => `[${String.fromCharCode(0x3400 + index)}\uffff]`);
+		const source = `(?<key>${variants.join("|")}|a(?:b|c)defghi)[0-9]`;
+		const linear = new LinearRegExp(source, "gd", { jitAfter: 1 });
+		const native = new RegExp(source, "gd");
+		expect(linear.streamsExactly).toBe(true);
+		for (const unit of ["", "é", "\uffff", "\u3400"]) {
+			const text = `abcdefghi acdefghi abdefghi? ${unit} `.repeat(100) + `abdefghi2 \uffff4 \u34099`;
+			expect([...text.matchAll(linear)]).toEqual([...text.matchAll(native)]);
+		}
+		const stream = linear.stream()!;
+		stream.push("\uffff");
+		expect(stream.matched).toBe(false);
+		stream.push("7");
+		expect(stream.matched).toBe(true);
+	});
+
+	it("keeps native captures and exact streaming for large fixed-width block counts", () => {
+		const source = String.raw`^(?<body>(?:ab|cd){12000,12002})$`;
+		const blocks = "abcd".repeat(6_000);
+		const linear = new LinearRegExp(source, "dg");
+		const native = new RegExp(source, "dg");
+		expect(linear.streamsExactly).toBe(true);
+		for (const text of [blocks, `${blocks}cdab`, `${blocks}c`, `${blocks}cdabcd`]) {
+			expect([...text.matchAll(linear)]).toEqual([...text.matchAll(native)]);
+		}
+		const unanchored = new LinearRegExp(String.raw`(?<last>ab|cd){12000,12002}$`, "dg");
+		const long = "abcd".repeat(9_000);
+		expect(unanchored.exec(`${long}!`)).toBeNull();
+		const match = unanchored.exec(long)!;
+		expect(match.index).toBe(long.length - 24_004);
+		expect(match.indices?.groups?.last).toEqual([long.length - 2, long.length]);
+		const stream = linear.stream()!;
+		stream.push(blocks.slice(0, -1));
+		expect(stream.matched).toBe(false);
+		stream.push(blocks.slice(-1));
+		expect(stream.matched).toBe(true);
+		stream.push("aba");
+		expect(stream.matched).toBe(false);
+		stream.push("b");
+		expect(stream.matched).toBe(true);
+	});
+
+	it("keeps native fallback for oversized repetitions outside the fixed-width route", () => {
+		const source = "(?:a|aa){20000}";
+		const linear = new LinearRegExp(source);
+		expect(linear.stream()).toBeUndefined();
+		expect(linear.exec("abc")).toEqual(new RegExp(source).exec("abc"));
 	});
 
 	it("coerces lastIndex and the input, and feeds replace, split and search, like RegExp", () => {

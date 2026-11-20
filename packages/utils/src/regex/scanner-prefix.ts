@@ -51,6 +51,7 @@ function maximumWidth(node: RegexNode): number {
 			return node.items.reduce((sum, item) => sum + maximumWidth(item), 0);
 		case "alt":
 			return node.options.reduce((max, option) => Math.max(max, maximumWidth(option)), 0);
+		case "string":
 		case "backref":
 			return Infinity;
 		default:
@@ -156,6 +157,7 @@ function nativeFragment(nodes: readonly RegexNode[], flags: Flags): Fragment {
 					whole: options.every(option => option.width === width && option.whole),
 				};
 			}
+			case "string":
 			case "backref":
 				return stop;
 		}

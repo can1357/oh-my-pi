@@ -187,21 +187,29 @@ function isRun(value: unknown): value is Run {
 /** One DFA snapshot's scan code, compiled on first use per layout. */
 export class Kernel {
 	readonly #mode: ScanMode;
+	readonly #layout: Layout | undefined;
 	/** Code units by action, per state. */
 	readonly #plan: Map<number, number[]>[];
 	readonly #runs: (Run | undefined)[] = [];
 
 	/** Stores the transition ranges for compilation against the eventual input layout. */
-	constructor(mode: ScanMode, plan: Map<number, number[]>[]) {
+	constructor(mode: ScanMode, plan: Map<number, number[]>[], layout?: Layout) {
 		this.#mode = mode;
 		this.#plan = plan;
+		this.#layout = layout;
+	}
+
+	/** Whether this snapshot covers the loaded text's layout. */
+	supports(layout: Layout): boolean {
+		return this.#layout === undefined || this.#layout === layout;
 	}
 
 	/** The compiled function bound to the current shared memory. */
 	run(layout: Layout): Run {
 		const existing = this.#runs[layout];
 		if (existing) return existing;
-		const module = new WebAssembly.Module(emit(this.#mode, this.#plan, layout));
+		const rows = layout === NARROW && this.#layout === undefined ? this.#plan.map(clip) : this.#plan;
+		const module = new WebAssembly.Module(emit(this.#mode, rows, layout));
 		const run: unknown = new WebAssembly.Instance(module, { m: { m: memory } }).exports.k;
 		if (!isRun(run)) throw new TypeError("Wasm kernel does not export k");
 		this.#runs[layout] = run;
@@ -231,6 +239,37 @@ export function compileKernel(
 		plan.push(groups);
 	}
 	return new Kernel(mode, plan);
+}
+
+/**
+ * Snapshot only ASCII transitions when compiling every class in a wide
+ * alphabet would exceed the kernel budget. Unknown rows still yield to the DFA.
+ */
+export function compileAsciiKernel(
+	mode: ScanMode,
+	states: number,
+	width: number,
+	transitions: Int32Array,
+	asciiClasses: Uint16Array,
+): Kernel {
+	const plan: Map<number, number[]>[] = [];
+	for (let state = 0; state < states; state++) {
+		const groups = new Map<number, number[]>();
+		const row = state * width;
+		let first = 0;
+		let action = transitionAction(mode, transitions[row + asciiClasses[0]!]!);
+		for (let unit = 1; unit <= LAST_ASCII + 1; unit++) {
+			const next = unit > LAST_ASCII ? undefined : transitionAction(mode, transitions[row + asciiClasses[unit]!]!);
+			if (next === action) continue;
+			let units = groups.get(action);
+			if (!units) groups.set(action, (units = []));
+			units.push(first, unit - 1);
+			first = unit;
+			if (next !== undefined) action = next;
+		}
+		plan.push(groups);
+	}
+	return new Kernel(mode, plan, NARROW);
 }
 
 // Parameters, followed by the scalar unit, vector scratch and pair-scan entry pointer.
@@ -337,13 +376,12 @@ const section = (id: number, body: number[]): number[] => [id, ...uleb(body.leng
  * Layout: `block $exit { loop $dispatch { block $s(n-1) … block $s0 { br_table state } <s0> } … <s(n-1)> } }`:
  * branching to block k's label lands on state k's code; states past the snapshot exit.
  */
-function emit(mode: ScanMode, plan: readonly Map<number, number[]>[], layout: Layout): Uint8Array<ArrayBuffer> {
+function emit(mode: ScanMode, rows: readonly Map<number, number[]>[], layout: Layout): Uint8Array<ArrayBuffer> {
 	const narrow = layout === NARROW;
 	const back = mode === MARK_BACK;
 	const unit = narrow ? 1 : 2;
 	const step = back ? -unit : unit;
-	const states = plan.length;
-	const rows = narrow ? plan.map(clip) : plan;
+	const states = rows.length;
 	const c = new Code();
 	c.block().loop();
 	for (let state = 0; state < states; state++) c.block();
@@ -715,8 +753,7 @@ function groupUnits(
 ): Map<number, number[]> {
 	const groups = new Map<number, number[]>();
 	for (let id = 0; id < width; id++) {
-		const next = transitions[row + id]!;
-		const action = next < 0 ? EXIT : mode === FIND && (next & 1) !== 0 ? HIT : next;
+		const action = transitionAction(mode, transitions[row + id]!);
 		let units = groups.get(action);
 		if (!units) {
 			units = [];
@@ -726,6 +763,10 @@ function groupUnits(
 	}
 	for (const [action, units] of groups) groups.set(action, joinRuns(units));
 	return groups;
+}
+
+function transitionAction(mode: ScanMode, next: number): number {
+	return next < 0 ? EXIT : mode === FIND && (next & 1) !== 0 ? HIT : next;
 }
 
 /** Sorts flattened, disjoint `[first, last]` runs and joins adjacent ones. */

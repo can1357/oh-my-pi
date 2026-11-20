@@ -129,6 +129,7 @@ function bounded(items: readonly RegexNode[], skipStart = items.length, skipCoun
 				if (!body) return undefined;
 				return withinBounds(max * body.width, (max - min + 1) * body.paths ** max, 1 + max * (1 + body.steps));
 			}
+			case "string":
 			case "backref":
 				return undefined;
 		}
@@ -193,6 +194,7 @@ function separates(nodes: readonly RegexNode[], end: number, run: Uint8Array, cl
 				return (
 					node.multiline === false || run.every((member, id) => !member || !(classes.classFlags[id]! & LINE_CLASS))
 				);
+			case "string":
 			case "backref":
 				return false;
 		}

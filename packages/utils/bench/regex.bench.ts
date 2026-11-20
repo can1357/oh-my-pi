@@ -71,6 +71,23 @@ await group(
 	{ samples: 5 },
 	scanCases("a{20000,30000}$", "g", `${"a".repeat(22_000)}!`),
 );
+await group(
+	"ambiguous Unicode string-property repetition, no match",
+	{ samples: 5 },
+	scanCases(String.raw`^(?:\p{RGI_Emoji}+|\p{RGI_Emoji})+$`, "gv", `${"😀".repeat(13)}!`),
+);
+await group(
+	"large fixed-width block count with a terminal assertion, no match",
+	{ samples: 5 },
+	scanCases("(?:ab|cd){12000,12002}$", "g", `${"ab".repeat(12_300)}!`),
+);
+const wideAlphabet = Array.from({ length: 2_200 }, (_, index) => `[${String.fromCharCode(0x3400 + index)}\uffff]`);
+const nearMatches = "abcdefghi acdefghi ".repeat(40_000);
+await group(
+	"large alphabet, ASCII near matches",
+	{ units: nearMatches.length, unit: "char" },
+	scanCases(`(?:${wideAlphabet.join("|")}|a(?:b|c)defghi)[0-9]`, "g", nearMatches),
+);
 const words = Array.from({ length: 2500 }, (_, index) => `ab${String.fromCharCode(0x3400 + index)}cd`);
 const dictionaryMisses = `${"ab??cd ".repeat(25_000)}${words[2499]}`;
 await group(

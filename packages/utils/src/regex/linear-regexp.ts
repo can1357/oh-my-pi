@@ -9,8 +9,8 @@
  *
  * - a lazily built DFA ({@link LazyDfa}) over character classes JSC itself
  *   computed ({@link CharClasses}) decides whether a match exists, in time
- *   linear in the text; for patterns without lookarounds or backreferences that
- *   answer is final;
+ *   linear in the text; for patterns without lookarounds, backreferences, or
+ *   Unicode properties of strings that answer is final;
  * - the automaton run backwards from where the earliest match ends marks where
  *   a match can start, and a memoized backtracker ({@link Backtracker}) with
  *   ECMAScript semantics finds the match JavaScript would return, captures
@@ -23,7 +23,7 @@
  * A small set of patterns proven to have linear search cost use native `exec`
  * and keep the automaton for streaming. Unicode atoms are lowered to UTF-16,
  * with guards at code-point boundaries. Large literal vocabularies and large
- * single-unit runs have their own scanners rather than expanded automata.
+ * fixed-width runs have their own scanners rather than expanded automata.
  * Unsupported constructs and other patterns beyond engine limits keep the native engine.
  *
  * @example
@@ -40,6 +40,7 @@ import { CharClasses, compileNfa, type PatternFlags } from "./nfa";
 import { type ParsedPattern, parsePattern, type RegexNode, UnsupportedPatternError } from "./parse";
 import { scanPrefix } from "./scanner-prefix";
 import type { RegexStream } from "./stream";
+import { compileWideBlock } from "./wide-block";
 import { compileWideRun } from "./wide-run";
 
 /**
@@ -343,7 +344,7 @@ export class LinearRegExp extends RegExp {
 		return this.#compiled()?.matcher.stream();
 	}
 
-	/** Whether {@link LinearRegExp.stream} answers exactly (no lookarounds or backreferences). */
+	/** Whether {@link LinearRegExp.stream} gives exact results without confirming an approximate match. */
 	get streamsExactly(): boolean {
 		return this.#compiled()?.exact ?? false;
 	}
@@ -369,6 +370,8 @@ function compile(regex: RegExp, limits: EngineLimits): CompiledPattern | null {
 		const names = pattern.names;
 		const literals = compileLiteralAlternatives(pattern, flags);
 		if (literals) return { matcher: literals, names, exact: true };
+		const blocks = compileWideBlock(pattern, flags);
+		if (blocks) return { matcher: blocks, names, exact: true };
 		const classes = new CharClasses(pattern, flags);
 		const run = compileWideRun(pattern, classes, flags);
 		if (run) return { matcher: run, names, exact: true };

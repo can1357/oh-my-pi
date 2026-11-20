@@ -17,6 +17,7 @@
  */
 import {
 	cachedLayout,
+	compileAsciiKernel,
 	compileKernel,
 	FIND,
 	type Kernel,
@@ -35,6 +36,7 @@ import type { RegexStream } from "./stream";
 const END = -1;
 /** Cached transitions (states × classes) past which no kernel is generated: its source would outweigh its gain. */
 const KERNEL_ENTRIES = 1 << 14;
+const ASCII_UNITS = 128;
 /**
  * A text the kernels have not loaded is copied only once this automaton has
  * interpreted 1/2^LOAD_SHIFT of its length, over one scan or several of texts
@@ -104,8 +106,9 @@ export class LazyDfa {
 		this.#jitAt = limits.jitAfter;
 		this.#startCore = Int32Array.of(nfa.start);
 		this.#universalCore = Int32Array.from(nfa.kind, (_, node) => node);
-		this.#transitions = new Int32Array(16 * this.#width).fill(-1);
-		this.#atEnd = new Int8Array(16).fill(-1);
+		const capacity = Math.min(16, this.#maxStates);
+		this.#transitions = new Int32Array(capacity * this.#width).fill(-1);
+		this.#atEnd = new Int8Array(capacity).fill(-1);
 		this.#visited = new Uint32Array(nfa.kind.length);
 	}
 
@@ -139,7 +142,7 @@ export class LazyDfa {
 		this.#flags.push(flags);
 		this.#ids.set(key, id);
 		if (this.#atEnd.length <= id) {
-			const atEnd = new Int8Array(this.#atEnd.length * 2).fill(-1);
+			const atEnd = new Int8Array(Math.min(this.#maxStates, this.#atEnd.length * 2)).fill(-1);
 			atEnd.set(this.#atEnd);
 			this.#atEnd = atEnd;
 			const transitions = new Int32Array(atEnd.length * this.#width).fill(-1);
@@ -214,6 +217,10 @@ export class LazyDfa {
 						this.#coldUnits = 0;
 					}
 				}
+			}
+			if (kernel && layout !== -1 && !kernel.supports(layout)) {
+				kernel = undefined;
+				loadAfter = Infinity;
 			}
 			if (kernel && layout !== -1) {
 				index = runKernel(kernel, layout, mode, index, stop, state, marks, lo);
@@ -311,10 +318,21 @@ export class LazyDfa {
 			this.#jitAt = Math.max(1, this.#jitAt * 2);
 			if (!this.#kernels[mode] && this.#nfa.kind.length <= 128) this.#prefill();
 			const states = this.#cores.length;
-			const kernel =
+			const alphabet = this.#nfa.classes.alphabet;
+			let kernel =
 				states * this.#width > KERNEL_ENTRIES
 					? undefined
-					: compileKernel(mode, states, this.#width, this.#transitions, this.#nfa.classes.alphabet.runs);
+					: compileKernel(mode, states, this.#width, this.#transitions, alphabet.runs);
+			if (!kernel && this.#width > ASCII_UNITS && states * ASCII_UNITS <= KERNEL_ENTRIES) {
+				const base = alphabet.blockIndex[0]! << 8;
+				kernel = compileAsciiKernel(
+					mode,
+					states,
+					this.#width,
+					this.#transitions,
+					alphabet.blocks.subarray(base, base + ASCII_UNITS),
+				);
+			}
 			// An older kernel stays valid within its epoch, only less complete.
 			if (kernel) this.#kernels[mode] = kernel;
 		}

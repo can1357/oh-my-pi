@@ -248,16 +248,28 @@ export class Alphabet {
 	constructor(sets: readonly UnitSet[], maxClasses: number) {
 		const distinct = [...new Set(sets)];
 		// Between consecutive boundaries every set is uniform, so each segment lies in one class.
-		const cuts = new Set([0, UNIT_COUNT]);
-		for (const set of distinct) addBoundaries(set, cuts);
-		const bounds = [...cuts].sort((a, b) => a - b);
+		const cuts = new Uint32Array(SET_WORDS);
+		cuts[0] = 1;
+		const words = [0];
+		for (const set of distinct) addBoundaries(set, cuts, words);
+		words.sort((a, b) => a - b);
+		const bounds: number[] = [];
+		for (const word of words) {
+			for (let bits = cuts[word]!; bits; bits &= bits - 1) {
+				bounds.push((word << 5) + firstBit(bits));
+			}
+		}
+		bounds.push(UNIT_COUNT);
 		const classes = new Uint16Array(UNIT_COUNT);
-		const ids = new Map<string, number>();
+		const refine = distinct.length > 32;
+		if (refine) refineClasses(distinct, cuts, words, bounds.length - 1, classes, maxClasses);
+		// Assign public IDs in order of the first code unit in each class.
+		const ids = new Map<number, number>();
 		const runs: number[][] = [];
 		for (let segment = 0; segment + 1 < bounds.length; segment++) {
 			const first = bounds[segment]!;
 			const end = bounds[segment + 1]!;
-			const signature = distinct.map(set => (has(set, first) ? "1" : "0")).join("");
+			const signature = refine ? classes[first]! : signatureOf(distinct, first);
 			let id = ids.get(signature);
 			if (id === undefined) {
 				if (ids.size >= maxClasses) throw new RangeError(`more than ${maxClasses} character classes`);
@@ -311,16 +323,86 @@ export class Alphabet {
 }
 
 /** Adds every code unit where membership in `set` changes. */
-function addBoundaries(set: UnitSet, cuts: Set<number>): void {
-	let inside = false;
+function addBoundaries(set: UnitSet, cuts: Uint32Array, words: number[]): void {
+	let previous = 0;
 	for (let word = 0; word < SET_WORDS; word++) {
 		const bits = set[word]!;
-		if (bits === (inside ? 0xffffffff : 0)) continue;
-		for (let bit = 0; bit < 32; bit++) {
-			if (((bits & (1 << bit)) !== 0) !== inside) {
-				inside = !inside;
-				cuts.add(word * 32 + bit);
+		if (bits === (previous ? 0xffffffff : 0)) continue;
+		const old = cuts[word]!;
+		if (!old) words.push(word);
+		cuts[word] = old | (bits ^ ((bits << 1) | previous));
+		previous = bits >>> 31;
+	}
+}
+
+/** Index of the lowest set bit in a nonzero word. */
+function firstBit(bits: number): number {
+	return 31 - Math.clz32(bits & -bits);
+}
+
+/** A packed membership signature for at most 32 sets. */
+function signatureOf(sets: readonly UnitSet[], unit: number): number {
+	let signature = 0;
+	const word = unit >>> 5;
+	const bit = 1 << (unit & 31);
+	for (const set of sets) signature = (signature << 1) | Number((set[word]! & bit) !== 0);
+	return signature;
+}
+
+function popcount(bits: number): number {
+	bits -= (bits >>> 1) & 0x55555555;
+	bits = (bits & 0x33333333) + ((bits >>> 2) & 0x33333333);
+	return Math.imul((bits + (bits >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24;
+}
+
+/** Refine on each set, enumerating segment starts only on its smaller side. */
+function refineClasses(
+	sets: readonly UnitSet[],
+	cuts: Uint32Array,
+	words: readonly number[],
+	segmentCount: number,
+	classes: Uint16Array,
+	maxClasses: number,
+): void {
+	if (segmentCount === 1) return;
+	// Counts may reach 65,536; IDs and segment starts are at most 65,535.
+	const counts = new Uint32Array(segmentCount);
+	const moved = new Uint32Array(segmentCount);
+	const split = new Uint16Array(segmentCount);
+	const selected = new Uint16Array(segmentCount >>> 1);
+	counts[0] = segmentCount;
+	let size = 1;
+
+	for (const set of sets) {
+		let inside = 0;
+		for (const word of words) inside += popcount(set[word]! & cuts[word]!);
+		if (inside === 0 || inside === segmentCount) continue;
+		const invert = inside > segmentCount - inside ? -1 : 0;
+		let length = 0;
+		for (const word of words) {
+			for (let bits = (set[word]! ^ invert) & cuts[word]!; bits; bits &= bits - 1) {
+				const first = (word << 5) + firstBit(bits);
+				selected[length++] = first;
+				moved[classes[first]!]!++;
 			}
 		}
+		for (let i = 0; i < length; i++) {
+			const first = selected[i]!;
+			const id = classes[first]!;
+			const count = moved[id]!;
+			if (count) {
+				// If the entire class was selected, it needs no split.
+				if (count === counts[id]) split[id] = id;
+				else {
+					if (size >= maxClasses) throw new RangeError(`more than ${maxClasses} character classes`);
+					counts[id]! -= count;
+					counts[size] = count;
+					split[id] = size++;
+				}
+				moved[id] = 0;
+			}
+			classes[first] = split[id]!;
+		}
+		if (size === segmentCount) break;
 	}
 }

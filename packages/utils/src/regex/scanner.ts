@@ -142,6 +142,7 @@ function firstClasses(root: RegexNode, classes: CharClasses): Uint8Array | undef
 			case "assert":
 			case "look":
 				return true;
+			case "string":
 			case "backref":
 				return undefined;
 		}
@@ -345,6 +346,8 @@ class Generator {
 			case "look":
 				this.#lookaround(node, position, captures, then);
 				return;
+			case "string":
+				throw new NotScannable("Unicode string atom");
 			case "repeat":
 				if (node.body.type === "unit") {
 					this.#run(this.#classes.setOf(node.body), node, backward, position, captures, then, follow);

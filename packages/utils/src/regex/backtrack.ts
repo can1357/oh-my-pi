@@ -23,6 +23,7 @@ import { GreedyRuns, REPLAY_LIMIT } from "./greedy";
 import { assertionOf, type CharClasses, holds, MAX_NODES } from "./nfa";
 import { capturesWithin, nullable, type ParsedPattern, type RegexNode } from "./parse";
 import { BAIL, compileScanner, NONE, type Scanner } from "./scanner";
+import { stepCodePoint, type StringAtom } from "./string-atom";
 
 const CHAR = 0;
 const SPLIT = 1;
@@ -39,6 +40,9 @@ const SUCCEED = 10;
 const RUN = 11;
 /** Resumes the {@link RUN} at the next instruction with a shorter length; reached only from a choice point. */
 const RETRY = 12;
+const STRING = 13;
+/** Resumes the next {@link STRING} with a shorter bound; reached only from a choice point. */
+const STRING_RETRY = 14;
 
 /** Nesting limit for nullable loops: one mask bit per level. */
 const MAX_NULLABLE_DEPTH = 30;
@@ -79,6 +83,7 @@ export interface MemoLimits {
  * - `MARK`/`CHECK`: `x` mask bit; `ASSERT`: `x` assertion;
  * - `BACKREF`: `x` index into `refs`, `y` 1 backwards; `LOOK`: `x` body entry, `y` 1 when negative;
  * - `RUN`: `x` set index, `y` least and `z` most repetitions (-1 unbounded); its `RETRY` is the instruction before it.
+ * - `STRING`: `x` index into `strings`, `y` 1 backwards; its `STRING_RETRY` is the instruction before it.
  */
 interface Program {
 	op: Uint8Array;
@@ -95,6 +100,7 @@ interface Program {
 	groupCount: number;
 	/** Candidate groups per backreference; duplicate group names give several. */
 	refs: number[][];
+	strings: StringAtom[];
 	/** 1 at join instructions, where configurations are memoized. */
 	memo: Uint8Array;
 	/** Index into `readGroups` per instruction; 0 when no reachable backreference reads a capture. */
@@ -117,6 +123,7 @@ class ProgramBuilder {
 	readonly y: number[] = [];
 	readonly z: number[] = [];
 	readonly refs: number[][] = [];
+	readonly strings: StringAtom[] = [];
 	readonly #pattern: ParsedPattern;
 	readonly #classes: CharClasses;
 	readonly #multiline: boolean;
@@ -147,6 +154,9 @@ class ProgramBuilder {
 		switch (node.type) {
 			case "unit":
 				return this.add(CHAR, next, this.#classes.setOf(node), direction);
+			case "string":
+				this.add(STRING_RETRY, next);
+				return this.add(STRING, next, this.strings.push(node.atom) - 1, direction);
 			case "seq": {
 				// Backwards the last item is matched first.
 				const { items } = node;
@@ -324,6 +334,7 @@ function compileProgram(
 		entry,
 		groupCount: pattern.groups.length === 0 ? 0 : pattern.groups.length - 1,
 		refs: builder.refs,
+		strings: builder.strings,
 		memo,
 		reads: readsOf,
 		readGroups,
@@ -348,7 +359,10 @@ export class Backtracker {
 	readonly #pending: number;
 	/** (register, previous value) pairs, undone on backtracking. */
 	readonly #undo: number[] = [];
-	/** Choice points (instruction, position, mask, undo length, path length); each run owns the entries above its base. */
+	/**
+	 * Choice points (instruction, position, mask, undo length, path length).
+	 * A STRING_RETRY also stores its bound before those fields. Each run owns the entries above its base.
+	 */
 	readonly #choices: number[] = [];
 	/** (memo key, bit) of the memoized configurations on the current search path: not known to fail yet. */
 	readonly #path: number[] = [];
@@ -497,7 +511,7 @@ export class Backtracker {
 	 * when visited and are recorded as failed once the search backtracks past them.
 	 */
 	#run(entry: number, start: number): number {
-		const { op, next, x, y, z, follow, memo, refs, reads } = this.#program;
+		const { op, next, x, y, z, follow, memo, refs, strings, reads } = this.#program;
 		const { sets } = this.#classes;
 		const { blockIndex, blocks } = this.#classes.alphabet;
 		const size = op.length;
@@ -514,6 +528,7 @@ export class Backtracker {
 		let pc = entry;
 		let position = start;
 		let mask = 0;
+		let stringLimit = -1;
 		for (;;) {
 			fail: {
 				if (memo[pc]) {
@@ -535,6 +550,33 @@ export class Backtracker {
 						position = y[pc] ? at : at + 1;
 						mask = 0;
 						pc = next[pc]!;
+						continue;
+					}
+					case STRING:
+					case STRING_RETRY: {
+						const retry = op[pc] === STRING_RETRY;
+						const atomPc = retry ? pc + 1 : pc;
+						const atom = strings[x[atomPc]!]!;
+						const backward = y[atomPc] === 1;
+						const end = retry
+							? atom.retry(text, position, stringLimit, backward)
+							: atom.first(text, position, backward);
+						if (end < 0) break fail;
+						const then = next[atomPc]!;
+						if (end === position) {
+							const single = atom.singleAfterEmpty(text, position, backward);
+							if (single >= 0) choices.push(then, single, 0, undo.length, path.length);
+						} else {
+							const shorter = stepCodePoint(text, end, !backward);
+							if (shorter !== position) {
+								choices.push(shorter, atomPc - 1, position, mask, undo.length, path.length);
+							} else if (atom.nullable) {
+								choices.push(then, position, mask, undo.length, path.length);
+							}
+							mask = 0;
+						}
+						position = end;
+						pc = then;
 						continue;
 					}
 					case SPLIT:
@@ -676,6 +718,7 @@ export class Backtracker {
 			mask = choices.pop()!;
 			position = choices.pop()!;
 			pc = choices.pop()!;
+			if (op[pc] === STRING_RETRY) stringLimit = choices.pop()!;
 		}
 	}
 

@@ -5,8 +5,9 @@
  * set of JSC-decided classes, shared by the automata and the backtracker.
  * {@link compileNfa} builds the automaton a {@link LazyDfa} runs, forward or
  * over reversed text. Automata decide whether a match exists, so lookarounds
- * compile to ε and a backreference to an optional copy of its group: a
- * superset, flagged by {@link Nfa.exact}.
+ * compile to ε, backreferences to optional copies of their groups, and
+ * properties of strings to runs of arbitrary units: supersets flagged by
+ * {@link Nfa.exact}.
  */
 import {
 	Alphabet,
@@ -61,7 +62,7 @@ export const AFTER_LINE = LINE_CLASS << 1;
 /** Patterns past this many nodes stay on the `RegExp`: each DFA step walks the NFA. */
 export const MAX_NODES = 10_000;
 /** Patterns splitting the code units finer than this stay on the `RegExp`: the DFA table is states × classes. */
-const MAX_CLASSES = 1024;
+const MAX_CLASSES = 4096;
 
 /** The `RegExp` flags that change what a pattern matches. */
 export interface PatternFlags {
@@ -307,6 +308,14 @@ class NfaBuilder {
 		switch (node.type) {
 			case "unit":
 				return this.#add(CHAR, next, this.#classes.setOf(node));
+			case "string": {
+				// Keep the surrounding automaton intact, but don't guess which strings JSC knows.
+				this.#exact = false;
+				const loop = this.#add(SPLIT, -1, next);
+				const unit = this.#add(CHAR, loop, this.#classes.anySet());
+				this.#out1[loop] = unit;
+				return node.atom.nullable ? loop : unit;
+			}
 			case "seq": {
 				// Chained back to front: forwards the first item is the entry, backwards the last.
 				const { items } = node;
