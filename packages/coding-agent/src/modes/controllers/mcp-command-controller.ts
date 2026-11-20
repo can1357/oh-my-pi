@@ -32,6 +32,7 @@ import {
 	type OAuthFlowResult,
 } from "../../mcp/oauth-reauth";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
+import type { McpUpstreamStatus } from "../../mcp/host/contract";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -118,6 +119,16 @@ function wrapUrlRows(label: string, url: string, width: number): string[] {
 		rows.push(theme.fg("muted", sanitized.slice(i, i + effective)));
 	}
 	return rows;
+}
+
+/** Host-side state of a server for the `/mcp` list: upstream state, pid, and how many sessions share it. */
+function describeServerRuntime(runtime: McpUpstreamStatus | undefined): string {
+	if (!runtime) return "";
+	const parts = [
+		runtime.state === "running" && runtime.pid !== undefined ? `running, pid ${runtime.pid}` : runtime.state,
+	];
+	if (runtime.links > 1) parts.push(`shared by ${runtime.links} sessions`);
+	return parts.join(", ");
 }
 
 /**
@@ -1064,6 +1075,10 @@ export class MCPCommandController {
 			}
 
 			const lines: string[] = [];
+			const runtimeOf = (name: string): string => {
+				const text = describeServerRuntime(this.ctx.mcpManager?.getServerRuntime(name));
+				return text ? theme.fg("dim", ` (${text})`) : "";
+			};
 
 			// Show user-level servers
 			if (userServers.length > 0) {
@@ -1083,7 +1098,8 @@ export class MCPCommandController {
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
 									: theme.fg("muted", " ○ not connected");
-					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
+					const runtime = state === "inactive" ? "" : runtimeOf(name);
+					lines.push(`  ${theme.fg("accent", name)}${status}${runtime} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
 			}
@@ -1106,7 +1122,8 @@ export class MCPCommandController {
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
 									: theme.fg("muted", " ○ not connected");
-					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
+					const runtime = state === "inactive" ? "" : runtimeOf(name);
+					lines.push(`  ${theme.fg("accent", name)}${status}${runtime} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
 			}
@@ -1123,7 +1140,7 @@ export class MCPCommandController {
 								: state === "connecting"
 									? theme.fg("muted", " ◌ connecting")
 									: theme.fg("muted", " ○ not connected");
-						lines.push(`  ${theme.fg("accent", name)}${status}`);
+						lines.push(`  ${theme.fg("accent", name)}${status}${runtimeOf(name)}`);
 					}
 					lines.push("");
 				}
@@ -1313,7 +1330,8 @@ export class MCPCommandController {
 			}
 
 			// Create temporary connection
-			connection = await connectToServer(name, resolvedConfig, { signal: abortController.signal });
+			// Live: a test answered from the host's store would pass for a server that is down.
+			connection = await connectToServer(name, resolvedConfig, { signal: abortController.signal, live: true });
 
 			// List tools to verify connection
 			const tools = await listTools(connection, { signal: abortController.signal });

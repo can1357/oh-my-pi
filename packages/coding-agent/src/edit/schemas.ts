@@ -43,7 +43,9 @@ export const hashlineEditParamsSchema = type({
 export type HashlineParams = typeof hashlineEditParamsSchema.infer;
 
 export const sloppyEditSchema = type({
-	input: "string",
+	input: type("string").describe(
+		"Complete patch. Use `*** Replace Block: opener` plus new code for a whole block. For `*** Find`, include the action (Replace, Insert, Cut, or Paste) in this SAME string before sending.",
+	),
 });
 
 export type SloppyParams = typeof sloppyEditSchema.infer;

@@ -89,8 +89,8 @@ class "gemini" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high"
 		}
-		// Gemini 4 Hydrogen adds an `xhigh` level (default `high`).
-		models "gemini-4-hydrogen" {
+		// Gemini 4 Hydrogen and Neon add an `xhigh` level (default `high`).
+		models "gemini-4-hydrogen" "gemini-4-neon" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high" "xhigh"
 		}
@@ -102,12 +102,12 @@ class "gemini" {
 	// API's models.get lists for Argon and Carbon) end every long answer with
 	// MAX_TOKENS at the first segment, often before any visible text. 262,144
 	// is the output cap Google's own Antigravity client advertises for Carbon
-	// and Hydrogen. Zen is left alone: its continuation passthrough is
-	// unverified.
+	// and Hydrogen; Neon, adapted from Carbon, documents the same long decode.
+	// Zen is left alone: its continuation passthrough is unverified.
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen#long-decodes
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
 	on "google" "google-vertex" {
-		models "gemini-4-argon" "gemini-4-carbon" "gemini-4-hydrogen" {
+		models "gemini-4-argon" "gemini-4-carbon" "gemini-4-hydrogen" "gemini-4-neon" {
 			limits-patch {
 				max-tokens 262144
 			}
@@ -153,6 +153,21 @@ class "gemini" {
 				input 1.5
 				output 7.5
 				cache-read 0.075
+				cache-write 0
+			}
+		}
+	}
+
+	// Gemini 4 Neon: $3/$15, cache read $0.15 on the paid Gemini API tier;
+	// Antigravity discovery reports $0, so the collapsed row is pinned to the
+	// same card.
+	// https://aistudio.google.com/docs/pricing
+	on "google" "google-antigravity" {
+		models "gemini-4-neon" {
+			cost-patch {
+				input 3
+				output 15
+				cache-read 0.15
 				cache-write 0
 			}
 		}

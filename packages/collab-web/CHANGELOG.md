@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `GuestClient.sendPrompt` accepts images and sends them with the prompt.
+
 ## [19.0.0] - 2026-11-18
 
 ### Fixed

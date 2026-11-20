@@ -635,6 +635,7 @@ mod tests {
 		(code, capture.out(), capture.err())
 	}
 
+	#[cfg(unix)]
 	fn run_with_stdin(cwd: PathBuf, args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_util::<Ln>(args, stdin, cwd);
 		(code, capture.out(), capture.err())
