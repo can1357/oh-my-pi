@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Entering `/goal` on Anthropic no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
+
 ## [19.0.1] - 2026-11-19
 
 ### Added

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Anthropic requests now declare `Context.inactiveTools` as deferred from the first request, so a tool activated later no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
+
 ## [19.0.1] - 2026-11-19
 
 ### Fixed
