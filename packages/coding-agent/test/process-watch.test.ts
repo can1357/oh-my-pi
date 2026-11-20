@@ -263,6 +263,24 @@ describe("ProcessWatch", () => {
 		expect(drain(queue)).toHaveLength(1);
 	});
 
+	it("keeps the schedule of a job that started while a look was in flight", async () => {
+		jobs = [job("bg1", "sleep 1000")];
+		judge.hang = true;
+		start();
+
+		await advance(30);
+		expect(judge.requests).toHaveLength(1);
+		judge.hang = false;
+		await advance(2);
+		jobs = [...jobs, job("bg2", "bun test")];
+		// The hung look times out with bg2 28 s old: its first look is still due at 30 s.
+		await advance(28);
+		expect(judge.requests).toHaveLength(1);
+		await advance(2);
+		expect(judge.requests).toHaveLength(2);
+		expect(Object.keys(judge.requests[1]!.questions)).toEqual(["p0", "p1"]);
+	});
+
 	it("fails open: a judge error produces no notice and the next look still happens", async () => {
 		jobs = [job("bg1", "sleep 100")];
 		judge.fail = true;

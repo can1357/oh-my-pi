@@ -219,7 +219,10 @@ export class ProcessWatch {
 			clearTimeout(deadline);
 			if (this.#inFlight === controller) this.#inFlight = undefined;
 			if (!this.#disposed) {
-				this.#advance(this.#running());
+				// Count the look only for the jobs it judged: a job that started while
+				// it was in flight keeps its own schedule.
+				const running = new Set(this.#running().map(job => job.id));
+				this.#advance(jobs.filter(job => running.has(job.id)));
 				this.#arm();
 			}
 		}
