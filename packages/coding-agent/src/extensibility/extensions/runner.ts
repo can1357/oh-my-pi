@@ -68,6 +68,8 @@ import type {
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
+	CommitSelectionEvent,
+	CommitSelectionEventResult,
 	Extension,
 	ExtensionActions,
 	ExtensionAgentIdentity,
@@ -463,6 +465,7 @@ type RunnerEmitEvent = Exclude<
 	| ToolCallEvent
 	| ToolResultEvent
 	| UserBashEvent
+	| CommitSelectionEvent
 	| ContextEvent
 	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
@@ -2389,6 +2392,50 @@ export class ExtensionRunner {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
 		}
 		return buildAggregatedToolCallResult(result, aggregated);
+	}
+
+	/**
+	 * Emit `commit_selection` before the eval `commit` prelude writes a draft to Git.
+	 *
+	 * Handlers run in extension order. The first `block` wins, and a handler error,
+	 * timeout, or cancellation blocks too (fail-closed, as for `tool_call`). Otherwise
+	 * any `allow` authorizes; `undefined` means every handler abstained.
+	 */
+	async emitCommitSelection(
+		event: CommitSelectionEvent,
+		signal?: AbortSignal,
+	): Promise<CommitSelectionEventResult | undefined> {
+		const ctx = this.createContext();
+		let allowed = false;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("commit_selection");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				const handlerResult = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					(kind, message) => ({
+						block: true,
+						reason:
+							kind === "timeout"
+								? `Extension ${ext.path} timed out after ${extensionHandlerTimeoutMs}ms`
+								: `Extension ${ext.path} failed: ${message}`,
+					}),
+					signal,
+				)) as CommitSelectionEventResult | undefined;
+				if (handlerResult?.block) return { block: true, reason: handlerResult.reason };
+				if (handlerResult?.allow) allowed = true;
+			}
+		}
+
+		if (signal?.aborted) {
+			return { block: true, reason: "Commit was cancelled while an extension handler was pending" };
+		}
+		return allowed ? { allow: true } : undefined;
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {

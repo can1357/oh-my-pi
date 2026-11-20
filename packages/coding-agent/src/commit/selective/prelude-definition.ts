@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { HostEvalPreludeDefinition } from "../../eval/preludes";
+import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../../eval/preludes";
 import commitDocumentation from "../../prompts/tools/commit.md" with { type: "text" };
 import commitGuidance from "../../prompts/tools/commit-guidance.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -93,7 +93,10 @@ function describeCall(parameters: unknown): string | undefined {
  * Create the `commit` eval prelude: draft the session agent tree's changes from its change
  * journal, adjust the selection, and commit it without touching other agents' work.
  */
-export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefinition {
+export function createCommitPrelude(
+	session: ToolSession,
+	authorize?: (repoRoot: string, invocation: EvalPreludeContext) => Promise<void>,
+): HostEvalPreludeDefinition {
 	const drafts = new Map<string, { draft: Draft; scope: ScopeSpec }>();
 	const remember = (draft: Draft, scope: ScopeSpec) => {
 		drafts.set(draft.id, { draft, scope });
@@ -116,7 +119,8 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 	};
 
 	const describe = (draft: Draft) => ({ id: draft.id, head: draft.head, scope: [...draft.scope] });
-	const invoke = async (params: CommitParams, signal?: AbortSignal) => {
+	const invoke = async (params: CommitParams, invocation: EvalPreludeContext) => {
+		const { signal } = invocation;
 		if (params.action === "draft") {
 			const cwd = params.repo === undefined ? session.cwd : resolveToCwd(params.repo, session.cwd);
 			const draft = await draftFor(context(signal, cwd), params.agents);
@@ -156,6 +160,7 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 						journal: artifactsDir ? ChangeJournal.at(artifactsDir) : null,
 						agent: { agent, parent: AgentRegistry.global().get(agent)?.parentId },
 						signal,
+						authorize: authorize && (repoRoot => authorize(repoRoot, invocation)),
 					},
 				);
 				drafts.delete(draft.id);
@@ -194,7 +199,7 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 			const parsed = paramsSchema(parameters);
 			if (parsed instanceof type.errors) throw new ToolError(`commit received invalid arguments: ${parsed.summary}`);
 			try {
-				const { text, details } = await invoke(parsed, invocation.signal);
+				const { text, details } = await invoke(parsed, invocation);
 				return { content: [{ type: "text", text }], details };
 			} catch (error) {
 				if (error instanceof ToolError) throw error;

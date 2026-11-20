@@ -739,6 +739,19 @@ export const cfgCommitEnabled = register({
 	},
 });
 
+export const cfgCommitRequireGuard = register({
+	id: "commit.requireGuard",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Require commit guard",
+		description:
+			"Eval commit() writes only when an extension's commit_selection handler allows it; /commit and shell git commit are not covered",
+	},
+});
+
 export const cfgComputerDisplay = register({
 	id: "computer.display",
 	type: "string",

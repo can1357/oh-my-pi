@@ -166,9 +166,12 @@ the loop did not handle, and approval evaluates the revised input. This differs
 from the standalone `HookToolWrapper` described below.
 
 Eval prelude invocations such as `browser.open(...)`, direct `BrowserTab`
-helpers, `tab.run(...)`, direct `computer` helpers, and
-`computer.run(fnOrCode, options)` are host bridge calls, not AgentTool calls,
-so they do not emit `tool_call` or `tool_result`.
+helpers, `tab.run(...)`, direct `computer` helpers,
+`computer.run(fnOrCode, options)`, and `commit(...)` are host bridge calls, not
+AgentTool calls, so they do not emit `tool_call` or `tool_result`. Before
+`commit(...)` writes a draft to Git, the extension runner emits the dedicated
+`commit_selection` event instead (see
+[extensions](./extensions.md#commit-selection-guard)).
 
 ```text
 Hook tool interception flow
