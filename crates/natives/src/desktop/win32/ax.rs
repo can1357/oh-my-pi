@@ -87,7 +87,7 @@ impl Win32Ax {
 	pub(super) fn host_root(&mut self, element: &UIElement) -> Option<HWND> {
 		let walker = self.walker().ok()?;
 		let mut current = element.clone();
-		for _ in 0..64 {
+		for _ in 0..MAX_ANCESTORS {
 			if let Some(hwnd) = native_window(&current) {
 				let root = window::root(hwnd);
 				// SAFETY: GetDesktopWindow has no preconditions.
@@ -224,7 +224,7 @@ impl Win32Ax {
 			}
 			let mut element = run.call(|| Ok::<_, DesktopError>(hit.clone()))?;
 			let mut found = None;
-			for _ in 0..MAX_SCROLL_DEPTH {
+			for _ in 0..MAX_ANCESTORS {
 				if let Ok(pattern) =
 					run.call(|| Ok::<_, DesktopError>(element.get_pattern::<UIScrollPattern>()))?
 					&& run.call(|| {
@@ -325,7 +325,7 @@ fn bind_scroll_candidate<T>(
 	root: usize,
 	mut next_host: impl FnMut() -> CoreResult<Option<usize>>,
 ) -> CoreResult<Option<T>> {
-	for _ in 0..16 {
+	for _ in 0..MAX_ANCESTORS {
 		if let Some(host) = next_host()? {
 			return Ok((host == root).then_some(candidate));
 		}
@@ -333,10 +333,11 @@ fn bind_scroll_candidate<T>(
 	Ok(None)
 }
 
-/// The most ancestors walked from a hit-tested element, both to find its scroll
-/// container and back to that container from a step's anchor, so any point a
-/// container was found for also yields its anchor.
-const MAX_SCROLL_DEPTH: usize = 16;
+/// The most raw-view parents any walk here climbs: to an element's host
+/// window, from a hit to its scroll container and from the container to its
+/// host, and back from a step's anchor to the container. One limit for all,
+/// so no walk gives up on a tree another one accepted.
+const MAX_ANCESTORS: usize = 64;
 
 /// The container's child under `point`: content that a scroll moves by what
 /// it moves the view, and that rows added or removed past it and a resized
@@ -372,14 +373,14 @@ fn content_child<N: Fn() -> Instant>(
 }
 
 /// `start` or its ancestor whose parent is the container, within
-/// [`MAX_SCROLL_DEPTH`] parents.
+/// [`MAX_ANCESTORS`] parents.
 fn child_of<T>(
 	start: T,
 	mut parent: impl FnMut(&T) -> CoreResult<Option<T>>,
 	mut is_container: impl FnMut(&T) -> CoreResult<bool>,
 ) -> CoreResult<Option<T>> {
 	let mut element = start;
-	for _ in 0..MAX_SCROLL_DEPTH {
+	for _ in 0..MAX_ANCESTORS {
 		let Some(up) = parent(&element)? else {
 			return Ok(None);
 		};
@@ -985,11 +986,14 @@ mod tests {
 
 	#[test]
 	fn scroll_candidate_rejects_foreign_and_unknown_hosts() {
+		// A container whose host window is 20 parents up, past the old limit.
+		let deep = [vec![None; 20], vec![Some(1)]].concat();
 		for (hosts, expected) in [
 			(&[None, Some(1)][..], Some("pattern")),
+			(&deep[..], Some("pattern")),
 			(&[None, Some(2)][..], None),
 			(&[Some(0)][..], None),
-			(&[None; 16][..], None),
+			(&[None; MAX_ANCESTORS][..], None),
 		] {
 			let mut hosts = hosts.iter().copied();
 			assert_eq!(
@@ -1006,8 +1010,8 @@ mod tests {
 		for (depth, expected) in [
 			(1, Some(0)),
 			(12, Some(11)),
-			(MAX_SCROLL_DEPTH, Some(MAX_SCROLL_DEPTH - 1)),
-			(MAX_SCROLL_DEPTH + 1, None),
+			(MAX_ANCESTORS, Some(MAX_ANCESTORS - 1)),
+			(MAX_ANCESTORS + 1, None),
 		] {
 			let child = child_of(0, |element| Ok(Some(element + 1)), |parent| Ok(*parent == depth));
 			assert_eq!(child.unwrap(), expected, "container {depth} parents up");
