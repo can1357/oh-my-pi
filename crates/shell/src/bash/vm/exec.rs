@@ -1023,7 +1023,6 @@ enum FrameSnap {
 		what:   ScriptKind,
 		tail:   Box<[u8]>,
 		resume: Resume,
-		parse:  Option<Box<ParseSnapshot>>,
 	},
 	Function,
 	NoFork,
@@ -1043,8 +1042,6 @@ pub struct CutShortInput {
 	status:       i32,
 	cleanup_runs: bool,
 	options:      Vec<super::exit_options::WalkOptions>,
-	aliases:      Option<builtins::Aliases>,
-	features:     Features,
 }
 
 impl CutShortInput {
@@ -1055,9 +1052,7 @@ impl CutShortInput {
 		top: TopCut,
 		status: i32,
 		cleanup_runs: bool,
-		options: &[super::exit_options::WalkOptions],
-		aliases: Option<&builtins::Aliases>,
-		features: Features,
+		options: Vec<super::exit_options::WalkOptions>,
 	) -> Self {
 		Self {
 			frames: vp
@@ -1081,7 +1076,6 @@ impl CutShortInput {
 									.and_then(|a| a.pending.as_ref())
 									.map_or_default(|p| p.1.iter().map(|a| a.to_vec()).collect()),
 							},
-							parse:  aux.as_deref().and_then(|a| a.parse.clone()).map(Box::new),
 						},
 						FrameKind::Function { .. } => FrameSnap::Function,
 						FrameKind::NoFork => FrameSnap::NoFork,
@@ -1108,9 +1102,7 @@ impl CutShortInput {
 			top,
 			status,
 			cleanup_runs,
-			options: options.to_vec(),
-			aliases: aliases.cloned(),
-			features,
+			options,
 		}
 	}
 
@@ -1256,18 +1248,12 @@ pub fn walk_cut_short(
 					&& current_options.continueonerror
 					&& matches!(frame.kind, FrameSnap::Script { what: ScriptKind::Run, .. }));
 			if reads_source
-				&& let FrameSnap::Script { tail, resume, parse, .. } = &frame.kind
+				&& let FrameSnap::Script { tail, resume, .. } = &frame.kind
+				&& let Some(parse) = current_options.parse.as_deref()
 				&& script_has_command(
 					tail,
-					parse
-						.as_deref()
-						.or(current_options.parse.as_deref())
-						.map_or(input.features, |p| Features::from_bits(p.features)),
-					parse
-						.as_deref()
-						.or(current_options.parse.as_deref())
-						.map_or(input.aliases.as_ref(), |p| p.aliases.as_ref())
-						.map(|a| a as &dyn AliasLookup),
+					Features::from_bits(parse.features),
+					parse.aliases.as_ref().map(|a| a as &dyn AliasLookup),
 					resume,
 				) {
 				return true;
@@ -1376,24 +1362,15 @@ pub(super) fn capture_exit_report(
 		// The verdict waits for the run's pipeline children to settle
 		// ([`Shell::ended_by_exit_cut_short`]): freeze the walk's input
 		// now, before cleanup unwinds the frames it reads.
-		k.pending_cut_short = (cause == Some(ExitCause::Exit)).then(|| {
-			let options = super::exit_options::by_frame(k, vp, cx).unwrap_or_else(|err| {
-				k.fail(err);
-				Vec::new()
-			});
-			let aliases = builtins::alias_table(k, cx, vp).unwrap_or_else(|err| {
-				k.fail(err);
-				None
-			});
-			let feat = features(k, cx.store, vp).unwrap_or_else(|err| {
-				k.fail(err);
-				Features::NONE
-			});
-			(
-				run.id,
-				CutShortInput::of(vp, top, status, cleanup_runs, &options, aliases.as_ref(), feat),
-			)
-		});
+		// Attribution is optional: a store read needed only by the walk
+		// must not fail the run, suppress cleanup, or abort other vprocs.
+		k.pending_cut_short = if cause == Some(ExitCause::Exit) {
+			super::exit_options::by_frame(k, vp, cx)
+				.ok()
+				.map(|options| (run.id, CutShortInput::of(vp, top, status, cleanup_runs, options)))
+		} else {
+			None
+		};
 	}
 }
 
@@ -1523,6 +1500,7 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	// clear the report that cleanup is still holding.
 	if vp.parent.is_none() {
 		k.exit_report = None;
+		k.pending_cut_short = None;
 	}
 	if run.explicit_mode {
 		run.restore_mode = Some(vp.mode);
@@ -6397,12 +6375,103 @@ mod tests {
 		top: TopCut,
 		status: i32,
 		cleanup_runs: bool,
-		options: &[super::super::exit_options::WalkOptions],
-		aliases: Option<&builtins::Aliases>,
 		child_status: impl FnMut(Vpid) -> Option<i32>,
 	) -> bool {
-		CutShortInput::of(vp, top, status, cleanup_runs, options, aliases, Features::NONE)
-			.walk(child_status)
+		CutShortInput::of(vp, top, status, cleanup_runs, Vec::new()).walk(child_status)
+	}
+
+	#[test]
+	fn exit_classification_store_fault_does_not_interrupt_execution() {
+		use crate::{
+			bash::{
+				Budget, Engine, EngineConfig, MemStore, Script, Shell, ShellInit, Step,
+				store::{BlobSlot, Change, Table},
+			},
+			testkit::FakeHost,
+		};
+
+		#[derive(Default)]
+		struct Store {
+			inner:              MemStore,
+			reject_attribution: bool,
+			failed_reads:       usize,
+		}
+
+		impl StateStore for Store {
+			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+				// The Bash parser does not read the zsh-only aliases option;
+				// the attribution snapshot reads it to model restored modes.
+				if self.reject_attribution && matches!(key, Key::ZshOpt(ZshOpt::Aliases)) {
+					self.failed_reads += 1;
+					return Err(StoreError::Backend(
+						std::io::Error::other("attribution read failed").into(),
+					));
+				}
+				self.inner.get(key)
+			}
+
+			fn scan(
+				&mut self,
+				table: Table,
+				f: &mut dyn FnMut(Key<'_>, &Record),
+			) -> Result<(), StoreError> {
+				self.inner.scan(table, f)
+			}
+
+			fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+				self.inner.apply(change)
+			}
+
+			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+				self.inner.put_blob(slot, bytes)
+			}
+
+			fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+				self.inner.get_blob(slot)
+			}
+
+			fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+				self.inner.del_blob(slot)
+			}
+
+			fn epoch(&self) -> u64 {
+				self.inner.epoch()
+			}
+		}
+
+		for fail in [false, true] {
+			let mut store = Store::default();
+			let mut host = FakeHost::new();
+			let engine = Engine::new(EngineConfig::default());
+			let mut shell = Shell::create(
+				&engine,
+				&mut Cx { host: &mut host, store: &mut store },
+				ShellInit::default(),
+			)
+			.unwrap();
+			store.reject_attribution = fail;
+			let run = shell
+				.submit(Script::command(b"trap 'CLEANED=yes' EXIT; exit 7; MARKER=bad".as_slice()));
+			let status = (0..20).find_map(|_| {
+				match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
+					Step::Done { run: done, status } if done == run => Some(status),
+					_ => None,
+				}
+			});
+			assert_eq!(status, Some(7));
+			assert_eq!(shell.exit_cause(run), Some(ExitCause::Exit));
+			assert_eq!(shell.ended_by_exit_cut_short(&mut store, run), !fail);
+			assert_eq!(store.failed_reads > 0, fail);
+			let cleaned = store.inner.get(Key::Var(BStr::new(b"CLEANED"))).unwrap();
+			assert!(matches!(cleaned, Some(Record::Var(v)) if v.as_scalar() == Some(b"yes")));
+			assert!(
+				store
+					.inner
+					.get(Key::Var(BStr::new(b"MARKER")))
+					.unwrap()
+					.is_none()
+			);
+		}
 	}
 
 	#[test]
@@ -6435,7 +6504,7 @@ mod tests {
 						autoload: false,
 					}));
 				assert_eq!(
-					exit_cut_short(&vp, TopCut::At(1), 0, false, &[], None, |_| None),
+					exit_cut_short(&vp, TopCut::At(1), 0, false, |_| None),
 					expected,
 					"{operation}"
 				);
@@ -6514,7 +6583,7 @@ mod tests {
 							}));
 					}
 					assert_eq!(
-						exit_cut_short(&vp, TopCut::At(1), 1 - kept, true, &[], None, |_| None),
+						exit_cut_short(&vp, TopCut::At(1), 1 - kept, true, |_| None),
 						kept == 0,
 						"{key:?}, kept={kept}, text={text}"
 					);

@@ -1051,6 +1051,34 @@ async fn exit_classification_restored_caller_parse_context() {
 	}
 }
 
+/// A locale nameref may change without a write to any locale variable.
+/// Live execution and the counterfactual parser must agree on that change.
+#[tokio::test]
+async fn exit_classification_caller_locale_tracks_nameref_target_changes() {
+	let _guard = shell_test_lock().lock().await;
+	for (outer, inner, multibyte) in [("C", "zh_TW.Big5", true), ("zh_TW.Big5", "C", false)] {
+		for scoped in [false, true] {
+			for exiting in [false, true] {
+				let transfer = if exiting { "exit 0" } else { "return 0" };
+				let local = if scoped { "local " } else { "" };
+				let command = format!(
+					"unset LC_ALL LC_CTYPE LANG\nPI_EXIT_CHARSET={outer}\ndeclare -n \
+					 LC_ALL=PI_EXIT_CHARSET\nshopt -s expand_aliases\nalias $'\\xa3'=''\nf() {{ \
+					 {local}PI_EXIT_CHARSET={inner}; {transfer}; }}\neval $'f\\n\\xa3\\\\\\n'"
+				);
+				let result = run_exit_case(&Shell::new(None), &command).await;
+				let final_multibyte = multibyte != scoped;
+				assert_eq!(
+					result.exit_code,
+					Some(if !exiting && final_multibyte { 127 } else { 0 }),
+					"{command}"
+				);
+				assert_eq!(result.ended_by_exit, exiting && final_multibyte, "{command}");
+			}
+		}
+	}
+}
+
 /// Locale is part of the parser context too: a multibyte trailing backslash
 /// is literal, while in C it escapes the newline and leaves an empty alias.
 /// Return controls exercise real scope restoration independently of the walk.
