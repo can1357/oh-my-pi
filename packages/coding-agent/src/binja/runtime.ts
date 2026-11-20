@@ -1,6 +1,5 @@
 import * as path from "node:path";
 import { $env, logger } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
 import { DisasmUnavailableError, type WorkerRuntime } from "../disasm/backend";
 import { findWorkerRuntime, memoizeWorkerRuntime } from "../disasm/python-runtime";
 import type { ToolSession } from "../tools";
@@ -8,12 +7,16 @@ import { binjaPythonDir, cfgBinjaInstall } from "./install";
 import { cfgBinjaPython } from "./settings";
 
 /** Imports the API and initialises the core, which is where the licence is checked. */
-const PROBE = "import binaryninja as b; b.BinaryView.new(b'\\x00')";
+export const BINJA_PROBE = "import binaryninja as b; b.BinaryView.new(b'\\x00')";
+
+/** How long one interpreter gets to start the core; a licence server that never answers must not hang analysis. */
+export const BINJA_PROBE_TIMEOUT_MS = 30_000;
 
 /** What the core reports when it starts without a usable licence. */
 const LICENSE_REFUSAL = "License is not valid";
 
-type ProbeResult = "ok" | "license" | "unusable";
+/** `license`: the core refused its licence. `unusable`: any other failure, a probe that ran out of time included. */
+export type BinjaProbeResult = "ok" | "license" | "unusable";
 
 /**
  * Resolve the Python interpreter and environment that run the Binary Ninja worker, memoized per
@@ -40,7 +43,7 @@ export function resolveBinjaRuntime(session: ToolSession): Promise<WorkerRuntime
 					pythonPath: candidate.pythonPath,
 					env: buildBinjaEnv(candidate.env, pythonDir),
 				};
-				const result = await probeCandidate(runtime);
+				const result = await probeBinjaRuntime(runtime);
 				if (result === "license") {
 					// The licence belongs to the install and user folder, not the interpreter: no other candidate can pass.
 					throw new DisasmUnavailableError(
@@ -85,12 +88,26 @@ export function buildBinjaEnv(
 	return env;
 }
 
-async function probeCandidate(runtime: WorkerRuntime): Promise<ProbeResult> {
+/** Whether the interpreter and environment of `runtime` start Binary Ninja headless. */
+export async function probeBinjaRuntime(
+	runtime: WorkerRuntime,
+	timeoutMs = BINJA_PROBE_TIMEOUT_MS,
+): Promise<BinjaProbeResult> {
 	try {
-		const result = await $`${runtime.pythonPath} -c ${PROBE}`.env(runtime.env).quiet().nothrow();
-		if (result.exitCode === 0) return "ok";
-		const stderr = result.stderr.toString();
-		logger.debug("Binary Ninja python probe rejected", { pythonPath: runtime.pythonPath, stderr });
+		const probe = Bun.spawn([runtime.pythonPath, "-c", BINJA_PROBE], {
+			env: runtime.env,
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "pipe",
+			timeout: timeoutMs,
+			killSignal: "SIGKILL",
+		});
+		const [exitCode, stderr] = await Promise.all([
+			probe.exited,
+			new Response(probe.stderr as ReadableStream<Uint8Array>).text(),
+		]);
+		if (exitCode === 0) return "ok";
+		logger.debug("Binary Ninja python probe rejected", { pythonPath: runtime.pythonPath, exitCode, stderr });
 		return stderr.includes(LICENSE_REFUSAL) ? "license" : "unusable";
 	} catch (error) {
 		logger.debug("Binary Ninja python probe failed", { pythonPath: runtime.pythonPath, error });

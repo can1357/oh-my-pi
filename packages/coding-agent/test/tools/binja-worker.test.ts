@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { $ } from "bun";
 import { binjaPythonDir, locateBinjaInstall } from "@oh-my-pi/pi-coding-agent/binja/install";
+import { BINJA_PROBE, BINJA_PROBE_TIMEOUT_MS, buildBinjaEnv } from "@oh-my-pi/pi-coding-agent/binja/runtime";
 import { DISASM_BACKENDS, type WorkerRuntime } from "@oh-my-pi/pi-coding-agent/disasm/backend";
 import type { DatabaseLocation } from "@oh-my-pi/pi-coding-agent/disasm/store";
 import { DisasmWorker, type WorkerRequestOptions } from "@oh-my-pi/pi-coding-agent/disasm/supervisor";
@@ -25,7 +26,6 @@ const BACKEND = DISASM_BACKENDS.binja;
 /** A small dynamically linked ELF: analysis takes well under a second. */
 const INPUT = "/bin/true";
 const TEST_TIMEOUT_MS = 120_000;
-const PROBE = "import binaryninja as b; b.BinaryView.new(b'\\x00')";
 
 function isElf(file: string): boolean {
 	let fd: number;
@@ -47,16 +47,16 @@ function headlessRuntime(): WorkerRuntime | undefined {
 	const installDir = locateBinjaInstall(undefined);
 	const pythonPath = Bun.which("python3");
 	if (!installDir || !pythonPath || !isElf(INPUT)) return undefined;
-	const env: Record<string, string> = {};
-	for (const [key, value] of Object.entries(process.env)) {
-		if (value !== undefined && key !== "BN_LICENSE") env[key] = value;
-	}
-	env.PYTHONUNBUFFERED = "1";
-	env.PYTHONIOENCODING = "utf-8";
-	env.PYTHONPATH = binjaPythonDir(installDir);
-	env.BN_DISABLE_USER_PLUGINS = "1";
-	env.BN_DISABLE_REPOSITORY_PLUGINS = "1";
-	const probe = Bun.spawnSync([pythonPath, "-c", PROBE], { env, stdout: "ignore", stderr: "ignore" });
+	const env = buildBinjaEnv(process.env, binjaPythonDir(installDir));
+	// Synchronous because the suite is skipped or not while this file loads, and bounded so that a
+	// licence that never answers skips the suite instead of hanging test collection.
+	const probe = Bun.spawnSync([pythonPath, "-c", BINJA_PROBE], {
+		env,
+		stdout: "ignore",
+		stderr: "ignore",
+		timeout: BINJA_PROBE_TIMEOUT_MS,
+		killSignal: "SIGKILL",
+	});
 	return probe.exitCode === 0 ? { pythonPath, env } : undefined;
 }
 
