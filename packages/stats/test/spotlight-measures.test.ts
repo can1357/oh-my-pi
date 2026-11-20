@@ -287,6 +287,46 @@ describe("Spotlight holdout-adjusted net", () => {
 			12,
 		);
 	});
+
+	it("charges the cuts the same fetch-back turns in the net, the economics and the time cost", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shapedRead(b, "src/c.ts");
+		shapedRead(b, "src/d.ts");
+		// A request whose two calls both recover a cut: one extra turn, split between the two cuts.
+		const pure = b.request({
+			cacheRead: 12_000,
+			cost: 0.05,
+			duration: 7000,
+			calls: [
+				{ name: "read", args: { path: "src/c.ts:20-30" } },
+				{ name: "read", args: { path: "src/d.ts:20-30" } },
+			],
+		});
+		for (const id of pure) b.result(id, { text: "y".repeat(400) });
+		// A request that recovers a cut but also does other work: not the cuts' turn anywhere.
+		const mixed = b.request({
+			cacheRead: 12_000,
+			cost: 0.08,
+			duration: 9000,
+			calls: [
+				{ name: "read", args: { path: "src/c.ts:40-50" } },
+				{ name: "grep", args: { pattern: "x" } },
+			],
+		});
+		for (const id of mixed) b.result(id, { text: "z".repeat(400) });
+		call(b, "grep", { pattern: "y" });
+		await write("cut-turns.jsonl", b);
+
+		const stats = await dashboard();
+		const read = stats.economics.find(e => e.tool === "read");
+		expect(read).toMatchObject({ cuts: 2, extraTurns: 1 });
+		expect(read?.turnUsd).toBeCloseTo(0.05, 12);
+		expect(stats.timeCost).toMatchObject({ fetchBackTurns: 1, fetchBackMs: 7000 });
+		// No holdouts: the whole recovery, and only the pure turn, comes off the adjusted net.
+		const { savedUsd, spotlightUsd } = stats.compounding;
+		expect(stats.adjusted.netUsd.value).toBeCloseTo(savedUsd - (read?.recoveryUsd ?? 0) - 0.05 - spotlightUsd, 12);
+	});
 });
 
 describe("Spotlight historical gated reads", () => {

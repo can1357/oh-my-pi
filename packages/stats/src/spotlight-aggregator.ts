@@ -59,6 +59,7 @@ import {
 	computeRanking,
 	computeSteps,
 	computeTimeCost,
+	cutRecoveryTurns,
 	emptyAdjusted,
 	emptyRanking,
 	holdoutBaselines,
@@ -1306,12 +1307,8 @@ export function buildSpotlightDashboard(
 		compounding.promptTokens += sessionFacts?.promptTokens ?? 0;
 
 		const turnsCounted = new Set<string>();
-		// Recoveries of cuts per request: a turn is the cuts' when every call it made recovered one, as in economics.
-		const cutRecoveries = new Map<string, number>();
-		for (const call of analysis.calls) {
-			if (!call.recovery?.source.result?.shortened || !call.entryId) continue;
-			cutRecoveries.set(call.entryId, (cutRecoveries.get(call.entryId) ?? 0) + 1);
-		}
+		// The requests that only recovered cuts: the turns economics charges the cuts.
+		const cutTurns = cutRecoveryTurns(analysis);
 		const sessionMoney: SessionMoney = {
 			sessionFile: analysis.session.session_file,
 			savedTokens: 0,
@@ -1388,7 +1385,7 @@ export function buildSpotlightDashboard(
 					totals.turnsUsd += turnUsd;
 				}
 				compounding.recoveryUsd += turnUsd;
-				if (cutRecoveries.get(call.entryId) === call.callsInTurn) sessionMoney.recoveryUsd += turnUsd;
+				if (cutTurns.has(call.entryId)) sessionMoney.recoveryUsd += turnUsd;
 				point.netUsd -= turnUsd;
 			}
 		}
@@ -1594,16 +1591,8 @@ function computeFetchBack(evaluated: readonly Evaluated[], tools: readonly Spotl
  * two such calls adds half a turn (and half its cost) to each call's cut.
  */
 function extraTurnShares(analysis: SessionAnalysis): Map<Call, { turns: number; usd: number }> {
-	const byEntry = new Map<string, Call[]>();
-	for (const call of analysis.calls) {
-		if (!call.recovery?.source.result?.shortened || !call.entryId) continue;
-		const calls = byEntry.get(call.entryId);
-		if (calls) calls.push(call);
-		else byEntry.set(call.entryId, [call]);
-	}
 	const shares = new Map<Call, { turns: number; usd: number }>();
-	for (const [entryId, calls] of byEntry) {
-		if (calls.length !== calls[0].callsInTurn) continue;
+	for (const [entryId, calls] of cutRecoveryTurns(analysis)) {
 		const usd = analysis.costByEntry.get(entryId) ?? 0;
 		for (const call of calls) {
 			const source = call.recovery?.source;

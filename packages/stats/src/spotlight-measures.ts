@@ -635,6 +635,22 @@ export function computeSteps(
 // ---------------------------------------------------------------------------
 
 /**
+ * The requests that did nothing but recover output applied cuts hid (every call they made recovered one), each with
+ * those calls. The headline net, the economics table and the time cost all charge the cuts exactly these turns.
+ */
+export function cutRecoveryTurns(analysis: SessionAnalysis): Map<string, Call[]> {
+	const byEntry = new Map<string, Call[]>();
+	for (const call of analysis.calls) {
+		if (!call.entryId || !call.recovery?.source.result?.shortened) continue;
+		const calls = byEntry.get(call.entryId);
+		if (calls) calls.push(call);
+		else byEntry.set(call.entryId, [call]);
+	}
+	for (const [entryId, calls] of byEntry) if (calls.length !== calls[0].callsInTurn) byEntry.delete(entryId);
+	return byEntry;
+}
+
+/**
  * Agent time of the experiment sessions in the range: the model time of their requests, of the requests that did
  * nothing but fetch back cut output, and the time tool calls spent shaping.
  */
@@ -643,18 +659,13 @@ export function computeTimeCost(active: readonly SessionAnalysis[], cutoff: numb
 	for (const analysis of active) {
 		const requests = new Map(analysis.requests.map(request => [request.entryId, request]));
 		for (const request of analysis.requests) if (request.timestamp >= cutoff) cell.agentMs += request.durationMs;
-		const fetchBackCalls = new Map<string, { calls: number; callsInTurn: number }>();
 		for (const call of analysis.calls) {
 			const result = call.result;
 			if (result && result.timestamp >= cutoff) cell.shapeMs += result.shapeMs ?? 0;
-			if (!call.entryId || !call.recovery?.source.result?.shortened) continue;
-			const entry = fetchBackCalls.get(call.entryId) ?? { calls: 0, callsInTurn: call.callsInTurn };
-			entry.calls++;
-			fetchBackCalls.set(call.entryId, entry);
 		}
-		for (const [entryId, entry] of fetchBackCalls) {
+		for (const entryId of cutRecoveryTurns(analysis).keys()) {
 			const request = requests.get(entryId);
-			if (entry.calls !== entry.callsInTurn || !request || request.timestamp < cutoff) continue;
+			if (!request || request.timestamp < cutoff) continue;
 			cell.fetchBackTurns++;
 			cell.fetchBackMs += request.durationMs;
 		}
