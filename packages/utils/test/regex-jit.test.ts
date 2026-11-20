@@ -63,8 +63,10 @@ test("mixed UTF-16 and ASCII inputs keep native captures and offsets", () => {
 	const native = new RegExp(source, "gd");
 	for (const unit of ["x", "é", "🦀", "\ud800"]) {
 		const value = unit.repeat(163);
-		const input = `${value}key=${value};${value}key=${value};`;
-		expect([...input.matchAll(regex)]).toEqual([...input.matchAll(native)]);
+		for (const prefix of ["", "x".repeat(32 * 1024 - 1)]) {
+			const input = `${prefix}${value}key=${value};${value}key=${value};`;
+			expect([...input.matchAll(regex)]).toEqual([...input.matchAll(native)]);
+		}
 	}
 });
 

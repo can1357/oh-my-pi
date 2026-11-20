@@ -61,6 +61,8 @@ const MARKS = 16;
 const MIN_LOAD_SPAN = 16;
 /** Bound the shared text and marks storage; larger inputs use the table scan. */
 const MAX_TEXT_UNITS = 1 << 23;
+/** Limit how much non-ASCII text we transcode before switching to UTF-16. */
+const COPY_BLOCK = 32 * 1024;
 
 const memory = new WebAssembly.Memory({ initial: 1 });
 /** Code units the marks and text regions hold. */
@@ -120,11 +122,17 @@ export function cachedLayout(text: string, from: number, to: number, backward: b
 export function load(text: string, span: number): Layout | -1 {
 	if (span < MIN_LOAD_SPAN || text.length > MAX_TEXT_UNITS) return -1;
 	reserve(text.length);
-	// Only ASCII uses one UTF-8 byte per UTF-16 code unit. Count without transcoding
-	// into Wasm memory, then write once; UTF-16LE preserves lone surrogates.
-	const ascii = Buffer.byteLength(text, "utf8") === text.length;
-	writer.write(text, textAt, ascii ? "latin1" : "utf16le");
-	loadedLayout = ascii ? NARROW : WIDE;
+	loadedLayout = NARROW;
+	for (let start = 0; start < text.length; start += COPY_BLOCK) {
+		const end = Math.min(start + COPY_BLOCK, text.length);
+		const part = start === 0 && end === text.length ? text : text.slice(start, end);
+		// Four extra bytes fit any next UTF-8 scalar, so a write returning exactly
+		// one byte per code unit cannot have stopped early on a multibyte scalar.
+		if (writer.write(part, textAt + start, part.length + 4, "utf8") === part.length) continue;
+		writer.write(text, textAt, "utf16le");
+		loadedLayout = WIDE;
+		break;
+	}
 	loaded = text;
 	return loadedLayout;
 }
