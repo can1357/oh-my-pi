@@ -1,5 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
+import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
 
 const TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
@@ -186,6 +188,41 @@ describe("inline mouse tracking", () => {
 			tui.start();
 			tui.renderNow();
 			expect(terminal.output.includes(TRACKING_ON)).toBe(false);
+		} finally {
+			tui.stop();
+		}
+	});
+});
+
+describe("pause screen mouse tracking", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	it("does not enable mouse capture while paused, so the terminal keeps native selection", async () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		tui.start();
+		const paused = runPauseScreen({ ui: tui, showStatus: () => {} });
+		try {
+			tui.renderNow();
+			expect(terminal.output.includes(TRACKING_ON)).toBe(false);
+		} finally {
+			terminal.sendInput("\r");
+			await paused;
+			tui.stop();
+		}
+	});
+
+	it("a fullscreen overlay that does not opt out of mouse tracking enables it", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		try {
+			tui.start();
+			const overlay = tui.showOverlay(new StaticOverlay(), { fullscreen: true });
+			tui.renderNow();
+			expect(terminal.output.includes(TRACKING_ON)).toBe(true);
+			overlay.hide();
 		} finally {
 			tui.stop();
 		}
