@@ -139,9 +139,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsThinkingBindingControls?": "boolean",
 	});
 
+	const GoogleCompatSchema = type({
+		"streamFunctionCallArguments?": "boolean",
+	});
+
 	// Provider-level overrides can target bundled models whose API is not repeated
 	// in models.yml, so preserve the sparse compat shape for each supported API.
-	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
+	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema).and(GoogleCompatSchema);
 
 	const ApiSchema = type(
 		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',

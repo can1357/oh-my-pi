@@ -46,11 +46,26 @@ export interface InlineDataPart {
 	data: string;
 }
 
+/** Incremental argument fragment emitted when `streamFunctionCallArguments` is enabled on Vertex AI. */
+export interface PartialArg {
+	/** RFC 9535 JSONPath addressing the target location (e.g. `$.path`, `$.items[0].k`, `$.tags[]`, `$.obj{}`). */
+	jsonPath?: string;
+	stringValue?: string | null;
+	numberValue?: number | null;
+	boolValue?: boolean | null;
+	nullValue?: unknown;
+	/** True for chunked `stringValue` fragments when more chunks follow for the same `jsonPath`. */
+	willContinue?: boolean;
+}
+
 /** Function call emitted by the model. */
 export interface FunctionCallPart {
 	name?: string;
 	args?: Record<string, unknown>;
 	id?: string;
+	partialArgs?: PartialArg[];
+	/** True when subsequent streamed chunks carry more `partialArgs` for this function call. */
+	willContinue?: boolean;
 }
 
 /** Tool execution result fed back to the model. */
@@ -110,8 +125,9 @@ export interface ToolDeclaration {
 /** Tool selection mode container. */
 export interface ToolConfig {
 	functionCallingConfig?: {
-		mode: FunctionCallingConfigMode;
+		mode?: FunctionCallingConfigMode;
 		allowedFunctionNames?: string[];
+		streamFunctionCallArguments?: boolean;
 	};
 }
 

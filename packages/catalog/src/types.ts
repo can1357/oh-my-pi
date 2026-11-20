@@ -1348,6 +1348,14 @@ export interface GoogleCompat {
 	 * `thoughtSignature` as bytes and reject the raw literal.
 	 */
 	base64SkipThoughtSignature?: boolean;
+	/**
+	 * Request incremental Vertex AI function-call argument streaming
+	 * (`toolConfig.functionCallingConfig.streamFunctionCallArguments: true`).
+	 * Supported on Gemini 3+ via Vertex AI (excluding Gemini 3.1 Flash-Lite);
+	 * unsupported on the public Gemini Developer API. Opt in on custom
+	 * `google-generative-ai` models backed by a Vertex proxy.
+	 */
+	streamFunctionCallArguments?: boolean;
 	/** Drop unsigned thinking blocks from replayed history (Antigravity Claude). */
 	dropUnsignedThinking?: boolean;
 	/** Cloud Code Assist legacy `parameters` schema field instead of `parametersJsonSchema`. */
@@ -1393,6 +1401,7 @@ export type ResolvedGoogleCompat = Required<
 		| "antigravityUsageLabel"
 		| "supportsSamplingParams"
 		| "base64SkipThoughtSignature"
+		| "streamFunctionCallArguments"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1402,6 +1411,7 @@ export type ResolvedGoogleCompat = Required<
 	antigravityUsageLabel?: string;
 	supportsSamplingParams?: boolean;
 	base64SkipThoughtSignature?: boolean;
+	streamFunctionCallArguments?: boolean;
 	maxImageDimension?: number;
 	maxImagePayloadBytes?: number;
 };

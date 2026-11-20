@@ -7,6 +7,10 @@
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin's Gemini 4 Neon images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#19883](https://github.com/can1357/oh-my-pi/pull/19883) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Added
+
+- Added the `stream-function-call-arguments` (`compat.streamFunctionCallArguments`) Google wire axis, enabled by default for Gemini 3+ on `google-vertex` (excluding Gemini 3.1 Flash-Lite) and opt-in for custom Vertex-backed `google-generative-ai` providers ([#19876](https://github.com/can1357/oh-my-pi/pull/19876) by [@farnoy](https://github.com/farnoy))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes

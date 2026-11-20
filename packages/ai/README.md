@@ -339,7 +339,7 @@ for await (const event of s) {
 - Arrays may be incomplete
 - Nested objects may be partially populated
 - At minimum, `arguments` will be an empty object `{}`, never `undefined`
-- The Google provider does not support function call streaming. Instead, you will receive a single `toolcall_delta` event with the full arguments.
+- On Vertex AI (Gemini 3+, excluding Gemini 3.1 Flash-Lite) and custom `google-generative-ai` models with `compat.streamFunctionCallArguments: true`, function call arguments stream incrementally as `toolcall_delta` events. The public Gemini Developer API and older models still emit a single `toolcall_delta` event with the full arguments.
 
 ### Validating Tool Arguments
 
