@@ -798,28 +798,27 @@ pub(super) fn retained_minimized_owner(root: &AxHandle, wid: u32) -> Option<libc
 
 /// Reads only the exact minimized AX window. A sibling can be key, have the
 /// same title, or occupy the same frame; none of those identifies this root.
-pub(super) fn minimized_root(pid: libc::pid_t, wid: u32) -> CoreResult<AxHandle> {
+/// `None` unless the app lists that window and reports it minimized, so a
+/// window hidden for another reason keeps its "not found" error.
+pub(super) fn minimized_root(pid: libc::pid_t, wid: u32) -> CoreResult<Option<AxHandle>> {
 	ensure_trusted()?;
-	let unavailable = || {
-		DesktopError::window_unavailable(format!(
-			"window '{wid}' is not in the visible window list and its minimized accessibility root \
-			 could not be verified"
-		))
+	let Some(app) = probe_application(pid) else {
+		return Ok(None);
 	};
-	let app = probe_application(pid).ok_or_else(unavailable)?;
 	let windows = copy_elements(&app, "AXWindows")?;
-	let element = minimized_element(
+	let Some(element) = minimized_element(
 		wid,
 		windows,
 		|element| window_id(element),
 		|element| copy_bool(element, "AXMinimized"),
-	)
-	.ok_or_else(unavailable)?;
+	) else {
+		return Ok(None);
+	};
 	if element_pid(&element)? != pid {
-		return Err(unavailable());
+		return Ok(None);
 	}
 	set_timeout(&element)?;
-	Ok(AxHandle::Mac(element))
+	Ok(Some(AxHandle::Mac(element)))
 }
 
 fn minimized_element<E>(

@@ -4519,6 +4519,13 @@ describe("retained window menu", () => {
 		native.axQuery = async id => [{ ...axNode, title: `AX child ${id}` }];
 		const read = await runWorker(transport, "snapshot", renderComputerCall([root, { method: "ax", args: [] }]), true);
 		expect(read.ok && read.payload.returnValue).toBe("AX root 42");
+		// `computer.window` also takes the id as a number.
+		const numbered = renderComputerCall([
+			{ method: "window", args: [42] },
+			{ method: "ax", args: [] },
+		]);
+		const byNumber = await runWorker(transport, "snapshot-number", numbered, true);
+		expect(byNumber.ok && byNumber.payload.returnValue).toBe("AX root 42");
 		const find = await runWorker(transport, "find", renderComputerCall([root, { method: "find", args: [{}] }]), true);
 		expect(find.ok && find.payload.returnValue).toMatchObject([{ title: "AX child 42" }]);
 		const click = await runWorker(transport, "click", renderComputerCall([root, { method: "click", args: [1, 2] }]));

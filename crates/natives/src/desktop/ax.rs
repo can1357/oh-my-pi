@@ -1169,7 +1169,13 @@ pub struct WindowRoot {
 }
 
 pub enum RootState {
-	Visible { focused: bool },
+	Visible {
+		focused: bool,
+	},
+	#[cfg_attr(
+		not(target_os = "macos"),
+		allow(dead_code, reason = "only the macOS backend reads minimized windows")
+	)]
 	Minimized,
 }
 

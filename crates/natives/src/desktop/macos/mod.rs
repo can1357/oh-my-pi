@@ -140,8 +140,9 @@ impl Backend for MacosBackend {
 			(pid, held.clone())
 		} else if let Some(pid) =
 			window_owner(id, skylight::window_owner_pid, || capture::window_owner_pid(wid))
+			&& let Some(element) = ax::minimized_root(pid, wid)?
 		{
-			(pid, ax::minimized_root(pid, wid)?)
+			(pid, element)
 		} else {
 			return Ok(None);
 		};
