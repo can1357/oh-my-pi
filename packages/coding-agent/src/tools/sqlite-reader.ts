@@ -1,4 +1,6 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
+import * as fs from "node:fs/promises";
+import { isEnoent, TempDir } from "@oh-my-pi/pi-utils";
 import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -41,15 +43,63 @@ function configureSqliteReadConnection(db: Database): Database {
 }
 
 /**
- * Opens the query-only connection used by read tools, retrying read-write mode solely to initialize missing WAL sidecars.
+ * A connection to a private copy of a database. Closing it removes the copy's directory, so the copy
+ * lives exactly as long as the read that opened it.
+ */
+class PrivateCopyDatabase extends Database {
+	readonly #tempDir: TempDir;
+
+	constructor(filePath: string, tempDir: TempDir) {
+		super(filePath, { readwrite: true, create: false, strict: true });
+		this.#tempDir = tempDir;
+	}
+
+	override close(throwOnError?: boolean): void {
+		try {
+			super.close(throwOnError);
+		} finally {
+			this.#tempDir.removeSync();
+		}
+	}
+}
+
+/**
+ * Reads a database through a copy of it and its `-wal`. SQLite recovers the copied WAL on the copy, so
+ * the original and everything next to it stay untouched.
+ */
+async function openPrivateCopy(filePath: string): Promise<Database> {
+	const tempDir = await TempDir.create("@omp-sqlite-read-");
+	try {
+		const copyPath = tempDir.join("database.sqlite");
+		await fs.copyFile(filePath, copyPath);
+		try {
+			await fs.copyFile(`${filePath}-wal`, `${copyPath}-wal`);
+		} catch (error) {
+			// The writer may remove its -wal at any time; then the copied database is already complete.
+			if (!isEnoent(error)) throw error;
+		}
+		return configureSqliteReadConnection(new PrivateCopyDatabase(copyPath, tempDir));
+	} catch (error) {
+		await tempDir.remove();
+		throw error;
+	}
+}
+
+/**
+ * Opens the query-only connection used by read tools.
+ *
+ * The original is never opened read-write: a read-write close checkpoints and truncates its WAL, which
+ * a live writer may own. A database that needs WAL recovery or whose sidecars SQLite would create beside
+ * it, or whose read-only open fails with SQLITE_CANTOPEN, is read through a private copy instead.
  *
  * Helpers here run statements through `db.query()`: `close()` finalizes that cache, while an
  * unfinalized `db.prepare()` statement leaves the connection a zombie that keeps the file open
  * (Windows then refuses to delete it).
  */
 export async function openSqliteReadConnection(filePath: string): Promise<Database> {
-	if (await requiresWalSidecarInitialization(filePath)) {
-		return configureSqliteReadConnection(new Database(filePath, { readwrite: true, create: false, strict: true }));
+	// Turso's multiprocess WAL is coordinated through `-tshm`, which SQLite cannot see.
+	if ((await Bun.file(`${filePath}-tshm`).exists()) || (await requiresWalSidecarInitialization(filePath))) {
+		return openPrivateCopy(filePath);
 	}
 	try {
 		return configureSqliteReadConnection(new Database(filePath, { readonly: true, strict: true }));
@@ -58,7 +108,7 @@ export async function openSqliteReadConnection(filePath: string): Promise<Databa
 			throw error;
 		}
 	}
-	return configureSqliteReadConnection(new Database(filePath, { readwrite: true, create: false, strict: true }));
+	return openPrivateCopy(filePath);
 }
 const SQLITE_PATH_PATTERN = /\.(?:sqlite3?|db3?)(?=(?::|\?|$))/gi;
 const DEFAULT_QUERY_LIMIT = 20;

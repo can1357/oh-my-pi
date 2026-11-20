@@ -1,10 +1,10 @@
 import { Database } from "bun:sqlite";
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import {
@@ -169,6 +169,26 @@ describe("SQLite tool support", () => {
 		return dbPath;
 	}
 
+	/**
+	 * Stamps a WAL database whose committed frame is still in its `-wal`, with no
+	 * `-shm`: the shape of a database copied out from under a live writer.
+	 */
+	async function stampHotWalDb(name: string): Promise<string> {
+		const dbPath = path.join(tmpDir, name);
+		const writer = new Database(`${dbPath}.source`);
+		try {
+			writer.run("PRAGMA journal_mode = WAL");
+			writer.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+			writer.prepare("INSERT INTO entries (value) VALUES (?)").run("in-wal");
+			// Copy while the writer is open: its close would checkpoint the frame into the database.
+			await fs.copyFile(`${dbPath}.source`, dbPath);
+			await fs.copyFile(`${dbPath}.source-wal`, `${dbPath}-wal`);
+		} finally {
+			writer.close();
+		}
+		return dbPath;
+	}
+
 	beforeAll(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqlite-tool-test-"));
 		sqlitePath = path.join(tmpDir, "app.sqlite");
@@ -262,6 +282,61 @@ describe("SQLite tool support", () => {
 		});
 
 		expect(getText(result)).toContain("| 1");
+	});
+
+	it("reads a WAL database whose WAL another engine owns without changing the WAL or the directory", async () => {
+		// Turso's multiprocess WAL is coordinated through `-tshm`; closing a read-write
+		// connection here checkpoints and truncates the `-wal` under its live writer.
+		const walPath = await stampHotWalDb("foreign-wal.sqlite");
+		await fs.writeFile(`${walPath}-tshm`, "");
+		const walSizeBefore = (await fs.stat(`${walPath}-wal`)).size;
+		const listingBefore = (await fs.readdir(tmpDir)).sort();
+		expect(walSizeBefore).toBeGreaterThan(0);
+
+		const result = await readTool.execute("sqlite-foreign-wal", { path: walPath });
+
+		expect(getText(result)).toContain("entries (1 rows)");
+		expect((await fs.stat(`${walPath}-wal`)).size).toBe(walSizeBefore);
+		expect((await fs.readdir(tmpDir)).sort()).toEqual(listingBefore);
+	});
+
+	it("reads a WAL database with a stale -shm and a -tshm without changing its sidecars or leaving a copy", async () => {
+		// The -shm indexes an older state of the WAL than the copied -wal holds, so a read of the original would miss the newest commit.
+		const dbPath = path.join(tmpDir, "stale-shm-foreign.sqlite");
+		const writer = new Database(`${dbPath}.source`);
+		try {
+			writer.run("PRAGMA journal_mode = WAL");
+			writer.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+			await fs.copyFile(`${dbPath}.source-shm`, `${dbPath}-shm`);
+			writer.prepare("INSERT INTO entries (value) VALUES (?)").run("in-wal");
+			await fs.copyFile(`${dbPath}.source`, dbPath);
+			await fs.copyFile(`${dbPath}.source-wal`, `${dbPath}-wal`);
+		} finally {
+			writer.close();
+		}
+		await fs.writeFile(`${dbPath}-tshm`, "");
+		const shmBefore = await fs.readFile(`${dbPath}-shm`);
+		const walSizeBefore = (await fs.stat(`${dbPath}-wal`)).size;
+
+		const copies: TempDir[] = [];
+		const realCreate = TempDir.create;
+		const createTempDir = spyOn(TempDir, "create").mockImplementation(async prefix => {
+			const copy = await realCreate(prefix);
+			copies.push(copy);
+			return copy;
+		});
+		let result: ToolTextResult;
+		try {
+			result = await readTool.execute("sqlite-stale-shm-foreign-wal", { path: dbPath });
+		} finally {
+			createTempDir.mockRestore();
+		}
+
+		expect(getText(result)).toContain("entries (1 rows)");
+		expect(await fs.readFile(`${dbPath}-shm`)).toEqual(shmBefore);
+		expect((await fs.stat(`${dbPath}-wal`)).size).toBe(walSizeBefore);
+		expect(copies).toHaveLength(1);
+		await expect(fs.stat(copies[0]!.path())).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
 	// Issue #15586: any in-process close of a live database or its `-shm` released the
