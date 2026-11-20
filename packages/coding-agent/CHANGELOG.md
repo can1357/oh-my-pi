@@ -2,16 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- `omp usage reset` and `/usage reset` list each saved reset's id and title, and for Claude the limits it clears; the `/usage reset` picker shows the selected account's resets too ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
-
-### Fixed
-
-- `omp usage reset` and `/usage reset` take `<provider>/<credential id>:<credit id>` to spend exactly that saved reset, and refuse a target without one when the account holds resets that clear different limits (a full Claude reset next to a Fable-only one), or a named Claude grant that isn't the one Claude offers next ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
-- Automatic Claude restores no longer spend a reset that clears more than the block needs, such as a full reset on a Fable-only block or a reset that also clears the weekly window on a 5h-only block (even with `claudeResets.autoRedeem5h: yes`); the session shows the command to spend it instead ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
-- The expiry banner's spend command for a Claude account names the expiring reset ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
-- The `/usage reset` picker shows each reset of an account whose resets clear different limits as its own row and spends only the one offered next ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
@@ -51,6 +41,7 @@
 - Changed read to treat a file named .i64 or .idb as an IDA database even when it is a SQLite file: it shows database metadata instead of a table listing ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed an in-place disassembler database to be identified by its real path, so one opened through a symlink gets a new id and dsm handle ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- `omp usage reset` and `/usage reset` list each saved reset's id and title, and for Claude the limits it clears; the `/usage reset` picker shows the selected account's resets too ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
@@ -87,6 +78,10 @@
 - Fixed `computer` on Windows passing off a fully covered window's screenshot and `ax()` tree as current: for Chrome, Edge and Electron apps, which can stop drawing while covered, both now say the window appeared covered and may be stale ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 - Entering `/goal` on Anthropic no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
 - Fixed isolated `task` subagents starting with no git work tree when the session cwd is a bare-repository container (`.git` with `core.bare=true`); isolation now refuses before spawning and names the repository's work trees to start from ([#19791](https://github.com/can1357/oh-my-pi/issues/19791))
+- `omp usage reset` and `/usage reset` take `<provider>/<credential id>:<credit id>` to spend exactly that saved reset, and refuse a target without one when the account holds resets that clear different limits (a full Claude reset next to a Fable-only one), or a named Claude grant that isn't the one Claude offers next ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
+- Automatic Claude restores no longer spend a reset that clears more than the block needs while the account banks one, offered later, that clears only that (a full reset ahead of a Fable-only one on a Fable-only block); the session shows the command to spend it instead, and a blocked account whose reset clears only what blocks it is restored first ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
+- The expiry banner's spend command for a Claude account names the expiring reset ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
+- The `/usage reset` picker shows each reset of an account whose resets clear different limits as its own row and spends only the one offered next ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.0.1] - 2026-11-19
 

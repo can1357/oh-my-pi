@@ -1623,13 +1623,13 @@ export type ResetAutoRedeemMode = SettingValueOf<typeof cfgCodexResetsAutoRedeem
 export const cfgClaudeResetsAutoRedeem5h = resetWindowSetting(
 	"claudeResets.autoRedeem5h",
 	"Claude Auto-Redeem Saved Resets (5h)",
-	"Spend a Claude Juniper reset, or a Cedar reset that clears no weekly limit, on 5-hour-only blocks, and salvage expiring grants whose fullest covered limit is 5h. A reset that also clears a weekly limit is not spent on a 5-hour-only block; the session shows the command to spend it instead.",
+	"Spend Claude Cedar or Juniper resets on 5-hour-only blocks and on expiring grants whose fullest covered limit is 5h.",
 );
 
 export const cfgClaudeResetsAutoRedeemWeekly = resetWindowSetting(
 	"claudeResets.autoRedeemWeekly",
 	"Claude Auto-Redeem Saved Resets (Weekly)",
-	"Spend Claude Cedar resets on weekly or model-scoped blocks and on expiring grants whose fullest covered limit is weekly. A reset that clears more than the block needs, such as a full reset on a Fable-only block, is not spent; the session shows the command to spend it instead.",
+	"Spend Claude Cedar resets on weekly or model-scoped blocks and on expiring grants whose fullest covered limit is weekly.",
 );
 
 export const cfgClaudeResetsAutoRedeemFable = resetWindowSetting(

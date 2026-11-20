@@ -425,7 +425,7 @@ describe("planClaudeResetRedemptions: window consent", () => {
 	});
 });
 
-describe("planClaudeResetRedemptions: never a wider reset than the block needs", () => {
+describe("planClaudeResetRedemptions: a wider reset than the block needs", () => {
 	const fullClears = ["anthropic:5h", "anthropic:7d", "anthropic:7d:fable"];
 	const fableBlock = { weeklyUsed: 0.5, fableUsed: 1 };
 	const fableGrant: UsageResetCredit = {
@@ -501,10 +501,10 @@ describe("planClaudeResetRedemptions: never a wider reset than the block needs",
 		expect(plan.actions).toMatchObject([
 			{ reason: "blocked-account", target: { credentialId: 22, creditId: "launch-2610-fable" } },
 		]);
-		expect(plan.held).toMatchObject([{ target: { credentialId: 11, creditId: "full-reset-2611" } }]);
+		expect(plan.held).toEqual([]);
 	});
 
-	it("holds a reset that also clears the weekly window on a 5h-only block", () => {
+	it("spends a reset that also clears the weekly window on a 5h-only block when no narrower grant is banked", () => {
 		const plan = planClaudeResetRedemptions(
 			input({
 				reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })],
@@ -519,9 +519,29 @@ describe("planClaudeResetRedemptions: never a wider reset than the block needs",
 				],
 			}),
 		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", window: "5h", blockedWindows: ["anthropic:5h"] },
+		]);
+		expect(plan.held).toEqual([]);
+	});
+
+	it("holds a reset that also clears the weekly window on a 5h-only block when a 5h-only grant is banked", () => {
+		const live = status({
+			availableCount: 2,
+			credit: {
+				blocking: ["anthropic:5h"],
+				usedFractions: { "anthropic:5h": 1 },
+				expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString(),
+			},
+		});
+		live.credits.push({ ...fableGrant, id: "five-hour-2611", clears: ["anthropic:5h"] });
+		const plan = planClaudeResetRedemptions(
+			input({ reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })], statuses: [live] }),
+		);
 		expect(plan.actions).toEqual([]);
-		expect(plan.held).toMatchObject([{ blockedWindows: ["anthropic:5h"], beyond: ["anthropic:7d"] }]);
-		expect(plan.held?.[0]?.narrower).toBeUndefined();
+		expect(plan.held).toMatchObject([
+			{ blockedWindows: ["anthropic:5h"], beyond: ["anthropic:7d"], narrower: { id: "five-hour-2611" } },
+		]);
 	});
 });
 

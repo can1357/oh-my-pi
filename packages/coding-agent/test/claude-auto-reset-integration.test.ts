@@ -446,7 +446,10 @@ describe("Claude saved-reset trigger integration", () => {
 			...claudeStatus(true),
 			report: fiveHourBlocked({ accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID }),
 			nextCreditId: "wide-reset",
-			credits: [grant("wide-reset", ["anthropic:5h", "anthropic:7d"])],
+			credits: [
+				grant("wide-reset", ["anthropic:5h", "anthropic:7d"]),
+				{ ...grant("five-hour-later", ["anthropic:5h"]), usable: false, status: "unavailable" },
+			],
 		};
 		const other: ResetCreditAccountStatus = {
 			...claudeStatus(true),

@@ -4,12 +4,10 @@
 
 ### Added
 
-- Added `groupResetCreditsByClears`, which groups an account's spendable saved-reset credits by the limits they clear ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
+- Added `groupResetCreditsByClears`, which groups an account's spendable saved-reset credits by the limits they clear ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
-
-- `resets.redeem` no longer spends the Claude grant offered next when the target names no credit and the account holds grants that clear different limits; it returns `credit_choice_required` and spends nothing ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
-### Fixed
+- `resets.redeem` no longer spends the Claude grant offered next when the target names no credit and the account holds grants that clear different limits; it returns `credit_choice_required` and spends nothing ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 - LiteLLM requests now switch to another configured key when a 422 budget-exceeded response stops the current key ([#19860](https://github.com/can1357/oh-my-pi/issues/19860)).
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))

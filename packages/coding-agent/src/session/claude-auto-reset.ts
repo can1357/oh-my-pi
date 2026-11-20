@@ -121,8 +121,9 @@ export interface ClaudeResetSkip {
 }
 
 /**
- * A blocked account whose offered grant clears more than the blocking windows:
- * not spent automatically, so the session tells the user instead.
+ * A blocked account whose offered grant clears more than the blocking windows
+ * while a grant Claude offers later clears only those: not spent automatically,
+ * so the session tells the user instead.
  */
 export interface ClaudeResetHold {
 	accountKey: string;
@@ -135,7 +136,7 @@ export interface ClaudeResetHold {
 	/** Limits the offered grant clears beyond the blocking ones. */
 	beyond: string[];
 	/** A banked grant on the same account that clears only what blocks it, offered later. */
-	narrower?: UsageResetCredit;
+	narrower: UsageResetCredit;
 	remainingMs: number;
 }
 
@@ -143,8 +144,8 @@ export interface ClaudeResetHold {
 export interface ClaudeResetPlan {
 	actions: ClaudeResetAction[];
 	skipped: ClaudeResetSkip[];
-	/** Blocked accounts left unspent because the offered grant clears more than blocks them. */
-	held?: ClaudeResetHold[];
+	/** Blocked accounts left unspent because a later grant clears only what blocks them. */
+	held: ClaudeResetHold[];
 }
 
 interface ClaudeAccountSnapshot {
@@ -337,10 +338,14 @@ function skipForEpisode(
 export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeResetPlan {
 	const skipped: ClaudeResetSkip[] = [];
 	if (!resetWindowsEnabled(input.settings.modes)) {
-		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
+		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }], held: [] };
 	}
 	if (input.trigger === "blocked" && input.provider !== CLAUDE_PROVIDER) {
-		return { actions: [], skipped: [{ accountKey: "*", rule: "blocked-account", reason: "wrong-provider" }] };
+		return {
+			actions: [],
+			skipped: [{ accountKey: "*", rule: "blocked-account", reason: "wrong-provider" }],
+			held: [],
+		};
 	}
 
 	const snapshots: ClaudeAccountSnapshot[] = [];
@@ -455,6 +460,8 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			window: ResetWindow;
 			/** Spends without a prompt, so it outranks a candidate that needs one. */
 			approved: boolean;
+			/** Clears more than the block needs, so a candidate that clears only that outranks it. */
+			wider: boolean;
 		}
 		const candidates: RestoreCandidate[] = [];
 		for (const snapshot of snapshots) {
@@ -542,18 +549,22 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				blockers,
 				unblockAtMs,
 			);
-			// Never spend a wider reset than the block needs, e.g. a full reset on a
-			// Fable-only block. The user decides; the session tells them.
+			// Never spend a wider reset than the block needs while the account banks
+			// one that clears only that, e.g. a full reset ahead of a Fable-only one
+			// on a Fable-only block. The user decides; the session tells them.
 			const beyond = claudeResetClearsBeyond(snapshot.credit, blockers);
-			if (beyond.length > 0) {
-				const narrower = groupResetCreditsByClears(snapshot.credits, input.nowMs)
-					.flat()
-					.find(
-						credit =>
-							credit.id !== snapshot.credit.id &&
-							blockers.every(id => credit.clears?.includes(id)) &&
-							claudeResetClearsBeyond(credit, blockers).length === 0,
-					);
+			const narrower =
+				beyond.length > 0
+					? groupResetCreditsByClears(snapshot.credits, input.nowMs)
+							.flat()
+							.find(
+								credit =>
+									credit.id !== snapshot.credit.id &&
+									blockers.every(id => credit.clears?.includes(id)) &&
+									claudeResetClearsBeyond(credit, blockers).length === 0,
+							)
+					: undefined;
+			if (narrower) {
 				held.push({
 					accountKey: snapshot.accountKey,
 					attemptKey,
@@ -562,7 +573,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 					credit: snapshot.credit,
 					blockedWindows: blockers,
 					beyond,
-					...(narrower ? { narrower } : {}),
+					narrower,
 					remainingMs,
 				});
 				skip("broader-than-blocked");
@@ -573,10 +584,19 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip(episodeSkip);
 				continue;
 			}
-			candidates.push({ snapshot, blockers, remainingMs, unblockAtMs, window, approved: mode === "yes" });
+			candidates.push({
+				snapshot,
+				blockers,
+				remainingMs,
+				unblockAtMs,
+				window,
+				approved: mode === "yes",
+				wider: beyond.length > 0,
+			});
 		}
 		candidates.sort((left, right) => {
 			if (left.approved !== right.approved) return left.approved ? -1 : 1;
+			if (left.wider !== right.wider) return left.wider ? 1 : -1;
 			if (left.snapshot.active !== right.snapshot.active) return left.snapshot.active ? -1 : 1;
 			const leftExpiry = creditExpiryMs(left.snapshot.credit) ?? Number.POSITIVE_INFINITY;
 			const rightExpiry = creditExpiryMs(right.snapshot.credit) ?? Number.POSITIVE_INFINITY;
@@ -710,7 +730,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 	return {
 		actions: restore ? [restore, ...salvages] : salvages,
 		skipped,
-		...(held.length > 0 ? { held } : {}),
+		held,
 	};
 }
 

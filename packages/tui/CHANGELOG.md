@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- The saved-reset picker shows each reset of an account whose resets clear different limits as its own row and only confirms the one offered next ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion` and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`; import them from the new path ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
@@ -31,6 +28,7 @@
 - Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there
 - `ask` HTML forms keep a prefilled or hidden control named `__proto__` in their default data, so a timed-out form no longer drops it ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
 - An ask form with one question submits on one Enter instead of stopping on Submit first
+- The saved-reset picker shows each reset of an account whose resets clear different limits as its own row and only confirms the one offered next ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.0.1] - 2026-11-19
 

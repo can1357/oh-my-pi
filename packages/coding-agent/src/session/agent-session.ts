@@ -16332,23 +16332,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Claude's live reset listing includes the same response's quota
 			// windows; a second broker usage poll adds no evidence and can 429.
 			const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
-			const plan =
+			const claudePlan =
 				provider === "anthropic"
 					? this.#planClaudeResets("blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
-					: this.#planCodexResets(
-							"blocked",
-							overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() }),
-							identity,
-							coordinator,
-							activeBlockUnblockAtMs,
-						);
+					: undefined;
+			const plan =
+				claudePlan ??
+				this.#planCodexResets(
+					"blocked",
+					overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() }),
+					identity,
+					coordinator,
+					activeBlockUnblockAtMs,
+				);
 			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
 			if (plan.actions.length === 0) {
 				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
 				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
 			}
 			// A held grant is reported whatever else this pass spends, fails to spend or asks consent for.
-			if ("held" in plan) this.#noticeHeldClaudeResets(plan.held, coordinator);
+			if (claudePlan) this.#noticeHeldClaudeResets(claudePlan.held, coordinator);
 			if (plan.actions.length === 0) {
 				let retryAfterMs: number | undefined;
 				if (provider === "anthropic" && Object.values(modes).includes("yes")) {
@@ -16379,24 +16382,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Tell the user once per block episode why a blocked Claude account's offered
-	 * reset was not spent: it clears more than the windows blocking the account.
+	 * reset was not spent: it clears more than the windows blocking the account
+	 * while a banked grant on the account clears only those.
 	 */
-	#noticeHeldClaudeResets(
-		held: readonly ClaudeResetHold[] | undefined,
-		coordinator: CodexAutoRedeemCoordinator,
-	): void {
+	#noticeHeldClaudeResets(held: readonly ClaudeResetHold[], coordinator: CodexAutoRedeemCoordinator): void {
 		const windows = (ids: readonly string[]) => ids.map(formatUsageResetWindow).join(" + ");
 		const name = (credit: UsageResetCredit) =>
 			sanitizeText(credit.title ? `“${credit.title}” (${credit.id})` : credit.id).replace(/\s+/g, " ");
-		for (const hold of held ?? []) {
+		for (const hold of held) {
 			if (coordinator.notifiedKeys.has(hold.attemptKey)) continue;
 			coordinator.notifiedKeys.add(hold.attemptKey);
-			const narrower = hold.narrower
-				? ` ${name(hold.narrower)} clears only what blocks it, but Claude offers it after that one.`
-				: "";
 			this.emitNotice(
 				"warning",
-				`${hold.label} is blocked by ${windows(hold.blockedWindows)} for about ${formatDuration(hold.remainingMs)}. The saved reset Claude offers next, ${name(hold.credit)}, also clears ${windows(hold.beyond)}, so it was not spent automatically.${narrower} To spend it anyway: \`/usage reset anthropic/${hold.target.credentialId}:${hold.credit.id}\`.`,
+				`${hold.label} is blocked by ${windows(hold.blockedWindows)} for about ${formatDuration(hold.remainingMs)}. The saved reset Claude offers next, ${name(hold.credit)}, also clears ${windows(hold.beyond)}, so it was not spent automatically. ${name(hold.narrower)} clears only what blocks it, but Claude offers it after that one. To spend it anyway: \`/usage reset anthropic/${hold.target.credentialId}:${hold.credit.id}\`.`,
 				"claude-auto-reset",
 			);
 		}
