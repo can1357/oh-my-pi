@@ -118,7 +118,7 @@ import {
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { frameDataBytesBudget, readerIncludesThinking } from "@oh-my-pi/snapcompact";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-import { ASYNC_NOTIFY_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
+import { ASYNC_NOTIFY_MESSAGE_TYPE, PROCESS_WATCH_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import {
@@ -129,7 +129,7 @@ import {
 	type NotifyBatch,
 } from "../async";
 import { readHostPressure } from "../async/host-pressure";
-import { PROCESS_WATCH_MESSAGE_TYPE, ProcessWatch, registerProcessWatchDelivery } from "../async/process-watch";
+import { ProcessWatch, registerProcessWatchDelivery } from "../async/process-watch";
 import { planParallel } from "../auto-parallel/planner";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";

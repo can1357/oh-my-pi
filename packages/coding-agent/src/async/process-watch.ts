@@ -14,14 +14,20 @@
  *
  * What. One choice per job. Jobs whose P(stalled) + P(failing) + P(ready)
  * reach `async.processWatch.threshold` are handed to the host as one notice,
- * which the session delivers at the agent's next turn (or, between runs, the
- * way it delivers a finished job). There is no counter: a job that stays stuck
- * is told again at its next look, each further apart. Nothing here stops a job,
- * and a judge that is unavailable, times out or errors changes nothing.
+ * which the session delivers at the agent's next turn boundary (ending a
+ * `wait`), never by starting a turn between runs. There is no counter: a job
+ * that stays stuck is told again at its next look, each further apart.
+ * Nothing here stops a job, and a judge that is unavailable, times out or
+ * errors changes nothing.
  *
  * Ported from nace-ai/intern's `process_watch.py` (Apache-2.0).
  */
 import { type ChoiceAnswer, type Judge, type JsonValue, judgeQuestions, renderQuestion } from "@oh-my-pi/pi-ai";
+import {
+	PROCESS_WATCH_MESSAGE_TYPE,
+	type ProcessWatchFlag,
+	type ProcessWatchNotice,
+} from "@oh-my-pi/pi-tui/chat/messages";
 import { formatDuration, logger, prompt, truncate, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import questionFile from "../prompts/judge/process-watch.json" with { type: "json" };
@@ -37,9 +43,6 @@ import {
 } from "../tools/settings";
 import { type HostPressure, hostStrain, summarizeHostPressure } from "./host-pressure";
 import type { AsyncJob } from "./job-manager";
-
-/** `customType` of the injected process-watch notice. */
-export const PROCESS_WATCH_MESSAGE_TYPE = "process-watch";
 
 const QUESTIONS = judgeQuestions(questionFile);
 
@@ -69,23 +72,6 @@ const LAST_OUTPUT_LINES = 3;
 const LAST_OUTPUT_LINE_CHARS = 200;
 /** Characters of a command shown to the judge and in the notice. */
 const COMMAND_CHARS = 400;
-
-/** One job the judge flagged, as the notice tells it. */
-export interface ProcessWatchFlag {
-	jobId: string;
-	command: string;
-	ageMs: number;
-	quietMs?: number;
-	lastOutput?: string;
-	verdict: FlaggedVerdict;
-}
-
-/** What one look tells the agent. */
-export interface ProcessWatchNotice {
-	jobs: ProcessWatchFlag[];
-	/** Host strain the look's snapshot showed (see {@link hostStrain}), when a flagged job looks stalled. */
-	hostStrain?: string[];
-}
 
 /** The judge's answer for one job at one look; every look logs them all. */
 export interface ProcessWatchVerdictRecord {
@@ -340,10 +326,11 @@ function worst(answer: ChoiceAnswer): FlaggedVerdict {
 /**
  * Registers process-watch notices on a session's yield queue and returns the
  * {@link ProcessWatchHost.notify} that queues one. The queue injects a notice
- * at the agent's next turn boundary, or between runs starts a turn the way a
- * finished job's result does. Every completed look replaces the notice not yet
- * delivered: a look that flags nothing withdraws it, so a verdict the latest
- * look ruled out never reaches the agent. A notice names only the jobs
+ * at the agent's next turn boundary and a pending one ends a `wait`, but it
+ * never starts a turn between runs: a job left running on purpose must not
+ * wake an idle agent at every look. Every completed look replaces the notice
+ * not yet delivered: a look that flags nothing withdraws it, so a verdict the
+ * latest look ruled out never reaches the agent. A notice names only the jobs
  * `isRunning` still reports running when it is injected; once every flagged
  * job ended it is dropped.
  */
@@ -352,6 +339,7 @@ export function registerProcessWatchDelivery(
 	isRunning: (jobId: string) => boolean,
 ): (notice: ProcessWatchNotice) => void {
 	queue.register<ProcessWatchNotice>(PROCESS_WATCH_MESSAGE_TYPE, {
+		skipIdleFlush: true,
 		isStale: notice => !notice.jobs.some(job => isRunning(job.jobId)),
 		build: notices => {
 			const latest = notices[notices.length - 1];

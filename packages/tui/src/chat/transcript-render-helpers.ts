@@ -15,6 +15,7 @@ import {
 	type AsyncNotifyDetails,
 	type CustomMessage,
 	type FileMentionMessage,
+	type ProcessWatchNotice,
 	resolveAbortLabel,
 	shouldRenderAbortReason,
 } from "./messages";
@@ -235,6 +236,55 @@ export function buildAsyncNotifyBlock(message: CustomOrHookMessage): ToolActivit
 		}
 		if (total > shown.length) rows.push(detail(`… ${total - shown.length} more`, "dim"));
 		if (report.stopped) rows.push(detail("Matched too often: notify is off for it", "warning"));
+	}
+	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
+}
+
+const PROCESS_WATCH_VERDICTS = {
+	stalled: { label: "Looks stalled", tone: "warning", color: "warning" },
+	failing: { label: "Looks failing", tone: "error", color: "error" },
+	ready: { label: "Looks up and ready", tone: "info", color: "accent" },
+} as const;
+
+/**
+ * Render a `process-watch` custom message (running background jobs the judge
+ * flagged) as a transcript block: one "Looks stalled" / "Looks failing" /
+ * "Looks up and ready" row per job with its command and last output lines
+ * beneath, then the host strain the look saw, if any.
+ */
+export function buildProcessWatchBlock(message: CustomOrHookMessage): ToolActivityContainer {
+	const details = (message as CustomMessage<ProcessWatchNotice>).details;
+	const rows: TranscriptStatusRow[] = [];
+	const body = (line: string): TranscriptStatusRow => {
+		const shown = replaceTabs(line);
+		return {
+			parts: [{ text: truncateToWidth(shown, TRUNCATE_LENGTHS.LINE), color: "dim" }],
+			indent: 3,
+			native: { tone: "info", body: true, message: [span(shown, "mono")] },
+		};
+	};
+	for (const job of details?.jobs ?? []) {
+		const { label, tone, color } = PROCESS_WATCH_VERDICTS[job.verdict];
+		const age = `running ${formatDuration(job.ageMs)}`;
+		const quiet = job.quietMs === undefined ? undefined : `quiet ${formatDuration(job.quietMs)}`;
+		rows.push({
+			parts: [
+				{ text: `${theme.status[tone]} ${label}`, color },
+				{ text: job.jobId, color: "accent" },
+				{ text: `(${quiet ? `${age}, ${quiet}` : age})`, color: "dim" },
+			],
+			native: { tone, message: [span(label), ...facts([job.jobId, age, quiet])] },
+		});
+		rows.push(body(job.command));
+		for (const line of job.lastOutput?.split("\n") ?? []) rows.push(body(line));
+	}
+	if (details?.hostStrain && details.hostStrain.length > 0) {
+		const strain = `Host shows ${details.hostStrain.join(", ")}`;
+		rows.push({
+			parts: [{ text: strain, color: "warning" }],
+			indent: 3,
+			native: { tone: "warning", message: [span(strain)] },
+		});
 	}
 	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
 }

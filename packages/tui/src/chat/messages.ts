@@ -342,3 +342,25 @@ export interface AsyncNotifyReport {
 export interface AsyncNotifyDetails {
 	reports: AsyncNotifyReport[];
 }
+
+/** Custom message type for running background jobs the judge flagged (`async.processWatch`). */
+export const PROCESS_WATCH_MESSAGE_TYPE = "process-watch";
+
+/** One job a process-watch look flagged, as the notice tells it. */
+export interface ProcessWatchFlag {
+	jobId: string;
+	command: string;
+	ageMs: number;
+	/** Time since the job last reported something new. */
+	quietMs?: number;
+	/** Its last output lines, newline-joined. */
+	lastOutput?: string;
+	verdict: "stalled" | "failing" | "ready";
+}
+
+/** Details payload on the `process-watch` custom message drawn in the transcript. */
+export interface ProcessWatchNotice {
+	jobs: ProcessWatchFlag[];
+	/** Host strain the look's snapshot showed, when a flagged job looks stalled. */
+	hostStrain?: string[];
+}

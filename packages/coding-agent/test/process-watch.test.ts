@@ -3,13 +3,10 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Judge, type JudgmentRequest, type JudgmentResult, tokenUsage } from "@oh-my-pi/pi-ai";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async";
 import type { HostPressure } from "@oh-my-pi/pi-coding-agent/async/host-pressure";
-import {
-	PROCESS_WATCH_MESSAGE_TYPE,
-	ProcessWatch,
-	registerProcessWatchDelivery,
-} from "@oh-my-pi/pi-coding-agent/async/process-watch";
+import { ProcessWatch, registerProcessWatchDelivery } from "@oh-my-pi/pi-coding-agent/async/process-watch";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
+import { PROCESS_WATCH_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
 
 type Probabilities = Record<string, number>;
 
@@ -300,5 +297,26 @@ describe("ProcessWatch", () => {
 
 		await advance(120);
 		expect(judge.requests).toHaveLength(0);
+	});
+});
+
+describe("registerProcessWatchDelivery", () => {
+	it("waits for the agent's next turn boundary instead of starting a turn between runs", () => {
+		let idleFlushes = 0;
+		const queue = new YieldQueue({
+			isStreaming: () => false,
+			injectIdle: async () => {},
+			scheduleIdleFlush: () => {
+				idleFlushes++;
+			},
+		});
+		const notify = registerProcessWatchDelivery(queue, () => true);
+		notify({ jobs: [{ jobId: "bg1", command: "bun run dev", ageMs: 60_000, verdict: "stalled" }] });
+		queue.requestIdleFlush();
+
+		expect(idleFlushes).toBe(0);
+		// Still pending for the next boundary, and visible to `wait`.
+		expect(queue.hasDeliverable(PROCESS_WATCH_MESSAGE_TYPE)).toBe(true);
+		expect(drain(queue)).toHaveLength(1);
 	});
 });

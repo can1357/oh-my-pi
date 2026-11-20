@@ -24,6 +24,8 @@ import {
 	type HookMessage,
 	LAUNCH_COMPLETION_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
+	PROCESS_WATCH_MESSAGE_TYPE,
+	type ProcessWatchNotice,
 	type PythonExecutionMessage,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
@@ -479,6 +481,13 @@ function blockHead(block: WrappedTranscriptBlock): BlockHead {
 			return {
 				...plainHead("job", "omp.activity", "Background output", target),
 				glyph: theme.fg("accent", theme.status.info),
+			};
+		}
+		case PROCESS_WATCH_MESSAGE_TYPE: {
+			const jobs = (message.details as ProcessWatchNotice | undefined)?.jobs ?? [];
+			return {
+				...plainHead("job", "omp.activity", "Process watch", jobs.map(job => job.jobId).join(", ")),
+				glyph: theme.fg("warning", theme.status.warning),
 			};
 		}
 		case LAUNCH_COMPLETION_MESSAGE_TYPE: {
