@@ -564,9 +564,20 @@ export class EditTool implements AgentTool<TInput> {
 				session: this.session,
 				input: params.input,
 				signal,
-				apply: (path, edits) => this.execute(toolCallId, { path, edits }, signal, undefined, context),
+				apply: (path, edits, rawSnapshot) =>
+					this.#execute(toolCallId, { path, edits }, signal, context, rawSnapshot),
 			});
 		}
+		return this.#execute(toolCallId, params, signal, context);
+	}
+
+	async #execute(
+		toolCallId: string,
+		params: EditParams,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+		rawSnapshot?: string,
+	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		let open = this.#sessions.get(toolCallId);
 		const argsJson = JSON.stringify(params);
 		if (open && this.#streamedArgs.get(toolCallId) !== argsJson) {
@@ -593,7 +604,14 @@ export class EditTool implements AgentTool<TInput> {
 		try {
 			outcome = await editSession.apply(
 				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
-				(_error, request) => this.#write(request, signal),
+				async (_error, request) => {
+					if (rawSnapshot !== undefined && (await Bun.file(request.path).text()) !== rawSnapshot) {
+						throw new ToolError("The file changed after the numbered snapshot was read; re-read and retry.", {
+							path: request.path,
+						});
+					}
+					return this.#write(request, signal);
+				},
 			);
 			if (outcome.isError && batch?.flush) {
 				await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);

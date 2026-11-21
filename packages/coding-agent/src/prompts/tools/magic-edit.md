@@ -7,8 +7,10 @@ Payload: one section per file. A `# path` line opens it; the lines after it say 
 {{/if}}
 
 - Changes: mechanical instructions that someone holding only that file can carry out with no decisions left to make.
-- Name every site by its text: the function, the statement, a quoted fragment. Line numbers from your latest read MAY be added.
-- New or changed code: give it verbatim. Deleting, moving, swapping: say which lines and where they go.
+- The fast model reads the file itself, with line numbers, and finds what you name. NEVER `read` a file or list a directory just to locate or describe a change you can already name (a rename; deleting, moving or swapping a block by its first line): edit directly. A given path works; a wrong one is reported.
+- Name each site by its original text; include known line numbers.
+- Quote only genuinely new text. For deletion, movement, or indentation, name the existing range and state the operation; NEVER retype its contents.
+- For an exact target, compare the affected file range and include every difference in one call.
 - NEVER describe a goal ("fix the bug", "handle the error"): decide the fix yourself, then describe the text change.
 {{#if xml}}
 - NEVER put text outside the elements.
@@ -22,7 +24,8 @@ Payload: one section per file. A `# path` line opens it; the lines after it say 
 <example>
 {{#if xml}}
 <edit file="src/jobs.ts">
-In `drain()`, swap the two lines `const batch = queue.take(limit);` and `const limit = queue.size();` so `limit` is declared first.
+In `drain()`, swap the two lines `const batch = queue.take(limit);` and `const limit = queue.size();`.
+Swap the function starting `export function stop(` with the function after it, starting `function flush(`.
 </edit>
 <edit file="src/parse.ts">
 Rename every `retrunValue` to `returnValue`.
@@ -33,7 +36,8 @@ Delete the second, duplicated `if (req.method === "OPTIONS") { ... }` block in `
 </edit>
 {{else}}
 # src/jobs.ts
-In `drain()`, swap the two lines `const batch = queue.take(limit);` and `const limit = queue.size();` so `limit` is declared first.
+In `drain()`, swap the two lines `const batch = queue.take(limit);` and `const limit = queue.size();`.
+Swap the function starting `export function stop(` with the function after it, starting `function flush(`.
 # src/parse.ts
 Rename every `retrunValue` to `returnValue`.
 In `parseHeader`, replace `return fields.slice(1);` with `return fields.slice(0);`.

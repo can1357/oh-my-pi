@@ -18,16 +18,17 @@
  * ```
  *
  * For each file an auxiliary model (the `edit.magic.model` selector, else the
- * `smol` role) reads the numbered file and answers with SEARCH/REPLACE blocks,
- * which the edit tool applies as one atomic `replace` batch: matching, fuzzy
- * recovery, plan-mode policy, LSP writethrough and the result diff are the
- * tool's usual ones. A rejected batch goes back to the model for a corrected
- * reply; a file whose change runs out of attempts is left as it was. The
+ * `smol` role) reads the numbered file and returns line operations against it. The edit tool applies them as one atomic batch,
+ * preserving plan-mode policy, LSP writethrough and the result diff.
+ * A rejected batch goes back to the model for a corrected reply. A file
+ * whose change runs out of attempts is left as it was. The
  * files' completions run concurrently; their writes do not.
  */
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type Api, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { parseCodeStatus } from "@oh-my-pi/pi-natives";
 import type { EditToolDetails, EditToolPerFileResult } from "@oh-my-pi/pi-tui/tools/edit";
+import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -37,6 +38,8 @@ import type { ToolSession } from "../tools";
 import { resolvePlanPath } from "../tools/plan-mode-guard";
 import applyRequestPrompt from "./magic-apply.md" with { type: "text" };
 import applySystemPromptSource from "./magic-apply-system.md" with { type: "text" };
+import { blockHints, compileLineEdits } from "./magic-lines";
+import { type FileView, fileViews } from "./magic-view";
 import { normalizeToLF, stripBom } from "./normalize";
 import type { ReplaceBatchParams } from "./schemas";
 import { cfgEditMagicFormat, cfgEditMagicModel } from "./settings";
@@ -46,15 +49,19 @@ const MAX_ATTEMPTS = 3;
 const COMPLETION_MAX_TOKENS = 16_384;
 /** One budget across every attempt: the calling agent's turn blocks on the edit. */
 const APPLY_TIMEOUT_MS = 120_000;
-/** Largest share of the apply model's context window the file may take. */
+/** Largest share of the apply model's context window the shown part of a file may take. */
 const MAX_CONTEXT_SHARE = 0.5;
 /** Conservative characters-per-token estimate for source text. */
 const CHARS_PER_TOKEN = 3;
 
-const SEARCH_MARKER = /^<{5,9} ?SEARCH( ALL)?\s*$/i;
-const DIVIDER_MARKER = /^={5,9}\s*$/;
-const REPLACE_MARKER = /^>{5,9} ?REPLACE\s*$/i;
-const REFUSAL = /^\s*CANNOT:\s*(.*)$/i;
+const REFUSAL = /^CANNOT:\s*(.*)/i;
+/**
+ * Output tokens per character of the shown file and the change, plus slack: a
+ * reply never needs more than retyping both, so a model that keeps talking is
+ * stopped long before the general output limit.
+ */
+const OUTPUT_TOKENS_PER_CHAR = 0.5;
+const OUTPUT_SLACK_TOKENS = 256;
 
 const APPLY_SYSTEM_PROMPT = prompt.render(applySystemPromptSource);
 
@@ -182,117 +189,91 @@ export function parseMagicInput(input: string, format: MagicFormat): MagicSectio
 	return sections;
 }
 
-/** One SEARCH/REPLACE block of an apply-model reply, as whole lines. */
-export interface MagicBlock {
-	search: string[];
-	replace: string[];
-	/** `SEARCH ALL`: every occurrence of the fragment is replaced. */
-	all: boolean;
-}
-
-/** What an apply-model reply asks for. */
-export type MagicReply =
-	| { kind: "blocks"; blocks: MagicBlock[] }
-	/** The model judged the change impossible as described. */
-	| { kind: "refusal"; reason: string }
-	/** Not a usable set of blocks; `problem` is worded for the model. */
-	| { kind: "malformed"; problem: string };
-
-/**
- * Read an apply-model reply. Text outside the blocks (code fences, stray
- * commentary) is ignored; a `CANNOT:` first line is a refusal.
- */
-export function parseMagicReply(reply: string): MagicReply {
-	const lines = normalizeToLF(reply).split("\n");
-	const refusal = lines.find(line => line.trim() !== "")?.match(REFUSAL);
-	if (refusal) return { kind: "refusal", reason: refusal[1].trim() || "no reason given" };
-
-	const blocks: MagicBlock[] = [];
-	let open: (MagicBlock & { divided: boolean }) | undefined;
-	for (const line of lines) {
-		if (!open) {
-			const marker = SEARCH_MARKER.exec(line);
-			if (marker) open = { search: [], replace: [], all: marker[1] !== undefined, divided: false };
-		} else if (!open.divided) {
-			if (DIVIDER_MARKER.test(line)) open.divided = true;
-			else open.search.push(line);
-		} else if (REPLACE_MARKER.test(line)) {
-			blocks.push({ search: open.search, replace: open.replace, all: open.all });
-			open = undefined;
-		} else {
-			open.replace.push(line);
-		}
-	}
-	if (open) {
-		return {
-			kind: "malformed",
-			problem: `Block ${blocks.length + 1} is not closed: every block needs a \`=======\` line and a closing \`>>>>>>> REPLACE\` line.`,
-		};
-	}
-	if (blocks.length === 0) return { kind: "malformed", problem: "The reply contains no SEARCH/REPLACE block." };
-	const empty = blocks.findIndex(block => block.search.every(line => line.trim() === ""));
-	if (empty !== -1) {
-		return { kind: "malformed", problem: `Block ${empty + 1} has an empty SEARCH: quote the lines to change.` };
-	}
-	return { kind: "blocks", blocks };
-}
-
-/** `replace`-engine operands for `block`, given the LF text of the file it edits. */
-function toReplaceEdit(content: string, block: MagicBlock): ReplaceEdit {
-	const search = block.search.join("\n");
-	if (block.all || block.replace.length > 0) {
-		return { old_string: search, new_string: block.replace.join("\n"), replace_all: block.all };
-	}
-	// An empty REPLACE deletes whole lines, so a line terminator goes with them:
-	// the one after, or the one before when the lines end an unterminated file.
-	if (content.includes(`${search}\n`)) return { old_string: `${search}\n`, new_string: "" };
-	if (content.endsWith(`\n${search}`)) return { old_string: `\n${search}`, new_string: "" };
-	return { old_string: search, new_string: "" };
-}
-
-/** `content` with each line behind its 1-based number and a tab. */
-function numberLines(content: string): string {
-	const lines = content.split("\n");
-	if (content.endsWith("\n")) lines.pop();
-	return lines.map((line, index) => `${index + 1}\t${line}`).join("\n");
+/** `content` with the edit's unique `old_string` (or the whole content) replaced. */
+function spliced(content: string, edit: ReplaceEdit): string {
+	const at = content.indexOf(edit.old_string);
+	return content.slice(0, at) + edit.new_string + content.slice(at + edit.old_string.length);
 }
 
 /**
- * Turn `change` into an applied edit of `path`: ask `complete` for
- * SEARCH/REPLACE blocks against `content` (the file's LF text), hand them to
- * `apply` as one atomic batch, and return a rejection to the model for a
- * corrected reply. Resolves with the result of the batch that applied.
+ * Ask `complete` for an edit to the LF snapshot, compile it into one atomic
+ * batch, and return any rejection to the model for correction.
+ *
+ * The model is shown `views` in order (by default {@link fileViews}): a reply
+ * that fails against an excerpt is asked for again with the next, wider view.
  *
  * # Errors
- * {@link ToolError} when the model declines the change, or when no reply
- * applied within {@link MAX_ATTEMPTS}. `apply` never succeeded, so the file is
- * as it was.
+ * {@link ToolError} when the model declines the change with nothing wider to
+ * show it, or when no reply applied within {@link MAX_ATTEMPTS}. `apply` never
+ * succeeded, so the file is as it was.
  */
 export async function applyDescribedChange(options: {
 	path: string;
 	change: string;
 	content: string;
-	complete: (request: string) => Promise<string>;
-	apply: (edits: ReplaceEdit[]) => Promise<AgentToolResult<EditToolDetails>>;
+	/** What the model may be shown, narrowest first; at least one view. */
+	views?: FileView[];
+	/** One completion of at most `maxTokens` output tokens. */
+	complete: (request: string, maxTokens: number) => Promise<Reply>;
+	apply: (edits: ReplaceEdit[], checkSnapshot?: boolean) => Promise<AgentToolResult<EditToolDetails>>;
 }): Promise<AgentToolResult<EditToolDetails>> {
 	const { path, change, content } = options;
-	const file = numberLines(content);
+	const views = options.views ?? fileViews(content, change);
+	const parses = (code: string) => parseCodeStatus({ code: code === "" ? "\n" : code, path }).parsed;
+	// A file that parses must still parse: a wrong range goes back to the model, not to syntax repair.
+	const parsed = parses(content);
+	let view = 0;
 	let previous: string | undefined;
 	let rejection = "";
+	/** A change whose ranges were doubted once; repeating it confirms it. */
+	let doubted: string | undefined;
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-		const reply = await options.complete(
-			prompt.render(applyRequestPrompt, { path, file, change, previous, rejection }),
+		const currentView = views[view];
+		const { text: file, partial } = currentView;
+		// Whatever goes wrong against an excerpt, the next attempt sees more of the file.
+		const wider = view < views.length - 1;
+		if (wider) view++;
+		const { text: reply, truncated } = await options.complete(
+			prompt.render(applyRequestPrompt, {
+				path,
+				file,
+				partial,
+				change,
+				previous,
+				rejection,
+			}),
+			Math.ceil((file.length + change.length) * OUTPUT_TOKENS_PER_CHAR) + OUTPUT_SLACK_TOKENS,
 		);
-		const parsed = parseMagicReply(reply);
-		if (parsed.kind === "refusal") {
-			throw new ToolError(`No change was made to ${path}: ${parsed.reason}`);
+		const refusal = reply.trim().match(REFUSAL);
+		if (refusal) {
+			// The model may have missed lines the excerpt left out: ask afresh.
+			if (wider) continue;
+			const reason = refusal[1].trim() || "no reason given";
+			throw new ToolError(
+				partial
+					? `No change was made to ${path}: ${reason}\nThe model saw only the lines your description names: quote the lines to change, or give their line numbers.`
+					: `No change was made to ${path}: ${reason}`,
+			);
 		}
-		if (parsed.kind === "blocks") {
-			const result = await options.apply(parsed.blocks.map(block => toReplaceEdit(content, block)));
+		const compiled = compileLineEdits(normalizeToLF(reply.trim()), content, currentView, truncated);
+		const hints = "edit" in compiled ? blockHints(content, compiled.ranges, currentView) : "";
+		const key = "edit" in compiled ? `${compiled.edit.old_string}\0${compiled.edit.new_string}` : "";
+		if ("edit" in compiled && parsed && !parses(spliced(content, compiled.edit))) {
+			rejection = `Nothing was applied: after these operations the file no longer parses, so a range cuts a block in two${hints ? `: ${hints}` : ""}.`;
+		} else if (hints && key !== doubted) {
+			// A range that does not match the block it starts may be off by a line: the model confirms it by repeating it.
+			doubted = key;
+			rejection = `Nothing was applied: ${hints}. Correct the range, or send the same operations again if that is intended.`;
+		} else if ("edit" in compiled) {
+			const result = await options.apply([compiled.edit], true);
 			if (!result.isError) return result;
 			rejection = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+		} else if (truncated) {
+			throw new ToolError(
+				`The model ran out of output before finishing the change to ${path}; the file is unchanged. Split the change into smaller calls.`,
+			);
 		} else {
-			rejection = parsed.problem;
+			rejection = compiled.problem;
 		}
 		previous = reply;
 	}
@@ -301,12 +282,18 @@ export async function applyDescribedChange(options: {
 	);
 }
 
+/** One apply-model reply; `truncated` when it ran into the output limit. */
+interface Reply {
+	text: string;
+	truncated: boolean;
+}
+
 /** The model that writes the patch, and one completion against it. */
 interface Applier {
 	/** `provider/id`, for error messages. */
 	name: string;
 	model: Model<Api>;
-	complete(request: string): Promise<string>;
+	complete(request: string, maxTokens: number): Promise<Reply>;
 }
 
 /**
@@ -323,12 +310,15 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 	const available = registry?.getAvailable() ?? [];
 	const pool = offline ? available.filter(candidate => candidate.provider === activeProvider) : available;
 	const selector = cfgEditMagicModel.get(session.settings);
-	const model = selector
+	const resolved = selector
 		? resolveModelRoleValue(selector, pool, {
 				settings: session.settings,
 				matchPreferences: getModelMatchPreferences(session.settings),
-			}).model
-		: resolveRoleSelection(["smol"], session.settings, pool)?.model;
+			})
+		: resolveRoleSelection(["smol"], session.settings, pool);
+	const model = resolved?.model;
+	// Typing a described change needs no deliberation: reasoning runs only when the selector asks (`…:low`).
+	const reasoning = toReasoningEffort(concreteThinkingLevel(resolved?.thinkingLevel));
 	if (!registry || !model) {
 		throw new ToolError(
 			selector
@@ -344,7 +334,7 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 
 	const timeout = AbortSignal.timeout(APPLY_TIMEOUT_MS);
 	const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-	const complete = async (request: string): Promise<string> => {
+	const complete = async (request: string, maxTokens: number): Promise<Reply> => {
 		const journal = journalCompletion(session.sessionManager, {
 			purpose: "magic-edit",
 			role: selector ? undefined : "smol",
@@ -361,8 +351,9 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 					{
 						apiKey: registry.resolver(model, sessionId),
 						sessionId,
-						maxTokens: Math.min(model.maxTokens ?? COMPLETION_MAX_TOKENS, COMPLETION_MAX_TOKENS),
-						disableReasoning: true,
+						maxTokens: Math.min(model.maxTokens ?? COMPLETION_MAX_TOKENS, COMPLETION_MAX_TOKENS, maxTokens),
+						reasoning,
+						disableReasoning: reasoning === undefined,
 						signal: combined,
 					},
 				);
@@ -383,29 +374,28 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 					: "The edit was aborted; the file is unchanged.",
 			);
 		}
-		if (response.stopReason === "length") {
-			throw new ToolError(
-				`${name} ran out of output before finishing the edit; split the change into smaller calls.`,
-			);
-		}
-		return response.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		return {
+			text: response.content.map(block => (block.type === "text" ? block.text : "")).join(""),
+			truncated: response.stopReason === "length",
+		};
 	};
 	return { name, model, complete };
 }
 
 /**
- * Apply one section: read its file, have `applier` write the change as
- * SEARCH/REPLACE blocks, and pass them to `apply`.
+ * Apply one section: read its file, have `applier` write the change as line
+ * operations, and pass the compiled edit to `apply` together with the raw text
+ * it was written against, so `apply` can refuse a file that changed since.
  *
  * # Errors
- * {@link ToolError} when the file is missing, binary or too large for the
- * apply model, and as {@link applyDescribedChange}.
+ * {@link ToolError} when the file is missing or binary, when no view of it
+ * fits the apply model, and as {@link applyDescribedChange}.
  */
 async function applySection(options: {
 	session: ToolSession;
 	section: MagicSection;
 	applier: Applier;
-	apply: (edits: ReplaceEdit[]) => Promise<AgentToolResult<EditToolDetails>>;
+	apply: (edits: ReplaceEdit[], rawSnapshot?: string) => Promise<AgentToolResult<EditToolDetails>>;
 	signal?: AbortSignal;
 }): Promise<AgentToolResult<EditToolDetails>> {
 	const { session, applier, signal } = options;
@@ -422,10 +412,21 @@ async function applySection(options: {
 	// LF line ends and no BOM, as the edit engine matches it.
 	const content = normalizeToLF(stripBom(raw).text);
 	const window = applier.model.contextWindow ?? 0;
-	if (window > 0 && content.length / CHARS_PER_TOKEN > window * MAX_CONTEXT_SHARE) {
-		throw new ToolError(`${target} is too large for ${applier.name} to edit from a description.`);
+	const limit = window > 0 ? window * MAX_CONTEXT_SHARE * CHARS_PER_TOKEN : undefined;
+	const views = fileViews(content, change, limit);
+	if (views.length === 0) {
+		throw new ToolError(
+			`${target} is too large for ${applier.name} to read whole, and the change names no part of it to show instead: quote the lines to change, or give their line numbers.`,
+		);
 	}
-	return applyDescribedChange({ path: target, change, content, complete: applier.complete, apply: options.apply });
+	return applyDescribedChange({
+		path: target,
+		change,
+		content,
+		views,
+		complete: applier.complete,
+		apply: (edits, checkSnapshot) => options.apply(edits, checkSnapshot ? raw : undefined),
+	});
 }
 
 /**
@@ -444,7 +445,7 @@ async function applySection(options: {
 export async function runMagicEdit(options: {
 	session: ToolSession;
 	input: string;
-	apply: (path: string, edits: ReplaceEdit[]) => Promise<AgentToolResult<EditToolDetails>>;
+	apply: (path: string, edits: ReplaceEdit[], rawSnapshot?: string) => Promise<AgentToolResult<EditToolDetails>>;
 	signal?: AbortSignal;
 }): Promise<AgentToolResult<EditToolDetails>> {
 	const { session, signal } = options;
@@ -454,8 +455,8 @@ export async function runMagicEdit(options: {
 	let writes: Promise<unknown> = Promise.resolve();
 	const settled = await Promise.all(
 		sections.map(async section => {
-			const apply = (edits: ReplaceEdit[]) => {
-				const write = writes.then(() => options.apply(section.path, edits));
+			const apply = (edits: ReplaceEdit[], rawSnapshot?: string) => {
+				const write = writes.then(() => options.apply(section.path, edits, rawSnapshot));
 				writes = write.catch(() => {});
 				return write;
 			};
