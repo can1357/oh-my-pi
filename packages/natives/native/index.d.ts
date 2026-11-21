@@ -3603,6 +3603,18 @@ export interface PipeStreamInfo {
   open: boolean
   /** The stream is a file a command redirected its output into. */
   file: boolean
+  /**
+   * Run-trace node key (`unit:0:node`) of the stage writing into the pipe,
+   * or of the command whose redirection opened the file. Absent when the
+   * run has no trace or the writer's unit is not in it.
+   */
+  node?: string
+  /**
+   * When it was last written, in ms since the UNIX epoch: a pipe's last
+   * write (its opening before any), a file's modification time (0 when
+   * unreadable).
+   */
+  modified: number
 }
 
 export interface PointerOptions {

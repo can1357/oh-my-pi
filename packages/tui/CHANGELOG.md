@@ -4,24 +4,32 @@
 
 ### Breaking Changes
 
+- Removed `ComposerPreferences.completeScrollback`, `TranscriptContainer.completeScrollback`, `Composer.setRunActive` and the `transientChrome`/`selfClearingChrome`/`billedChrome` options of `Composer.setRuntimeChildren`: retirement always uses the height the chrome leaves on screen
 - Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion` and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`; import them from the new path ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
 - `OutputSinkOptions.artifactPath`/`artifactId` are replaced by `allocateArtifact` (`ArtifactAllocator`), which the sink calls only when output first overflows its inline view
 - Removed the `windows-altgr` module (`translateWindowsAltGrSequence`, `readAltGrLayer`, `createRightAltLatch`, `RIGHT_ALT_LATCH_MS`, `AltGrHost`, `KeyboardLayoutHandle`); AltGr recovery is `translateWindowsAltGrSequence` in `@oh-my-pi/pi-natives`
 
 ### Added
 
+- The editor now shows described changes for `magic` mode as Markdown in the transcript until the apply model returns final diffs
 - Added handling of `features` terminal events to update UI without waiting for a new hello
 
 ### Changed
 
+- Rows that chrome below the transcript pushes off screen go straight to scrollback; when that chrome shrinks, the input stays on the bottom row and the freed rows stay blank until new output fills them. A docked report, a waiting ask and the editor's completion list are the exception: the rows they cover come back when they close
 - Native chats no longer show a crossed-out Spotlight star or leave an empty row under unchanged tool results.
+- Native web search cards send their sources as one `omp.tool.sources` grid, answered or not; a search without an answer puts each page excerpt inside its source row (`omp.tool.excerpt`), which Tern shows once the card is unfolded, and titles take up to two lines
 - Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`
-- The background jobs sheet reads a job's output from where its command sends it: a command that pipes (`| tail`) or redirects (`> log`) gets a tab per stream beside Output and opens on the one being written, instead of "No output yet" until it ends
+- The background jobs sheet reads a job's output from where its command sends it: it follows whatever the command writes now (its own output, a pipe it feeds `| tail`, a file it redirects into `> log`) and highlights that step in the command; clicking a step of the command shows that step's output until you click it again or choose Follow live, and a source menu lists every stream, instead of "No output yet" until it ends
+- Clicking a step of a running bash command in the transcript shows the output that step writes (its pipe, its redirected file, or its own slice of the output) in place of the run's output, and while the run writes a stream the card follows it
 - The background jobs sheet draws a job's command as its live shell visualization with the running step in view, and fits what the job is for, its caption and its facts in fewer lines
+- Bash command footers replace the `Wall:` and `Timeout:` labels with icons and one compact chip (`⏱ 1.2s/5m · ✘ 1`), and prefix the job, service, PID, artifact and minimizer parts with theme glyphs
 
 ### Fixed
 
+- omp now selects the light theme inside Zellij when the terminal reports a light background, instead of dropping the background reply Zellij forwards after its own DA1 answer ([#20002](https://github.com/can1357/oh-my-pi/issues/20002))
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
+- Transcript rows no longer go missing between the scrollback and the screen while a todo list, subagent panel, queued-message band, dialog or draft is up, which made tool cards look cut off after their first rows
 - The terminal cursor no longer blinks off and on with every spinner tick in kitty
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))

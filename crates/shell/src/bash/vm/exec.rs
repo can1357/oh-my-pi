@@ -24,10 +24,12 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey, assign_preview},
+	event::{
+		CompiledUnit, Construct, EventData, NodeKind, NodeRef, Origin, WaitKey, assign_preview,
+	},
 	fd::FdRef,
-	host::{ResolveCtx, Resolved, Via},
-	ids::{Dialect, ModeId, UnitId, Vpid},
+	host::{ResolveCtx, Resolved, TapSite, Via},
+	ids::{AstNodeId, Dialect, ModeId, UnitId, Vpid},
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
@@ -4806,15 +4808,15 @@ fn retarget_bang(k: &mut Kernel, job_vproc: Vpid, unit: &Unit, stages: &[(Vpid, 
 	}
 }
 
-/// Source text of stage `i` of pipeline `info`, for a pipe tap: the node of
-/// the `SubExit` that ends the stage's code (just before the next stage's
-/// entry, or before the pipeline's end).
-fn stage_text(unit: &Unit, info: &ir::SpawnIr, i: usize) -> BString {
+/// Node of stage `i` of pipeline `info`, for a pipe tap: the node of the
+/// `SubExit` that ends the stage's code (just before the next stage's entry,
+/// or before the pipeline's end).
+fn stage_node(unit: &Unit, info: &ir::SpawnIr, i: usize) -> Option<u32> {
 	let end = info.stages.get(i + 1).map_or(info.end, |next| next.entry);
 	end.checked_sub(1)
 		.and_then(|pc| unit.ops.get(pc as usize))
 		.filter(|op| op.code == Opcode::SubExit)
-		.map_or_else(BString::default, |op| node_text(unit, op.node))
+		.map(|op| op.node)
 }
 
 /// `Spawn`: start children; wait for subshells and pipelines.
@@ -4947,9 +4949,18 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					fds.set(0, stdin.take());
 					if i + 1 < n {
 						let mirror = tap.as_ref().and_then(|tap| {
-							let producer = stage_text(unit, info, i);
-							let consumer = stage_text(unit, info, i + 1);
-							tap.open(BStr::new(&producer), BStr::new(&consumer))
+							let text = |node: Option<u32>| {
+								node.map_or_else(BString::default, |node| node_text(unit, node))
+							};
+							let producer = stage_node(unit, info, i);
+							let producer_text = text(producer);
+							let consumer_text = text(stage_node(unit, info, i + 1));
+							let site = TapSite {
+								vpid: vp.vpid,
+								node: producer.map(|node| NodeRef { unit: unit.id, node: AstNodeId(node) }),
+								text: BStr::new(&producer_text),
+							};
+							tap.open(site, BStr::new(&consumer_text))
 						});
 						let (r, w) = match mirror {
 							Some(mirror) => mem::tapped_pipe(mirror),

@@ -464,7 +464,6 @@ import {
 	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
-	cfgTuiCompleteScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
@@ -504,7 +503,6 @@ const cfgLiveUiSettings = combine({
 	showHardwareCursor: cfgShowHardwareCursor,
 	"tui.maxInlineImages": cfgTuiMaxInlineImages,
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
-	"tui.completeScrollback": cfgTuiCompleteScrollback,
 	"tui.imeSafeCursor": cfgTuiImeSafeCursor,
 	autocompleteMaxVisible: cfgAutocompleteMaxVisible,
 	"spelling.typoDetection": cfgSpellingTypoDetection,
@@ -1236,22 +1234,30 @@ export function nextSubagentPreviewTickMs(sessions: readonly ObservableSession[]
 }
 
 /**
- * Live-preview row for a running subagent: its current (or, between calls,
- * most recent) tool call with a one-line detail and, once the call has run a
- * while, an elapsed marker. The detail is that call's own intent, else its
- * args — never an earlier call's intent. Undefined when the agent has not
- * called a tool yet. The row never overflows `width`.
+ * Live-preview row for a running subagent: the call it runs, else the call its
+ * model is still writing, else (between calls) its most recent one, with a
+ * one-line detail and, once a running call has run a while, an elapsed marker.
+ * The detail is that call's own intent, else its args — never an earlier
+ * call's intent. Undefined when the agent has not called a tool yet. The row
+ * never overflows `width`.
  */
 function renderSubagentToolPreview(session: ObservableSession, width: number): string | undefined {
 	const progress = session.progress;
 	if (progress?.status !== "running") return undefined;
-	const currentTool = progress.currentTool;
+	const running = progress.currentTool;
+	const writing = !running && progress.streaming?.kind === "call" ? progress.streaming : undefined;
 	const recent = progress.recentTools[0];
-	const tool = currentTool ?? recent?.tool;
-	if (!tool) return undefined;
-	const intent = currentTool ? progress.currentToolIntent : recent?.intent;
-	const args = currentTool ? progress.currentToolArgs : recent?.args;
-	const argsKey = currentTool ? progress.currentToolArgsKey : recent?.argsKey;
+	const call = running
+		? {
+				tool: running,
+				intent: progress.currentToolIntent,
+				args: progress.currentToolArgs,
+				argsKey: progress.currentToolArgsKey,
+			}
+		: (writing ?? recent);
+	if (!call) return undefined;
+	const live = running !== undefined || writing !== undefined;
+	const { tool, intent, args, argsKey } = call;
 	// A model-written intent is prose, so home paths inside it are shortened as they stand. An argument is
 	// shortened by its key, so a literal search pattern that names a home path still shows what was searched.
 	const detail = intent
@@ -1259,7 +1265,7 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 		: args
 			? shortenToolArgumentPaths(replaceTabs(args), argsKey)
 			: undefined;
-	const elapsed = currentTool && progress.currentToolStartMs ? Date.now() - progress.currentToolStartMs : 0;
+	const elapsed = running && progress.currentToolStartMs ? Date.now() - progress.currentToolStartMs : 0;
 	const elapsedLabel =
 		elapsed > SUBAGENT_PREVIEW_ELAPSED_MIN_MS
 			? `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`
@@ -1267,11 +1273,11 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	const elapsedWidth = visibleWidth(elapsedLabel);
 	const hook = `${theme.fg("dim", theme.tree.hook)} `;
 	// Between calls the row keeps the last call, marked with how it ended.
-	const status = !currentTool && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
+	const status = !live && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
 	const prefixWidth = visibleWidth(hook) + visibleWidth(status);
 	// Reserve the elapsed marker first, then cap the tool name; the detail gets whatever is left.
 	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - prefixWidth - elapsedWidth), "");
-	let line = `${hook}${status}${theme.fg(currentTool ? "muted" : "dim", shortTool)}`;
+	let line = `${hook}${status}${theme.fg(live ? "muted" : "dim", shortTool)}`;
 	const detailBudget = width - prefixWidth - visibleWidth(shortTool) - elapsedWidth - visibleWidth(": ");
 	if (detail && detailBudget >= SUBAGENT_PREVIEW_MIN_DETAIL_WIDTH) {
 		line += `: ${theme.fg("dim", previewLine(detail, Math.min(TRUNCATE_LENGTHS.SHORT, detailBudget)))}`;
@@ -2786,40 +2792,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.hookWidgetContainerBelow,
 			],
 			{
-				// Roots that collapse without new transcript output must not raise the
-				// post-run chrome floor: user-driven ones (editor drafts, dialogs and
-				// selectors, staged attachments, reports, queued messages, dismissible
-				// panels and the error banner). Any root listed in neither set counts
-				// as persistent: once it holds its height after a run the floor rises
-				// to it, and its later collapse floats the editor until output fills
-				// in. Classify every new root that can collapse on its own.
-				transientChrome: [
-					this.editorContainer,
-					this.askContainer,
-					this.attachmentChipsContainer,
-					this.reportContainer,
-					this.pendingShellContainer,
-					this.pendingMessagesContainer,
-					this.btwContainer,
-					this.omfgContainer,
-					this.cleanseContainer,
-					this.errorBannerContainer,
-				],
-				// HUDs that clear themselves on a timer or registry change (todos,
-				// background subagents, model cycle, progress). Their first paint can be
-				// their tallest (a restored todo list on resume), so it is never a baseline.
-				selfClearingChrome: [
-					this.todoContainer,
-					this.subagentContainer,
-					this.modelCycleContainer,
-					this.progressHudContainer,
-				],
-				// The working row, the idle status line that replaces it, and the
-				// margin above the editor (the band composer's gap opens when that
-				// row empties; a spacer replaces it over hook widgets): billed at
-				// their current height so streamed rows reach native history as
-				// they leave the screen.
-				billedChrome: [this.statusContainer, this.editorTopGapContainer],
 				// Natively the HUD pills lead the dock, aboveEditor hook widgets sit
 				// over the working row (the tray's header, so nothing comes between
 				// the two), queued messages sit between the working row and the
@@ -2845,6 +2817,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				// end, where they stay when they move in, not pinned over the composer.
 				// An ask waiting for answers follows them, right above the composer.
 				nativeTail: [this.pendingShellContainer, this.askContainer],
+				// A docked report or a waiting ask covers the transcript while it is
+				// open; closing it brings the rows back instead of leaving them in
+				// scrollback.
+				coveringChrome: [this.reportContainer, this.askContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
@@ -4416,7 +4392,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			showHardwareCursor: cfgShowHardwareCursor.get(this.settings),
 			maxInlineImages: cfgTuiMaxInlineImages.get(this.settings),
 			resizeScrollback: cfgTuiResizeScrollback.get(this.settings),
-			completeScrollback: cfgTuiCompleteScrollback.get(this.settings),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(this.settings),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(this.settings),
 			spellingTypoDetection: cfgSpellingTypoDetection.get(this.settings),
@@ -4474,7 +4449,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				"showHardwareCursor",
 				"tui.maxInlineImages",
 				"tui.resizeScrollback",
-				"tui.completeScrollback",
 				"tui.imeSafeCursor",
 				"autocompleteMaxVisible",
 				"spelling.typoDetection",

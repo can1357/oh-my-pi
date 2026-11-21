@@ -33,6 +33,8 @@ import { RELAY_RECHECK_PATH, RELAY_RESTART_PATH } from "./protocol";
 /** Options for {@link startRelayServer}. */
 export interface RelayServerOptions {
 	port: number;
+	/** Accept the browser only over its chat native messaging port. */
+	chatOnly?: boolean;
 	/**
 	 * A `POST /omp/relay/restart` from omp `version`; `idleOnly` asks only when no CDP client is connected. Returns
 	 * whether the server is going away; absent, every restart is refused.
@@ -106,6 +108,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 		log,
 		group,
 		async installedStamp(extensionId) {
+			if (opts.chatOnly) return null;
 			const installs = await readRelayInstalls({
 				registryFile: opts.installRegistryFile,
 			});
@@ -115,6 +118,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			return install ? installedRelayExtensionStamp(install.dir) : null;
 		},
 		async updateExtension(extensionId) {
+			if (opts.chatOnly) return false;
 			// Only a folder omp manages can be rewritten; Chrome named it by its path, so its id says which.
 			const ours = await registeredRelayExtensionIds({
 				registryFile: opts.installRegistryFile,
@@ -181,7 +185,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
 			}
-			if (path === "/ext") {
+			if (path === "/ext" && !opts.chatOnly) {
 				const origin = req.headers.get("origin");
 				if (origin && !origin.startsWith("chrome-extension://")) {
 					return new Response("Forbidden", { status: 403 });
@@ -281,7 +285,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	log("relay listening", { port: opts.port });
 	return {
 		bridge,
-		port: opts.port,
+		port: server.port!,
 		stop() {
 			clearInterval(keepalive);
 			server.stop(true);

@@ -300,7 +300,7 @@ describe("BashTool execution results", () => {
 					.render(160)
 					.join("\n"),
 			);
-			expect(rendered).toContain("Minimized: lint 1.9KB → 27B");
+			expect(rendered).toContain(`${theme.icon.minimize} lint 1.9KB → 27B`);
 			const view = JSON.stringify(
 				bashToolRenderer.describeResult(result, { expanded: false, isPartial: false }, args),
 			);

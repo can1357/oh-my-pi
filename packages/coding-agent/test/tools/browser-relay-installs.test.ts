@@ -14,7 +14,7 @@ import { findFreeCdpPort } from "../../src/tools/browser/attach";
 import {
 	extensionIdForPath,
 	installedRelayExtensionVersion,
-	RELAY_EXTENSION_BUILD,
+	loadRelayExtension,
 	writeRelayExtension,
 } from "../../src/tools/browser/relay/extension-files";
 import {
@@ -116,7 +116,7 @@ describe("browser relay install registry", () => {
 		expect(await installedRelayExtensionVersion(installed)).toBe(VERSION);
 		expect(await fs.stat(missing).catch(() => undefined)).toBeUndefined();
 		expect(await readRelayInstallRegistry(registryFile)).toMatchObject({
-			lastSynced: `${VERSION}+${RELAY_EXTENSION_BUILD}`,
+			lastSynced: `${VERSION}+${(await loadRelayExtension()).build}`,
 		});
 		expect(await readRelayInstalls({ registryFile })).toEqual([
 			{ dir: installed, version: VERSION, missing: false },

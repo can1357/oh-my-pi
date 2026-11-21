@@ -6,7 +6,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBrowserRelayDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { replaceFileAtomically } from "../../../utils/atomic-file";
-import { embeddedRelayBuild, embeddedRelayFiles } from "./extension-assets";
+import { embeddedRelayExtension } from "./embedded-extension";
 import {
 	type RelayExtensionStamp,
 	readRelayExtensionStamp,
@@ -14,29 +14,63 @@ import {
 	stampRelayExtensionScript,
 } from "./protocol";
 
-/** The extension build these omp files are (a digest of the unstamped files); stamped into every install. */
-export const RELAY_EXTENSION_BUILD: string = embeddedRelayBuild;
+/** The unstamped extension files, binary ones base64-encoded, as packages/browser-relay/scripts/build-extension.ts writes them. */
+export interface RelayExtensionBundle {
+	/** Digest of the unstamped files; stamped into every install so a relay can spot a stale build. */
+	build: string;
+	files: Record<string, string | { base64: string }>;
+}
+
+/** Where a source checkout keeps the generated extension; builds embed it instead. */
+const GENERATED_EXTENSION = path.join(
+	import.meta.dir,
+	"extension.generated.json",
+);
+
+let loading: Promise<RelayExtensionBundle> | undefined;
+
+/**
+ * The extension this omp installs: embedded in binaries and bundles, read from `extension.generated.json` in a source
+ * checkout. A missing file fails only the caller, so startup survives a checkout that has not generated it.
+ *
+ * @throws Error naming `bun run gen:relay-extension` when a source checkout has not generated the extension.
+ */
+export function loadRelayExtension(): Promise<RelayExtensionBundle> {
+	if (embeddedRelayExtension) return Promise.resolve(embeddedRelayExtension);
+	loading ??= Bun.file(GENERATED_EXTENSION)
+		.json()
+		.catch((error: unknown) => {
+			loading = undefined;
+			if (!isEnoent(error)) throw error;
+			throw new Error(
+				`This omp checkout has not built the omp extension (${GENERATED_EXTENSION} is missing). Run \`bun run gen:relay-extension\` at the repository root.`,
+			);
+		});
+	return loading;
+}
 
 type ExtensionFiles = Record<string, string | Buffer> & {
 	"background.js": string;
 	"manifest.json": string;
 };
 
-/** The extension files `omp browser-relay install` writes, stamped with the installing omp's version. */
-export function relayExtensionFiles(ompVersion: string): ExtensionFiles {
+/**
+ * The extension files `omp browser-relay install` writes, stamped with the installing omp's version.
+ *
+ * @throws Error when the extension is missing (see {@link loadRelayExtension}) or lacks its manifest or service worker.
+ */
+export async function relayExtensionFiles(
+	ompVersion: string,
+): Promise<ExtensionFiles> {
+	const { build, files: assets } = await loadRelayExtension();
+	const manifest = assets["manifest.json"];
+	const script = assets["background.js"];
+	if (typeof manifest !== "string" || typeof script !== "string")
+		throw new Error("The omp extension lacks manifest.json or background.js");
 	const files: ExtensionFiles = {
-		"manifest.json": stampRelayExtensionManifest(
-			embeddedRelayFiles["manifest.json"],
-			ompVersion,
-		),
-		"background.js": stampRelayExtensionScript(
-			embeddedRelayFiles["background.js"],
-			ompVersion,
-			RELAY_EXTENSION_BUILD,
-		),
+		"manifest.json": stampRelayExtensionManifest(manifest, ompVersion),
+		"background.js": stampRelayExtensionScript(script, ompVersion, build),
 	};
-	const assets: Readonly<Record<string, string | { base64: string }>> =
-		embeddedRelayFiles;
 	for (const name in assets) {
 		if (name === "background.js" || name === "manifest.json") continue;
 		const content = assets[name]!;
@@ -65,7 +99,7 @@ export async function writeRelayExtension(
 	dir: string,
 	ompVersion: string,
 ): Promise<boolean> {
-	const files = relayExtensionFiles(ompVersion);
+	const files = await relayExtensionFiles(ompVersion);
 	let changed = false;
 	for (const name in files) {
 		if (name === "background.js" || name === "manifest.json") continue;

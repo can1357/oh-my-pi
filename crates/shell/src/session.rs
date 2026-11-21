@@ -2158,14 +2158,15 @@ mod tests {
 		impl PipeTap for Taps {
 			fn open(
 				&self,
-				producer: &bstr::BStr,
+				producer: crate::bash::TapSite<'_>,
 				consumer: &bstr::BStr,
 			) -> Option<Arc<dyn crate::bash::PipeMirror>> {
 				let mirror = Arc::new(Mirror::default());
-				self
-					.0
-					.lock()
-					.push((producer.to_string(), consumer.to_string(), Arc::clone(&mirror)));
+				self.0.lock().push((
+					producer.text.to_string(),
+					consumer.to_string(),
+					Arc::clone(&mirror),
+				));
 				Some(mirror)
 			}
 		}

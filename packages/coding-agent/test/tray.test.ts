@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import {
 	buildTrayItems,
@@ -10,6 +11,7 @@ import {
 	type TrayMain,
 	TrayMainActivity,
 	TrayMemory,
+	trayAgentDetail,
 } from "@oh-my-pi/pi-coding-agent/modes/tray";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -434,6 +436,64 @@ describe("tray items", () => {
 		expect(done?.item === "done" && done.entries[0]?.name).toBe("Old");
 	});
 
+	it("follows a running agent's stream between calls: the call it writes, its newest line, its reasoning", () => {
+		const f = fixture();
+		f.refs.push(ref("Scout", "running"));
+		const last = { tool: "edit", args: "src/norm.py", argsKey: "path", endMs: 30_000 };
+		const writing = { kind: "call", tool: "write", args: "tests/test_norm.py", argsKey: "path" } as const;
+		const doing = (overrides: Partial<AgentProgress>): [string, string] => {
+			f.sessions.splice(0, 1, observed("Scout", "active", { recentTools: [last], ...overrides }));
+			const card = buildTrayItems(input(f), new TrayMemory()).items[0];
+			return card?.item === "agent" ? [card.tool, card.text] : ["", ""];
+		};
+		expect(doing({})).toEqual(["edit", "src/norm.py"]);
+		expect(doing({ streaming: writing })).toEqual(["write", "tests/test_norm.py"]);
+		expect(doing({ streaming: { ...writing, intent: "Write the norm test" } })).toEqual([
+			"write",
+			"Write the norm test",
+		]);
+		expect(
+			doing({ streaming: { kind: "text" }, recentOutput: ["**Next**, the norm test", "Fixed the edit"] }),
+		).toEqual(["", "Next, the norm test"]);
+		expect(doing({ streaming: { kind: "thinking" } })).toEqual(["", "Thinking"]);
+		// A call that runs outranks what streams beside it.
+		expect(
+			doing({ currentTool: "bash", currentToolArgs: "bun test", currentToolArgsKey: "command", streaming: writing }),
+		).toEqual(["bash", "bun test"]);
+		// The closer look ends with the call being written, as the card says.
+		expect(
+			trayAgentDetail(observed("Scout", "active", { recentTools: [last], streaming: writing }), 60_000).tail,
+		).toEqual([
+			{ tool: "edit", text: "src/norm.py", state: "ok", age: undefined },
+			{ tool: "write", text: "tests/test_norm.py", state: "run", age: undefined },
+		]);
+	});
+
+	it("names the model a settled agent ran on, and a running one's current model, after a switch", () => {
+		const f = fixture();
+		const switched = {
+			model: { id: "gpt-5.5", thinking: true },
+			thinkingLevel: "low",
+		} as unknown as AgentRecordLike["session"];
+		const ran = { resolvedModel: "anthropic/claude-opus-4-5", resolvedThinkingLevel: ThinkingLevel.High };
+		f.sessions.push(observed("Running", "active", ran), observed("Settled", "completed", ran));
+		f.refs.push(
+			{ ...ref("Running", "running"), session: switched },
+			{ ...ref("Settled", "idle"), session: switched },
+		);
+		f.agentJobs.set("Settled", job("Settled", { type: "task", agentId: "Settled", status: "completed" }));
+		const models = () =>
+			buildTrayItems(input(f), new TrayMemory()).items.map(item => (item.item === "agent" ? item.model : ""));
+		// A job's undelivered result keeps the settled card beside the running one.
+		expect(models()).toEqual(["gpt-5.5 · low", "claude-opus-4-5 · high"]);
+		// Nothing runs: the settled agent's own card in a quiet tray.
+		f.sessions.splice(0, 1);
+		f.refs.splice(0, 1);
+		f.agentJobs.clear();
+		f.jobs.push(job("bg_1", { status: "completed", endTime: 2_000 }));
+		expect(models().filter(Boolean)).toEqual(["claude-opus-4-5 · high"]);
+	});
+
 	it("hides agent cards and the done card under display.pinnedAgents off, keeping the jobs", () => {
 		const f = fixture();
 		f.sessions.push(observed("Running", "active"));
@@ -714,13 +774,21 @@ describe("Tray", () => {
 		f.jobs.push(job("bg_1"));
 		for (let i = 0; i < 53; i++) f.refs.push(ref(`Old${i}`, "idle", i));
 		// Finished in this run: the observer knows how it went and what it last said.
-		f.refs.push({ ...ref("Fresh", "idle", 100), sessionFile: "/tmp/fresh.jsonl" });
+		// Its session was switched to another model after the run; the list names the one it ran on.
+		const switched = { model: { id: "gpt-5.5", thinking: true }, thinkingLevel: "low" };
+		f.refs.push({
+			...ref("Fresh", "idle", 100),
+			sessionFile: "/tmp/fresh.jsonl",
+			session: switched as unknown as AgentRecordLike["session"],
+		});
 		f.sessions.push(
 			observed("Fresh", "failed", {
 				durationMs: 252_000,
 				toolCount: 38,
 				cost: 0.12,
 				recentOutput: ["", "Tests fail in auth"],
+				resolvedModel: "anthropic/claude-opus-4-5",
+				resolvedThinkingLevel: ThinkingLevel.High,
 			}),
 		);
 		// Restored from disk: its persisted history and summary.
@@ -756,7 +824,7 @@ describe("Tray", () => {
 			role: "omp.tray.done.item",
 			status: "failed",
 			actions: { click: "tray.open=Fresh" },
-			aria: "Fresh, failed, 4m12s · 38 tools · $0.120, Tests fail in auth",
+			aria: "Fresh, failed, claude-opus-4-5 · high · 4m12s · 38 tools · $0.120, Tests fail in auth",
 		});
 		expect(
 			children(fresh).map(node => [
@@ -766,7 +834,7 @@ describe("Tray", () => {
 		).toEqual([
 			["omp.tray.dot", [{ t: "●", s: "error" }]],
 			["omp.tray.name", "Fresh"],
-			["omp.tray.meta", [{ t: "4m12s · 38 tools · $0.120", s: "dim" }]],
+			["omp.tray.meta", [{ t: "claude-opus-4-5 · high · 4m12s · 38 tools · $0.120", s: "dim" }]],
 			["omp.tray.line", "Tests fail in auth"],
 		]);
 		// Unknown numbers are left out rather than printed as zeros.

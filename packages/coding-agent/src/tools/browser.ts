@@ -20,7 +20,8 @@ import { chromiumNeedsDownload, ensureChromiumExecutable } from "./browser/launc
 import { type EmulationViewport, viewportSchema } from "./browser/emulation";
 import { sameAddress } from "./browser/navigation";
 import { resolveInitScriptSources } from "./browser/open-options";
-import { resolveRelayKind } from "./browser/relay/kind";
+import type { BrowserRelayGuidance } from "./browser/prelude-definition";
+import { isRelayOnly, resolveRelayKind } from "./browser/relay/kind";
 import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
@@ -102,7 +103,7 @@ export {
 	type AriaSnapshotDiffResult,
 	type SnapshotPostProcessOptions,
 } from "./browser/snapshot-plus";
-export { DEFAULT_RELAY_URL, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
+export { isRelayOnly, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
 export { type TernKind, resolveTernKind } from "./browser/tern/kind";
 export { resolveWebKitKind, type WebKitKind } from "./browser/webkit/kind";
 export type { Observation, ObservationEntry } from "./browser/tab-protocol";
@@ -176,7 +177,9 @@ interface BrowserPreludeDetails {
  * a cmux surface, then omp's own browser ({@link ownBrowserKind}). `app: "auto"`
  * is that chain without the relay. Tern and cmux are automatic only while no
  * other omp owns the terminal, and none of the user's own surfaces (relay, Tern,
- * cmux) is automatic for a subagent. `app: "tern"` and `app: "webkit"` are explicit:
+ * cmux) is automatic for a subagent. With `PI_BROWSER_RELAY=only` (a session
+ * started from the extension's side panel) every open, a subagent's included,
+ * goes to the relay, and any `app` but `"relay"` throws. `app: "tern"` and `app: "webkit"` are explicit:
  * they throw when Tern or omp's WebKit host is unavailable.
  */
 export function resolveBrowserKind(
@@ -185,6 +188,15 @@ export function resolveBrowserKind(
 	env: Record<string, string | undefined> = process.env,
 ): BrowserKind {
 	const app = params.app;
+	if (isRelayOnly(env)) {
+		if (app !== undefined && app !== "relay") {
+			throw new ToolError(
+				`This session drives the user's Chrome through the omp extension and has no other browser; app: ${JSON.stringify(app)} is unavailable. Omit app or pass app: "relay".`,
+			);
+		}
+		const relayKind = resolveRelayKind({ url: env.PI_PANEL_RELAY_URL ?? cfgBrowserRelayUrl.get(session.settings) }, env);
+		if (relayKind) return relayKind;
+	}
 	if (app !== undefined && URL_SCHEME.test(app)) {
 		return { kind: "connected", cdpUrl: app.replace(/\/+$/, "") };
 	}
@@ -318,10 +330,12 @@ export function createBrowserPrelude(session: ToolSession): HostEvalPreludeDefin
 		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
 		status: describeBrowserCall,
 		// The documentation promises omp's own browser for an open without `app`; while
-		// the relay takes that open, the prompt names where `app: "auto"` goes instead.
-		get relayFallback() {
+		// the relay takes that open, the prompt says so: the only browser in relay-only
+		// mode, otherwise naming where `app: "auto"` goes instead.
+		get relay(): BrowserRelayGuidance | undefined {
+			if (isRelayOnly()) return { mode: "only" };
 			return resolveBrowserKind({ action: "open" }, session).kind === "relay"
-				? resolveBrowserKind({ action: "open", app: "auto" }, session)
+				? { mode: "default", fallback: resolveBrowserKind({ action: "open", app: "auto" }, session) }
 				: undefined;
 		},
 	});
@@ -624,6 +638,8 @@ async function installWebKitForOpen(
 	params: BrowserParams,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
+	// The relay is the only browser: nothing omp runs itself needs installing (an explicit app throws at resolve).
+	if (isRelayOnly()) return undefined;
 	const explicit = params.app === "webkit";
 	const pending = await webKitEngineToInstall({
 		settingEnabled: explicit || cfgBrowserWebKit.get(session.settings),

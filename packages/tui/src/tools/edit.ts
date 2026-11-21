@@ -7,7 +7,7 @@ import type { Component } from "../tui";
 import { sliceWithWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
-import { code, compact, node, span } from "../native/describe";
+import { code, compact, md, node, span } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import {
 	diagnosticsBadge,
@@ -52,6 +52,7 @@ import {
 	HL_MOVE_KEYWORD,
 	HL_REM_KEYWORD,
 } from "./hashline-format";
+import { splitMagicSections } from "./magic-sections";
 
 /** Edit payload syntax selected by the caller. */
 export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "sloppy";
@@ -228,13 +229,63 @@ function previewCacheAt(caches: RenderedStringCache[] | undefined, index: number
 const CALL_TEXT_PREVIEW_LINES = 6;
 const CALL_TEXT_PREVIEW_WIDTH = 80;
 
+/**
+ * The described changes of an `edit.mode: magic` call. Its tool reports mode
+ * `replace`, whose own schema has no `input`, so an `input` string there is a
+ * magic payload.
+ */
+function magicPayload(args: { input?: unknown; _input?: unknown }, editMode: EditMode | undefined): string | undefined {
+	const input = args.input ?? args._input;
+	return editMode === "replace" && typeof input === "string" ? input : undefined;
+}
+
+/** One file of a magic payload: its described changes so far, as Markdown. */
+interface MagicChange {
+	path: string;
+	change: string;
+	/** Holds the payload's last section, the one that may still be streaming in. */
+	open: boolean;
+}
+
+/**
+ * The files of a possibly partial magic payload in order, sections naming the
+ * same path merged as the tool merges them.
+ */
+function magicChanges(input: string): MagicChange[] {
+	const merged = new Map<string, MagicChange>();
+	const { runs } = splitMagicSections(input);
+	for (const [index, run] of runs.entries()) {
+		const change = sanitizeText(run.text).trim();
+		const open = index === runs.length - 1;
+		const file = merged.get(run.path);
+		if (!file) merged.set(run.path, { path: run.path, change, open });
+		else {
+			file.change = [file.change, change].filter(Boolean).join("\n\n");
+			file.open = open;
+		}
+	}
+	return [...merged.values()];
+}
+
+/** Native call view of a magic edit: each file's described changes as Markdown until the result replaces them with diffs. */
+function describeMagicCall(input: string, streaming: boolean): NativeToolView {
+	const files = magicChanges(input);
+	const view = (file: MagicChange) =>
+		md(file.change, { role: "omp.tool.edit.change", stream: streaming && file.open });
+	const tool = editToolHead({ path: files[0]?.path, files: files.length, added: 0, removed: 0 });
+	if (files.length === 1) return { tool, body: files[0]!.change ? [view(files[0]!)] : [] };
+	return {
+		tool,
+		body: files.map(file => fileDiffSection(file, file.change ? [view(file)] : [], { role: "omp.tool.edit.file" })),
+	};
+}
+
 /** Render replacement text until a computed diff preview is available. */
 export function renderStreamingFallback(editMode: EditMode, args: unknown, theme: Theme): string {
 	if (editMode !== "replace" || !args || typeof args !== "object") return "";
 	const record = args as Record<string, unknown>;
-	// `edit.mode: magic` calls carry per-file sections of described changes, not replacement text.
-	const described = record.input ?? record._input;
-	if (typeof described === "string") {
+	const described = magicPayload(record, editMode);
+	if (described !== undefined) {
 		return replaceTabs(sanitizeText(described))
 			.trim()
 			.split("\n")
@@ -958,6 +1009,11 @@ function resolveEditCallFactsUncached(
 	isPartial: boolean,
 	editMode: EditMode | undefined,
 ): EditCallFacts {
+	const magic = magicPayload(editArgs, editMode);
+	if (magic !== undefined) {
+		const files = magicChanges(magic);
+		return { rawPath: files[0]?.path ?? "", fileCount: files.length, hasHashlineLineEdits: false };
+	}
 	const hashlineInputSummary = getHashlineInputRenderSummary(editArgs, editMode);
 	const sloppyInputSummary = getSloppyInputRenderSummary(editArgs, editMode);
 	const applyPatchSummary = getApplyPatchRenderSummary(editArgs, isPartial, editMode);
@@ -1209,6 +1265,8 @@ export const editToolRenderer = {
 		options: RenderResultOptions & { renderContext?: EditRenderContext },
 	): NativeToolView {
 		const renderContext = options.renderContext;
+		const magic = magicPayload(args, renderContext?.editMode);
+		if (magic !== undefined) return describeMagicCall(magic, options.isPartial);
 		const { rawPath, rename, op, fileCount, applyPatchError } = resolveEditCallFacts(
 			args,
 			options.isPartial,

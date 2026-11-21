@@ -2,8 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Standardized the `magic` edit mode to use Markdown bulleted lists as the mandatory input format, replacing the previous `xml` and `markdown` options
+- `get_model_picker` RPC command: omp's session model picker (Recent block, search ranking, role chips, `@` quick roles, thinking slider) for remote pickers such as the Chrome side panel.
+- `get_state` reports `configuredThinkingLevel` and `thinkingLevels`; `set_model` takes `thinkingLevel` and `role`, and `set_thinking_level` accepts `auto`.
+- `resume` and `abort_and_deliver_queue` RPC commands: the TUI's `.`/`c` continue shortcut and its empty-Enter interrupt that sends the queued messages.
+- Collab guests can continue the host's agent, interrupt it to send queued messages, and queue a prompt as a follow-up instead of steering.
+
 ### Breaking Changes
 
+- Removed the `tui.completeScrollback` setting: its behaviour is now the only one, so transcript rows pushed off screen by a HUD, dialog or draft go straight to scrollback and the input stays on the bottom row when it closes
 - Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
 - The browser relay now runs inside the omp extension's native host while Chrome is open, instead of being started on demand by omp. `omp browser-relay` (serving the relay by hand) and its `--port`, `--token` and `--no-group` options are removed; `browser.relayUrl` still points omp at a relay forwarded from another machine. After updating, reload the omp extension once (or restart Chrome)
 - Eval's `archive.search(query)` now finds sessions by title, idle recap, or what the user and assistant wrote, across all history, and returns session records with their `matches`; prompt-only search moved to `archive.prompts({ query })`. Both match query words against the start of words (`arch` finds `archive`, `chiv` no longer does)
@@ -12,12 +21,13 @@
 ### Added
 
 - Accepted Unicode set mode (`v`) in slash-delimited `secrets.yml` regexes.
-- Added the `magic` edit mode (`edit.mode: magic`): `edit` takes changes described in words inside one `<edit file="path">` element per file (or under one `# path` line with `edit.magic.format: markdown`), and a fast model (`edit.magic.model`, a model or role alias such as `@slow`; by default the `smol` role) writes and applies each file's patch, returning the diffs
+- Added the `magic` edit mode (`edit.mode: magic`): `edit` takes changes described in words as `- ` bullets under one `# path` line per file, and a fast model (`edit.magic.model`, a model or role alias such as `@slow`; by default the `smol` role) writes and applies each file's patch, returning the diffs; until then Tern shows each file's described changes as Markdown
+- `magic` edits of long files show the apply model only the lines the description quotes, names or numbers (with their blocks and context) instead of the whole file, so files beyond the apply model's context window can be edited and large ones cost less
 - Sloppy edits can replace, delete or move a syntax block by its opening line without quoting its body, and rename a whole identifier with `*** Find all`
 - MCP servers now run in the omp daemon instead of inside every session: sessions with the same server configuration share one process for servers on MCP 2026-07-28, and `/mcp list` shows each server's state, pid and how many sessions share it. Turn off with `mcp.shared` ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))
 - MCP servers start on first use: tool, prompt and resource lists come from a shared cache, so a session that never calls a server starts no process for it, and an unused 2026-07-28 server stops after `mcp.idleStopMinutes` (default 5) ([#2888](https://github.com/can1357/oh-my-pi/issues/2888))
 - Added MCP protocol revision 2026-07-28 (`server/discover`, per-request metadata, input rounds for roots, `subscriptions/listen`, `ttlMs`/`cacheScope` caching). Servers that need the `initialize` handshake keep working, with one process per session
-- Added `omp browser-relay native-host`, the Chrome native messaging host that runs a new `omp --mode rpc` session (with `browser.relay` on) in a directory the omp extension's side panel picks
+- Added `omp browser-relay native-host`, the Chrome native messaging host that runs a new `omp --mode rpc` session (with `browser.relay` on) in a directory the omp extension's side panel picks. Side panel chats stay out of the terminal's resume picker, recent sessions, `--continue` and ACP session lists; `--resume <id|path>` still opens one
 - Added `omp browser-relay sync`: rewrites every registered omp extension folder with this omp's files. `install` registers its folder (and the native host); a verified `omp update`, and the first launch of a new version, sync every registered folder
 - `omp browser-relay install` now adds the extension to Chrome itself: it writes the profile's unpacked-install record with Chrome's HMAC and macOS OSCrypt authenticators, restarting a running Chrome, instead of only printing load steps (`--no-chrome` keeps the old behavior, `--profile` picks a profile)
 - The browser relay draws omp's page overlay in tabs it drives: an animated pointer, click ring and action label for the input omp sends, hidden around every screenshot and screencast
@@ -30,6 +40,7 @@
 - Session transcripts get a full-text index (`~/.omp/agent/transcripts.db`) of user and assistant messages, built by the omp daemon in the background on the first `archive.search` and kept current on later ones, never on a session's own thread; the first build reads every top-level transcript once
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
+- The jobs sheet and a bash call's card show the output of the command step you click (the pipe it feeds, the file it redirects into, or its own output) and otherwise follow whichever of them the command is writing now
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 
 ### Changed
@@ -51,12 +62,19 @@
 
 ### Fixed
 
+- Nix builds fetch all browser-relay dependencies without falling back to the npm registry ([#19999](https://github.com/can1357/oh-my-pi/pull/19999) by [@shaunkh](https://github.com/shaunkh))
+- Tern's tray cards follow an agent as its model streams: the call it is writing (such as `write · tests/test_norm.py`), the line it is writing, or Thinking, instead of its previous call until the new one starts
+- A tray card shows the model a `/switch` picked for the agent you are viewing at once, instead of the old model until the new one has answered
+- Finished agents' tray cards and the done card's list name the model and thinking level each agent ran on, even after its model was switched
+- The running subagents' live preview (`display.subagentLivePreview`) shows the call an agent is still writing, instead of its previous call until the new one starts
+- Sessions started from the omp extension's side panel drive only your Chrome: Eval's `browser.open` no longer launches omp's own browser there (`app` other than `"relay"` is refused), so every tab it opens shows up in your window
 - In Tern, answers keep their turn footer and its Copy button after a resume, a compaction or any other transcript rebuild; previously every answer drawn before the rebuild lost them
 - `--continue` (and `autoResume`) no longer resumes a session another running omp is writing, which duplicated its conversation into a new file on the first message; it starts a new session as plain `omp` does
 - `/handoff` now shows its progress like `/compact` while it writes the summary: a working row with a spinner and timer while the agent is idle, and a row above it while a turn runs. Previously only a one-off status line said it had started
 - On macOS, reading a cloud-only iCloud Drive, Desktop & Documents, Google Drive or Dropbox file now downloads it instead of failing with `EDEADLK`, in tools and in the commands omp runs, even when the terminal turned downloads off for its shells
 - A TTSR rule whose `condition` regex backtracks badly, including one with a backreference, no longer freezes the session; conditions match exactly as before, and `omp ttsr test`/`scan` match the same way ([#19147](https://github.com/can1357/oh-my-pi/issues/19147), [#19360](https://github.com/can1357/oh-my-pi/issues/19360))
 - A `secrets.yml` regex entry that backtracks badly (such as an email pattern with an unbounded `+` on long runs of letters) no longer stalls requests while the history is redacted; entries match exactly as before ([#5372](https://github.com/can1357/oh-my-pi/issues/5372))
+- Subagents woken by IRC (and sessions with a context hook that inserts its own first message) keep their prompt cache: the date/cwd reminder no longer rides on a per-call message and then gets prefixed onto the already-sent task ([#19930](https://github.com/can1357/oh-my-pi/issues/19930))
 - The shell's `rg` builtin prints paths under an explicit `.` as `./path` like ripgrep, so names starting with `-` (session directories such as `--work-pi--`) can be passed back to `rg` and other commands
 - The shell's `fd` builtin prints paths like fd: `./path` under an explicit `.`, with `-0`, or when a name starts with `-`; directories end in the path separator; `--strip-cwd-prefix` takes effect, `--format`'s `{//}` is the printed path's parent instead of an absolute one, and `--absolute-path` no longer prints `/./`
 - Sloppy edits reject incomplete Find/action pairs without writing, preserve numeric `||` expressions, and no longer mistake a nested or partial closing line for the end of a block range
