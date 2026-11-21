@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed Vertex OpenAI-endpoint requests failing on `reasoning_effort: "xhigh"` instead of retrying as `max` ([#19366](https://github.com/can1357/oh-my-pi/pull/19366) by [@CrypticCortex](https://github.com/CrypticCortex))
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))

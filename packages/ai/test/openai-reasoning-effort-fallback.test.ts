@@ -90,6 +90,20 @@ function camelCaseReasoningEffortResponse(): Response {
 		headers: { "content-type": "application/json" },
 	});
 }
+
+/**
+ * Vertex OpenAI endpoint: the verdict comes before the field name, and the
+ * rejected value is named after the allowed list.
+ */
+function vertexExpectedEffortResponse(): Response {
+	const message =
+		"Expected 'reasoning_effort' to be one of: 'high', 'low', 'max', 'medium', 'minimal'; found 'xhigh'.";
+	return new Response(JSON.stringify({ error: { code: 400, message, status: "INVALID_ARGUMENT" } }), {
+		status: 400,
+		headers: { "content-type": "application/json" },
+	});
+}
+
 function invalidMediumReasoningResponse(): Response {
 	return new Response(
 		JSON.stringify({
@@ -398,6 +412,27 @@ describe("OpenAI reasoning effort fallback retry", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(bodies.map(body => body.reasoning_effort)).toEqual(["xhigh", "high"]);
+	});
+
+	it("retries Vertex's expected-one-of rejection of xhigh as max", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const body = parseJsonBody(init);
+				bodies.push(body);
+				return bodies.length === 1 ? vertexExpectedEffortResponse() : createChatSseResponse();
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const result = await streamOpenAICompletions(createCompletionsModel(), testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "xhigh",
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(bodies.map(body => body.reasoning_effort)).toEqual(["xhigh", "max"]);
 	});
 
 	it("does not apply a cached enabled-effort fallback to tool-suppressed Azure Astra requests", async () => {
