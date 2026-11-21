@@ -560,6 +560,38 @@ describe("subagent HUD lines", () => {
 			expect(out).toContain("grep: renderSubagentHudLines");
 		});
 
+		it("follows the call the model is still writing until it runs, over the last finished one", () => {
+			const writing = { kind: "call", tool: "write", args: "tests/test_norm.py", argsKey: "path" } as const;
+			const row = (overrides: Partial<AgentProgress>) =>
+				render(
+					[
+						makeSession({
+							id: "Writer",
+							progress: makeProgress({
+								id: "Writer",
+								recentTools: [{ tool: "edit", args: "src/norm.py", argsKey: "path", endMs: 1 }],
+								...overrides,
+							}),
+						}),
+					],
+					120,
+					true,
+				)
+					.split("\n")
+					.at(-1);
+			const done = Bun.stripANSI(theme.styledSymbol("status.success", "success"));
+			// Not yet run, so not marked with how it ended.
+			expect(row({ streaming: writing })).toEndWith(`${theme.tree.hook} write: tests/test_norm.py`);
+			expect(row({ streaming: { ...writing, intent: "Write the norm test" } })).toContain(
+				"write: Write the norm test",
+			);
+			expect(row({ currentTool: "bash", currentToolArgs: "bun test", streaming: writing })).toContain(
+				"bash: bun test",
+			);
+			// Reasoning and prose are not calls: the row keeps the last one.
+			expect(row({ streaming: { kind: "thinking" } })).toContain(`${done} edit: src/norm.py`);
+		});
+
 		it("adds an elapsed marker to long-running calls and stays within the viewport", () => {
 			const columns = 120;
 			const out = render(

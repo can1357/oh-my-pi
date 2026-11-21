@@ -1234,22 +1234,30 @@ export function nextSubagentPreviewTickMs(sessions: readonly ObservableSession[]
 }
 
 /**
- * Live-preview row for a running subagent: its current (or, between calls,
- * most recent) tool call with a one-line detail and, once the call has run a
- * while, an elapsed marker. The detail is that call's own intent, else its
- * args — never an earlier call's intent. Undefined when the agent has not
- * called a tool yet. The row never overflows `width`.
+ * Live-preview row for a running subagent: the call it runs, else the call its
+ * model is still writing, else (between calls) its most recent one, with a
+ * one-line detail and, once a running call has run a while, an elapsed marker.
+ * The detail is that call's own intent, else its args — never an earlier
+ * call's intent. Undefined when the agent has not called a tool yet. The row
+ * never overflows `width`.
  */
 function renderSubagentToolPreview(session: ObservableSession, width: number): string | undefined {
 	const progress = session.progress;
 	if (progress?.status !== "running") return undefined;
-	const currentTool = progress.currentTool;
+	const running = progress.currentTool;
+	const writing = !running && progress.streaming?.kind === "call" ? progress.streaming : undefined;
 	const recent = progress.recentTools[0];
-	const tool = currentTool ?? recent?.tool;
-	if (!tool) return undefined;
-	const intent = currentTool ? progress.currentToolIntent : recent?.intent;
-	const args = currentTool ? progress.currentToolArgs : recent?.args;
-	const argsKey = currentTool ? progress.currentToolArgsKey : recent?.argsKey;
+	const call = running
+		? {
+				tool: running,
+				intent: progress.currentToolIntent,
+				args: progress.currentToolArgs,
+				argsKey: progress.currentToolArgsKey,
+			}
+		: (writing ?? recent);
+	if (!call) return undefined;
+	const live = running !== undefined || writing !== undefined;
+	const { tool, intent, args, argsKey } = call;
 	// A model-written intent is prose, so home paths inside it are shortened as they stand. An argument is
 	// shortened by its key, so a literal search pattern that names a home path still shows what was searched.
 	const detail = intent
@@ -1257,7 +1265,7 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 		: args
 			? shortenToolArgumentPaths(replaceTabs(args), argsKey)
 			: undefined;
-	const elapsed = currentTool && progress.currentToolStartMs ? Date.now() - progress.currentToolStartMs : 0;
+	const elapsed = running && progress.currentToolStartMs ? Date.now() - progress.currentToolStartMs : 0;
 	const elapsedLabel =
 		elapsed > SUBAGENT_PREVIEW_ELAPSED_MIN_MS
 			? `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`
@@ -1265,11 +1273,11 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	const elapsedWidth = visibleWidth(elapsedLabel);
 	const hook = `${theme.fg("dim", theme.tree.hook)} `;
 	// Between calls the row keeps the last call, marked with how it ended.
-	const status = !currentTool && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
+	const status = !live && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
 	const prefixWidth = visibleWidth(hook) + visibleWidth(status);
 	// Reserve the elapsed marker first, then cap the tool name; the detail gets whatever is left.
 	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - prefixWidth - elapsedWidth), "");
-	let line = `${hook}${status}${theme.fg(currentTool ? "muted" : "dim", shortTool)}`;
+	let line = `${hook}${status}${theme.fg(live ? "muted" : "dim", shortTool)}`;
 	const detailBudget = width - prefixWidth - visibleWidth(shortTool) - elapsedWidth - visibleWidth(": ");
 	if (detail && detailBudget >= SUBAGENT_PREVIEW_MIN_DETAIL_WIDTH) {
 		line += `: ${theme.fg("dim", previewLine(detail, Math.min(TRUNCATE_LENGTHS.SHORT, detailBudget)))}`;
