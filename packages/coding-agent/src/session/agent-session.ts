@@ -5383,6 +5383,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					msg.provider === model.provider &&
 					msg.model === model.id &&
 					(msg.stopReason === "length" ||
+						msg.contextBudgetWrapUp === true ||
 						(msg.stopReason === "error" && AIError.isContextOverflow(msg, model.contextWindow ?? 0)));
 				const speculationCompletion = requiresSpeculativeRecovery ? skippedSpeculationCompletion : undefined;
 				if (!speculationCompletion) {

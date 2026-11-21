@@ -1418,6 +1418,81 @@ describe("AgentSession auto-compaction progress guard", () => {
 		);
 	});
 
+	it("waits for an in-flight speculative handoff when a Cursor budget wrap-up lands", async () => {
+		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionAsyncEnabled.set(session.settings, true);
+		cfgCompactionThresholdTokens.set(session.settings, 150_000);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		compactHookEnabled = false;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const handoffStarted = Promise.withResolvers<void>();
+		const handoffResult = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+			handoffStarted.resolve();
+			return handoffResult.promise;
+		});
+
+		const speculativeTrigger = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "working" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 144_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(speculativeTrigger);
+		session.agent.emitExternalEvent({ type: "message_end", message: speculativeTrigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [speculativeTrigger] });
+		await handoffStarted.promise;
+		expect(session.compactionSpeculation).toBe("running");
+
+		await session.waitForIdle();
+		const wrapUpStop = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "Paused for compaction." }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			contextBudgetWrapUp: true,
+			usage: {
+				input: 155_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 156_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: speculativeTrigger.timestamp + 1,
+		};
+		sessionManager.appendMessage(wrapUpStop);
+		session.agent.emitExternalEvent({ type: "message_end", message: wrapUpStop });
+		await scheduler.yield();
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [wrapUpStop] });
+		await scheduler.yield();
+
+		handoffResult.resolve("## Goal\nContinue after Cursor wrap-up");
+		await session.waitForIdle();
+
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({
+			type: "compaction",
+			summary: expect.stringContaining("## Goal\nContinue after Cursor wrap-up"),
+		});
+	});
+
 	it("resumes length recovery when overlapping speculation fails before agent_end", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
 		cfgCompactionEnabled.set(session.settings, true);

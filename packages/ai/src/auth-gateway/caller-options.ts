@@ -44,6 +44,8 @@ const OPTION_TIERS = {
 	// A session that learned to leave other models' reasoning out of Claude
 	// requests must keep doing so through the gateway.
 	omitDemotedReasoning: "client",
+	// Coding-agent compaction threshold so the gateway stops Cursor's server-side loop in time.
+	cursorContextBudgetTokens: "client",
 
 	// Attribution.
 	headers: "gateway",
@@ -93,7 +95,6 @@ const OPTION_TIERS = {
 	cursorExecHandlers: "server",
 	cursorOnToolResult: "server",
 	cursorExternalToolExecutor: "server",
-	cursorContextBudgetTokens: "server",
 	codexCompaction: "server",
 	codexSseMaxAttempts: "server",
 	fallbackCreditRedemption: "server",
