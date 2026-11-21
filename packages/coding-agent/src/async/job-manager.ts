@@ -224,6 +224,8 @@ export interface AsyncJobProcess {
 	 * redirects into, kept with the job row (`proc://<id>/streams`).
 	 */
 	readonly streams?: PipeStreams;
+	/** Milliseconds since the UNIX epoch the command last wrote its own output; undefined before it wrote. */
+	outputModified?(): number | undefined;
 	/**
 	 * The run's shell trace: the live one while it runs, the final one once it ended. Undefined before the first
 	 * poll, and always with the shell visualization off.
