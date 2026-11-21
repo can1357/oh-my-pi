@@ -1,7 +1,8 @@
 /**
- * Builds the omp extension. `bun scripts/build-extension.ts` writes `dist/extension/`, the GitHub release ZIP, and
- * the unstamped files embedded in the CLI for `omp browser-relay install`. `--embedded` writes only the embedded
- * files: install, build and release scripts run it, since the generated directory is not committed.
+ * Builds the omp extension. `bun scripts/build-extension.ts` writes `dist/extension/`, the GitHub release ZIP, and the
+ * CLI's embedded copy for `omp browser-relay install`; `--embedded` writes only the embedded copy. That copy is
+ * generated, not committed: `bun install` writes it for source checkouts, and binary and npm builds embed it through
+ * {@link generateEmbeddedExtension}.
  */
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -15,22 +16,38 @@ import {
 const root = path.resolve(import.meta.dir, "..");
 const source = path.join(root, "extension");
 const dist = path.join(root, "dist");
-const assetsDir = path.resolve(root, "../coding-agent/src/tools/browser/relay/extension-assets");
+/** Where the CLI reads the embedded copy in a source checkout (see extension-files.ts). */
+const embeddedFile = path.resolve(root, "../coding-agent/src/tools/browser/relay/extension.generated.json");
 
-if (process.argv.includes("--embedded")) {
+if (import.meta.main) {
+	if (process.argv.includes("--embedded")) {
+		await generateEmbeddedExtension();
+		console.log(`Generated ${embeddedFile}`);
+	} else {
+		await buildRelease();
+	}
+}
+
+/**
+ * Bundle the unstamped extension and write it to `extension.generated.json` as `{ build, files }`, binary files
+ * base64-encoded. Returns the JSON text written.
+ */
+export async function generateEmbeddedExtension(): Promise<string> {
 	const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-extension-"));
 	try {
 		await bundleExtension(scratch);
-		await writeEmbeddedAssets(scratch);
+		return (await writeEmbedded(scratch)).json;
 	} finally {
 		await fs.rm(scratch, { recursive: true, force: true });
 	}
-	console.log(`Generated ${assetsDir}`);
-} else {
+}
+
+/** `dist/extension/`, the pre-stamped release ZIP, and the embedded copy. */
+async function buildRelease(): Promise<void> {
 	const distExtension = path.join(dist, "extension");
 	await fs.rm(dist, { recursive: true, force: true });
 	await bundleExtension(distExtension);
-	const build = await writeEmbeddedAssets(distExtension);
+	const { build } = await writeEmbedded(distExtension);
 	// Only the release ZIP is pre-stamped. CLI installs stamp their own version with this build.
 	const manifest = path.join(distExtension, "manifest.json");
 	const background = path.join(distExtension, "background.js");
@@ -45,7 +62,7 @@ if (process.argv.includes("--embedded")) {
 	]);
 	const zipPath = path.join(dist, "omp-browser-relay-extension.zip");
 	await $`zip -qr ${zipPath} .`.cwd(distExtension);
-	console.log(`Built:\n  ${distExtension}\n  ${zipPath}\n  ${assetsDir}`);
+	console.log(`Built:\n  ${distExtension}\n  ${zipPath}\n  ${embeddedFile}`);
 }
 
 /** Bundle the extension's scripts and copy its static files into `outDir`, unstamped. */
@@ -74,47 +91,21 @@ async function bundleExtension(outDir: string): Promise<void> {
 	}
 }
 
-/**
- * Replace the CLI's embedded copy with the unstamped extension in `extensionDir`: one text asset per file (binary
- * files base64-encoded) and an `index.ts` mapping names to them. Returns the build id it records.
- */
-async function writeEmbeddedAssets(extensionDir: string): Promise<string> {
+/** Write the unstamped extension in `extensionDir` to {@link embeddedFile}; returns its build id and the JSON text. */
+async function writeEmbedded(extensionDir: string): Promise<{ build: string; json: string }> {
 	const names = [...new Bun.Glob("**/*").scanSync({ cwd: extensionDir, dot: true })]
 		.map(name => name.replaceAll(path.sep, "/"))
 		.sort();
-	const build = await buildId(extensionDir, names);
-	await fs.rm(assetsDir, { recursive: true, force: true });
-	const imports: string[] = [];
-	const entries: string[] = [];
-	for (const [index, name] of names.entries()) {
+	const files: Record<string, string | { base64: string }> = {};
+	for (const name of names) {
 		const file = Bun.file(path.join(extensionDir, name));
 		const isText = name === "LICENSE" || /\.(?:css|html|js|json|map|svg|txt)$/.test(name);
-		await Bun.write(
-			path.join(assetsDir, `${name}.txt`),
-			isText ? file : Buffer.from(await file.arrayBuffer()).toBase64(),
-		);
-		const binding = `asset${index}`;
-		const key = name === "LICENSE" ? name : JSON.stringify(name);
-		imports.push(`import ${binding} from ${JSON.stringify(`./${name}.txt`)} with { type: "text" };`);
-		entries.push(`\t${key}: ${isText ? binding : `{ base64: ${binding} }`},`);
+		files[name] = isText ? await file.text() : { base64: Buffer.from(await file.arrayBuffer()).toBase64() };
 	}
-	await Bun.write(
-		path.join(assetsDir, "index.ts"),
-		[
-			"// Generated by packages/browser-relay/scripts/build-extension.ts — do not edit.",
-			...imports,
-			"",
-			"/** The unstamped extension files, with binary assets encoded as base64. */",
-			"export const embeddedRelayFiles = {",
-			...entries,
-			"};",
-			"",
-			"/** Digest of the unstamped files above; installs stamp it into background.js so a relay can spot a stale build. */",
-			`export const embeddedRelayBuild = ${JSON.stringify(build)};`,
-			"",
-		].join("\n"),
-	);
-	return build;
+	const build = await buildId(extensionDir, names);
+	const json = JSON.stringify({ build, files });
+	await Bun.write(embeddedFile, json);
+	return { build, json };
 }
 
 /** First 16 hex chars of SHA-256 over each unstamped file's name and bytes, in `names` order. */
