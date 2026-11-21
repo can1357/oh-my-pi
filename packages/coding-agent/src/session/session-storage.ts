@@ -1421,36 +1421,6 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * Conditionally delete under the same cross-process lock used by the first
-	 * durable append to a draft-only session.
-	 */
-	deleteSessionWithArtifactsIf(sessionPath: string, shouldDelete: (content: string) => boolean): Promise<boolean> {
-		const deleted = this.withSessionFileLockSync(sessionPath, () => {
-			const content = fs.readFileSync(sessionPath, "utf-8");
-			if (!shouldDelete(content)) return false;
-
-			fs.unlinkSync(sessionPath);
-			const artifactsDir = sessionPath.slice(0, -6);
-			try {
-				fs.rmSync(artifactsDir, { recursive: true, force: true });
-			} catch (err) {
-				const error = toError(err);
-				throw new Error(
-					`Session file deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`,
-					{ cause: error },
-				);
-			}
-			return true;
-		});
-		return Promise.resolve(deleted);
-	}
-
-	/** Run a synchronous session mutation under this file's cross-process lock. */
-	withSessionFileLockSync<T>(sessionPath: string, operation: () => T): T {
-		return withFileLockSync(sessionPath, operation);
-	}
-
-	/**
 	 * Conditionally delete under the same cross-process lock the first durable
 	 * append to a draft-only session takes, so the re-read decision and the
 	 * unlink cannot be split by another process's write. The decision reads a

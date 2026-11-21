@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { openAnnotationDraft } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/draft-store";
+import type { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { parseSessionContent } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { FileSessionStorage, type SessionStorageWriter } from "@oh-my-pi/pi-coding-agent/session/session-storage";
@@ -304,6 +306,22 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 	// A draft still on disk at close time is the whole reason the session
 	// file was materialized in the first place (`--resume` needs to find
 	// this session's file to reattach the draft). Never drop it.
+	it("keeps the session file when its current contents include a malformed record", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-keep-malformed-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		session.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await session.saveDraft("draft in terminal A");
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		await session.saveDraft("");
+		fs.appendFileSync(sessionFile, "{partially-written-external-record\n");
+		await session.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+	});
+
 	it("keeps the session file when a draft sidecar is still present at close", async () => {
 		using tempDir = TempDir.createSync("@pi-session-close-keep-draft-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
@@ -319,6 +337,40 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 
 		expect(await fileExists(sessionFile)).toBe(true);
 		expect(await fileExists(draftPath)).toBe(true);
+	});
+
+	it("keeps an otherwise empty session that holds an /annotate draft", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-keep-annotation-draft-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		session.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await session.saveDraft("materialize session");
+		await session.saveDraft("");
+		const sessionFile = session.getSessionFile()!;
+		const drafts = path.join(session.getArtifactsDir()!, "annotation-drafts", session.getSessionId());
+		await fs.promises.mkdir(drafts, { recursive: true });
+		await Bun.write(path.join(drafts, `draft-${"a".repeat(64)}.json`), "{}");
+
+		await session.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+	});
+
+	it("keeps an empty session while an /annotate overlay is open, before its draft is written", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-open-annotation-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		session.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await session.saveDraft("materialize session");
+		await session.saveDraft("");
+		const sessionFile = session.getSessionFile()!;
+		const source = { kind: "text", source: { id: "p", kind: "prompt", label: "Prompt", text: "x" } } as const;
+		const draft = await openAnnotationDraft(session, source);
+		draft.restore({ getDraft: () => ({ kind: "text", annotations: [] }) } as unknown as AnnotationOverlay);
+
+		// Shutdown runs session cleanup and the pending draft save concurrently.
+		await session.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+		await draft.close(undefined);
 	});
 
 	// Real conversations must survive close() unconditionally.
