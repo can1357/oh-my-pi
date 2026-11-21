@@ -85,6 +85,7 @@
 
 ### Fixed
 
+- Avoided Google Cloud Code 429 quota exhaustion and provider prompt blocklists by removing fingerprint-matched identity and tool catalog phrases ([#19570](https://github.com/can1357/oh-my-pi/pull/19570) by [@KaifKol](https://github.com/KaifKol)).
 - Fixed PTY command transcripts sometimes gaining a blank line where a `\r\n` line ending was split across two terminal reads.
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)
 - Fixed bash output minimizing being skipped on Windows when a command is named by a `\` path or with `.exe` (`"C:\Program Files\Git\cmd\git.exe" status`, `git.exe log`)
