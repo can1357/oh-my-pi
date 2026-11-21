@@ -62,7 +62,7 @@
 
 ### Fixed
 
-- Speculative compaction no longer re-sends a `compaction.remoteEndpoint` request after the endpoint rejects it with a non-retriable error, such as a 404 or 400 for the session's model; it speculates the next configured method until a compaction commits.
+- Speculative compaction no longer re-sends a `compaction.remoteEndpoint` request after the endpoint rejects it with a non-retriable error, such as a 404 or 400 for the session's model; it speculates the next configured method until a compaction commits ([#20011](https://github.com/can1357/oh-my-pi/pull/20011) by [@nick-maderight](https://github.com/nick-maderight)).
 - Nix builds fetch all browser-relay dependencies without falling back to the npm registry ([#19999](https://github.com/can1357/oh-my-pi/pull/19999) by [@shaunkh](https://github.com/shaunkh))
 - Tern's tray cards follow an agent as its model streams: the call it is writing (such as `write · tests/test_norm.py`), the line it is writing, or Thinking, instead of its previous call until the new one starts
 - A tray card shows the model a `/switch` picked for the agent you are viewing at once, instead of the old model until the new one has answered
