@@ -22,7 +22,6 @@ import type {
 	MemoryBackendStatus,
 	MemoryPromptPreparation,
 } from "../memory-backend/types";
-import { memoryToolRefs } from "../memory-backend/tool-names";
 import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-system.md" with { type: "text" };
 import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
 import mnemopiInstructions from "../prompts/system/mnemopi-instructions.md" with { type: "text" };
@@ -165,9 +164,7 @@ export const mnemopiBackend: MemoryBackend = {
 		return withLoopPhase("mnemopi.recall", () => {
 			const state = getMnemopiSessionState(session);
 			const primary = state?.aliasOf ?? state;
-			const parts = [
-				prompt.render(mnemopiInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) }),
-			];
+			const parts = [prompt.render(mnemopiInstructions)];
 			if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
 			const rendered = parts.join("\n\n").trim();
 			if (!rendered) return undefined;
