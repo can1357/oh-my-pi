@@ -8,15 +8,8 @@
 
 ### Fixed
 
-- Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann)) ([#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus)) ([#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon)) ([#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Large repaints are again written in pieces that end between rows, so output from another process sharing the terminal cannot land inside a row or an escape sequence ([#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there ([#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
-- `ask` HTML forms keep a prefilled or hidden control named `__proto__` in their default data, so a timed-out form no longer drops it ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95)) ([#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
-- An ask form with one question submits on one Enter instead of stopping on Submit first ([#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed `/usage reset` saying an account had no saved resets usable right now when its saved resets failed to load; selecting that account now shows the load error and that nothing was spent ([#16487](https://github.com/can1357/oh-my-pi/issues/16487)) ([#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Fixed `/usage reset` saying an account had no saved resets usable right now when its saved resets failed to load; selecting that account now shows the load error and that nothing was spent ([#16487](https://github.com/can1357/oh-my-pi/issues/16487), [#19936](https://github.com/can1357/oh-my-pi/pull/19936) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ## [19.1.0] - 2026-11-21
 
