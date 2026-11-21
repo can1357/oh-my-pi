@@ -270,6 +270,50 @@ def test_route_incoming_pr_opened_skips_draft_bot_and_disabled() -> None:
     assert "disabled" in disabled.reason
 
 
+def test_route_incoming_pr_opened_skips_listed_bot_login() -> None:
+    payload = {
+        "action": "opened",
+        "pull_request": {
+            "number": 9,
+            "draft": False,
+            "user": {"login": "renovate-bot"},
+            "author_association": "CONTRIBUTOR",
+        },
+        "repository": {"full_name": "octo/widget"},
+    }
+    decision = route(
+        "pull_request",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_skip_bots=frozenset({"renovate-bot"}),
+    )
+    assert not decision.should_queue
+    assert "skip list" in decision.reason
+
+    # `@` prefix and case are normalized away on both sides.
+    payload["pull_request"]["user"] = {"login": "@Renovate-Bot"}  # type: ignore[index]
+    decision = route(
+        "pull_request",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_skip_bots=frozenset({"renovate-bot"}),
+    )
+    assert not decision.should_queue
+
+    # A different bot on the list must NOT be skipped.
+    decision = route(
+        "pull_request",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        pr_review_skip_bots=frozenset({"other-bot"}),
+    )
+    assert decision.should_queue
+    assert decision.task == "review_pr"
+
+
 def test_route_pull_request_synchronize_stays_skipped() -> None:
     decision = route(
         "pull_request",
