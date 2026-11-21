@@ -25,6 +25,10 @@
 ### Fixed
 
 - Fixed the TUI freezing at 100% CPU while streaming text that begins with a blank line followed by a line containing `|`.
+- Fixed the TUI freezing when charting a table whose numbers overflow (`1e400`, a `p999…` header with hundreds of digits, a `1e-300 → 1e300` change) or sit above 2^53 and differ only slightly.
+- Fixed the editor freezing when a vim count is typed with hundreds of digits; counts now cap at 99,999.
+- Fixed Windows input mode freezing on a key record with an impossibly large repeat count.
+- Fixed backward character jump (`Ctrl+Alt+]`) at the start of a line finding the cursor's own character instead of searching earlier lines.
 - Fixed light-theme detection inside Zellij when the terminal reports a light background.
 - Preserved custom foreground colors and text styles in status-line segments while continuing to apply the accent color to unstyled statuses.
 - Fixed transcript rows and tool cards disappearing or appearing truncated when overlays and panels were open.
