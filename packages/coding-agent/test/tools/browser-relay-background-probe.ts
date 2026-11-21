@@ -126,15 +126,16 @@ switch (Bun.env.PROBE_SCENARIO) {
 		break;
 	}
 	case "reconnect": {
-		// Hold reconnect timers for the probe to fire; anything else runs as usual.
+		// Hold reconnect timers for the probe to fire. Anything else runs as usual but unref'd: the alarm's connect
+		// arms a 15s link deadline that never comes due here and would hold the probe open long after it reported.
 		const timers: Array<{ delay: number; run: () => void }> = [];
 		const realSetTimeout = globalThis.setTimeout;
-		const holdReconnects = (run: () => void, delay?: number): ReturnType<typeof setTimeout> => {
+		const holdReconnects = (run: () => void, delay?: number): NodeJS.Timeout => {
 			if (delay !== undefined && delay >= 1_000 && delay <= 10_000) {
 				timers.push({ delay, run });
-				return 0 as unknown as ReturnType<typeof setTimeout>;
+				return 0 as unknown as NodeJS.Timeout;
 			}
-			return realSetTimeout(run, delay);
+			return realSetTimeout(run, delay).unref();
 		};
 		globalThis.setTimeout = holdReconnects as unknown as typeof setTimeout;
 		const panel = new FakePort("omp-panel");

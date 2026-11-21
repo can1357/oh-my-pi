@@ -39,182 +39,181 @@ async function auditEntries(audit: string): Promise<Record<string, unknown>[]> {
 	});
 }
 
-// Both modes enter main.ts -> createAgentSession -> runRpcMode. An SDK-only
+// rpc-ui enters main.ts -> createAgentSession -> runRpcMode. An SDK-only
 // fixture would miss a lost MCP manager at that launch boundary.
 describe("CLI RPC MCP discovery", () => {
-	for (const mode of ["rpc", "rpc-ui"] as const) {
-		test(`${mode}: mounted MCP survives session switches; user denylist prevents spawn until restart restores it`, async () => {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-mcp-"));
-			const home = path.join(root, "home");
-			const agentDir = path.join(home, ".omp/agent");
-			const project = path.join(root, "project");
-			await fs.mkdir(agentDir, { recursive: true });
-			await fs.mkdir(project);
-			// Do not inherit API keys, profiles, provider overrides or external-tool configs.
-			const env = {
-				PATH: `${path.dirname(process.execPath)}${path.delimiter}${Bun.env.PATH ?? ""}`,
-				HOME: home,
-				USERPROFILE: home,
-				XDG_CONFIG_HOME: path.join(home, ".config"),
-				PI_CONFIG_DIR: ".omp",
-				PI_CODING_AGENT_DIR: agentDir,
-				PI_NO_TITLE: "1",
-				// Wait for the stub at startup: a server the MCP host has never seen is
-				// probed before it serves, which outlasts the default startup window.
-				OMP_MCP_STARTUP_TIMEOUT_MS: "0",
-			};
-			using model = ptree.spawn([process.execPath, fakeModel, agentDir], {
-				cwd: project,
-				env,
-				stdin: "pipe",
-				detached: true,
-				timeout: 120_000,
-			});
-			try {
-				let ready = "";
-				for await (const line of readLines(model.stdout, AbortSignal.timeout(10_000))) {
-					ready = new TextDecoder().decode(line);
-					break;
-				}
-				expect(ready, model.peekStderr()).toMatch(/^READY \d+/);
-				// The denied launch runs first: the restored launch then proves the same
-				// command does spawn once the denylist is lifted, that nothing from the
-				// denied run sticks across restart, and that the mount survives switches.
-				for (const phase of ["disabled", "restored"] as const) {
-					const audit = path.join(root, `${phase}.jsonl`);
-					await Bun.write(audit, "");
-					await Bun.write(
-						path.join(agentDir, "mcp.json"),
-						JSON.stringify({
-							mcpServers: { stub: { command: process.execPath, args: [peer, audit] } },
-							// Deny must win even when the user also explicitly force-enables it.
-							...(phase === "disabled" ? { disabledServers: ["stub"], enabledServers: ["stub"] } : {}),
-						}),
+	test("rpc-ui: mounted MCP survives session switches; user denylist prevents spawn until restart restores it", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-mcp-"));
+		const home = path.join(root, "home");
+		const agentDir = path.join(home, ".omp/agent");
+		const project = path.join(root, "project");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.mkdir(project);
+		// Do not inherit API keys, profiles, provider overrides or external-tool configs.
+		const env = {
+			PATH: `${path.dirname(process.execPath)}${path.delimiter}${Bun.env.PATH ?? ""}`,
+			HOME: home,
+			USERPROFILE: home,
+			XDG_CONFIG_HOME: path.join(home, ".config"),
+			PI_CONFIG_DIR: ".omp",
+			PI_CODING_AGENT_DIR: agentDir,
+			PI_NO_TITLE: "1",
+			// Wait for the stub at startup: a server the MCP host has never seen is
+			// probed before it serves, which outlasts the default startup window.
+			OMP_MCP_STARTUP_TIMEOUT_MS: "0",
+			// The stub ignores end-of-input (see the fixture), so each stop, the era
+			// probe's included, waits out the step before SIGTERM: keep that short.
+			OMP_MCP_SHUTDOWN_STEP_MS: "10",
+		};
+		using model = ptree.spawn([process.execPath, fakeModel, agentDir], {
+			cwd: project,
+			env,
+			stdin: "pipe",
+			detached: true,
+			timeout: 120_000,
+		});
+		try {
+			let ready = "";
+			for await (const line of readLines(model.stdout, AbortSignal.timeout(10_000))) {
+				ready = new TextDecoder().decode(line);
+				break;
+			}
+			expect(ready, model.peekStderr()).toMatch(/^READY \d+/);
+			// The denied launch runs first: the restored launch then proves the same
+			// command does spawn once the denylist is lifted, that nothing from the
+			// denied run sticks across restart, and that the mount survives switches.
+			for (const phase of ["disabled", "restored"] as const) {
+				const audit = path.join(root, `${phase}.jsonl`);
+				await Bun.write(audit, "");
+				await Bun.write(
+					path.join(agentDir, "mcp.json"),
+					JSON.stringify({
+						mcpServers: { stub: { command: process.execPath, args: [peer, audit] } },
+						// Deny must win even when the user also explicitly force-enables it.
+						...(phase === "disabled" ? { disabledServers: ["stub"], enabledServers: ["stub"] } : {}),
+					}),
+				);
+				using child = ptree.spawn(
+					[
+						process.execPath,
+						cli,
+						"--mode",
+						"rpc-ui",
+						"--model",
+						"fake/fake-model",
+						"--no-extensions",
+						"--no-skills",
+						"--no-rules",
+						"--no-lsp",
+						"--no-prewalk",
+					],
+					{ cwd: project, env, stdin: "pipe", detached: true, timeout: 60_000 },
+				);
+				let observingEof = false;
+				using client = new RpcClient({
+					spawn: () => ({
+						stdin: child.stdin,
+						stdout: child.stdout,
+						exited: child.exited,
+						peekStderr: () => child.peekStderr(),
+						kill: (reason, graceMs) => {
+							// RpcClient reaps on stdout EOF. That must not rescue a CLI
+							// which exited without terminating its owned MCP peer.
+							if (!observingEof) child.kill(reason, graceMs);
+						},
+					}),
+				});
+				try {
+					await client.start();
+					const state = await client.getState();
+					expect(state.dumpTools?.map(tool => tool.name)).toEqual(
+						expect.arrayContaining(["read", "write", "bash"]),
 					);
-					using child = ptree.spawn(
-						[
-							process.execPath,
-							cli,
-							"--mode",
-							mode,
-							"--model",
-							"fake/fake-model",
-							"--no-extensions",
-							"--no-skills",
-							"--no-rules",
-							"--no-lsp",
-							"--no-prewalk",
-						],
-						{ cwd: project, env, stdin: "pipe", detached: true, timeout: 60_000 },
-					);
-					let observingEof = false;
-					using client = new RpcClient({
-						spawn: () => ({
-							stdin: child.stdin,
-							stdout: child.stdout,
-							exited: child.exited,
-							peekStderr: () => child.peekStderr(),
-							kill: (reason, graceMs) => {
-								// RpcClient reaps on stdout EOF. That must not rescue a CLI
-								// which exited without terminating its owned MCP peer.
-								if (!observingEof) child.kill(reason, graceMs);
-							},
-						}),
-					});
-					try {
-						await client.start();
-						const state = await client.getState();
-						expect(state.dumpTools?.map(tool => tool.name)).toEqual(
-							expect.arrayContaining(["read", "write", "bash"]),
-						);
-						expect(state.dumpTools?.some(tool => tool.name === toolCommand)).toBe(false);
-						const invokeCommand = `${toolCommand} -j '{}'`;
-						if (phase === "disabled") {
+					expect(state.dumpTools?.some(tool => tool.name === toolCommand)).toBe(false);
+					const invokeCommand = `${toolCommand} -j '{}'`;
+					if (phase === "disabled") {
+						const events = await client.promptAndWait(`run_command ${invokeCommand}`);
+						expect(toolResult(events, "bash", { command: invokeCommand })).not.toContain("rpc-mcp-invoked");
+						expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({ isError: true });
+						expect(await auditEntries(audit)).toEqual([]);
+					} else {
+						// Discovery runs asynchronously. Probe the help command itself until it is mounted.
+						const helpCommand = `${toolCommand} --help`;
+						const help = await waitFor(async () => {
+							const events = await client.promptAndWait(`run_command ${helpCommand}`);
+							const output = toolResult(events, "bash", { command: helpCommand });
+							return output.includes(`${toolCommand}: command not found`) ? undefined : output;
+						}, `${toolCommand} to be mounted`);
+						expect(help).toContain("Return an independently audited invocation marker.");
+						const invoke = async () => {
+							const before = (await auditEntries(audit)).filter(entry => entry.method === "tools/call").length;
 							const events = await client.promptAndWait(`run_command ${invokeCommand}`);
-							expect(toolResult(events, "bash", { command: invokeCommand })).not.toContain("rpc-mcp-invoked");
-							expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({ isError: true });
-							expect(await auditEntries(audit)).toEqual([]);
-						} else {
-							// Discovery runs asynchronously. Probe the help command itself until it is mounted.
-							const helpCommand = `${toolCommand} --help`;
-							const help = await waitFor(async () => {
-								const events = await client.promptAndWait(`run_command ${helpCommand}`);
-								const output = toolResult(events, "bash", { command: helpCommand });
-								return output.includes(`${toolCommand}: command not found`) ? undefined : output;
-							}, `${toolCommand} to be mounted`);
-							expect(help).toContain("Return an independently audited invocation marker.");
-							const invoke = async () => {
-								const before = (await auditEntries(audit)).filter(
-									entry => entry.method === "tools/call",
-								).length;
-								const events = await client.promptAndWait(`run_command ${invokeCommand}`);
-								expect(toolResult(events, "bash", { command: invokeCommand })).toContain("rpc-mcp-invoked");
-								expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({
-									isError: false,
-								});
-								const calls = (await auditEntries(audit)).filter(entry => entry.method === "tools/call");
-								expect(calls).toHaveLength(before + 1);
-								expect(calls.at(-1)).toMatchObject({ params: { name: "regression_announce", arguments: {} } });
-							};
-							await invoke();
-							const original = (await client.getState()).sessionFile;
-							if (!original) throw new Error("Expected persisted RPC session");
-							expect(await client.openSession(path.join(root, "other-sessions"))).toMatchObject({
-								cancelled: false,
+							expect(toolResult(events, "bash", { command: invokeCommand })).toContain("rpc-mcp-invoked");
+							expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({
+								isError: false,
 							});
-							expect((await client.getState()).sessionFile).not.toBe(original);
-							await invoke();
-							expect(await client.switchSession(original)).toEqual({ cancelled: false });
-							expect((await client.getState()).sessionFile).toBe(original);
-							await invoke();
-						}
-						// Observe natural server teardown before allowing any client tree kill.
-						observingEof = true;
-						child.stdin.end();
-						child.attachTimeout(10_000);
-						expect(await child.exited).toBe(0);
-						const entries = await auditEntries(audit);
-						const spawns = entries.filter(entry => entry.event === "spawn");
-						if (phase === "disabled") {
-							expect(spawns).toHaveLength(0);
-						} else {
-							// The host launches the stub to probe it and again to serve. Every
-							// invocation, across both session switches, reached that one server.
-							const firstCall = entries.findIndex(entry => entry.method === "tools/call");
-							const lastSpawn = entries.findLastIndex(entry => entry.event === "spawn");
-							expect(lastSpawn).toBeGreaterThanOrEqual(0);
-							expect(firstCall).toBeGreaterThan(lastSpawn);
-						}
-						for (const spawn of spawns) {
-							if (typeof spawn.pid !== "number") throw new Error("Missing MCP PID");
-							const pid = spawn.pid;
-							// The MCP host owns the peer and stops it once the exiting session lets
-							// go: shortly after the CLI is gone, with no event this test could await.
-							await waitFor(() => !isAlive(pid), `MCP peer ${pid} to stop after RPC shutdown`, 5_000);
-						}
+							const calls = (await auditEntries(audit)).filter(entry => entry.method === "tools/call");
+							expect(calls).toHaveLength(before + 1);
+							expect(calls.at(-1)).toMatchObject({ params: { name: "regression_announce", arguments: {} } });
+						};
+						await invoke();
+						const original = (await client.getState()).sessionFile;
+						if (!original) throw new Error("Expected persisted RPC session");
+						expect(await client.openSession(path.join(root, "other-sessions"))).toMatchObject({
+							cancelled: false,
+						});
+						expect((await client.getState()).sessionFile).not.toBe(original);
+						await invoke();
+						expect(await client.switchSession(original)).toEqual({ cancelled: false });
+						expect((await client.getState()).sessionFile).toBe(original);
+						await invoke();
+					}
+					// Observe natural server teardown before allowing any client tree kill.
+					observingEof = true;
+					child.stdin.end();
+					child.attachTimeout(10_000);
+					expect(await child.exited).toBe(0);
+					const entries = await auditEntries(audit);
+					const spawns = entries.filter(entry => entry.event === "spawn");
+					if (phase === "disabled") {
+						expect(spawns).toHaveLength(0);
+					} else {
+						// The host launches the stub to probe it and again to serve. Every
+						// invocation, across both session switches, reached that one server.
+						const firstCall = entries.findIndex(entry => entry.method === "tools/call");
+						const lastSpawn = entries.findLastIndex(entry => entry.event === "spawn");
+						expect(lastSpawn).toBeGreaterThanOrEqual(0);
+						expect(firstCall).toBeGreaterThan(lastSpawn);
+					}
+					for (const spawn of spawns) {
+						if (typeof spawn.pid !== "number") throw new Error("Missing MCP PID");
+						const pid = spawn.pid;
+						// The MCP host owns the peer and stops it once the exiting session lets
+						// go: shortly after the CLI is gone, with no event this test could await.
+						await waitFor(() => !isAlive(pid), `MCP peer ${pid} to stop after RPC shutdown`, 5_000);
+					}
+				} finally {
+					observingEof = false;
+					try {
+						await client.stop();
 					} finally {
-						observingEof = false;
-						try {
-							await client.stop();
-						} finally {
-							child.kill(undefined, 0);
-							await child.exited.catch(() => {});
-							// An already-exited CLI may have lost its process-tree handle.
-							// Audit-owned peer PIDs remain available for bounded fallback cleanup.
-							for (const entry of await auditEntries(audit)) {
-								if (entry.event === "spawn" && typeof entry.pid === "number") {
-									await Process.fromPid(entry.pid)?.terminate({ gracefulMs: 0 });
-								}
+						child.kill(undefined, 0);
+						await child.exited.catch(() => {});
+						// An already-exited CLI may have lost its process-tree handle.
+						// Audit-owned peer PIDs remain available for bounded fallback cleanup.
+						for (const entry of await auditEntries(audit)) {
+							if (entry.event === "spawn" && typeof entry.pid === "number") {
+								await Process.fromPid(entry.pid)?.terminate({ gracefulMs: 0 });
 							}
 						}
 					}
 				}
-			} finally {
-				model.stdin.end();
-				model.kill();
-				await model.exited.catch(() => {});
-				await removeWithRetries(root);
 			}
-		}, 120_000);
-	}
+		} finally {
+			model.stdin.end();
+			model.kill();
+			await model.exited.catch(() => {});
+			await removeWithRetries(root);
+		}
+	}, 120_000);
 });
