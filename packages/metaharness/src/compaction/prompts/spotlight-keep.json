@@ -1,0 +1,6 @@
+{
+	"unresolved": "a failure, mismatch with the reference program, or bug the agent has not fixed yet",
+	"behavior": "observed behavior of the reference program (outputs, error messages, formatting, edge cases) the implementation must match",
+	"decision": "a design decision, constraint, or plan the agent is still following",
+	"code": "the current structure or contents of code the agent is still changing"
+}

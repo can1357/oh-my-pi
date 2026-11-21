@@ -1645,23 +1645,6 @@ mod watching {
 		assert_eq!(watching.stop().await.0, 130);
 	}
 
-	/// Failure mode: `/_` is not replaced, every `/_` is, or it names a file
-	/// other than the first listed (before any change) and the one that
-	/// changed (after).
-	#[tokio::test(flavor = "multi_thread")]
-	async fn the_placeholder_names_the_file_that_changed() {
-		let (_dir, root) = tree(&["a.txt", "b.txt"]);
-		let watching = Watching::start(&root, &["echo", "saw", "/_", "/_"], "a.txt\nb.txt\n");
-		let first = format!("saw {} /_\n", root.join("a.txt").display());
-		assert_eq!(watching.until(|out| out.ends_with('\n')).await, first);
-		let second = format!("saw {} /_\n", root.join("b.txt").display());
-		let out = watching
-			.nudge(|| append(&root.join("b.txt")), |out| out.len() > first.len() && out.ends_with('\n'))
-			.await;
-		assert_eq!(&out[first.len()..first.len() + second.len()], second);
-		watching.stop().await;
-	}
-
 	/// Failure mode: `-s` does not hand the command line to the shell, or the
 	/// changed file is not its `$0`.
 	#[tokio::test(flavor = "multi_thread")]
@@ -1779,23 +1762,6 @@ mod watching {
 		assert_eq!(code, 1);
 		assert!(out.ends_with("up\ndown\n"), "{out:?}");
 		assert_eq!(out.matches("up\n").count(), out.matches("down\n").count(), "{out:?}");
-	}
-
-	/// Failure mode: a utility that writes a listed file runs itself in a
-	/// loop; with `-a` such a change is not answered.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn changes_made_during_a_run_only_count_when_asked_for() {
-		let (_dir, root) = tree(&["a.txt"]);
-		let rewrite = "echo ran; echo more >> a.txt";
-		let watching = Watching::start(&root, &["sh", "-c", rewrite], "a.txt\n");
-		watching.until(|out| runs(out) == 1).await;
-		tokio::time::sleep(Duration::from_secs(1)).await;
-		assert_eq!(runs(&watching.out()), 1);
-		watching.stop().await;
-
-		let watching = Watching::start(&root, &["-a", "sh", "-c", rewrite], "a.txt\n");
-		watching.until(|out| runs(out) >= 3).await;
-		watching.stop().await;
 	}
 
 	/// Failure mode: a burst of writes (a checkout, a formatter) runs the

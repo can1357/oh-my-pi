@@ -89,7 +89,7 @@ The client answers `host_tool_call` frames itself and never delivers host tool f
 
 A handler returns text or a `HostToolResultPayload`. If it returns an error or panics, the result is sent with `isError: true`. Once the server sends `host_tool_cancel`, nothing more is sent for that call: the writer checks the call's cancellation right before it writes each update or result, so even a reply already in the queue is dropped. Closing the client cancels every running call.
 
-Host tools may be mounted as `xd://` devices and invoked through `write`. The `tool_execution_update` and `tool_execution_end` events of those calls are renamed to the host tool's name.
+Host tools may be mounted as tool commands and invoked inside `bash` calls. The `tool_execution_update` and `tool_execution_end` events of those calls are renamed to the host tool's name.
 
 ## Host URIs
 

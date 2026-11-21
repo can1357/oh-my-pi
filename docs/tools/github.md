@@ -136,7 +136,7 @@ Branches:
 - `fill && (title || body !== undefined)` throws.
 - Non-empty `body` is written under a temp dir `gh-pr-body-*` in `os.tmpdir()`, passed as `--body-file`, then removed in `finally`.
 - After creation, the tool parses the returned URL and best-effort runs `gh pr view <number> --repo <repo> --json <GH_PR_CREATE_FIELDS>`, requesting only the summary fields above, not bodies, files, or reviews. Lookup failure still returns the creation URL and available input metadata.
-- `xd://github` creation results retain only `op` and `repo` in dispatch renderer arguments, not the body or other execution-only fields. The full validated body still reaches `gh pr create` unchanged; the original tool-call input remains in history. Read `pr://<N>` explicitly to retrieve the body.
+- `github` creation results retain only `op` and `repo` in dispatch renderer arguments, not the body or other execution-only fields. The full validated body still reaches `gh pr create` unchanged; the original tool-call input remains in history. Read `pr://<N>` explicitly to retrieve the body.
 
 ### `pr_checkout`
 

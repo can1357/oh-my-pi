@@ -995,6 +995,13 @@ export interface ResolvedOpenAISharedCompat {
 	requiresMistralToolIds: boolean;
 	requiresToolResultName: boolean;
 	requiresAssistantAfterToolResult: boolean;
+	/**
+	 * Append a user/developer message that directly follows a tool result to
+	 * that result's content instead of sending it as its own turn. Rule-owned:
+	 * Gemini 4 Neon ends about half of the requests that close on user text
+	 * after a function response with an empty `MALFORMED_RESPONSE`.
+	 */
+	foldUserAfterToolResult: boolean;
 	requiresAssistantContentForToolCalls: boolean;
 	stripDeepseekSpecialTokens: boolean;
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
