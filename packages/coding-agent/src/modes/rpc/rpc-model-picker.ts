@@ -71,7 +71,9 @@ export class RpcModelPicker {
 	readonly #session: AgentSession;
 	readonly #source: ModelBrowserSource;
 	readonly #scopes: SessionModelScopeCache;
-	#ranker: { items: readonly ModelBrowserItem[]; providerOrder: readonly string[]; ranker: ModelItemRanker } | undefined;
+	#ranker:
+		| { items: readonly ModelBrowserItem[]; providerOrder: readonly string[]; ranker: ModelItemRanker }
+		| undefined;
 
 	constructor(session: AgentSession) {
 		this.#session = session;
@@ -98,13 +100,11 @@ export class RpcModelPicker {
 		const tokens = session.getContextUsage()?.tokens ?? 0;
 		const current = session.model;
 		const rows = shown.map(({ model }): RpcModelPickerRow => {
-			const roles = heldRoles(model, scope.roles, this.#source).map(
-				({ role, assignment }): RpcModelPickerRole => ({
-					role,
-					label: roleChipLabel(role, this.#source),
-					...(assignment.autoSelected ? { auto: true } : {}),
-				}),
-			);
+			const roles = heldRoles(model, scope.roles, this.#source).map(({ role, assignment }): RpcModelPickerRole => ({
+				role,
+				label: roleChipLabel(role, this.#source),
+				...(assignment.autoSelected ? { auto: true } : {}),
+			}));
 			const slider = thinkingSlider(model, level);
 			const window = model.contextWindow ?? 0;
 			return {
@@ -145,15 +145,13 @@ export class RpcModelPicker {
 	#quickRoles(query: string, limit: number): RpcModelPickerResult {
 		const cycle = this.#session.getRoleModelCycle(cfgCycleOrder.get(this.#session.settings));
 		if (!cycle) return { rows: [], recent: 0, total: 0 };
-		const items = cycle.models.map(
-			(entry, index): ModelBrowserItem & { index: number } => ({
-				provider: "",
-				id: `@${entry.role}`,
-				model: entry.model,
-				selector: `@${entry.role}`,
-				index,
-			}),
-		);
+		const items = cycle.models.map((entry, index): ModelBrowserItem & { index: number } => ({
+			provider: "",
+			id: `@${entry.role}`,
+			model: entry.model,
+			selector: `@${entry.role}`,
+			index,
+		}));
 		const matched = query.trim() ? fuzzyRank(items, query, modelSearchText).map(result => result.item) : items;
 		const rows = matched.slice(0, limit).map(({ index }): RpcModelPickerRow => {
 			const entry = cycle.models[index]!;
