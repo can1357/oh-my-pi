@@ -3,15 +3,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ptree, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
-import { isSettingsInitialized, Settings, settings } from "../../config/settings";
+import type { Settings } from "../../config/settings";
 import type { AgentStorageApi } from "../../session/agent-storage";
+import { cfgProvidersFetch } from "../../session/settings";
 import { throwIfAborted } from "../../tools/tool-errors";
 import { ensureTool } from "../../utils/tools-manager";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../parallel";
 import type { RenderResult, SpecialHandler } from "./types";
-import { buildResult, formatMediaDuration, formatNumber } from "./types";
-
-import { cfgProvidersFetch } from "../../session/settings";
+import { buildResult, formatMediaDuration, formatNumber, handlerSettings } from "./types";
 
 interface YouTubeUrl {
 	videoId: string;
@@ -119,8 +118,7 @@ export const handleYouTube: SpecialHandler = async (
 	const videoUrl = `https://www.youtube.com/watch?v=${yt.videoId}`;
 
 	// Prefer Parallel extract when it sits in the reader chain and creds exist
-	const effectiveSettings = sessionSettings ?? (isSettingsInitialized() ? settings : Settings.isolated());
-	const fetchPreference = cfgProvidersFetch.get(effectiveSettings);
+	const fetchPreference = cfgProvidersFetch.get(handlerSettings(sessionSettings));
 	if ((fetchPreference === "auto" || fetchPreference === "parallel") && findParallelApiKey(storage)) {
 		try {
 			const parallelResult = await extractWithParallel(
