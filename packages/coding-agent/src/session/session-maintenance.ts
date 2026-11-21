@@ -3978,11 +3978,7 @@ export class SessionMaintenance {
 		}
 	}
 
-	async resolveContextPromotionTarget(
-		currentModel: Model,
-		contextWindow: number,
-		signal?: AbortSignal,
-	): Promise<Model | undefined> {
+	#resolveContextPromotionCandidate(currentModel: Model, contextWindow: number): Model | undefined {
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
@@ -4002,6 +3998,23 @@ export class SessionMaintenance {
 		) {
 			return undefined;
 		}
+		return candidate;
+	}
+
+	/** Whether context promotion is enabled and has a strictly larger candidate for `model`. */
+	hasContextPromotionCandidate(model: Model): boolean {
+		if (!cfgContextPromotionEnabled.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
+		const contextWindow = model.contextWindow ?? 0;
+		return contextWindow > 0 && this.#resolveContextPromotionCandidate(model, contextWindow) !== undefined;
+	}
+
+	async resolveContextPromotionTarget(
+		currentModel: Model,
+		contextWindow: number,
+		signal?: AbortSignal,
+	): Promise<Model | undefined> {
+		const candidate = this.#resolveContextPromotionCandidate(currentModel, contextWindow);
+		if (!candidate) return undefined;
 		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
 		if (!apiKey) return undefined;
 		return candidate;
@@ -4694,8 +4707,9 @@ export class SessionMaintenance {
 		});
 	}
 
-	#fixedContextExceedsRecoveryBand(): boolean {
-		const contextWindow = this.#model?.contextWindow ?? 0;
+	/** Whether fixed non-message context alone exceeds the threshold recovery band for `model`. */
+	fixedContextExceedsRecoveryBand(model: Model | undefined = this.#model): boolean {
+		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 		const recoveryBand = Math.floor(
 			resolveThresholdTokens(contextWindow, this.#compactionSettings) * COMPACTION_RECOVERY_BAND,
@@ -4713,7 +4727,7 @@ export class SessionMaintenance {
 	 * `undefined` when compaction can still help.
 	 */
 	#thresholdFixedContextDeadEnd(): CompactionCheckResult | undefined {
-		if (!this.#fixedContextExceedsRecoveryBand()) {
+		if (!this.fixedContextExceedsRecoveryBand()) {
 			this.#fixedContextDeadEndNotifiedSessionId = undefined;
 			return undefined;
 		}
@@ -4726,7 +4740,7 @@ export class SessionMaintenance {
 	}
 
 	#compactionDeadEndWarning(remedies: string): string {
-		if (this.#fixedContextExceedsRecoveryBand()) return FIXED_CONTEXT_DEAD_END_WARNING;
+		if (this.fixedContextExceedsRecoveryBand()) return FIXED_CONTEXT_DEAD_END_WARNING;
 		return (
 			"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. " +
 			`The most recent turn alone is too large to reduce further; ${remedies} or switch to a larger-context model.`

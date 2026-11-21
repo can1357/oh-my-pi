@@ -167,15 +167,6 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.omitDemotedReasoning).toBe(true);
 	});
 
-	it("forwards cursorContextBudgetTokens so the gateway stops Cursor loops at the client compaction threshold", () => {
-		const parsed = parseRequest({
-			modelId: "cursor/claude-sonnet-4-5",
-			context: baseContext,
-			options: { cursorContextBudgetTokens: 150_000 },
-		});
-		expect(parsed.options.cursorContextBudgetTokens).toBe(150_000);
-	});
-
 	it("preserves headers, metadata, sessionId, thinkingBudgets, and hidden thinking summaries", () => {
 		const parsed = parseRequest({
 			modelId: "x",

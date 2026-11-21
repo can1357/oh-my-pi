@@ -1364,6 +1364,17 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(budgetAtDispatch).toBe(140_000);
 	});
 
+	it("omits the Cursor budget when fixed non-message context exceeds the recovery band without promotion", () => {
+		const cursor = getBundledModel("cursor", "composer-2.5");
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionThresholdTokens.set(session.settings, 10_000);
+		cfgContextPromotionEnabled.set(session.settings, false);
+
+		// ~8,500 tokens in the system prompt alone: below the 10k threshold, but above the 8k (80%) recovery band.
+		session.agent.setSystemPrompt("x".repeat(36_000));
+		expect(session.cursorContextBudgetTokens(cursor)).toBeUndefined();
+	});
+
 	it("settles an overlapping successful stop but resumes a thinking-only length stop", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
 		cfgCompactionEnabled.set(session.settings, true);
