@@ -348,6 +348,12 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | `PI_AI_ANTIGRAVITY_OS`      | Overrides Antigravity hub user-agent os_type (unset: the native build for the host OS, `darwin`, `linux` or `windows`; other OSes report `linux`) |
 | `PI_AI_ANTIGRAVITY_ARCH`    | Overrides Antigravity hub user-agent arch (unset: that build's arch, `arm64` on macOS, `amd64` on Linux and Windows)                              |
 
+### Prompt perturbation
+
+| Variable                  | Default / behavior                                                                                                                                                                     |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OMP_PROMPT_PERTURBATION` | Unset: models whose KDL rules set `prompt-perturbation #true` get the pooled lines rewritten with the wording chosen for this installation; others get the bundled wording. `1` perturbs every model; `0` none. |
+
 ### GitLab Duo
 
 | Variable                         | Default / behavior                                                                                                                                                                                                                                                                                               |

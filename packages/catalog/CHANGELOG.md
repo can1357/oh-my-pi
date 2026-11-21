@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added the `prompt-perturbation` catalog axis, which opts a provider or model into per-install prompt paraphrasing.
 - Added the `uncached-instructions` compatibility flag for GPT-6.2 models across all hosts, moving system prompts out of the uncached Responses `instructions` field.
 
 ### Fixed

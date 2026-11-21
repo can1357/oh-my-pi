@@ -382,7 +382,7 @@ export function renderXdevPromptDocs(docs: XdevPromptDocs, listedElsewhere?: Rea
 		"## Additional devices (docs on demand)",
 		...lines,
 		"",
-		`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
+		`Before first use, read the docs and JSON schema for ${XD_URL_PREFIX}<tool>.`,
 	].join("\n");
 	return [...docs.sections, catalogSection].join("\n\n");
 }
