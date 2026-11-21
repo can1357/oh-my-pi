@@ -72,6 +72,7 @@ import { cfgOvnfsPath, cfgTaskBatch, cfgTaskCrossInstance, cfgTaskEager } from "
 import { cfgBrowserCdpUrl, cfgBrowserRelayUrl } from "./tools/browser/settings";
 import {
 	cfgAsyncEnabled,
+	cfgFetchEnabled,
 	cfgOutEnabled,
 	cfgToolsIntentTracing,
 	cfgToolsXdevDocs,
@@ -96,6 +97,10 @@ export const cfgSystemPromptInputs = combine({
 	xdevDocs: cfgToolsXdevDocs,
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,
+	// The `read` tool renders its URL guidance from this flag, so a live toggle
+	// must rebuild the prompt: with inline descriptors the description rides in
+	// the prompt, and the provider schema copy is pruned from the wire.
+	fetchEnabled: cfgFetchEnabled,
 	outEnabled: cfgOutEnabled,
 	crossInstanceAgents: cfgTaskCrossInstance,
 	renderMermaid: cfgTuiRenderMermaid,
