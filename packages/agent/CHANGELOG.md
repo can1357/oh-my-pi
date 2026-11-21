@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A turn that fails with a thrown `CredentialUnavailableError` now carries its transient classification (`errorId`) on the error message, so a host's turn retry can treat it as retryable, and marks the message `credentialUnavailable`, so a host can tell that no provider refused the request ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

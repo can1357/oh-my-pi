@@ -5364,11 +5364,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// a short backoff without touching the credential pool. Model-policy 403s
 			// (plan, model policy, org restriction) also preserve the credential: the
 			// token is valid, and wiping it hides the provider from `/model` (#11275).
+			// A lookup that produced no key sent nothing to reject: the turn retries
+			// it, and wiping the stored credential would make that retry fail.
 			if (msg.stopReason === "error" && msg.provider === "github-copilot") {
 				const errorId = AIError.classifyMessage(msg);
 				const isConcurrencyCap = AIError.parseRateLimitReason(msg.errorMessage ?? "") === "CONCURRENT_LIMIT";
 				if (
 					AIError.is(errorId, AIError.Flag.AuthFailed) &&
+					msg.credentialUnavailable !== true &&
 					!AIError.is(errorId, AIError.Flag.UsageLimit) &&
 					!isConcurrencyCap &&
 					!AIError.isGitHubCopilotPolicyDenial(msg.provider, msg.errorStatus, msg.errorMessage)
@@ -5788,6 +5791,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			for (;;) {
 				try {
 					if (!this.agent.state.isStreaming) onStart?.();
+					// An Esc can end an automatic retry after it passed the scheduling checks but before
+					// `continue()` claims the agent (a queued usage-aware preflight awaits in between, and the
+					// scheduler's signal stays live for that stop). Recheck the retry's own gate at this last
+					// boundary. Only the retry's: another continuation's gate reads state this run's own
+					// in-flight count changes (a queued-message drain reads `isStreaming`), so it would skip
+					// here every time, and the drain would reschedule itself on microtasks without end.
+					if (isAutomaticRetry && request.options.shouldContinue && !request.options.shouldContinue()) {
+						return { status: "skipped", reason: "should-continue-false" };
+					}
 					await this.agent.continue(signal);
 					return { status: "completed" };
 				} catch (error) {
@@ -9990,9 +10002,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			}
 
-			// Validate API key; a provider without one walks the retry fallback chain first.
+			// Validate API key. A key that may come back without the user configuring
+			// one (a `!command` apiKey that produced nothing, stored credentials that
+			// cannot serve now) is left to the turn, whose resolver fails retryably so
+			// auto-retry covers it. Any other provider without one walks the retry
+			// fallback chain first.
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
-			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
+			if (
+				!apiKey &&
+				!(await this.#modelRegistry.missingKeyMayRecover(model.provider, setupAbort.signal)) &&
+				!(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))
+			) {
 				if (setupAbort.signal.aborted) return false;
 				throw new PromptPreflightError(
 					`No API key found for ${model.provider}.\n\n` +

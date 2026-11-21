@@ -106,6 +106,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"errorStatus",
 		"errorId",
 		"requestBodyReadTimeoutFullReplay",
+		"credentialUnavailable",
 		"duration",
 		"ttft",
 		"dt",

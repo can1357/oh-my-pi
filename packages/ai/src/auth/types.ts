@@ -134,6 +134,54 @@ export interface DisabledCredentialSummary {
 	disabledAtMs?: number;
 }
 
+/** Disable cause of a credential the user deleted (`omp` auth commands, `/logout`). */
+export const DELETED_BY_USER = "deleted by user";
+/** Disable cause of a credential the user logged out of on the auth broker (`omp auth-broker logout`). */
+export const LOGGED_OUT_BY_USER = "logged out by user";
+/** Disable cause prefix of a credential a newer one replaced (`replaced by newer credential`, `replaced by oauth login`). */
+export const REPLACED_BY_CAUSE_PREFIX = "replaced by";
+/** Disable cause prefix of a duplicate row of an account merged away (`deduplicated duplicate credential`). */
+export const DEDUPLICATED_CAUSE_PREFIX = "deduplicated";
+
+/** Whether a disable cause records the user's own removal of a credential. */
+export function isUserRemovalCause(cause: string): boolean {
+	const lower = cause.toLowerCase();
+	return lower.startsWith(DELETED_BY_USER) || lower.startsWith(LOGGED_OUT_BY_USER);
+}
+
+/**
+ * Whether a tombstone records an OAuth credential torn down automatically
+ * (refresh failure, upstream invalidation) rather than one the user replaced,
+ * deleted or logged out of, or a duplicate merged away: lost capacity a new
+ * login restores, not lifecycle noise.
+ */
+export function isAutoDisabledCredential(summary: DisabledCredentialSummary): boolean {
+	if (summary.type !== "oauth" || isUserRemovalCause(summary.cause)) return false;
+	const cause = summary.cause.toLowerCase();
+	return !cause.startsWith(REPLACED_BY_CAUSE_PREFIX) && !cause.startsWith(DEDUPLICATED_CAUSE_PREFIX);
+}
+
+/**
+ * Whether a login a failure disabled may still come back: no credential of the same
+ * provider was removed, logged out, replaced or merged away since. A tombstone does
+ * not say which account it held, so any such teardown of the provider ends the wait
+ * (it fails sooner, never later). Unknown timestamps sort first; removal wins ties.
+ */
+export function isRecoverableDisabledCredential(
+	failure: DisabledCredentialSummary,
+	tombstones: readonly DisabledCredentialSummary[],
+): boolean {
+	return (
+		isAutoDisabledCredential(failure) &&
+		!tombstones.some(
+			removal =>
+				removal.provider === failure.provider &&
+				!isAutoDisabledCredential(removal) &&
+				(removal.disabledAtMs ?? 0) >= (failure.disabledAtMs ?? 0),
+		)
+	);
+}
+
 /**
  * Per-credential health record returned by {@link AuthStorage.health.check}.
  *

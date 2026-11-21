@@ -23,6 +23,7 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -2244,6 +2245,15 @@ export class Agent {
 				: err instanceof Error
 					? err.message
 					: String(err);
+			// A credential source that produced no key (a failed key command, stored
+			// credentials that cannot serve now, a transient OAuth refresh failure)
+			// keeps its Transient flag so turn recovery retries it: the key may come
+			// back, and nothing was sent. Only that error marks the message
+			// `credentialUnavailable`, so a host can tell that no provider refused
+			// the request. Other thrown errors stay classified by text and are not marked.
+			const credentialUnavailable =
+				!stoppedForAbort && err instanceof AIError.CredentialUnavailableError ? true : undefined;
+			const errorId = credentialUnavailable ? AIError.classify(err) : undefined;
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2271,6 +2281,8 @@ export class Agent {
 							),
 							stopReason: "error",
 							errorMessage,
+							errorId,
+							credentialUnavailable,
 						}
 					: {
 							role: "assistant",
@@ -2288,6 +2300,8 @@ export class Agent {
 							},
 							stopReason: stoppedForAbort ? "aborted" : "error",
 							errorMessage,
+							errorId,
+							credentialUnavailable,
 							timestamp: Date.now(),
 						};
 
