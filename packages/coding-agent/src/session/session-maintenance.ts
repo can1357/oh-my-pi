@@ -4010,7 +4010,14 @@ export class SessionMaintenance {
 		) {
 			return undefined;
 		}
-		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
+		// A session restricted to an OAuth account pool throws for a provider none of its
+		// pooled accounts can serve; that target is unavailable, exactly like one without a credential.
+		let apiKey: string | undefined;
+		try {
+			apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
+		} catch (error) {
+			if (!(error instanceof AIError.MissingApiKeyError)) throw error;
+		}
 		if (!apiKey) return undefined;
 		return candidate;
 	}

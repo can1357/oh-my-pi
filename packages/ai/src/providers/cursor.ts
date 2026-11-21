@@ -907,15 +907,17 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
 	let activeAppends = 0;
+	const inFlightAppends = new Set<Promise<void>>();
 	let closed = false;
 	let ended = false;
+	let streamEnded = false;
 	let responseListener: (headers: http2.IncomingHttpHeaders) => void = () => {};
 	let dataListener: (chunk: Buffer) => void = () => {};
 	let endListener: () => void = () => {};
 	let errorListener: (error: unknown) => void = () => {};
 
 	const fail = (error: unknown): void => {
-		if (closed) return;
+		if (closed || streamEnded) return;
 		closed = true;
 		pendingAppends.length = 0;
 		abortController.abort(error);
@@ -956,12 +958,14 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			const append = pendingAppends.shift();
 			if (!append) return;
 			activeAppends++;
-			void sendAppend(append)
+			const sending: Promise<void> = sendAppend(append)
 				.catch(fail)
 				.finally(() => {
 					activeAppends--;
+					inFlightAppends.delete(sending);
 					pumpAppends();
 				});
+			inFlightAppends.add(sending);
 		}
 	};
 
@@ -991,6 +995,13 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 				dataListener(Buffer.from(chunk));
 			}
 			if (closed) return;
+			// Appends are unary calls that can still be answering when the server has already
+			// streamed its reply: let them settle so each delivery is recorded before the
+			// stream finalizes. A failure from here on no longer changes how the stream ended.
+			streamEnded = true;
+			pendingAppends.length = 0;
+			await Promise.allSettled(inFlightAppends);
+			if (closed) return;
 			closed = true;
 			endListener();
 		} catch (error) {
@@ -1000,13 +1011,13 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	void run();
 	return {
 		get writable() {
-			return !closed && !ended;
+			return !closed && !ended && !streamEnded;
 		},
 		get closed() {
 			return closed;
 		},
 		write(frame, onDelivered) {
-			if (closed || ended) return;
+			if (closed || ended || streamEnded) return;
 			pendingAppends.push({
 				seqno: appendSeqno++,
 				data: readConnectFrameMessage(frame),
