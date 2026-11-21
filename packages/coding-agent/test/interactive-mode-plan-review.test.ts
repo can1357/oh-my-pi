@@ -1906,6 +1906,61 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 	});
 
+	it("defaults an out-of-cycle pre-plan model and its auto reasoning for execution", async () => {
+		const previous = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!previous) throw new Error("Expected pre-plan model");
+		session.settings.setModelRole("default", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
+		session.setThinkingLevel(AUTO_THINKING, true);
+		await mode.handlePlanModeCommand();
+
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nExecute using the previous model.");
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, _dialog, extra) => {
+			const slider = extra?.slider;
+			expect(slider?.segments[slider.index]?.label).toBe("Pre-plan model");
+			expect(slider?.segments[slider.index]?.detail).toContain(AUTO_THINKING);
+			return "keep";
+		});
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		expect(session.model?.id).toBe(previous.id);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+	});
+
+	it("preselects the recorded role without adding a pre-plan option for the same model", async () => {
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-5");
+		session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5");
+		const slow = session.getRoleModelCycle(["default", "slow"])?.models.find(entry => entry.role === "slow");
+		if (!slow) throw new Error("Expected slow role");
+		await session.applyRoleModel(slow);
+		await mode.handlePlanModeCommand();
+
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nExecute on the selected role.");
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, _dialog, extra) => {
+			const slider = extra?.slider;
+			expect(slider?.segments[slider.index]?.label).toBe("slow");
+			expect(slider?.segments.some(segment => segment.label === "Pre-plan model")).toBe(false);
+			return "keep";
+		});
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		expect(session.model?.id).toBe(slow.model.id);
+	});
+
 	it("executes on the slider-selected tier, surviving #exitPlanMode's model restore", async () => {
 		// Regression: the model-tier slider's choice used to be applied BEFORE
 		// #approvePlan ran. #approvePlan → #exitPlanMode restores the model that
@@ -2098,17 +2153,14 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
-	it("falls back to the pre-plan model when only plan is configured and the slider is hidden", async () => {
+	it("defaults to the pre-plan model when the only role resolves to the planning model", async () => {
 		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		const opus = session.modelRegistry.find("anthropic", "claude-opus-4-5");
 		if (!sonnet || !opus) throw new Error("Expected sonnet + opus to exist in registry");
 		expect(session.model?.id).toBe(sonnet.id);
 
-		// Only the plan role is configured. getRoleModelCycle synthesizes a
-		// singleton `default` entry from the active plan model (opus), so the
-		// slider is hidden — the operator made no selection and approval must
-		// fall through to the pre-plan sonnet restore instead of pinning the
-		// lone plan tier.
+		// The synthesized default points at the planning model. The review must
+		// offer and select the distinct pre-plan model instead.
 		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
 
 		const planFilePath = "local://PLAN.md";
@@ -2116,7 +2168,7 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nNo slider, restore default.");
+		await Bun.write(resolvedPlanPath, "# Plan\n\nRestore the previous model.");
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(opus.id);
@@ -2134,7 +2186,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
-		expect(sliderShown).toBeUndefined();
+		expect(sliderShown?.segments[sliderShown.index]?.label).toBe("Pre-plan model");
 		expect(session.model?.id).toBe(sonnet.id);
 	});
 

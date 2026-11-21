@@ -517,6 +517,8 @@ Without an interactive UI, `code-review` delegates to `/review` instead of openi
 
 The decision options are the approval choices and **Save**, which writes the plan to a chosen path and leaves the review open (plan mode and the session stay as they are). **Refine plan** appears only while the plan has feedback (annotations or deleted sections); it is then the first, preselected option and re-prompts the model with that feedback.
 
+The execution model control initially selects the model and thinking level used before entering plan mode. If no configured cycle role matches that model, it appears as `Pre-plan model`. Select another role or use `Alt+M` / **Custom model…** for a one-off model and reasoning level without changing role assignments.
+
 Under Tern the plan is one editable document: double-click edits it in place (edits are mirrored to the plan file and annotations follow their text), and selecting text offers a Comment bubble whose comments become Refine feedback (`> "quote"` then the note, under the section heading). Below it a dock holds the Approve split button (Refine while the plan has comments; its menu lists every approval choice), the execution model chip, Save and Cancel; Enter runs the main button, ←/→ change the model, ↑/↓ walk the Contents (hidden while the plan has comments). Older Tern builds keep one Markdown block per section and the option bar.
 
 ## 14) Built-in command note: `/context`

@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { PlanReviewOverlay, type PlanReviewOverlayChoice } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
@@ -181,6 +182,74 @@ describe("PlanReviewOverlay", () => {
 		// The slider must not have moved the option cursor.
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
+	});
+
+	it("opens the custom picker without committing, but not while editing an annotation", () => {
+		const onCustomModel = vi.fn();
+		const onPick = vi.fn();
+		const onCancel = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Plan\n\nBody",
+			{ options: APPROVAL_OPTIONS, slider: { segments: [{ label: "default" }], index: 0 } },
+			{ onPick, onCancel, onCustomModel },
+		);
+		expect(render(overlay)).toContain("custom model");
+		overlay.handleInput("\x1bm");
+		expect(onCustomModel).toHaveBeenCalledTimes(1);
+		expect(onPick).not.toHaveBeenCalled();
+		expect(onCancel).not.toHaveBeenCalled();
+		overlay.handleInput(TAB);
+		overlay.handleInput("a");
+		overlay.handleInput("\x1bm");
+		expect(onCustomModel).toHaveBeenCalledTimes(1);
+		overlay.handleInput(CANCEL);
+		overlay.handleInput(ENTER);
+		overlay.handleInput(ENTER);
+		expect(onPick).toHaveBeenCalledTimes(1);
+	});
+
+	it("replaces the model control and exposes custom selection in native dock and legacy layouts", () => {
+		const onCustomModel = vi.fn();
+		const onPick = vi.fn();
+		const onChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"plan",
+			{ options: APPROVAL_OPTIONS },
+			{
+				onPick,
+				onCancel: vi.fn(),
+				onCustomModel,
+			},
+		);
+		const cx: DescribeContext = {
+			cols: 100,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		expect(JSON.stringify(overlay.describe(cx))).toContain("Custom model…");
+		overlay.handleNativeEvent({ type: "action", key: "dock/model", act: "custom-model", mods: [] });
+		expect(onCustomModel).toHaveBeenCalledTimes(1);
+		overlay.setSlider({
+			segments: [{ label: "Pre-plan model", detail: "provider/model · auto" }],
+			index: 0,
+			onChange,
+		});
+		expect(render(overlay)).toContain("provider/model · auto");
+		expect(JSON.stringify(overlay.describe(cx))).toContain("Pre-plan model");
+		expect(onChange).not.toHaveBeenCalled();
+		overlay.handleNativeEvent({ type: "action", key: "dock/model", act: "custom-model", mods: [] });
+		const legacy: DescribeContext = {
+			...cx,
+			supports: kind => kind !== "doc" && kind !== "buttons" && kind !== "menu",
+		};
+		expect(JSON.stringify(overlay.describe(legacy))).toContain("Custom model…");
+		overlay.handleNativeEvent({ type: "action", key: "slider/custom-model", act: "custom-model", mods: [] });
+		expect(onCustomModel).toHaveBeenCalledTimes(3);
+		expect(onPick).not.toHaveBeenCalled();
+		overlay.handleInput(ENTER);
+		expect(onPick).toHaveBeenCalledTimes(1);
 	});
 
 	it("invokes the external-editor callback on its key", () => {
