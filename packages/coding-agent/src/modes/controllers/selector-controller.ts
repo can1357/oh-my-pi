@@ -737,10 +737,14 @@ export class SelectorController {
 	 * Pick a one-off plan target without changing the session or settings.
 	 * The caller owns the review lifecycle and restores its focus after this resolves.
 	 */
-	pickPlanExecutionModel(): Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined> {
+	pickPlanExecutionModel(
+		selected: Model | undefined,
+	): Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined> {
 		this.cancelPlanExecutionModel();
-		const viewed = this.ctx.viewSession;
-		const current = viewed.model;
+		const session = this.ctx.session;
+		const extraModels: Model[] = [];
+		if (selected) extraModels.push(selected);
+		if (session.model) extraModels.push(session.model);
 		const { promise, resolve } = Promise.withResolvers<
 			{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined
 		>();
@@ -763,8 +767,8 @@ export class SelectorController {
 		this.#cancelPlanExecutionPicker = cancel;
 		const picker = new ModelPickerComponent(
 			this.ctx.ui,
-			createModelBrowserSource(this.ctx.settings, model => viewed.effectiveServiceTier(model)),
-			this.ctx.session.modelRegistry,
+			createModelBrowserSource(this.ctx.settings, model => session.effectiveServiceTier(model)),
+			session.modelRegistry,
 			[],
 			{
 				onPick: model => {
@@ -801,9 +805,8 @@ export class SelectorController {
 				},
 			},
 			{
-				planExecution: true,
-				planExecutionModel: current,
-				currentSelector: current ? `${current.provider}/${current.id}` : undefined,
+				planExecution: { extraModels },
+				currentSelector: selected ? `${selected.provider}/${selected.id}` : undefined,
 			},
 		);
 		component = picker;

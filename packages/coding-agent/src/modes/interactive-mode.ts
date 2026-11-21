@@ -8201,7 +8201,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				onSave: content => void savePlan(content),
 				onCustomModel: () => {
 					const overlay = this.#planReviewOverlay;
-					void this.#selectorController.pickPlanExecutionModel().then(
+					void this.#selectorController.pickPlanExecutionModel(modelFor(executionModel)).then(
 						picked => {
 							if (this.#pendingPlanReview !== pending || !overlay || this.#planReviewOverlay !== overlay) return;
 							this.ui.setFocus(overlay);

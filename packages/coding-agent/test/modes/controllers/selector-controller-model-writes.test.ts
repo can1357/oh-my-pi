@@ -108,7 +108,7 @@ describe("SelectorController model selector writes", () => {
 		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function () {
 			return {};
 		} as never);
-		const result = controller.pickPlanExecutionModel();
+		const result = controller.pickPlanExecutionModel(sonnet);
 		controller.cancelPlanExecutionModel();
 		expect(await result).toBeUndefined();
 		expect(session!.model).toBe(sonnet);

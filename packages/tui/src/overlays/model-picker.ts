@@ -97,10 +97,8 @@ export interface ModelPickerOptions {
 	 * the picker shows none.
 	 */
 	thinkingLevelFor?: (model: Model) => ConfiguredThinkingLevel | undefined;
-	/** Value-only plan execution selection; no role or task switching. */
-	planExecutionModel?: Model;
-	/** Enable value-only plan execution selection even when no model is active. */
-	planExecution?: boolean;
+	/** Value-only plan execution selection; retain these targets even outside the available catalog. */
+	planExecution?: { extraModels: readonly Model[] };
 }
 
 /** Fixed chrome rows: top border, status row, footer, bottom border. */
@@ -228,7 +226,7 @@ export class ModelPickerComponent implements Component {
 	#taskModeKey: KeyId | undefined;
 	#taskSelector: string | undefined;
 	#planExecution: boolean;
-	#planExecutionModel: Model | undefined;
+	#planExecutionModels: readonly Model[] | undefined;
 	#thinkingLevelFor: ((model: Model) => ConfiguredThinkingLevel | undefined) | undefined;
 	/** The slider's pending level; undefined while untouched (each model shows the session's current level). */
 	#thinking: ConfiguredThinkingLevel | undefined;
@@ -264,8 +262,8 @@ export class ModelPickerComponent implements Component {
 		this.#currentSelector = options.currentSelector;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
 		this.#taskSelector = options.taskSelector;
-		this.#planExecution = options.planExecution ?? false;
-		this.#planExecutionModel = options.planExecutionModel;
+		this.#planExecution = options.planExecution !== undefined;
+		this.#planExecutionModels = options.planExecution?.extraModels;
 		this.#thinkingLevelFor = options.thinkingLevelFor;
 		if (callbacks.onPickTask) {
 			this.#taskModeKey = options.taskModeKeys?.[0];
@@ -348,12 +346,16 @@ export class ModelPickerComponent implements Component {
 		);
 		this.#configError = scope.error;
 		this.#modelItems = scope.items;
-		const active = this.#planExecutionModel;
-		if (active && !this.#modelItems.some(item => item.provider === active.provider && item.id === active.id)) {
-			this.#modelItems = [
-				...this.#modelItems,
-				{ provider: active.provider, id: active.id, model: active, selector: `${active.provider}/${active.id}` },
-			];
+		if (this.#planExecutionModels) {
+			for (const model of this.#planExecutionModels) {
+				if (this.#modelItems.some(item => item.provider === model.provider && item.id === model.id)) continue;
+				this.#modelItems.push({
+					provider: model.provider,
+					id: model.id,
+					model,
+					selector: `${model.provider}/${model.id}`,
+				});
+			}
 		}
 		this.#browser.setRoles(scope.roles);
 		this.#browser.setMruOrder(scope.mruOrder);

@@ -422,7 +422,7 @@ export class PlanReviewOverlay implements Component {
 	/** Index into {@link #entries}. */
 	#selectedIndex: number;
 	#slider: HookSelectorSlider | undefined;
-	#sliderIndex: number;
+	#sliderIndex = 0;
 
 	#focus: Focus = "actions";
 	#tocCursor = 0;
@@ -493,12 +493,7 @@ export class PlanReviewOverlay implements Component {
 		this.#externalEditorLabel = options.externalEditorLabel;
 		this.#promptTitle = options.promptTitle;
 		this.#selectedIndex = this.#coerceIndex(options.initialIndex ?? 0);
-		if (options.slider && options.slider.segments.length > 0) {
-			this.#slider = options.slider;
-			this.#sliderIndex = Math.max(0, Math.min(options.slider.index, options.slider.segments.length - 1));
-		} else {
-			this.#sliderIndex = 0;
-		}
+		if (options.slider) this.setSlider(options.slider);
 		this.#editor = new Editor(getEditorTheme());
 		this.#editor.setBorderVisible(false);
 		this.#editor.setPromptGutter("> ");
@@ -954,10 +949,17 @@ export class PlanReviewOverlay implements Component {
 	/** Replace the execution model control without notifying its change handler. */
 	setSlider(slider: HookSelectorSlider): void {
 		if (this.#committed) return;
-		this.#slider = slider.segments.length > 0 ? slider : undefined;
+		this.#slider = slider.segments.length
+			? {
+					...slider,
+					segments: slider.segments.map(({ label, detail }) => ({
+						label: sanitizeStatusText(label),
+						detail: detail === undefined ? undefined : sanitizeStatusText(detail),
+					})),
+				}
+			: undefined;
 		this.#sliderIndex = Math.max(0, Math.min(slider.index, slider.segments.length - 1));
 		this.#nativeRoot = undefined;
-		this.invalidate();
 	}
 
 	/** Synchronize an external tier pick with the displayed slider before committing. */

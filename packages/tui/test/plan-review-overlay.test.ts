@@ -252,6 +252,35 @@ describe("PlanReviewOverlay", () => {
 		expect(onPick).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps model details single-line and within the review border", () => {
+		const overlay = new PlanReviewOverlay(
+			"plan",
+			{ options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn() },
+		);
+		const tail = "long-model-id-".repeat(8);
+		overlay.setSlider({
+			segments: [{ label: "Pre-plan model", detail: `provider/model\tname\nversion\u0007 ${tail}` }],
+			index: 0,
+		});
+		const width = 48;
+		const row = overlay
+			.render(width)
+			.map(stripVTControlCharacters)
+			.find(line => line.includes("provider/model"));
+		expect(row).toContain("provider/model name version");
+		expect(row).not.toContain(tail);
+		expect(row).toHaveLength(width);
+		const native = overlay.describe({
+			cols: width,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		});
+		expect(JSON.stringify(native)).toContain(`provider/model name version ${tail}`);
+	});
+
 	it("invokes the external-editor callback on its key", () => {
 		setKeybindings(KeybindingsManager.inMemory({ "tui.select.cancel": "ctrl+g", "app.editor.external": "ctrl+e" }));
 		const onExternalEditor = vi.fn();

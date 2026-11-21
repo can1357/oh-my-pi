@@ -5,6 +5,7 @@ import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -12,7 +13,9 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type {
 	Extension,
@@ -1959,6 +1962,66 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 		expect(session.model?.id).toBe(slow.model.id);
+	});
+
+	it("dispatches an approved plan with the custom picker model and effort without changing roles", async () => {
+		const roles = {
+			default: "anthropic/claude-sonnet-4-5",
+			plan: "anthropic/claude-opus-4-6",
+		};
+		for (const [role, selector] of Object.entries(roles)) session.settings.setModelRole(role, selector);
+		const originalRoles = structuredClone(cfgModelRoles.get(session.settings));
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath ?? "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nRun the approved plan.",
+		);
+		vi.spyOn(modelRegistry, "refreshIfStale").mockResolvedValue(false);
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		const dispatched: Array<{ model?: string; thinking?: string }> = [];
+		vi.spyOn(session, "prompt").mockImplementation(async (...args) => {
+			if (isPlanApprovedCall(args)) {
+				dispatched.push({ model: session.model?.id, thinking: session.configuredThinkingLevel() });
+			}
+			return undefined as never;
+		});
+		const opened = Promise.withResolvers<void>();
+		const approval = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "PLAN" },
+			{ onOpened: () => opened.resolve() },
+		);
+		await Promise.race([
+			opened.promise,
+			approval.then(() => {
+				throw new Error("Plan Review did not open");
+			}),
+		]);
+		const review = mode.ui.overlayStack.at(-1)?.component;
+		if (!(review instanceof PlanReviewOverlay)) throw new Error("Expected Plan Review");
+		try {
+			review.handleInput("\x1bm");
+			const picker = mode.ui.overlayStack.at(-1)?.component;
+			if (!(picker instanceof ModelPickerComponent)) throw new Error("Expected model picker");
+			for (const key of "claude-opus-4-5") picker.handleInput(key);
+			picker.handleInput("\r");
+			const thinking = mode.ui.overlayStack.at(-1)?.component;
+			if (!(thinking instanceof ThinkingSelectorComponent)) throw new Error("Expected thinking picker");
+			thinking.getSelectList().setSelectedValue(ThinkingLevel.High);
+			thinking.getSelectList().handleInput("\n");
+			await Promise.resolve();
+			expect(session.model?.id).toBe("claude-opus-4-6");
+			expect(review.selectOption("keep")).toBe(true);
+			await approval;
+			expect(dispatched).toEqual([{ model: "claude-opus-4-5", thinking: ThinkingLevel.High }]);
+			expect(cfgModelRoles.get(session.settings)).toEqual(originalRoles);
+		} finally {
+			review.handleInput("\x1b");
+			await approval;
+		}
 	});
 
 	it("executes on the slider-selected tier, surviving #exitPlanMode's model restore", async () => {

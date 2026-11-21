@@ -377,8 +377,9 @@ function rowIds(p: TspPickerProps): string[] {
 	return (p.order ?? []).filter((entry): entry is string => typeof entry === "string");
 }
 
-test("plan execution picker includes and selects an active model outside the available catalog", () => {
-	const active = model("local", "planning-model");
+test("plan execution picker defaults to the selected target and retains the planning model outside the catalog", () => {
+	const selected = model("local", "execution-model");
+	const planning = model("local", "planning-model");
 	const picked: string[] = [];
 	const picker = new ModelPickerComponent(
 		ui,
@@ -389,14 +390,14 @@ test("plan execution picker includes and selects an active model outside the ava
 			onPick: (_model, selector) => picked.push(selector),
 			onCancel: () => picked.push("cancel"),
 		},
-		{ planExecution: true, planExecutionModel: active, currentSelector: "local/planning-model" },
+		{ planExecution: { extraModels: [selected, planning] }, currentSelector: "local/execution-model" },
 	);
 	const view = props(picker.describe(withPicker));
 	expect(rowIds(view)).toContain("local/planning-model");
 	expect(view.placeholder).toBe("Search models…");
 	expect(view.actions ?? []).toEqual([]);
 	picker.handleInput("\r");
-	expect(picked).toEqual(["local/planning-model"]);
+	expect(picked).toEqual(["local/execution-model"]);
 });
 
 test("the quick picker is a composer drop-up with a provider rail, a thinking slider and a task-model toggle", () => {
