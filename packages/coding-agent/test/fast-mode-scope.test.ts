@@ -214,4 +214,49 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeActive()).toBe(false);
 	});
+
+	it("emits service_tier_changed when switching to a session with a different saved tier on the same model", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const sessionDir = path.join(tempDir.path(), "switch-tier-sessions");
+		const targetFile = path.join(sessionDir, "target-tier.jsonl");
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetFile,
+			`${[
+				{ type: "session", version: 3, id: "target-tier", timestamp, cwd: tempDir.path() },
+				{ type: "model_change", id: "m1", parentId: null, timestamp, model: `${model.provider}/${model.id}` },
+				{
+					type: "service_tier_change",
+					id: "t1",
+					parentId: "m1",
+					timestamp,
+					serviceTier: { anthropic: "priority" },
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		authStorage.keys.setRuntime(model.provider, "token");
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.create(tempDir.path(), sessionDir),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		expect(session.isFastModeEnabled()).toBe(false);
+
+		const events: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "service_tier_changed" || event.type === "model_changed") events.push(event.type);
+		});
+
+		const switched = await session.switchSession(targetFile);
+		expect(switched).toBe(true);
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(events).toEqual(["service_tier_changed"]);
+	});
 });

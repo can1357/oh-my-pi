@@ -275,7 +275,15 @@ export class ModelControls {
 
 	/** Restores service tiers without persisting a duplicate transcript entry. */
 	restoreServiceTiers(tiers: ServiceTierByFamily): void {
+		const previous = this.#serviceTierByFamily;
 		this.#serviceTierByFamily = tiers;
+		if (
+			previous.openai !== tiers.openai ||
+			previous.anthropic !== tiers.anthropic ||
+			previous.google !== tiers.google
+		) {
+			this.#host.emit({ type: "service_tier_changed" });
+		}
 	}
 	resolveRoleModel(role: string): Model | undefined {
 		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
