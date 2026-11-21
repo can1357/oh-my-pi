@@ -135,6 +135,14 @@ describe("CLI RPC MCP discovery", () => {
 							expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({ isError: true });
 							expect(await auditEntries(audit)).toEqual([]);
 						} else {
+							// Deferred discovery may land after the first turn starts: wait until the command is mounted.
+							const probe = `type ${toolCommand}`;
+							for (let attempt = 0; attempt < 20; attempt++) {
+								const seen = toolResult(await client.promptAndWait(`run_command ${probe}`), "bash", {
+									command: probe,
+								});
+								if (!seen.includes("not found")) break;
+							}
 							const help = toolResult(await client.promptAndWait(`run_command ${toolCommand} --help`), "bash", {
 								command: `${toolCommand} --help`,
 							});
