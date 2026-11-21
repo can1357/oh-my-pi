@@ -184,6 +184,30 @@ describe("EvalTool auto-background", () => {
 		await asyncJobManager.dispose();
 	});
 
+	it("backgrounds a long cell with default settings instead of holding the turn to its deadline", async () => {
+		// Interactive, print and VM sessions never set the option: a long cell
+		// must still return control and deliver later, as bash does by default.
+		const deliveries: string[] = [];
+		const asyncJobManager = new AsyncJobManager({
+			onJobComplete: async (_jobId, text) => void deliveries.push(text),
+		});
+		const cell = mockGatedCell("default-on\n");
+		const tool = new EvalTool(
+			makeSession(Settings.isolated({ "eval.autoBackground.thresholdMs": 10 }), asyncJobManager),
+		);
+		const result = await tool.execute("call-default", { language: "js", code: "await work()" });
+
+		expect(result.details?.async?.state).toBe("running");
+		const jobId = result.details?.async?.jobId;
+		if (!jobId) throw new Error("expected an auto-backgrounded job id");
+		cell.release();
+		await asyncJobManager.getJob(jobId)?.promise;
+		await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+		expect(deliveries).toHaveLength(1);
+		expect(deliveries[0]).toContain("default-on");
+		await asyncJobManager.dispose();
+	});
+
 	it("backgrounds a running cell when the steering signal fires mid-wait", async () => {
 		const asyncJobManager = new AsyncJobManager({});
 		const cell = mockGatedCell("steered\n");

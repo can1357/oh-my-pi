@@ -68,11 +68,14 @@ export const cfgEvalWorkpoolFreshAgents = register({
 	},
 });
 
+// On by default, like `bash.autoBackground.enabled`: a cell past the threshold returns control
+// with its output so far and delivers its result later; the cell's own deadline still bounds it.
+// `protocolDefault` pins this same default for RPC hosts rather than a user's interactive value.
 export const cfgEvalAutoBackgroundEnabled = register({
 	id: "eval.autoBackground.enabled",
 	protocolDefault: ["rpc"],
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "shell",
 		group: "Eval & Runtimes",
