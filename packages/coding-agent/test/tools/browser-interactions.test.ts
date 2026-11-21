@@ -1029,9 +1029,9 @@ return { value: await tab.value("#msg"), sent: await tab.evaluate(() => window.s
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const tabName = `fill-keyup-${crypto.randomUUID()}`;
-		// `#q` searches only on `keyup`, as CyberChef's operation search does, and its input spends the page's user
-		// activation on a popup; input in `#opens` and a keydown in `#hops` move focus to a button; a keydown in `#flip`
-		// makes it a checkbox; `#box` is a MathML element named like a text field.
+		// `#q` searches only on `keyup`, as CyberChef's operation search does. Its input tries to spend any user
+		// activation on a popup. Input in `#opens` and a keydown in `#hops` move focus to a button; a keydown in
+		// `#flip` makes it a checkbox; `#box` is a MathML element named like a text field.
 		const html = `<!doctype html><input id="q" value="old"><p id="results"></p><input id="opens"><input id="hops">
 <input id="flip"><button id="ok">OK</button><math><textarea id="box" tabindex="0"></textarea></math>
 <script>
@@ -1039,8 +1039,15 @@ window.events = [];
 for (const type of ["keydown", "keypress", "beforeinput", "input", "keyup", "click"]) {
   addEventListener(type, event => events.push([type, event.target.id, event.key ?? "", event.target.value].join(":")), true);
 }
-q.addEventListener("input", () => window.open()?.close());
-q.addEventListener("keyup", () => { results.textContent = q.value + " active:" + navigator.userActivation.isActive; });
+let activationAfterInput = false;
+q.addEventListener("input", () => {
+  window.open()?.close();
+  activationAfterInput = navigator.userActivation.isActive;
+});
+q.addEventListener("keyup", event => {
+  const activated = !activationAfterInput && navigator.userActivation.isActive;
+  results.textContent = q.value + " trusted:" + event.isTrusted + " activated:" + activated;
+});
 opens.addEventListener("input", () => ok.focus());
 hops.addEventListener("keydown", () => ok.focus());
 flip.addEventListener("keydown", () => { flip.type = "checkbox"; });
@@ -1068,7 +1075,7 @@ return { boxKeys, results, events: await tab.evaluate(() => window.events) };`,
 				context,
 			);
 			expect(valueFrom<unknown>(result)).toEqual({
-				results: "to base64 active:false",
+				results: "to base64 trusted:false activated:false",
 				events: [
 					"beforeinput:q::",
 					"input:q::to base64",
