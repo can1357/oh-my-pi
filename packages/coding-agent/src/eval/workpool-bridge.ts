@@ -85,7 +85,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		const perCallModel = typeof model === "string" ? model : undefined;
 		// Raw: the shared preflight validates and reports a malformed role instead of the bridge dropping it.
 		const modelRole: Pick<StructuredSubagentRequest, "modelRole"> = Object.hasOwn(record, "modelRole")
-			? { modelRole: record.modelRole as string | undefined }
+			? { modelRole: record.modelRole }
 			: {};
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");

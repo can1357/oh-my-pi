@@ -203,7 +203,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		: undefined;
 	// Forward even a non-string or blank role so the shared preflight judges it rather than the bridge.
 	const modelRole: Pick<StructuredSubagentRequest, "modelRole"> = Object.hasOwn(parsed, "modelRole")
-		? { modelRole: parsed.modelRole as string | undefined }
+		? { modelRole: parsed.modelRole }
 		: {};
 
 	try {

@@ -92,7 +92,7 @@ export interface WorkPoolCreateOptions {
 	/** Raw selector applied to each worker at creation, never to follow-up turns. */
 	model?: string;
 	/** Raw workload role applied to each worker at creation, never to follow-up turns. */
-	modelRole?: string;
+	modelRole?: unknown;
 	policy: EffectiveSubagentPolicy;
 	context?: string;
 	customTools?: CustomTool[];
@@ -116,7 +116,7 @@ export class WorkPool {
 	readonly session: ToolSession;
 	readonly policy: EffectiveSubagentPolicy;
 	readonly #model?: string;
-	readonly #modelRole?: string;
+	readonly #modelRole?: unknown;
 	readonly context?: string;
 	readonly customTools: CustomTool[];
 	readonly freshAgents: boolean;

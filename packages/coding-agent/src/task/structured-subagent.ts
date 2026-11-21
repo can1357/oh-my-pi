@@ -154,7 +154,7 @@ export interface StructuredSubagentRequest {
 	 * `task.perCallModel` and grants no exact model. Raw caller value; blank is
 	 * absent and anything else is refused by {@link resolveEffectiveSubagentPolicy}.
 	 */
-	modelRole?: string;
+	modelRole?: unknown;
 
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
