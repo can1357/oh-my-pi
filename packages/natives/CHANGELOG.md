@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows `computer` takeovers starting while you type, so your keys went into the target: a takeover now waits until the session has had no input for 5 s (pointer moves included) and you hold no mouse button or modifier, and returns `UserIntervened` with nothing sent if that does not come before the call's deadline; once started, a takeover still runs to the end if you type ([#20019](https://github.com/can1357/oh-my-pi/pull/20019) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added
@@ -81,12 +85,6 @@
 - Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
 - Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
 - Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
-- Fixed the native addon failing to load when HOME, PI_NATIVES_DIR or the install directory contains `?` ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
-- `commitCreate()` now reports a HEAD that moves after the expected-HEAD check, such as from a `commit-msg` hook, as a `HeadMoved` error instead of a generic `Backend` failure ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
-- Fixed macOS window reads losing a window once it is minimized: an AX snapshot or query of that exact window ID still reads its tree, marks the root `(minimized)`, and keeps its refs inspection-only until a visible read of the restored window completes; menu reads and commands report `WindowUnavailable` instead of restoring it or using a sibling's menu ([#19825](https://github.com/can1357/oh-my-pi/pull/19825) by [@baekjosh](https://github.com/baekjosh))
-- Fixed Windows window captures and accessibility trees of a fully covered window passing as current: for Chromium-based browsers and Electron apps, which can stop drawing while covered, they now report `covered` ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Windows `computer` `setValue` on a classic text box (Win32 and WinForms, including Windows 10 Notepad) bringing its window in front of yours, so the keys you typed next went into that box ([#19814](https://github.com/can1357/oh-my-pi/pull/19814) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Windows `computer` takeovers starting while you type, so your keys went into the target: a takeover now waits until the session has had no input for 5 s (pointer moves included) and you hold no mouse button or modifier, and returns `UserIntervened` with nothing sent if that does not come before the call's deadline; once started, a takeover still runs to the end if you type
 
 ## [19.0.1] - 2026-11-19
 
