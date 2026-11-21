@@ -1812,6 +1812,9 @@ impl Worker {
 				Ok(Response::Input(control::take_focus_return()))
 			},
 			Request::Scroll { target, x, y, dx, dy, takeover, .. } => {
+				if !dx.is_finite() || !dy.is_finite() {
+					return Err(DesktopError::input_failed("scroll deltas must be finite"));
+				}
 				let (x, y, frame) = self.map_point(target, *x, *y)?;
 				self.backend()?.pointer(
 					target,
@@ -5491,6 +5494,24 @@ mod capture_tests {
 			ErrorCode::InvalidCoordinateFrame
 		);
 		assert_eq!(*captures.lock(), 1, "invalid zoom must not reach the capture backend");
+	}
+
+	#[test]
+	fn scroll_rejects_non_finite_deltas_before_resolving_the_target() {
+		let mut worker = worker_with(FakeWaylandBackend::new());
+		let token = CancellationSource::default().token();
+		for (dx, dy) in [(f64::INFINITY, 0.0), (0.0, f64::NEG_INFINITY), (0.0, f64::NAN)] {
+			let request = Request::Scroll {
+				target: Target::Window(WAYLAND_ID.to_string()),
+				x: 1.0,
+				y: 1.0,
+				dx,
+				dy,
+				takeover: Takeover::new(None, None),
+				reply: flume::unbounded().0,
+			};
+			assert_eq!(worker.process(&request, &token).err().unwrap().code, ErrorCode::InputFailed);
+		}
 	}
 
 	/// With no input route, every pointer and keyboard call, element clicks

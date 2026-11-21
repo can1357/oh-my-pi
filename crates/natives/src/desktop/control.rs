@@ -346,6 +346,14 @@ pub(crate) fn time_left() -> Option<Duration> {
 		})
 }
 
+/// The operation's absolute cutoff, leaving time for its reply.
+#[cfg(target_os = "windows")]
+pub(crate) fn reply_deadline() -> Option<Instant> {
+	CURRENT
+		.with_borrow(|token| token.as_ref().and_then(OperationToken::deadline))
+		.and_then(|deadline| deadline.checked_sub(DEADLINE_MARGIN))
+}
+
 /// [`check`] for a step that would send new input from inside [`cleanup`],
 /// such as pressing an item of a menu that cleanup is settling: cleanup lets
 /// releases through after cancellation, never fresh input.

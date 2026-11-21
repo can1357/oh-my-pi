@@ -131,6 +131,15 @@ fn scroll_steps(delta: f64) -> i32 {
 	}
 }
 
+const WHEEL_DELTA: i32 = 120;
+
+/// Both background routes accept only wheel steps that fit one posted message.
+pub(super) fn background_wheel(steps: i32) -> CoreResult<i16> {
+	let wheel = steps.saturating_mul(WHEEL_DELTA);
+	i16::try_from(wheel)
+		.map_err(|_| DesktopError::input_failed(format!("scroll delta {wheel} exceeds Win32 range")))
+}
+
 fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button, count, modifiers } => {
@@ -240,8 +249,9 @@ mod background {
 	use crate::desktop::win32::{
 		ax::Win32Ax,
 		delivery::{
-			EventKind, TargetTraits, TextUnit, is_chromium_class, non_client_drag_region,
-			posts_double_click, text_input_unsupported, text_units, would_be_silently_dropped,
+			EventKind, TargetTraits, TextUnit, is_chromium_class, is_wpf_class,
+			non_client_drag_region, posts_double_click, text_input_unsupported, text_units,
+			would_be_silently_dropped,
 		},
 		window,
 	};
@@ -249,7 +259,6 @@ mod background {
 	const MK_LBUTTON: usize = 0x0001;
 	const MK_RBUTTON: usize = 0x0002;
 	const MK_MBUTTON: usize = 0x0010;
-	const WHEEL_DELTA: i32 = 120;
 
 	/// Time between a posted button press and its release.
 	const CLICK_HOLD: Duration = Duration::from_millis(35);
@@ -407,22 +416,29 @@ mod background {
 		}
 	}
 
-	fn wheel_wparam(delta: i32) -> CoreResult<WPARAM> {
-		let delta = i16::try_from(delta).map_err(|_| {
-			DesktopError::input_failed(format!("scroll delta {delta} exceeds Win32 range"))
-		})?;
-		Ok(usize::from(u16::from_ne_bytes(delta.to_ne_bytes())) << 16)
+	const fn wheel_wparam(delta: i16) -> WPARAM {
+		(u16::from_ne_bytes(delta.to_ne_bytes()) as usize) << 16
 	}
 
 	/// Posts pointer input to the deepest child window under the point.
 	///
 	/// Toolkits that drop posted clicks still get a single unmodified left
 	/// click when UI Automation can invoke the control under the point, except
-	/// Chromium, whose Invoke reports success without acting.
+	/// Chromium, whose Invoke reports success without acting. While a WPF
+	/// window without a Chromium descendant holds the foreground, its scrolls
+	/// go to the UI Automation scroll container under the point; any other
+	/// WPF scroll is refused, as `main` refuses WPF pointer input.
 	pub(super) fn pointer(ax: &mut Win32Ax, id: &str, event: PointerEvent) -> CoreResult<()> {
 		control::check()?;
 		let root = hwnd(id)?;
 		ensure_integrity(id, root)?;
+		// A scroll with no wheel steps sends nothing, so no route can refuse it.
+		if let PointerEvent::Scroll { dx, dy, .. } = event
+			&& super::scroll_steps(dx) == 0
+			&& super::scroll_steps(dy) == 0
+		{
+			return Ok(());
+		}
 		let kind = match event {
 			PointerEvent::Click { .. } | PointerEvent::Hold { .. } => EventKind::MouseClick,
 			PointerEvent::Move { .. } => EventKind::MouseMove,
@@ -430,7 +446,10 @@ mod background {
 			PointerEvent::Scroll { .. } => EventKind::MouseScroll,
 		};
 		let class = window::class_name(root);
-		if let Some(reason) = drop_reason(root, &class, kind) {
+		let wpf_scroll = kind == EventKind::MouseScroll
+			&& is_wpf_class(&class)
+			&& !window::has_chromium_descendant(root);
+		if !wpf_scroll && let Some(reason) = drop_reason(root, &class, kind) {
 			if let PointerEvent::Click { x, y, button: MouseButton::Left, count: 1, modifiers } = event
 				&& modifiers == Modifiers::default()
 				&& !is_chromium_class(&class)
@@ -537,22 +556,37 @@ mod background {
 				})
 			},
 			PointerEvent::Scroll { x, y, dx, dy } => {
+				let horizontal_steps = super::scroll_steps(dx);
+				let vertical_steps = super::scroll_steps(dy);
 				let point = screen_point(x, y);
 				// Wheel messages carry screen coordinates; unhandled wheel input
 				// bubbles from the child up its parent chain.
 				let (target, _) = child_under(root, point)?;
+				if wpf_scroll && (target == root || is_wpf_class(&window::class_name(target))) {
+					let (horizontal, vertical) = (horizontal_steps, vertical_steps);
+					if ax.scroll_at_point(root, point, horizontal, vertical)? {
+						return Ok(());
+					}
+					return Err(refusal(
+						id,
+						&class,
+						kind,
+						"WPF ignores posted wheels, and UI Automation scrolls it only through a scroll \
+						 container under the point while the window is in front",
+					));
+				}
 				ensure_delivery(id, target, kind)?;
 				let point = window::logical_screen_point(target, point).ok_or_else(|| {
 					DesktopError::input_failed("cannot map wheel coordinates to the target's DPI")
 				})?;
 				let location = packed_point(point.x, point.y)?;
-				let horizontal = super::scroll_steps(dx).saturating_mul(WHEEL_DELTA);
-				let vertical = super::scroll_steps(dy).saturating_mul(-WHEEL_DELTA);
+				let horizontal = super::background_wheel(horizontal_steps)?;
+				let vertical = super::background_wheel(vertical_steps)?;
 				if horizontal != 0 {
-					post(target, WM_MOUSEHWHEEL, wheel_wparam(horizontal)?, location)?;
+					post(target, WM_MOUSEHWHEEL, wheel_wparam(horizontal), location)?;
 				}
 				if vertical != 0 {
-					post(target, WM_MOUSEWHEEL, wheel_wparam(vertical)?, location)?;
+					post(target, WM_MOUSEWHEEL, wheel_wparam(-vertical), location)?;
 				}
 				Ok(())
 			},
@@ -1903,4 +1937,26 @@ pub(super) fn raise_window(id: &str) -> CoreResult<()> {
 	window::wait_for_foreground(hwnd, Duration::from_millis(500))?.ok_or_else(|| {
 		DesktopError::input_failed(format!("Windows refused to raise window {id} (foreground lock)"))
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn background_scroll_keeps_the_posted_wheel_range() {
+		for (delta, expected) in [
+			(0.0, Some(0)),
+			(27_300.0, Some(32_760)),
+			(-27_300.0, Some(-32_760)),
+			(27_400.0, None),
+			(f64::MAX, None),
+		] {
+			assert_eq!(
+				background_wheel(scroll_steps(delta)).map_err(|error| error.code),
+				expected.ok_or(super::super::super::error::ErrorCode::InputFailed),
+				"{delta}"
+			);
+		}
+	}
 }

@@ -242,6 +242,7 @@ mod tests {
 		fmt::Write as _,
 		io::{BufRead, BufReader, Write},
 		process::{Child, ChildStdout, Command, Stdio},
+		sync::Arc,
 		time::Duration,
 	};
 
@@ -250,15 +251,21 @@ mod tests {
 		UI::{
 			Input::KeyboardAndMouse::VK_RETURN,
 			WindowsAndMessaging::{
-				CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, ES_AUTOHSCROLL, GetForegroundWindow,
-				GetMessageW, MSG, PostMessageW, SendMessageW, SetForegroundWindow, TranslateMessage,
-				WM_APP, WM_GETTEXT, WM_KEYDOWN, WM_SETTEXT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+				CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, ES_AUTOHSCROLL, FindWindowW,
+				GetForegroundWindow, GetMessageW, MSG, PostMessageW, SPI_GETWHEELSCROLLCHARS,
+				SPI_GETWHEELSCROLLLINES, SendMessageW, SetForegroundWindow, SystemParametersInfoW,
+				TranslateMessage, WM_APP, WM_GETTEXT, WM_KEYDOWN, WM_SETTEXT, WS_OVERLAPPEDWINDOW,
+				WS_VISIBLE,
 			},
 		},
 	};
 
 	use super::*;
-	use crate::desktop::control::{self, CancellationSource};
+	use crate::desktop::{
+		Request, Response, Takeover, Worker,
+		control::{self, CancellationSource},
+		error::ErrorCode,
+	};
 
 	fn wide(text: &str) -> Vec<u16> {
 		text.encode_utf16().chain(Some(0)).collect()
@@ -767,5 +774,305 @@ mod tests {
 		// the hung one first.
 		let reason = unconfirmed.expect("the call reported the text unconfirmed");
 		assert!(reason.contains("read all the typed text"), "{reason}");
+	}
+
+	const MARK: u32 = WM_APP + 7;
+	const GROW: u32 = WM_APP + 11;
+	const CHROMIUM: u32 = WM_APP + 12;
+	const PIN_ACROSS: u32 = WM_APP + 13;
+	/// The fixture activates its own windows: it owns the foreground, so
+	/// Windows lets it, where a test process outside the foreground is refused.
+	const FRONT: u32 = WM_APP + 14;
+	const BACK: u32 = WM_APP + 15;
+	const WPF_LIST: &str = r#"
+Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml,UIAutomationProvider,UIAutomationTypes,WindowsFormsIntegration,System.Windows.Forms,System.Drawing -TypeDefinition @'
+using System; using System.Windows; using System.Windows.Controls; using System.Windows.Interop;
+using System.Windows.Automation; using System.Windows.Automation.Peers; using System.Windows.Automation.Provider;
+using System.Runtime.InteropServices; using System.Collections.Generic;
+public class WheelMarker : System.Windows.Forms.NativeWindow {
+	public static int Wheels;
+	protected override void WndProc(ref System.Windows.Forms.Message message) {
+		if (message.Msg == 0x020A || message.Msg == 0x020E) Wheels++;
+		base.WndProc(ref message);
+	}
+}
+public class DecorativeHost : HwndHost {
+	delegate IntPtr WindowProc(IntPtr hwnd, uint message, IntPtr w, IntPtr l);
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	struct WindowClass {
+		public uint style; public WindowProc procedure; public int classExtra, windowExtra;
+		public IntPtr instance, icon, cursor, background, menu;
+		[MarshalAs(UnmanagedType.LPWStr)] public string name;
+	}
+	[DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern ushort RegisterClass(ref WindowClass value);
+	[DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateWindowEx(int ex, string kind, string title, int style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+	[DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr hwnd);
+	[DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr DefWindowProc(IntPtr hwnd, uint message, IntPtr w, IntPtr l);
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+	static WindowProc procedure = DefWindowProc;
+	static IntPtr instance = GetModuleHandle(null);
+	IntPtr chromium;
+	protected override HandleRef BuildWindowCore(HandleRef parent) {
+		var kind = new WindowClass { procedure = procedure, instance = instance, name = "Chrome_RenderWidgetHostHWND" };
+		if (RegisterClass(ref kind) == 0) throw new Exception("register synthetic Chromium class");
+		var hwnd = CreateWindowEx(0, "STATIC", "", 0x50000000, 0, 0, 80, 50, parent.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+		if (hwnd == IntPtr.Zero) throw new Exception("create decorative STATIC");
+		return new HandleRef(this, hwnd);
+	}
+	public void ToggleChromium() {
+		if (chromium != IntPtr.Zero) { DestroyWindow(chromium); chromium = IntPtr.Zero; return; }
+		chromium = CreateWindowEx(0, "Chrome_RenderWidgetHostHWND", "", 0x50000000, 0, 0, 10, 10, Handle, IntPtr.Zero, instance, IntPtr.Zero);
+		if (chromium == IntPtr.Zero) throw new Exception("create synthetic Chromium child");
+	}
+	protected override void DestroyWindowCore(HandleRef hwnd) { DestroyWindow(hwnd.Handle); }
+}
+public class TestList : ListBox { protected override AutomationPeer OnCreateAutomationPeer() { return new TestPeer(this); } }
+public class TestPeer : ListBoxAutomationPeer, IScrollProvider {
+	public TestPeer(ListBox owner) : base(owner) {}
+	IScrollProvider Inner { get { return (IScrollProvider)base.GetPattern(PatternInterface.Scroll); } }
+	public override object GetPattern(PatternInterface pattern) { return pattern == PatternInterface.Scroll ? this : base.GetPattern(pattern); }
+	public void Scroll(ScrollAmount across, ScrollAmount down) { if (!Fixture.Grow()) Inner.Scroll(across, down); }
+	public void SetScrollPercent(double across, double down) { Inner.SetScrollPercent(across, down); }
+	public double HorizontalScrollPercent { get { return Inner.HorizontalScrollPercent; } }
+	public double VerticalScrollPercent { get { return Inner.VerticalScrollPercent; } }
+	public double HorizontalViewSize { get { return Inner.HorizontalViewSize; } }
+	public double VerticalViewSize { get { return Inner.VerticalViewSize; } }
+	public bool HorizontallyScrollable { get { return Inner.HorizontallyScrollable; } }
+	public bool VerticallyScrollable { get { return Inner.VerticallyScrollable; } }
+}
+public static class Fixture {
+	static ListBox list; static System.Windows.Forms.ListBox hosted;
+	static DecorativeHost decorative;
+	delegate bool EnumChild(IntPtr hwnd, IntPtr parameter);
+	[DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr hwnd, EnumChild callback, IntPtr parameter);
+	static Dictionary<IntPtr, WheelMarker> markers = new Dictionary<IntPtr, WheelMarker>();
+	static void MarkChildren(IntPtr root) {
+		EnumChildWindows(root, (hwnd, parameter) => {
+			if (!markers.ContainsKey(hwnd)) { var marker = new WheelMarker(); marker.AssignHandle(hwnd); markers.Add(hwnd, marker); }
+			return true;
+		}, IntPtr.Zero);
+	}
+	static bool grow; static double offset, across; static Window other;
+	static int calls;
+	public static bool Grow() {
+		calls++; if (!grow) return false;
+		grow = false; var count = list.Items.Count;
+		for (var row = count + 1; row <= count + 60; row++) list.Items.Add("Row " + row);
+		list.UpdateLayout();
+		return true;
+	}
+	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
+		if (message == 0x020A || message == 0x020E) { Console.WriteLine("wheel"); Console.Out.Flush(); }
+		else if (message == 0x8007) {
+			list.UpdateLayout();
+			Console.WriteLine("{0} {1} {2} {3} {4} {5}", offset, list.Items.Count, hosted.TopIndex, calls, across, WheelMarker.Wheels);
+			Console.Out.Flush();
+		}
+		else if (message == 0x800B) grow = true;
+		else if (message == 0x800C) { decorative.ToggleChromium(); MarkChildren(hwnd); }
+		else if (message == 0x800E) Window.GetWindow(HwndSource.FromHwnd(hwnd).RootVisual).Activate();
+		else if (message == 0x800F) other.Activate();
+		else if (message == 0x800D) { ((IScrollProvider)UIElementAutomationPeer.CreatePeerForElement(list).GetPattern(PatternInterface.Scroll)).SetScrollPercent(100, -1); list.UpdateLayout(); }
+		return IntPtr.Zero; }
+	public static void Run() {
+		list = new TestList();
+		hosted = new System.Windows.Forms.ListBox { IntegralHeight = false };
+		for (var row = 1; row <= 60; row++) { list.Items.Add("Row " + row + new string('x', 100)); hosted.Items.Add("Hosted " + row); }
+		ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Auto);
+		list.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler((sender, e) => { offset = e.VerticalOffset; across = e.HorizontalOffset; }));
+		var panel = new DockPanel(); var header = new DockPanel { Height = 50, LastChildFill = false };
+		decorative = new DecorativeHost { Width = 80, Height = 50 };
+		DockPanel.SetDock(decorative, Dock.Right); header.Children.Add(decorative);
+		DockPanel.SetDock(header, Dock.Top); panel.Children.Add(header);
+		var host = new System.Windows.Forms.Integration.WindowsFormsHost { Width = 120, Child = hosted };
+		DockPanel.SetDock(host, Dock.Right); panel.Children.Add(host); panel.Children.Add(list);
+		var window = new Window { Title = "omp test: wpf list", Left = 40, Top = 40, Width = 420, Height = 240, Content = panel };
+		other = new Window { Title = "omp test: wpf other", Left = 500, Top = 40, Width = 240, Height = 160 };
+		window.SourceInitialized += (sender, e) => HwndSource.FromHwnd(new WindowInteropHelper(window).Handle).AddHook(Hook);
+		window.ContentRendered += (sender, e) => { MarkChildren(new WindowInteropHelper(window).Handle); other.Show(); Console.WriteLine("ready"); Console.Out.Flush(); };
+		window.ShowDialog(); }
+}
+'@
+[Fixture]::Run()
+"#;
+	struct WpfList {
+		host:   Child,
+		output: std::io::Lines<BufReader<ChildStdout>>,
+		window: HWND,
+		other:  HWND,
+	}
+	impl WpfList {
+		fn open() -> Self {
+			let mut host = Command::new("powershell")
+				.args(["-NoProfile", "-Command", WPF_LIST])
+				.stdout(Stdio::piped())
+				.spawn()
+				.unwrap();
+			let output = BufReader::new(host.stdout.take().unwrap()).lines();
+			let mut list =
+				Self { host, output, window: std::ptr::null_mut(), other: std::ptr::null_mut() };
+			assert_eq!(list.output.next().unwrap().unwrap(), "ready");
+			// SAFETY: both titles are NUL-terminated and outlive these calls.
+			unsafe {
+				list.window = FindWindowW(std::ptr::null(), wide("omp test: wpf list").as_ptr());
+				list.other = FindWindowW(std::ptr::null(), wide("omp test: wpf other").as_ptr());
+			}
+			assert!(!list.window.is_null() && !list.other.is_null());
+			list
+		}
+
+		fn post(&self, message: u32) {
+			// SAFETY: a plain message to a window this fixture owns.
+			assert_ne!(unsafe { PostMessageW(self.window, message, 0, 0) }, 0);
+		}
+
+		fn state(&mut self) -> [f64; 6] {
+			self.post(MARK);
+			// MARK is a queue barrier: every native child counts wheels, and
+			// an unexpected root wheel marker fails this parse.
+			let line = self.output.next().unwrap().unwrap();
+			let mut values = line.split_whitespace();
+			std::array::from_fn(|_| values.next().unwrap().parse().unwrap())
+		}
+	}
+	impl Drop for WpfList {
+		fn drop(&mut self) {
+			let _ = self.host.kill();
+			let _ = self.host.wait();
+		}
+	}
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn wpf_scrolls_go_through_ui_automation_in_front_and_report_what_moved() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		const OFFSET: usize = 0;
+		const ROWS: usize = 1;
+		const HOSTED: usize = 2;
+		const CALLS: usize = 3;
+		const ACROSS: usize = 4;
+		const NATIVE_WHEELS: usize = 5;
+		let mut list = WpfList::open();
+		let mut worker = Worker::new(DisplaySelector::Active, Arc::default(), Arc::default());
+		let token = CancellationSource::default().token();
+		let target = Target::Window(list.window.expose_provenance().to_string());
+		let mut per_notch = 3_u32;
+		let mut characters = 3_u32;
+		// SAFETY: this action writes one u32 to the pointer given.
+		unsafe {
+			SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, (&raw mut per_notch).cast(), 0);
+			SystemParametersInfoW(SPI_GETWHEELSCROLLCHARS, 0, (&raw mut characters).cast(), 0);
+		}
+		assert!((1..=20).contains(&per_notch), "the test needs 1 to 20 wheel lines per notch");
+		assert!(characters > 0, "the test needs horizontal wheel scrolling enabled");
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let foreground = || unsafe { GetForegroundWindow() };
+		assert!(window::wait_for_foreground(list.other, Duration::from_secs(2)).unwrap());
+		let request = Request::Capture {
+			target: target.clone(),
+			caps:   CaptureCaps::default(),
+			reply:  flume::unbounded().0,
+		};
+		let Response::Capture(frame) = worker.execute(&request, &token).unwrap() else {
+			panic!("expected capture")
+		};
+		let (width, height) = (f64::from(frame.coordinate_width), f64::from(frame.coordinate_height));
+		let (x, y) = (width / 3.0, height / 2.0);
+		let mut scroll = |x, y, (dx, dy), takeover| {
+			let request = Request::Scroll {
+				target: target.clone(),
+				x,
+				y,
+				dx,
+				dy,
+				takeover: Takeover::new(takeover, None),
+				reply: flume::unbounded().0,
+			};
+			worker.execute(&request, &token).map(drop)
+		};
+		let initial = list.state();
+		for dy in [100.0, 27_400.0] {
+			let error = scroll(x, y, (0.0, dy), None).unwrap_err();
+			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+			assert_eq!(list.state(), initial);
+			assert_eq!(foreground(), list.other);
+		}
+		scroll(width * 0.85, y, (0.0, 100.0), None).unwrap();
+		let hosted = list.state();
+		assert!(hosted[HOSTED] > initial[HOSTED]);
+		assert_eq!(hosted[OFFSET], initial[OFFSET]);
+		assert_eq!(hosted[CALLS], initial[CALLS]);
+		assert!(hosted[NATIVE_WHEELS] > initial[NATIVE_WHEELS]);
+		assert_eq!(foreground(), list.other);
+		// A synthetic Chromium-class descendant exercises root admission,
+		// not a real WebView2 provider.
+		list.post(CHROMIUM);
+		assert_eq!(list.state(), hosted);
+		assert!(window::has_chromium_descendant(list.window));
+		for point in [(x, y), (width * 0.85, y)] {
+			let error = scroll(point.0, point.1, (0.0, 100.0), None).unwrap_err();
+			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+			assert_eq!(list.state(), hosted);
+			assert_eq!(foreground(), list.other);
+		}
+		// No wheel steps: nothing is sent, so nothing is refused or taken over.
+		scroll(x, y, (0.0, 0.0), None).unwrap();
+		assert_eq!(list.state(), hosted);
+		assert_eq!(foreground(), list.other);
+		list.post(CHROMIUM);
+		assert_eq!(list.state(), hosted);
+		assert!(!window::has_chromium_descendant(list.window));
+		list.post(FRONT);
+		assert!(window::wait_for_foreground(list.window, Duration::from_secs(2)).unwrap());
+		let before = list.state();
+		let error = scroll(x, y, (100.0, 27_400.0), None).unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
+		assert_eq!(list.state(), before, "neither axis may scroll an oversized request");
+		scroll(x, y, (100.0, 0.0), None).unwrap();
+		let across = list.state();
+		assert!(across[ACROSS] > initial[ACROSS]);
+		assert_eq!(across[OFFSET], initial[OFFSET]);
+		assert!(across[CALLS] > initial[CALLS]);
+		scroll(x, y, (0.0, 100.0), None).unwrap();
+		let moved = list.state();
+		assert_eq!(moved[OFFSET], initial[OFFSET] + f64::from(per_notch));
+		assert!(moved[CALLS] > initial[CALLS]);
+		let error = scroll(x, height * 0.2, (0.0, 100.0), None).unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		assert_eq!(list.state(), moved);
+		assert_eq!(foreground(), list.window);
+		list.post(PIN_ACROSS);
+		let pinned = list.state();
+		assert!(pinned[ACROSS] > moved[ACROSS]);
+		assert_eq!(pinned[OFFSET], moved[OFFSET]);
+		scroll(x, y, (100.0, 100.0), None).unwrap();
+		let mixed = list.state();
+		assert_eq!(mixed[ACROSS], pinned[ACROSS]);
+		assert_eq!(mixed[OFFSET], pinned[OFFSET] + f64::from(per_notch));
+		assert!(mixed[CALLS] > pinned[CALLS]);
+		scroll(x, y, (0.0, 27_300.0), None).unwrap();
+		let end = list.state();
+		assert!(end[OFFSET] > moved[OFFSET]);
+		let error = scroll(x, y, (0.0, 100.0), None).unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
+		assert_eq!(list.state(), end);
+		list.post(GROW);
+		assert_eq!(list.state(), end);
+		// Rows added during a step move the scroll percentage but not the
+		// offset: the step did not move, and is not reported as moved.
+		let error = scroll(x, y, (0.0, -100.0), None).unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
+		let grown = list.state();
+		assert_eq!(grown[OFFSET], end[OFFSET]);
+		assert_eq!(grown[ROWS], 120.0);
+		assert_eq!(grown[CALLS], end[CALLS] + 1.0);
+		list.post(BACK);
+		assert!(window::wait_for_foreground(list.other, Duration::from_secs(2)).unwrap());
+		scroll(x, y, (0.0, -100.0), Some(true)).unwrap();
+		assert_eq!(list.output.next().unwrap().unwrap(), "wheel");
+		let wheel = list.state();
+		assert_eq!(wheel[OFFSET], grown[OFFSET] - f64::from(per_notch));
+		assert_eq!(wheel[CALLS], grown[CALLS]);
+		assert_eq!(foreground(), list.other);
 	}
 }
