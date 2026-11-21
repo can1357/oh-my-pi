@@ -228,6 +228,25 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("an older prompt");
 		});
 
+		it("k then j through a remembered draft brings the live draft back with its paste payloads", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const older = Array.from({ length: 20 }, (_, i) => `older ${i}`).join("\n");
+			const live = Array.from({ length: 20 }, (_, i) => `live ${i}`).join("\n");
+			editor.handleInput(`\x1b[200~${older}\x1b[201~`);
+			editor.rememberDraft();
+			editor.setText("");
+			editor.clearPasteState();
+			editor.handleInput(`\x1b[200~${live}\x1b[201~`);
+			expect(editor.getText()).toMatch(/^\[Paste #1, \+\d+ lines\]$/);
+			editor.setVimMode(true);
+			editor.handleInput(ESC);
+			editor.handleInput("k");
+			// The remembered draft, with its own payload.
+			expect(editor.getExpandedText()).toBe(older);
+			editor.handleInput("j");
+			expect(editor.getExpandedText()).toBe(live);
+		});
+
 		it("backspace moves left in normal mode rather than deleting", () => {
 			const editor = vimEditor("alfa", { cursorToStart: false });
 			editor.handleInput(ESC);

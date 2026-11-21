@@ -758,12 +758,12 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	/**
-	 * `j`/`k` in Vim mode: one row down or up, as ↓/↑, on a row that takes no typing (an option, a closed
-	 * dropdown, Submit), and from a text box in Normal mode on its last or first line. 0 otherwise, so
-	 * text boxes keep their letters and an open dropdown its type-ahead.
+	 * `j`/`k` in Vim mode: one row down or up, as ↓/↑, on a row that takes no typing (an option,
+	 * Submit), and from a text box in Normal mode on its last or first line. 0 otherwise, so text
+	 * boxes keep their letters and a dropdown, closed or open, its letter type-ahead.
 	 */
 	#vimStep(stop: Stop, data: string): -1 | 0 | 1 {
-		if (!this.#options.vimMode) return 0;
+		if (!this.#options.vimMode || stop.kind === "select") return 0;
 		const step = matchesKey(data, "j") ? 1 : matchesKey(data, "k") ? -1 : 0;
 		if (step === 0 || (stop.kind !== "text" && stop.kind !== "other")) return step;
 		const editor = this.activeEditor();

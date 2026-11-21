@@ -444,7 +444,8 @@ export class InputController {
 						return undefined;
 					}
 					// Vim Normal mode owns Ctrl-R as redo, in the composer and in a dialog's text box alike;
-					// history search stays on it in Insert mode.
+					// history search stays on it in Insert mode. Only literal Ctrl-R is the editor's, so a
+					// remapped `app.history.search` key still opens the search from Normal mode.
 					const focused = this.ctx.ui.getFocused();
 					const editor =
 						focused === this.ctx.editor
@@ -452,7 +453,7 @@ export class InputController {
 							: focused instanceof HookEditorComponent || focused instanceof HtmlFormDialog
 								? focused.activeEditor()
 								: undefined;
-					if (editor?.vimEnabled && editor.vimMode === "normal") return undefined;
+					if (matchesKey(data, "ctrl+r") && editor?.vimEnabled && editor.vimMode === "normal") return undefined;
 					this.ctx.showHistorySearch();
 					return { consume: true };
 				}

@@ -685,14 +685,17 @@ interface HistoryStorage {
 	getRecent(limit: number): HistoryEntry[];
 }
 
+/** What a remembered draft needs besides its text: paste and atom payloads, and the host's own state. */
+interface DraftPayload {
+	pastes: Map<number, string>;
+	atoms: Map<string, string>;
+	pasteCounter: number;
+	restore?: () => void;
+}
+
 interface LocalHistoryEntry {
 	text: string;
-	draft?: {
-		pastes: Map<number, string>;
-		atoms: Map<string, string>;
-		pasteCounter: number;
-		restore?: () => void;
-	};
+	draft?: DraftPayload;
 }
 
 /** A synchronous replacement immediately before the editor cursor. */
@@ -971,8 +974,8 @@ export class Editor implements Component, Focusable {
 	#vimUnnamed: VimRegister | null = null;
 	/** A `"+`/`"*` clipboard read started when the register was named; settles once the text is stored. */
 	#vimClipboardRead: Promise<void> | null = null;
-	/** The draft `k` stepped away from into history; `j` back past the newest prompt restores it. */
-	#vimHistoryDraft: string | null = null;
+	/** The draft `k` stepped away from into history, payloads included; `j` back past the newest prompt restores it. */
+	#vimHistoryDraft: { text: string; draft: DraftPayload } | null = null;
 	/** Set by `gj`/`gk` within a key, so the screen column they keep survives it. */
 	#vimScreenMoved = false;
 	/** Bumped by every store into `"+`/`"*`, so a clipboard read started before it cannot overwrite it. */
@@ -1319,21 +1322,31 @@ export class Editor implements Component, Focusable {
 	rememberDraft(restore?: () => void): void {
 		const text = this.getText();
 		if (!text.trim()) return;
+		this.#pushHistory({ text, draft: this.#draftPayload(text, restore) });
+	}
+
+	/** The payloads `text` refers to, so the draft can be brought back whole. */
+	#draftPayload(text: string, restore: (() => void) | undefined): DraftPayload {
 		const pastes = new Map<number, string>();
 		for (const match of text.matchAll(/\[Paste #(\d+)(?:, (?:\+\d+ lines|\d+ chars))?\]/g)) {
 			const id = Number(match[1]);
 			const value = this.#pastes.get(id);
 			if (value !== undefined) pastes.set(id, value);
 		}
-		this.#pushHistory({
-			text,
-			draft: {
-				pastes,
-				atoms: new Map([...this.#atoms].filter(([label]) => text.includes(label))),
-				pasteCounter: this.#pasteCounter,
-				restore,
-			},
-		});
+		return {
+			pastes,
+			atoms: new Map([...this.#atoms].filter(([label]) => text.includes(label))),
+			pasteCounter: this.#pasteCounter,
+			restore,
+		};
+	}
+
+	/**
+	 * A closure that puts host-owned draft state (attachments the host keeps beside the text) back as
+	 * it is now, for {@link rememberDraft} and Vim's history steps. The base editor keeps none.
+	 */
+	captureHistoryState(): (() => void) | undefined {
+		return undefined;
 	}
 
 	/** Release the current draft's expansion payloads without touching history. */
@@ -1404,19 +1417,22 @@ export class Editor implements Component, Focusable {
 		if (newIndex < -1 || newIndex >= this.#history.length) return;
 		this.#historyIndex = newIndex;
 		const entry = this.#history[this.#historyIndex];
-		if (entry?.draft || this.#historyDraftActive) {
-			this.#pastes = new Map(entry?.draft?.pastes);
-			this.#atoms = new Map(entry?.draft?.atoms);
-			this.#atomsRevision++;
-			this.#pasteCounter = entry?.draft?.pasteCounter ?? 0;
-			this.restoreHistoryState(entry?.draft?.restore);
-			this.#historyDraftActive = entry?.draft !== undefined;
-		}
+		if (entry?.draft || this.#historyDraftActive) this.#applyDraftPayload(entry?.draft);
 		// Browsing asks for the edge the key came from, so one press still steps one
 		// entry: Up opens a multi-row entry at its top, Down at its bottom (#99).
 		// #setTextInternal drops that request for single-row entries — see there.
 		const cursorAnchor: HistoryCursorAnchor = direction === -1 ? "start" : "end";
 		this.#setTextInternal(entry?.text ?? "", cursorAnchor);
+	}
+
+	/** Swap in a remembered draft's payloads (none: an empty set) before its text triggers onChange. */
+	#applyDraftPayload(draft: DraftPayload | undefined): void {
+		this.#pastes = new Map(draft?.pastes);
+		this.#atoms = new Map(draft?.atoms);
+		this.#atomsRevision++;
+		this.#pasteCounter = draft?.pasteCounter ?? 0;
+		this.restoreHistoryState(draft?.restore);
+		this.#historyDraftActive = draft !== undefined;
 	}
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
@@ -3037,7 +3053,9 @@ export class Editor implements Component, Focusable {
 	#stepVimHistory(older: boolean, count: number): void {
 		const start = this.#historyIndex;
 		if (older && start === -1 && this.onUpFromTop?.()) return;
-		const draft = start === -1 && older ? this.#state.lines.join("\n") : null;
+		const text = this.#state.lines.join("\n");
+		const draft =
+			start === -1 && older ? { text, draft: this.#draftPayload(text, this.captureHistoryState()) } : null;
 		for (let n = 0; n < count; n++) {
 			const index = this.#historyIndex;
 			this.#navigateHistory(older ? -1 : 1);
@@ -3045,8 +3063,12 @@ export class Editor implements Component, Focusable {
 		}
 		if (this.#historyIndex === start) return;
 		if (draft !== null) this.#vimHistoryDraft = draft;
-		if (this.#historyIndex === -1 && this.#vimHistoryDraft !== null) {
-			this.#setTextInternal(this.#vimHistoryDraft);
+		const left = this.#vimHistoryDraft;
+		if (this.#historyIndex === -1 && left !== null) {
+			// Back to the live draft: its pastes, atoms, and host attachments, not just its text.
+			this.#applyDraftPayload(left.draft);
+			this.#historyDraftActive = false;
+			this.#setTextInternal(left.text);
 			this.#vimHistoryDraft = null;
 		}
 		const line = older ? this.#state.lines.length - 1 : 0;

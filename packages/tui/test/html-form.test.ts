@@ -1211,6 +1211,13 @@ describe("html form", () => {
 			}).form;
 			text.handleInput("j");
 			expect(text.data()).toEqual({ name: "j" });
+			// A closed dropdown keeps its letter type-ahead: `k` picks Kotlin instead of moving.
+			const select = dialog(
+				`<form><label>Lang <select name="lang"><option value="json">JSON</option><option value="kotlin">Kotlin</option></select></label></form>`,
+				{ vimMode: true },
+			).form;
+			select.handleInput("k");
+			expect(select.data()).toEqual({ lang: "kotlin" });
 		});
 
 		it("text boxes starting in Normal mode: j/k on the box's edge line step to the next or previous field", () => {

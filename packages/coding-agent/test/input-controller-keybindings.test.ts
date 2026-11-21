@@ -1589,6 +1589,26 @@ describe("InputController global editor actions", () => {
 		expect(context.ctx.showHistorySearch).toHaveBeenCalledTimes(1);
 	});
 
+	it("opens history search from a Vim Normal-mode box when app.history.search is remapped off Ctrl+R", async () => {
+		const context = await createContext();
+		context.setKeybinding("app.history.search", ["alt+h"]);
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const form = new HtmlFormDialog(
+			parseHtmlForm(`<form><label>Notes<textarea name="notes"></textarea></label></form>`),
+			{
+				onSubmit: () => {},
+				onCancel: () => {},
+				vimMode: true,
+			},
+		);
+		context.setFocused(form);
+		form.handleInput("\x1b");
+		expect(dispatchInput(listeners, "\x1bh")).toEqual({ consume: true });
+		expect(context.ctx.showHistorySearch).toHaveBeenCalledTimes(1);
+	});
+
 	it("still routes transcript actions when the main editor holds focus", async () => {
 		const context = await createContext();
 		const controller = new context.InputController(context.ctx);
