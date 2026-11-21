@@ -1,15 +1,10 @@
 # Changelog
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [Unreleased]
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-- `Agent.setStandbyTools()` and `AgentContext.standbyTools` name inactive tools that may activate later; they reach the provider as `inactiveTools` until a request declares tools ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed the refusal of an `xd://resolve` or `xd://reject` write sent with other tool calls, which now says that the other calls caused it ([#18859](https://github.com/can1357/oh-my-pi/issues/18859)) ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926)) ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
+- Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ## [19.1.0] - 2026-11-21
 
@@ -18,1291 +13,1291 @@
 - Added standby tools support through `Agent.setStandbyTools()` and `AgentContext.standbyTools`, allowing tools to remain inactive until a request explicitly enables tool use.
 
 ## [19.0.0] - 2026-11-18
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added support for excluding custom messages from model context and compaction or branch summaries, while allowing queued steering and follow-up messages to continue correctly after excluded messages.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.22.1] - 2026-11-17
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - A model on an extension's custom api can take the Anthropic on-demand compaction lane by declaring `remoteCompaction: { api: "anthropic-messages", enabled: true }`; the request goes through its own stream like any turn ([#19580](https://github.com/can1357/oh-my-pi/pull/19580) by [@ryanskidmore](https://github.com/ryanskidmore))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed provider-error handling so failed tool calls are no longer fed back to the model as refusal explanations.
 - Fixed one-shot retries and title generation for custom Zhipu Coding Plan providers so Beijing-time quota resets are honored.
 - Fixed OpenAI remote compaction (V1 and V2) dropping configured headers of models.yml and extension-registered models, so header-authenticated gateways returned 401 ([#19579](https://github.com/can1357/oh-my-pi/pull/19579) by [@ryanskidmore](https://github.com/ryanskidmore))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.20.1] - 2026-11-14
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Corrected context cost estimates for requests that omit reasoning history, so billing estimates now include thinking text only when it is sent or reconstructed for a tool call.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.20.0] - 2026-11-12
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `prepareCompaction()` runs as the `compaction.prepare` loop phase, so a `ui.loop-blocked` stall from a cold token walk over a long branch names compaction instead of "unknown" ([#15027](https://github.com/can1357/oh-my-pi/issues/15027), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.18.9] - 2026-11-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that run beside them and may write files (their approval, asked with their arguments, is not `read`) have finished; speculative results wait for those effects before validation, and cancellation while waiting prevents their commit ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.18.8] - 2026-11-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.18.2] - 2026-11-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `canReplayRemoteCompactionFrom()` to determine whether a model can replay provider-native compaction produced by another model.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed GenAI message-content capture configured in omp's own `.env` files so it continues to apply when those values are no longer exposed through the process environment.
 - Fixed compaction preparation for remote OpenAI compaction that the active model cannot replay, ensuring the content is expanded and remains available for compaction.
 - Fixed generic remote compaction requests to `/chat/completions` so gateway sessions retain the correct per-request model attribution.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.17.0] - 2026-11-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.16.0] - 2026-11-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Context estimates for a model without a known tokenizer family (Gemini, Grok and the like), and token counts made without a model (compress metrics, the legacy `estimateTokens` export), count text in o200k_base instead of guessing 4 bytes per token, which undercounted what those providers bill by 11–48% on code-heavy sessions and let compaction fire late after a switch to them ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Context estimates no longer charge a reader another model's thinking signatures or redacted thinking, which the request strips: a Claude session switched to Grok or Gemini, including Gemini through Factory, counted them as text ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Removed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed `PI_TOKENIZER_ACCURATE`: every model is now counted with a native tokenizer ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.15.0] - 2026-11-01
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.14.2] - 2026-10-31
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - The soft steering signal a tool sees as `toolCall.steeringSignal` now aborts with the source of the queued message (`"user"`, `"irc"`, …) as its `reason`, so a tool can yield only to the sources it should ([#17537](https://github.com/can1357/oh-my-pi/issues/17537))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Reject incomplete local compaction, turn-prefix, handoff, and branch summaries ending with `stopReason: "length"` instead of using truncated text as complete context. Omit incomplete display-only short summaries without discarding a completed full summary ([#17499](https://github.com/can1357/oh-my-pi/pull/17499) by [@Xytronix](https://github.com/Xytronix)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.14.1] - 2026-10-31
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `SentToolDefinitions.inactiveFor(messages, tools)` is replaced by `withInactiveTools(context)`, which also clears a stale `inactiveTools`; `transformProviderContext` now receives the request's `inactiveTools` ([#17492](https://github.com/can1357/oh-my-pi/pull/17492))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Long tool-call intents no longer block tool execution when intent tracing is enabled ([#13140](https://github.com/can1357/oh-my-pi/issues/13140)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.14.0] - 2026-10-29
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed the Bun event-loop workaround utilities from `@oh-my-pi/pi-agent-core/utils/yield`; agent loops no longer insert cooperative sleeps while streaming or between tool calls.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `AgentTool.approvalRestrictionPaths` so tools can report the paths they read, allowing restricted-folder approvals to cover those paths without remembering approval separately for each path.
 - Added `Agent.logContext`, which adds custom context fields to every log record written during an agent run.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.13.3] - 2026-10-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Updated Bun engine requirement to ≥1.4.4
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed chat-completions context estimates counting past thinking that the request drops (no reasoning replay), which triggered compaction far below the threshold ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#17231](https://github.com/can1357/oh-my-pi/pull/17231) by [@ghisguth](https://github.com/ghisguth))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.13.2] - 2026-10-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `AgentTool` gained the optional `handlesToolInterrupt` flag: an interruptible tool that sets it (such as `wait`) still runs, without blocking, when a loop-owned interrupt is already queued, so it can drain the queued wake event instead of being skipped; user cancellation still skips it ([#17174](https://github.com/can1357/oh-my-pi/pull/17174) by [@alphastorm](https://github.com/alphastorm))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.13.1] - 2026-10-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Hosts can distinguish safely paused agents from turns still draining with `Agent.isPaused` ([#17073](https://github.com/can1357/oh-my-pi/pull/17073) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.13.0] - 2026-10-26
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `SummaryOptions.remotePromptCacheKey` and `remoteCompactionPolicyModel()` so remote compaction can carry a cache key gated against the request it actually sends ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Remote compaction now sends cache and session headers for the endpoint and model the request actually uses, so a configured compaction override no longer inherits the live turn's routing ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 - Aside providers (`AgentLoopConfig.getAsideMessages`, `Agent.setAsideMessageProvider`) now receive which boundary is polled, `"work"` after tool calls or `"stop"` at the end of a turn, so they can keep a message out of a finished turn ([#16583](https://github.com/can1357/oh-my-pi/pull/16583) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed `--max-time` values above about 596 hours (such as `600h`) aborting the first turn with "Deadline exceeded" right away ([#17054](https://github.com/can1357/oh-my-pi/pull/17054) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed repeated compaction on small or provider-capped context windows: compaction keeps only as much recent history as fits under the configured trigger, and no longer counts stale pre-compaction usage ([#16904](https://github.com/can1357/oh-my-pi/pull/16904) by [@eggpeat](https://github.com/eggpeat))
 - Fixed native compaction token estimates counting opaque encrypted-state bytes as conversation text ([#16904](https://github.com/can1357/oh-my-pi/pull/16904) by [@eggpeat](https://github.com/eggpeat))
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
 - Fixed compaction failing as a whole, and discarding the completed summary, when the optional short summary fails or returns no answer; the compaction now completes without a short summary, and cancellation still cancels it ([#16942](https://github.com/can1357/oh-my-pi/pull/16942) by [@Mouriya-Emma](https://github.com/Mouriya-Emma))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.12.4] - 2026-10-20
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Enabled native compaction for supported Bedrock Claude models ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.12.3] - 2026-10-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `AgentTool` gained the optional `approvalCacheTargets` hook, which the `always-ask-cached` approval mode uses to check and record per-file grants ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Tools with `lenientArgValidation` now receive unknown root arguments that their closed schema would otherwise drop, so they can reject them ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.12.2] - 2026-10-18
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - The failed-tool-call correction sent to DeepSeek models now also covers chat-template tool-call tokens written out as text, not only malformed DSML ([#16216](https://github.com/can1357/oh-my-pi/pull/16216) by [@H4vC](https://github.com/H4vC))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Ollama chat history estimates counting stripped native thinking and missing foreign thinking replayed as text, which skewed compaction after model switches ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.12.0] - 2026-10-17
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Cursor turns failing with `PROVIDER_ERROR` when a follow-up (a finished background job, a late diagnostic, a reminder) arrived while the previous turn was still streaming ([#15821](https://github.com/can1357/oh-my-pi/pull/15821) by [@robfeldmann](https://github.com/robfeldmann))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.11.3] - 2026-10-16
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `prepareQueuedMessages` receives which queue (`steering` or `followUp`) a batch came from ([#16026](https://github.com/can1357/oh-my-pi/pull/16026))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.11.2] - 2026-10-16
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `agent_start` carries `resumedToolCallIds` when a continued run first executes the calls of an unpaired assistant tail
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Cancelling an `ask` after a background job finishes now reports the user cancellation instead of telling the model to retry a skipped tool ([#15985](https://github.com/can1357/oh-my-pi/issues/15985))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.11.1] - 2026-10-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `Tokenizer.countLatestTurn`: counts a message as the transcript's latest assistant turn, which an Anthropic Messages replay keeps byte-for-byte ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
 - `Agent.prioritizeSteering`: moves given pending steering messages ahead of older ones so one-at-a-time delivery takes them first ([#15642](https://github.com/can1357/oh-my-pi/pull/15642))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed a Cursor tool call re-sent by the server persisting two results under one id; the re-run's result replaces the first ([#15749](https://github.com/can1357/oh-my-pi/issues/15749))
 - Fixed compaction keeping more recent history than `keepRecentTokens` when the latest Claude turn on the Anthropic Messages API ended its tool calls on `stop` or `length`: the replay keeps that turn's signed reasoning, but the cut point counted only its visible blocks ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.11.0] - 2026-10-14
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed `ApprovalDetailsOptions`; `formatApprovalDetails` takes only `args` again, since the compact approval prompt no longer shows tool details ([#15642](https://github.com/can1357/oh-my-pi/pull/15642) by [@H4vC](https://github.com/H4vC))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `AgentTool.delegationGuidance`: instructions a same-name extension replacement inherits in its description when it delegates to the native tool ([#15477](https://github.com/can1357/oh-my-pi/pull/15477) by [@iliaal](https://github.com/iliaal))
 - `CompactionPreparation.lastSummarizedEntryId` and `CompactionResult.providerReplayThroughEntryId`: a remote compaction that could only fit the history before the kept tail reports the last entry its native history covers; later entries replay normally ([#15712](https://github.com/can1357/oh-my-pi/pull/15712) by [@H4vC](https://github.com/H4vC))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed native (OpenAI/Codex) remote compaction refusing or truncating sessions that fit the window: its preflight counted the JSON-escaped request, inflating quote-, backslash- and newline-heavy tool output such as disassembly by ~10–20%; it now counts text as the model reads it ([#15712](https://github.com/can1357/oh-my-pi/pull/15712) by [@H4vC](https://github.com/H4vC))
 - Fixed OpenAI V1/V2 remote compaction failing outright when the history, kept tail included, exceeds the context window (a large final response or tool output after the last check); it retries on the history before the kept tail ([#15712](https://github.com/can1357/oh-my-pi/pull/15712) by [@H4vC](https://github.com/H4vC))
 - Fixed fitted output caps overflowing the context window on strict hosts (llama.cpp-family) after turns with many parallel tool results; chat-template framing is now charged per locally counted message ([#15699](https://github.com/can1357/oh-my-pi/issues/15699))
 - Fixed leaked DeepSeek DSML markup reaching saved history from reasoning blocks and from turns that also made a valid tool call ([#15485](https://github.com/can1357/oh-my-pi/issues/15485))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.10.4] - 2026-10-13
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `AgentTool.formatApprovalDetails` receives `ApprovalDetailsOptions`; `compact: true` asks for untruncated bodies so a compact approval prompt can count their lines ([#15550](https://github.com/can1357/oh-my-pi/pull/15550) by [@H4vC](https://github.com/H4vC))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Before-model-call hooks now receive the loop context as a second argument, and `buildProviderContext` receives the summarizer model ([#15436](https://github.com/can1357/oh-my-pi/pull/15436) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed a Claude compaction or branch summarizer receiving assistant reasoning from a snapcompact archive rendered under another model, which Claude refuses (`reasoning_extraction`) ([#15436](https://github.com/can1357/oh-my-pi/pull/15436) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.10.3] - 2026-10-12
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed `estimateImageContentTokens()` from `@oh-my-pi/pi-agent-core/image-tokens`; use `Tokenizer.imageTokens(size, detail)`, which prices with the reading model's catalog image rule ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
 - `applyShakeRegion()` and `applyShakeRegions()` take the replacement's token count (`replacementTokens`); a block rewrite of an assistant turn adds the tokens it removes to `elidedOutputTokens`, so a replayed Claude turn's count stays lowered after a reload ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Claude context counts reading Opus 5.5 requests about 55% over their billed input: a replayed thinking turn now counts at the output size Claude billed for it, not its signature's bytes ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed screenshots and other non-frame images being counted at the OpenAI rate for every model instead of the reading model's own; Claude billed them about 16% higher ([#15446](https://github.com/can1357/oh-my-pi/pull/15446) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed OpenAI Responses and Codex context estimates leaving out replayed reasoning: each turn whose encrypted reasoning actually replays now counts its reported reasoning tokens (its ciphertext when the backend reports none), and none while a cold session rebuilds it out of the request, so compaction and snapcompact sizing match billing; branch summaries no longer budget for encrypted reasoning they never send ([#15447](https://github.com/can1357/oh-my-pi/pull/15447) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.10.2] - 2026-10-12
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `AgentLoopConfig.onDetachedToolUpdate`: a tool's `onUpdate` frames that arrive after its run's event stream ended (a returned call whose background job keeps reporting) reach it instead of being dropped; `Agent` forwards them to its subscribers as `tool_execution_update` events
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.9.2] - 2026-10-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved context caching for repeat turns, reducing redundant prompt processing and making subsequent turns faster when the system prompt is unchanged.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.9.0] - 2026-10-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed stale queue updates when queued steering is adopted, withdrawn, or added to the transcript, ensuring queue listeners consistently receive the latest state.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.8.8] - 2026-10-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `Agent.setModelResolver()` to fit every model an agent adopts (via `setModel`, starting with the current one) before it is used ([#15048](https://github.com/can1357/oh-my-pi/pull/15048) by [@H4vC](https://github.com/H4vC))
 - Added `CompactionSettings.baseWindowTokens`: when set, `resolveThresholdTokens()` scales its percentage or reserve-based threshold from that base instead of the full context window ([#15065](https://github.com/can1357/oh-my-pi/pull/15065) by [@H4vC](https://github.com/H4vC))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed OpenAI V1 remote compaction re-attaching a prior Anthropic native payload after a successful compact ([#15041](https://github.com/can1357/oh-my-pi/pull/15041) by [@PaleRoses](https://github.com/PaleRoses))
 - Fixed `resolveThresholdTokens()` clamping a positive `thresholdTokens` to `baseWindowTokens`; a fixed threshold is checked against the real window, and the base only rescales the percentage and reserve policies ([#15074](https://github.com/can1357/oh-my-pi/pull/15074) by [@H4vC](https://github.com/H4vC))
 - Fixed `resolveThresholdTokens()` clamping a fixed `thresholdTokens` at or past the context window to one token below it, so compaction fired only after the next request overflowed; it now clamps to the window less the reserve ([#15146](https://github.com/can1357/oh-my-pi/pull/15146) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.8.6] - 2026-10-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added support for warm-cache-aware conversation pruning, keeping pruned history within the model’s prompt-cache lookback window while preserving Anthropic prompt-cache efficiency.
 - Added `AgentLoopConfig.hasQueuedAsides` (also available on `Agent`) to allow interruptible waits to detect queued asides without consuming them or signaling other tools.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.8.1] - 2026-10-07
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added the public `validateAgentToolArguments()` API for consistent, lenient-aware validation of agent tool arguments across agent and coding-agent workflows.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.8.0] - 2026-10-07
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved performance when pruning tool output and capturing telemetry messages during long-running sessions.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.7.0] - 2026-10-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed interrupted runs so assistant message boundaries are emitted reliably, allowing subscribers to persist and recover the interrupted turn.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.6.3] - 2026-10-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `Agent.withdrawUndeliveredQueuedMessages()` replaces `withdrawLiveSteering()` and returns `{ steering, followUp }`: it also takes back queued input already dequeued for the next model call, which the aborted run then neither records nor reports in `agent_end` ([#14179](https://github.com/can1357/oh-my-pi/pull/14179) by [@andrebrait](https://github.com/andrebrait))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `Agent.setOnModelCallSystemPrompt`, called with the exact system prompt each model call is built from ([#14338](https://github.com/can1357/oh-my-pi/pull/14338) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `SessionInitEntry.systemPrompt` holds the system prompt blocks as sent; session files written earlier keep one joined string ([#14338](https://github.com/can1357/oh-my-pi/pull/14338) by [@will-bogusz](https://github.com/will-bogusz))
 - Image token estimates now use the catalog's `imageTokens()` formula with its OpenAI Responses wire rule; values are unchanged ([#14286](https://github.com/can1357/oh-my-pi/pull/14286) by [@will-bogusz](https://github.com/will-bogusz)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed the context count and auto-compaction trigger pricing every snapcompact archive frame at Opus's high-res rate, which overcounted Codex and Gemini sessions and could re-trigger compaction right after compacting ([#14291](https://github.com/can1357/oh-my-pi/pull/14291) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed native (OpenAI) compaction being refused as over the context window in sessions with many screenshots. Images were counted as about 1,200 tokens when deciding to compact but 12,000 when checking whether the compaction request fits; both checks now estimate images from their actual dimensions, and a request is no longer refused when only the image estimate pushes it over the window ([#14260](https://github.com/can1357/oh-my-pi/pull/14260) by [@H4vC](https://github.com/H4vC)).
 - Fixed OpenAI and Codex Remote Compaction V2 dropping your recent messages instead of keeping them next to the compaction summary ([#14247](https://github.com/can1357/oh-my-pi/pull/14247) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the failed V2 remote compaction warning claiming a V1 fallback on Codex, where V1 does not run ([#14245](https://github.com/can1357/oh-my-pi/pull/14245) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Anthropic native compaction being rejected with `Invalid signature in thinking block` (or silently dropping the summarized thinking) on models with preserved thinking ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.6.1] - 2026-10-04
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed native OpenAI context compaction for sessions containing many screenshots, preventing image-size estimates from incorrectly causing compaction requests to be rejected.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.6.0] - 2026-10-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - When a DeepSeek turn ends with raw `<｜DSML｜…>` tool-call text that could not be parsed into a real call, and no tool call was made, the broken markup is now removed from the message before it is saved to history. The agent then tells the model the tool call failed, shows it the correct format, and asks it again, at most twice in a row. Previously the markup stayed in history, and the agent stopped as if the model had finished ([#14202](https://github.com/can1357/oh-my-pi/pull/14202) by [@H4vC](https://github.com/H4vC)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.5.1] - 2026-10-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added provider-reported usage cost, the unnormalized provider ID, and the requested model ID to CostEstimatorContext, allowing cost estimators to use the cost already recorded for a request instead of recomputing it from token counts.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved tool-result supersession so path reads with selectors are tracked independently from bare-path reads, while failed results supersede only earlier failed results for the same key.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed parallel tool calls with reused or empty IDs executing with another call’s arguments or merging results; each call now executes and reports its own payload.
 - Fixed completed tool calls being retried after a transient provider-stream read error; incomplete calls from the affected turn are now discarded.
 - Fixed previously read code being removed from context when a subsequent read returned a summary, truncated content, or an error.
 - Fixed intent tracing for tools that define i as a real argument, preserving the argument and its declared schema order.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.4.11] - 2026-10-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed lenient argument validation for tools such as `yield`: malformed tool-call JSON is now reported to the model instead of causing the tool to run with empty arguments.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.4.10] - 2026-10-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - `streamProxy` no longer finalizes a cut-off tool-call argument buffer into an executable auto-closed preview; such a call gets the parse-error arguments, so the tool is not run and the model receives the parse error ([#13868](https://github.com/can1357/oh-my-pi/pull/13868) by [@alphastorm](https://github.com/alphastorm))
 - OpenAI remote compaction no longer sends stored native tool calls whose names are blank, longer than 128 characters, or contain whitespace or control characters. The outputs that answer those calls are dropped as well ([#13985](https://github.com/can1357/oh-my-pi/pull/13985) by [@Xytronix](https://github.com/Xytronix)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.4.6] - 2026-10-01
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added APIs for improving agent follow-up and steering workflow management, including moving queued follow-ups into steering with a single queue-change notification.
 - Added support for trusted post-tool guidance via `afterToolCall` results, allowing additional context to be included in the next provider request, including after tool failures.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.4.4] - 2026-09-29
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `Agent.replaceQueue()` to replace one pending queue without changing the other queue ([#11872](https://github.com/can1357/oh-my-pi/pull/11872) by [@andrebrait](https://github.com/andrebrait)).
 - Added queued-message grouping so owned companion records and their user prompt are dequeued together in `one-at-a-time` mode ([#11872](https://github.com/can1357/oh-my-pi/pull/11872) by [@andrebrait](https://github.com/andrebrait)).
 - Added `Agent.onQueueChange()`, a listener called whenever a steering/follow-up queue mutator (enqueue, dequeue on delivery, clear, or restore) runs, so hosts can observe queue changes without polling ([#11872](https://github.com/can1357/oh-my-pi/pull/11872) by [@andrebrait](https://github.com/andrebrait)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed GPT models on Amazon Bedrock's OpenAI routes (bedrock-runtime and bedrock-mantle `/openai/...`) falling back to a local summary instead of OpenAI's native remote compaction; set `remoteCompaction.enabled: false` to opt out ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
 - Fixed native compaction on Amazon Bedrock's OpenAI routes skipping the provider's request setup, which sent Bedrock Mantle compaction to an unresolved `{region}` host and skipped configured headers and proxies; other providers' compaction requests are unchanged ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.4.3] - 2026-09-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `transformAssistantMessagePreservesToolCalls`, letting stream speculation and direct speculative candidates run under a `transformAssistantMessage` that never rewrites streamed tool calls
 - Added `authorizeLaunch` to the speculative execution host and coordinator so tool stream sessions can start host-approved effectful work (e.g. subagents) before their call dispatches
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed auto-compaction with the `remote` method failing on long Codex/OpenAI sessions with "Remote compaction input exceeds the context window" ([#13611](https://github.com/can1357/oh-my-pi/issues/13611))
 - Fixed passive tool-call context being repeated when several calls in one batch returned the same text; identical per-call context is now delivered once, at its first position ([#13633](https://github.com/can1357/oh-my-pi/pull/13633) by [@andrebrait](https://github.com/andrebrait))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.4.2] - 2026-09-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added tool_execution_end events that fire as each tool call settles for live UI updates
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Emitted tool result messages in the order of tool calls, preserving call order regardless of completion order
 - Reduced repeated token-counting work with a bounded, model-scoped cache of exact text and short-message fragment counts.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where streaming tool call arguments could be incorrectly modified in-place
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.4.1] - 2026-09-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed fitted output caps overshooting the context window by a few tokens on strict Chat Completions hosts (e.g. llama.cpp), causing 400s.
 - Fixed native remote compaction sending requests already estimated past the model's context window (e.g. after re-expanding history behind another provider's native boundary); it now fails fast so the next configured compaction method runs ([#13502](https://github.com/can1357/oh-my-pi/issues/13502))
 - Fixed V2 remote compaction retrying a standalone stream `error` event three times and reporting it as `stream closed before response.completed`; the upstream status, code, and message (e.g. `context_too_large`) are now surfaced ([#13502](https://github.com/can1357/oh-my-pi/issues/13502))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.4.0] - 2026-09-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Updated telemetry attribute names from the `pi.*` namespace to the `omp.*` namespace.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.3.3] - 2026-09-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added live steering support, allowing models to receive and act on user steering messages during an active stream.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.3.2] - 2026-09-25
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed tool calls that put their payload in the intent field `i` (for example a file body in `write`) silently running with the leftover arguments; they now fail with an error telling the model to retry ([#13140](https://github.com/can1357/oh-my-pi/issues/13140), [#13141](https://github.com/can1357/oh-my-pi/pull/13141) by [@radkawar](https://github.com/radkawar))
 - Fixed the Anthropic compaction failure log omitting why no compaction block came back; it now names the stop reason ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.3.1] - 2026-09-25
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added live steering support for Codex WebSocket transports, allowing users to provide input while a response is in progress.
 - Added passive tool-call context support, allowing hooks and tools to supply additional context for subsequent model processing.
 - Improved context-window handling by automatically adjusting output-token limits and supporting models that truncate output at the context-window limit.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved prompt token counting for requests with anchored prefixes by using provider-reported usage and limiting local estimation to new message content.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.3.0] - 2026-09-24
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added support for documenting agent tools on demand through the new `AgentTool.docTopics` method.
 - Added `TOOL_INTERRUPT_ABORT_REASON` so interruptible tools can distinguish queued steering, peer messages, or background completions from a full run abort.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved interrupt handling so tools respect wait mode and can be interrupted when appropriate.
 - Updated Anthropic compaction compatibility with signature verification.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.2.11] - 2026-09-23
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed background job completions interrupting foreground Bash and eval calls, which could cause those calls to be repeatedly moved into the background.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.2.9] - 2026-09-22
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed stream finalization when a provider ends without emitting a completion or error event, ensuring the final assistant message is preserved and corresponding message lifecycle events are emitted.
 - Fixed tool execution being incorrectly skipped when host steering callbacks reject during a tool batch.
 - Fixed stream hangs and preserved the original error when host aside-commit or discard callbacks fail.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.2.5] - 2026-09-17
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Improved agent performance by reducing redundant tool-schema processing during repeated model calls and optimizing streamed tool-call argument parsing.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.2.1] - 2026-09-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added optional queued-message preparation with cancellation-safe delivery and appended context ([#11835](https://github.com/can1357/oh-my-pi/pull/11835) by [@andrebrait](https://github.com/andrebrait)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed streaming CPU blowup on long turns: per-delta `message_update` snapshots now deep-clone only the blocks the stream actually touched instead of the entire accumulated message, eliminating the quadratic cloning work that could freeze the TUI for tens of seconds to minutes while a subagent streams ([#10605](https://github.com/can1357/oh-my-pi/issues/10605)).
 - Native compaction now carries an existing local summary into the first provider-native request instead of losing the summarized history. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
 - Subsequent native compactions preserve messages appended between a speculative snapshot and its commit, while honoring `/clear` boundaries. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
 - Native replay compatibility checks the active provider and Responses API independently of whether future native compaction is enabled. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
 - Fixed compaction retaining oversized older steps beyond the recent-history budget and skipping previously retained history on later passes, preventing long tool loops from freeing enough context ([#11365](https://github.com/can1357/oh-my-pi/issues/11365)).
 - Fixed Codex remote compaction retries for both Bun and proxy socket-closure messages and stopped falling back to the unsupported `/responses/compact` endpoint after V2 failures.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.1.19] - 2026-09-12
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `Agent.getPendingToolResults()` for reconstructing live displays before buffered tool results are persisted ([#11868](https://github.com/can1357/oh-my-pi/pull/11868) by [@serverinspector](https://github.com/serverinspector)).
 - Added opt-in host authorization and exact-once streamed child execution for discard-safe local reads.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `Tool <name> not found` now also suggests mounted `xd://` devices, not just the advertised tool set, via the new `suggestFallbackToolNames` option ([#11516](https://github.com/can1357/oh-my-pi/issues/11516), [#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Speculative stream sessions are now discarded when a hook or argument transform replaces a call's arguments while keeping its ID, instead of releasing deferred work planned from the original code ([#11889](https://github.com/can1357/oh-my-pi/pull/11889) by [@h4vc](https://github.com/h4vc)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.1.18] - 2026-09-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Anthropic server-side compaction as a `remote` compaction backend: model lines the beta supports (`compat.supportsServerCompaction`, rule-owned in the catalog: Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) on the official endpoint, resolved the way the provider routes requests, plus Anthropic-compatible routes with `remoteCompaction.enabled`, compact by re-issuing the live turn's own request — same system prompt, tools, and history, so it reads the prompt cache the last turn wrote — with the `compact_20260112` edit paused after the summary and the harness summary prompt as `instructions`. The instructions name where the retained tail begins so the summary covers only the history the rebuilt context drops. The API's summary is stored as the entry text and as `preserveData.anthropicCompaction`, replayed natively on later Anthropic requests and read as plain text by every other provider; the retained tail comes from session entries as with a local summary. Contexts below 55k tokens (the API trigger floor plus margin) keep summarizing locally, and a response without a summary is a native failure, like the OpenAI lanes. An aborted compaction response is the abort (a cancellation, never a native failure) and an error response keeps its HTTP status, so auth and timeout classification match the OpenAI lanes; the block's opaque `encrypted_content` is persisted as `preserveData.anthropicCompaction.encryptedContent` and replayed verbatim.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - `compact()` now forwards the caller's `oneshotRetry` opt-out to every summarization oneshot; auto-compaction's outer retry loop no longer multiplies with the inner transient-failure retries.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.1.17] - 2026-09-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `Tool <name> not found` now names a plausible intended target when the advertised set contains one, e.g. `Tool mcp__abc123__xyz789_read not found. Did you mean read?`. A model that mis-transcribes a long opaque tool name reliably keeps the trailing segment, which is the only part carrying meaning, so the miss becomes recoverable in the same turn instead of costing a round trip. Purely advisory — the suggestion is only ever a string in the error, never a dispatch target, so an unrecognized name still fails ([#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed the token estimator counting developer messages as free and ignoring images in user content, which let context budgeting, pruning and the compaction trigger read a transcript as far smaller than the one sent to the provider.
 - Fixed repeated local compaction omitting messages retained before the previous compaction record, while preserving original entry IDs and `/clear` boundaries.
 - Raised remote compaction request timeout from 3 minutes to 5 minutes so long Codex/gpt-6-astra compact streams can finish before the watchdog aborts them.
 - Fixed proxy responses dropping the cost the server reported; recorded costs are kept instead of being recomputed.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.1.10] - 2026-09-04
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Codex V2 remote compaction ignoring explicit thinking-off.
 - Fixed Codex V2 remote compaction rebuilding the request prefix differently from normal turns, restoring prompt-cache reuse ([#10786](https://github.com/can1357/oh-my-pi/issues/10786)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.1.6] - 2026-09-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added support for streaming tool argument updates, providing more responsive tool-call progress.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved steering behavior so queued steering commands preserve already-emitted non-interruptible tool calls while aborting or skipping only interruptible waits.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.1.2] - 2026-09-01
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed preservation of Claude thinking/reasoning context when conversations are compacted or tool results are pruned.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.0.11] - 2026-08-29
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed agent startup and context compaction failures for models with unrecognized tokenizer encodings.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.0.10] - 2026-08-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added support for continuing interrupted agent runs with pending tool calls, allowing those calls to be retried before requesting the next model response.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.0.9] - 2026-08-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed `/shake elide` handling of mixed tool results so images are preserved and token savings are reported accurately.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.0.7] - 2026-08-26
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Codex remote compaction to preserve images returned by image-reading tools, preventing them from being replayed as incorrect synthetic user messages.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.0.5] - 2026-08-25
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Corrected remote compaction summaries so they accurately report the number of input tokens processed.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.0.4] - 2026-08-24
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved performance in append-only context mode by memoizing message serialization, keeping per-call sync overhead flat as conversations grow.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where `onTurnEnd` was skipped for turns ended by a terminal tool result (such as a subagent's final `yield`).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [18.0.0] - 2026-08-22
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Anthropic Claude tool calls containing provider-visible private-use icon glyphs by reversibly tokenizing glyphs at the wire boundary and rejecting model-invented or unresolved glyph tokens before execution.
 - Fixed agent identity confusion after session handoffs by clarifying context framing and ensuring successor instances seamlessly resume existing execution plans.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.4.1] - 2026-08-21
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Codex remote compaction requests failing for region-pinned enterprise ChatGPT workspaces when requests egress from a different region.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.4.0] - 2026-08-20
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Replaced global token counting functions (`countTokens`, `countTokensConservatively`, `setTokenizerModel`, and `estimateTokens`) with model-scoped, immutable `Tokenizer` instances (`agent.tokenizer`). Use `tokenizer.countTokens(text, mode?)`, `tokenizer.countMessage(message)`, or `tokenizer.countMessages(messages)`.
 - Updated context management functions (`findCutPoint`, `prepareBranchEntries`, `collectShakeRegions`, `pruneToolOutputs`, `pruneSupersededToolResults`, and `trimRemoteCompactionInputToContextWindow`) to require an explicit `Tokenizer` instance.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `Tokenizer.checkTokenBudget(text, budget)` to efficiently verify if text fits within a token limit using fast byte-bound checks before falling back to full tokenization.
 - Added provider-anchored transcript token estimation (`findTranscriptUsageAnchor`, `isTranscriptUsageAnchor`, `estimateTranscriptTokens`) to calculate transcript token counts incrementally from the latest reported assistant turn usage.
 - Added `remotePreserveReusable()` to check whether a previous remote compaction payload remains reusable with the active model.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Expanded native tokenizer support across catalog models, adding exact embedded token counting for Claude, Qwen 3.5+, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5+ models. `Tokenizer` now constructs from a resolved catalog `Model`.
 - `createCompactionSummaryMessage` takes an options object after `(summary, tokensBefore, timestamp)`; `CompactionSummaryMessage` gained optional `method` and `tokensAfter` display metadata.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.3.8] - 2026-08-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed `/compact` (and automatic compaction) resurrecting pre-`/clear` conversation turns: `prepareCompaction` now honors the latest `reset_boundary`, so a compaction after an in-place `/clear` only summarizes messages created after the reset ([#8718](https://github.com/can1357/oh-my-pi/issues/8718)).
 - Hardened compaction summarization against prompt injection: conversation history and previous summaries are now treated as untrusted, and embedded `<conversation>`/`<previous-summary>` boundary tags are neutralized before prompt assembly ([#8727](https://github.com/can1357/oh-my-pi/pull/8727) by [@koopmannleon19977-cmyk](https://github.com/koopmannleon19977-cmyk)).
 - Compaction summarization input is now bounded to the summary model's context (windowed fold for oversized spans) and deterministic context-overflow 400s are no longer retried up to the full retry budget; artifact ids containing `503` no longer misclassify hard 400s as transient.
 - Fixed remote compaction mirroring the #8789 Responses shape: `buildOpenAiNativeHistory` now hoists an assistant `message` wedged between a tool-call batch and its outputs ahead of the batch, so compaction requests to strict opencode-go gateways match the canonical `message(s) → calls → outputs` order ([#8789](https://github.com/can1357/oh-my-pi/issues/8789)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.3.5] - 2026-08-16
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added automatic retry support for transient provider failures during one-shot completions, allowing callers such as compaction to opt in to resilient request handling.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed /handoff, branch summarization, and manual /compact failing outright on transient provider errors (e.g. Anthropic overloaded/429/529 responses); these operations now retry automatically instead of leaving the user's context full.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.3.4] - 2026-08-14
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Codex-compatible V2 remote compaction with an explicit `v2Endpoint` by sending the required feature-negotiation header ([#8524](https://github.com/can1357/oh-my-pi/issues/8524)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.3.0] - 2026-08-13
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Improved the manual `/shake` command to retain a small history of recent tool results, preventing the agent from losing its active working context.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.2.13] - 2026-08-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Cursor sessions re-executing settled tools when an owned dialect projector rebuilds toolCall blocks: `snapshotAssistantContentBlock` now copies `kCursorExecResolved` explicitly so agent-loop still skips already-settled calls.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.2.10] - 2026-08-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue in remote OpenAI response compaction replay where output-only `status` fields were incorrectly sent back as input, affecting persisted native and V1/V2 replacement history.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.2.9] - 2026-08-05
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Preserved queued steering and follow-up messages when a continuation is cancelled before or during pre-dequeue hooks, and propagated the caller's cancellation signal through every continuation model-call loop.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.2.6] - 2026-08-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where peer-IRC interrupts (such as subagent messages) incorrectly skipped non-interruptible tool calls queued in the same batch.
 - Improved interruption messaging to clearly distinguish between parent-agent steering and system-advisory interruptions.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.2.5] - 2026-08-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Tool examples embedded in tool descriptions now always render in Python call syntax, and the `exampleDialect` option has been removed from `AppendOnlyContextManager` build options.
 - Updated `normalizeTools` to accept a `NormalizeToolsOptions` configuration object (`{ injectIntent, pruneDescriptions }`) instead of positional booleans.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where runs would fail with an error if an Anthropic stream was truncated after complete tool calls were streamed; the agent now recovers and executes those tool calls.
 - Fixed an issue where artifact recovery reads could be incorrectly elided during compaction.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.2.4] - 2026-08-01
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed Codex V2 remote compaction bypassing the provider's live WebSocket transport before trying SSE ([#7198](https://github.com/can1357/oh-my-pi/issues/7198)).
 - Tool calls skipped mid-batch to service queued steering/peer input now distinguish calls that never entered `tool.execute` (`SyntheticToolResultDetails`, `executed: false`) from in-flight calls that may have performed partial work (`execution: "started"`), allowing UI/telemetry consumers to render normal steering control flow without misreporting execution state ([#7199](https://github.com/can1357/oh-my-pi/issues/7199)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.2.2] - 2026-07-31
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where response-only usage records were incorrectly treated as authoritative context anchors, while ensuring prompt and total-only provider telemetry remains preserved.
 - Fixed context compaction summaries growing excessively with large context windows by capping the summary output budget to 16,384 tokens, ensuring conversations are properly compressed rather than duplicated.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.2.0] - 2026-07-30
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Provider-native compaction failures now surface their transport error instead of silently switching to generic summarization; streaming V2 still falls back to native V1 when available.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.1.7] - 2026-07-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `beforeToolCall` now runs during arg-prep in a pre-dispatch prepare phase — on the streamed path before the assistant message's `message_start`/`message_end` are emitted, and always ahead of concurrency resolution, `tool_execution_start`, telemetry span start, and `tool.execute` — instead of inside the already-scheduled execution slot. It receives the resolved `tool` in its context and may return `args` to replace the call's arguments; a replacement is revalidated against the tool schema, written back to the assistant message's tool-call block, and re-resolves argument-dependent interruptibility, making it the single source of truth for history, persistence, provider replay, scheduling, execution events, and `tool.execute`. Argument validation moved into the same prepare phase, so functional `concurrency` resolvers now see validated (and possibly revised) arguments rather than raw pre-validation ones. The hook now receives the run's request abort signal rather than the per-tool signal.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.1.6] - 2026-07-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added a pre-model-call gate: `AgentLoopConfig.beforeModelCall` receives the finalized provider context and run abort signal, and may return `{ stop: true, reason? }` to end the run before the provider is called, so a host can refuse a request it has decided not to pay for (prompt no longer fits, budget boundary crossed, session should hand off). `Agent.setBeforeModelCall` installs the host callback; `Agent.addBeforeModelCall` registers an additional one without displacing it and returns a disposer. A gate-stopped run retains pending soft tool reminders/escalations and an unserved hard tool choice for the next admitted request; deferred choices are revalidated against active tools and cleared with queued session state ([#6543](https://github.com/can1357/oh-my-pi/pull/6543) by [@paralin](https://github.com/paralin)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Input message events (prompt, steering, soft reminders) are now emitted once provider-context preparation succeeds, so a pre-model gate can veto the request before any turn opens; gate-stopped and failed runs still commit their accepted inputs ([#6543](https://github.com/can1357/oh-my-pi/pull/6543) by [@paralin](https://github.com/paralin)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.1.5] - 2026-07-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed proxy-stream clients dropping finalized provider-only content blocks, including Anthropic native web-search history, by allowing `done` and `error` events to carry terminal assistant content while retaining delta-reconstructed content from older proxy servers that omit it ([#6703](https://github.com/can1357/oh-my-pi/issues/6703)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.1.4] - 2026-07-26
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Steering is now woken by an event instead of polled on a fixed interval while a tool batch runs. `AgentLoopConfig.waitForSteeringMessages` resolves when a steer is enqueued, so an interruption is observed as soon as it arrives rather than at the next tick, and idle batches stop burning wakeups. The interval timer remains for the IRC interrupt queue, which has no wake callback, and checks only IRC while the event watcher owns steering. Waits are raced against local abort, so a callback that does not observe its signal cannot hang batch teardown.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed a Cursor tool result being lost when a custom `cursorOnToolResult` transformer was still pending as the turn closed. The provider dispatches decoded messages without awaiting them, so a `message_end` from the same chunk could drain the buffer before the transformer resolved, dropping the result and leaving its `toolCall` block to be stripped as dangling on replay. The entry is now reserved synchronously and patched in place once the transformer resolves, preserving buffer order.
 - Fixed an async `cursorOnToolResult` transformer's rewrite being silently discarded when it resolved after the buffer drain. The reservation kept the call from dangling but the late patch mutated a detached entry, so the already-persisted message kept the pre-transform payload. The drain now awaits any transformer still in flight before persisting, matching the awaited exec-channel paths. A rejecting transformer is swallowed and the reserved payload stands in, so a failing hook cannot take the turn down or cost the result.
 - Fixed Cursor tool results being dropped for hosts that pass neither `cursorExecHandlers` nor `cursorOnToolResult`. Both are optional, but the Cursor provider resolves native todo calls server-side and synthesizes exec blocks regardless, marking both as resolved so no placeholder result is emitted for them. The result buffer callback was only installed when one of the options was present, so a bare SDK host discarded the provider's paired result and every rebuilt transcript stripped the interaction. It is now installed unconditionally.
 - Fixed an async `cursorOnToolResult` rewrite being lost when the provider errored mid-transform. The normal drain waits for a pending transformer, but the error path snapshotted the buffer without that await, so a transform still in flight patched an entry the catch path had already detached and the pre-transform payload was persisted. A provider error is exactly when a transform is most likely to be mid-flight.
 - Reduced oversized OpenAI native compaction requests by replacing only trailing tool-output bodies that exceed the model context window, while preserving calls, assistant history, and reasoning.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.1.2] - 2026-07-24
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `resolveFallbackTool` option to allow routing unadvertised tool calls to host-side transports (e.g., device mounts)
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.1.1] - 2026-07-24
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added the provider-neutral native computer-call lifecycle, preserving observation outputs and input actions across pending and acknowledged tool results.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Queued steering no longer hard-aborts non-interruptible tools (e.g. `bash`): it aborts interruptible waits only and raises a cooperative steering signal (`ToolCallContext.steeringSignal`) that long-running tools may observe to finish early or background themselves. The mid-batch steering/IRC watch now runs for every tool batch instead of only batches containing an interruptible tool.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.1.0] - 2026-07-24
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added support for tracking Cloudflare AI Gateway cache status (hit, miss, bypass, unknown) on chat spans.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved tool execution steering behavior: queued steering now cooperatively signals long-running, non-interruptible tools (via ToolCallContext.steeringSignal) to allow graceful early termination or backgrounding, rather than hard-aborting them.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an out-of-memory (OOM) crash caused by an infinite loop when a steer or follow-up message was queued on an agent session with an empty transcript.
 - Fixed an issue where switching providers or models on a session could lose compacted history; the agent now correctly falls back to a portable local summary if the new model cannot replay the prior provider's remote-compaction payload.
 - Fixed a compaction failure with Anthropic models where serializing prior assistant reasoning inside <thinking> tags triggered reasoning_extraction refusals.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.0.8] - 2026-07-22
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Improved resilience against transient stream JSON parse failures by recovering completed tool calls while safely preventing incomplete, unknown, refused, or sensitive calls from executing.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.0.5] - 2026-07-18
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added a per-message token estimation cache to optimize performance by reusing token counts for settled message history, with automatic cache invalidation on message mutation.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved tool execution control by making tool interruptibility resolvable per call, allowing side-effecting operations to complete while passive waits can yield to queued steering.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.0.2] - 2026-07-17
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Improved error visibility in interactive clients by surfacing provider stream failures through the assistant message lifecycle, preventing silent loading spinners.
 - Fixed an issue where Cursor provider contexts omitted host-supplied MCP tools from main and side-channel requests.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [17.0.0] - 2026-07-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Replaced the irc, job, and launch tools with a unified hub tool.
 - Removed the tool discovery system (including the search-tool-bm25 tool) and its associated configuration settings (tools.discoveryMode, tools.essentialOverride, mcp.discoveryMode, and mcp.discoveryDefaultServers).
 - Removed the resolve tool; plan approval and preview actions now use writes to the xd://propose virtual device path.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Introduced the xd:// virtual device protocol for mounting tools as URLs readable/writable via read/write tools, configurable via the new tools.xdev setting (defaults to true).
 - Added the hub tool, consolidating agent peer messaging, background job control, and supervised long-running processes.
 - Added the edit.enforceSeenLines configuration setting (defaults to false) to optionally reject edits on lines that have not been fully displayed.
 - Added the ToolLoadMode type and an optional satisfies predicate to SoftToolRequirement to support compliance checks against specific invocation shapes (such as writing to a virtual device path).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.5.2] - 2026-07-14
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Improved session deadline abort signals to carry structured cancellation reasons, enabling timeout-aware tools to correctly classify deadline cancellations.
 - Fixed an issue where completed tool executions were incorrectly marked as skipped (clobbering their actual results) if a user message was queued while the tool was in flight.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.5.1] - 2026-07-14
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed compatibility with Copilot gpt-5.6 models by correcting token escaping in compaction summaries.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.5.0] - 2026-07-13
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added an automated image-dropping rescue tier to compaction dead-end recovery.
 - Added visual warnings and detailed recovery instructions to the session timeline when compaction fails to free sufficient space.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.4.5] - 2026-07-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added a process-global pause gate (`agentPauseGate`) to safely pause agent loops before model calls or tool executions, allowing them to be resumed later or aborted cleanly.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.4.3] - 2026-07-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where skipped sibling tool results incorrectly reported that a queued user message caused the skip.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.4.2] - 2026-07-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed serialization of BigInt tool arguments to prevent data loss during remote compaction.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.4.1] - 2026-07-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Enabled reasoning encryption content for all Responses Lite compaction requests
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.4.0] - 2026-07-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added the `ThinkingLevel.Max` ("max") configuration option, mapping to the `Effort.Max` tier for supported models.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed remote compaction behavior for Codex Responses Lite (GPT-5.6 family) models across both V1 and V2 endpoints to ensure correct formatting and routing.
 - Fixed an issue where aborted tool-result hooks could trigger subsequent provider calls before the abort signal fully settled.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.3.12] - 2026-07-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added per-tool abort metadata so stream-wide aborts can label matching tool-call placeholders separately from unaffected sibling calls ([#2783](https://github.com/can1357/oh-my-pi/issues/2783)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed handoff generation retrying with `toolChoice: "auto"` when custom OpenAI-compatible providers reject `toolChoice: "none"` with an auto-only 400. ([#4715](https://github.com/can1357/oh-my-pi/issues/4715))
 - Fixed generic remote compaction against OpenAI-compatible `/chat/completions` endpoints (for example llama.cpp `openai-completions`) by sending chat messages instead of the custom `{ systemPrompt, prompt }` summarizer payload. ([#4630](https://github.com/can1357/oh-my-pi/issues/4630))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.3.7] - 2026-07-05
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where provider orchestration tokens were incorrectly included in context token calculations, which could trigger premature context auto-compaction and promotion.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.3.3] - 2026-07-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Enabled dynamic model resolution to support seamless mid-run model switching.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue in the Cursor agent where assistant messages containing native tool calls could duplicate text blocks on replay.
 - Fixed a bug where Cursor agent exec-channel tools (such as bash, write, and delete) were executed a second time after server-side execution.
 - Improved error handling for tool calls interrupted by upstream provider stream errors, distinguishing transport/provider failures from local tool execution failures in the CLI, events, and messages.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.3.0] - 2026-07-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added support for Anthropic fallback content blocks in agent-loop assistant messages, ensuring they are preserved across session persistence and event fanout.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where legacy steering messages were prematurely consumed and dropped during in-flight tool execution polls.
 - Fixed an issue where skipped tool results in queued messages were incorrectly treated as completed, preventing necessary retries.
 - Improved branch summaries to preserve informative tool results from abandoned branches while filtering out redundant output.
 - Fixed interruptible tool waits to properly abort on host-provided IRC interrupts in addition to user steering.
 - Fixed schema validation errors for closed union tools by correctly injecting intent tracing into each variant.
 - Fixed token compaction reserve-budget logic to honor explicit reserveTokens values equal to the built-in default, and clamped the fallback reserve to at least one token for very small context windows.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.2.4] - 2026-06-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Improved the reliability of remote compaction by introducing transient error retries, configurable timeouts, and immediate termination upon user-initiated aborts.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where assistant responses and encrypted reasoning could be lost during local history trimming prior to remote compaction.
 - Fixed type compatibility for hosts with title audit entries by adding support for `title_change` session metadata.
 - Fixed an issue where transient stream read failures after a completed tool call were treated as terminal errors, allowing the agent to successfully execute the tool and continue the turn.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.2.3] - 2026-06-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Enabled V2 streaming remote compaction by default for compatible AI and OpenAI-compatible models, which forwards full conversation history to the provider and supports session routing, prompt caching, provider-native tool history replay, transient error retries, and configurable timeouts.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where assistant responses and encrypted reasoning could be lost during local history trimming.
 - Added `title_change` session metadata to the compaction entry type union to maintain type compatibility for hosts with title audit entries.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.2.2] - 2026-06-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added optional AgentTool.matcherPaths(args) and AgentTool.matcherEntries(args) hooks to allow tools to surface target file paths and isolate file evaluations for path-scoped stream matchers (e.g., when handling multi-file payloads or embedded paths in streamed arguments).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Removed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed support for Pi dialect integration.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.2.0] - 2026-06-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added an optional `cwdResolver` to `Agent` and `getCwd` to `AgentLoopConfig` to dynamically resolve the working directory per LLM call, allowing workspace-scoped provider discovery (such as GitLab Duo Agent) to follow live directory changes without reconstructing the agent.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed an issue where API-level provider refusals were replayed as assistant dialogue on subsequent requests, preventing repeated refusals after a single blocked turn.
 - Fixed a bug where internal streaming state (`partialJson`) could leak onto the final `AssistantMessage` if a stream ended without a `toolcall_end` event.
 - Fixed `Agent` to correctly forward the working directory (`cwd`) into provider stream options, enabling providers like GitLab Duo Agent to scope local tool execution to the workspace.
 - Enabled custom OpenAI-compatible providers to use native remote compaction instead of falling back to local summarization.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.23] - 2026-06-26
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed `AgentLoopConfig.onTurnEnd` and `Agent.setOnTurnEnd` callbacks to receive whether the loop will continue with another provider request.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed stale snapcompact archive frames leaking into context-full compaction after `compaction.strategy` was switched from `snapcompact` to `context-full`. Switching strategy left the latest compaction entry's `preserveData.snapcompact` in place, so context-full kept rebuilding context with old image frames attached — inflating context/token usage and making sessions appear to compact early (around ~60% apparent window use). The first context-full compaction after the switch now folds the prior archive's plaintext into the LLM summary input and strips `preserveData.snapcompact` from the new entry; legacy frame-only archives (no plaintext to migrate) are stripped outright. ([#3561](https://github.com/can1357/oh-my-pi/pull/3561) by [@serverinspector](https://github.com/serverinspector))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.18] - 2026-06-25
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed `AppendOnlyContextManager.syncMessages` clearing the entire log on any in-place rewrite of an already-synced message. Per-turn tool-output pruning, image stripping, or any `transformContext` re-render that touched a single message used to drop every prior turn out of the append-only log and re-send the conversation from scratch, forcing local backends (llama.cpp / Ollama / LM Studio) to re-prefill tens of thousands of tokens every few turns. `syncMessages` now finds the longest byte-stable prefix between the previously-synced messages and the new ones, truncates the log to that prefix, and only re-appends the diverged tail — so the provider's KV cache stays warm up to the divergence point. ([#3406](https://github.com/can1357/oh-my-pi/issues/3406))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.17] - 2026-06-24
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Hardened the agent-loop cooperative yield against backward wall-clock jumps. A stale future timestamp left in the shared yield gate (NTP step, or a fake-timer test mocking `Date.now`) could make `yieldIfDue()` gate forever and stop yielding to the event loop; the gate now treats a backward clock delta as due and re-anchors. The gate is exposed as an injectable `YieldGate` (with `yieldIfDue()` retained as the shared singleton) so it can be exercised without mocking process-global timers.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.16] - 2026-06-23
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `generateHandoffFromContext(context, model, options)` to `@oh-my-pi/pi-agent-core/compaction`: runs the handoff oneshot against a fully-built provider `Context` (system prompt, normalized tools, transformed history, trailing handoff prompt) with `streamOptions` mirroring the live turn's cache routing, so a host that owns the transform pipeline can make the handoff request share the prompt cache the main turn populated. `generateHandoff(messages, …)` is unchanged and now delegates to it.
 - Added an optional `systemPrompt` argument to `Agent.buildSideRequestContext(llmMessages, systemPrompt?)`, defaulting to the live agent prompt; callers can pin a different prompt (e.g. handoff generation, which uses the base prompt rather than a per-turn `before_agent_start` hook override).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Updated `buildSideRequestContext` to allow pinning custom system prompts
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.10] - 2026-06-21
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed labeled user interrupts retaining incomplete streamed tool calls before `toolcall_end`, which could persist malformed tool-call IDs into replay.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.8] - 2026-06-20
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed `transformProviderContext` and `buildSideRequestContext` to return a Promise
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `buildSideRequestContext` to the `Agent` class to build prompt-cache-friendly provider Contexts for side-channels or ephemeral requests.
 - Added `compactionContextTokens(providerContextTokens, storedConversationEstimate)`: floors the provider-reported context tokens by a local estimate of the stored conversation for the compaction decision, so a `before_provider_request` payload transform (a compression extension, obfuscator, or inline snapcompact) that shrinks the request can no longer deflate provider usage below the true history size and suppress auto-compaction.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Exported helper functions `normalizeMessagesForProvider` and `resolveOwnedDialectFromEnv` from `packages/agent/src/agent-loop.ts`.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.5] - 2026-06-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Wire-encoded `normalizeTools` parameters unconditionally so tools whose `intent` resolves to `"omit"` (function intent or `intent: "omit"`, e.g. builtin `eval` / `resolve`) no longer leak raw arktype/zod schema objects in `parameters` ([#3074](https://github.com/can1357/oh-my-pi/issues/3074))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.2] - 2026-06-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Prevented sensitive raw JSON payloads from leaking into agent events during tool validation
 - Ensured tool validation errors are handled correctly for malformed JSON parse inputs
 - Ensure deep-cloning of tool-call arguments respects own enumerable properties
 - Prevent direct object references between agent message snapshots and streaming events
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.1.0] - 2026-06-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `SoftToolRequirement` support to `getToolChoice`: a host can require a tool by returning a soft requirement instead of a hard `ToolChoice`. The loop injects the supplied reminder once (leaving `tool_choice` on auto), and escalates to a one-turn forced choice — skipping any detour tool batch — only if the model fails to call the required tool, avoiding the provider message-cache invalidation of forcing every turn.
 - Added `pruneToolDescriptions` option to reduce token usage by stripping tool descriptions from provider-bound specs
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Improved token estimation accuracy for compaction summaries containing multi-block content
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.0.11] - 2026-06-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Updated the display format for truncated file operation summaries
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.0.8] - 2026-06-18
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Stopped the compaction `<files>` summary from tracking `scheme://` URLs — internal URIs (`conflict://`, `artifact://`, `local://`, `history://`, …) and web URLs are no longer recorded as files, and legacy entries rehydrated from older compaction summaries are dropped.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.0.6] - 2026-06-18
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `transformAssistantMessage` hook to `AgentOptions` and `Agent` to allow mutating the finalized assistant message before UI emission, context appending, or tool dispatch
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.0.5] - 2026-06-17
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed `AgentOptions.getApiKey` and `AgentLoopConfig.getApiKey` to receive the active `Model` and return an API key or `ApiKeyResolver`, so credential routing stays model-scoped and retry context is no longer exposed through the agent-core API
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added agent-loop deadline support for graceful wall-clock session stops.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed Gemini repetition-loop detection to live in the pi-ai stream layer instead of the agent loop. The agent no longer runs its own Gemini-gated verbatim repetition check (`detectRepetition`/`truncateRepetition`); loops now surface as a retryable transient stream error that the standard auto-retry path discards and re-samples, rather than a committed contentful error message.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed `PI_DIALECT=minimax` being ignored by the owned tool-calling env selector. ([#2759](https://github.com/can1357/oh-my-pi/issues/2759))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.0.1] - 2026-06-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed transient provider errors after streamed tool-call arguments so incomplete tool calls are marked as interrupted output instead of eligible for automatic retry ([#2683](https://github.com/can1357/oh-my-pi/issues/2683)).
 - Fixed `@oh-my-pi/pi-agent-core` telemetry content capture crashing every chat turn with `TypeError: systemPrompt.map is not a function` when `captureMessageContent` is enabled (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`). `ChatRequestSnapshot.systemPrompt` now accepts `string | readonly string[]` and the telemetry serializers normalize a bare string to a single-element array — previously the full-system serializer called `.map` on a string (the `.length` guard passed, so it threw) and the request-message serializer iterated the string into one `system` message per character.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [16.0.0] - 2026-06-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Renamed owned tool-calling options from `toolCallSyntax`/`exampleSyntax` to `dialect`/`exampleDialect`.
 - Changed compaction conversation serialization to use the target model's native dialect turn, thinking, tool-call, and tool-result envelopes when a dialect is selected.
 - Renamed the owned dialect environment variable from `PI_OWNED_TOOLS` to `PI_DIALECT`.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `onTurnEnd` hook support (`setOnTurnEnd`/`onTurnEnd`) to run awaited per-turn bookkeeping with current messages before the next model request and skip callback execution for aborted or error turns
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Renamed `toolCallSyntax` option to `dialect` in AgentOptions and AgentLoopConfig
 - Updated conversation serialization to use dialect's native transcript rendering when a dialect is selected
 - Changed internal references from `ToolCallSyntax` type to `Dialect` type across agent loop and compaction modules
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.13.3] - 2026-06-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added the `interruptible` tool field: when set, the agent loop may abort the tool mid-execution to deliver a queued steering message (honored only in `immediate` interrupt mode).
 - Added support for `gemini` and `gemma` as valid owned tool syntax values in environment configuration
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed `pruneToolOutputs` blanking tiny tool results during overflow pruning: results below `50` tokens (`MIN_PRUNE_TOKENS`) are no longer replaced with the `[Output truncated - N tokens]` placeholder, which cost more tokens than the result itself and churned the prompt cache for zero savings.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.13.2] - 2026-06-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed `harmony-leak` exports from the `@oh-my-pi/pi-agent-core` package entrypoint
 - Replaced the experimental `promptToolCalls` agent/loop option with `toolCallSyntax`, selecting an explicit in-band tool-call grammar instead of a boolean GLM-only mode.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added support for selecting owned in-band tool-call syntax via `PI_OWNED_TOOLS=<syntax>` (for example `hermes` or `qwen3`) while preserving legacy `PI_OWNED_TOOLS=1/true` as GLM mode
 - Added owned in-band tool calling for multiple syntaxes (`glm`, `hermes`, `kimi`, `xml`, `anthropic`, `deepseek`, `harmony`, `pi-native`, `qwen3`). Owned mode sends no native provider tools, appends a syntax-specific prompt/catalog, re-encodes prior tool calls/results as grammar-owned text, and parses streamed model output back into canonical tool calls.
 - Added tool-example folding to `normalizeTools`: when given a model's affinity syntax (resolved via `preferredToolSyntax`), it renders each tool's `examples` into an `<examples>` block in that native syntax and appends it to the wire description. Wired through both context paths (fresh build and append-only `takeSnapshot`/`build` via a new `exampleSyntax` build option), with the `_i` intent-field placeholder added to examples when intent tracing injects it.
 - Added the `abortOnFabricatedToolResult` option to `AgentOptions`/`AgentLoopConfig` (default `true`): when owned tool calling is active and the model fabricates a tool result mid-turn, `true` aborts the provider request immediately while `false` lets it finish and discards the fabricated continuation.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added owned in-band syntax support to `Agent` loop configuration resolution by selecting syntax from `toolCallSyntax` or `PI_OWNED_TOOLS` when present
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed append-only context cache fingerprinting to account for `exampleSyntax`, so switching tool-call syntax rebuilds cached prompts with the correct injected tool examples
 - Fixed owned in-band tool-calling requests to omit `toolChoice` after stripping native tools, preventing invalid tool-choice requests
 - Fixed owned tool calling letting the model fabricate tool results by treating grammar-owned tool-result markers in assistant text as a hard turn boundary: calls before the fabrication are kept, fabricated results and dependent calls are dropped, and the real result is fed back on the next turn.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.13.1] - 2026-06-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added repetition-loop detection to the streaming agent loop for Gemini-family providers. A runaway run of a repeated text or thinking unit is detected mid-stream from a bounded rolling tail (O(1) per delta), the provider request is aborted, the repeated tail is collapsed to a single representative copy, and the turn ends gracefully with an `error` stop reason. Legitimate all-numeric/whitespace/punctuation runs (hexdumps, zero-fills, numeric tables) are not misclassified as loops ([#2549](https://github.com/can1357/oh-my-pi/pull/2549) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed repetition loop handling to collapse repeated `thinking` blocks to a single representative copy when a loop is detected
 - Fixed repetition-loop detection to ignore repeats that contain only digits, whitespace, or punctuation so legitimate numeric outputs no longer stop with a repetition-loop error
 - Fixed false-positive repetition-loop checks across `text` and `thinking` stream boundaries by tracking loop detection per block type
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.12.6] - 2026-06-14
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed dynamic forced tool choices from queue hooks being filtered against the active per-turn tool set before provider dispatch. ([#1701](https://github.com/can1357/oh-my-pi/issues/1701))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.12.4] - 2026-06-13
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed remote compaction input trimming to use unlimited context when `model.contextWindow` is unset
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.12.1] - 2026-06-12
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed `pruneSupersededToolResults` to allow `supersedeKey` to be omitted so useless-result pruning can run without read-style supersede grouping
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `pruneUseless` controls to `PruneConfig` and `SupersedePruneConfig` so callers can toggle compaction of `toolResult` entries marked `useless`
 - Added the ability to disable useless-result pruning by setting `pruneUseless` to false
 - Tools can flag a result contextually useless (`AgentToolResult.useless`; overridable via `AfterToolCallResult.useless`): the agent loop copies the flag onto the persisted `ToolResultMessage` (errors always win), and compaction consumes it — the cache-aware supersede pass and the threshold prune blank flagged results to the exact `USELESS_NOTICE` placeholder (bypassing the protect window, skipping results smaller than the notice), shake collects them inside the protect-recent window, and `serializeConversation` drops the whole tool call/result pair from summarizer input
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed `pruneSupersededToolResults` to allow omitted `supersedeKey` when `pruneUseless` is enabled, so useless-result pruning can run without read-style supersede grouping
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.11.4] - 2026-06-12
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `hasSteeringMessages` to `AgentLoopConfig` (wired by `Agent` to its steering queue): a peek used by the immediate-interrupt poll during tool execution, so the loop can detect queued steering without dequeuing and the queue keeps owning its messages until the injection boundary
 - The agent loop now re-samples after a non-terminal stop (`stopReason: "stop"` with `stopDetails: { type: "pause_turn" }`, emitted by the Codex providers for `end_turn: false` commentary-only responses): the assistant message is committed to history and the model is called again without ending the turn. Consecutive pause continuations without an intervening tool call are capped at 8 to bound a backend that never stops pausing.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed steering handling so queued steering messages are now dequeued only at injection boundaries, with immediate mid-batch interrupt polling using `hasSteeringMessages`. Consumers constructing `AgentLoopConfig` directly with only `getSteeringMessages` no longer get mid-batch interrupts — steering degrades to boundary-only delivery until they also supply `hasSteeringMessages`
 - Compaction, handoff, short-summary, and branch-summarization helpers now accept an `ApiKey` (static string or resolver) instead of a pre-resolved string, so a 401 mid-compaction force-refreshes and rotates the credential through the central auth-retry policy before any model-level fallback. The remote OpenAI compaction request is wrapped in `withAuth` and its HTTP failures now carry `.status`, so the retry classifier actually fires on remote-compaction 401s.
 - `transformProviderContext` now receives the dispatch model as a second argument (`(context, model) => Context`), so per-request transforms can gate on model capabilities (vision input, provider, API family). Existing single-argument implementations keep working unchanged.
 - Remote-compaction and summarization failures now throw pi-ai's typed `ProviderHttpError` instead of mutating plain `Error`s with a `.status` property; the generic `requestRemoteCompaction` error now carries `.status` (and response headers) too.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed a regression where steering messages could be injected into history during an aborted in-flight tool batch, leaving them hidden from queue consumers for post-abort continue
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.11.2] - 2026-06-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `AgentTool.concurrency` now also accepts a per-call resolver function `(args) => "shared" | "exclusive"`, letting tools pick the scheduling mode from the call's arguments (a throwing resolver falls back to `"exclusive"`)
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed whitespace-only error tool results so Anthropic requests no longer 400 with `tool_result: content cannot be empty if is_error is true` and wedge the session on every subsequent turn
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.11.0] - 2026-06-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed `compaction/index.ts` re-export of snapcompact helpers, so snapcompact utilities are no longer available from the agent compaction barrel and should be imported from `@oh-my-pi/snapcompact`
 - Removed the `convertToLlm` alias export from `compaction/messages` — it duplicated `defaultConvertToLlm` under a second name. Import `defaultConvertToLlm` (array form) or the new `convertMessageToLlm` (single-message form) instead
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `convertMessageToLlm()`: the single-message core transformer behind `defaultConvertToLlm()`. Embedders with app-specific message roles should handle their own roles and delegate every core role (`user`/`developer`/`assistant`/`toolResult`/`custom`/`hookMessage`/`branchSummary`/`compactionSummary`) to it instead of duplicating the conversion — a duplicated `compactionSummary` case is how snapcompact frames once silently dropped off provider requests
 - Added `pruneSupersededToolResults()` and the opt-in `PruneConfig.supersedeKey` hook so harnesses can prune stale tool results superseded by a newer read of the same file; superseded results are pruned ahead of age-based victims during overflow pruning and replaced with a `[Superseded by a newer read of this file]` placeholder. Without the new config, `pruneToolOutputs()` behavior is unchanged.
 - Added `readToolSupersedeKey()` implementing the read-tool path/selector grammar (selector-free reads supersede range reads of the same file; URL-scheme paths exempt). Pruning honors prompt-cache economics: per-turn prunes only fire when the post-candidate suffix is small or the cache is cold (idle gap).
 - Added the `snapcompact` compaction strategy via `@oh-my-pi/snapcompact`: instead of an LLM summary, discarded history is printed onto dense bitmap frames and re-attached to the compaction summary message as image blocks. `CompactionSummaryMessage` gains an optional `images` field, `estimateTokens()` charges per attached frame, and frames persist under `preserveData.snapcompact` with an 8-frame middle-out eviction budget.
 - Snapcompact frames are now rendered in a provider-aware shape (`SNAPCOMPACT_SHAPES` + `resolveSnapcompactShape(api)`), following the snapcompact 200k-token monolithic evals: Anthropic-family and unknown APIs get `8x8r-bw` (unscii-8 square cells, black ink, every line printed twice with the copy on a pale highlight band — read at F1 parity with raw text at ~2x lower cost and the most refusal-robust), Google gets `8x8r-sent` (sentence-hue ink, ~2.9x cheaper), and OpenAI gets `6x6u-sent` (unscii Lanczos-stretched to 6x6 cells — OpenAI bills a flat ~2.9k tokens per image, so frame count is the only cost lever) with `detail: "original"` on the frame images. `snapcompactCompact()` accepts `model`/`shape` options, frames persist their shape metadata, mixed-shape archives (provider switches, legacy 5x8 frames) are flagged in the reading instructions, and `snapcompactGeometry()`/`renderSnapcompactFrame()` now take a shape
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Compaction and branch-summary file lists are now a single `<files>` tag instead of `<read-files>`/`<modified-files>`: paths render as the grouped, prefix-folded directory tree the find/search tools emit (`# dir/` headers, bare basenames), each annotated `(Read)`, `(Write)`, or `(RW)` — modified files that were also read get `(RW)`. Legacy tags in summaries written by earlier versions are still stripped and self-heal on the next compaction
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed queued steering messages being drained into an externally aborted run: interrupting mid-tool execution (e.g. Enter with a pending steer) dequeued the steer into the dying run — it landed in history without a response and the post-abort resume saw an empty queue, so the agent stopped instead of continuing. Steering/follow-up/aside queue polls are now skipped once the run's abort signal fires, leaving the queue intact for `Agent.continue()`.
 - Fixed `<read-files>` compaction lists recording the same file once per line-range/raw selector (`src/foo.ts:50-200`, `:raw`, `:1-50:raw`, …): read-tool selectors are now stripped before tracking, so reads dedupe to the base path and match their write/edit path when splitting read-only vs modified lists. Selector-polluted lists stored by earlier compactions self-heal on the next compaction. `readToolSupersedeKey()` now shares the same splitter (`splitReadSelector()`), gaining the `..` range alias and `L`-prefix forms it previously missed.
 - Fixed `estimateTokens()` undercounting thinking-heavy assistant messages on replay: `thinkingSignature` payloads (OpenAI Responses encrypted reasoning items, Anthropic signed thinking blocks, etc.) and `redactedThinking.data` are now charged alongside the visible thinking text, so the local estimate tracks provider-reported usage instead of straddling the threshold on every turn ([#2275](https://github.com/can1357/oh-my-pi/issues/2275)).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.10.12] - 2026-06-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `AgentLoopConfig.getDisableReasoning` so callers can override `disableReasoning` per LLM call, mirroring `getReasoning`.
 - Added `transformProviderContext` to `AgentOptions`/`AgentLoopConfig`: an optional hook applied to the assembled provider context after conversion, normalization, and append-only handling, but before telemetry capture and provider send.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed `Agent` runs so explicit reasoning disablement is forwarded to provider stream options and re-resolved per continuation, keeping mid-run thinking-off changes in sync with the next provider request.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.10.11] - 2026-06-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Editorial pass over the compaction prompts: fixed garbled grammar and missing articles, RFC-keyed prohibitions, deduped restated instructions; parsed markers (`<read-files>`/`<modified-files>`/`<previous-summary>`) and all output-format headings left byte-identical
 - Catalog imports moved to the new `@oh-my-pi/pi-catalog` package: subpath imports (`calculateCost`, Codex wire constants) plus catalog values previously taken from the `@oh-my-pi/pi-ai` root (`getBundledModel`, `clampThinkingLevelForModel`), which pi-ai no longer re-exports; type-only `Model`/`Api`/`Effort` imports from pi-ai are unchanged
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.10.8] - 2026-06-09
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added optional `fetch` overrides to `SummaryOptions` and `compact`/`generateSummary` so remote compaction can use custom HTTP clients
 - Added optional `fetch` option to `ProxyStreamOptions` to control the HTTP request used by `streamProxy`
 - Added optional `fetch` overrides to `requestOpenAiRemoteCompaction` and `requestRemoteCompaction` for injectable HTTP transport
 - Added the upstream provider that served a request (`AssistantMessage.upstreamProvider`, e.g. OpenRouter's routed provider) as a `pi.gen_ai.response.upstream_provider` chat-span telemetry attribute, alongside the existing response id and time-to-first-chunk.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.10.5] - 2026-06-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Removed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed the `maxToolCallsPerTurn` option from `AgentOptions` and `AgentLoopConfig`, so assistant turns are no longer capped after a configured number of completed tool calls
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed stalled aborted assistant responses so the run now stops without waiting for provider iterator cleanup and returns the aborted message promptly
 - Fixed `afterToolCall` handling so it now runs for completed tool executions even after a run is aborted so tool post-processing still applies
 - Fixed `agentLoopDetailed().detailed()` so run telemetry and coverage are captured before `stream.result()` resolves.
@@ -1313,167 +1308,167 @@
 - Fixed tool-call completion so assistant messages on abort keep only completed tool-call blocks and continue processing tool calls when a length stop still included results
 - Fixed deliberate aborts (TTSR rule matches, user-interrupt labels) so a mid-stream tool-call block that never reached `toolcall_end` is retained on the aborted assistant message and paired with a placeholder result labeled by the abort reason, instead of being dropped; anonymous aborts (bare `abort()`) still drop incomplete tool calls whose partial arguments are unsafe to replay
 - Fixed runs that stopped with reason `length` after returning tool results so execution continues to handle additional tool calls
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.10.3] - 2026-06-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added a non-interrupting "aside" message channel to the agent loop (`AgentLoopConfig.getAsideMessages` / `Agent.setAsideMessageProvider`). Asides are drained at each step boundary (after a tool batch, before the next model call) and at the yield check, so passive notifications (e.g. background-job completions, late LSP diagnostics) reach the model *between requests* without waiting for the agent to stop and without aborting in-flight tools the way steering does.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed core custom and hook messages to convert to `developer` messages for provider context.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed the compaction spinner freezing (only repainting on a terminal resize) when compacting very large codex/OpenAI contexts. `buildOpenAiNativeHistory` re-collected the full known/custom tool-call id sets on every history-bearing message, rescanning the entire growing native history each time — O(N²) in history items — which blocked the event loop for seconds and starved the loader's animation timer and render scheduler. The sets are now maintained incrementally (linear), so building the compaction request no longer monopolizes the main thread.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Removed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed the now-dead `<turn-aborted>` marker from the OpenAI compaction output user-message filter, since `transformMessages` no longer emits that note.
 - Removed stale synthetic user-message tag filters from OpenAI remote compaction output preservation; developer messages are now dropped by role instead.
 - Tool executions now receive the active turn `AbortSignal` unconditionally.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.10.2] - 2026-06-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed proxy stream silently returning a zero-token success response when the server disconnects without sending a `done` or `error` terminal SSE event. The stream now throws an error, surfacing the disconnect as an `error` event with `stopReason: "error"` and resolving `finalResultPromise`, instead of defaulting to `stopReason: "stop"` with empty content and leaving `stream.result()` callers hanging indefinitely.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.10.1] - 2026-06-07
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added optional `promptCacheKey` support to `AgentOptions` and `Agent` via a new `promptCacheKey` property so providers can receive a caller-provided prompt cache key
 - Added optional `ApiKeyResolveContext` parameter to `getApiKey` in `AgentOptions` and `AgentLoopConfig` so key resolvers can receive retry context
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Enabled streaming API calls to re-resolve credentials through the `getApiKey` callback when retries occur after authentication-related errors
 - `Agent.abort(reason?)` now forwards `reason` to the underlying `AbortController`, and the synthesized aborted assistant message carries that reason on `errorMessage` (string or non-`AbortError` `Error` message) instead of always defaulting to `"Request was aborted"`. Bare `abort()` is unchanged.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed handling of short-lived API keys so that expired tokens are retried with a refreshed value during 401/usage-limit failures
 - Ensured fallback API key resolution uses the initially configured static `apiKey` when `getApiKey` is present
 - Wrapped oneshot LLM completions (`instrumentedCompleteSimple`: handoff, compaction/branch summaries) in an `EventLoopKeepalive`. These run outside the agent `#runLoop`, so without the keepalive Bun's event loop stopped servicing timers while parked on the completion promise — freezing host spinners (e.g. the `/handoff` loader) until an unrelated terminal resize poked the loop into rendering again.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.9.5] - 2026-06-05
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Surfaced Anthropic stream failures whose message starts with `Output blocked by conten` as normal assistant error lifecycle events, so interactive clients render content-filter blocks instead of silently dropping the streaming bubble at `agent_end`.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.8.3] - 2026-06-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `getReadToolPath(context)` to `@oh-my-pi/pi-agent-core/compaction/tool-protection` to extract a paired `read` tool call's `path` for embedders building read-targeted protection matchers
 - Added `getReadToolPath(context)` to `@oh-my-pi/pi-agent-core/compaction/tool-protection`: the shared primitive that extracts a paired `read` tool call's `path` argument, so embedders can build their own read-targeted compaction protection matchers (e.g. plan-file reads) the same way `isSkillReadToolResult` does.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.8.2] - 2026-06-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added optional `AgentTool.matcherDigest(args)` hook: tools whose streamed arguments encode content in a wire grammar (patch formats, escaped strings) can expose the real content they introduce, so stream-content matchers (e.g. TTSR rules) run against plain source text instead of the wire format.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed the agent loop wedging the model when a `write`/`edit` tool call is truncated by `stop_reason: length` (e.g. an OpenCode Zen / Claude-3.5-Haiku turn that emits >~1000 lines of code, blowing past the 8K `max_tokens` output cap). The skipped tool result now surfaces an actionable hint — naming `stop_reason: length` and telling the model to split the payload into multiple smaller calls — instead of the generic "Tool call was not executed because the assistant ended its turn" placeholder, which left the auto-continue loop re-emitting the same oversized payload until the user gave up. Tools are still NOT executed when the arguments are truncated. ([#1785](https://github.com/can1357/oh-my-pi/issues/1785))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.8.0] - 2026-06-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Engaged GPT-5 Harmony leak detection on the committed assistant message (openai-codex only). `detectHarmonyLeakInAssistantMessage` now runs on the streamed `done`/`error` result and the trailing fallback, so a leaked final response is aborted-and-retried by the existing mitigation instead of being committed as-is. Tool-argument (`tool_arg`) scanning is gated on the trailing-garbage `T` co-signal and only fires when a caller supplies a parse boundary via `detectHarmonyLeakInAssistantMessage`'s new optional `toolArgParseEnd` resolver. The agent loop passes none — it cannot bound a streamed tool DSL — so that surface stays inert and a legitimate codex tool call whose content legitimately carries `to=functions.*` next to a channel word or non-Latin script (e.g. editing the harmony fixtures) is never hard-aborted.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.7.4] - 2026-05-31
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Removed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed the local-model `summarizeShakeRegions` compressor and related shake-summary prompt/types; shake now only provides mechanical artifact-backed elision primitives.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.7.3] - 2026-05-31
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `shake` compaction primitives (`collectShakeRegions`, `applyShakeRegion`, `applyShakeRegions`, `summarizeShakeRegions`, `DEFAULT_SHAKE_CONFIG`, `AGGRESSIVE_SHAKE_CONFIG`, plus the `ShakeRegion`/`ShakeConfig`/`ShakeSummaryItem`/`ShakeSummaryComplete`/`ProtectedToolMatcher` types) under `@oh-my-pi/pi-agent-core/compaction`. These detect heavy context regions — whole tool-call results plus large fenced/XML blocks — and either elide them with placeholders or extractively compress them through an injected completion backend (no LLM summary cut-point). The compressor is provider-agnostic: callers wire it to a local on-device model. Pure detection/mutation; no I/O.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed tool-output pruning and shake protection for `read`: ordinary file/URL reads are now eligible for compaction, while `read` calls whose `path` starts with `skill://` remain protected like native `skill` results.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.5.15] - 2026-05-30
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `maxToolCallsPerTurn` to `AgentLoopConfig`/`AgentOptions`, allowing callers to cut a streamed assistant turn after a completed tool-call batch and execute the runnable partial turn instead of waiting for the provider to yield.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Normalized `maxToolCallsPerTurn` to accept only positive integer limits, with non-finite or non-positive values treated as disabled
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.5.14] - 2026-05-29
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed the agent loop abandoning tool calls that Anthropic adaptive/interleaved-thinking models (e.g. Opus) emit under `stop_reason: "end_turn"`. The previous gate only ran tools when `stopReason === "toolUse"`, so an `end_turn`+tool_use turn produced "Tool call was not executed because the assistant ended its turn" placeholders, made no progress, and could trap the model in a re-emit/abandon loop. `stop_reason` is never replayed on the wire and (verified against the live Anthropic Messages API) does not gate continuation validity, so `stop`/`end_turn` turns carrying tool_use blocks are now executed and the loop continues — exactly like `toolUse`. Only `length` (max_tokens truncation) still abandons, since the trailing tool call may have incomplete arguments. The continuation stays valid because `transformMessages` strips the now-untrustworthy thinking signature and the encoder downgrades the block to text.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.5.10] - 2026-05-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed compaction summarizer throws losing the provider's HTTP status. `generateSummary`, `generateHandoff`, `generateShortSummary`, and `generateTurnPrefixSummary` now route their `stopReason === "error"` throws through a `createSummarizationError` helper that copies `AssistantMessage.errorStatus` onto the thrown `Error` as `.status`, letting downstream consumers (e.g. `AgentSession.#isCompactionAuthFailure` in `@oh-my-pi/pi-coding-agent`) branch on real provider 401/403s without regex-scraping the message body.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.5.0] - 2026-05-26
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `approval` support to `AgentTool` declarations with the new `ToolTier` and `ToolApproval` APIs, allowing tools to declare capability tiers (`read`, `write`, or `exec`) and optional override/reason metadata for approval gating
 - Added `formatApprovalDetails` on `AgentTool` to append custom detail text or lines to approval prompts
 - Added exported `ToolTier` and `ToolApproval` type aliases for tool approval declarations
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed chat-request telemetry storing the raw scoped `serviceTier` value (`"openai-only"`/`"claude-only"`) in `OpenAIAttr.RequestServiceTier` instead of the resolved wire value (`"priority"`). Dashboards and alerts filtering on the concrete tier name (`service_tier == "priority"`) were broken by the scoped placeholder; `buildChatRequestAttributes` now runs the tier through `resolveServiceTier(serviceTier, provider)` before recording, keeping the `shouldSendServiceTier` gate intact so non-OpenAI providers continue to omit the attribute entirely.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.3.0] - 2026-05-25
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed `transformContext` receiving the loop config object as the `signal` argument instead of the actual `AbortSignal`, so hooks that check `signal.aborted` or call `signal.addEventListener` now work correctly under abort/timeout conditions
 - Fixed `appendOnlyContext` not being re-evaluated after `setModel()` — the mode was decided once at session construction based on the initial model's provider, so switching from/to DeepSeek (or changing `provider.appendOnlyContext`) mid-session produced incorrect mode behavior
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.2.3] - 2026-05-22
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `onBeforeYield` hook support so user code can run right before the agent loop checks for follow-up messages
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.1.3] - 2026-05-17
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added optional `telemetry` support to `generateSummary`, `generateHandoff`, `generateBranchSummary`, and `compact` options so compaction, handoff, and branch summary one-shot LLM calls can emit OpenTelemetry chat telemetry when enabled
 - Added shared oneshot telemetry instrumentation for compaction, handoff, and branch summary calls, tagging spans with `pi.gen_ai.oneshot.kind` values such as `compaction_summary`, `compaction_short_summary`, `compaction_turn_prefix`, `handoff`, and `branch_summary`
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.1.2] - 2026-05-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `responseHeaders` to `ChatUsageEvent` and `ManualChatTelemetryOptions` so telemetry hooks receive captured lowercase upstream response headers for each chat span
 - Added automatic gateway/proxy detection from response headers (`litellm`, `helicone`, `portkey`, `openrouter`) and stamped `pi.gen_ai.gateway.*` span attributes for detected routing metadata
 - Added exported `detectGatewayFromHeaders` API for header-based gateway detection
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.1.0] - 2026-05-15
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed the `@oh-my-pi/pi-agent-core/compaction/handoff` exports from the package surface, including `extractHandoffDocument`, `createHandoffContext`, and `createHandoffFileName`
 - Removed legacy telemetry constants from the public enum surface (including `AGGREGATE_ATTR`, `GenAIAttr.System`, and old `gen_ai.*` extension keys such as `gen_ai.request.service_tier`/cost/tool status/handoff fields) and replaced them with `OpenAIAttr`, `PiGenAIAttr`, and `PiGenAIAggregateAttr`
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `generateHandoff(messages, model, apiKey, options)` to `@oh-my-pi/pi-agent-core/compaction` to generate a handoff document by calling the model directly, using live system/tool context and optional metadata
 - Added generation filtering so the returned handoff document now includes only text content blocks from the model output
 - Added support for defining `AgentTool` schemas with Zod, with legacy TypeBox schemas still supported when generating tool schemas for model calls
@@ -1492,18 +1487,18 @@
 - Added `Agent#setTelemetry(config)` so consumers can swap or disable instrumentation between invocations.
 - Added `@opentelemetry/api` as a runtime dependency; SDK setup (exporters, samplers, processors) remains the host's responsibility per standard OTEL conventions. When no SDK is registered, helpers fall through to no-op spans with zero overhead.
 - Added compaction APIs under `@oh-my-pi/pi-agent-core/compaction`, including context compaction, branch summarization, handoff prompt/context helpers, pruning, token budgeting, prompt templates, and OpenAI `/responses/compact` helpers.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed handoff document generation to force `toolChoice: "none"` when calling the model so tool invocation is disabled during generation
 - Changed `chat` spans to emit normalized provider identifiers in `gen_ai.provider.name` via OTEL-style values (for example `google` to `gcp.gemini`) instead of the legacy `gen_ai.system` label
 - Changed service-tier telemetry to emit `openai.request.service_tier`/`openai.response.service_tier` only when supported by provider via `shouldSendServiceTier`, rather than always using `gen_ai.request.service_tier`
 - Changed captured message payloads so full capture now records OTEL-structured message parts with `pi.gen_ai.request.messages`, `pi.gen_ai.system_instructions`, and `gen_ai.output.messages` including assistant `finish_reason`
 - Changed the `agent_end` event payload to include optional `telemetry` and `coverage` fields when telemetry is enabled, while keeping the legacy payload shape when disabled
 - Changed `invoke_agent` spans to include aggregate `pi.gen_ai.agent.*` attributes for chat/tool counts, latency, usage, cost, errors, and tool coverage
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed intent-field injection for tool schemas defined with Zod by converting them to wire schema before mutation
 - Fixed token accounting in `ChatUsageEvent` and usage summaries so `inputTokens` and `totalTokens` now include cached read/write input tokens
 - Fixed `execute_tool` span attributes so `pi.gen_ai.tool.status` and `error.type` now reflect run-level tool outcomes (`ok`, `error`, `skipped`, `blocked`, `timeout`, `aborted`) instead of mapping all non-ok cases the same way
@@ -1515,404 +1510,404 @@
 - Fixed `AgentRunSummary.usage.inputTokens` so it now includes `cache_read` and `cache_write` input tokens, matching `ChatUsageEvent.inputTokens`
 - Fixed span lifecycle hooks (`onSpanStart`, `onSpanEnd`) so a thrown user callback is caught and surfaced via `onTelemetryWarning` (`on_span_start_failed` / `on_span_end_failed`) instead of leaking and aborting the surrounding span
 - Fixed unbounded recursion in summary content capture when a captured value contains a cyclic or deeply nested array — array recursion now respects the same depth cap as plain-object recursion and replaces back-references with `"[Circular]"`
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [15.0.1] - 2026-05-14
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Raised the minimum required Bun version from >=1.3.7 to >=1.3.14
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.9.5] - 2026-05-12
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added an `isError?: boolean` field on `AgentToolResult` so tools can flag a non-throwing failure (e.g. an aggregator that catches per-entry errors). `coerceToolResult` preserves the flag and the agent loop surfaces it as a tool error on the wire.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.9.3] - 2026-05-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `onHarmonyLeak` option on `Agent`/loop config to receive GPT-5 Harmony leak audit callbacks
 - Added harmony-leak detection and audit exports to the package index for programmatic leak detection and recovery hooks
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed OpenAI Codex model runs to detect GPT-5 Harmony protocol leakage during streaming and automatically retry or recover tool calls instead of sending contaminated arguments downstream
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Security
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Hardened tool-call handling against leaked `to=functions.*` protocol tails by truncating or retrying before execution
 - Hardened failure handling so repeated GPT-5 Harmony leak mitigation is retried only up to two times before escalating to an explicit error
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.9.0] - 2026-05-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `Agent#metadata` field forwarded to every API request; callers can set arbitrary provider metadata (e.g. `metadata.user_id`) once and have it applied to all subsequent stream calls without modifying per-call options
 - Added `Agent#setMetadataResolver(fn)` for installing a function that resolves request metadata at call time. The `metadata` getter dispatches through the resolver on every read (including the snapshot taken per `prompt()`), so callers reflect mutable external state (e.g. live OAuth account UUID after a token refresh) without manual re-syncs. Plain `agent.metadata = …` continues to set a static value and clears any installed resolver.
 - Added an `onSseEvent` agent option and loop config forwarding path for raw provider SSE diagnostics.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.7.6] - 2026-05-07
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `hideThinkingSummary` option/getter/setter on `Agent` and `AgentLoopConfig`. Forwarded to the underlying stream call so providers can omit reasoning/thinking summaries on demand.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.7.2] - 2026-05-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `loadMode` option to `AgentTool` to mark built-in tools as `essential` for initial loading or `discoverable` for search activation
 - Added optional `summary` field to `AgentTool` definitions for one-line text used in tool discovery indexes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.7.0] - 2026-05-04
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed `Agent` API types so `systemPrompt` is now a list of prompt strings, requiring callers to pass and update system prompts via string arrays
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed automatic project-context injection into each model call from loop logic
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Removed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed the `projectPrompt` field from agent state/context and the `setProjectPrompt` mutator
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.6.2] - 2026-05-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed unhandled promise rejection when `getApiKey` or any other async error occurs during `streamAssistantResponse`: agent loop IIFEs now catch and route errors through `EventStream.fail()`, which terminates the `for await` loop and lets `Agent#runLoop`'s catch block create a proper error assistant message instead of crashing
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.6.0] - 2026-05-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed request cancellation before provider events by emitting an aborted assistant message and ending the stream with `stopReason: "aborted"`
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.5.10] - 2026-04-30
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added an `onResponse` stream option for observing provider response metadata after response headers arrive.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.2.0] - 2026-04-23
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed tool dispatch to match model-returned tool calls by either internal tool name or custom wire name, enabling custom OpenAI tool names such as `apply_patch`.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [14.0.1] - 2026-04-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `onAssistantMessageEvent` callback option to inspect assistant streaming events before they are emitted, enabling abort decisions before buffered events continue flowing
 - Added `setAssistantMessageEventInterceptor()` method to dynamically set or update the assistant message event interceptor
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.13.0] - 2026-03-18
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `startup.checkUpdate` setting, set to `true` by default, can be disabled to skip the update check on agent initialization
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.12.7] - 2026-03-16
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added overload for `prompt()` method accepting a string input with optional options parameter
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed stale forced toolChoice being passed to provider after tools are refreshed mid-turn
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.9.16] - 2026-03-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `onPayload` option to `AgentOptions` to inspect or replace provider payloads before they are sent
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.9.3] - 2026-03-07
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Exported `ThinkingLevel` selector constants and types for configuring agent reasoning behavior
 - Added `inherit` thinking level option to defer reasoning configuration to higher-level selectors
 - Added `serviceTier` option to configure service tier for agent requests
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed `thinkingLevel` from required string to optional `Effort` type, allowing undefined state
 - Updated `setThinkingLevel()` method to accept `Effort | undefined` instead of `ThinkingLevel` string
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.4.0] - 2026-03-01
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `getToolChoice` option to dynamically override tool choice per LLM call
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.3.8] - 2026-02-28
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Changed intent field name from `agent__intent` to `_i` in tool schemas
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed synthetic tool result text formatting so aborted/error tool results no longer emit `Tool execution was aborted.: Request was aborted` style punctuation.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.3.7] - 2026-02-27
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `lenientArgValidation` option to tools to allow graceful handling of argument validation errors by passing raw arguments to execute() instead of returning an error to the LLM
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.3.1] - 2026-02-26
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `topP`, `topK`, `minP`, `presencePenalty`, and `repetitionPenalty` options to `AgentOptions` for fine-grained sampling control
 - Added getter and setter properties for sampling parameters on the `Agent` class to allow runtime configuration
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [13.1.0] - 2026-02-23
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Removed per-tool `agent__intent` field description from injected schema to reduce token usage; intent format is now documented once in the system prompt instead of repeated in every tool definition
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [12.19.0] - 2026-02-22
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Updated tool result messages to include error details when tool execution fails
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [12.14.0] - 2026-02-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `intentTracing` option to enable intent goal extraction from tool calls, allowing models to specify high-level goals via a required `_intent` field that is automatically injected into tool schemas and stripped from arguments before execution
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [12.11.0] - 2026-02-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Exported `AgentBusyError` exception class for handling concurrent agent operations
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Agent now throws `AgentBusyError` instead of generic `Error` when attempting concurrent operations
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [12.8.0] - 2026-02-16
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `transformToolCallArguments` option to `AgentOptions` and `AgentLoopConfig` for transforming tool call arguments before execution (e.g. secret deobfuscation)
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [12.2.0] - 2026-02-13
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `providerSessionState` option to share provider state map for session-scoped transport and session caches
 - Added `preferWebsockets` option to hint that websocket transport should be preferred when supported by the provider implementation
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [11.10.0] - 2026-02-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `temperature` option to `AgentOptions` to control LLM sampling temperature
 - Added `temperature` getter and setter to `Agent` class for runtime configuration
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [11.6.0] - 2026-02-07
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `hasQueuedMessages()` method to check for pending steering/follow-up messages
 - Resume queued steering and follow-up messages from `continue()` after auto-compaction
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Extracted `dequeueSteeringMessages()` and `dequeueFollowUpMessages()` from inline config callbacks
 - Added `skipInitialSteeringPoll` option to `_runLoop()` for correct queue resume ordering
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [11.3.0] - 2026-02-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `maxRetryDelayMs` option to AgentOptions to cap server-requested retry delays, allowing higher-level retry logic to handle long waits with user visibility
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Updated ThinkingLevel documentation to include support for gpt-5.3 and gpt-5.3-codex models with 'xhigh' thinking level
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [11.2.0] - 2026-02-05
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed handling of aborted requests to properly throw abort errors when stream terminates without a terminal event
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [10.5.0] - 2026-02-04
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `concurrency` option to `AgentTool` to control tool scheduling: "shared" (default, runs in parallel) or "exclusive" (runs alone)
 - Implemented parallel execution of shared tools within a single agent turn for improved performance
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Refactored tool execution to support concurrent scheduling with proper interrupt handling and steering message checks
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [9.2.2] - 2026-01-31
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added toolChoice option to AgentPromptOptions for controlling tool selection
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [8.2.0] - 2026-01-24
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Updated TypeScript configuration for better publish-time configuration handling with tsconfig.publish.json
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [8.0.0] - 2026-01-23
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `nonAbortable` option to tools to ignore abort signals during execution
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [6.8.0] - 2026-01-20
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Updated proxy stream processing to use utility function for reading lines
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [6.2.0] - 2026-01-19
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Enhanced getToolContext to receive tool call batch information including batchId, index, total count, and tool call details
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [5.6.7] - 2026-01-18
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Added proper tool result messages for tool calls that are aborted or error out
 - Ensured tool_use/tool_result pairing is maintained when tool execution fails
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [4.6.0] - 2026-01-12
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Modified assistant message handling to split messages around tool results for improved readability when using Cursor tools
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed tool result ordering in Cursor mode by buffering results and emitting them at the correct position within assistant messages
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [4.3.0] - 2026-01-11
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `cursorExecHandlers` and `cursorOnToolResult` options for local tool execution with cursor-based streaming
 - Added `emitExternalEvent` method to allow external event injection into the agent state
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [4.0.0] - 2026-01-10
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `popLastSteer()` and `popLastFollowUp()` methods to remove and return the last queued message (LIFO) for dequeue operations
 - `thinkingBudgets` option on `Agent` and `AgentOptions` to customize token budgets per thinking level
 - `sessionId` option on `Agent` to forward session identifiers to LLM providers for session-based caching
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - `minimal` thinking level now maps to `minimal` reasoning effort instead of being treated as `low`
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [3.33.0] - 2026-01-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Ensured aborted assistant responses always include an error message for callers.
 - Filtered thinking blocks from Cerebras request context to keep multi-turn prompts compatible.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [3.21.0] - 2026-01-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Switched from local `@oh-my-pi/pi-ai` to upstream `@mariozechner/pi-ai` package
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `sessionId` option for provider caching (e.g., OpenAI Codex session-based prompt caching)
 - Added `sessionId` getter/setter on Agent class for runtime session switching
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [3.20.0] - 2026-01-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Replaced `queueMessage`/`queueMode` with steering + follow-up queues: use `steer`, `setSteeringMode`, and `getSteeringMode` for mid-run interruptions, and `followUp`, `setFollowUpMode`, and `getFollowUpMode` for post-turn messages
 - Agent loop callbacks now use `getSteeringMessages` and `getFollowUpMessages` instead of `getQueuedMessages`
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added follow-up message queue support so new user messages can continue a run after the agent would otherwise stop
 - Added `RenderResultOptions.spinnerFrame` for animated tool-result rendering
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `prompt()` and `continue()` now throw when the agent is already streaming; use steering or follow-up queues instead
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [3.4.1337] - 2026-01-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `popMessage()` method to Agent class for removing and retrieving the last message
 - Added abort signal checks during response streaming for faster interruption handling
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - Fixed abort handling to properly return aborted message state when stream is interrupted mid-response
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [1.341.0] - 2026-01-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Added `interruptMode` option to control when queued messages interrupt tool execution.
 - Implemented "immediate" mode (default) to check queue after each tool and interrupt remaining tools.
 - Implemented "wait" mode to defer queue processing until the entire turn completes.
 - Added getter and setter methods for `interruptMode` on Agent class.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [1.337.1] - 2026-01-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - Forked to @oh-my-pi scope with unified versioning across all packages
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [1.337.0] - 2026-01-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mono](https://github.com/badlogic/pi-mono).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [0.38.0] - 2026-01-08
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `thinkingBudgets` option on `Agent` and `AgentOptions` to customize token budgets per thinking level ([#529](https://github.com/badlogic/pi-mono/pull/529) by [@melihmucuk](https://github.com/melihmucuk))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [0.37.3] - 2026-01-06
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `sessionId` option on `Agent` to forward session identifiers to LLM providers for session-based caching.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [0.37.0] - 2026-01-05
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - `minimal` thinking level now maps to `minimal` reasoning effort instead of being treated as `low`.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [0.32.0] - 2026-01-03
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - **Queue API replaced with steer/followUp**: The `queueMessage()` method has been split into two methods with different delivery semantics ([#403](https://github.com/badlogic/pi-mono/issues/403)):
   - `steer(msg)`: Interrupts the agent mid-run. Delivered after current tool execution, skips remaining tools.
   - `followUp(msg)`: Waits until the agent finishes. Delivered only when there are no more tool calls or steering messages.
@@ -1922,15 +1917,15 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
   - `queueMessage()` → `steer()` and `followUp()`
   - `clearMessageQueue()` → `clearSteeringQueue()`, `clearFollowUpQueue()`, `clearAllQueues()`
   - `setQueueMode()`/`getQueueMode()` → `setSteeringMode()`/`getSteeringMode()` and `setFollowUpMode()`/`getFollowUpMode()`
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+### Fixed
+
 - `prompt()` and `continue()` now throw if called while the agent is already streaming, preventing race conditions and corrupted state. Use `steer()` or `followUp()` to queue messages during streaming, or `await` the previous call.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [0.31.0] - 2026-01-02
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Breaking Changes
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - **Transport abstraction removed**: `ProviderTransport`, `AppTransport`, and `AgentTransport` interface have been removed. Use the `streamFn` option directly for custom streaming implementations.
 - **Agent options renamed**:
   - `transport` → removed (use `streamFn` instead)
@@ -1940,17 +1935,16 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 - **`CustomMessages` renamed to `CustomAgentMessages`**: The declaration merging interface has been renamed.
 - **`UserMessageWithAttachments` and `Attachment` types removed**: Attachment handling is now the responsibility of the `convertToLlm` function.
 - **Agent loop moved from `@oh-my-pi/pi-ai`**: The `agentLoop`, `agentLoopContinue`, and related types have moved to this package. Import from `@oh-my-pi/pi-agent` instead.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Added
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `streamFn` option on `Agent` for custom stream implementations. Default uses `streamSimple` from pi-ai.
 - `streamProxy()` utility function for browser apps that need to proxy LLM calls through a backend server. Replaces the removed `AppTransport`.
 - `getApiKey` option for dynamic API key resolution (useful for expiring OAuth tokens like GitHub Copilot).
 - `agentLoop()` and `agentLoopContinue()` low-level functions for running the agent loop without the `Agent` class wrapper.
 - New exported types: `AgentLoopConfig`, `AgentContext`, `AgentTool`, `AgentToolResult`, `AgentToolUpdateCallback`, `StreamFn`.
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ### Changed
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 - `Agent` constructor now has all options optional (empty options use defaults).
 - `queueMessage()` is now synchronous (no longer returns a Promise).
- ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
