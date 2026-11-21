@@ -376,21 +376,23 @@ describe("AgentSession queued steer delivery", () => {
 	});
 
 	// Interrupt-and-send (empty Enter with a queued steer): the abort's own drain
-	// resumes the run, so its settle must not read as a stop — otherwise the UI
+	// resumes the run, so the interrupted loop only pauses it — otherwise the UI
 	// flips to idle (title, OSC 7501, loader) for one frame before the steer runs.
-	it("settles an interrupt non-terminally when a queued steer resumes the run", async () => {
+	it("pauses the run on an interrupt when a queued steer resumes it", async () => {
 		const { session } = await createSession([
 			{ content: ["slow response"], delayMs: 1_000 },
 			{ content: ["steered response"] },
 		]);
-		const settles: Array<boolean | undefined> = [];
+		const settles: string[] = [];
+		const runStates: string[] = [];
+		session.subscribeRunState(state => runStates.push(state));
 		const streaming = Promise.withResolvers<void>();
 		const steered = Promise.withResolvers<void>();
 		session.subscribe(event => {
 			if (event.type === "message_start" && event.message.role === "assistant") streaming.resolve();
-			if (event.type !== "agent_end") return;
-			settles.push(event.isTerminal);
-			if (settles.length === 2) steered.resolve();
+			if (event.type !== "agent_end" && event.type !== "agent_pause") return;
+			settles.push(event.type);
+			if (event.type === "agent_end") steered.resolve();
 		});
 
 		const run = session.prompt("hello").catch(() => {});
@@ -400,7 +402,8 @@ describe("AgentSession queued steer delivery", () => {
 		await withTimeout(steered.promise, 2_000, "queued steer never resumed the run");
 		await run;
 
-		expect(settles).toEqual([false, true]);
+		expect(settles).toEqual(["agent_pause", "agent_end"]);
+		expect(runStates).toEqual(["running", "idle"]);
 	});
 
 	// A host driving the session to a result (the subagent executor) awaits the
@@ -572,13 +575,13 @@ describe("AgentSession queued steer delivery", () => {
 		});
 	}
 
-	it("settles an interrupt terminally when nothing is queued to resume it", async () => {
+	it("ends the run on an interrupt when nothing is queued to resume it", async () => {
 		const { session } = await createSession([{ content: ["slow response"], delayMs: 1_000 }]);
-		const settles: Array<boolean | undefined> = [];
+		const settles: string[] = [];
 		const streaming = Promise.withResolvers<void>();
 		session.subscribe(event => {
 			if (event.type === "message_start" && event.message.role === "assistant") streaming.resolve();
-			if (event.type === "agent_end") settles.push(event.isTerminal);
+			if (event.type === "agent_end" || event.type === "agent_pause") settles.push(event.type);
 		});
 
 		const run = session.prompt("hello").catch(() => {});
@@ -587,7 +590,7 @@ describe("AgentSession queued steer delivery", () => {
 		await session.waitForIdle();
 		await run;
 
-		expect(settles).toEqual([true]);
+		expect(settles).toEqual(["agent_end"]);
 	});
 
 	it("dequeuing an ultrathink prompt mid-stream restores the text and drops its companion notice", async () => {

@@ -18,6 +18,11 @@ function rule(name: string, condition: string): Rule {
 const TEXT: TtsrMatchContext = { source: "text" };
 /** Many complete lines: past the size where every check rescans the whole buffer. */
 const FILLER = "const value = compute(input);\n".repeat(2_000);
+/**
+ * Appended to a condition, a quantifier bound past `LinearRegExp`'s node limit keeps it
+ * on the native engine, so `RegExp.prototype` spies can count the paced scans.
+ */
+const NATIVE_ONLY = "x{0,20000}";
 
 function names(rules: Rule[]): string[] {
 	return rules.map(match => match.name);
@@ -34,6 +39,47 @@ describe("TTSR incremental stream matching", () => {
 		// A match on a completed line stays reported as the stream grows.
 		expect(names(manager.checkDelta(" line\n", TEXT))).toEqual(["forbidden"]);
 		expect(manager.matchExcerpt("forbidden", TEXT)).toContain("call FORBIDDEN_api(1); next");
+	});
+
+	it("streams a catastrophically backtracking condition without freezing and fires on the delta that completes it", () => {
+		// JSC needs seconds for one `test` of this shape on ~20 body lines (#19147); here there are 400.
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(
+			rule("local-import", "(?m)^[ \\t]*def[ \\t]+[^\\n]+\\n(?:[ \\t]+[^\\n]*\\n|[ \\t]*\\n)*?[ \\t]+import "),
+		);
+		const body = Array.from({ length: 400 }, (_, line) => (line % 2 ? "    \n" : "    value = compute()\n")).join("");
+		const source = `def handler():\n${body}    import os\n`;
+		const matchEnd = source.indexOf("    import ") + "    import ".length;
+		const DELTA = 16;
+		let firstHit = -1;
+		for (let offset = 0; offset < source.length && firstHit < 0; offset += DELTA) {
+			if (manager.checkDelta(source.slice(offset, offset + DELTA), TEXT).length > 0) firstHit = offset / DELTA;
+		}
+		expect(firstHit).toBe(Math.floor((matchEnd - 1) / DELTA));
+		expect(manager.matchExcerpt("local-import", TEXT)).toStartWith("def handler(): value = compute()");
+	});
+
+	it("confirms a backreference condition without freezing once its automaton can match", () => {
+		// #19360: the indentation backreference keeps JSC backtracking exponentially per body line.
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(
+			rule(
+				"n-plus-one",
+				"(?:^|\\n)([ \\t]*)for\\b[^\\n]*:[ \\t]*\\n(?:\\1[ \\t]+[^\\n]*\\n|[ \\t]*\\n)*?\\1[ \\t]+[^\\n]*(?:\\.objects\\.get\\s*\\()",
+			),
+		);
+		const body = Array.from({ length: 200 }, (_, line) =>
+			line % 2 ? "    \n" : "        total = total + item\n",
+		).join("");
+		// Shallower than the loop body: the automaton cannot rule it out, the backreference can.
+		const outside = `def total(items):\n    for item in items:\n${body}    user = User.objects.get(pk=1)\n`;
+		for (let offset = 0; offset < outside.length; offset += 64) {
+			expect(manager.checkDelta(outside.slice(offset, offset + 64), TEXT)).toEqual([]);
+		}
+		expect(manager.checkDelta("", TEXT, { final: true })).toEqual([]);
+		manager.resetBuffer();
+		const inside = `def total(items):\n    for item in items:\n${body}        User.objects.get(pk=1)\n`;
+		expect(names(manager.checkSnapshot(inside, TEXT))).toEqual(["n-plus-one"]);
 	});
 
 	it("finds a condition spanning lines on the final check of a long stream", () => {
@@ -82,27 +128,21 @@ describe("TTSR incremental stream matching", () => {
 		expect(manager.matchExcerpt("long", TEXT)).toBe("new TOKEN_short context");
 	});
 
-	it("keeps settled matches cheap while a non-interrupting rule stays pending", () => {
+	it("leaves a non-interrupting rule to the final check", () => {
 		const manager = new TtsrManager({ enabled: true });
-		manager.addRule({
-			...rule("early", "EARLY_HIT"),
-			condition: ["NEVER_\\d{3}", "EARLY_HIT"],
-			interruptMode: "never",
-		});
-		manager.checkDelta("EARLY_HIT\n", TEXT);
-		const exec = RegExp.prototype.exec;
-		let scanned = 0;
-		const spy = vi.spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, input: string) {
-			if (this.source.includes("EARLY_HIT") || this.source.includes("NEVER_")) scanned += input.length;
-			return exec.call(this, input);
-		});
-		try {
-			for (let index = 0; index < 2_000; index++) manager.checkDelta("const value = compute(input);\n", TEXT);
-			expect(scanned).toBeLessThan(2 * FILLER.length);
-			expect(manager.matchExcerpt("early", TEXT)).toBe("EARLY_HIT");
-		} finally {
-			spy.mockRestore();
-		}
+		manager.addRule({ ...rule("warn", "WARN_ME"), interruptMode: "never" });
+		expect(manager.checkDelta("WARN_ME\n", TEXT)).toEqual([]);
+		expect(manager.checkDelta(FILLER, TEXT)).toEqual([]);
+		expect(names(manager.checkDelta("", TEXT, { final: true }))).toEqual(["warn"]);
+		expect(manager.matchExcerpt("warn", TEXT)).toStartWith("WARN_ME");
+	});
+
+	it("names a non-interrupting rule the stream already broke when another rule interrupts it", () => {
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule({ ...rule("warn", "WARN_ME"), interruptMode: "never" });
+		manager.addRule({ ...rule("stop", "STOP_NOW"), interruptMode: "always" });
+		expect(manager.checkDelta("WARN_ME\n", TEXT)).toEqual([]);
+		expect(names(manager.checkDelta("STOP_NOW", TEXT)).sort()).toEqual(["stop", "warn"]);
 	});
 
 	it("omits zero-width excerpts without losing the rule match", () => {
@@ -130,7 +170,7 @@ describe("TTSR incremental stream matching", () => {
 
 	it("matches a condition that arrives late in a snapshot growing in small chunks, scanning each chunk once", () => {
 		const manager = new TtsrManager({ enabled: true });
-		manager.addRule(rule("forbidden", "FORBIDDEN_\\w+\\("));
+		manager.addRule(rule("forbidden", `FORBIDDEN_\\w+\\(${NATIVE_ONLY}`));
 		// Count regex input instead of timing it: wall-clock ratios flake under load.
 		const test = RegExp.prototype.test;
 		let scanned = 0;
@@ -172,7 +212,7 @@ describe("TTSR incremental stream matching", () => {
 
 		it("reads the line a bounded number of times instead of once per delta", () => {
 			const manager = new TtsrManager({ enabled: true });
-			manager.addRule(toolRule("force-push", "git\\s+push\\s+--force"));
+			manager.addRule(toolRule("force-push", `git\\s+push\\s+--force${NATIVE_ONLY}`));
 			const wire = JSON.stringify({ command: "echo ok\n".repeat(8_192) });
 			const test = RegExp.prototype.test;
 			let scanned = 0;
@@ -268,5 +308,35 @@ describe("TTSR tool inspection cache", () => {
 
 		meta.mode = "b";
 		expect(inspector.digest(toolCall)).toBe("evil:b");
+	});
+
+	it("reuses an unchanged inspection and re-inspects when a key or a value's type changes", () => {
+		let digests = 0;
+		const write: TtsrTool = {
+			name: "write",
+			matcherDigest: args => {
+				digests++;
+				return JSON.stringify(args);
+			},
+		};
+		const inspector = new TtsrToolInspector(
+			() => [write],
+			() => "/repo",
+		);
+		const args: Record<string, unknown> = { path: "a.ts", count: 1 };
+		const toolCall: ToolCall = { type: "toolCall", id: "call-1", name: "write", arguments: args };
+		inspector.digest(toolCall);
+		inspector.digest(toolCall);
+		expect(digests).toBe(1);
+
+		args.count = "1";
+		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1"}');
+		args.extra = null;
+		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1","extra":null}');
+		// A renamed key keeps the value and the snapshot's length.
+		delete args.extra;
+		args.other = null;
+		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1","other":null}');
+		expect(digests).toBe(4);
 	});
 });

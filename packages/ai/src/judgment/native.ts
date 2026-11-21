@@ -11,7 +11,8 @@
  * `x-goog-api-key` credential; `google-decisions.ts`).
  * Credentials flow through {@link withAuth}, so a stored key rotates on
  * 401/403 exactly like chat providers; transient 429/5xx responses retry with
- * bounded, `retry-after`-aware backoff. Endpoints that cap the questions per
+ * bounded, `retry-after`-aware backoff, except a gateway's 502 that
+ * {@link isGatewayCredentialsExhausted}. Endpoints that cap the questions per
  * request (the catalog's `judgment-questions-max`, e.g. OpenJEV at 16) get
  * oversized requests split into chunks under `maxQuestions`, at most
  * {@link CHUNK_PARALLEL} in flight at once.
@@ -29,7 +30,7 @@ import {
 import { resolveJudgmentQuestionsMax } from "@oh-my-pi/pi-catalog/compat/judgment-questions";
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, parseImageMetadata, tryParseJson } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { validateImageInput } from "../images/shared";
@@ -234,9 +235,21 @@ export interface NativeJudgeCallOptions extends JudgeOptions {
 	onPartialUsage?: (usage: Usage) => void;
 }
 
-/** Non-2xx response from a native judgment API. */
+/** Non-2xx response from a native judgment API; `code` is the error envelope's `code` or `type`. */
 export class JudgmentApiError extends AIError.ProviderHttpError {
 	override readonly name = "JudgmentApiError";
+}
+
+/**
+ * Whether `error` is a gateway's 502 `upstream_credentials_exhausted` (Bifrost: every upstream key for
+ * the provider and model failed). Retrying cannot succeed until the gateway's keys change.
+ */
+export function isGatewayCredentialsExhausted(error: unknown): boolean {
+	return (
+		error instanceof AIError.ProviderHttpError &&
+		error.status === 502 &&
+		error.code === "upstream_credentials_exhausted"
+	);
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -573,8 +586,11 @@ export class NativeJudge implements Judge {
 			const text = await response.text();
 			const error = new JudgmentApiError(`${this.label} API error (${response.status}): ${text}`, response.status, {
 				headers: response.headers,
+				code: AIError.OpenAIHttpError.parseEnvelope(tryParseJson(text), text).code,
 			});
-			const transient = response.status === 408 || response.status === 429 || response.status >= 500;
+			const transient =
+				(response.status === 408 || response.status === 429 || response.status >= 500) &&
+				!isGatewayCredentialsExhausted(error);
 			if (!transient || attempt + 1 >= MAX_ATTEMPTS) throw error;
 			await Bun.sleep(backoffMs(attempt, response.headers));
 		}

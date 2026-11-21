@@ -5,11 +5,13 @@ import {
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	setProgramStatusSupported,
 	setRunStatus,
 	settleStartupRun,
 } from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 
 // OSC 7501 Program Status Protocol reports, as the terminal parses them:
 // https://mitchellh.com/writing/program-status-osc7501
@@ -171,5 +173,41 @@ describe("run status OSC 7501 reporting", () => {
 		setProgramStatusEnabled(true);
 		settleStartupRun();
 		expect(writes).toEqual([report("state=working:app=omp"), report("state=idle:app=omp")]);
+	});
+
+	it("keeps prompt navigation before negotiation and suppresses redraws only after confirmation", () => {
+		const bubble = new UserMessageComponent("Run sleep 15");
+		const marked = () => bubble.render(40).join("").includes("\x1b]133;A\x07");
+
+		// An unknown terminal may ignore OSC 7501; `agent_start` reports
+		// working before this bubble's first paint.
+		setRunStatus({ state: "working" });
+		expect(marked()).toBe(true);
+		setProgramStatusSupported(true);
+		expect(marked()).toBe(false);
+		const release = holdBlockedStatus({ state: "blocked", kind: "question" });
+		expect(marked()).toBe(false);
+		setProgramStatusSupported(false);
+		expect(marked()).toBe(true);
+		release();
+
+		setProgramStatusSupported(true);
+		setProgramStatusEnabled(false);
+		expect(marked()).toBe(true);
+		setProgramStatusEnabled(true);
+		expect(marked()).toBe(false);
+		setRunStatus({ state: "done" });
+		expect(marked()).toBe(true);
+		// A dialog opened after the run settled holds a droppable `blocked` record too.
+		const releaseIdle = holdBlockedStatus({ state: "blocked", kind: "permission" });
+		expect(marked()).toBe(false);
+		releaseIdle();
+		expect(marked()).toBe(true);
+		setRunStatus({ state: "working" });
+		disposeProgramStatus();
+		expect(marked()).toBe(true);
+		initProgramStatus();
+		setRunStatus({ state: "working" });
+		expect(marked()).toBe(true);
 	});
 });

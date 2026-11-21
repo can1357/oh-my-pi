@@ -8,7 +8,6 @@ export const BUILTIN_TOOL_NAMES = [
 	"ast_edit",
 	"ask",
 	"debug",
-	"ida",
 	"eval",
 	"github",
 	"glob",
@@ -59,7 +58,7 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 		defaultState: "detected",
 		detectedWhen: "a native judge model is available",
 	},
-	eval: { summary: "Run Python/JS cells; hosts the browser and computer-use helpers", defaultState: "on" },
+	eval: { summary: "Run Python/JS cells with browser, computer, and binary-analysis helpers", defaultState: "on" },
 	task: { summary: "Launch subagents for parallel work", defaultState: "on" },
 	wait: { summary: "Wait for background jobs", defaultState: "on" },
 	todo: { summary: "Track a todo list", defaultState: "on" },
@@ -68,11 +67,6 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	lsp: { summary: "Language server queries (code intelligence)", defaultState: "on" },
 	ast_edit: { summary: "Rewrite code with AST patterns", defaultState: "on" },
 	debug: { summary: "Debug a running process over DAP", defaultState: "on" },
-	ida: {
-		summary: "Open, edit, and script IDA Pro databases",
-		defaultState: "detected",
-		detectedWhen: "IDA Pro is installed",
-	},
 	ast_grep: { summary: "Search code with AST patterns", defaultState: "off" },
 	github: { summary: "Query and act on GitHub repositories, issues, and PRs", defaultState: "off" },
 	checkpoint: { summary: "Save a git-based checkpoint of session state", defaultState: "off" },
@@ -102,6 +96,36 @@ const CANONICAL_TOOL_NAMES: Record<string, true> = Object.fromEntries(
 export function normalizeToolName(name: string): string {
 	const lower = name.toLowerCase();
 	return LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(lower) ?? (Object.hasOwn(CANONICAL_TOOL_NAMES, lower) ? lower : name);
+}
+
+/**
+ * Claude Code tool names (lowercased) and the omp built-in that covers each. Only names with a real
+ * equivalent are listed; Claude-only tools such as `ExitPlanMode` or `KillShell` have none.
+ */
+export const CLAUDE_CODE_TOOL_NAMES: ReadonlyMap<string, BuiltinToolName> = new Map([
+	["task", "task"],
+	["agent", "task"],
+	["bash", "bash"],
+	["read", "read"],
+	["notebookread", "read"],
+	["ls", "read"],
+	["webfetch", "read"],
+	["skill", "read"],
+	["write", "write"],
+	["edit", "edit"],
+	["multiedit", "edit"],
+	["notebookedit", "edit"],
+	["glob", "glob"],
+	["grep", "grep"],
+	["websearch", "web_search"],
+	["todowrite", "todo"],
+	["todoread", "todo"],
+	["askuserquestion", "ask"],
+]);
+
+/** Canonicalize a tool name written in the Claude Code dialect, falling back to {@link normalizeToolName}. */
+export function normalizeClaudeCodeToolName(name: string): string {
+	return CLAUDE_CODE_TOOL_NAMES.get(name.toLowerCase()) ?? normalizeToolName(name);
 }
 
 /** Normalize and deduplicate tool names while preserving first-seen order. */

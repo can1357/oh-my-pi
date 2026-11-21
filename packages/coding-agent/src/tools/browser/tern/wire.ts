@@ -35,6 +35,7 @@ export type TernErrorKind =
 	| "unsupported"
 	| "js"
 	| "failed"
+	| "unresponsive"
 	| "connect"
 	| "closed"
 	| "timeout"
@@ -262,8 +263,15 @@ export interface TernTransport {
 	readonly product: string;
 	/** The peer as errors name it, after "the": `Tern daemon at /run/tern.sock`. */
 	readonly peer: string;
+	/**
+	 * Whether the peer holds an `events` call with `wait: true` until the block has an event after `after` (omp's
+	 * WebKit host does; the Tern daemon answers it at once, like any `events` call).
+	 */
+	readonly waitsForEvents: boolean;
 	/** Why a peer may hang up before greeting, appended to that error. */
 	readonly greetingHint?: string;
+	/** How long the peer may take to answer the greeting; {@link CONNECT_TIMEOUT_MS} when unset. */
+	readonly greetingTimeoutMs?: number;
 	/** Open the stream. Called once; a throw is a failed connection. */
 	start(events: TernTransportEvents): void;
 	/** Send one frame. A throw is a dropped connection. */
@@ -275,6 +283,7 @@ export interface TernTransport {
 /** The Tern daemon's Unix socket. */
 class TernSocketTransport implements TernTransport {
 	readonly product = "Tern";
+	readonly waitsForEvents = false;
 	readonly peer: string;
 	readonly greetingHint = "a Tern without omp's JSON protocol cannot read its hello (update Tern)";
 	readonly #socketPath: string;
@@ -335,6 +344,8 @@ const PROTOCOL_ERROR_KINDS: Record<string, TernErrorKind> = {
 	unsupported: "unsupported",
 	js: "js",
 	failed: "failed",
+	// omp's WebKit host: the page's web process stopped answering (a script keeps it busy).
+	unresponsive: "unresponsive",
 };
 
 /**
@@ -366,6 +377,11 @@ export class TernSocketClient {
 	/** The backend's display name ({@link TernTransport.product}). */
 	get product(): string {
 		return this.#transport.product;
+	}
+
+	/** Whether the peer holds an `events` call with `wait: true` until there is an event ({@link TernTransport.waitsForEvents}). */
+	get waitsForEvents(): boolean {
+		return this.#transport.waitsForEvents;
 	}
 
 	/** Whether the connection is up and welcomed. */
@@ -464,7 +480,7 @@ export class TernSocketClient {
 		this.#greeting = greeting;
 		const timer = setTimeout(() => {
 			this.#fail(new TernError("connect", `The ${transport.peer} did not answer the greeting in time`));
-		}, CONNECT_TIMEOUT_MS);
+		}, transport.greetingTimeoutMs ?? CONNECT_TIMEOUT_MS);
 		timer.unref();
 		// A stream that drops before the welcome never connected (`connect`); after it, the connection dropped (`closed`).
 		const dropped = (reason: string | undefined): TernError => {

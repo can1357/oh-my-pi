@@ -127,6 +127,7 @@ it("revives a parked subagent on its prewalk handoff target, keeping its todo li
 
 	try {
 		const result = await runSubprocess({
+			outputSchema: {},
 			cwd,
 			artifactsDir,
 			agent: {
@@ -215,6 +216,7 @@ it("revives a parked per-call worker on its exact model, not on a session-local 
 
 	try {
 		const result = await runSubprocess({
+			outputSchema: {},
 			cwd,
 			artifactsDir,
 			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },

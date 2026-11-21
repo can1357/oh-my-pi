@@ -32,7 +32,7 @@ import {
 	trailingOutsidePreservedPlaceholderChunk,
 	transformOutsidePlaceholdersTracked,
 } from "./placeholder-scan";
-import { compileSecretRegex, requiredLiteral } from "./regex";
+import { advanceRegexAfterEmptyMatch, compileSecretRegex, requiredLiteral } from "./regex";
 import { RegistryRevision, TrackedMap, TrackedSet } from "./registry-revision";
 import {
 	ensureDistinctReplacement,
@@ -597,7 +597,7 @@ export class SecretObfuscator {
 				const match = regex.exec(text);
 				if (match === null) break;
 				if (match[0].length === 0) {
-					regex.lastIndex++;
+					advanceRegexAfterEmptyMatch(regex, text);
 					continue;
 				}
 				matches.push({ entry, start: match.index, end: match.index + match[0].length });
@@ -1374,7 +1374,7 @@ export class SecretObfuscator {
 				const match = entry.regex.exec(text);
 				if (match === null) break;
 				if (match[0].length === 0) {
-					entry.regex.lastIndex++;
+					advanceRegexAfterEmptyMatch(entry.regex, text);
 					continue;
 				}
 				values.add(match[0]);
@@ -1772,7 +1772,7 @@ export class SecretObfuscator {
 			const match = regex.exec(scanText);
 			if (match === null) break;
 			if (match[0].length === 0) {
-				regex.lastIndex++;
+				advanceRegexAfterEmptyMatch(regex, scanText);
 				continue;
 			}
 			let start = match.index;

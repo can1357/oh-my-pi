@@ -17,7 +17,6 @@ import {
 	buildNpmUpdateEnv,
 	buildRenameCleanupPackages,
 	type InstalledVersionVerification,
-	managedInstallName,
 	type ManagerUpdateSteps,
 	migrateRenamedInstall,
 	parseReportedVersion,
@@ -1736,49 +1735,6 @@ describe("verifyInstalledVersion", () => {
 		} finally {
 			process.env.PATH = originalPath;
 		}
-	});
-});
-
-describe("managedInstallName", () => {
-	async function managedRoot(): Promise<string> {
-		const root = await makeTempDir();
-		await fs.mkdir(path.join(root, "versions"));
-		await fs.mkdir(path.join(root, "bin"));
-		await Bun.write(path.join(root, "versions", "1.0.0"), "omp");
-		await Bun.write(path.join(root, "manager.json"), JSON.stringify({ manager: "tern", name: "Tern" }));
-		return root;
-	}
-
-	it.skipIf(process.platform === "win32")(
-		"names the manager through the launcher symlink and a link outside the root",
-		async () => {
-			const root = await managedRoot();
-			const launcher = path.join(root, "bin", "omp");
-			await fs.symlink(path.join("..", "versions", "1.0.0"), launcher);
-			const outside = path.join(await makeTempDir(), "omp");
-			await fs.symlink(launcher, outside);
-
-			expect(await managedInstallName(launcher)).toBe("Tern");
-			expect(await managedInstallName(outside)).toBe("Tern");
-		},
-	);
-
-	it("names the manager of a copied launcher (Windows layout)", async () => {
-		const root = await managedRoot();
-		const copy = path.join(root, "bin", "omp.exe");
-		await Bun.write(copy, "omp");
-
-		expect(await managedInstallName(copy)).toBe("Tern");
-	});
-
-	it("treats a binary without a readable manifest as unmanaged", async () => {
-		const plain = path.join(await makeTempDir(), "bin", "omp");
-		await Bun.write(plain, "omp");
-		expect(await managedInstallName(plain)).toBeUndefined();
-
-		const root = await managedRoot();
-		await Bun.write(path.join(root, "manager.json"), "{not json");
-		expect(await managedInstallName(path.join(root, "versions", "1.0.0"))).toBeUndefined();
 	});
 });
 

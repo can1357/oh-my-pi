@@ -238,6 +238,9 @@ function buildRule(
 		rawMode === "never" || rawMode === "prose-only" || rawMode === "tool-only" || rawMode === "always"
 			? rawMode
 			: undefined;
+	const rawRepeat = frontmatter.repeatMode;
+	const repeatMode: Rule["repeatMode"] =
+		rawRepeat === "once" || rawRepeat === "after-gap" || rawRepeat === "always" ? rawRepeat : undefined;
 	return {
 		name: resolvedName,
 		path: filePath,
@@ -251,6 +254,7 @@ function buildRule(
 		scope,
 		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,
+		repeatMode,
 		_source: source,
 	};
 }
@@ -302,7 +306,7 @@ export interface ParsedAgentFields {
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
-	/** `true` = keep `yield` and the output schema when `task.structured` is off. */
+	/** `true` = keep the output schema (and with it `yield`) when `task.structured` is off. */
 	structured?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;

@@ -1,9 +1,41 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { decodeJwtPayload } from "@oh-my-pi/pi-ai/registry/engine/common";
+import { getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { logger, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { StencilCredential } from "../stencil/credential";
 import { DEFAULT_SPOTLIGHT_MODEL, DEFAULT_SPOTLIGHT_URL, type SpotlightThinking } from "./types";
 
 /** How long a warm-up request may take. */
 const WARM_TIMEOUT_MS = 120_000;
+/** How long a `waitlisted`/`forbidden` answer stands before the same account asks again. */
+export const DENIED_BACKOFF_MS = 6 * 60 * 60_000;
+/** Pause after a 429 or 503 that names no usable `Retry-After`. */
+const BUSY_BACKOFF_MS = 60_000;
+
+/** An answer that stands until `until`: requests in between fail with it instead of being sent. */
+interface Pause {
+	until: number;
+	message: string;
+	status: number;
+	code: string | null;
+}
+
+/**
+ * Process-wide pauses, shared by every client (each session and subagent makes its own). A denial is keyed by
+ * endpoint and account, so signing in to another account asks again at once; a 429/503 pause by endpoint alone.
+ */
+const pauses = new Map<string, Pause>();
+/** Denials (endpoint and account) the user was already told about, so each is shown once per process. */
+const deniedNoticed = new Set<string>();
+
+/** The account a credential belongs to: a login token's `sub`, stable across refreshes, else the key itself. */
+function accountOf(token: string): string {
+	const sub = decodeJwtPayload(token)?.sub;
+	return typeof sub === "string" && sub ? sub : token;
+}
+
+function deniedKey(url: string, token: string): string {
+	return `${url}\n${accountOf(token)}`;
+}
 
 /** Spotlight's `state`: the conversation context sent with the output. */
 export interface SpotlightState {
@@ -59,6 +91,8 @@ export interface SpotlightClientOptions {
 	/** Budget of one {@link SpotlightClient.rank} call. */
 	timeoutMs: number;
 	credential?: StencilCredential;
+	/** Whether this request is permitted by the active session's auxiliary-model policy. */
+	allowRequest?: () => boolean;
 	fetch?: typeof fetch;
 }
 
@@ -74,6 +108,7 @@ export class SpotlightClient {
 	/** The credential was created here, so close() releases its auth store; an injected one stays the caller's. */
 	#ownsCredential: boolean;
 	#fetch: typeof fetch;
+	#allowRequest: () => boolean;
 	#warming?: Promise<void>;
 	/** The last ranking found no credential; cleared once one resolves, so a later loss is reported again. */
 	#credentialMissing = false;
@@ -82,6 +117,11 @@ export class SpotlightClient {
 	 * after a credential resolved in between.
 	 */
 	onCredentialMissing?: () => void;
+	/**
+	 * Called with Cloud's message when the account has no Spotlight access (403 `waitlisted`/`forbidden`), once per
+	 * process and account across every client: the first client with this set that meets the denial reports it.
+	 */
+	onAccessDenied?: (message: string) => void;
 
 	constructor(options: SpotlightClientOptions) {
 		this.url = options.url || DEFAULT_SPOTLIGHT_URL;
@@ -90,6 +130,7 @@ export class SpotlightClient {
 		this.#credential = options.credential ?? new StencilCredential();
 		this.#ownsCredential = options.credential === undefined;
 		this.#fetch = options.fetch ?? fetch;
+		this.#allowRequest = options.allowRequest ?? (() => true);
 	}
 
 	/**
@@ -97,9 +138,12 @@ export class SpotlightClient {
 	 *
 	 * @throws {SpotlightError} without a Stencil credential (status 0, code `no_credential`), on a transport failure
 	 * or timeout (status 0), for any non-200 answer (its status and Cloud's error code), and for a reply that does not
-	 * score every item of every question (status 200, code `bad_reply`).
+	 * score every item of every question (status 200, code `bad_reply`). After a 403 `waitlisted`/`forbidden` (for
+	 * {@link DENIED_BACKOFF_MS}, per account) or a 429/503 (for its `Retry-After`), it rethrows that answer without
+	 * sending anything.
 	 */
 	async rank(request: SpotlightRequest, signal?: AbortSignal, timeoutMs = this.#timeoutMs): Promise<SpotlightReply> {
+		if (!this.#allowRequest()) throw new SpotlightError("spotlight: disabled by model policy", 0, "policy");
 		const token = await this.#credential.resolve();
 		if (!token) {
 			if (!this.#credentialMissing) {
@@ -110,7 +154,48 @@ export class SpotlightClient {
 			throw new SpotlightError(StencilCredential.missingMessage, 0, "no_credential");
 		}
 		this.#credentialMissing = false;
+		const pause = this.#activePause(token);
+		if (pause) throw new SpotlightError(pause.message, pause.status, pause.code);
 		return this.#post(token, request, signal, timeoutMs);
+	}
+
+	/**
+	 * The pause this client's next request to `token`'s account falls in, if any; a denial in force is reported
+	 * here too, for a client that did not meet it itself.
+	 */
+	#activePause(token: string): Pause | undefined {
+		const now = Date.now();
+		const key = deniedKey(this.url, token);
+		const denied = pauses.get(key);
+		if (denied && denied.until > now) {
+			this.#reportDenied(key, denied.message);
+			return denied;
+		}
+		const busy = pauses.get(this.url);
+		return busy && busy.until > now ? busy : undefined;
+	}
+
+	#reportDenied(key: string, message: string): void {
+		if (!this.onAccessDenied || deniedNoticed.has(key)) return;
+		deniedNoticed.add(key);
+		this.onAccessDenied(message);
+	}
+
+	/** Holds a refusal that asking again would not change: no access (hours, per account), or 429/503 (Retry-After). */
+	#pauseAfter(token: string, response: Response, message: string, code: string | null): void {
+		const status = response.status;
+		const pause = { message: `spotlight HTTP ${status}: ${message}`, status, code };
+		// Cloud's 403 codes for an account (or a key's workspace) without Stencil Cloud access.
+		if (status === 403 && (code === "waitlisted" || code === "forbidden")) {
+			const key = deniedKey(this.url, token);
+			pauses.set(key, { ...pause, until: Date.now() + DENIED_BACKOFF_MS });
+			logger.warn("spotlight: account has no Stencil Cloud access; not asking again for hours", { code });
+			this.#reportDenied(key, message);
+			return;
+		}
+		if (status !== 429 && status !== 503) return;
+		const wait = Math.min(getRetryAfterMsFromHeaders(response.headers) ?? BUSY_BACKOFF_MS, DENIED_BACKOFF_MS);
+		pauses.set(this.url, { ...pause, until: Date.now() + wait });
 	}
 
 	async #post(
@@ -119,6 +204,7 @@ export class SpotlightClient {
 		signal: AbortSignal | undefined,
 		timeoutMs: number,
 	): Promise<SpotlightReply> {
+		if (!this.#allowRequest()) throw new SpotlightError("spotlight: disabled by model policy", 0, "policy");
 		const questions: Record<string, { probe: string }> = {};
 		for (const id in request.questions) questions[id] = { probe: request.questions[id] };
 		const body = JSON.stringify({
@@ -135,7 +221,11 @@ export class SpotlightClient {
 		try {
 			response = await this.#fetch(this.url, {
 				method: "POST",
-				headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+				headers: {
+					authorization: `Bearer ${token}`,
+					"content-type": "application/json",
+					"user-agent": USER_AGENT,
+				},
 				body,
 				signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
 			});
@@ -159,8 +249,11 @@ export class SpotlightClient {
 			} catch {
 				// A non-JSON body (proxy page) keeps its first characters as the message.
 			}
+			this.#pauseAfter(token, response, message, code);
 			throw new SpotlightError(`spotlight HTTP ${response.status}: ${message}`, response.status, code);
 		}
+		// The account has access (again): a later loss of it is reported anew.
+		deniedNoticed.delete(deniedKey(this.url, token));
 		const reply = parseReply(text, Object.keys(request.questions), request.items.length);
 		return {
 			...reply,
@@ -184,12 +277,16 @@ export class SpotlightClient {
 	 * logged only. A missing credential is left for the first real ranking to report.
 	 */
 	warm(): void {
-		if (this.#warming) return;
+		if (this.#warming || !this.#allowRequest()) return;
 		this.#warming = this.#credential
 			.resolve()
 			.then(async token => {
 				if (!token) {
 					logger.debug("spotlight warm skipped: no credential");
+					return;
+				}
+				if (this.#activePause(token)) {
+					logger.debug("spotlight warm skipped: paused after a refusal");
 					return;
 				}
 				const reply = await this.#post(

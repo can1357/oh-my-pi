@@ -108,10 +108,11 @@ export interface SecurityScanSession {
 		options?: { expandPromptTemplates?: boolean; synthetic?: boolean; userInitiated?: boolean },
 	): Promise<boolean>;
 	waitForIdle(): Promise<void>;
-	/** True while a background job owned by the session (e.g. a detached `task` worker) can still wake it. */
-	hasPendingAsyncWork(): boolean;
-	/** Waits for owned background jobs, delivers their results, and lets the woken turns finish. */
-	settleAsyncWork(): Promise<void>;
+	/**
+	 * Resolves once the session's run is over: no turn is live and nothing it owns (a detached `task`
+	 * worker, a child agent) can still wake it.
+	 */
+	waitForRunEnd(): Promise<void>;
 	getSessionStats?(): {
 		tokens: {
 			input: number;
@@ -574,6 +575,7 @@ export class SecurityCoordinator {
 		const startedAt = toIsoTimestamp(this.#now);
 		let session: SecurityScanSession | undefined;
 		let publishedBundle: SecurityScanBundle | undefined;
+		const published = Promise.withResolvers<void>();
 		let executionTarget: PreparedSecurityExecutionTarget | undefined;
 		try {
 			await store.putBundle(
@@ -613,6 +615,7 @@ export class SecurityCoordinator {
 				operationId: record.snapshot.operationId,
 				onPublished: async bundle => {
 					publishedBundle = bundle;
+					published.resolve();
 					record.snapshot.findingCount = bundle.findings.length;
 					this.#update(record, "publishing");
 				},
@@ -643,10 +646,13 @@ export class SecurityCoordinator {
 					userInitiated: false,
 				});
 				await session.waitForIdle();
-				// With `async.enabled`, `task` workers run as background jobs and the coordinator
-				// may end its turn awaiting them; their delivered results wake it to publish.
-				while (!publishedBundle && session.hasPendingAsyncWork()) {
-					await untilAborted(signal, session.settleAsyncWork());
+				// With `async.enabled`, `task` workers run in the background and the coordinator
+				// may end its turn awaiting them; their delivered results wake it to publish. The
+				// run ends once nothing can wake it anymore. A publication ends the wait early,
+				// but the turn that published still finishes.
+				if (!publishedBundle) {
+					await untilAborted(signal, Promise.race([session.waitForRunEnd(), published.promise]));
+					await session.waitForIdle();
 				}
 				record.snapshot.sessionFile = session.sessionFile;
 				if (publishedBundle) {

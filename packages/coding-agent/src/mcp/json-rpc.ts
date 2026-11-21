@@ -6,32 +6,11 @@
  */
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, readSseEvents } from "@oh-my-pi/pi-utils";
+import { redactUrlForLog } from "../utils/redact-url";
 import type { JsonRpcResponse } from "./types";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
-
-const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
-
-/**
- * Redact credentials embedded in a URL — userinfo (`user:pass@`) and
- * credential-bearing query params (e.g. `exaApiKey`) — so diagnostics never
- * write secrets to the persistent log file or the UI.
- */
-export function redactUrlForLog(url: string): string {
-	try {
-		const parsed = new URL(url);
-		parsed.username = "";
-		parsed.password = "";
-		for (const name of parsed.searchParams.keys()) {
-			if (SENSITIVE_QUERY_PARAM.test(name)) parsed.searchParams.set(name, "[redacted]");
-		}
-		return parsed.toString();
-	} catch {
-		// Unparseable URL — drop the query string and any userinfo rather than risk leaking them.
-		return url.split("?")[0].replace(/^([^:/?#]+:\/\/)[^/@]*@/, "$1");
-	}
-}
 
 function decodeJsonRpcResponse(message: unknown): JsonRpcResponse | null {
 	if (!isRecord(message) || message.jsonrpc !== "2.0") {

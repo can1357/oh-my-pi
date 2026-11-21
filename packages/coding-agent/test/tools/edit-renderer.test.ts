@@ -217,7 +217,7 @@ describe("editToolRenderer", () => {
 			{
 				input: [
 					"*** Begin Patch",
-					"[crates/pi-natives/src/shell.rs]",
+					"[crates/natives/src/shell.rs]",
 					"PUT >$:",
 					"+pub fn streaming_preview() {",
 				].join("\n"),
@@ -228,7 +228,7 @@ describe("editToolRenderer", () => {
 		);
 
 		const rendered = Bun.stripANSI(component.render(160).join("\n"));
-		expect(rendered).toContain("crates/pi-natives/src/shell.rs");
+		expect(rendered).toContain("crates/natives/src/shell.rs");
 		expect(rendered).not.toContain("PUT >$:");
 		expect(rendered).not.toContain("+pub fn streaming_preview() {");
 		expect(rendered).not.toContain("*** Begin Patch");

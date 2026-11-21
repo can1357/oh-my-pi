@@ -9,18 +9,18 @@ import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
-	CODEX_CLIENT_VERSION,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
+import { getCodexClientVersion } from "@oh-my-pi/pi-catalog/wire/codex-version";
 import { readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, searchReasoningEffort, withHardTimeout } from "./utils";
 
 const DEFAULT_INSTRUCTIONS =
 	"You are a helpful assistant with web search capabilities. Search the web to answer the user's question accurately and cite your sources.";
@@ -303,7 +303,7 @@ function buildCodexHeaders(
 	}
 	applyCodexResidencyHeader(headers, accessToken);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
-	headers.set(OPENAI_HEADERS.VERSION, CODEX_CLIENT_VERSION);
+	headers.set(OPENAI_HEADERS.VERSION, getCodexClientVersion());
 	headers.set("User-Agent", USER_AGENT);
 	headers.set("Accept", "text/event-stream");
 	headers.set("Content-Type", "application/json");
@@ -354,6 +354,8 @@ async function callCodexSearch(
 		timeoutMs?: number;
 		systemPrompt?: string;
 		searchContextSize?: "low" | "medium" | "high";
+		/** Wire `reasoning.effort`; omitted when undefined so the server default applies. */
+		reasoningEffort?: string;
 		modelId: string;
 		fetch?: FetchImpl;
 		transport: CodexSearchTransport;
@@ -385,6 +387,7 @@ async function callCodexSearch(
 		tool_choice: { type: "web_search" },
 		instructions: options.systemPrompt ?? DEFAULT_INSTRUCTIONS,
 	};
+	if (options.reasoningEffort !== undefined) body.reasoning = { effort: options.reasoningEffort };
 
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(options.transport.url, {
@@ -573,6 +576,7 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 			timeoutMs: params.timeoutMs,
 			systemPrompt: params.systemPrompt,
 			searchContextSize: "high",
+			reasoningEffort: searchReasoningEffort(params.model, params.thinkingLevel),
 			modelId: params.model.id,
 			fetch: params.fetch,
 			transport: requestTransport,

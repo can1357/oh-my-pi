@@ -3,8 +3,9 @@ import { $env, $envExact, logger } from "@oh-my-pi/pi-utils";
 import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey, resolveAfterRotation } from "../auth-retry";
 import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
 import * as AIError from "../error";
+import { getProviderDefinition } from "../registry";
 import { assertProviderEnabled, providerPauseReason } from "../registry/oauth";
-import { AUTHENTICATED_SENTINEL } from "../registry/types";
+import { AUTHENTICATED_SENTINEL, type ProviderDefinition } from "../registry/types";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { CredentialSelector, OAuthResolutionResult } from "./select";
@@ -16,12 +17,15 @@ import type {
 	AuthSourceOptions,
 	KeysApi,
 	LimitsApi,
+	OAuthCredential,
 	OAuthRequestIdentity,
 } from "./types";
 
+type OAuthKeyEncoder = NonNullable<ProviderDefinition["getApiKey"]>;
+
 /**
  * Default config value resolver that checks env vars and treats as literal.
- * Does NOT support "!command" syntax (that requires pi-natives).
+ * Does NOT support "!command" syntax (that requires omp-natives).
  */
 async function defaultConfigValueResolver(config: string): Promise<string | undefined> {
 	const envValue = $envExact(config);
@@ -160,6 +164,19 @@ export class KeyCascade implements KeysApi {
 	}
 
 	/**
+	 * The request key a provider's `getApiKey` hook builds from a stored OAuth
+	 * row, or undefined when the hook rejects the row (an incomplete login).
+	 */
+	#encodeOAuthKey(getApiKey: OAuthKeyEncoder, credential: OAuthCredential): string | undefined {
+		try {
+			return getApiKey(credential);
+		} catch (error) {
+			logger.debug("Stored OAuth credential skipped: provider cannot build its key", { error: String(error) });
+			return undefined;
+		}
+	}
+
+	/**
 	 * True when a stored credential is the provider's KDL `empty-fallback`
 	 * keyless-mode marker — what an empty paste at an "Optional: paste API key"
 	 * login prompt stores (e.g. `lm-studio-local` for lm-studio). The wire layer
@@ -275,14 +292,21 @@ export class KeyCascade implements KeysApi {
 		// Peek never refreshes, so only an unexpired OAuth access token is usable
 		// unless the caller only needs the account it names.
 		const now = Date.now();
+		// A provider-owned key encoding (`getApiKey`) is shared with `getOAuthApiKey`, so a peek
+		// and a refresh of one row resolve the same key; a row it rejects is skipped, as `get()` does.
+		const getApiKey = getProviderDefinition(provider)?.getApiKey;
+		const servable = (credential: AuthCredential): credential is OAuthCredential =>
+			credential.type === "oauth" && (!getApiKey || this.#encodeOAuthKey(getApiKey, credential) !== undefined);
 		const oauthSelection =
 			this.#deps.selector.selectByType(
 				provider,
 				"oauth",
 				undefined,
-				credential =>
-					credential.type === "oauth" && Number.isFinite(credential.expires) && credential.expires > now,
-			) ?? (options?.includeExpired ? this.#deps.selector.selectByType(provider, "oauth") : undefined);
+				credential => servable(credential) && Number.isFinite(credential.expires) && credential.expires > now,
+			) ??
+			(options?.includeExpired
+				? this.#deps.selector.selectByType(provider, "oauth", undefined, servable)
+				: undefined);
 		if (oauthSelection) {
 			if (provider === "github-copilot") {
 				return JSON.stringify({
@@ -291,6 +315,7 @@ export class KeyCascade implements KeysApi {
 					apiEndpoint: oauthSelection.credential.apiEndpoint,
 				});
 			}
+			if (getApiKey) return this.#encodeOAuthKey(getApiKey, oauthSelection.credential);
 			return oauthSelection.credential.access;
 		}
 
@@ -425,8 +450,8 @@ export class KeyCascade implements KeysApi {
 		}
 		if (oauthResolved) {
 			if (onCredentialId && oauthResolved.credentialId !== undefined) {
-				const { orgId, region, inferenceRegion } = oauthResolved.credential;
-				const identity = { orgId, region, inferenceRegion };
+				const { accountId, orgId, region, inferenceRegion } = oauthResolved.credential;
+				const identity = { accountId, orgId, region, inferenceRegion };
 				onCredentialId(oauthResolved.credentialId, identity, oauthResolved.credential.access);
 			}
 			return oauthResolved.apiKey;

@@ -2349,8 +2349,10 @@ function resumeParkedCursorRun(
 }
 
 /** Streams a Cursor Agent turn, retrying a discovered effort id when its normalized wire id is unavailable. */
-export const streamCursor: StreamFunction<"cursor-agent"> = (model, context, options) =>
-	resumeParkedCursorRun(model, context, options) ?? streamCursorWithWireMode(model, context, options, "normalized");
+export const streamCursor: StreamFunction<"cursor-agent"> = (model, context, options) => {
+	const turn = withPromptLast(context);
+	return resumeParkedCursorRun(model, turn, options) ?? streamCursorWithWireMode(model, turn, options, "normalized");
+};
 
 export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
@@ -6401,10 +6403,20 @@ function resolveCursorRecordReplays(
 ): Map<number, CursorRecordReplay> {
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const replays = new Map<number, CursorRecordReplay>();
+	// The message a turn was recorded against, chosen as `withPromptLast` chooses
+	// it: a user prompt outranks developer context sent beside it.
 	let userMessage: Message | undefined;
+	let promptInBlock = false;
 	for (let index = 0; index < historyEnd; index++) {
 		const msg = messages[index];
-		if (msg.role === "user" || msg.role === "developer") userMessage = msg;
+		if (msg.role === "user") {
+			userMessage = msg;
+			promptInBlock = true;
+		} else if (msg.role === "developer") {
+			if (!promptInBlock) userMessage = msg;
+		} else {
+			promptInBlock = false;
+		}
 		if (msg.role !== "assistant" || msg.providerPayload?.type !== "cursorHistory") continue;
 		if (msg.api !== "cursor-agent" || msg.provider !== provider || msg.model !== modelId) continue;
 		if (msg.providerPayload.wireRoute !== wireRoute) continue;
@@ -6486,15 +6498,15 @@ export function buildMcpToolDefinitions(
 		return [];
 	}
 
-	// The `write` tool doubles as the xd:// transport: forwarded devices such as
-	// `ast_edit` stage previews finalized only by writing a reason to xd://resolve
-	// or xd://reject. Cursor's native catalog may expose no write path, so
-	// re-include the built-in `write` (dropped as native above) whenever pi-agent
-	// devices are advertised — otherwise a staged preview can never be resolved
-	// and the SoftToolRequirement('write') escalation aborts the turn.
-	const writeTool = tools.find(tool => tool.name === "write");
-	const forwarded =
-		writeTool && !advertisedTools.includes(writeTool) ? [...advertisedTools, writeTool] : advertisedTools;
+	// Staged previews (e.g. from `ast_edit`) are finalized only by `resolve` or
+	// `reject`. Without the bash tool those are ordinary tools, forwarded above;
+	// with it they are commands run through `bash`. Cursor's native catalog may
+	// expose no shell path, so re-include the built-in `bash` (dropped as native
+	// above) whenever pi-agent tools are advertised — otherwise a staged preview
+	// can never be resolved and the SoftToolRequirement('bash') escalation aborts
+	// the turn.
+	const bashTool = tools.find(tool => tool.name === "bash");
+	const forwarded = bashTool && !advertisedTools.includes(bashTool) ? [...advertisedTools, bashTool] : advertisedTools;
 
 	return forwarded.map(tool => {
 		const wireSchema = toolWireSchema(tool);
@@ -6707,6 +6719,20 @@ function findLastUserMessageIndex(messages: Message[]): number {
 		}
 	}
 	return -1;
+}
+
+/**
+ * Puts the turn's user prompt last. Hosts append context after the prompt
+ * (developer messages from `context` hooks), and Cursor sends the last message
+ * as the run's user message: trailing context would stand in for the prompt,
+ * and the prompt would ride in history. The context moves ahead of the prompt.
+ */
+function withPromptLast(context: Context): Context {
+	const { messages } = context;
+	let index = messages.length - 1;
+	while (index >= 0 && messages[index].role === "developer") index--;
+	if (index === messages.length - 1 || messages[index]?.role !== "user") return context;
+	return { ...context, messages: [...messages.slice(0, index), ...messages.slice(index + 1), messages[index]] };
 }
 
 /**
@@ -7558,7 +7584,7 @@ export async function buildGrpcRequest(
 	options: CursorOptions | undefined,
 	state: CursorRequestState,
 ): Promise<CursorGrpcRequest> {
-	return buildGrpcRequestForWireMode(model, context, options, state, "normalized");
+	return buildGrpcRequestForWireMode(model, withPromptLast(context), options, state, "normalized");
 }
 
 function hasImages(content: (TextContent | ImageContent)[]): boolean {

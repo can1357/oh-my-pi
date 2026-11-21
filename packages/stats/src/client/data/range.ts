@@ -25,6 +25,8 @@ export interface RangeMeta {
 const RANGE_META: Record<TimeRange, RangeMeta> = {
 	"1h": { label: "1h", windowLabel: "the last hour", spanMs: HOUR_MS, bucketMs: 5 * MINUTE_MS },
 	"24h": { label: "24h", windowLabel: "the last 24 hours", spanMs: DAY_MS, bucketMs: HOUR_MS },
+	"2d": { label: "2d", windowLabel: "the last 2 days", spanMs: 2 * DAY_MS, bucketMs: HOUR_MS },
+	"3d": { label: "3d", windowLabel: "the last 3 days", spanMs: 3 * DAY_MS, bucketMs: HOUR_MS },
 	"7d": { label: "7d", windowLabel: "the last 7 days", spanMs: 7 * DAY_MS, bucketMs: DAY_MS },
 	"30d": { label: "30d", windowLabel: "the last 30 days", spanMs: 30 * DAY_MS, bucketMs: DAY_MS },
 	"90d": { label: "90d", windowLabel: "the last 90 days", spanMs: 90 * DAY_MS, bucketMs: DAY_MS },
@@ -34,7 +36,7 @@ const RANGE_META: Record<TimeRange, RangeMeta> = {
 const MAX_BUCKETS = 1500;
 
 /** Ranges in selector order. */
-export const TIME_RANGES: readonly TimeRange[] = ["1h", "24h", "7d", "30d", "90d", "all"];
+export const TIME_RANGES: readonly TimeRange[] = ["1h", "24h", "2d", "3d", "7d", "30d", "90d", "all"];
 
 export function rangeMeta(range: TimeRange): RangeMeta {
 	return RANGE_META[range];
@@ -54,10 +56,11 @@ export function formatTick(timestamp: number, bucketMs: number): string {
 
 /**
  * Contiguous, ascending bucket starts covering `range`, aligned like the
- * server's `(timestamp / bucketMs) * bucketMs`. For all time the axis starts at
- * the earliest data point, so gaps between sessions still render as zeros;
- * it is capped at {@link MAX_BUCKETS} so a stray epoch-zero timestamp cannot
- * explode the axis into decades of empty days.
+ * server's series buckets: day buckets start at local midnight (a DST day is
+ * 23 or 25 hours long), shorter buckets at `(timestamp / bucketMs) * bucketMs`.
+ * For all time the axis starts at the earliest data point, so gaps between
+ * sessions still render as zeros; it is capped at {@link MAX_BUCKETS} so a
+ * stray epoch-zero timestamp cannot explode the axis into decades of empty days.
  */
 export function bucketAxis(
 	range: TimeRange,
@@ -65,18 +68,30 @@ export function bucketAxis(
 	bucketMs = RANGE_META[range].bucketMs,
 	now = Date.now(),
 ): number[] {
-	const last = Math.floor(now / bucketMs) * bucketMs;
+	const daily = bucketMs === DAY_MS;
+	const align = (ts: number) => (daily ? new Date(ts).setHours(0, 0, 0, 0) : Math.floor(ts / bucketMs) * bucketMs);
+	const last = align(now);
 	const span = RANGE_META[range].spanMs;
 	let first: number;
 	if (span !== null) {
-		first = Math.floor((now - span) / bucketMs) * bucketMs;
+		first = align(now - span);
 	} else {
 		first = last;
 		for (const ts of dataTimestamps) if (ts < first) first = ts;
-		first = Math.floor(first / bucketMs) * bucketMs;
+		first = align(first);
 	}
-	first = Math.max(first, last - (MAX_BUCKETS - 1) * bucketMs);
+	first = Math.max(first, align(last - (MAX_BUCKETS - 1) * bucketMs));
 	const buckets: number[] = [];
-	for (let t = first; t <= last; t += bucketMs) buckets.push(t);
+	for (let t = first; t <= last;) {
+		buckets.push(t);
+		if (daily) {
+			const next = new Date(t);
+			next.setDate(next.getDate() + 1);
+			// Re-align: on a day whose midnight DST skips, `t` is 01:00 and would carry forward.
+			t = next.setHours(0, 0, 0, 0);
+		} else {
+			t += bucketMs;
+		}
+	}
 	return buckets;
 }

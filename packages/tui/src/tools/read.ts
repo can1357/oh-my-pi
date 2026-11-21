@@ -123,6 +123,17 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 );
 
 const BARE_LINE_RE = /^\d+$/;
+// A comma list whose chunks carry their own `raw` (`:1-32:raw,48-50:raw`, `:raw:5,raw:9-12`).
+const RAW_CHUNK_SRC = `(?:raw:)?${LIST_CHUNK_SRC}(?::raw)?`;
+const PER_CHUNK_RAW_LIST_RE = new RegExp(`:(${RAW_CHUNK_SRC}(?:,${RAW_CHUNK_SRC})+)$`, "i");
+
+/** Rewrite a list with per-chunk `raw` to its one-raw form: `a:1-3:raw,9:raw` → `a:1-3,9:raw`. */
+function hoistChunkRaw(rawPath: string): string {
+	const match = PER_CHUNK_RAW_LIST_RE.exec(rawPath);
+	if (!match || !/raw/i.test(match[1])) return rawPath;
+	const chunks = match[1].split(",").map(chunk => chunk.replace(/^raw:|:raw$/gi, ""));
+	return `${rawPath.slice(0, match.index)}:${chunks.join(",")}:raw`;
+}
 
 /**
  * Fold the list chunks split off by a colon inside one comma list into the `list`
@@ -172,6 +183,7 @@ export function splitPathAndSel(
 	rawPath: string,
 	options?: { foldListColons?: boolean },
 ): { path: string; sel?: string } {
+	rawPath = hoistChunkRaw(rawPath);
 	const colon = rawPath.lastIndexOf(":");
 	if (colon <= 0) return { path: rawPath };
 
@@ -216,7 +228,7 @@ export function splitPathAndSel(
  * grammar. That rule is right for filesystem paths (a file named `a:1-50` is
  * legal) but wrong for internal URLs, where any trailing `:<chunk>` after the
  * scheme is unambiguously a read-tool selector — even if malformed (e.g.
- * `artifact://3:raw:-100-5`).
+ * `local://3.log:raw:-100-5`).
  *
  * This function iteratively peels selector-shaped chunks (well-formed plus
  * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
@@ -243,13 +255,14 @@ export function splitInternalUrlSel(
 	if (spec.portAuthority && !url.rest.includes("/")) return { path: rawPath };
 
 	const schemeEnd = rawPath.length - url.rest.length;
+	rawPath = hoistChunkRaw(rawPath);
 	let path = rawPath;
 	const chunks: string[] = [];
 	while (true) {
 		const colon = path.lastIndexOf(":");
 		// Stop before crossing into the scheme separator `://`.
 		if (colon < schemeEnd) break;
-		// `artifact://7:1-30,:-30`, `artifact://7:20:40,85:100`: chunks split off
+		// `local://7.log:1-30,:-30`, `local://7.log:20:40,85:100`: chunks split off
 		// by a colon inside one list join the list peeled after them.
 		if (chunks.length > 0 && FILE_LINE_RANGE_ONLY_RE.test(chunks[0])) {
 			const folded = foldListColons(path, chunks[0], schemeEnd);

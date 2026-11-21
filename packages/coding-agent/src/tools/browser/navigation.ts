@@ -1,6 +1,8 @@
 import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Page, WaitForOptions } from "puppeteer-core";
 import { puppeteerTimeoutError } from "./launch";
+import { urlPattern } from "./network";
 
 /** Whether `requested` is the address `current` already shows (`https://a.test` is `https://a.test/`). */
 export function sameAddress(requested: string, current: string): boolean {
@@ -10,6 +12,18 @@ export function sameAddress(requested: string, current: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * `tab.waitForUrl()`'s pattern as every backend tests it ({@link urlPattern}): a RegExp, a `*` glob compiled to one,
+ * or a substring. A predicate function, among others, is refused with a {@link ToolError} before anything waits.
+ */
+export function parseUrlPattern(pattern: unknown): string | RegExp {
+	if (typeof pattern === "string" || pattern instanceof RegExp) return urlPattern(pattern);
+	const given = pattern === null ? "null" : typeof pattern === "function" ? "a function" : typeof pattern;
+	throw new ToolError(
+		`tab.waitForUrl() takes a string the URL contains, a glob with * (**/path), or a RegExp it matches, not ${given}`,
+	);
 }
 
 declare module "puppeteer-core" {

@@ -1,21 +1,21 @@
 [workspace]
-# Explicit, not `crates/pi-*`: a glob member that resolves to a directory
+# Explicit, not `crates/*`: a glob member that resolves to a directory
 # without a Cargo.toml (a deleted crate whose dir survives `git reset --hard`
 # because an ignored file stayed behind) is a hard error that fails the whole
 # workspace, not a skipped entry.
 members = [
-   "crates/pi-ast",
-   "crates/pi-builtins",
-   "crates/pi-diff",
-   "crates/pi-edit",
-   "crates/pi-iso",
-   "crates/pi-natives",
-   "crates/pi-predict",
-   "crates/pi-shell",
-   "crates/pi-vcs",
-   "crates/pi-vfs",
-   "crates/pi-voice",
-   "crates/pi-walker",
+   "crates/ast",
+   "crates/builtins",
+   "crates/diff",
+   "crates/edit",
+   "crates/iso",
+   "crates/natives",
+   "crates/predict",
+   "crates/shell",
+   "crates/vcs",
+   "crates/vfs",
+   "crates/voice",
+   "crates/xfs",
    "crates/vendor/cfg_aliases",
    "crates/vendor/grep-searcher",
    "crates/vendor/jaq-core",
@@ -27,7 +27,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.19.0"
+version = "19.1.0"
 edition = "2024"
 rust-version = "1.101"
 license = "MIT"
@@ -63,8 +63,8 @@ codegen-units = 1
 strip = true
 # Unwind (not abort) so panics inside vendored code and native tasks stay
 # recoverable at the appropriate boundary: the uutils boundary
-# (pi-shell coreutils) turns a panic into a failed command, and the
-# `task::blocking` wrapper in `crates/pi-natives/src/task.rs` catches unwinds
+# (omp-shell coreutils) turns a panic into a failed command, and the
+# `task::blocking` wrapper in `crates/natives/src/task.rs` catches unwinds
 # inside `Blocking::compute` before they cross napi-rs's async-work
 # `extern "C"` callback (napi `src/async_work.rs:109`) so they surface as
 # rejected JS Promises instead of forced process aborts under Rust's C-unwind
@@ -72,7 +72,7 @@ strip = true
 # per-call `catch_unwind` on the `Task`/`AsyncTask` path; the tokio-future
 # path (`env.spawn_future`) is guarded upstream. Recoverable uutils panics
 # are kept out of the crash report by the crash hook
-# (see crates/pi-natives/src/crash_handler.rs).
+# (see crates/natives/src/crash_handler.rs).
 panic = "unwind"
 
 # Share host and target dependency units in release builds.
@@ -133,10 +133,10 @@ opt-level = 2
 codegen-units = 256
 debug = false
 
-# pi-shell's bash engine recurses per nesting level (arithmetic, parser);
+# omp's shell engine recurses per nesting level (arithmetic, parser);
 # unoptimized frames overflow the 2 MiB test-thread stack before its recursion
 # limits hit.
-[profile.dev.package.pi-shell]
+[profile.dev.package.omp-shell]
 opt-level = 1
 
 [workspace.lints.rust]
@@ -258,18 +258,18 @@ too_many_lines = "allow"     # Arbitrary limits don't account for necessary comp
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal Libraries
 # ──────────────────────────────────────────────────────────────────────────────
-pi-ast = { path = "crates/pi-ast", default-features = false }
-pi-diff = { path = "crates/pi-diff" }
-pi-edit = { path = "crates/pi-edit" }
-pi-iso = { path = "crates/pi-iso" }
-pi-shell = { path = "crates/pi-shell" }
-pi-predict = { path = "crates/pi-predict" }
-pi-voice = { path = "crates/pi-voice" }
-pi-walker = { path = "crates/pi-walker" }
-pi-vcs = { path = "crates/pi-vcs" }
-pi-vfs = { path = "crates/pi-vfs" }
-pi-builtins = { path = "crates/pi-builtins" }
-# Third-party crates of pi-shell's bash engine (`crates/pi-shell/src/bash`),
+omp-ast = { path = "crates/ast", default-features = false }
+omp-diff = { path = "crates/diff" }
+omp-edit = { path = "crates/edit" }
+omp-iso = { path = "crates/iso" }
+omp-shell = { path = "crates/shell" }
+omp-predict = { path = "crates/predict" }
+omp-voice = { path = "crates/voice" }
+omp-xfs = { path = "crates/xfs" }
+omp-vcs = { path = "crates/vcs" }
+omp-vfs = { path = "crates/vfs" }
+omp-builtins = { path = "crates/builtins" }
+# Third-party crates of omp's shell engine (`crates/shell/src/bash`),
 # at the versions of the workspace it came from.
 blake3 = { version = "1.8.7", features = ["rayon"] }
 bstr = { version = "1.13.1", features = ["serde"] }
@@ -363,7 +363,7 @@ windows-sys = { version = "0.61", features = [
    "Win32_System_SystemInformation",
    "Win32_System_Threading",
 ] }
-# Transitive-only pin (wired through crates/pi-natives' `cfg(false)` target
+# Transitive-only pin (wired through crates/natives' `cfg(false)` target
 # deps so the constraint participates in resolution without tripping the
 # unused-dependency lint): cc 1.2.x passes
 # FILE_ATTRIBUTE_TEMPORARY to OpenOptionsExt::custom_flags as u32, but
@@ -417,10 +417,10 @@ zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
 # (cannot find macro `vec` in alloc-only context).
 tinyvec = "=1.13.3"
 png = "0.18"
-# Oniguruma, not fancy-regex: onig is already linked (pi-builtins), and its
+# Oniguruma, not fancy-regex: onig is already linked (omp-builtins), and its
 # compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB
 # RSS; a 16.8k-line .d.ts highlights in 226 vs 1166 ms). When upgrading, re-sync
-# crates/pi-natives/src/syntaxes/Markdown.sublime-syntax and preserve its fixes.
+# crates/natives/src/syntaxes/Markdown.sublime-syntax and preserve its fixes.
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
@@ -438,7 +438,7 @@ html-to-markdown-rs = { version = "3.18.3", default-features = false }
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokenization
 # ──────────────────────────────────────────────────────────────────────────────
-xutf = "1.5"
+xutf = "2.3"
 zstd = "0.14"
 fancy-regex = "0.17"
 tiktoken-rs = "0.12"
@@ -480,7 +480,7 @@ tree-sitter-cpp = "0.23"
 tree-sitter-css = "0.25"
 tree-sitter-diff = "0.1"
 # elisp, fortran, lua, ruby, swift: test-only stand-ins for wasm grammars (see
-# the pi-ast and pi-edit dev-dependencies); every other grammar here is linked in.
+# the omp-ast and omp-edit dev-dependencies); every other grammar here is linked in.
 tree-sitter-elisp = "1.7.2"
 tree-sitter-fortran = "0.6.0"
 tree-sitter-go = "0.25"
@@ -500,13 +500,17 @@ tree-sitter-typescript = "0.23"
 tree-sitter-yaml = "0.7"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Machine Learning (pi-predict SmolLM2 engine)
+# Machine Learning (omp-predict SmolLM2 engine)
 # ──────────────────────────────────────────────────────────────────────────────
-# macOS-only (Metal decoder; other targets use pi-predict's own CPU decoder).
+# macOS-only (Metal decoder; other targets use omp-predict's own CPU decoder).
 # 0.9.x, not 0.10+: later candle-core releases depend unconditionally on
 # `tokenizers` with the `onig` C library.
 candle-core = "0.9.2"
 candle-nn = "0.9.2"
+# Phonon on-device TTS (omp-natives `tts`). `hf` reads the checkpoint's
+# tokenizer.json through `tokenizers` without its `onig` C library; downloads
+# stay in TypeScript, so no `hub`.
+ptts = { version = "0.7.1", default-features = false, features = ["hf"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Unsorted (added by `cargo add` - move into a section above)

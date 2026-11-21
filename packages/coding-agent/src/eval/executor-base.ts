@@ -1,6 +1,6 @@
 import { logger, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { type ArtifactAllocator, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -83,9 +83,9 @@ export interface KernelExecutorBaseOptions {
 	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
 	onReply?: (text: string) => void;
 	toolSession?: ToolSession;
+	parentToolCallId?: string;
 	bridgeSessionId?: string;
-	artifactId?: string;
-	artifactPath?: string;
+	allocateArtifact?: ArtifactAllocator;
 	/** Set by the kernel session registry; true when this cell is the first on a replacement for a dead kernel. */
 	claimKernelRestartNotice?: () => boolean;
 }
@@ -442,6 +442,12 @@ export interface SessionOwners {
 	hasFallbackOwner: boolean;
 }
 
+/** Narrows owner-scoped retained-kernel disposal. */
+export interface DisposeByOwnerOptions {
+	/** Sessions with this (language-namespaced) session id keep their kernel and owner registration. */
+	keepSessionId?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Base executor implementation
 // ---------------------------------------------------------------------------
@@ -482,8 +488,7 @@ export async function executeWithKernelBase<
 	const settings = await Settings.init();
 	const sink = new OutputSink({
 		onChunk: options?.onChunk,
-		artifactPath: options?.artifactPath,
-		artifactId: options?.artifactId,
+		allocateArtifact: options?.allocateArtifact,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
@@ -536,6 +541,7 @@ export async function executeWithKernelBase<
 		options?.toolSession && options?.bridgeSessionId
 			? registerPyToolBridge(options.bridgeSessionId, runId, {
 					toolSession: options.toolSession,
+					parentToolCallId: options.parentToolCallId,
 					signal: options.signal,
 					cellTimeoutMs: executionTimeoutMs ?? options.idleTimeoutMs ?? 0,
 					shieldedSignal: abortShield.signal,

@@ -179,6 +179,24 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.getAll("image").some(isGatewayImage)).toBe(true);
 	});
 
+	test("an extension model keeps its configured snapcompact shape across refresh", async () => {
+		const snapcompactShape = { variant: "11on16-bw", frameSize: 1932 };
+		registry.registerProvider(
+			"my-gateway",
+			{
+				baseUrl: "https://gateway.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "gemini-3.5-flash", snapcompactShape }],
+			},
+			"ext://runtime",
+		);
+
+		expect(registry.find("my-gateway", "gemini-3.5-flash")?.snapcompactShape).toEqual(snapcompactShape);
+		await registry.refresh("offline");
+		expect(registry.find("my-gateway", "gemini-3.5-flash")?.snapcompactShape).toEqual(snapcompactShape);
+	});
+
 	test("fetchDynamicModels drops a row whose api cannot serve its kind", async () => {
 		registry.registerProvider(
 			"my-gateway",
@@ -385,6 +403,32 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(dynamicFetches).toBe(1);
 		expect(registry.find(providerName, "dynamic-model")).toBeDefined();
 		expect(registry.find(providerName, "fallback-model")).toBeDefined();
+	});
+
+	test("retryUnavailableDiscovery recovers models a failed discovery left out", async () => {
+		const providerName = "flaky-runtime-provider";
+		let failing = true;
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "fallback-model" }],
+				fetchDynamicModels: async () => {
+					if (failing) throw new Error("transient discovery failure");
+					return [{ ...baseModel, id: "dynamic-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+		await registry.refreshRuntimeProviders("online");
+		expect(registry.find(providerName, "dynamic-model")).toBeUndefined();
+
+		failing = false;
+		await registry.retryUnavailableDiscovery();
+
+		expect(registry.find(providerName, "dynamic-model")).toBeDefined();
 	});
 
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {

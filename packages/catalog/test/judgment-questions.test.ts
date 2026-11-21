@@ -29,11 +29,13 @@ describe("judgment-questions-max", () => {
 		expect(resolveJudgmentQuestionsMax(judge("verdict-1.4", "typesafe", "my-openjev"))).toBe(256);
 	});
 
-	test("leaves hosted jev uncapped", () => {
-		expect(resolveJudgmentQuestionsMax(judge("jev-latest", "typesafe", "typesafe"))).toBeUndefined();
-		expect(
-			resolveJudgmentQuestionsMax(judge("~typesafe/jev-latest", "openrouter-decisions", "openrouter")),
-		).toBeUndefined();
+	test("caps hosted jev at 32 questions on TypeSafe, OpenRouter, Command Code and OpenCode Zen", () => {
+		expect(resolveJudgmentQuestionsMax(judge("jev-latest", "typesafe", "typesafe"))).toBe(32);
+		expect(resolveJudgmentQuestionsMax(judge("jev-1.14.0", "typesafe", "typesafe"))).toBe(32);
+		expect(resolveJudgmentQuestionsMax(judge("~typesafe/jev-latest", "openrouter-decisions", "openrouter"))).toBe(32);
+		expect(resolveJudgmentQuestionsMax(judge("typesafe/jev-1.14", "openrouter-decisions", "openrouter"))).toBe(32);
+		expect(resolveJudgmentQuestionsMax(judge("typesafe/jev", "typesafe", "commandcode"))).toBe(32);
+		expect(resolveJudgmentQuestionsMax(judge("jev-1.13-free", "typesafe", "opencode-zen"))).toBe(32);
 		expect(resolveJudgmentQuestionsMax(judge("gpt-6-luna-decisions", "openai-decisions", "openai"))).toBeUndefined();
 	});
 
@@ -51,7 +53,6 @@ describe("judgment-questions-max", () => {
 		);
 		// The OpenRouter-scoped Clef glob does not leak onto TypeSafe's adapter.
 		expect(resolveJudgmentQuestionsMax(judge("cloudflare/clef", "typesafe", "my-judge"))).toBeUndefined();
-		expect(resolveJudgmentQuestionsMax(judge("jev-latest", "typesafe", "typesafe"))).toBeUndefined();
 	});
 
 	test("caps Gemini Decisions at the API's 1,000 questions", () => {

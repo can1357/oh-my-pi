@@ -1,5 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
+import { cfgNoSpotlight, cfgOffline } from "../config/auxiliary-model-policy";
 import type { Settings } from "../config/settings";
 import type { CustomEntry } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
@@ -20,6 +21,7 @@ import { newShapeState, type ShapeState } from "./shape";
 import { ArtifactShapeSink, readArtifactText } from "./sink";
 import {
 	ALL_TOOLS,
+	DEFAULT_SPOTLIGHT_URL,
 	SPOTLIGHT_ENTRY,
 	type SpotlightEntryType,
 	type SpotlightSession,
@@ -28,7 +30,7 @@ import {
 
 /**
  * Schema description of the tool-call intent field `i` in experiment sessions. Spotlight ranks output against the
- * intent, so it asks what the agent wants from the call's output; `PI_INTENT_DESC` still overrides it.
+ * full intent, while the UI shows its brief label; `PI_INTENT_DESC` still overrides it.
  */
 export const SPOTLIGHT_INTENT_DESCRIPTION: string = intentField.trim();
 
@@ -75,6 +77,11 @@ export const SPOTLIGHT_NOTICE_SOURCE = "spotlight";
 /** The warning a session shows when Spotlight finds no Stencil credential. */
 export const NO_CREDENTIAL_NOTICE =
 	"No Stencil credential: Spotlight ranking is off, and tool output is cut by the unranked fallback rules. To restore it, run /login and choose Stencil, or set STENCIL_API_KEY.";
+
+/** The warning a session shows when Stencil Cloud refuses the account Spotlight access (`waitlisted`/`forbidden`). */
+export function accessDeniedNotice(reason: string): string {
+	return `Spotlight ranking is off: ${reason} Tool output is cut by the unranked fallback rules; omp asks again in a few hours, or as soon as you sign in to another Stencil account.`;
+}
 
 /**
  * The experiment's state for one session: the Spotlight client, the coin shares, and the per-session shaping state
@@ -200,9 +207,10 @@ export class SpotlightExperiment implements SpotlightSession {
 export function startSpotlightExperiment(
 	settings: Settings,
 	sessionManager: SessionManager,
+	getSessionProvider?: () => string | undefined,
 ): SpotlightExperiment | undefined {
 	if (!cfgSpotlightExperimentEnabled.get(settings)) return undefined;
-	const client = spotlightClient(settings);
+	const client = spotlightClient(settings, getSessionProvider);
 	const experiment = new SpotlightExperiment(client, cfgSpotlightThinking.get(settings), sessionManager, {
 		holdout: cfgSpotlightExperimentHoldout.get(settings),
 		scoreFree: cfgSpotlightExperimentScoreFree.get(settings),
@@ -218,15 +226,21 @@ export function startSpotlightExperiment(
  * undefined (the judge ranks). Nothing is journaled, since no session exists.
  */
 export function standaloneFindSpotlight(settings: Settings): Pick<SpotlightSession, "client" | "thinking"> | undefined {
-	if (!cfgSpotlightExperimentEnabled.get(settings)) return undefined;
+	if (!cfgSpotlightExperimentEnabled.get(settings) || cfgNoSpotlight.get(settings) || cfgOffline.get(settings)) {
+		return undefined;
+	}
 	return { client: spotlightClient(settings), thinking: cfgSpotlightThinking.get(settings) };
 }
 
-function spotlightClient(settings: Settings): SpotlightClient {
+function spotlightClient(settings: Settings, getSessionProvider?: () => string | undefined): SpotlightClient {
+	const url = cfgSpotlightUrl.get(settings);
 	return new SpotlightClient({
-		url: cfgSpotlightUrl.get(settings),
+		url,
 		model: cfgSpotlightModel.get(settings),
 		timeoutMs: cfgSpotlightTimeoutMs.get(settings),
+		allowRequest: () =>
+			(!cfgNoSpotlight.get(settings) && !cfgOffline.get(settings)) ||
+			(url === DEFAULT_SPOTLIGHT_URL && getSessionProvider?.() === "stencil"),
 	});
 }
 

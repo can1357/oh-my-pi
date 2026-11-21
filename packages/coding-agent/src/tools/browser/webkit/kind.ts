@@ -7,7 +7,8 @@
  * nothing else is selected and the engine is installed; Chromium takes over
  * when it is not, and for a visible window where the engine ships no viewer.
  * A missing engine is downloaded into that directory (`install.ts`) for
- * `app: "webkit"`, and before Chrome for Testing when no browser is installed.
+ * `app: "webkit"`, and before Chrome for Testing when no browser is installed;
+ * an outdated one is updated before an open that uses it.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -81,6 +82,11 @@ function viewerOf(executable: string): string | undefined {
  * next. Like `resolveTernKind`, the
  * setting opts in and the env flag is the final override in both directions.
  * `platform` picks the executable's file name inside an engine directory.
+ *
+ * The path is the executable's real path: the engine finds its helper
+ * processes beside its library as loaded, so a host started through a link
+ * (Tern links `~/.o2/lib/abkit` to a version) keeps its own version's helpers
+ * when the link moves on.
  */
 export function resolveWebKitKind(
 	options?: ResolveWebKitKindOptions | null,
@@ -89,26 +95,9 @@ export function resolveWebKitKind(
 ): WebKitKind | null {
 	if (!parseFlag(env.PI_BROWSER_WEBKIT, options?.settingEnabled ?? true)) return null;
 	const location = env.PI_BROWSER_WEBKIT_PATH?.trim() || options?.settingPath?.trim() || getWebKitHostPath(platform);
-	const executable = hostExecutableAt(location, platform);
-	if (executable === null) return null;
+	const found = hostExecutableAt(location, platform);
+	if (found === null) return null;
+	const executable = fs.realpathSync.native(found);
 	const viewer = viewerOf(executable);
 	return viewer === undefined ? { kind: "webkit", path: executable } : { kind: "webkit", path: executable, viewer };
-}
-
-/**
- * The engine directory a download would fill for this configuration, or null:
- * only the default one (`~/.o2/lib/abkit`), only while the backend is on (as
- * {@link resolveWebKitKind} decides) and neither `PI_BROWSER_WEBKIT_PATH` nor
- * the `browser.webkitPath` setting names another location (a configured engine
- * is the user's to install), and only when it holds no host executable.
- */
-export function webKitEngineToInstall(
-	options?: ResolveWebKitKindOptions | null,
-	env: Record<string, string | undefined> = process.env,
-	platform: NodeJS.Platform = process.platform,
-): string | null {
-	if (!parseFlag(env.PI_BROWSER_WEBKIT, options?.settingEnabled ?? true)) return null;
-	if (env.PI_BROWSER_WEBKIT_PATH?.trim() || options?.settingPath?.trim()) return null;
-	const engineDir = path.dirname(getWebKitHostPath(platform));
-	return hostExecutableAt(engineDir, platform) === null ? engineDir : null;
 }

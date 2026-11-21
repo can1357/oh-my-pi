@@ -61,6 +61,16 @@ beforeAll(() => {
 							headers: { "content-type": "application/rss+xml" },
 						},
 					);
+				case "/app":
+					return new Response(
+						'<!doctype html><html><head><title>App</title><link rel="alternate" type="application/rss+xml" href="/app/index.xml"></head><body><div id="root"></div><script>start()</script></body></html>',
+						{ headers: { "content-type": "text/html" } },
+					);
+				case "/app/index.xml":
+					return new Response(
+						`<?xml version="1.0"?><rss version="2.0"><channel><title>APP_FEED</title><item><title>Entry</title><description>${filler}</description></item></channel></rss>`,
+						{ headers: { "content-type": "application/rss+xml" } },
+					);
 				case "/release_notes.html":
 					return new Response(html("nvCOMP 6.0.0", ""), { headers: { "content-type": "text/html" } });
 				case "/release_notes.html.md":
@@ -127,10 +137,17 @@ describe("read HTML alternates", () => {
 		expect(result.output).toContain(`URL: ${origin}/guide/index.txt`);
 	});
 
-	it("retains a page-specific comments feed", async () => {
+	it("renders a post instead of substituting its page-specific feed", async () => {
 		const result = await fetchReadUrl(session, { path: `${origin}/posts/one` });
+		expect(result.details.method).toBe("native");
+		expect(result.content).toContain("POST_BODY");
+		expect(result.content).not.toContain("POST_COMMENTS");
+	});
+
+	it("falls back to a page-specific feed when the page renders to nothing", async () => {
+		const result = await fetchReadUrl(session, { path: `${origin}/app` });
 		expect(result.details.method).toBe("alternate-feed");
-		expect(result.details.notes).toContain(`Used feed alternate: ${origin}/posts/one/comments.xml`);
-		expect(result.details.finalUrl).toBe(`${origin}/posts/one/comments.xml`);
+		expect(result.details.notes).toContain(`Used feed alternate: ${origin}/app/index.xml`);
+		expect(result.content).toContain("APP_FEED");
 	});
 });

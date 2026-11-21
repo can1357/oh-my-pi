@@ -15,6 +15,7 @@ import {
 	prompt,
 } from "@oh-my-pi/pi-utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -26,6 +27,7 @@ import readPathTemplate from "../prompts/memories/read-path.md" with { type: "te
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { journalCompletion } from "../session/model-usage-journal";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -428,9 +430,20 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 
 		await runWithConcurrency(claims, config.stage1Concurrency, async claim => {
 			if (!isMemoryStartupActive(options)) return;
+			if (cfgOffline.get(session.settings) && session.model?.provider !== phase1Model.provider) {
+				markStage1Failed(db, {
+					threadId: claim.threadId,
+					ownershipToken: claim.ownershipToken,
+					retryDelaySeconds: config.stage1RetryDelaySeconds,
+					reason: "Memory model provider differs from the active session provider",
+					nowSec: unixNow(),
+				});
+				return;
+			}
 			const result = await runStage1Job({
 				claim,
 				model: phase1Model,
+				session,
 				apiKey: modelRegistry.resolver(phase1Model, session.sessionId),
 				sessionId: session.sessionId,
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
@@ -591,9 +604,13 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 
 		try {
 			if (!isMemoryStartupActive(options)) return;
+			if (cfgOffline.get(session.settings) && session.model?.provider !== phase2Model.provider) {
+				throw new Error("Memory model provider differs from the active session provider");
+			}
 			const consolidated = await runConsolidationModel({
 				memoryRoot,
 				model: phase2Model,
+				session,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				sessionId: session.sessionId,
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
@@ -866,6 +883,7 @@ export async function buildStage1RolloutItems(rolloutPath: string, tokenLimit: n
 async function runStage1Job(options: {
 	claim: Stage1Claim;
 	model: Model;
+	session: AgentSession;
 	apiKey: ApiKey;
 	sessionId: string;
 	modelMaxTokens: number;
@@ -892,9 +910,14 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
+		// Billed to the session running the pipeline, whichever thread the rollout belongs to.
+		const journal = journalCompletion(options.session.sessionManager, { purpose: "memory:extract" });
 		const response = await retryTransientCompletion(
-			() =>
-				completeSimple(
+			() => {
+				if (cfgOffline.get(options.session.settings) && options.session.model?.provider !== model.provider) {
+					throw new Error("Memory model provider differs from the active session provider");
+				}
+				return completeSimple(
 					model,
 					{
 						systemPrompt: [stageOneSystemTemplate],
@@ -909,8 +932,10 @@ async function runStage1Job(options: {
 						// OpenAI chat-completions owns its transient retries in the HTTP
 						// transport; never restart that budget at the provider/oneshot layers.
 						maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
+						onAttempt: message => journal?.(message, inputPrompt),
 					},
-				),
+				);
+			},
 			{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 		);
 
@@ -1016,6 +1041,7 @@ async function readRolloutSummaries(memoryRoot: string): Promise<string> {
 async function runConsolidationModel(options: {
 	memoryRoot: string;
 	model: Model;
+	session: AgentSession;
 	apiKey: ApiKey;
 	sessionId: string;
 	metadata?: Record<string, unknown>;
@@ -1038,9 +1064,13 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
+	const journal = journalCompletion(options.session.sessionManager, { purpose: "memory:consolidate" });
 	const response = await retryTransientCompletion(
-		() =>
-			completeSimple(
+		() => {
+			if (cfgOffline.get(options.session.settings) && options.session.model?.provider !== model.provider) {
+				throw new Error("Memory model provider differs from the active session provider");
+			}
+			return completeSimple(
 				model,
 				{
 					systemPrompt: [consolidationSystemTemplate],
@@ -1053,8 +1083,10 @@ async function runConsolidationModel(options: {
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 					maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
+					onAttempt: message => journal?.(message, input),
 				},
-			),
+			);
+		},
 		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 	);
 	if (response.stopReason === "error") {
@@ -1372,15 +1404,20 @@ async function resolveMemoryModel(options: {
 	fallbackRole: string;
 }): Promise<Model | undefined> {
 	const { modelRegistry, session, fallbackRole } = options;
+	const provider = session.model?.provider;
+	if (cfgOffline.get(session.settings) && !provider) return undefined;
+	const models = cfgOffline.get(session.settings)
+		? modelRegistry.getAll().filter(model => model.provider === provider)
+		: modelRegistry.getAll();
 	const requestedModel = session.settings.getModelRole(fallbackRole) || session.settings.getModelRole("default");
 	if (requestedModel) {
-		const resolved = resolveModelRoleValue(requestedModel, modelRegistry.getAll(), {
+		const resolved = resolveModelRoleValue(requestedModel, models, {
 			settings: session.settings,
 			matchPreferences: getModelMatchPreferences(session.settings),
 		});
 		if (resolved.model) return resolved.model;
 	}
-	return session.model ?? modelRegistry.getAll()[0];
+	return session.model ?? models[0];
 }
 
 function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {

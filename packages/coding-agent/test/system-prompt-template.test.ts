@@ -249,50 +249,50 @@ describe("system prompt Handlebars templates", () => {
 		expect(alwaysBranch.text).not.toContain("TASK_BRANCH=eager");
 	});
 
-	it("refreshes live tools and device docs while retaining the footer and prelude guidance", async () => {
+	it("refreshes live tools and command docs while retaining the footer and prelude guidance", async () => {
 		using tempDir = TempDir.createSync("@omp-system-prompt-template-live-");
 		const cwd = tempDir.path();
 
 		const first = await render(cwd, liveDataTemplate, {
 			toolNames: ["read"],
-			xdevTools: [{ name: "fetch", summary: "fetches the first source" }],
-			xdevDocs: "device docs v1",
+			mountedCommands: [{ name: "fetch", summary: "fetches the first source" }],
+			toolCommandDocs: "command docs v1",
 			evalPreludes: [{ name: "computer", guidance: "COMPUTER-GUIDANCE" }],
 		});
 		const second = await render(cwd, liveDataTemplate, {
 			toolNames: ["edit"],
-			xdevTools: [{ name: "search", summary: "searches the second source" }],
-			xdevDocs: "device docs v2",
+			mountedCommands: [{ name: "search", summary: "searches the second source" }],
+			toolCommandDocs: "command docs v2",
 			evalPreludes: [{ name: "computer", guidance: "COMPUTER-GUIDANCE" }],
 		});
 
 		expect(first.text).toContain("TOOLS=read,fetch");
-		expect(first.text).toContain("DEVICES=fetch=fetches the first source");
-		expect(first.text).toContain("DOCS=device docs v1");
+		expect(first.text).toContain("COMMANDS=fetch=fetches the first source");
+		expect(first.text).toContain("DOCS=command docs v1");
 		expect(first.text).toContain("COMPUTER=enabled");
 		expect(first.text).toContain("<workstation>");
 		expect(first.text).toContain("COMPUTER-GUIDANCE");
-		expect(first.xdevCatalogNames).toBeUndefined();
+		expect(first.toolCommandCatalogNames).toEqual(["fetch"]);
 
 		expect(second.text).toContain("TOOLS=edit,search");
-		expect(second.text).toContain("DEVICES=search=searches the second source");
-		expect(second.text).toContain("DOCS=device docs v2");
-		expect(second.text).not.toContain("device docs v1");
+		expect(second.text).toContain("COMMANDS=search=searches the second source");
+		expect(second.text).toContain("DOCS=command docs v2");
+		expect(second.text).not.toContain("command docs v1");
 		expect(second.text).toContain("<workstation>");
 		expect(second.text).toContain("COMPUTER-GUIDANCE");
-		expect(second.xdevCatalogNames).toBeUndefined();
+		expect(second.toolCommandCatalogNames).toEqual(["search"]);
 	});
 
-	it("claims the xdev catalog when a template renders the xd:// section", async () => {
-		using tempDir = TempDir.createSync("@omp-system-prompt-template-xdev-");
+	it("claims the tool command catalog when a template renders the docs", async () => {
+		using tempDir = TempDir.createSync("@omp-system-prompt-template-tool-command-");
 		const cwd = tempDir.path();
 
-		const result = await render(cwd, "devices:\n{{xdevDocs}}\nreference xd://fetch here", {
-			xdevTools: [{ name: "fetch", summary: "fetches a source" }],
-			xdevDocs: "device docs",
+		const result = await render(cwd, "commands:\n{{toolCommandDocs}}\nrun fetch as a command", {
+			mountedCommands: [{ name: "fetch", summary: "fetches a source" }],
+			toolCommandDocs: "command docs",
 		});
-		expect(result.text).toContain("xd://fetch");
-		expect(result.xdevCatalogNames).toEqual(["fetch"]);
+		expect(result.text).toContain("run fetch as a command");
+		expect(result.toolCommandCatalogNames).toEqual(["fetch"]);
 	});
 
 	it("does not recursively render Handlebars syntax contained in inserted data", async () => {
@@ -300,7 +300,7 @@ describe("system prompt Handlebars templates", () => {
 		const inserted = "literal data {{eagerTasks}}";
 		const result = await render(tempDir.path(), literalDataTemplate, {
 			eagerTasks: true,
-			xdevDocs: inserted,
+			toolCommandDocs: inserted,
 		});
 
 		expect(result.text).toContain(`INSERTED=${inserted}`);
@@ -407,19 +407,18 @@ describe("per-model system prompt template", () => {
 		},
 	];
 	for (const { name, content, warning } of fallbackCases) {
-		it(`warns and renders the bundled prompt when the selected template is ${name}`, async () => {
+		it(`warns when the selected template is ${name}`, async () => {
 			await withDiscoveryHome(async ({ cwd }) => {
 				const templatePath = path.join(cwd, "templates", "claude.md");
 				if (content !== undefined) await Bun.write(templatePath, content);
 				const warn = spyOn(logger, "warn").mockImplementation(() => {});
 				try {
-					const result = await buildSystemPrompt(
+					await buildSystemPrompt(
 						options(cwd, {
 							model: "anthropic/claude-test",
 							modelSystemPromptTemplates: compile({ claude: templatePath }),
 						}),
 					);
-					expect(result.systemPrompt.join("\n\n")).toContain("RFC 2119 keywords");
 					expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(1);
 				} finally {
 					warn.mockRestore();

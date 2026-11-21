@@ -59,7 +59,7 @@ describe("issue #1270: Vertex AI global endpoint", () => {
 		await stream.result();
 
 		expect(urls).toContain(
-			"https://aiplatform.googleapis.com/v1/projects/vertex-project/locations/global/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse",
+			"https://aiplatform.googleapis.com/v1beta1/projects/vertex-project/locations/global/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse",
 		);
 	});
 
@@ -97,7 +97,7 @@ describe("issue #1270: Vertex AI global endpoint", () => {
 		await stream.result();
 
 		expect(urls).toContain(
-			`https://${host}/v1/projects/vertex-project/locations/${location}/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse`,
+			`https://${host}/v1beta1/projects/vertex-project/locations/${location}/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse`,
 		);
 	});
 });

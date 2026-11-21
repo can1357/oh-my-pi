@@ -12,7 +12,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
-import { countNewlines } from "@oh-my-pi/pi-utils";
+import { countNewlines, spillUrl } from "@oh-my-pi/pi-utils";
 import { reasonShows, type SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
@@ -37,16 +37,17 @@ import { outlineBash, outlineRead } from "./outline";
 import { alignedTo, bump, headTail, noteRank, noteWhy, type Origin, type Run, scoreLines } from "./run";
 import { noteCall, noteShown, type ShapeState } from "./state";
 import { shapeTestRun } from "./test-runs";
-import { fileSpans, runSpan, type Span, type View } from "./view";
+import { fileSpans, runSpan, type SourcePeak, type Span, type View } from "./view";
 import {
 	fillSmallGaps,
+	foldDividers,
 	keepCommitHeaders,
 	lineShape,
 	uniformShape,
 	COMMIT,
-	DENSITY_MAX,
 	DENSITY_PARTS,
-	densityScores,
+	rankLines,
+	peakLines,
 	frameLines,
 	isDiff,
 	isGrid,
@@ -101,7 +102,10 @@ const REASK_LINES = 3;
 const VALVE_OVER = 3_900;
 /** Output of the agent's own programs triggers the valve only past twice the size. */
 const PROGRAM_SCALE = 2;
-/** Results shaped earlier, source reads, and sub-agent reports and edit results are left whole up to this size. */
+/**
+ * Results shaped earlier, source reads, sub-agent reports, edit results, and pull request and issue threads are left
+ * whole up to this size; a source read this short is not outlined either.
+ */
 const EXEMPT_MAX = 12_000;
 /**
  * A result of a tool without steps of its own this short, in characters and lines, passes whole (under every size
@@ -126,6 +130,8 @@ const VERBATIM = /[;,]\s*verbatim(?: copy)?: \S+\]$/;
  * instructions it must follow (`skill://`, `rule://`).
  */
 const WHOLE_READ = /^(?:agent|local|skill|rule):\/\//i;
+/** A `read` of one pull request or issue (`pr://7`, `issue://owner/repo/7?comments=0`), not a listing or a PR's diff. */
+const THREAD_READ = /^(?:pr|issue):\/\/(?:[^?#]*\/)?(?<!diff\/)\d+(?:[?#].*)?$/i;
 
 /**
  * Whether a result is shown whole besides page-backs and `:raw` reads: a {@link WHOLE_READ} target, or a `read` of
@@ -197,7 +203,7 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 	if (input.read) {
 		let recovery = false;
 		if (SOURCE_PATH.test(input.read.path)) {
-			const o = await outlineRead(run, await realPath(run.cwd, input.read.path));
+			const o = await outlineRead(run, await realPath(run.cwd, input.read.path), EXEMPT_MAX);
 			if (o.view) return { view: o.view, steps: ["outline"], recovery: false };
 			recovery = o.recovery;
 		}
@@ -211,25 +217,30 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 	let text = input.text;
 	const steps: string[] = [];
 	let recovery = false;
+	let peaks: SourcePeak[] | undefined;
+	let scores: (number | null)[] | undefined;
 	if (input.tool === "bash") {
 		const code = await outlineBash(run, text);
 		recovery = code.recovery;
 		if (code.text !== undefined) {
 			text = code.text;
+			peaks = code.peaks;
+			scores = code.scores;
 			steps.push("outline");
 		}
-		const docs = await foldBashDocs(run, text);
+		const docs = await foldBashDocs(run, text, peaks);
 		if (docs !== undefined) {
 			text = docs;
 			steps.push("docs");
 		}
 		if (isTestRun(command)) {
-			const tests = await shapeTestRun(run, text);
+			const tests = await shapeTestRun(run, text, peaks);
 			if (tests !== undefined) {
 				text = tests;
 				steps.push("tests");
 			}
 		}
+		if (code.text !== text) scores = undefined;
 	}
 	if (!steps.length) {
 		const dump = await shapeDumpOutput(run, text);
@@ -238,7 +249,11 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 			steps.push("dump");
 		}
 	}
-	return { view: steps.length ? { lines: text.split("\n"), spans: null } : subject.view, steps, recovery };
+	return {
+		view: steps.length ? { lines: text.split("\n"), spans: null, peaks, scores } : subject.view,
+		steps,
+		recovery,
+	};
 }
 
 /**
@@ -260,8 +275,8 @@ function cutTarget(run: Run, view: View): { url: string; spans: Span[] | null } 
 
 /** Stands in the shaped text for the saved copy's URL until the copy is written; no tool output holds it. */
 const PENDING_COPY = "\u0000spotlight-copy\u0000";
-/** What the savings gate counts {@link PENDING_COPY} as: a session artifact's URL, the size it ships with. */
-const COUNTED_COPY = "artifact://100";
+/** What the savings gate counts {@link PENDING_COPY} as: a session spill's URL, the size it ships with. */
+const COUNTED_COPY = spillUrl(100);
 
 /**
  * Lines of no file (notes of earlier shaping) can't be named by file lines, so a file-addressed cut keeps them, as
@@ -421,12 +436,6 @@ async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View
 	return { lines, spans: view.spans && spans };
 }
 
-/** Spotlight's line scores with nulls as 0, or the head + tail order when Spotlight did not answer. */
-async function lineScores(run: Run, lines: readonly string[], origin?: Origin): Promise<number[]> {
-	const scores = await scoreLines(run, lines, origin);
-	return scores ? scores.map(s => s ?? 0) : headTail(lines.length);
-}
-
 /**
  * Where a view's lines are in the run's base: a read's file lines by their spans (a line standing for one file
  * line is that window line), else the base lines they equal.
@@ -444,11 +453,15 @@ function viewOrigin(run: Run, view: View): Origin | undefined {
 /**
  * The base layers, then the valve: already-seen runs collapse, lines over 400 characters keep 280, and a result over
  * 3.9k (the agent's own program output past 7.8k) is cut to ~3k, except outlines, source reads, sub-agent reports
- * (`task`, `wait`, `omp -p`) and edit results up to 12k, and pictures. Output repeating one line shape is cut to the
- * lines that differ, its ends, and a line naming the shape.
+ * (`task`, `wait`, `omp -p`), edit results and `pr://` / `issue://` threads up to 12k, and pictures. Output repeating
+ * one line shape is cut to the lines that differ, its ends, and a line naming the shape.
  * Re-asks (results up to 12k bringing back lines a cut hid) and reads of folded code come back whole.
  */
-async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; steps: string[] }> {
+async function shapeSubject(
+	run: Run,
+	subject: Subject,
+	previewChars: number,
+): Promise<{ view: View; steps: string[] }> {
 	const { input, state } = run;
 	const command = input.command ?? "";
 	const b = await base(run, subject);
@@ -481,14 +494,16 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		? SOURCE_PATH.test(input.read.path)
 		: input.tool === "bash" && printsFiles(command) && namesSource(command) && !program;
 	// A sub-agent's report is read in full: cut, it came back as a read of the cut's copy (8 of 9), costing more than
-	// the cut saved. An edit's result came back 5 of 13 times for ~600 tokens saved: even, so it stays whole too.
+	// the cut saved. An edit's result came back 5 of 13 times for ~600 tokens saved: even, so it stays whole too. A
+	// pull request or issue under 12k came back 76 of 146 times, for ~1.2k tokens saved per read back.
 	const report =
 		input.tool === "task" ||
 		input.tool === "wait" ||
 		input.tool === "edit" ||
 		input.tool === "write" ||
 		input.tool === "ast_edit" ||
-		(input.tool === "bash" && runsAgent(command));
+		(input.tool === "bash" && runsAgent(command)) ||
+		(input.tool === "read" && THREAD_READ.test((input.path ?? "").trim()));
 	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4). Searches and filtered commands
 	// get no such pass: cut, 2% of `grep` results and 11% of filtered commands were read back, costing a fraction of
 	// what showing them whole up to 12k added.
@@ -500,12 +515,12 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	// Why the valve shows or hides each line; undefined: shown, as the base layers decided.
 	let why: (SpotlightReason | undefined)[] = witnessed.map(w => (w ? "r" : undefined));
 	let frame: { chosen: Window; density: number[] } | undefined;
-	let budget = WINDOW_BUDGET * scale;
 	let uniform: { shapes: string[]; differs: boolean[]; edges: boolean[] } | undefined;
 	if (cut) {
-		const spot = await lineScores(run, lines, origin);
-		const density = densityScores(lines, spot);
-		uniform = input.read ? undefined : uniformShape(lines, witnessed);
+		const source = b.view.peaks?.filter(p => !witnessed[p.line]);
+		const spot = b.view.scores ?? (await scoreLines(run, lines, origin));
+		const { density, order } = rankLines(lines, spot ?? headTail(lines.length));
+		uniform = input.read || source?.length ? undefined : uniformShape(lines, witnessed);
 		// The lines the call asks for: those its intent names and command output's last line.
 		const asked = intentLines(run, lines).map((named, i) => named || keep[i]);
 		const forced = lines.map(
@@ -533,23 +548,34 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		lines.forEach((_, i) => {
 			if (namedBody(i)) bodies += width[i] + 1;
 		});
-		budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + bodies);
+		const budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + bodies);
+		const peaks =
+			spot && !uniform && (!b.view.scores || !source?.length) ? peakLines(lines, witnessed, spot, order) : undefined;
 		const chosen = frameLines(width, lines, witnessed, scores, {
 			budget,
 			// Neighbours of a line that differs in uniform output are routine lines themselves.
 			ctx: uniform ? 0 : 1,
 			head: 3,
 			tail: 4,
+			source: !uniform ? source : undefined,
+			passages: peaks?.length
+				? {
+						peaks,
+						named: i => asked[i] || namedBody(i),
+						previewChars: folded ? undefined : previewChars,
+					}
+				: undefined,
 			// In uniform output only the lines that say something new are picked; the rest are routine samples.
 			...(uniform ? { pick: forced } : {}),
 		});
 		frame = { chosen, density };
 		why = chosen.why;
-		if (!shapesItself(input.tool)) keepHeadings(lines, why);
+		if (!shapesItself(input.tool) || (input.tool === "read" && !input.read)) keepHeadings(lines, why);
 		if (!input.read) keepCommitHeaders(lines, why);
 		fillSmallGaps(width, why);
 		// A filled gap can show a commit's lines whose header is still hidden.
 		if (!input.read) keepCommitHeaders(lines, why);
+		if (spot && !uniform && !folded) foldDividers(chosen, lines);
 	}
 	const show = (i: number) => {
 		const reason = why[i];
@@ -568,11 +594,11 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	if (frame) {
 		noteRank(run, origin, {
 			parts: DENSITY_PARTS,
-			max: DENSITY_MAX,
+			max: 1,
 			values: [frame.density],
 			why,
-			floor: DENSITY_MAX,
-			budget,
+			floor: 1,
+			budget: frame.chosen.budget,
 			used: frame.chosen.used,
 			last: frame.chosen.last,
 		});
@@ -775,7 +801,11 @@ export async function shapeBlock(
 			if (steps.length) text = view.lines.join("\n");
 		}
 	} else if (subject) {
-		const shaped = await shapeSubject(run, subject);
+		const shaped = await shapeSubject(
+			run,
+			subject,
+			Math.min(input.text.length, plain?.text.length ?? input.text.length),
+		);
 		steps = shaped.steps;
 		if (steps.length) text = subject.before + shaped.view.lines.join("\n") + subject.after;
 	} else if (input.read) bump(run, "unlocated");

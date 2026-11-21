@@ -8,6 +8,7 @@
  * const data = defaultFormData(form);   // { db: "sqlite", notes: "" }
  * formAnswers(form, data);              // [{ name: "db", question: "Database", answer: "SQLite" }, …]
  */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type ChoiceField, type FormBlock, type FormField, type HtmlForm, spansText, type TextField } from "./parse";
 
 /** Submitted value of one control: text, a number for `number`/`range` inputs, or a group's checked values. */
@@ -36,7 +37,13 @@ export interface OptionNote {
 	option: string;
 	/** The option's submitted value, as it appears in the form data. */
 	value: string;
+	/**
+	 * In a form-dialog result, `[Image #N, WxH]` markers are numbered 1..K in order of appearance within this
+	 * note; `images[N-1]` is marker N's image.
+	 */
 	text: string;
+	/** Pasted images of the note; present only when non-empty. */
+	images?: ImageContent[];
 }
 
 /** Label of the free-text answer the UI adds to radio and checkbox groups ({@link ChoiceField.other}). */
@@ -117,7 +124,8 @@ function compilePattern(pattern: string): RegExp | undefined {
 
 /** Data the form submits untouched: hidden inputs, preselected options and prefilled text. */
 export function defaultFormData(form: HtmlForm): HtmlFormData {
-	const data: HtmlFormData = {};
+	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
+	const data: HtmlFormData = Object.create(null);
 	for (const [name, value] of form.hidden) data[name] = value;
 	for (const field of form.fields) {
 		if (!field.name) continue;
@@ -176,6 +184,24 @@ export function blockText(block: FormBlock): string | undefined {
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * The form's section titles and context blocks as plain text, in order, for a
+ * host that shows the whole form with each named field titled by its question
+ * ({@link fieldQuestions}): text that already is such a question is left out,
+ * so it shows once. Blank parts are dropped.
+ */
+export function formContext(form: HtmlForm): string[] {
+	const questions = new Set<string>();
+	for (const [field, question] of fieldQuestions(form)) if (field.name) questions.add(question);
+	const parts: string[] = [];
+	for (const section of form.sections) {
+		for (const text of [spansText(section.title).trim(), ...section.blocks.map(blockText)]) {
+			if (text?.trim() && !questions.has(oneLine(text))) parts.push(text);
+		}
+	}
+	return parts;
 }
 
 /**

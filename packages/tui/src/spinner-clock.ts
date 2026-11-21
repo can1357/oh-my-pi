@@ -39,12 +39,21 @@ export function onSpinnerIntervalChange(listener: () => void): () => void {
 }
 
 /**
+ * Period index on the shared clock: whole spinner intervals since the epoch, or 0 when spinners are
+ * static. Two readings differ exactly when a tick boundary lies between them.
+ */
+export function sharedSpinnerTick(now: number = Date.now()): number {
+	if (intervalMs === SPINNER_INTERVAL_STATIC) return 0;
+	return Math.floor(now / intervalMs);
+}
+
+/**
  * Glyph index on the shared clock, or frame 0 when spinners are static. Every spinner reads
  * wall-clock time, so they share a phase as well as a period.
  */
 export function sharedSpinnerFrame(frameCount: number, now: number = Date.now()): number {
-	if (frameCount <= 0 || intervalMs === SPINNER_INTERVAL_STATIC) return 0;
-	return Math.floor(now / intervalMs) % frameCount;
+	if (frameCount <= 0) return 0;
+	return sharedSpinnerTick(now) % frameCount;
 }
 
 /**

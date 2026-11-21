@@ -151,7 +151,7 @@ test("a provider-wide unknown-class ladder yields to published tiers", async () 
 	expect(resolveModelPolicy(model!).thinking?.efforts).toEqual([Effort.Low, Effort.High]);
 });
 
-test("rule-owned ladders and non-reasoning rows are left alone", async () => {
+test("rule-owned ladders and rows discovery leaves silent are left alone", async () => {
 	const models = await discover(
 		stubFetch(
 			{
@@ -174,8 +174,8 @@ test("rule-owned ladders and non-reasoning rows are left alone", async () => {
 	// The catalog publishes a narrower ["minimal"]; the reviewed tiers survive.
 	expect(reviewed?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	expect(resolveModelPolicy(reviewed!).thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
-	// Discovery says this one does not reason; a published ladder cannot flip that.
-	expect(plain?.reasoning).toBe(false);
+	// Discovery is silent on this one; a published ladder only refines rows discovery marks as reasoning.
+	expect(plain?.reasoning).toBeUndefined();
 	expect(plain?.thinking).toBeUndefined();
 });
 

@@ -10,7 +10,7 @@
    - `packages/utils/src/ar` (`@oh-my-pi/pi-utils/ar`) — archive selector parsing, member loading, and serialization; the write tool supplies the atomic temp-file/rename boundary.
    - `packages/coding-agent/src/tools/sqlite-reader.ts` — detect SQLite paths and perform row insert/update/delete.
    - `packages/coding-agent/src/tools/conflict-detect.ts` / `conflict-uri.ts` — register/validate conflict regions, expand side tokens, and resolve writes through the internal URL handler.
-   - `packages/coding-agent/src/internal-urls/router.ts` / `packages/coding-agent/src/tools/xdev.ts` — writable internal resources and `xd://` tool-device dispatch.
+   - `packages/coding-agent/src/internal-urls/router.ts` — built-in internal resources and their write semantics.
    - `packages/coding-agent/src/lsp/writethrough.ts` — format-on-write and diagnostics writethrough.
    - `packages/coding-agent/src/tools/auto-generated-guard.ts` — block overwriting generated files.
    - `packages/coding-agent/src/tools/plan-mode-guard.ts` — resolve paths and enforce plan-mode write policy.
@@ -19,8 +19,8 @@
 
 | Field     | Type     | Required                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | --------- | -------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`    | `string` | Yes                       | Target path. Plain paths write files. Writable internal URLs delegate to their handler. `xd://<device>` dispatches a mounted tool using JSON in `content`. `archive.ext:inner/path` writes an archive entry for `.zip` and ZIP-format aliases (`.jar`, `.war`, `.ear`, `.apk`, …), `.tar`, `.tar.gz`/`.tgz`, `.tar.zst`/`.tzst`, or `.asar`. `db.sqlite:table` inserts a row; `db.sqlite:table:key` updates/deletes one. `conflict://<id>` resolves a registered conflict and `conflict://*` performs a bulk resolution. A copied `[path#TAG]` wrapper is accepted and removed. |
-| `content` | `string` | Except `proc://<id>/kill` | Full replacement file/archive/internal-resource content, conflict replacement, or SQLite row payload. Ignored for `/kill`. SQLite non-delete writes must parse as a JSON5 object; empty or whitespace-only content deletes a keyed row. For `xd://`, this is the mounted tool's JSON argument object.                                                                                                                                                                                                                                                                           |
+| `path`    | `string` | Yes                       | Target path. Plain paths write files. Writable internal URLs delegate to their handler. `archive.ext:inner/path` writes an archive entry for `.zip` and ZIP-format aliases (`.jar`, `.war`, `.ear`, `.apk`, …), `.tar`, `.tar.gz`/`.tgz`, `.tar.zst`/`.tzst`, or `.asar`. `db.sqlite:table` inserts a row; `db.sqlite:table:key` updates/deletes one. `conflict://<id>` resolves a registered conflict and `conflict://*` performs a bulk resolution. A copied `[path#TAG]` wrapper is accepted and removed. |
+| `content` | `string` | Yes                       | Full replacement file/archive/internal-resource content, conflict replacement, or SQLite row payload. Ignored for `/kill`. SQLite non-delete writes must parse as a JSON5 object; empty or whitespace-only content deletes a keyed row.                                                                                                                                                                                                                                                                           |
 
 Worked examples:
 
@@ -43,24 +43,24 @@ content: "{name: 'Ada', active: true}"
 
 Single-shot result.
 
-- Success always returns at least one text block, except that an `xd://` dispatch preserves the mounted tool's own content/error result.
+- Success always returns at least one text block.
    - Plain file write: `Successfully wrote <bytes> bytes to <relative-path>` (UTF-8 byte length of the final formatted content; the ACP bridge receipt counts the submitted content).
    - Internal URL write: handler-provided receipt/status text when present; otherwise `Successfully wrote <bytes> bytes to <url>`. File-backed URL writes (`local://`, `vault://`) name the URL too, never the backing path.
    - Archive write: `Successfully wrote <bytes> bytes to <relative-archive-path>:<entry-path>` (UTF-8 member-content size).
    - SQLite write: one of `Inserted row into <table>`, `Updated row '<key>' in <table>`, `No row updated ...`, `Deleted row ...`, `No row deleted ...`.
    - Conflict resolution: conflict-specific success text, with fresh hashline snapshot headers when applicable. Bulk resolution can return `isError: true` after some files succeeded and others failed.
-- During execution, `onUpdate` may emit `Writing <bytes> bytes to <path>...` using UTF-8 byte length; `xd://` forwards the mounted tool's updates.
+- During execution, `onUpdate` may emit `Writing <bytes> bytes to <path>...` using UTF-8 byte length.
 - If hashline prefixes were copied from `read` output and stripped first, the first text block gets an extra note.
 - In hashline display mode, plain file writes (including ACP bridge writes) and conflict resolutions prepend a fresh `[<relative-path>#TAG]` header (`[<url>#TAG]` for file-backed URL writes). The snapshot has no seen-line provenance: anchored edits still need to read their anchor lines. Bulk conflict resolutions append a `Snapshots:` block listing one header per successfully written file.
 - Plain file writes may also return `details.diagnostics` plus `details.meta.diagnostics` when LSP diagnostics-on-write is enabled, and `details.madeExecutable` when a shebang file gains execute bits.
-- Plain/archive/single-conflict results set `details.resolvedPath` when backed by a file. SQLite writes additionally set `details.meta.source` through `sourcePath(...)`. Handler-owned URL writes preserve handler details (for example `details.proc`); generic handler receipts use empty details and device dispatch sets `details.xdev`.
+- Plain/archive/single-conflict results set `details.resolvedPath` when backed by a file. SQLite writes additionally set `details.meta.source` through `sourcePath(...)`. Handler-owned URL writes preserve handler details (for example `details.proc`); generic handler receipts use empty details.
 
 ## Flow
 
 1. `WriteTool.execute()` unwraps a copied `[path#TAG]` argument and peels a valid read selector from internal URLs so write and read address the same resource. Malformed/range selectors on writable URLs are rejected.
-2. It requires `content` unless the target's write policy makes it optional (`proc://<id>/kill`). Device-only sessions allow device/coordination writes and, in active plan mode, local sandbox drafts; other targets fail before mutation. Hashline display prefixes are stripped from text payloads, but messages, process input, settings, and conflict directives reach their handlers verbatim.
-3. It validates URI-like targets. Unknown schemes and common `xd://` misspellings fail instead of becoming local filenames; prefix with `./` to deliberately create a URI-looking POSIX filename.
-4. If `path` is an internal URL whose handler exposes `write`, the tool delegates to it. `xd://` validates and dispatches JSON to the mounted tool while preserving its result and approval tier; `local://` falls through to the session-local filesystem path.
+2. The schema requires `content` for every target, including `proc://<id>/kill`, which ignores it: strict-mode providers would otherwise advertise an optional `content` as nullable and models send `null`. Plan mode allows coordination writes, replies, and `local://` sandbox drafts; other targets are refused before mutation. Hashline display prefixes are stripped from text payloads, but messages, process input, settings, and conflict directives reach their handlers verbatim.
+3. It validates URI-like targets. Unknown schemes fail instead of becoming local filenames; prefix with `./` to deliberately create a URI-looking POSIX filename.
+4. If `path` is an internal URL whose handler exposes `write`, the tool delegates to it. `local://` falls through to the session-local filesystem path.
 5. `conflict://...` is one of those handler-owned writes, implemented by `ConflictProtocolHandler` and `tools/conflict-uri.ts`. Scope reads such as `conflict://<id>/ours` are read-only; writable conflict URIs omit the scope. Registered markers are revalidated before replacement.
 6. It calls `#resolveArchiveWritePath()`. Candidate archive files are checked longest-first; when none exists, the shortest candidate archive path is used for creating a new container.
 7. Archive writes call `enforcePlanModeWrite(..., { op: exists ? "update" : "create" })`, then `#writeArchiveEntry()`.
@@ -80,11 +80,11 @@ Single-shot result.
 
 - It rejects high-confidence mis-dispatched read targets: a missing selector-shaped filename with empty content, or a missing semicolon-joined list of selector paths. Existing literal paths win; non-empty content is the escape hatch for a single deliberate selector-shaped filename.
 - Plan-mode policy and path resolution run before mutation. An existing target that is neither a regular file nor a directory (including through a symlink) is refused; existing regular files then pass the generated-file guard, which opens and reads the file head on the main thread and could block forever on such a target.
-- If submitted content ends in an OMP read-truncation notice and covers less than the current source, the overwrite is refused. This also applies to text handler-owned resources; tool-device arguments are exempt.
+- If submitted content ends in an OMP read-truncation notice and covers less than the current source, the overwrite is refused. This also applies to text handler-owned resources.
 - ACP bridge `writeTextFile` is tried first when available; otherwise the session writethrough writes the content. LSP settings may format, synchronize, and diagnose the write.
 - When the written (post-format) content starts with `#!` and not `#![`, adds execute bits (`mode | 0o111`, `chmod a+x`) once those bytes are on disk — after ACP `writeTextFile`, or in the writethrough before `textDocument/didSave` and LSP diagnostics (returned in the result or delivered late).
 
-11. The tool returns text plus optional diagnostics, executable, resolved-path, or device-dispatch metadata.
+11. The tool returns text plus optional diagnostics, executable, or resolved-path metadata.
 
 ## Modes / Variants
 
@@ -151,16 +151,15 @@ path: "data/app.sqlite:users:42"
 content: ""
 ```
 
-### Writable internal resources and tool devices
+### Writable internal resources
 
-- `agent://<id>` with non-empty `content` sends a message to that peer (delivery receipt text); `agent://all` broadcasts to visible live peers; only the main agent may broadcast, and a subagent's `agent://all` write fails with an error naming direct messages instead. This write is read-approved and allowed in plan mode and `deviceOnlyWrite` when messaging is available. `agent://` reads remain output artifacts.
+- `agent://<id>` with non-empty `content` sends a message to that peer (delivery receipt text); `agent://all` broadcasts to visible live peers; only the main agent may broadcast, and a subagent's `agent://all` write fails with an error naming direct messages instead. This write is read-approved and allowed in plan mode when messaging is available. `agent://` reads remain output artifacts.
 - `agent://<id>?progress` marks the message as an acknowledgement or progress note on something that peer asked: it answers nothing and asks nothing, so the peer's `wait` keeps blocking for the real reply, which is any later plain message. It wakes no relay turn. `agent://all?progress` is rejected.
-- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill" })` cancels a job or owned subagent, or stops a service; `content` is optional and ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval. Stdin and `/mode` writes are blocked in plan mode and unavailable in `deviceOnlyWrite` sessions; `/kill` is allowed in both. Proc reads do not consume job delivery. `/kill` and `/mode` are write-only.
-- `out://` shows `content` (Markdown, at most 64 KiB) to the user as a reply without ending the turn: the transcript draws the call as assistant prose that streams with the arguments, not as a tool card, and keeps it visible when tool activity is hidden. The URL path is ignored and the scheme is write-only. The write is read-approved and allowed in plan mode and `deviceOnlyWrite`. It is refused for subagents, and where `out.enabled` is off — by default everywhere but the interactive TUI (terminal or Tern), so print, RPC, and ACP sessions neither see nor accept it unless `out.enabled` is explicitly set. Only sessions where it is on get the system-prompt entry.
+- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill", content: "" })` cancels a job or owned subagent, or stops a service; `content` is ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval. Stdin and `/mode` writes are blocked in plan mode; `/kill` is allowed there. Proc reads do not consume job delivery. `/kill` and `/mode` are write-only.
+- `out://` shows `content` (Markdown, at most 64 KiB) to the user as a reply without ending the turn: the transcript draws the call as assistant prose that streams with the arguments, not as a tool card, and keeps it visible when tool activity is hidden. The URL path is ignored and the scheme is write-only. The write is read-approved and allowed in plan mode. It is refused for subagents, and where `out.enabled` is off — by default everywhere but the interactive TUI (terminal or Tern), so print, RPC, and ACP sessions neither see nor accept it unless `out.enabled` is explicitly set. Only sessions where it is on get the system-prompt entry.
 - A registered internal handler with a `write` hook owns its resource semantics (for example, `cfg://`, `agent://`, `proc://`). File-backed schemes (`local://`, `vault://`) have no hook: the router locates the target file (`local://` in the session-local artifact sandbox, `vault://` under the vault root) and the write follows the plain-file path.
-- `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first, then pass one JSON object as `content`. Device schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved. `xd://<name>` also accepts a tool's unambiguous `customWireName` alias (`xd://apply_patch` for `edit` in `apply_patch` mode). The outer approval gate uses `tools.approval.<tool>`, keyed by the canonical tool name, before the generic `write` policy. `xd://report_issue` separately accepts a plain issue description.
 - Unknown URI-like schemes are refused to prevent silent local-file creation. Use `./scheme://...` only when that filename is intentional.
-- Registered read-only schemes (no write policy: `artifact://`, `skill://`, `history://`, …) are denied at the approval gate (`<scheme>:// URLs are read-only`) without prompting; `edit` and `ast_edit` targets are denied the same way. A trailing line selector on a write, edit, or bash URL target (`local://notes.md:5`) is refused rather than dropped; only `:raw`/`:conflicts` are peeled.
+- Registered read-only schemes (no write policy: `skill://`, `history://`, …) are denied at the approval gate (`<scheme>:// URLs are read-only`) without prompting; `edit` and `ast_edit` targets are denied the same way. A trailing line selector on a write, edit, or bash URL target (`local://notes.md:5`) is refused rather than dropped; only `:raw`/`:conflicts` are peeled.
 
 ### Merge-conflict resolution
 
@@ -188,7 +187,6 @@ content: ""
 - Session state
    - Enforces plan-mode write restrictions before mutating the target.
    - Updates file mutation/snapshot state for plain files and conflict resolutions; resolved conflict ids are invalidated.
-   - `xd://` dispatches a mounted tool and may therefore have that tool's documented side effects.
 - Background work / cancellation
    - Marks the tool `concurrency = "exclusive"` in `WriteTool`.
    - The write body is wrapped with `untilAborted`; LSP writethrough can deliver diagnostics late when its inline wait expires or schedule a deferred fetch after its `5_000` ms operation timeout, in both cases after writing the final content and applying any shebang `chmod a+x`.
@@ -196,7 +194,7 @@ content: ""
 ## Limits & Caps
 
 - Plain/internal file content has no tool-level byte cap beyond in-memory handling. Archive readers default to `256 MiB` in-memory input and `64 MiB` per member. ZIP output emits ZIP64 records for large entry counts, but member sizes and central-directory/member offsets remain below the 32-bit sentinel.
-- The generated-file guard delegates to `editAutoGeneratedMessage` in `crates/pi-natives/src/edit.rs`, reading at most `1024` bytes; `crates/pi-edit/src/path_policy.rs` checks at most `40` header lines. `edit.blockAutoGenerated` controls the guard.
+- The generated-file guard delegates to `editAutoGeneratedMessage` in `crates/natives/src/edit.rs`, reading at most `1024` bytes; `crates/edit/src/path_policy.rs` checks at most `40` header lines. `edit.blockAutoGenerated` controls the guard.
 - SQLite writes set `PRAGMA busy_timeout = 3000`.
 - LSP writethrough (`packages/coding-agent/src/lsp/writethrough.ts`) uses a `5_000` ms operation timeout in `runLspWritethrough()` and may schedule deferred diagnostics with `AbortSignal.timeout(25_000)`.
 - Shebang executable handling depends on host filesystem chmod support.
@@ -216,7 +214,7 @@ content: ""
 - Existing plain files may be rejected by `assertEditableFile()` when they look generated.
 - Existing plain-file targets and SQLite database candidates that are neither regular files nor directories are refused with `Cannot write '<path>': it is a <kind>, not a regular file or directory.` Opening or reading them in-process can block forever (a FIFO with no writer, a terminal).
 - A file-backed URL write whose target is an existing directory fails with `<scheme>:// URL must resolve to a file: <url>`.
-- URI-like unknown targets and malformed/missing `xd://` devices fail rather than writing local files; mounted devices surface their own schema/tool errors.
+- URI-like unknown targets fail rather than writing local files.
 - Empty writes to missing selector-shaped targets and semicolon-joined selector lists are rejected as likely read/write mis-dispatches.
 - Incomplete read projections that would discard unseen source are rejected; re-read omitted ranges and replace the whole file, or use `edit` for a partial change.
 - Conflict scope writes are read-only; invalid/stale ids, malformed bulk directives, missing `@base`, and stale marker locations surface `ToolError`.
@@ -233,4 +231,4 @@ content: ""
 - Generic write receipts count UTF-8 bytes with `Buffer.byteLength(...)`; handler-owned receipts define their own content/status wording.
 - `stripWriteContent()` only removes hashline prefixes when the session’s file display mode has `hashLines` enabled; otherwise content is written unchanged. Even then it removes them only when every content row carries one and each number is one more than the row above, except after a blank, elision or header row (how `read` and `grep` number their rows); numbers that jump, such as hex dump addresses or log timestamps, stay as written, and so do partial views that skip rows without a marker (edit previews, `ast_grep` matches). `conflict://*` per-id directives are recognized behind a copied `LINE:` prefix either way.
 
-- The tool has `strict = true`, `loadMode = "essential"`, and exclusive concurrency. The native transcript view previews the first 8 content lines; `xd://` results delegate rendering to the mounted device.
+- The tool has `strict = true`, `loadMode = "essential"`, and exclusive concurrency. The native transcript view previews the first 8 content lines.

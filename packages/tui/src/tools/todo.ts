@@ -127,6 +127,53 @@ export function isClosedTodo<T extends { status: TodoStatus }>(task: T): boolean
 }
 
 /**
+ * Delimiters tried, in order, on a `task` string that names no task verbatim, mirroring path-list
+ * recovery: a split wins when every part names a task; `partial` delimiters also win when only some
+ * do, so the error names each missing part instead of the whole flattened string.
+ */
+const TASK_LIST_DELIMITERS: readonly { pattern: RegExp; partial: boolean }[] = [
+	{ pattern: /\r?\n/, partial: true },
+	{ pattern: /;/, partial: true },
+	{ pattern: /,/, partial: true },
+	{ pattern: /\s+/, partial: false },
+	{ pattern: /[\s,;]+/, partial: false },
+];
+
+const QUOTED_TASK_RE = /^(["'`])(.*)\1$/s;
+
+function normalizeTaskPart(part: string): string {
+	const trimmed = part.trim();
+	return QUOTED_TASK_RE.exec(trimmed)?.[2].trim() ?? trimmed;
+}
+
+function splitTaskList(content: string, known: ReadonlySet<string>): string[] {
+	if (known.has(content)) return [content];
+	let partial: string[] | undefined;
+	for (const delimiter of TASK_LIST_DELIMITERS) {
+		const parts = content
+			.split(delimiter.pattern)
+			.map(normalizeTaskPart)
+			.filter(part => part.length > 0);
+		const named = parts.filter(part => known.has(part)).length;
+		if (named > 0 && named === parts.length) return parts;
+		if (!partial && delimiter.partial && named > 0 && parts.length > 1) partial = parts;
+	}
+	return partial ?? [content];
+}
+
+/**
+ * Task contents a todo `task` arg targets, shared by the todo tool and its renderer. A string naming
+ * a task verbatim is one target; otherwise a string flattening several tasks (`"a; b"`, `"a, b"`,
+ * newline- or space-separated) splits like a path list, with parts trimmed and unquoted (see
+ * {@link TASK_LIST_DELIMITERS}). Array entries expand the same way; absent, `""` and `[]` target none.
+ */
+export function todoTaskTargets(phases: readonly TodoPhase[], task: string | readonly string[] | undefined): string[] {
+	if (task === undefined || task === "") return [];
+	const known = new Set(phases.flatMap(phase => phase.tasks.map(item => item.content)));
+	return (typeof task === "string" ? [task] : task).flatMap(content => splitTaskList(content, known));
+}
+
+/**
  * A todo the collapsed viewport treats as current work: the literal
  * `in_progress` task or a pending task a live subagent is executing. Both
  * collapsed views (transient tool result + sticky HUD) run this same policy so
@@ -235,7 +282,7 @@ export function selectCollapsedTodos<T extends { status: TodoStatus }>(
 
 type TodoRenderOp = {
 	op?: string;
-	task?: string;
+	task?: string | string[];
 	phase?: string;
 	items?: string[];
 };
@@ -257,6 +304,25 @@ function normalizeTodoArg(args: TodoRenderArgs | undefined): TodoRenderOp[] {
 		return args.ops.filter((entry): entry is TodoRenderOp => !!entry && typeof entry === "object");
 	}
 	return typeof args.op === "string" ? [args] : [];
+}
+
+/** Non-empty task contents an op targets; drops partially-streamed non-string entries. */
+function opTasks(op: TodoRenderOp): string[] {
+	const { task } = op;
+	if (typeof task === "string") return task ? [task] : [];
+	return Array.isArray(task) ? task.filter((entry): entry is string => typeof entry === "string" && !!entry) : [];
+}
+
+/** Header label for one op: verb, then target task(s)/phase, then appended item count. */
+function describeOp(op: TodoRenderOp): string {
+	const parts = [forDisplay(op.op ?? "update")];
+	const tasks = opTasks(op);
+	if (tasks.length === 1) parts.push(forDisplay(tasks[0]));
+	else if (tasks.length > 1) parts.push(`${tasks.length} ${pluralize("task", tasks.length)}`);
+	if (op.phase) parts.push(forDisplay(op.phase));
+	if (Array.isArray(op.items) && op.items.length)
+		parts.push(`${op.items.length} ${pluralize("item", op.items.length)}`);
+	return parts.join(" ");
 }
 
 // =============================================================================
@@ -424,8 +490,8 @@ function computeTouchedPhases(
 			const named = phases.find(phase => phase.name === op.phase);
 			if (named) touched.add(named.name);
 		}
-		if (typeof op.task === "string" && op.task) {
-			const phase = phases.find(phase => phase.tasks.some(task => task.content === op.task));
+		for (const content of todoTaskTargets(phases, opTasks(op))) {
+			const phase = phases.find(phase => phase.tasks.some(task => task.content === content));
 			if (phase) touched.add(phase.name);
 		}
 	}
@@ -540,18 +606,7 @@ export const todoToolRenderer = {
 		const opsList = normalizeTodoArg(args);
 		// Model-authored, partially-streamed strings going straight into a header:
 		// `renderStatusLine` only flattens CR/LF and leaves the rest to the caller.
-		const ops =
-			opsList.length === 0
-				? ["update"]
-				: opsList.map(e => {
-						const parts = [forDisplay(e.op ?? "update")];
-						if (e.task) parts.push(forDisplay(e.task));
-						if (e.phase) parts.push(forDisplay(e.phase));
-						if (Array.isArray(e.items) && e.items.length) {
-							parts.push(`${e.items.length} item${e.items.length === 1 ? "" : "s"}`);
-						}
-						return parts.join(" ");
-					});
+		const ops = opsList.length === 0 ? ["update"] : opsList.map(describeOp);
 		// No body worth boxing while the call streams — a lone status line reads
 		// cleaner than an empty frame. The container renders it without chrome.
 		const header = renderStatusLine(
@@ -735,14 +790,7 @@ export const todoToolRenderer = {
 		});
 	},
 	describeCall(args: TodoRenderArgs): NativeToolView {
-		const ops = normalizeTodoArg(args).map(e => {
-			const parts = [forDisplay(e.op ?? "update")];
-			if (e.task) parts.push(forDisplay(e.task));
-			if (e.phase) parts.push(forDisplay(e.phase));
-			if (Array.isArray(e.items) && e.items.length)
-				parts.push(`${e.items.length} ${pluralize("item", e.items.length)}`);
-			return parts.join(" ");
-		});
+		const ops = normalizeTodoArg(args).map(describeOp);
 		return { tool: { title: "Todo", target: ops.length === 0 ? "update" : ops.join(", "), targetKind: "text" } };
 	},
 

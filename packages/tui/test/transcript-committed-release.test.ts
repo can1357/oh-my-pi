@@ -4,6 +4,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { Lexer, type Token } from "@oh-my-pi/pi-utils/marked";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { ToolExecutionComponent, type ToolExecutionUi } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { FramedMessageComponent } from "@oh-my-pi/pi-tui/chrome/message-frame";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
@@ -541,6 +542,8 @@ describe("committed transcript blocks release render caches", () => {
 			return component;
 		}
 
+		// The interpreted shell view replaces the highlighted command; only visualization-off cards highlight it.
+		setChatTranscriptDisplayPreferences({ shellVisualization: false });
 		const highlightSpy = spyOn(themeModule, "highlightCode");
 		try {
 			// 1. Settled bash ToolExecutionComponent through commit retirement + resize replay.
@@ -592,6 +595,7 @@ describe("committed transcript blocks release render caches", () => {
 			expect(highlightSpy.mock.calls.length).toBe(beforePendingHighlight + 3);
 		} finally {
 			highlightSpy.mockRestore();
+			setChatTranscriptDisplayPreferences({ shellVisualization: true });
 		}
 	});
 

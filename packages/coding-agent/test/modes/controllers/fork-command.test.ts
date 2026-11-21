@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { classifyTerminalMultiplexer, type TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { extractProfileFlags } from "@oh-my-pi/pi-coding-agent/cli/profile-bootstrap";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Settings } from "../../../src/config/settings";
@@ -55,6 +57,7 @@ function createContext(
 	const session = {
 		isStreaming: options.streaming ?? false,
 		fork: vi.fn(async () => true),
+		abort: vi.fn(async () => undefined),
 		flushToDisk: vi.fn(async () => undefined),
 		sessionFile,
 		sessionId: "parent-session-id",
@@ -67,6 +70,7 @@ function createContext(
 		getHeader: vi.fn(() => undefined),
 		getCwd: vi.fn(() => options.cwd ?? "/workspace/project"),
 		getSessionFile: vi.fn(() => sessionFile),
+		getSessionId: vi.fn(() => "parent-session-id"),
 		isSessionOnDisk: vi.fn(() => sessionFile !== undefined),
 		flush,
 	};
@@ -378,6 +382,32 @@ describe("/fork terminal placement", () => {
 		expect(launchTerminal).not.toHaveBeenCalled();
 	});
 
+	it("preserves boolean --plan across terminal forks while still blocking a following --api-key", async () => {
+		const secret = "do-not-include-this-key";
+		const blocked = createContext({
+			argv: ["--plan", "--api-key", secret, "prompt"],
+		});
+		await blocked.controller.handleForkCommand("pane");
+		expect(blocked.showError.mock.calls[0]?.[0]).toContain("--api-key");
+		expect(blocked.showError.mock.calls[0]?.[0]).not.toContain(secret);
+		expect(blocked.launchTerminal).not.toHaveBeenCalled();
+
+		const forked = createContext({
+			argv: ["--plan", "--model", "old-provider/model-a", "prompt"],
+		});
+		await forked.controller.handleForkCommand("pane");
+		const command = forked.launchTerminal.mock.calls[0]?.[0].command ?? [];
+		const appArgs = command.slice(command.indexOf("omp-entry") + 1);
+		const extracted = extractProfileFlags(appArgs);
+		expect(extracted.profile).toBe("active-profile");
+		const startupChild = parseArgs(extracted.argv);
+		expect(startupChild.model).toBe("provider/model");
+		expect(startupChild.messages).toEqual([]);
+		const extChild = parseArgs(extracted.argv, new Map([["plan", { type: "boolean" }]]));
+		expect(extChild.unknownFlags.get("plan")).toBe(true);
+		expect(extChild.model).toBe("provider/model");
+	});
+
 	it("rejects placement forks without a persisted transcript", async () => {
 		const { controller, ctx, launchTerminal, flush } = createContext({ persisted: false });
 		await controller.handleForkCommand("window");
@@ -458,12 +488,14 @@ describe("/fork inside Tern", () => {
 		expect(ctx.present).toHaveBeenCalledTimes(1);
 	});
 
-	it("refuses the in-place fallback mid-turn when Tern declines the fork", async () => {
+	it("aborts the running turn and forks in place when Tern declines the fork", async () => {
 		const tern = await startTern(() => ({ error: { kind: "not_agent", message: "no session file" } }));
 		const { controller, ctx, session } = createContext({ streaming: true });
 		await controller.handleForkCommand();
 		expect(tern.forks).toHaveLength(1);
-		expect(session.fork).not.toHaveBeenCalled();
-		expect(ctx.showWarning).toHaveBeenCalledTimes(1);
+		expect(session.abort).toHaveBeenCalledTimes(1);
+		expect(session.fork).toHaveBeenCalledTimes(1);
+		expect(session.abort.mock.invocationCallOrder[0]).toBeLessThan(session.fork.mock.invocationCallOrder[0]);
+		expect(ctx.showWarning).not.toHaveBeenCalled();
 	});
 });

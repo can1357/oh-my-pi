@@ -22,6 +22,7 @@ import * as AIError from "../error";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
+	AssistantMessagePhase,
 	ComputerAction,
 	ComputerSafetyCheck,
 	ComputerScreenshotRef,
@@ -49,7 +50,12 @@ import {
 	type OpenAIResponsesTool,
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
-import { coerceNullMessageContentInPlace, encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
+import {
+	coerceNullMessageContentInPlace,
+	encodeTextSignatureV1,
+	parseAssistantMessagePhase,
+	parseTextSignature,
+} from "./openai-shared";
 
 export type { ParsedRequest };
 
@@ -97,11 +103,11 @@ function asString(v: unknown): string | undefined {
 	return typeof v === "string" ? v : undefined;
 }
 
-type AssistantItemPhase = "commentary" | "final_answer";
+type AssistantItemPhase = AssistantMessagePhase;
 type MessageSignature = { id: string; phase?: AssistantItemPhase };
 
 function parseAssistantItemPhase(value: unknown): AssistantItemPhase | undefined {
-	return value === "commentary" || value === "final_answer" ? value : undefined;
+	return parseAssistantMessagePhase(value);
 }
 
 function messageTextSignature(id: unknown, phase: unknown): string | undefined {
@@ -347,8 +353,8 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 // ─── parseRequest ───────────────────────────────────────────────────────────
 
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
-	// Header capture is centralized in `auth-gateway/server.ts` (the
-	// allow-listed set lands on `options.headers` automatically). We also
+	// The gateway forwards allow-listed request headers itself, for the gateway
+	// token only (`applyCallerTrust` in `auth-gateway/caller-options.ts`). We
 	// consult `headers` here to populate `options.promptCacheKey` when the
 	// client signals a cache identity outside the body — see the
 	// `resolvePromptCacheKey` call further down.

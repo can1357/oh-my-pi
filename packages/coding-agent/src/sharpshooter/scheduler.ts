@@ -2,6 +2,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
+import type { ModelUsageLedger } from "../session/model-usage-journal";
 import { runSharpshooterConsolidation, sharpshooterNextConsolidationAt } from "./consolidate";
 import { readSharpshooterState, sharpshooterBankDir } from "./paths";
 import { sharpshooterQueueDepth } from "./queue";
@@ -23,6 +24,9 @@ export function startSharpshooterScheduler(options: {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sessionId: string;
+	getSessionProvider?: () => string | undefined;
+	/** Session journal scheduled passes bill; like `sessionId`, the first session to start the bank's scheduler. */
+	usageLedger?: Partial<ModelUsageLedger>;
 }): () => void {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
 	const existing = schedulers.get(bankDir);

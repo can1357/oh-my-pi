@@ -1520,6 +1520,11 @@ def _run_pip(argv: list[str], args: str) -> None:
     if not _has_pip():
         code = _bootstrap_pip()
         if code != 0:
+            sys.stderr.write(
+                f"%pip: {sys.executable} has no pip and it could not be bootstrapped"
+                " (ensurepip failed and `uv` is not on PATH). Install `uv`, or your distribution's"
+                " python3-pip/python3-venv package, then retry.\n"
+            )
             _emit_status("pip", args=args, installed=[], exit_code=code)
             return
     installed_packages: list[str] = []
@@ -2404,7 +2409,9 @@ def _install_builtins(ns: dict) -> None:
     ns["__omp_magic_async"] = __omp_magic_async
     ns["__omp_magic_cell"] = __omp_magic_cell
     ns["__omp_shell"] = __omp_shell
-    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get()
+    # Plain threads (ThreadPoolExecutor) do not inherit the ContextVar: fall back
+    # to the request currently executing, the same target fd-1 capture uses.
+    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get() or _STATE.capture_rid
 
 
 _install_builtins(_STATE.user_ns)
@@ -2571,14 +2578,15 @@ def _prepare_file_source(
     if display_source and (not lines or not lines[-1].endswith(("\n", "\r"))):
         lines[-1] += "\n"
     linecache.cache[filename] = (len(display_source), None, lines, filename)
-    ns["__file__"] = filename
-    script_dir = os.path.dirname(filename)
-    if script_dir:
-        try:
-            sys.path.remove(script_dir)
-        except ValueError:
-            pass
-        sys.path.insert(0, script_dir)
+    if not (filename.startswith("<") and filename.endswith(">")):
+        ns["__file__"] = filename
+        script_dir = os.path.dirname(filename)
+        if script_dir:
+            try:
+                sys.path.remove(script_dir)
+            except ValueError:
+                pass
+            sys.path.insert(0, script_dir)
 
 
 def _exec_source(source: str, ns: dict) -> None:
@@ -2607,8 +2615,7 @@ async def _exec_source_async(
     regions yield to other requests in the runner's persistent event loop."""
     _restore_call_site_helper(ns)
     body_code, expr_code, has_expr = _compile_source(source, filename)
-    if filename != "<cell>":
-        _prepare_file_source(source, ns, filename, linecache_source)
+    _prepare_file_source(source, ns, filename, linecache_source)
     if body_code is None:
         return
     await _run_compiled_async(body_code, ns, want_value=False)
@@ -2708,10 +2715,29 @@ _MANAGED_ENV_KEYS = (
 )
 
 
-def _apply_request_runtime(req: dict) -> None:
+def _apply_request_runtime(req: dict, rid: str) -> None:
     cwd = req.get("cwd")
     if isinstance(cwd, str) and cwd:
-        os.chdir(cwd)
+        try:
+            os.chdir(cwd)
+        except OSError as exc:
+            # The session cwd was moved or removed (e.g. a deleted worktree): keep running
+            # in the last valid directory instead of failing every cell.
+            try:
+                fallback = os.getcwd()
+            except OSError:
+                # The process cwd is gone too (usually the same deleted directory).
+                fallback = os.path.expanduser("~")
+                os.chdir(fallback)
+            _emit(
+                {
+                    "type": "stderr",
+                    "id": rid,
+                    "data": f"Warning: session cwd {cwd} is unavailable ({exc.strerror or exc}); this cell runs in {fallback}\n",
+                }
+            )
+            cwd = None
+    if isinstance(cwd, str) and cwd:
         try:
             sys.path.remove(cwd)
         except ValueError:
@@ -2914,17 +2940,17 @@ async def _handle_request_async(req: dict) -> None:
 
     try:
         try:
-            _apply_request_runtime(req)
+            _apply_request_runtime(req, rid)
             source = req.get("code", "")
-            transformed = transform_cell(source)
             requested_filename = req.get("filename")
             filename = (
                 requested_filename
                 if isinstance(requested_filename, str) and requested_filename
-                else "<cell>"
+                else f"<cell-{execution_count}>"
             )
+            transformed = transform_cell(source)
         except SyntaxError as exc:
-            _emit_error(rid, exc)
+            _emit_error(rid, exc, source_filename=filename)
             _emit(
                 {
                     "type": "done",
@@ -3018,8 +3044,8 @@ async def _handle_request_async(req: dict) -> None:
             _end_exec_sigint()
 
 
-def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -> None:
-    if isinstance(exc, SyntaxError) and exc.filename in ("<cell>", source_filename):
+def _emit_error(rid: str, exc: BaseException, source_filename: str | None = None) -> None:
+    if isinstance(exc, SyntaxError) and source_filename is not None and exc.filename == source_filename:
         # Syntax error in the executed source itself: every stack frame is
         # runner machinery, so emit only the caret display, like a REPL.
         tb_lines = traceback.format_exception_only(type(exc), exc)

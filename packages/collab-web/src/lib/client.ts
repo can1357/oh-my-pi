@@ -19,6 +19,7 @@ import type {
 	CollabUiRequest,
 	CollabUiResponseValue,
 	HostFrame,
+	ImageContent,
 	SessionEntry,
 	SessionHeader,
 	SessionState,
@@ -215,8 +216,17 @@ export class GuestClient {
 		return this.#snapshot;
 	}
 
-	sendPrompt(text: string): void {
-		this.#socket.send({ t: "prompt", text });
+	/**
+	 * Prompts the host; `images` ride in the same `prompt` frame (omitted when empty). `followUp` waits for the
+	 * running turn instead of steering it.
+	 */
+	sendPrompt(text: string, images?: readonly ImageContent[], options?: { followUp?: boolean }): void {
+		this.#socket.send({
+			t: "prompt",
+			text,
+			...(images && images.length > 0 ? { images: [...images] } : {}),
+			...(options?.followUp ? { followUp: true } : {}),
+		});
 	}
 
 	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
@@ -229,6 +239,16 @@ export class GuestClient {
 
 	sendAbort(): void {
 		this.#socket.send({ t: "abort" });
+	}
+
+	/** The `.`/`c` continue shortcut: the host resumes its agent, interrupting a running turn first. */
+	sendResume(): void {
+		this.#socket.send({ t: "resume" });
+	}
+
+	/** Empty Enter: the host interrupts a run that has queued input and continues it with that input. */
+	sendDeliverQueue(): void {
+		this.#socket.send({ t: "deliver-queue" });
 	}
 
 	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): void {
@@ -360,8 +380,13 @@ export class GuestClient {
 			this.#applyFrame(frame);
 		} catch (err) {
 			console.warn("collab: failed to apply frame", frame.t, err);
-			if (frame.t === "welcome" && !this.#welcomed) {
-				this.#end(`failed to apply session snapshot: ${err instanceof Error ? err.message : String(err)}`);
+			if (frame.t === "welcome") {
+				const reason = `failed to apply session snapshot: ${err instanceof Error ? err.message : String(err)}`;
+				// A failed welcome must never go live through its snapshot chunks. A
+				// guest already in the session says hello again instead, which also
+				// drops any earlier welcome's snapshot and timer.
+				if (this.#welcomed) this.#rejoin(reason);
+				else this.#end(reason);
 				return;
 			}
 			this.#pushNotice("error", `failed to apply ${frame.t} frame`);
@@ -371,7 +396,11 @@ export class GuestClient {
 
 	#applyFrame(frame: HostFrame): void {
 		switch (frame.t) {
-			case "welcome":
+			case "welcome": {
+				// Read every field that can throw on a malformed frame before any
+				// state changes, so a failed welcome leaves the guest as it was.
+				const agents = [...frame.agents];
+				const working = frame.state.isStreaming;
 				// A fresh welcome (first join or reconnect) restarts the snapshot.
 				// Entries already on screen stay until the new snapshot replaces
 				// them once complete, so a resync never blanks the transcript.
@@ -384,14 +413,14 @@ export class GuestClient {
 					this.#pendingSnapshot = { entries: [], live: [], total: frame.entryCount };
 				}
 				this.#state = frame.state;
-				this.#agents = [...frame.agents];
+				this.#agents = agents;
 				this.#stream = null;
 				this.#streamDone = false;
 				this.#activeTools = new Map();
 				this.#progress = new Map();
 				this.#lifecycle = new Map();
 				this.#unlistedBusIds.clear();
-				this.#working = frame.state.isStreaming;
+				this.#working = working;
 				this.#readOnly = frame.readOnly === true;
 				this.#clearUiRequests();
 				this.#welcomed = true;
@@ -404,6 +433,7 @@ export class GuestClient {
 				}
 				this.#endedReason = null;
 				break;
+			}
 			case "snapshot-chunk": {
 				// Buffer fragments and publish the transcript once, when the
 				// snapshot completes (as the TUI guest does). Intermediate chunks

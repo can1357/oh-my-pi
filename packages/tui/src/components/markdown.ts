@@ -128,8 +128,17 @@ function fenceIndentValid(text: string, lineStart: number, indent: number): bool
 
 /** Whether a code fence is still open at `end` of `text`. */
 function fenceOpenAt(text: string, end: number): boolean {
-	let open: string | undefined;
-	FENCE_LINE.lastIndex = 0;
+	return scanFenceLines(text, 0, end, undefined) !== undefined;
+}
+
+/**
+ * The marker of the fence left open by the fence lines of `text` that start in
+ * `[from, end)`, given the fence `open` in front of `from`. `from` must be a
+ * line start; fence lines are whole lines, so resuming there finds exactly the
+ * lines a scan from the start would.
+ */
+function scanFenceLines(text: string, from: number, end: number, open: string | undefined): string | undefined {
+	FENCE_LINE.lastIndex = from;
 	for (let match = FENCE_LINE.exec(text); match !== null && match.index < end; match = FENCE_LINE.exec(text)) {
 		const [, indent, marker, rest] = match;
 		if (!fenceIndentValid(text, match.index, indentWidth(indent))) continue;
@@ -140,7 +149,7 @@ function fenceOpenAt(text: string, end: number): boolean {
 			open = undefined;
 		}
 	}
-	return open !== undefined;
+	return open;
 }
 
 /** Locked column widths: per table (see tableLockKey), per available width. */
@@ -183,12 +192,25 @@ export function endsInsideOpenFence(text: string): boolean {
  * prefix it publishes, so cutting at the final "\n" would publish nothing on
  * exactly those frames. Once the closing fence has arrived, the retained line
  * is the one in front of it.
+ *
+ * `scan` is the fence state of an earlier, shorter form of `text`; it is used
+ * when `text` still starts with it, so a growing stream scans only new lines.
+ * Returns the cut and the scan to pass next time.
  */
-function settledFenceBodyEnd(text: string): number {
+function settledFenceBodyEnd(text: string, scan: FenceScan | undefined): { end: number; scan: FenceScan | undefined } {
 	const lastBreak = text.lastIndexOf("\n");
-	if (lastBreak <= 0) return 0;
+	if (lastBreak <= 0) return { end: 0, scan };
 	const cut = text.lastIndexOf("\n", lastBreak - 1) + 1;
-	return cut > 0 && fenceOpenAt(text, cut) ? cut : 0;
+	if (cut <= 0) return { end: 0, scan };
+	const resume = scan !== undefined && scan.text.length <= cut && text.startsWith(scan.text) ? scan : undefined;
+	const open = scanFenceLines(text, resume?.text.length ?? 0, cut, resume?.open);
+	return { end: open === undefined ? 0 : cut, scan: { text: text.slice(0, cut), open } };
+}
+
+/** Fence state at the end of `text`, which ends at a line start: the marker of the fence still open there. */
+interface FenceScan {
+	text: string;
+	open: string | undefined;
 }
 
 /**
@@ -211,7 +233,8 @@ export function holdPartialTableRow(text: string): string {
 	let lineStart = text.lastIndexOf("\n", lastBreak - 1) + 1;
 	let table = false;
 	while (matchesAt(PIPE_IN_LINE_AT, text, lineStart)) {
-		const above = lineStart > 0 ? text.lastIndexOf("\n", lineStart - 2) + 1 : -1;
+		// `lastIndexOf` clamps a negative start to 0: under a leading "\n" it would find that same break again.
+		const above = lineStart > 1 ? text.lastIndexOf("\n", lineStart - 2) + 1 : lineStart - 1;
 		if (matchesAt(DELIMITER_ROW_AT, text, lineStart)) {
 			table = above >= 0 && matchesAt(PIPE_IN_LINE_AT, text, above);
 			lineStart = above;
@@ -1858,6 +1881,8 @@ export interface MarkdownTheme {
 	/** Color a heading; `depth` is its level, 1–6. Bold/underline/`#` prefix are already applied. */
 	heading: (text: string, depth: number) => string;
 	link: (text: string) => string;
+	/** Color the label of a link an extension handles (a registered extension scheme); defaults to `link`. */
+	extensionLink?: (text: string) => string;
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
 	resolveLink?: (href: string) => string | undefined;
@@ -2560,6 +2585,8 @@ export class Markdown implements Component {
 	#extensionLinkOrdinal = 0;
 	#ignoreTight = false;
 	#native?: { text: string; stream: boolean; node: NativeNode };
+	/** Fence state of the streaming source up to its last checked line, so {@link getLastRenderStableText} scans only new lines. */
+	#fenceScan?: FenceScan;
 	setIgnoreTight(ignore: boolean): this {
 		this.#ignoreTight = ignore;
 		this.invalidate();
@@ -2718,7 +2745,9 @@ export class Markdown implements Component {
 			fence = undefined;
 			this.#streamFenceSettledText = undefined;
 		}
-		const body = settledFenceBodyEnd(source);
+		const settled = settledFenceBodyEnd(source, this.#fenceScan);
+		this.#fenceScan = settled.scan;
+		const body = settled.end;
 		if (body > (fence?.length ?? 0)) {
 			fence = source.slice(0, body);
 			this.#streamFenceSettledText = fence;
@@ -3466,9 +3495,13 @@ export class Markdown implements Component {
 		let contentLines: string[];
 		this.#activeRenderSignature = signature;
 		try {
-			contentLines = this.transientRenderCache
-				? this.#renderStreamingContentLines(tokens, normalizedText, signature, contentWidth)
-				: this.#renderContentLines(tokens, 0, tokens.length, contentWidth, signature);
+			// A final-mode render keeps a frozen prefix only while its text grows by
+			// appends (a settled prefix republished as it extends): reuse that
+			// prefix's rows like a stream does instead of re-rendering the whole text.
+			contentLines =
+				this.transientRenderCache || this.#streamPrefixText !== undefined
+					? this.#renderStreamingContentLines(tokens, normalizedText, signature, contentWidth)
+					: this.#renderContentLines(tokens, 0, tokens.length, contentWidth, signature);
 		} finally {
 			this.#activeRenderSignature = undefined;
 		}
@@ -3566,8 +3599,14 @@ export class Markdown implements Component {
 		if (tokens[tokens.length - 1]?.type !== "list") this.#listItemRowsCache = undefined;
 		const stableText = this.#streamPrefixText;
 		const stableTokenCount = this.#streamPrefixTokens?.length ?? 0;
+		// The tail row cache splices rows rendered at streaming fidelity; a final
+		// render draws its tail fresh at full fidelity.
+		const renderTail = (start: number): string[] =>
+			this.transientRenderCache
+				? this.#renderStreamingTail(tokens, start, contentWidth, signature)
+				: this.#renderContentLines(tokens, start, tokens.length, contentWidth, signature);
 		if (stableText === undefined || stableTokenCount === 0 || !normalizedText.startsWith(stableText)) {
-			return this.#renderStreamingTail(tokens, 0, contentWidth, signature);
+			return renderTail(0);
 		}
 
 		// Prefix rows live in #streamPrefixLineCache.lines, which is private to
@@ -3611,7 +3650,7 @@ export class Markdown implements Component {
 		};
 
 		if (renderedUntil >= tokens.length) return prefixLines.slice();
-		return prefixLines.concat(this.#renderStreamingTail(tokens, renderedUntil, contentWidth, signature));
+		return prefixLines.concat(renderTail(renderedUntil));
 	}
 
 	#matchingStreamPrefixLineCache(
@@ -4538,7 +4577,10 @@ export class Markdown implements Component {
 					// Its label gets its own (dotted) underline instead of the web-link one.
 					if (href && extensionLinkScheme(href)) {
 						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
-						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
+						const styledLabel = this.#theme.extensionLink
+							? this.#theme.extensionLink(linkText)
+							: this.#theme.link(linkText);
+						result += formatExtensionLink(styledLabel, href, key) + stylePrefix;
 						break;
 					}
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
@@ -4695,8 +4737,19 @@ export class Markdown implements Component {
 				continue;
 			}
 			const rowStart = lines.length;
-			const bullet = token.ordered ? `${startNumber + i}. ` : "- ";
-			const firstPrefix = indent + this.#theme.listBullet(bullet);
+			const marker = token.ordered ? `${startNumber + i}. ` : "- ";
+			// A task item's leading checkbox token draws nothing in #renderListItem;
+			// draw it after the marker so wrapped rows hang under the task text.
+			// `listBullet` only ever sees the bare marker (`- `, `10. `), so themes
+			// that match or replace it never touch the checkbox, which takes the
+			// item's text style instead.
+			const checkbox = item.tokens?.[0];
+			const taskBox = checkbox?.type === "checkbox" ? `[${checkbox.checked ? "x" : " "}] ` : "";
+			const bullet = marker + taskBox;
+			let firstPrefix = indent + this.#theme.listBullet(marker);
+			if (taskBox !== "") {
+				firstPrefix += styleContext ? styleContext.applyText(taskBox) : this.#applyDefaultStyle(taskBox);
+			}
 			// Continuation rows align under the item text, so the hang matches the
 			// actual bullet width (`10. ` is 4 cells, not 2).
 			const continuationIndent = indent + padding(visibleWidth(bullet));

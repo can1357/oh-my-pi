@@ -137,6 +137,7 @@ class RowEstimator {
 				return (hasText(node.p?.detail) ? 2 : 1) + this.#sum(node.c, cap, depth);
 			case "image":
 			case "media":
+			case "web":
 				return Math.min(cap, GRAPHIC_ROWS);
 			case "tool":
 			case "agent":

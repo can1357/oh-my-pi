@@ -83,7 +83,7 @@ import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import type { ModelRegistry } from "../../config/model-registry";
+import type { ModelRegistry, ProviderConfigInput } from "../../config/model-registry";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -133,6 +133,7 @@ import type {
 	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
 	SessionBranchEvent,
+	SessionClearEvent,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionCompactingResult,
@@ -235,6 +236,11 @@ export interface ExtensionUIDialogOptions {
 	/** Invoked when user input resets a UI-managed timeout countdown */
 	onTimeoutReset?: () => void;
 	/**
+	 * Form dialogs: invoked when `signal` closes the form before a submit (a message the user sent
+	 * instead), with the answers the user changed from the form's defaults and their option notes.
+	 */
+	onAbandon?: (given: ExtensionFormDialogResult) => void;
+	/**
 	 * Host hint to mask entered characters in `input` dialogs.
 	 * Enforced by the interactive TUI (masked as bullets), forwarded on RPC `input`
 	 * requests for hosts that honor it, and rejected (`undefined`) in ACP mode where
@@ -264,7 +270,7 @@ export interface ExtensionUIDialogOptions {
 	 *  trailing options (e.g. "Other"/"Done" actions) keep the plain cursor.
 	 *  Defaults to all options when `selectionMarker` is set. */
 	markableCount?: number;
-	/** Allow image pastes in rich ask-dialog custom-answer and note prompts. */
+	/** Allow image pastes in rich ask-dialog custom-answer and note prompts, and in `formDialog` option notes. */
 	acceptImages?: boolean;
 }
 
@@ -509,15 +515,17 @@ export interface ExtensionUIContext {
 
 export type { ContextUsage };
 
+/** One invocation's history-rewrite options and lifecycle callbacks. */
 export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	onError?: (error: Error) => void;
 	/**
 	 * Force a one-off compaction mode for this invocation, replacing the
-	 * configured `compaction.methodOrder` (`/compact soft`, `remote`, or
-	 * `snapcompact`). Omitted = configured preference order.
+	 * configured `compaction.methodOrder`. Omitted = configured preference order.
 	 */
 	mode?: CompactMode;
+	/** Cancel the compaction without interrupting any live turn. */
+	signal?: AbortSignal;
 	/**
 	 * Internal summarizer guidance — piped only to native summarization, never
 	 * exposed as `customInstructions` on the `session_before_compact` extension
@@ -531,7 +539,7 @@ export interface CompactOptions {
 	 */
 	internalGuidance?: string;
 	/**
-	 * A manual compaction aborts any turn in flight and, once the summary is
+	 * A foreground compaction aborts any turn in flight and, once the summary is
 	 * committed (or at once when there was nothing to compact), resumes it with
 	 * the auto-continue nudge. Set this when the caller dispatches its own
 	 * follow-up turn after compaction — plan-mode "Approve and compact context" —
@@ -824,20 +832,22 @@ export interface ExtensionContext {
 	/**
 	 * Answer the open interactive plan review as if the operator picked `choice` in it.
 	 * `refine` needs non-empty `input.feedback`, which is sent as the next planning prompt.
-	 * `save` writes the plan under its default file name without the path prompt.
+	 * `save` writes the plan under its default file name without the path prompt; the review
+	 * stays open and still takes an answer (no `plan_review_resolved`).
 	 * Approvals execute the plan as it is when picked (in-overlay edits, else the plan
 	 * file), which may differ from the `planContent` that `plan_review_requested` reported.
 	 * `input.role` selects an approval's execution tier, matched against `plan_review_requested`'s
 	 * `tiers` by role name; without it the approval runs on the tier selected in the
 	 * overlay's model slider. `role` applies only to approvals (`execute`, `compact`, `keep`).
-	 * False when that review is not open, the choice is disabled or missing its feedback,
-	 * `input.role` names no selectable tier or accompanies a non-approval choice, or the
-	 * mode has no plan review.
+	 * False when that review is not open, the choice is disabled (with `input.role`, on that tier) or
+	 * missing its feedback, `input.role` names no selectable tier or accompanies a non-approval choice,
+	 * or the mode has no plan review.
 	 */
 	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
 	/**
-	 * The open interactive plan review still awaiting an answer, as `plan_review_requested` reported it,
-	 * or `undefined`. Lets an extension that loaded or reconnected after the event answer the review.
+	 * The open interactive plan review still awaiting an answer, as `plan_review_requested` reported it
+	 * with `options` re-measured for the currently selected tier, or `undefined`. Lets an extension that
+	 * loaded or reconnected after the event answer the review.
 	 */
 	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
 	/**
@@ -1163,6 +1173,7 @@ export type {
 	SessionBeforeTreeEvent,
 	SessionBranchEvent,
 	SessionBranchReason,
+	SessionClearEvent,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,
@@ -1188,7 +1199,9 @@ export type {
 	CacheWarmingAction,
 	CacheWarmingDecision,
 	CacheWarmingMode,
+	CacheWarmingRentMethod,
 	CacheWarmingStatus,
+	CacheWarmingStrategy,
 } from "../../session/cache-warmer";
 
 /** Fired before a provider request is sent. Can replace the payload. */
@@ -1449,7 +1462,10 @@ export interface ToolApprovalResolvedEvent {
 
 /** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
 export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
-/** A choice as displayed in the interactive plan review, delivered in display order by `plan_review_requested`. */
+/**
+ * A choice of the interactive plan review, delivered in order by `plan_review_requested`. The overlay
+ * shows `refine` only while the plan has comments; it is always answerable with feedback.
+ */
 export interface PlanReviewOption {
 	id: PlanReviewChoice;
 	label: string;
@@ -1476,6 +1492,7 @@ export interface PlanReviewRequestedEvent {
 	title: string;
 	planFilePath: string;
 	planContent: string;
+	/** Availability for the tier selected when the review opened: `keep` is measured against that tier's context window. */
 	options: PlanReviewOption[];
 	/** Execution tiers in slider order (not selection order); omitted when fewer than two resolve. */
 	tiers?: PlanReviewTier[];
@@ -1543,9 +1560,14 @@ export interface ModeChangedEvent {
 	state: SessionModeState;
 }
 
-interface ToolCallEventBase {
-	type: "tool_call";
+interface ToolEventIdentity {
 	toolCallId: string;
+	/** ID of the eval or kernel-defined tool invocation that dispatched this call. Absent for direct calls. */
+	parentToolCallId?: string;
+}
+
+interface ToolCallEventBase extends ToolEventIdentity {
+	type: "tool_call";
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -1593,9 +1615,8 @@ export type ToolCallEvent =
 	| GlobToolCallEvent
 	| CustomToolCallEvent;
 
-interface ToolResultEventBase {
+interface ToolResultEventBase extends ToolEventIdentity {
 	type: "tool_result";
-	toolCallId: string;
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
@@ -1884,6 +1905,7 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>,
 	): void;
 	on(event: "session_switch", handler: ExtensionHandler<SessionSwitchEvent>): void;
+	on(event: "session_clear", handler: ExtensionHandler<SessionClearEvent>): void;
 	on(
 		event: "session_before_branch",
 		handler: ExtensionHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>,
@@ -2213,6 +2235,14 @@ export interface ExtensionAPI {
 	 * If `models` is provided: replaces all existing models for this provider.
 	 * If only `baseUrl` is provided: overrides the URL for existing models.
 	 * If `streamSimple` is provided: registers a custom API stream handler.
+	 * If `stream`/`generateImage`/`webSearch`/`rules` are provided: takes over those parts of the provider.
+	 *
+	 * @example
+	 * // Own an existing provider's wire requests and flip a KDL rule for its models
+	 * pi.registerProvider("google-generative-ai", {
+	 *   stream: myGeminiStream,
+	 *   rules: { "prompt-perturbation": true },
+	 * });
 	 *
 	 * @example
 	 * // Register a new provider with custom models and streaming
@@ -2258,8 +2288,18 @@ export interface ExtensionAPI {
 // Provider Registration Types
 // ============================================================================
 
-/** Configuration for registering a provider via pi.registerProvider(). */
-export interface ProviderConfig {
+/**
+ * Configuration for registering a provider via pi.registerProvider().
+ *
+ * `stream`, `generateImage`, `webSearch`, `discoverModels`, and `rules` take
+ * over a built-in provider without redefining its models: they replace its
+ * request adapter, image generation, grounded web search request, and roster
+ * fetch, and set KDL rule directives for its models. Removed again when the extension unloads.
+ */
+export interface ProviderConfig extends Pick<
+	ProviderConfigInput,
+	"stream" | "generateImage" | "webSearch" | "discoverModels" | "rules"
+> {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
 	/**
@@ -2318,12 +2358,14 @@ export interface ProviderModelConfig {
 	 * Must be a kind the api serves, as in `models.yml`.
 	 */
 	kind?: Model["kind"];
-	/** Whether the model supports extended thinking at all. */
-	reasoning: boolean;
+	/** Reviewed thinking capability; omitted when request-time discovery should determine support. */
+	reasoning?: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */
 	thinking?: Model["thinking"];
 	/** Supported input types. */
 	input: ("text" | "image")[];
+	/** Snapcompact frame shape for this model, replacing the model line's default (see `Model.snapcompactShape`). */
+	snapcompactShape?: Model["snapcompactShape"];
 	/** Cost per million tokens. */
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	/** Premium Copilot requests charged per user-initiated request. */

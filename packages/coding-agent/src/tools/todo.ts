@@ -5,6 +5,7 @@ import {
 	type TodoPhase,
 	type TodoCompletionTransition,
 	type TodoToolDetails,
+	todoTaskTargets,
 } from "@oh-my-pi/pi-tui/tools/todo";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -59,7 +60,7 @@ const InitListEntry = type({
 const todoSchema = type({
 	op: TodoOp,
 	"list?": InitListEntry.array().describe("phases for init"),
-	"task?": type("string").describe("verbatim task content"),
+	"task?": type("string | string[]").describe("verbatim task content; array targets several (not start)"),
 	"phase?": type("string"),
 	// No `atLeastLength(1)` here: `items` is only meaningful for `init`/`append`,
 	// and both enforce non-empty with op-specific errors. A stray `items: []` on
@@ -284,6 +285,20 @@ function resolveTaskOrError(
 	return hit;
 }
 
+/** Resolve every targeted task, recording one error per missing content. */
+function resolveTasksOrError(
+	phases: TodoPhase[],
+	contents: string[],
+	errors: string[],
+): { task: TodoItem; phase: TodoPhase }[] {
+	const hits: { task: TodoItem; phase: TodoPhase }[] = [];
+	for (const content of contents) {
+		const hit = resolveTaskOrError(phases, content, errors);
+		if (hit) hits.push(hit);
+	}
+	return hits;
+}
+
 function resolvePhaseOrError(phases: TodoPhase[], name: string | undefined, errors: string[]): TodoPhase | undefined {
 	if (!name) {
 		errors.push("Missing phase name");
@@ -294,16 +309,21 @@ function resolvePhaseOrError(phases: TodoPhase[], name: string | undefined, erro
 	return phase;
 }
 
+/** The tasks `done`/`drop`/`rm` name: `task`, else `items` (the list models pass alongside), as contents. */
+function namedTaskContents(phases: TodoPhase[], entry: TodoOpEntryValue): string[] {
+	const contents = todoTaskTargets(phases, entry.task);
+	return contents.length > 0 ? contents : (entry.items ?? []);
+}
+
 function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoItem[] {
-	if (entry.task) {
-		const hit = resolveTaskOrError(phases, entry.task, errors);
-		return hit ? [hit.task] : [];
-	}
+	const contents = namedTaskContents(phases, entry);
+	if (contents.length > 0) return resolveTasksOrError(phases, contents, errors).map(hit => hit.task);
 	if (entry.phase) {
 		const phase = resolvePhaseOrError(phases, entry.phase, errors);
 		return phase ? [...phase.tasks] : [];
 	}
-	return phases.flatMap(phase => phase.tasks);
+	errors.push(`${entry.op} needs a task, items or a phase`);
+	return [];
 }
 
 /** Default phase name for flat `init` and `append` to an empty list. */
@@ -387,10 +407,11 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 }
 
 function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
-	if (entry.task) {
-		const hit = resolveTaskOrError(phases, entry.task, errors);
-		if (!hit) return phases;
-		hit.phase.tasks = hit.phase.tasks.filter(candidate => candidate !== hit.task);
+	const contents = namedTaskContents(phases, entry);
+	if (contents.length > 0) {
+		for (const hit of resolveTasksOrError(phases, contents, errors)) {
+			hit.phase.tasks = hit.phase.tasks.filter(candidate => candidate !== hit.task);
+		}
 		return phases;
 	}
 	if (entry.phase) {
@@ -399,9 +420,7 @@ function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 		phase.tasks = [];
 		return phases;
 	}
-	for (const phase of phases) {
-		phase.tasks = [];
-	}
+	errors.push("rm needs a task, items or a phase");
 	return phases;
 }
 
@@ -410,7 +429,12 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 		case "init":
 			return initPhases(entry, errors);
 		case "start": {
-			const hit = resolveTaskOrError(phases, entry.task, errors);
+			const contents = todoTaskTargets(phases, entry.task);
+			if (contents.length > 1) {
+				errors.push("start takes a single task: only one task can be in progress");
+				return phases;
+			}
+			const hit = resolveTaskOrError(phases, contents[0], errors);
 			if (!hit) return phases;
 			for (const phase of phases) {
 				for (const candidate of phase.tasks) {
@@ -605,9 +629,12 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 		.filter(phase => phase.tasks.length > 0);
 	const remainingTasks = remainingByPhase.flatMap(phase => phase.tasks.map(task => ({ ...task, phase: phase.name })));
 
-	let currentIdx = phases.findIndex(phase =>
-		phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
-	);
+	// The active phase holds the in-progress task (`start` can pick one in any phase); without one, the earliest
+	// phase with open work.
+	let currentIdx = phases.findIndex(phase => phase.tasks.some(task => task.status === "in_progress"));
+	if (currentIdx === -1) {
+		currentIdx = phases.findIndex(phase => phase.tasks.some(task => task.status === "pending"));
+	}
 	if (currentIdx === -1) currentIdx = phases.length - 1;
 	const current = phases[currentIdx];
 	const done = current.tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
@@ -624,8 +651,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	}
 	// Closed = completed + abandoned, mirroring the per-phase `done` count.
 	const closedAll = tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
-	// The active phase is the EARLIEST one still holding open work, so the
-	// in-progress pointer can sit in a phase whose successors already have
+	// The in-progress pointer can sit in a phase whose successors already have
 	// completed tasks. Detect that "worked ahead" case to explain the
 	// otherwise-surprising backward pointer instead of letting it read as a
 	// completed task reverting to pending.
@@ -637,7 +663,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	lines.push(
 		`Active phase ${currentIdx + 1}/${phases.length} "${current.name}" (${done}/${current.tasks.length})${
 			workedAhead
-				? " — earliest phase with open tasks; the in-progress pointer auto-advances to the earliest open task on each completion, so it can sit behind out-of-order work (nothing was un-completed)."
+				? " — the in-progress pointer auto-advances to the earliest open task on each completion, so it can sit behind out-of-order work (nothing was un-completed)."
 				: "."
 		}`,
 	);

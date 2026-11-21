@@ -10,6 +10,7 @@ import {
 	renderChangelogEntries,
 	selectChangelogEntries,
 } from "../utils/changelog";
+import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
@@ -194,6 +195,7 @@ function launchSessionStatsDashboard(
 	const judge = resolveJudge({
 		settings: owner.settings,
 		registry: owner.session.modelRegistry,
+		sessionModel: owner.session.model,
 		sessionId: owner.session.sessionId,
 		purpose: "stats_frustration",
 		onUsage: journalJudgmentUsage(owner.sessionManager),
@@ -276,12 +278,16 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				if (!sessionFile) return usage("No session file to delete (in-memory session).", runtime);
 				// Detach the live agent before deleting its file; the next prompt must
 				// belong to a fresh session with a valid header and no old history.
+				// `drop` deletes the old file and keeps the successor lazy, so deleting
+				// never leaves an empty session behind.
 				try {
-					if (!(await runtime.session.newSession())) return usage("Session deletion cancelled.", runtime);
+					if (!(await runtime.session.newSession({ drop: true })))
+						return usage("Session deletion cancelled.", runtime);
 				} catch (err) {
 					return usage(`Failed to start a new session: ${errorMessage(err)}`, runtime);
 				}
 				try {
+					// `drop` only logs a failed delete; retry here to report it (ENOENT is success).
 					await runtime.sessionManager.dropSession(sessionFile);
 				} catch (err) {
 					return usage(
@@ -373,7 +379,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					`${guide}[${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}${agent}`,
 				);
 				// What the job is for leads; full mode follows it with what the command does and the whole command.
-				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [job.intent ?? job.label];
+				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [jobDisplayLabel(job)];
 				const indent = jobTreeIndent(row, theme);
 				for (const entry of lines) {
 					if (!entry) continue;
@@ -542,8 +548,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			const lines = all.map(name => `${active.includes(name) ? "*" : "-"} ${name}`);
-			for (const mounted of runtime.session.getXdevToolEntries()) {
-				lines.push(`~ xd://${mounted.name}`);
+			for (const mounted of runtime.session.getToolCommandEntries()) {
+				lines.push(`~ ${mounted.name}`);
 			}
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();

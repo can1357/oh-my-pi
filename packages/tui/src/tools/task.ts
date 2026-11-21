@@ -50,7 +50,7 @@ import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
 import { getSubprocessToolRenderer } from "./subprocess";
 import { assembleYieldResult, type YieldSectionShapes } from "./task-yield-assembly";
-import type { TspAgentProps, TspProps, TspTone } from "@oh-my-pi/pi-wire";
+import { type TspAgentProps, type TspProps, type TspTone, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { compact, kv, md, node, propNode, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { OwnerMemo, sameItems } from "../native/memo";
@@ -58,6 +58,7 @@ import { plainText } from "../native/spans";
 import { errorText, noteText, resultText } from "./native-view";
 import { describeJsonValue } from "./json-tree";
 import { taskSummary } from "../overlays/agent-hub-renderer";
+import { agentColored } from "../overlays/agent-identity";
 import type { NativeToolView, ToolRenderResult } from "./renderer";
 
 /** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
@@ -129,9 +130,8 @@ function extractIncrementalReviewResult(
 		data: item.data,
 		type: item.type,
 		status: item.status === "aborted" ? "aborted" : item.status === "success" ? "success" : undefined,
-		useLastTurn: item.useLastTurn,
 	}));
-	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_SECTION_SHAPES);
+	const assembled = assembleYieldResult(yieldItems, REVIEWER_SECTION_SHAPES);
 	const data = assembled?.data;
 	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
 	const record = data as Record<string, unknown>;
@@ -159,7 +159,6 @@ interface RenderYieldItem {
 	data?: unknown;
 	type?: string | string[];
 	status?: string;
-	useLastTurn?: boolean;
 }
 
 /**
@@ -198,7 +197,6 @@ function normalizeYieldData(value: unknown): RenderYieldItem[] {
 			data: record.data,
 			type,
 			status: typeof record.status === "string" ? record.status : undefined,
-			useLastTurn: record.useLastTurn === true ? true : undefined,
 		});
 	}
 	return normalized;
@@ -219,8 +217,7 @@ function getRenderYieldLabels(type: RenderYieldItem["type"]): string[] {
 }
 
 function formatYieldPreview(item: RenderYieldItem): string {
-	if (item.useLastTurn === true && item.data === undefined) return "last assistant turn";
-	if (item.data === undefined) return "last assistant turn";
+	if (item.data === undefined) return "finalize sections";
 	if (typeof item.data === "string") return previewLine(sanitizeText(item.data), 70);
 	try {
 		return previewLine(sanitizeText(JSON.stringify(item.data) ?? "null"), 70);
@@ -727,7 +724,7 @@ function renderRouteLine(route: string | undefined, continuePrefix: string, maxW
 
 /** A tool call's own intent, else its argument, with home paths shortened as the subagent HUD does. */
 function toolCallDetail(intent: string | undefined, args: string | undefined, argsKey: string | undefined): string {
-	return intent ? shortenEmbeddedPaths(intent) : shortenToolArgumentPaths(args ?? "", argsKey);
+	return intent ? shortenEmbeddedPaths(toolIntentLabel(intent)) : shortenToolArgumentPaths(args ?? "", argsKey);
 }
 
 /**
@@ -761,6 +758,7 @@ function renderAgentProgress(
 			status: progress.status,
 			prefix,
 			id: formatTaskId(progress.id),
+			agentId: progress.id,
 			width: maxWidth,
 			model: progress.resolvedModelIdentity ?? progress.resolvedModel,
 			thinkingLevel: progress.resolvedThinkingLevel,
@@ -1127,11 +1125,10 @@ function renderAgentResult(
 		visibleWidth(`${indent}${icon} ${modelLead}${displayId}: ${fullDescription}${badges}`) <= maxWidth
 			? fullDescription
 			: undefined;
-	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
-	let statusLine = `${indent}${icon} ${modelLead}${theme.fg(
-		success && !needsWarning ? "text" : "accent",
-		titlePart,
-	)}${badges}`;
+	const titleColor = success && !needsWarning ? "text" : "accent";
+	const name = agentColored(theme, result.id, description ? theme.bold(displayId) : displayId);
+	const title = description ? `${name}${theme.fg(titleColor, `: ${description}`)}` : name;
+	let statusLine = `${indent}${icon} ${modelLead}${title}${badges}`;
 	statusLine += formatAgentStatRun(
 		{
 			requests: result.requests,
@@ -2260,10 +2257,8 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
-	/** Bundled seance: override for the source session's saved model. Any other agent: one exact per-call model, gated by `task.perCallModel`. */
-	model?: string | string[];
+	/** One exact per-call model, gated by `task.perCallModel`. */
+	model?: string;
 	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
 	/** Ordered stages sent instead of `task` (`task.steps`), each once the child delivered the previous (several share a prompt past four). */
@@ -2293,10 +2288,8 @@ export interface TaskParams {
 	name?: string;
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
 	/** See {@link TaskItem.model}. */
-	model?: string | string[];
+	model?: string;
 	/** The work (flat form). */
 	task?: string;
 	/** Ordered stages (flat form); see {@link TaskItem.steps}. */
@@ -2368,8 +2361,6 @@ export interface YieldItem {
 	error?: string;
 	/** A string label is terminal; a non-empty array of labels is incremental. */
 	type?: string | string[];
-	/** Resolve this yield's payload from the latest durable assistant text instead of `data`. */
-	useLastTurn?: boolean;
 	/** True when an incremental workpool yield completed every item in its batch. */
 	complete?: boolean;
 	/**
@@ -2379,6 +2370,15 @@ export interface YieldItem {
 	 */
 	schemaOverridden?: boolean;
 }
+
+/**
+ * What an agent's model is producing while a response streams: its reasoning, its prose, or a tool
+ * call it is still writing, with the call's argument preview and intent so far.
+ */
+export type AgentStreaming =
+	| { kind: "thinking" }
+	| { kind: "text" }
+	| { kind: "call"; tool: string; args?: string; argsKey?: string; intent?: string };
 
 /** Progress tracking for a single agent */
 export interface AgentProgress {
@@ -2398,6 +2398,11 @@ export interface AgentProgress {
 	/** Intent the model attached to the current call; undefined when that call carried none. */
 	currentToolIntent?: string;
 	currentToolStartMs?: number;
+	/**
+	 * What the model is producing now, while a response streams. A call it finished writing stays
+	 * until it starts running ({@link currentTool}); reasoning and prose clear when the response ends.
+	 */
+	streaming?: AgentStreaming;
 	recentTools: Array<{
 		tool: string;
 		args: string;
@@ -2413,10 +2418,13 @@ export interface AgentProgress {
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;
 	/**
-	 * Current per-turn context size: latest assistant message's `usage.totalTokens`.
-	 * This is the number to compare against `contextWindow` — what compaction
-	 * decides on, what the user typically reads as "how full is the context".
-	 * Distinct from `tokens`, which is a lifetime billing-volume counter.
+	 * Current per-turn occupied context: the latest assistant message's
+	 * provider-reported `usage.contextTokens` when present, else its billable
+	 * `totalTokens` minus orchestration tokens (the same accounting session
+	 * compaction uses). This is the number to compare against `contextWindow` —
+	 * what compaction decides on, what the user typically reads as "how full
+	 * is the context". Distinct from `tokens`, which is a lifetime
+	 * billing-volume counter.
 	 */
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. Lets the UI render `<curr>/<window>` gauges. */

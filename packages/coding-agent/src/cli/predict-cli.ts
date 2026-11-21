@@ -30,7 +30,7 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { closeDaemonClients } from "../launch/client";
+import { closeDaemonClient } from "../daemon/client";
 import type { TextPredictMethod } from "../predict/protocol";
 import { closeTextPrediction, requestTextPrediction } from "../predict/client";
 
@@ -348,6 +348,6 @@ export async function runPredictCompare(): Promise<void> {
 		ui.stop();
 		// The daemon socket and the global broker lease would keep the process alive.
 		closeTextPrediction();
-		await closeDaemonClients();
+		await closeDaemonClient();
 	}
 }
