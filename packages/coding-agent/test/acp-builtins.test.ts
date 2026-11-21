@@ -55,6 +55,7 @@ interface FakeAcpBuiltinSession {
 	settings: Settings;
 	model: { provider: string; id: string } | undefined;
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
+	consumeSessionDropError(): unknown;
 	switchSession(sessionPath: string): Promise<boolean>;
 	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
 	markMovedFromEmptySessionFile(sessionFile: string): void;
@@ -136,6 +137,7 @@ function createRuntime() {
 		async newSession(_opts?: { drop?: boolean; parentSession?: string }) {
 			return true;
 		},
+		consumeSessionDropError: () => undefined,
 		async switchSession(sessionPath: string) {
 			this._switchedTo = path.resolve(sessionPath);
 			this.sessionFile = this._switchedTo;
@@ -898,6 +900,8 @@ describe("session lifecycle commands", () => {
 			const { output, session, runtime } = createRuntime();
 			runtime.sessionManager = manager;
 			session.newSession = async options => {
+				const previousFile = manager.getSessionFile();
+				if (options?.drop && previousFile) await manager.dropSession(previousFile);
 				await manager.newSession(options);
 				session.sessionId = manager.getSessionId();
 				session.sessionFile = manager.getSessionFile();
@@ -909,7 +913,7 @@ describe("session lifecycle commands", () => {
 			expect(output[0]).toContain(manager.getSessionId());
 			const nextFile = manager.getSessionFile();
 			if (!nextFile) throw new Error("Expected a new session path");
-			expect(output[0]).toContain(nextFile);
+			expect(output[0]).toContain(`Started a new session (${manager.getSessionId()})`);
 			// The successor stays lazy: deleting must not leave an empty listed session behind.
 			expect(await Bun.file(nextFile).exists()).toBe(false);
 			expect(await SessionManager.list(tempDir.path(), tempDir.path())).toEqual([]);
