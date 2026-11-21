@@ -48,6 +48,14 @@ export interface WorktreeBaseline {
 	nested: Array<{ relativePath: string; baseline: RepoBaseline }>;
 }
 
+/**
+ * The root of the git work tree holding `cwd`, which isolated tasks copy and
+ * merge back into.
+ *
+ * Throws when `cwd` is in a pure Jujutsu workspace, outside any git
+ * repository, or in a bare repository's directory — a container whose `.git`
+ * is bare and whose work trees live elsewhere — which has no work tree to copy.
+ */
 export async function getRepoRoot(cwd: string): Promise<string> {
 	// Pure-jj check runs first so a jj workspace nested under an unrelated
 	// outer Git checkout is rejected at its own root rather than silently
@@ -58,10 +66,36 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 		);
 	}
 
-	const repoRoot = vcs.git(cwd)?.info().repoRoot;
-	if (repoRoot) return repoRoot;
+	const repo = vcs.git(cwd);
+	if (!repo) throw new Error("Git repository not found for isolated task execution.");
+	const { repoRoot, gitDir, commonDir } = repo.info();
+	// A linked work tree's git dir differs from the common dir; git ignores
+	// `core.bare` there, so only the main git dir can be bare.
+	if (gitDir === commonDir && isGitTrue(await repo.configGet("core.bare"))) {
+		// The listing names the bare repository itself too, by its real path, and
+		// in git's forward-slash form on Windows; `path.resolve` normalizes both.
+		const own = new Set(
+			[repoRoot, gitDir, await fs.realpath(repoRoot), await fs.realpath(gitDir)].map(dir => path.resolve(dir)),
+		);
+		const worktrees = (await repo.worktrees()).map(entry => path.resolve(entry.path)).filter(dir => !own.has(dir));
+		const remedy =
+			worktrees.length > 0
+				? `Start the session in one of its work trees: ${worktrees.join(", ")}`
+				: "Add a work tree with `git worktree add` and start the session there";
+		throw new Error(
+			`Isolated task execution requires a Git work tree, but ${repoRoot} holds the bare repository ${gitDir} (core.bare=true). ${remedy}, or set \`task.isolation.enabled: false\` to disable task isolation.`,
+		);
+	}
+	return repoRoot;
+}
 
-	throw new Error("Git repository not found for isolated task execution.");
+/** Whether a git config value reads as true; unset and unparsable values count as false. */
+function isGitTrue(value: string | null | undefined): boolean {
+	if (!value) return false;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "true" || normalized === "yes" || normalized === "on") return true;
+	const number = Number(normalized);
+	return Number.isInteger(number) && number !== 0;
 }
 
 const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";

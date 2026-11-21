@@ -23,7 +23,7 @@ beforeEach(async () => {
 	dir = path.join(os.tmpdir(), `omp-mcp-tools-version-${Snowflake.next()}`);
 	fs.mkdirSync(dir, { recursive: true });
 	authStorage = createInMemoryAuthStorage();
-	manager = new MCPManager(dir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+	manager = new MCPManager(dir, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
 	await manager.connectServers(
 		{
 			progress: { type: "stdio", command: process.execPath, args: [path.join(FIXTURES, "progress-mcp.ts")] },

@@ -905,6 +905,10 @@ describe("streamSimple resolver auth retry", () => {
 			{ message: '{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}' },
 			{ message: '{"error":{"code":"usage_limit_reached","message":"usage limit reached"}}' },
 			{ message: "Upstream request failed: Insufficient account funds", status: 402 },
+			{
+				message: "422 Budget has been exceeded! Key=analytics-team Current cost: 0.06, Max budget: 0.05",
+				status: 422,
+			},
 		];
 		let activePayload = payloads[0]!;
 		let keys: unknown[] = [];
