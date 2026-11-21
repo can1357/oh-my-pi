@@ -54,7 +54,7 @@ describe("renderOutputBlock", () => {
 
 	it("wraps footer meta that overflows the border into body rows instead of clipping it", async () => {
 		const theme = (await getThemeByName("dark"))!;
-		const meta = "Wall: 1.20s · Timeout: 300s · Artifact: a123 · Exit: 7";
+		const meta = "Wall: 1.2s/5m · Artifact: a123 · Exit: 7";
 		const lines = renderOutputBlock(
 			{ width: 40, applyBg: false, footerMeta: meta, sections: [{ lines: ["out"] }] },
 			theme,

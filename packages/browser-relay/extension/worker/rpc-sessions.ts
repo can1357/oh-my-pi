@@ -3,6 +3,7 @@
  * session. They outlive any panel (scheduled runs start them with no panel open); a panel drives them by key.
  */
 import { type FromNativeHost, NATIVE_HOST, type RpcSessionInfo, type ToNativeHost } from "../messages";
+import { connectChatRelay } from "./relay";
 import { SessionValue } from "./session-store";
 
 /** How long the native host may take to start omp before the open fails. */
@@ -84,6 +85,7 @@ export class RpcSessions {
 		this.#live.set(info.sessionKey, live);
 		const ready = Promise.withResolvers<void>();
 		let started = false;
+		let relay: { receive(line: string): void; close(): void } | undefined;
 		const timer = setTimeout(() => {
 			ready.reject(new Error(`omp native host did not start omp within ${READY_TIMEOUT_MS / 1000}s`));
 			port.disconnect();
@@ -106,6 +108,12 @@ export class RpcSessions {
 
 		port.onMessage.addListener((message: FromNativeHost) => {
 			switch (message.t) {
+				case "linked":
+					relay = connectChatRelay(port);
+					return;
+				case "relay":
+					relay?.receive(message.line);
+					return;
 				case "ready":
 					started = true;
 					clearTimeout(timer);
@@ -122,7 +130,9 @@ export class RpcSessions {
 						return;
 					}
 					live.chunks.delete(message.id);
-					this.#deliver(info.sessionKey, parts.join(""));
+					const line = parts.join("");
+					if (message.relay) relay?.receive(line);
+					else this.#deliver(info.sessionKey, line);
 					return;
 				}
 				case "exit":
@@ -132,9 +142,10 @@ export class RpcSessions {
 			}
 		});
 		port.onDisconnect.addListener(() => {
+			relay?.close();
 			exit(null, chrome.runtime.lastError?.message ?? "omp native host disconnected");
 		});
-		const open: ToNativeHost = { t: "open", cwd: options.cwd };
+		const open: ToNativeHost = { t: "open", cwd: options.cwd, extensionId: chrome.runtime.id };
 		port.postMessage(open);
 
 		await ready.promise;
