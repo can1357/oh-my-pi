@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AbliteratedLLM (`abliteratedllm`) with live model discovery from `https://api.abliteratedllm.dev/v1/models` and `/login abliteratedllm` (`ABLITERATEDLLM_API_KEY`) ([#19227](https://github.com/can1357/oh-my-pi/pull/19227) by [@whiteworthy](https://github.com/whiteworthy))
+
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))

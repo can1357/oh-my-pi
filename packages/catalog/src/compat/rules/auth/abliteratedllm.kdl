@@ -1,0 +1,12 @@
+auth "abliteratedllm" {
+	name "AbliteratedLLM"
+	login "api-key" {
+		auth-url "https://abliteratedllm.dev/dashboard/keys"
+		instructions "Create or copy your API key from the AbliteratedLLM dashboard"
+		prompt "Paste your AbliteratedLLM API key" placeholder="sk-..."
+		// `/models` is public and answers 200 even with a bogus key, so the probe
+		// targets `/balance`: an authenticated GET that rejects an invalid key
+		// with 401 and validates the key without spending inference.
+		validate "models-endpoint" label="AbliteratedLLM" url="https://api.abliteratedllm.dev/v1/balance"
+	}
+}
