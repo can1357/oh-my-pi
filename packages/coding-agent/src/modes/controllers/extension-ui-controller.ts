@@ -1633,7 +1633,9 @@ export class ExtensionUiController {
 		} else if (type === "warning") {
 			this.ctx.showWarning(message);
 		} else {
-			this.ctx.showStatus(message);
+			// `notify` is shared by every extension: an info notice gets its own line so it neither
+			// overwrites nor is overwritten by another extension's notice or omp's own status.
+			this.ctx.showStatus(message, { collapse: false });
 		}
 	}
 

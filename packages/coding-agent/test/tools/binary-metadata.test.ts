@@ -455,7 +455,7 @@ describe("read metadata and explicit analysis boundary", () => {
 				parseSel(undefined),
 			);
 			expect(textOutput(full)).toContain("sample.bin:overview");
-			expect(textOutput(full)).toContain("xd://eval/dsm");
+			expect(textOutput(full)).toContain("help://eval/dsm");
 			expect(acquire).not.toHaveBeenCalled();
 		} finally {
 			acquire.mockRestore();

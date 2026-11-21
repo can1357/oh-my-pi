@@ -154,6 +154,13 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("alfa beta gamma |delta");
 		});
 
+		// Regression: 400 nines parsed to Infinity, and `l` stepped that many times.
+		it("caps a held digit's count so the motion still ends at the line edge", () => {
+			const editor = vimEditor("alfa beta");
+			for (const key of `${"9".repeat(400)}l`) editor.handleInput(key);
+			expect(cursor(editor)).toEqual({ line: 0, col: 8 });
+		});
+
 		it("gg and G jump to the buffer edges", () => {
 			const editor = vimEditor("one\ntwo\nthree");
 			editor.handleInput("G");
