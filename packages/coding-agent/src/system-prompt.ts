@@ -36,6 +36,7 @@ import defaultPersonality from "./prompts/system/personalities/default.md" with 
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
+import progressiveSkillsPrompt from "./prompts/system/progressive-skills.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
 import type { SystemPromptSource, SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
@@ -47,6 +48,7 @@ import { expandTilde } from "./tools/path-utils";
 import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import { combine } from "./config/registry";
+import { cfgDecisionBackend, cfgDecisionSkillsMode, cfgDecisionSkillsVariant } from "./decision/settings";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
 import { cfgEvalAutoBackgroundEnabled } from "./eval/settings";
 import { cfgTtsrBuiltinRules, cfgTtsrDisabledRules, cfgTtsrEnabled } from "./export/ttsr-settings";
@@ -120,6 +122,10 @@ export const cfgSystemPromptInputs = combine({
 	ttsrBuiltinRules: cfgTtsrBuiltinRules,
 	ttsrDisabledRules: cfgTtsrDisabledRules,
 	secretsEnabled: cfgSecretsEnabled,
+	// The progressive skill catalogue lists fewer skills (`decision/skill-projection.ts`).
+	decisionBackend: cfgDecisionBackend,
+	decisionSkillsMode: cfgDecisionSkillsMode,
+	decisionSkillsVariant: cfgDecisionSkillsVariant,
 });
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
@@ -569,6 +575,11 @@ export interface BuildSystemPromptOptions {
 	skills?: readonly Skill[];
 	/** Session-scoped description snapshot; background cache writes apply only to the next session. */
 	skillDescriptions?: SkillDescriptionCatalog;
+	/**
+	 * Progressive skill catalogue (`decision.skills.variant`): given the loaded skills, the ones to list,
+	 * or `undefined` to list every non-hidden skill. Listing fewer adds the `skill://?q=` discovery guidance.
+	 */
+	progressiveSkills?: (skills: readonly Skill[]) => readonly Skill[] | undefined;
 	/** Pre-loaded rulebook rules (descriptions, excluding TTSR and always-apply). */
 	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
 	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
@@ -1061,6 +1072,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
 				mountedCommands.some(entry => toolReadsSkillUris(tools.get(entry.name)));
 	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
+	const progressive = hasSkillUriAccess ? options.progressiveSkills?.(skills) : undefined;
 	const schemeHost: SchemeHost = {
 		skillUriAccess: hasSkillUriAccess,
 		ruleCount: rules?.length ?? 0,
@@ -1072,7 +1084,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		subagent,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
-		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],
+		hasSkillReader ? (progressive ?? skills).filter(skill => skill.hide !== true) : [],
 	);
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
@@ -1127,6 +1139,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
 		internalUrlReference: InternalUrlRouter.instance().reference(),
 		skills: filteredSkills,
+		skillDiscoveryInstruction: progressive ? progressiveSkillsPrompt.trim() : "",
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		cwd: promptCwd,

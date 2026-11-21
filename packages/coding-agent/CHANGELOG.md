@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in decision layer (`decision.*`, off by default) that asks the judge which skills each task needs and hints or loads them with the request; see [docs/decision-layer.md](https://github.com/can1357/oh-my-pi/blob/main/docs/decision-layer.md) ([#19056](https://github.com/can1357/oh-my-pi/pull/19056) by [@Xytronix](https://github.com/Xytronix))
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
