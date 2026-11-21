@@ -916,6 +916,8 @@ export class ExtensionUiController {
 	/** Gives the keys to the composer (Tab past an ask's last stop, the ask closing). */
 	#focusComposer(): void {
 		this.ctx.ui.setFocus(this.ctx.editor);
+		// A dialog's Vim editor may have left the cursor in its own mode's shape.
+		this.ctx.syncComposerVimStatus();
 		this.ctx.ui.requestRender();
 	}
 
@@ -1000,6 +1002,7 @@ export class ExtensionUiController {
 				skipNotice: () => this.#skipNotice(),
 				claimKeys: () => this.focusAsk(),
 				releaseKeys: () => this.#focusComposer(),
+				configureEditor: editor => this.ctx.configureDialogEditor(editor),
 			});
 			const slot = this.#mountAsk(dialog);
 			return () => {
@@ -1194,7 +1197,13 @@ export class ExtensionUiController {
 					prefill,
 					(text, images) => finishPrompt({ text, images }),
 					(text, images) => finishPrompt({ draft: { text, images } }),
-					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
+					{
+						promptStyle: true,
+						externalEditor: editDialogExternally,
+						question: prompt.question,
+						configureEditor: editor => this.ctx.configureDialogEditor(editor),
+						...options,
+					},
 				);
 				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
@@ -1590,7 +1599,11 @@ export class ExtensionUiController {
 				prefill,
 				value => settle(value),
 				() => settle(undefined),
-				{ ...editorOptions, externalEditor: editDialogExternally },
+				{
+					...editorOptions,
+					externalEditor: editDialogExternally,
+					configureEditor: editor => this.ctx.configureDialogEditor(editor),
+				},
 			);
 			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
@@ -1610,6 +1623,7 @@ export class ExtensionUiController {
 		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookEditor = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
+		this.ctx.syncComposerVimStatus();
 		this.ctx.ui.requestRender();
 	}
 

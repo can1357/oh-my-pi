@@ -100,6 +100,8 @@ export interface HookEditorOptions {
 	 * hint out of view.
 	 */
 	maxHeight?: number;
+	/** Called on the inner editor once it is built, e.g. to turn on Vim mode. */
+	configureEditor?: (editor: Editor) => void;
 }
 
 /** Interactive multiline dialog used by hooks and the ask tool's Other response. */
@@ -156,6 +158,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
+		options?.configureEditor?.(this.#editor);
 		if (this.#promptStyle) {
 			this.#editor.setBorderVisible(false);
 			this.#editor.setPromptGutter("> ");
@@ -405,7 +408,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Prompt-style keeps Escape as an explicit cancel key and also honors app.interrupt remaps.
 		if (matchesKey(keyData, "escape") || matchesKey(keyData, "esc") || matchesAppInterrupt(keyData)) {
-			this.#cancel();
+			if (this.#vimTakesEscape(keyData)) this.#editor.handleInput(keyData);
+			else this.#cancel();
 			return;
 		}
 
@@ -443,7 +447,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Escape to cancel
 		if (matchesAppInterrupt(keyData)) {
-			this.#cancel();
+			if (this.#vimTakesEscape(keyData)) this.#editor.handleInput(keyData);
+			else this.#cancel();
 			return;
 		}
 
@@ -455,6 +460,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Forward to editor
 		this.#editor.handleInput(keyData);
+	}
+
+	/** In Vim mode Escape first leaves Insert mode or cancels a half-typed command; only then does it cancel. */
+	#vimTakesEscape(keyData: string): boolean {
+		return (matchesKey(keyData, "escape") || matchesKey(keyData, "esc")) && this.#editor.vimConsumesEscape();
 	}
 
 	async #openExternalEditor(): Promise<void> {

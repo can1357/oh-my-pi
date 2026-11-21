@@ -78,6 +78,8 @@ function createControllerContext() {
 		ui,
 		hookEditor: undefined,
 		closeLinkBrowser: () => {},
+		configureDialogEditor: () => {},
+		syncComposerVimStatus: () => {},
 		rerenderInLinkBrowser: () => {},
 		rebuildTranscriptScrollback: () => {},
 	} as unknown as TestContext;

@@ -17,6 +17,10 @@
 - Added Vim registers: named `"a`–`"z` (uppercase appends), `"0` for yanks, `"1`–`"9` and `"-` for deletes, and the `"_` black hole ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim `X`, `Y`, `~`, the case operators `g~`/`gu`/`gU` (with `g~~`/`guu`/`gUU`), `gJ`, `ge`/`gE`, `gp`/`gP`, `gv`, and `gi` ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim counted inserts (`3ix`, `2ofoo`), Visual `p`/`P`/`r`/`u`/`U`/`~`, and Visual `X`/`D`/`Y`/`C`/`R` on whole lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim `gj`/`gk` to move by screen row through wrapped lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim `/`, `?`, `n`, and `N` to search prompt history, like a shell's vi mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim `"+p`/`"*p` to put the system clipboard; `Editor.onYank` now also gets the register name ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added a `configureEditor` option to `HtmlFormDialog` and `HookEditorComponent`; with Vim mode on, `Escape` in their editors leaves Insert mode before it closes or cancels anything ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 
 ### Changed
 
@@ -32,6 +36,7 @@
 - Fixed Vim `gg`, `G`, `dd`, and linewise puts landing in column 0 instead of the first non-blank; `dk` on the first line no longer deletes it; `D`/`C` no longer leave `j`/`k` stuck at line end ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `v$` not selecting through the line break and `g`-commands (`gg`, `gU`) doing nothing in Visual mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `cc`, `cj`, and other linewise changes keeping the start of the line when the cursor was mid-line, and storing the old text so `p` spliced it into a line instead of putting it back as whole lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Fixed Vim `di(`, `ci{`, and other bracket objects doing nothing when the cursor is before the brackets; like Vim 9.2 they now use the next pair ahead ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
