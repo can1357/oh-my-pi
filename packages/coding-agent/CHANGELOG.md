@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `eval` tool description now always points the model to `judge_batch` (`judgeBatch` in JS) for about 20+ homogeneous items sharing one yes/no, bucket or score question, with the rubric fixed before reading the data; it reads only the items the judge flags, is unsure about or fails on, instead of scanning them all by hand ([#19052](https://github.com/can1357/oh-my-pi/pull/19052) by [@Xytronix](https://github.com/Xytronix))
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
