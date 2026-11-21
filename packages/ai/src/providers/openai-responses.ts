@@ -1949,10 +1949,11 @@ export function buildParams(
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	let systemInstructions: string | undefined;
 	if (systemPrompts.length > 0) {
-		const needsDeveloperRole = policy.messages.systemRole === "developer";
-		if (needsDeveloperRole) {
+		if (policy.messages.systemRole === "developer" || model.compat.uncachedInstructions) {
 			// Reasoning models on known OpenAI-compatible endpoints require the
-			// `developer` role. Send all system prompts inline in `input`.
+			// `developer` role, and models that never prompt-cache top-level
+			// `instructions` (GPT-6.2) need it on every host, proxies included.
+			// Send all system prompts inline in `input`.
 			messages.unshift(
 				...systemPrompts.map(systemPrompt => ({ role: "developer" as const, content: systemPrompt })),
 			);

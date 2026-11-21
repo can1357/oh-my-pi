@@ -62,7 +62,14 @@ import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
 import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode } from "@oh-my-pi/pi-wire";
+import {
+	type TspChecklistItem,
+	type TspChecklistPhase,
+	type TspSpan,
+	type TspText,
+	type TspTreeNode,
+	toolIntentLabel,
+} from "@oh-my-pi/pi-wire";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
@@ -139,7 +146,7 @@ import {
 	type JudgmentBatchProgress,
 } from "../eval/judgment-batch-events";
 import { onDownloadActivity } from "../downloads/activity";
-import { DownloadActivityHud, JudgmentBatchProgressHud } from "./progress-hud";
+import { BackgroundCompactionHud, DownloadActivityHud, JudgmentBatchProgressHud } from "./progress-hud";
 import { autosaveApprovedPlan, planSaveFileName } from "../plan-mode/plan-autosave";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
@@ -464,7 +471,6 @@ import {
 	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
-	cfgTuiCompleteScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
@@ -504,7 +510,6 @@ const cfgLiveUiSettings = combine({
 	showHardwareCursor: cfgShowHardwareCursor,
 	"tui.maxInlineImages": cfgTuiMaxInlineImages,
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
-	"tui.completeScrollback": cfgTuiCompleteScrollback,
 	"tui.imeSafeCursor": cfgTuiImeSafeCursor,
 	autocompleteMaxVisible: cfgAutocompleteMaxVisible,
 	"spelling.typoDetection": cfgSpellingTypoDetection,
@@ -991,7 +996,8 @@ class StatusHudContainer extends AnchoredLiveContainer {
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
-		return this.mode.describeStatusHud(this.children, cx);
+		const idle = this.#idle();
+		return this.mode.describeStatusHud(idle ? [idle] : this.children, cx);
 	}
 
 	override render(width: number): readonly string[] {
@@ -1000,8 +1006,14 @@ class StatusHudContainer extends AnchoredLiveContainer {
 		return lines;
 	}
 
+	/** A background compaction's working row, shown in place of nothing: any child of the row outranks it. */
+	#idle(): Loader | undefined {
+		return this.children.length === 0 ? this.mode.backgroundCompaction.idleRow() : undefined;
+	}
+
 	#renderLines(width: number): readonly string[] {
-		const childLines = super.render(width);
+		const idle = this.#idle();
+		const childLines = idle ? idle.render(width) : super.render(width);
 		if (!this.mode.isCompactTodoMode()) {
 			if (childLines.length === 0) {
 				const idle = this.mode.renderIdleStatusHud(width);
@@ -1229,30 +1241,38 @@ export function nextSubagentPreviewTickMs(sessions: readonly ObservableSession[]
 }
 
 /**
- * Live-preview row for a running subagent: its current (or, between calls,
- * most recent) tool call with a one-line detail and, once the call has run a
- * while, an elapsed marker. The detail is that call's own intent, else its
- * args — never an earlier call's intent. Undefined when the agent has not
- * called a tool yet. The row never overflows `width`.
+ * Live-preview row for a running subagent: the call it runs, else the call its
+ * model is still writing, else (between calls) its most recent one, with a
+ * one-line detail and, once a running call has run a while, an elapsed marker.
+ * The detail is that call's own intent, else its args — never an earlier
+ * call's intent. Undefined when the agent has not called a tool yet. The row
+ * never overflows `width`.
  */
 function renderSubagentToolPreview(session: ObservableSession, width: number): string | undefined {
 	const progress = session.progress;
 	if (progress?.status !== "running") return undefined;
-	const currentTool = progress.currentTool;
+	const running = progress.currentTool;
+	const writing = !running && progress.streaming?.kind === "call" ? progress.streaming : undefined;
 	const recent = progress.recentTools[0];
-	const tool = currentTool ?? recent?.tool;
-	if (!tool) return undefined;
-	const intent = currentTool ? progress.currentToolIntent : recent?.intent;
-	const args = currentTool ? progress.currentToolArgs : recent?.args;
-	const argsKey = currentTool ? progress.currentToolArgsKey : recent?.argsKey;
+	const call = running
+		? {
+				tool: running,
+				intent: progress.currentToolIntent,
+				args: progress.currentToolArgs,
+				argsKey: progress.currentToolArgsKey,
+			}
+		: (writing ?? recent);
+	if (!call) return undefined;
+	const live = running !== undefined || writing !== undefined;
+	const { tool, intent, args, argsKey } = call;
 	// A model-written intent is prose, so home paths inside it are shortened as they stand. An argument is
 	// shortened by its key, so a literal search pattern that names a home path still shows what was searched.
 	const detail = intent
-		? shortenEmbeddedPaths(replaceTabs(intent))
+		? shortenEmbeddedPaths(replaceTabs(toolIntentLabel(intent)))
 		: args
 			? shortenToolArgumentPaths(replaceTabs(args), argsKey)
 			: undefined;
-	const elapsed = currentTool && progress.currentToolStartMs ? Date.now() - progress.currentToolStartMs : 0;
+	const elapsed = running && progress.currentToolStartMs ? Date.now() - progress.currentToolStartMs : 0;
 	const elapsedLabel =
 		elapsed > SUBAGENT_PREVIEW_ELAPSED_MIN_MS
 			? `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`
@@ -1260,11 +1280,11 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	const elapsedWidth = visibleWidth(elapsedLabel);
 	const hook = `${theme.fg("dim", theme.tree.hook)} `;
 	// Between calls the row keeps the last call, marked with how it ended.
-	const status = !currentTool && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
+	const status = !live && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
 	const prefixWidth = visibleWidth(hook) + visibleWidth(status);
 	// Reserve the elapsed marker first, then cap the tool name; the detail gets whatever is left.
 	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - prefixWidth - elapsedWidth), "");
-	let line = `${hook}${status}${theme.fg(currentTool ? "muted" : "dim", shortTool)}`;
+	let line = `${hook}${status}${theme.fg(live ? "muted" : "dim", shortTool)}`;
 	const detailBudget = width - prefixWidth - visibleWidth(shortTool) - elapsedWidth - visibleWidth(": ");
 	if (detail && detailBudget >= SUBAGENT_PREVIEW_MIN_DETAIL_WIDTH) {
 		line += `: ${theme.fg("dim", previewLine(detail, Math.min(TRUNCATE_LENGTHS.SHORT, detailBudget)))}`;
@@ -1501,6 +1521,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#composerStatusPersistTimer: NodeJS.Timeout | undefined;
 	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
 	readonly #downloadActivityHud = new DownloadActivityHud(() => this.ui.requestRender());
+	readonly backgroundCompaction = new BackgroundCompactionHud(() => this.statusContainer.children.length > 0);
 	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
@@ -1999,8 +2020,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		| {
 				request: PlanReviewRequestedEvent;
 				remote?: { choice: PlanReviewChoice; feedback?: string };
-				/** Applies a remote tier pick to the review's slider selection; undefined when the slider is hidden. */
-				selectTier?: (role: string) => boolean;
+				/**
+				 * Applies a remote tier pick to the review's slider selection; false when `role` names no tier
+				 * or `choice` is disabled on it. Undefined when the slider is hidden.
+				 */
+				selectTier?: (role: string, choice: PlanReviewChoice) => boolean;
 				/** A remote Save: writes the plan to its default file name; the review stays open. */
 				save: () => void;
 		  }
@@ -2420,6 +2444,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
 		this.progressHudContainer.addChild(this.#downloadActivityHud);
+		this.progressHudContainer.addChild(this.backgroundCompaction);
 		this.#eventBusUnsubscribers.push(onDownloadActivity(activity => this.#downloadActivityHud.update(activity)));
 		this.statusContainer = new StatusHudContainer(this);
 		this.todoContainer = new TodoHudContainer(this);
@@ -2503,6 +2528,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showGitUi();
 					return;
 				case "status.cost":
+				case "status.usage":
 					void this.handleUsageCommand();
 					return;
 				// Only the main session has a cache warmer, so a focused subagent's bar shows no
@@ -2773,43 +2799,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.hookWidgetContainerBelow,
 			],
 			{
-				// Roots that collapse without new transcript output must not raise the
-				// post-run chrome floor: user-driven ones (editor drafts, dialogs and
-				// selectors, staged attachments, reports, queued messages, dismissible
-				// panels and the error banner). Any root listed in neither set counts
-				// as persistent: once it holds its height after a run the floor rises
-				// to it, and its later collapse floats the editor until output fills
-				// in. Classify every new root that can collapse on its own.
-				transientChrome: [
-					this.editorContainer,
-					this.askContainer,
-					this.attachmentChipsContainer,
-					this.reportContainer,
-					this.pendingShellContainer,
-					this.pendingMessagesContainer,
-					this.btwContainer,
-					this.omfgContainer,
-					this.cleanseContainer,
-					this.errorBannerContainer,
-				],
-				// HUDs that clear themselves on a timer or registry change (todos,
-				// background subagents, model cycle, progress). Their first paint can be
-				// their tallest (a restored todo list on resume), so it is never a baseline.
-				selfClearingChrome: [
-					this.todoContainer,
-					this.subagentContainer,
-					this.modelCycleContainer,
-					this.progressHudContainer,
-				],
-				// The working row, the idle status line that replaces it, and the
-				// margin above the editor (the band composer's gap opens when that
-				// row empties; a spacer replaces it over hook widgets): billed at
-				// their current height so streamed rows reach native history as
-				// they leave the screen.
-				billedChrome: [this.statusContainer, this.editorTopGapContainer],
-				// Natively the HUD pills lead the dock, queued messages sit between
-				// the working row and the composer, and the attachment chips live
-				// inside the composer.
+				// Natively the HUD pills lead the dock, aboveEditor hook widgets sit
+				// over the working row (the tray's header, so nothing comes between
+				// the two), queued messages sit between the working row and the
+				// composer, and the attachment chips live inside the composer. The
+				// terminal spaces the dock itself, so the editor's top margin stays out.
 				nativeDock: [
 					new HudPillsRow(this),
 					this.btwContainer,
@@ -2819,11 +2813,10 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.modelCycleContainer,
 					this.deferredCommandContainer,
 					this.progressHudContainer,
+					this.hookWidgetContainerAbove,
 					this.statusContainer,
 					{ component: this.#tray, feature: "tray" },
 					this.pendingMessagesContainer,
-					this.editorTopGapContainer,
-					this.hookWidgetContainerAbove,
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
 				],
@@ -2831,6 +2824,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				// end, where they stay when they move in, not pinned over the composer.
 				// An ask waiting for answers follows them, right above the composer.
 				nativeTail: [this.pendingShellContainer, this.askContainer],
+				// A docked report or a waiting ask covers the transcript while it is
+				// open; closing it brings the rows back instead of leaving them in
+				// scrollback.
+				coveringChrome: [this.reportContainer, this.askContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
@@ -3607,8 +3604,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (was) this.showStatus(message);
 	}
 
+	/**
+	 * Whether loop iterations and goal continuations must hold off. An open run
+	 * counts even while paused on background subagents/jobs: its terminal
+	 * `agent_end` re-arms both.
+	 */
 	#isAutoSubmitBlocked(): boolean {
-		return this.session.isStreaming || this.session.isCompacting || this.session.hasPostPromptWork;
+		return (
+			this.session.isStreaming ||
+			this.session.isCompacting ||
+			this.session.hasPostPromptWork ||
+			this.session.isRunActive
+		);
 	}
 
 	#submitLoopPromptWhenReady(prompt: string): void {
@@ -4392,7 +4399,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			showHardwareCursor: cfgShowHardwareCursor.get(this.settings),
 			maxInlineImages: cfgTuiMaxInlineImages.get(this.settings),
 			resizeScrollback: cfgTuiResizeScrollback.get(this.settings),
-			completeScrollback: cfgTuiCompleteScrollback.get(this.settings),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(this.settings),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(this.settings),
 			spellingTypoDetection: cfgSpellingTypoDetection.get(this.settings),
@@ -4450,7 +4456,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				"showHardwareCursor",
 				"tui.maxInlineImages",
 				"tui.resizeScrollback",
-				"tui.completeScrollback",
 				"tui.imeSafeCursor",
 				"autocompleteMaxVisible",
 				"spelling.typoDetection",
@@ -6247,28 +6252,23 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
 		const previousTools = this.session.getEnabledToolNames();
-		const previousMountedTools = this.session.getMountedXdevToolNames();
+		const previousMountedTools = this.session.getMountedToolCommandNames();
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
-		// `write` and refine it with `edit`, and plan approval itself is a `write`
-		// to `xd://propose`. Both must be in the active set or the agent falls
-		// back to `edit` on a non-existent file and stalls — and cannot submit the plan.
+		// `write` and refine it with `edit`. Both must be in the active set or the
+		// agent falls back to `edit` on a non-existent file and stalls.
 		// `edit` is an essential built-in and always ships top-level; re-activate
 		// `write` here only when the current registry entry is the built-in write
-		// tool (issue #3165). A shadowing extension tool named `write` must stay
-		// inactive because plan mode's read-only guarantee relies on the built-in
-		// write/edit guard. The standing handler below consumes plan-approval
-		// dispatches.
+		// tool (issue #3165). A shadowing extension tool named `write` is dropped
+		// from the active set rather than carried over (issue #14030): plan mode's
+		// read-only guarantee relies on the built-in write/edit guard. `propose`
+		// needs no selection: it is a `bash` command while tool commands are
+		// mounted, otherwise a top-level tool the session presents while plan mode
+		// is on. The standing handler below consumes plan submissions.
 		const planAugmentations: string[] = [];
-		// A shadowing extension tool named `write` has no `xd://` transport, so plan
-		// approval would never dispatch and the turn would loop on propose writes
-		// forever (issue #14030). Drop it from the active set rather than carrying it
-		// over: keeping it active breaks both the read-only guarantee and approval.
 		if (this.session.hasBuiltInTool("write")) {
 			planAugmentations.push("write");
 		} else if (previousTools.includes("write")) {
-			this.showWarning(
-				"Plan mode: the `write` tool is provided by an extension and cannot submit plans. Disable it to use plan mode.",
-			);
+			this.showWarning("Plan mode: the `write` tool is provided by an extension and stays disabled while planning.");
 		}
 		const uniquePlanTools = [...new Set([...previousTools.filter(name => name !== "write"), ...planAugmentations])];
 
@@ -6283,9 +6283,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// prompt, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
 
-		// Plan mode state must land before the tool partition: it keeps `write`
-		// active as the staging transport, and plan approval is a top-level
-		// `write` to `xd://propose`.
+		// Plan mode state must land before the tool partition: the session
+		// presents `propose` as a top-level tool while plan mode is on and `bash`
+		// does not carry it as a command.
 		const previousPlanModeState = this.session.getPlanModeState();
 		this.session.setPlanModeState({
 			enabled: true,
@@ -6364,7 +6364,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		// A mid-turn exit must interrupt the currently streaming turn.
 		// The plan-mode prompt instructs the model to keep planning until it
-		// writes to `xd://propose`, so the live turn must be aborted inside
+		// submits the plan with `propose`, so the live turn must be aborted inside
 		// `runModeExitTeardown` to avoid restarting on the stale toolset.
 		if (options?.interruptActiveTurn && this.session.isStreaming) {
 			await this.session.runModeExitTeardown(async () => {
@@ -6383,7 +6383,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}): Promise<void> {
 		const planModeState = this.session.getPlanModeState();
 		const planModeTools = this.session.getEnabledToolNames();
-		const planModeMountedTools = this.session.getMountedXdevToolNames();
+		const planModeMountedTools = this.session.getMountedToolCommandNames();
 		const planModeModelState = this.session.model
 			? {
 					model: this.session.model,
@@ -6427,7 +6427,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 			}
 			const enabledTools = this.session.getEnabledToolNames();
-			const mountedTools = this.session.getMountedXdevToolNames();
+			const mountedTools = this.session.getMountedToolCommandNames();
 			if (
 				enabledTools.length !== planModeTools.length ||
 				enabledTools.some((name, index) => name !== planModeTools[index]) ||
@@ -6464,7 +6464,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Warn that a plan session blocks entering goal/vibe mode, distinguishing an
 	 * active session from a paused one. A paused session already restored the
-	 * tools/model and cleared the `xd://propose` handler, so "Exit plan mode
+	 * tools/model and cleared the `propose` handler, so "Exit plan mode
 	 * first." reads as stale right after the user toggled plan mode off (#11692);
 	 * point them at the second `/plan` toggle that fully exits instead.
 	 */
@@ -6744,12 +6744,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		const pick = this.#planReviewPick;
 		if (!pending || pending.request.reviewId !== reviewId || !pick) return false;
 		const option = pending.request.options.find(item => item.id === choice);
-		if (!option || option.disabled) return false;
+		if (!option) return false;
 		const feedback = input?.feedback;
 		if (choice === "refine" && !feedback?.trim()) return false;
 		if (input?.role !== undefined) {
+			// The tier decides availability (keep-context is measured against its window).
 			const approves = choice === "execute" || choice === "compact" || choice === "keep";
-			if (!approves || !pending.selectTier?.(input.role)) return false;
+			if (!approves || !pending.selectTier?.(input.role, choice)) return false;
+		} else if (option.disabled) {
+			return false;
 		}
 		if (choice === "save") {
 			pending.save();
@@ -6761,25 +6764,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		return false;
 	}
 
-	#getPlanApprovalContextUsage(): ContextUsage | undefined {
-		const executionModel = this.#planModePreviousModelState?.model ?? this.session.model;
+	/**
+	 * The keep-context approval as the review reports it and the overlay shows it, measured against
+	 * `executionModel`'s context window (the session's when it has none): disabled past
+	 * {@link PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT}.
+	 */
+	#planKeepContextChoice(executionModel: Model | undefined): {
+		option: PlanReviewOption;
+		choice: PlanReviewOverlayChoice;
+	} {
 		const contextWindow = executionModel?.contextWindow;
-		if (typeof contextWindow === "number") {
-			return this.session.getContextUsage({ contextWindow });
-		}
-		return this.session.getContextUsage();
-	}
-
-	/** The context the keep-context approval carries over (`~378k / 1m`), when known. */
-	#formatKeepContextUsage(contextUsage: ContextUsage | undefined): string | undefined {
-		if (!contextUsage) return undefined;
-		const tokens = formatContextTokenCount(contextUsage.tokens);
-		const contextWindow = formatContextTokenCount(contextUsage.contextWindow);
-		return `~${tokens} / ${contextWindow}`;
-	}
-
-	#isKeepContextDisabled(contextUsage: ContextUsage | undefined): boolean {
-		return contextUsage !== undefined && contextUsage.percent > PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT;
+		const usage =
+			typeof contextWindow === "number"
+				? this.session.getContextUsage({ contextWindow })
+				: this.session.getContextUsage();
+		// The context carried over (`~378k / 1m`), when known.
+		const meta = usage
+			? `~${formatContextTokenCount(usage.tokens)} / ${formatContextTokenCount(usage.contextWindow)}`
+			: undefined;
+		const disabled = usage !== undefined && usage.percent > PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT;
+		return {
+			option: {
+				id: "keep",
+				label: meta ? `Approve and keep context (${meta})` : "Approve and keep context",
+				disabled,
+			},
+			choice: {
+				id: "keep",
+				label: "Approve and keep context",
+				meta,
+				disabled: disabled ? `Context is over ${PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT}% full` : undefined,
+			},
+		};
 	}
 
 	/** Apply the `tui.vimMode` setting to an editor and route Visual-mode yanks to the clipboard. */
@@ -7036,7 +7052,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	): Promise<boolean> {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
 			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
-			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+			mounted: this.session.getMountedToolCommandNames().filter(name => !isMCPToolName(name)),
 			registered: this.session.getAllToolNames(),
 		};
 
@@ -8003,39 +8019,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#notifyModeChanged();
 		}
 
-		const contextUsage = this.#getPlanApprovalContextUsage();
-		const keepContextUsage = this.#formatKeepContextUsage(contextUsage);
-		const keepContextDisabled = this.#isKeepContextDisabled(contextUsage);
-		// The overlay offers Refine only while the plan has feedback; an extension may always refine
-		// with its own feedback, so the reported choices keep it.
-		const reviewOptions: PlanReviewOption[] = [
-			{ id: "execute", label: "Approve and execute", disabled: false },
-			{ id: "compact", label: "Approve and compact context", disabled: false },
-			{
-				id: "keep",
-				label: keepContextUsage ? `Approve and keep context (${keepContextUsage})` : "Approve and keep context",
-				disabled: keepContextDisabled,
-			},
-			{ id: "refine", label: "Refine plan", disabled: false },
-			{ id: "save", label: "Save", disabled: false },
-		];
-		const approveChoices: PlanReviewOverlayChoice[] = [
-			{ id: "execute", label: "Approve and execute", detail: "Start fresh with just the plan" },
-			{
-				id: "compact",
-				label: "Approve and compact context",
-				detail: "Summarize this conversation, then execute",
-			},
-			{
-				id: "keep",
-				label: "Approve and keep context",
-				meta: keepContextUsage,
-				disabled: keepContextDisabled
-					? `Context is over ${PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT}% full`
-					: undefined,
-			},
-		];
-
 		// Model-tier slider: let the operator pick which configured role model
 		// (smol/default/slow/…) executes the approved plan. The slider always starts
 		// on the `default` tier so execution defaults to the default model no matter
@@ -8057,9 +8040,39 @@ export class InteractiveMode implements InteractiveModeContext {
 						})),
 						onChange: index => {
 							selectedTierIndex = index;
+							const next = choicesAt(index);
+							request.options = next.options;
+							this.#planReviewOverlay?.setChoices(next.choices);
 						},
 					}
 				: undefined;
+		// Keep-context availability follows the model that executes: the selected tier while the
+		// slider shows, else the pre-plan model #exitPlanMode restores. The overlay offers Refine
+		// only while the plan has feedback; an extension may always refine with its own feedback,
+		// so the reported options keep it.
+		const restoredModel = this.#planModePreviousModelState?.model ?? this.session.model;
+		const choicesAt = (tierIndex: number): { options: PlanReviewOption[]; choices: PlanReviewOverlayChoice[] } => {
+			const keep = this.#planKeepContextChoice(slider ? cycle!.models[tierIndex]?.model : restoredModel);
+			return {
+				options: [
+					{ id: "execute", label: "Approve and execute", disabled: false },
+					{ id: "compact", label: "Approve and compact context", disabled: false },
+					keep.option,
+					{ id: "refine", label: "Refine plan", disabled: false },
+					{ id: "save", label: "Save", disabled: false },
+				],
+				choices: [
+					{ id: "execute", label: "Approve and execute", detail: "Start fresh with just the plan" },
+					{
+						id: "compact",
+						label: "Approve and compact context",
+						detail: "Summarize this conversation, then execute",
+					},
+					keep.choice,
+				],
+			};
+		};
+		const initialChoices = choicesAt(startTierIndex);
 		// The overlay now owns the dynamic, focus-aware help line; the caller only
 		// supplies the trailing cancel hint.
 		const helpText = `${editorKey("tui.select.cancel")} cancel`;
@@ -8078,7 +8091,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			title: details.title,
 			planFilePath,
 			planContent,
-			options: reviewOptions,
+			options: initialChoices.options,
 			tiers: slider
 				? cycle!.models.map(entry => ({
 						role: entry.role,
@@ -8110,9 +8123,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Undefined when the slider is hidden — a lone tier is no selection, and pinning
 			// it would switch the session back to the plan model.
 			selectTier: slider
-				? role => {
+				? (role, choice) => {
 						const index = cycle!.models.findIndex(entry => entry.role === role);
-						if (index < 0) return false;
+						if (index < 0 || choicesAt(index).options.find(option => option.id === choice)?.disabled)
+							return false;
 						this.#planReviewOverlay?.setSliderIndex(index);
 						return true;
 					}
@@ -8127,7 +8141,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const choicePromise = this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
-			approveChoices,
+			initialChoices.choices,
 			{
 				helpText,
 				refine: { id: "refine", label: "Refine plan" },
@@ -8151,7 +8165,7 @@ export class InteractiveMode implements InteractiveModeContext {
 						type: "plan_review_resolved",
 						reviewId,
 						sessionId: reviewSessionId,
-						choice: reviewOptions.find(option => option.id === closedWith)?.id,
+						choice: request.options.find(option => option.id === closedWith)?.id,
 						by: pending.remote ? "extension" : "local",
 					} as const;
 					void requestDelivered.promise.then(() => extensionRunner.emit(resolved));
@@ -8397,6 +8411,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController.dispose();
 		this.#clearJudgmentBatchProgress();
 		this.#downloadActivityHud.dispose();
+		this.backgroundCompaction.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();

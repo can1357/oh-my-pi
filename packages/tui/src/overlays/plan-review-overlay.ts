@@ -412,6 +412,8 @@ export class PlanReviewOverlay implements Component {
 	#hasFeedback = false;
 	/** Memoized {@link #entries} for the current {@link #hasFeedback}. */
 	#entryCache: { feedback: boolean; entries: readonly OptionEntry[] } | undefined;
+	/** Bumped by {@link setChoices} so the memoized native root redraws the options. */
+	#choicesRev = 0;
 	#helpSuffix: string | undefined;
 	#externalEditorLabel: string | undefined;
 	#promptTitle: string | undefined;
@@ -951,6 +953,15 @@ export class PlanReviewOverlay implements Component {
 	setSliderIndex(index: number): void {
 		if (this.#committed || !this.#slider) return;
 		this.#moveSlider(index - this.#sliderIndex);
+	}
+
+	/** Replace the approval choices (e.g. re-measured for a new slider tier); the cursor leaves a now-disabled row. */
+	setChoices(choices: readonly PlanReviewOverlayChoice[]): void {
+		this.#choices = choices;
+		this.#entryCache = undefined;
+		this.#choicesRev++;
+		this.#selectedIndex = this.#coerceIndex(this.#selectedIndex);
+		if (this.#hoveredOption !== undefined && this.#isDisabled(this.#hoveredOption)) this.#hoveredOption = undefined;
 	}
 
 	/**
@@ -1990,6 +2001,7 @@ export class PlanReviewOverlay implements Component {
 			this.#jump?.n ?? 0,
 			this.#selectedIndex,
 			this.#sliderIndex,
+			this.#choicesRev,
 			this.#committed ? `committed:${this.#committedLabel ?? ""}` : "",
 			this.#annotating
 				? `annotating:${target?.sectionIndex}:${target?.row}:${target?.context}:${this.#editingAnnotation !== undefined}`

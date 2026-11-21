@@ -5,9 +5,11 @@
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt as _;
 
+#[cfg(unix)]
 use tokio::process::Command;
 
 use super::*;
+#[cfg(unix)]
 use crate::proctree;
 
 mod builtins;
@@ -34,6 +36,7 @@ impl TestStdio {
 	}
 
 	/// Read stdin from (a duplicate of) `file`.
+	#[cfg(unix)]
 	fn stdin(mut self, file: &fs::File) -> Self {
 		self.stdin = Some(file.try_clone().expect("clone test stdin"));
 		self
@@ -46,6 +49,7 @@ impl TestStdio {
 	}
 
 	/// Write stderr to (a duplicate of) `file`.
+	#[cfg(unix)]
 	fn stderr(mut self, file: &fs::File) -> Self {
 		self.stderr = Some(file.try_clone().expect("clone test stderr"));
 		self
@@ -534,9 +538,11 @@ async fn still_written(path: &std::path::Path) -> bool {
 	std::fs::metadata(path).expect("stat output").len() > 0
 }
 
-/// Runs `command` on a fresh shell with pipe taps, collecting its output.
+/// Runs `command` on a fresh shell with pipe taps (and `trace`, if any),
+/// collecting its output.
 fn run_tapped(
 	command: &str,
+	trace: Option<Arc<RunTrace>>,
 	cancel: CancelToken,
 ) -> (Arc<PipeTaps>, tokio::task::JoinHandle<Result<ShellRunResult>>, flume::Receiver<String>) {
 	let taps = Arc::new(PipeTaps::new());
@@ -544,6 +550,7 @@ fn run_tapped(
 	let options = ShellRunOptions {
 		command: command.into(),
 		pipe_taps: Some(Arc::clone(&taps)),
+		trace,
 		..Default::default()
 	};
 	let run = tokio::spawn(async move { Shell::new(None).run(options, Some(tx), cancel).await });

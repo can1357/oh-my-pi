@@ -20,9 +20,9 @@ function createTestSession(cwd = "/tmp/test", overrides: Partial<ToolSession> = 
 		hasUI: true,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		// xdev mounting (default-on) would unmount the discoverable ast_edit
-		// into xd://; these tests need it in the returned toolset.
-		settings: Settings.isolated({ "tools.xdev": false }),
+		// Tool command mounting (default-on) would turn the discoverable ast_edit
+		// into a bash command; these tests need it in the returned toolset.
+		settings: Settings.isolated({ "tools.commands": false }),
 		...overrides,
 	};
 }

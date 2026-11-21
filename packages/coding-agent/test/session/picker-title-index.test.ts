@@ -79,4 +79,21 @@ describe("resume picker title index", () => {
 			[legacy, "Legacy", "2024-01-01T00:00:00.000Z"],
 		]);
 	});
+
+	it("leaves side panel chats out of both picker passes and out of --continue", async () => {
+		const terminal = await createSession("Terminal chat");
+		process.env.PI_SESSION_ORIGIN = "chrome";
+		try {
+			await createSession("Panel chat");
+		} finally {
+			delete process.env.PI_SESSION_ORIGIN;
+		}
+
+		const listing = await SessionManager.listForPicker(cwd);
+		expect(listing.sessions.map(session => session.path)).toEqual([terminal]);
+		expect((await listing.complete).map(session => session.path)).toEqual([terminal]);
+		const resumed = await SessionManager.continueRecent(cwd);
+		expect(resumed.getSessionFile()).toBe(terminal);
+		await resumed.close();
+	});
 });

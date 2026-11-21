@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Breaking Changes
+
+- Retired the `ComposerPreferences.completeScrollback`, `TranscriptContainer.completeScrollback`, and `Composer.setRunActive` APIs, along with the `transientChrome`, `selfClearingChrome`, and `billedChrome` options of `Composer.setRuntimeChildren`. Retirement now consistently uses the height left by on-screen chrome.
+- Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion`, and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`.
+- Replaced `OutputSinkOptions.artifactPath` and `artifactId` with the `allocateArtifact` (`ArtifactAllocator`) callback, which allocates an artifact only when output first exceeds its inline view.
+- Removed the `windows-altgr` module; Windows AltGr recovery is now provided by `translateWindowsAltGrSequence` in `@oh-my-pi/pi-natives`.
+
+### Added
+
+- The editor now displays described changes for `magic` mode as Markdown in the transcript while it waits for the apply model to return final diffs.
+- The UI now responds to terminal `features` events without waiting for a new hello message.
+
+### Changed
+
+- Tool commands run inside a bash call render as nested tool cards in the bash card
+- Tool activity and job titles show the brief label of a structured intent; the Spotlight inspector still exposes the full request.
+- Improved transcript layout around docked reports, waiting asks, completion lists, dialogs, todo lists, subagent panels, queued messages, and other lower-screen chrome so visible content and reclaimed rows behave more predictably.
+- Native chat and web search cards now present tool results and sources more clearly, including expandable page excerpts, multi-line titles, and a unified sources grid.
+- Windows console VT input and AltGr handling now use the native terminal integration.
+- Background jobs and running Bash commands now provide live, step-specific output for pipelines, redirects, and command stages, with controls to switch streams or follow the live output. Job cards also show the active command step and more compact metadata.
+- Bash command footers now use a compact, icon-based layout for timing, exit status, job and process details, artifacts, and minimizers.
+
+### Fixed
+
+- Fixed the TUI freezing at 100% CPU while streaming text that begins with a blank line followed by a line containing `|`.
+- Fixed the TUI freezing when charting a table whose numbers overflow (`1e400`, a `p999…` header with hundreds of digits, a `1e-300 → 1e300` change) or sit above 2^53 and differ only slightly.
+- Fixed the editor freezing when a vim count is typed with hundreds of digits; counts now cap at 99,999.
+- Fixed Windows input mode freezing on a key record with an impossibly large repeat count.
+- Fixed backward character jump (`Ctrl+Alt+]`) at the start of a line finding the cursor's own character instead of searching earlier lines.
+- Fixed light-theme detection inside Zellij when the terminal reports a light background.
+- Preserved custom foreground colors and text styles in status-line segments while continuing to apply the accent color to unstyled statuses.
+- Fixed transcript rows and tool cards disappearing or appearing truncated when overlays and panels were open.
+- Fixed cursor flicker in kitty terminals during spinner updates.
+- Preserved background colors on truncated rows while scrolling.
+- Fixed WebP and JPEG images rendering as blank gaps on Kitty graphics-compatible terminals when displayed through a bare `Image`.
+- Improved terminal output handling so large repaints remain row-safe and slow or unavailable terminal writers no longer freeze input.
+- Preserved prefilled or hidden `__proto__` controls when ask HTML forms time out.
+- A single-question ask form now submits on the first Enter press.
+- Improved native-terminal ask forms so answering long questions no longer causes the entire card to resize and stall on every movement.
+
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- The native session sheet shows a `Local` report line (the session's `local://` directory) as a copyable field beside the ID and file ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
+
+### Fixed
+
+- Fixed images from a previous session reappearing at the top-left of the screen after `/new` in herdr-app ([#19749](https://github.com/can1357/oh-my-pi/pull/19749) by [@jaredlyon](https://github.com/jaredlyon))
+- Loop-stall diagnostics (`ui.loop-blocked`) no longer sample the JS thread while no TUI runs, such as in an external editor or after the session ends ([#19703](https://github.com/can1357/oh-my-pi/pull/19703) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the usage dashboard rendering exhausted or pressured usage rows without a quota bar (prepaid balances, spent quotas) as dim informational text; they now take the error or warning color their reported status calls for, and a spent quota with no measurable amount reads "exhausted" instead of "no data" ([#19764](https://github.com/can1357/oh-my-pi/issues/19764))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

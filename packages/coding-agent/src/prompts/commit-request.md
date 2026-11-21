@@ -22,7 +22,8 @@ Every changed line of the repository, attributed from your edit journal:
 
 <instruction>
 - Use the eval `commit` namespace; `d = await commit.draft()` rebuilds this draft (pass `agents=` when the user named a scope). When Review is empty and Selected matches your work, commit in that same cell.
-- Resolve each `?` item: `await d.show()` lists them; `take`/`drop` by path, unit, or grep. Files a generator, formatter, or script you ran rewrote are yours.
+- Resolve each `?` item: `await d.show()` lists them; `take`/`drop` by path, unit, or grep.
+- Files and lines a generator, formatter, or script you ran wrote are yours, but unrecorded: `take` them from Unrecorded, from `left out: unrecorded`, and from Review.
 - Split unrelated work into separate commits with `only()`; draft again after each commit.
 - Follow the repository's commit conventions for the subject and body.
 - Do not run tests, builds, or other verification; the user asked for a commit.

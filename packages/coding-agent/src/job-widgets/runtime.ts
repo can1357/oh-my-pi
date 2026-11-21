@@ -693,16 +693,23 @@ export class JobWidgetRuntime {
 		return text ? truncate(text, MAX_STAGE_CHARS) : undefined;
 	}
 
-	/** Last non-empty line of the most recently active source, a pipe preferred over the job's own output. */
+	/**
+	 * Last non-empty line of the most recently active source, a pipe or redirected file preferred over the job's
+	 * own output.
+	 */
 	#lastLine(): string | undefined {
 		let best: SourceStats | undefined;
-		let bestIsPipe = false;
+		let bestIsStream = false;
 		for (const stats of this.#stats.values()) {
 			if (!stats.lastLine) continue;
-			const isPipe = /(?:^|:)pipe:/.test(stats.id);
-			if (!best || (isPipe && !bestIsPipe) || (isPipe === bestIsPipe && stats.lastActiveAt >= best.lastActiveAt)) {
+			const isStream = /(?:^|:)(?:pipe|file):/.test(stats.id);
+			if (
+				!best ||
+				(isStream && !bestIsStream) ||
+				(isStream === bestIsStream && stats.lastActiveAt >= best.lastActiveAt)
+			) {
 				best = stats;
-				bestIsPipe = isPipe;
+				bestIsStream = isStream;
 			}
 		}
 		return best?.lastLine ? truncate(best.lastLine.trim(), MAX_STAGE_CHARS) : undefined;
