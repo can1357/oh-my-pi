@@ -2408,7 +2408,7 @@ function parseFireworksCachedPromptTokens(headers: Headers | undefined): number 
 
 export function parseChunkUsage(
 	rawUsage: object,
-	model: Model<"openai-completions">,
+	model: Model,
 	premiumRequests: number | undefined,
 	timestamp?: number,
 	cachedTokensHeader?: number,

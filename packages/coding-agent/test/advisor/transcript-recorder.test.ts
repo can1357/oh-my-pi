@@ -109,6 +109,53 @@ describe("AdvisorTranscriptRecorder", () => {
 		});
 	});
 
+	it("persists a billed request the advisor made on its own", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			// The advisor's overflow compaction bypasses the advisor `Agent`, so
+			// its spend arrives here instead of as a message.
+			recorder.recordUsage({
+				purpose: "compaction:summary",
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "test-advisor-model",
+				usage: {
+					input: 80,
+					output: 20,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 100,
+					cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, total: 3 },
+				},
+				stopReason: "stop",
+			});
+			await recorder.close();
+
+			const file = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const text = await Bun.file(file).text();
+			const entries = text
+				.trim()
+				.split("\n")
+				.map(
+					line =>
+						JSON.parse(line) as {
+							type?: string;
+							purpose?: string;
+							usage?: { totalTokens?: number; cost?: { total?: number } };
+						},
+				);
+			const usage = entries.find(entry => entry.type === "model_usage");
+			expect(usage).toBeDefined();
+			expect(usage?.purpose).toBe("compaction:summary");
+			expect(usage?.usage?.totalTokens).toBe(100);
+			expect(usage?.usage?.cost?.total).toBe(3);
+		});
+	});
+
 	it("marks advisor user deltas synthetic and agent-attributed", async () => {
 		await withTempDir(async dir => {
 			const sessionFile = path.join(dir, "sess.jsonl");
