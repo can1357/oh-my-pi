@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { constants, Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -70,6 +70,28 @@ describe("agy conversation checkpoints", () => {
 		}
 		await deleteConversation(state.dir, forkId);
 		expect(existsSync(state.file)).toBe(true);
+	});
+
+	it("forks a checkpoint after agy closes the store and SQLite removes its WAL sidecars", async () => {
+		const state = await store();
+		const checkpoint = readConversationCheckpoint(state.dir, state.id, digest);
+		// agy's SQLite unlinks -wal/-shm on clean exit; Apple's system SQLite persists them unless disabled.
+		state.db.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, 0);
+		state.db.close();
+		expect(existsSync(`${state.file}-wal`)).toBe(false);
+		expect(existsSync(`${state.file}-shm`)).toBe(false);
+		expect(readConversationCheckpoint(state.dir, state.id, digest)).toEqual(checkpoint);
+		const forkId = forkConversation(state.dir, state.id, checkpoint, digest);
+		const fork = new Database(conversationStorePath(state.dir, forkId), { readonly: true });
+		try {
+			expect(fork.query("SELECT data FROM steps ORDER BY idx").all()).toEqual([
+				{ data: "user" },
+				{ data: "answer 41" },
+			]);
+			expect(fork.query("SELECT cascade_id FROM trajectory_meta").get()).toEqual({ cascade_id: forkId });
+		} finally {
+			fork.close();
+		}
 	});
 
 	it("records index high-water marks rather than row counts", async () => {
