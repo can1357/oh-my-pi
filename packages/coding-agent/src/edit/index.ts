@@ -35,7 +35,7 @@ import {
 } from "../internal-urls";
 import { isRemoteTextWritable, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
-import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { FileChangeType } from "../lsp/types";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
@@ -904,10 +904,7 @@ export class EditTool implements AgentTool<TInput> {
 			// post vs pre first (native memcmp, usually a length mismatch) so the
 			// expected final content is only encoded when disk really is unchanged.
 			// A formatter may restore the pre-image even though the request changed it.
-			const expectedContent =
-				diagnostics.diagnostics?.formatter === FileFormatResult.FORMATTED
-					? diagnostics.finalContent
-					: request.content;
+			const expectedContent = diagnostics.formatted ? diagnostics.finalContent : request.content;
 			let postWriteBytes: Uint8Array | undefined;
 			try {
 				postWriteBytes = await Bun.file(request.path).bytes();
