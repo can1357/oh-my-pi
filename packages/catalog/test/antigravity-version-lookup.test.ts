@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { ensureAntigravityVersion, getAntigravityPlatform } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import {
+	DEFAULT_ANTIGRAVITY_VERSION,
+	ensureAntigravityVersion,
+	getAntigravityPlatform,
+	getAntigravityUserAgent,
+	getAntigravityVersion,
+} from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 const RETRY_WINDOW_MS = 10 * 60_000;
 // The lookup state is process-wide; every test starts on a fresh clock past any
@@ -65,6 +71,16 @@ describe("ensureAntigravityVersion", () => {
 		release.resolve(new Response("unavailable", { status: 503 }));
 		await concurrent;
 		expect(calls()).toBe(1);
+	});
+
+	it("reports the pinned current client version when no manifest lookup succeeded", async () => {
+		const { fetcher } = countingFetch(async () => new Response("unavailable", { status: 503 }));
+
+		await ensureAntigravityVersion(fetcher);
+
+		expect(DEFAULT_ANTIGRAVITY_VERSION).toBe("2.32.1");
+		expect(getAntigravityVersion()).toBe("2.32.1");
+		expect(getAntigravityUserAgent()).toStartWith("antigravity/hub/2.32.1 (aidev_client; ");
 	});
 });
 

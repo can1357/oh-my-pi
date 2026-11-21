@@ -19,7 +19,11 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
-import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import {
+	getAntigravityHeaders,
+	getAntigravityUserAgent,
+	newAntigravityTraceId,
+} from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { type ConfiguredThinkingLevel, concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
@@ -390,11 +394,12 @@ async function callGeminiSearch(
 	timeoutMs: number | undefined,
 ): Promise<GeminiSearchResult> {
 	const endpoint = baseUrl.replace(/\/+$/, "");
-	const headers = auth.isAntigravity ? getAntigravityHeaders() : { Accept: "text/event-stream" };
+	const antigravityUserAgent = auth.isAntigravity ? getAntigravityUserAgent() : undefined;
+	const headers = auth.isAntigravity ? getAntigravityHeaders(antigravityUserAgent) : { Accept: "text/event-stream" };
 
 	const requestMetadata = auth.isAntigravity
 		? {
-				userAgent: "antigravity",
+				userAgent: antigravityUserAgent,
 				requestId: `agent-${crypto.randomUUID()}`,
 			}
 		: {
@@ -445,6 +450,13 @@ async function callGeminiSearch(
 			Authorization: `Bearer ${auth.accessToken}`,
 			"Content-Type": "application/json",
 			...headers,
+			// Per-request identity the shipped Antigravity client sends; see
+			// `getAntigravityHeaders`. Retries resend the same body, so the ids
+			// stay put for the life of this call.
+			...(auth.isAntigravity && {
+				"x-cloudaicompanion-trace-id": newAntigravityTraceId(),
+				"X-Aicode-Request-Id": String(requestMetadata.requestId),
+			}),
 		},
 		body: JSON.stringify(requestBody),
 		signal: withHardTimeout(signal, timeoutMs),

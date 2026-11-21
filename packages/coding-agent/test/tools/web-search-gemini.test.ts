@@ -5,6 +5,7 @@ import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } fr
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
+import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { GeminiProvider, searchGemini } from "@oh-my-pi/pi-coding-agent/web/search/providers/gemini";
 
@@ -421,7 +422,10 @@ describe("searchGemini tools serialization", () => {
 			fetch: fetchMock,
 		});
 
-		expect(capturedRequest?.body?.userAgent).toBe("antigravity");
+		expect(capturedRequest?.body?.userAgent).toBe(getAntigravityUserAgent());
 		expect(capturedRequest?.body?.requestType).toBeUndefined();
+		expect(capturedRequest?.headers?.["x-cloudaicompanion-trace-id"]).toMatch(/^[0-9a-f]{32}$/);
+		// `Headers` normalizes names to lowercase in the capture.
+		expect(capturedRequest?.headers?.["x-aicode-request-id"]).toBe(String(capturedRequest?.body?.requestId));
 	});
 });
