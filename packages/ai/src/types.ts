@@ -1381,6 +1381,14 @@ export interface ContextSnapshot {
 	lastMessageTimestamp?: number;
 }
 
+/** One steering message absorbed mid-stream by a Cursor turn. */
+export interface AnsweredSteeringEntry {
+	/** Trimmed text as the model read it. */
+	text: string;
+	/** Index in `AssistantMessage.content` where the model round that read this steering starts. */
+	beforeContentIndex?: number;
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (
@@ -1472,7 +1480,7 @@ export interface AssistantMessage {
 	 * model read it (trimmed), in delivery order (Cursor). The host records copies
 	 * after the response; history builders place them inside it, not as new input.
 	 */
-	answeredSteering?: string[];
+	answeredSteering?: AnsweredSteeringEntry[];
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	/** On a refusal: how many of other models' reasoning blocks the refused request replayed as text. */

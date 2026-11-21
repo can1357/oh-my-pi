@@ -399,10 +399,13 @@ describe("Cursor server records", () => {
 	});
 
 	/** A recorded K3 turn that absorbed `answered` as steering, and its tool result. */
-	async function steeredK3Turn(answered: string[]): Promise<[AssistantMessage, ToolResultMessage]> {
+	async function steeredK3Turn(
+		answered: Array<string | { text: string; beforeContentIndex?: number }>,
+	): Promise<[AssistantMessage, ToolResultMessage]> {
 		const recorded = await recordK3Turn();
 		if (recorded.assistant.providerPayload?.type !== "cursorHistory") throw new Error("turn was not recorded");
-		return [{ ...recorded.assistant, answeredSteering: answered }, recorded.toolResult];
+		const entries = answered.map(entry => (typeof entry === "string" ? { text: entry } : entry));
+		return [{ ...recorded.assistant, answeredSteering: entries }, recorded.toolResult];
 	}
 
 	const userText = (content: string): Message => ({ role: "user", content, timestamp: 2 });
@@ -483,6 +486,115 @@ describe("Cursor server records", () => {
 
 		expect(ids.slice(2, 2 + SPAN.length)).not.toEqual(SPAN_IDS);
 		expect(recordsWith(records, "use spaces")).toHaveLength(1);
+	});
+
+	it("invalidates answered steering when an image is added to the host copy", async () => {
+		const [assistant, toolResult] = await steeredK3Turn(["use tabs"]);
+		const editedWithImage: Message = {
+			role: "user",
+			content: [
+				{ type: "text", text: "use tabs" },
+				{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+			],
+			timestamp: 2,
+		};
+		const history = [firstUser, assistant, toolResult, editedWithImage, secondUser];
+
+		const { ids, records } = await rootPromptIds(model("kimi-k3"), history);
+
+		expect(ids.slice(2, 2 + SPAN.length)).not.toEqual(SPAN_IDS);
+		const parsed = records.map(record => JSON.parse(record));
+		const imageUser = parsed.find(
+			record =>
+				record.role === "user" &&
+				Array.isArray(record.content) &&
+				record.content.some((part: { type?: string }) => part.type === "image"),
+		);
+		expect(imageUser).toBeDefined();
+	});
+
+	it("replays absorbed steering at its recorded tool-result boundary across multi-round turns", async () => {
+		const call1 = { type: "toolCall" as const, id: "call-1", name: "read", arguments: { path: "a.ts" } };
+		const call2 = { type: "toolCall" as const, id: "call-2", name: "read", arguments: { path: "b.ts" } };
+		const result1: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "a" }],
+			isError: false,
+			timestamp: 2,
+		};
+		const result2: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-2",
+			toolName: "read",
+			content: [{ type: "text", text: "b" }],
+			isError: false,
+			timestamp: 3,
+		};
+		const baseAssistant: AssistantMessage = {
+			role: "assistant",
+			api: "cursor-agent",
+			provider: "cursor",
+			model: "composer-2.5",
+			content: [call1, { type: "text", text: "checking b next" }, call2, { type: "text", text: "done" }],
+			answeredSteering: [{ text: "switch to b.ts", beforeContentIndex: 1 }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const { records } = await rootPromptIds(model("composer-2.5"), [
+			firstUser,
+			baseAssistant,
+			result1,
+			result2,
+			userText("switch to b.ts"),
+			secondUser,
+		]);
+		expect(records.map(record => JSON.parse(record).role)).toEqual([
+			"system",
+			"user",
+			"assistant",
+			"tool",
+			"user",
+			"assistant",
+			"tool",
+			"assistant",
+		]);
+		expect(recordsWith(records, "switch to b.ts")).toEqual([records[4]]);
+
+		// Also splits back-to-back tool calls with no intermediate text/thinking block.
+		const backToBack: AssistantMessage = {
+			...baseAssistant,
+			content: [call1, call2, { type: "text", text: "done" }],
+			answeredSteering: [{ text: "switch to b.ts", beforeContentIndex: 1 }],
+		};
+		const rebuiltBackToBack = await rootPromptIds(model("composer-2.5"), [
+			firstUser,
+			backToBack,
+			result1,
+			result2,
+			userText("switch to b.ts"),
+			secondUser,
+		]);
+		expect(rebuiltBackToBack.records.map(record => JSON.parse(record).role)).toEqual([
+			"system",
+			"user",
+			"assistant",
+			"tool",
+			"user",
+			"assistant",
+			"tool",
+			"assistant",
+		]);
+		expect(recordsWith(rebuiltBackToBack.records, "switch to b.ts")).toEqual([rebuiltBackToBack.records[4]]);
 	});
 
 	it("skips one host copy per absorbed steering and keeps a repeated instruction", async () => {

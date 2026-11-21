@@ -1,7 +1,14 @@
 import { afterEach, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { type CursorOptions, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
-import type { Context, LiveSteerClaim, LiveSteering, Model, UserMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AnsweredSteeringEntry,
+	Context,
+	LiveSteerClaim,
+	LiveSteering,
+	Model,
+	UserMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentClientMessageSchema,
@@ -97,7 +104,7 @@ async function runTurn(
 	steps: Buffer[][],
 	options: Partial<CursorOptions> = {},
 	onTerminalEvent: () => void = () => {},
-): Promise<{ contexts: Map<number, string[]>; wrappedUp: boolean }> {
+): Promise<{ contexts: Map<number, string[]>; wrappedUp: boolean; answeredSteering?: AnsweredSteeringEntry[] }> {
 	const contextsByExecId = new Map<number, string[]>();
 	const server = http2.createServer();
 	servers.push(server);
@@ -161,7 +168,11 @@ async function runTurn(
 		if (event.type === "done" || event.type === "error") onTerminalEvent();
 	}
 	const message = await response.result();
-	return { contexts: contextsByExecId, wrappedUp: message.contextBudgetWrapUp === true };
+	return {
+		contexts: contextsByExecId,
+		wrappedUp: message.contextBudgetWrapUp === true,
+		answeredSteering: message.answeredSteering,
+	};
 }
 
 it("asks the turn to wrap up once, on the first accepting result past the budget", async () => {
@@ -241,14 +252,18 @@ function queuedSteering(content: UserMessage["content"]): { source: LiveSteering
 it("delivers user steering with the next tool result that accepts context", async () => {
 	const steering = queuedSteering("stop and use the staging bucket");
 
-	const { contexts } = await runTurn([[execReadFrame(1, false)], [execReadFrame(2, true)], [execReadFrame(3, true)]], {
-		liveSteering: steering.source,
-	});
+	const { contexts, answeredSteering } = await runTurn(
+		[[execReadFrame(1, false)], [execReadFrame(2, true)], [execReadFrame(3, true)]],
+		{
+			liveSteering: steering.source,
+		},
+	);
 
 	expect(contexts.get(1)).toEqual([]);
 	expect(contexts.get(2)).toEqual(["stop and use the staging bucket"]);
 	expect(contexts.get(3)).toEqual([]);
 	expect(steering.outcomes).toEqual(["absorbed"]);
+	expect(answeredSteering).toEqual([{ text: "stop and use the staging bucket", beforeContentIndex: 2 }]);
 });
 
 it("hands undelivered steering back before the turn reports its outcome", async () => {

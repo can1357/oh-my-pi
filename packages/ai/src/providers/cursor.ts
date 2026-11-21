@@ -187,6 +187,7 @@ import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
+	AnsweredSteeringEntry,
 	AssistantMessage,
 	Context,
 	CursorExecFrameContext,
@@ -200,6 +201,7 @@ import type {
 	CursorTodoSnapshotItem,
 	CursorTodoSyncHandler,
 	CursorToolResultHandler,
+	DeveloperMessage,
 	ImageContent,
 	Message,
 	Model,
@@ -212,6 +214,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 	Usage,
+	UserMessage,
 } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import {
@@ -1635,7 +1638,7 @@ function streamCursorWithWireMode(
 					if (!resultTransport.writable) return [];
 					const notice = contextBudget?.takeNotice(output.usage.contextTokens);
 					if (notice !== undefined) output.contextBudgetWrapUp = true;
-					return [notice, steering?.take()].filter(context => context !== undefined);
+					return [notice, steering?.take(output.content.length)].filter(context => context !== undefined);
 				},
 			};
 
@@ -6471,42 +6474,52 @@ interface CursorRecordReplay {
 
 /**
  * The host's copies of steering a turn absorbed, by copy index, each mapped to
- * the turn's index. The host records absorbed steering after the response that
- * answered it, so a copy is history that belongs inside its turn, never input.
+ * the turn's index and the content boundary where the model read it. The host
+ * records absorbed steering after the response that answered it, so a copy is
+ * history that belongs inside its turn, never input.
  */
-type AnsweredSteering = ReadonlyMap<number, number>;
+interface AnsweredSteeringCopy {
+	turnIndex: number;
+	beforeContentIndex?: number;
+}
+
+type AnsweredSteering = ReadonlyMap<number, AnsweredSteeringCopy>;
 
 function findAnsweredSteering(messages: Message[]): AnsweredSteering {
-	const answered = new Map<number, number>();
+	const answered = new Map<number, AnsweredSteeringCopy>();
 	for (const [turnIndex, message] of messages.entries()) {
 		if (message.role !== "assistant" || !message.answeredSteering) continue;
 		for (const copy of findSteeringCopies(messages, turnIndex, message.answeredSteering) ?? []) {
-			answered.set(copy, turnIndex);
+			answered.set(copy.copyIndex, { turnIndex, beforeContentIndex: copy.beforeContentIndex });
 		}
 	}
 	return answered;
 }
 
+function isTextOnlyMessage(message: UserMessage | DeveloperMessage): boolean {
+	return typeof message.content === "string" || message.content.every(part => part.type === "text");
+}
+
 /**
- * The host's copies of a turn's absorbed steering: the user or developer
- * messages that follow the turn (past its tool results and the passive context
- * its tools reported), one per absorbed text, in delivery order. Undefined when
- * they no longer match, e.g. after an edit or removal: the edited text is then
- * the user's newer input.
+ * The host's copies of a turn's absorbed steering: the text-only user or
+ * developer messages that follow the turn (past its tool results and the
+ * passive context its tools reported), one per absorbed entry, in delivery
+ * order. Undefined when they no longer match (e.g. edited text, added/replaced
+ * image, or removal): the edited copy is then the user's newer input.
  */
 function findSteeringCopies(
 	messages: Message[],
 	turnIndex: number,
-	answeredSteering: readonly string[],
-): number[] | undefined {
-	const copies: number[] = [];
+	answeredSteering: readonly AnsweredSteeringEntry[],
+): Array<{ copyIndex: number; beforeContentIndex?: number }> | undefined {
+	const copies: Array<{ copyIndex: number; beforeContentIndex?: number }> = [];
 	let index = turnIndex + 1;
-	for (const text of answeredSteering) {
-		while (index < messages.length && precedesSteeringCopy(messages[index], text)) index++;
+	for (const entry of answeredSteering) {
+		while (index < messages.length && precedesSteeringCopy(messages[index], entry.text)) index++;
 		const copy = messages[index];
 		if (index >= messages.length || (copy.role !== "user" && copy.role !== "developer")) return undefined;
-		if (extractUserMessageText(copy) !== text) return undefined;
-		copies.push(index++);
+		if (!isTextOnlyMessage(copy) || extractUserMessageText(copy) !== entry.text) return undefined;
+		copies.push({ copyIndex: index++, beforeContentIndex: entry.beforeContentIndex });
 	}
 	return copies;
 }
@@ -6517,7 +6530,7 @@ function precedesSteeringCopy(message: Message, steeringText: string): boolean {
 	return (
 		message.role === "developer" &&
 		message.attribution === "agent" &&
-		extractUserMessageText(message) !== steeringText
+		(!isTextOnlyMessage(message) || extractUserMessageText(message) !== steeringText)
 	);
 }
 
@@ -6536,7 +6549,8 @@ function resolveCursorRecordReplays(
 	answered: AnsweredSteering,
 ): Map<number, CursorRecordReplay> {
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const answeredTurns = new Set(answered.values());
+	const answeredTurns = new Set<number>();
+	for (const entry of answered.values()) answeredTurns.add(entry.turnIndex);
 	const replays = new Map<number, CursorRecordReplay>();
 	// The message a turn was recorded against, chosen as `withPromptLast` chooses
 	// it: a user prompt outranks developer context sent beside it.
@@ -6748,32 +6762,39 @@ interface CursorAssistantStep {
 	content: CursorRootPromptAssistantContentPart[];
 	/** Raw (un-normalized) ids of the calls this round issued, in order. */
 	callIds: string[];
+	/** Index in `AssistantMessage.content` of this step's first emitted item. */
+	startContentIndex: number;
 }
 
 /**
  * Split one assistant message into the model rounds it recorded. A Cursor
  * server turn persists as a single message whose tool calls interleave with
  * the text and reasoning that followed each result; a round ends at a call
- * followed by anything other than another call. Consecutive calls stay in one
- * round — they were issued together. Hidden reasoning still marks a boundary.
- * A call id repeated within the message — a re-dispatched exec frame recorded
- * before issue #15749 was fixed — is issued once; Cursor rejects a history that
- * repeats it.
+ * followed by anything other than another call, or at a recorded steering
+ * boundary. Consecutive calls stay in one round — they were issued together.
+ * Hidden reasoning still marks a boundary. A call id repeated within the
+ * message — a re-dispatched exec frame recorded before issue #15749 was fixed
+ * — is issued once; Cursor rejects a history that repeats it.
  */
-function buildCursorAssistantSteps(msg: AssistantMessage, targetModelId: string | undefined): CursorAssistantStep[] {
+function buildCursorAssistantSteps(
+	msg: AssistantMessage,
+	targetModelId: string | undefined,
+	steeringBoundaries?: ReadonlySet<number>,
+): CursorAssistantStep[] {
 	const steps: CursorAssistantStep[] = [];
-	let step: CursorAssistantStep = { content: [], callIds: [] };
+	let step: CursorAssistantStep = { content: [], callIds: [], startContentIndex: 0 };
 	const replayThinking = canReplayCursorThinking(msg, targetModelId);
 	const issuedCallIds = new Set<string>();
-	for (const item of msg.content) {
+	for (const [contentIndex, item] of msg.content.entries()) {
 		if (item.type === "toolCall") {
 			if (issuedCallIds.has(item.id)) continue;
 			issuedCallIds.add(item.id);
 		}
-		if (item.type !== "toolCall" && step.callIds.length > 0) {
+		if ((item.type !== "toolCall" || steeringBoundaries?.has(contentIndex)) && step.callIds.length > 0) {
 			steps.push(step);
-			step = { content: [], callIds: [] };
+			step = { content: [], callIds: [], startContentIndex: contentIndex };
 		}
+		if (step.content.length === 0) step.startContentIndex = contentIndex;
 		if (item.type === "text") {
 			if (item.text) step.content.push({ type: "text", text: item.text });
 		} else if (item.type === "thinking") {
@@ -6996,16 +7017,36 @@ function buildRootPromptMessagesJson(
 				for (const toolCallId of replay.toolCallIds) emittedResults.add(toolCallId);
 				continue;
 			}
-			const steps = buildCursorAssistantSteps(msg, targetModelId);
+			const turnSteering: Array<{ copyIndex: number; beforeContentIndex?: number }> = [];
+			let steeringBoundaries: Set<number> | undefined;
+			for (const [copyIndex, entry] of answered) {
+				if (entry.turnIndex !== i) continue;
+				turnSteering.push({ copyIndex, beforeContentIndex: entry.beforeContentIndex });
+				if (entry.beforeContentIndex !== undefined) {
+					(steeringBoundaries ??= new Set()).add(entry.beforeContentIndex);
+				}
+			}
+			const steps = buildCursorAssistantSteps(msg, targetModelId, steeringBoundaries);
+			// Place each absorbed steering right before the step that read it; entries
+			// without a recorded boundary fall back to the final step.
+			const steeringByStep = new Map<number, number[]>();
+			if (steps.length > 0) {
+				for (const { copyIndex, beforeContentIndex } of turnSteering) {
+					const targetStep =
+						beforeContentIndex === undefined
+							? steps.length - 1
+							: steps.findIndex(step => step.startContentIndex >= beforeContentIndex);
+					const resolvedStep = targetStep >= 0 ? targetStep : steps.length - 1;
+					const bucket = steeringByStep.get(resolvedStep);
+					if (bucket) bucket.push(copyIndex);
+					else steeringByStep.set(resolvedStep, [copyIndex]);
+				}
+			}
 			for (const [stepIndex, step] of steps.entries()) {
-				if (stepIndex === steps.length - 1) {
-					// Absorbed steering reached the model with an earlier round's results,
-					// and the final round answered it; the copies after the turn hold its text.
-					for (const [copy, turn] of answered) {
-						const steer = messages[copy];
-						if (turn === i && (steer.role === "user" || steer.role === "developer")) {
-							pushUserContent(steer.content);
-						}
+				for (const copy of steeringByStep.get(stepIndex) ?? []) {
+					const steer = messages[copy];
+					if (steer.role === "user" || steer.role === "developer") {
+						pushUserContent(steer.content);
 					}
 				}
 				pushJson({ role: "assistant", content: step.content });

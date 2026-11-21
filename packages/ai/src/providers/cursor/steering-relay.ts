@@ -1,5 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import type { LiveSteerClaim, LiveSteering, UserMessage } from "../../types";
+import type { AnsweredSteeringEntry, LiveSteerClaim, LiveSteering, UserMessage } from "../../types";
 
 /** Back-off when the source woke but had nothing deliverable (e.g. input still being prepared). */
 const EMPTY_CLAIM_BACKOFF_MS = 25;
@@ -11,8 +11,8 @@ const EMPTY_CLAIM_BACKOFF_MS = 25;
  * waiting for the whole turn to end.
  */
 export class CursorSteeringRelay {
-	/** Text of every steering message this turn absorbed, trimmed, in delivery order. */
-	readonly absorbed: string[] = [];
+	/** Steering this turn absorbed, trimmed, in delivery order, with each delivery's content boundary. */
+	readonly absorbed: AnsweredSteeringEntry[] = [];
 	readonly #stop = new AbortController();
 	readonly #run: Promise<void>;
 	#held: LiveSteerClaim | undefined;
@@ -23,14 +23,18 @@ export class CursorSteeringRelay {
 	}
 
 	/** The held steering as text, settled as answered by this turn; `undefined` when none is held. */
-	take(): string | undefined {
+	take(beforeContentIndex?: number): string | undefined {
 		const claim = this.#held;
 		if (!claim) return undefined;
 		this.#held = undefined;
 		claim.absorb();
 		this.#handedOver?.resolve();
 		const texts = claim.messages.map(messageText);
-		this.absorbed.push(...texts.map(text => text.trim()));
+		for (const text of texts) {
+			this.absorbed.push(
+				beforeContentIndex === undefined ? { text: text.trim() } : { text: text.trim(), beforeContentIndex },
+			);
+		}
 		return texts.join("\n\n");
 	}
 
