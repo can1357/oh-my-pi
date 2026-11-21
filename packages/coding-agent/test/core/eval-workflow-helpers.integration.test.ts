@@ -62,22 +62,20 @@ describe.skipIf(!SHOULD_RUN)("python eval workflow helpers", () => {
 		}
 	});
 
-	it("read() returns an artifact's full text and refuses artifact writes", async () => {
-		using tempDir = TempDir.createSync("@eval-workflow-artifact-");
-		const artifacts = path.join(tempDir.path(), "artifacts");
-		await Bun.write(path.join(artifacts, "12.eval.log"), `${"v".repeat(14_430)}\nsecond\nthird\n`);
+	it("read() returns a spill's full text from the local:// root", async () => {
+		using tempDir = TempDir.createSync("@eval-workflow-spill-");
+		const root = path.join(tempDir.path(), "local");
+		await Bun.write(path.join(root, "12.log"), `${"v".repeat(14_430)}\nsecond\nthird\n`);
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
 		try {
 			const code = [
-				"print('LEN', len(read('artifact://12')))",
-				"print('LINE', read('artifact://12', offset=2, limit=1).strip())",
-				"try:\n    write('artifact://12', 'x')\nexcept ValueError as e:\n    print('REFUSED', e)",
+				"print('LEN', len(read('local://12.log')))",
+				"print('LINE', read('local://12.log', offset=2, limit=1).strip())",
 			].join("\n");
-			const result = await executePythonWithKernel(kernel, code, { localRoots: { artifact: artifacts } });
+			const result = await executePythonWithKernel(kernel, code, { localRoots: { local: root } });
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain("LEN 14444");
 			expect(result.output).toContain("LINE second");
-			expect(result.output).toContain("REFUSED Protocol paths are not supported");
 		} finally {
 			await kernel.shutdown();
 		}

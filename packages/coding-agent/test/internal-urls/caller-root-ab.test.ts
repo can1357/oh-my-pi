@@ -29,6 +29,7 @@ import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/sessi
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { ShellFsOp } from "@oh-my-pi/pi-natives";
+import { resourceText } from "../helpers/resource-text";
 
 function sessionHeader(id: string): string {
 	return JSON.stringify({
@@ -269,7 +270,7 @@ describe("internal URL tools resolve against the caller root (A/B same ids)", ()
 
 		const router = InternalUrlRouter.instance();
 		const resource = await router.resolve("agent://Worker/count", { sessionFile: rootA });
-		expect(JSON.parse(resource.content)).toBe(1);
+		expect(JSON.parse(resourceText(resource))).toBe(1);
 		expect(resource.sourcePath?.endsWith(path.join("a", "main", "Worker.md"))).toBe(true);
 	});
 });

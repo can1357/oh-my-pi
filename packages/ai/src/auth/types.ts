@@ -353,7 +353,7 @@ export type AuthStorageOptions = {
 	usageLogger?: UsageLogger;
 	/**
 	 * Resolve a config value (API key, header value, etc.) to an actual value.
-	 * - coding-agent injects its resolveConfigValue (supports "!command" syntax via pi-natives)
+	 * - coding-agent injects its resolveConfigValue (supports "!command" syntax via omp-natives)
 	 * - Default: checks environment variable first, then treats as literal
 	 */
 	configValueResolver?: (config: string) => Promise<string | undefined>;

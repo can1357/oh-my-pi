@@ -1,8 +1,8 @@
 import { scheduler } from "node:timers/promises";
 import { isSqliteBusyError, logger, postmortem } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
-import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
+import { normalizeOAuthCredentialExpiry, refreshProviderOAuthToken } from "../registry/oauth";
+import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent, redactCredentialForWire } from "./pool";
@@ -1107,18 +1107,7 @@ export class OAuthRefresher {
 		if (overrideRefresh && credentialId !== undefined) {
 			refreshPromise = overrideRefresh(provider, credentialId, credential, signal, reason);
 		} else {
-			const customProvider = getOAuthProvider(provider);
-			if (customProvider) {
-				if (!customProvider.refreshToken) {
-					throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
-						kind: "configuration",
-						provider,
-					});
-				}
-				refreshPromise = customProvider.refreshToken(credential, signal, reason);
-			} else {
-				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal, reason);
-			}
+			refreshPromise = refreshProviderOAuthToken(provider, credential, signal, reason);
 		}
 		// Stop awaiting after `timeoutMs` or on `signal`. Leased exchanges pass no
 		// timeout: `refreshStored` stops its caller waiting without dropping the

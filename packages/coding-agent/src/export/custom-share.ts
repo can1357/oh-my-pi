@@ -7,6 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { assertBunCanImport } from "../extensibility/module-path";
 
 export interface CustomShareResult {
 	/** URL to display/open (optional - script may handle everything itself) */
@@ -50,6 +51,7 @@ export async function loadCustomShare(): Promise<LoadedCustomShare | null> {
 	}
 
 	try {
+		await assertBunCanImport(scriptPath);
 		const module = await import(scriptPath);
 		const fn = module.default;
 

@@ -847,12 +847,13 @@ func (v PythonExecutionMessage) MarshalJSON() ([]byte, error) {
 }
 
 type CustomMessage struct {
-	CustomType  string          `json:"customType"`
-	Content     MessageContent  `json:"content"`
-	Display     bool            `json:"display"`
-	Timestamp   float64         `json:"timestamp"`
-	Details     json.RawMessage `json:"details,omitempty"`
-	Attribution *Attribution    `json:"attribution,omitempty"`
+	CustomType         string          `json:"customType"`
+	Content            MessageContent  `json:"content"`
+	Display            bool            `json:"display"`
+	Timestamp          float64         `json:"timestamp"`
+	Details            json.RawMessage `json:"details,omitempty"`
+	Attribution        *Attribution    `json:"attribution,omitempty"`
+	ExcludeFromContext *bool           `json:"excludeFromContext,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -872,6 +873,7 @@ func (v *CustomMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("timestamp", &out.Timestamp)
 	d.optional("details", &out.Details)
 	d.optional("attribution", &out.Attribution)
+	d.optional("excludeFromContext", &out.ExcludeFromContext)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err
@@ -2531,19 +2533,23 @@ func (v *UsageLimitState) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type SessionState struct {
-	SessionID             string         `json:"sessionId"`
-	Model                 *ModelInfo     `json:"model,omitempty"`
-	ThinkingLevel         *ThinkingLevel `json:"thinkingLevel,omitempty"`
-	IsStreaming           bool           `json:"isStreaming"`
-	IsCompacting          bool           `json:"isCompacting"`
-	SteeringMode          QueueMode      `json:"steeringMode"`
-	FollowUpMode          QueueMode      `json:"followUpMode"`
-	InterruptMode         InterruptMode  `json:"interruptMode"`
-	SessionFile           *string        `json:"sessionFile,omitempty"`
-	SessionName           *string        `json:"sessionName,omitempty"`
-	AutoCompactionEnabled bool           `json:"autoCompactionEnabled"`
-	FastModeEnabled       bool           `json:"fastModeEnabled"`
-	FastModeActive        bool           `json:"fastModeActive"`
+	SessionID     string         `json:"sessionId"`
+	Model         *ModelInfo     `json:"model,omitempty"`
+	ThinkingLevel *ThinkingLevel `json:"thinkingLevel,omitempty"`
+	// The user's thinking selector: `auto` while auto mode picks the effort, else `thinkingLevel`.
+	ConfiguredThinkingLevel *ConfiguredThinkingLevel `json:"configuredThinkingLevel,omitempty"`
+	// Selectors the active model accepts, as omp's thinking selector lists them: `off`, `auto`, then its efforts.
+	ThinkingLevels        []ConfiguredThinkingLevel `json:"thinkingLevels,omitempty"`
+	IsStreaming           bool                      `json:"isStreaming"`
+	IsCompacting          bool                      `json:"isCompacting"`
+	SteeringMode          QueueMode                 `json:"steeringMode"`
+	FollowUpMode          QueueMode                 `json:"followUpMode"`
+	InterruptMode         InterruptMode             `json:"interruptMode"`
+	SessionFile           *string                   `json:"sessionFile,omitempty"`
+	SessionName           *string                   `json:"sessionName,omitempty"`
+	AutoCompactionEnabled bool                      `json:"autoCompactionEnabled"`
+	FastModeEnabled       bool                      `json:"fastModeEnabled"`
+	FastModeActive        bool                      `json:"fastModeActive"`
 	// `/slow` applies to the active model.
 	SlowModeSupported bool `json:"slowModeSupported"`
 	// `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.
@@ -2579,6 +2585,8 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("sessionId", &out.SessionID)
 	d.optional("model", &out.Model)
 	d.optional("thinkingLevel", &out.ThinkingLevel)
+	d.optional("configuredThinkingLevel", &out.ConfiguredThinkingLevel)
+	d.optional("thinkingLevels", &out.ThinkingLevels)
 	d.defaulted("isStreaming", &out.IsStreaming, `false`)
 	d.defaulted("isCompacting", &out.IsCompacting, `false`)
 	d.defaulted("steeringMode", &out.SteeringMode, `"one-at-a-time"`)
@@ -2772,6 +2780,99 @@ func (v *CompactionResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("details", &out.Details)
 	d.optional("preserveData", &out.PreserveData)
 	d.optional("providerReplayThroughEntryId", &out.ProviderReplayThroughEntryID)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// A role a model holds, as picker rows chip it.
+type ModelPickerRole struct {
+	Role string `json:"role"`
+	// The role's display tag.
+	Label string `json:"label"`
+	// Auto-selected: the role has no configured model.
+	Auto *bool `json:"auto,omitempty"`
+}
+
+func (v *ModelPickerRole) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ModelPickerRole", v.decodeFrom)
+}
+
+func (v *ModelPickerRole) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ModelPickerRole
+	d := fieldDecoder{raw: raw, owner: "ModelPickerRole"}
+	d.required("role", &out.Role)
+	d.required("label", &out.Label)
+	d.optional("auto", &out.Auto)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// One row of omp's session model picker.
+type ModelPickerRow struct {
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	// The quick role this row applies (`@` search); pass it to `set_model`.
+	Role *string `json:"role,omitempty"`
+	// Visible roles the model holds, built-in order first.
+	Roles []ModelPickerRole `json:"roles,omitempty"`
+	// Steps of the model's thinking slider, low to high: `auto`, `off`, then its efforts. Absent when it has no effort to pick.
+	Thinking []ConfiguredThinkingLevel `json:"thinking,omitempty"`
+	// Model rows: the session's level as this model would run it (the untouched slider). Quick-role rows: the role's explicit level, which `set_model` should carry.
+	ThinkingLevel *ConfiguredThinkingLevel `json:"thinkingLevel,omitempty"`
+	// The session's context exceeds the model's window.
+	OverContext *bool `json:"overContext,omitempty"`
+	// The session runs this row: its model, or under `@` its active quick role.
+	Current *bool `json:"current,omitempty"`
+}
+
+func (v *ModelPickerRow) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ModelPickerRow", v.decodeFrom)
+}
+
+func (v *ModelPickerRow) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ModelPickerRow
+	d := fieldDecoder{raw: raw, owner: "ModelPickerRow"}
+	d.required("provider", &out.Provider)
+	d.required("id", &out.ID)
+	d.required("name", &out.Name)
+	d.optional("role", &out.Role)
+	d.optional("roles", &out.Roles)
+	d.optional("thinking", &out.Thinking)
+	d.optional("thinkingLevel", &out.ThinkingLevel)
+	d.optional("overContext", &out.OverContext)
+	d.optional("current", &out.Current)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type ModelPickerResult struct {
+	Rows []ModelPickerRow `json:"rows"`
+	// Leading rows that are recently used or role-held (the picker's Recent block); 0 when there is no such split.
+	Recent int64 `json:"recent"`
+	// Matching rows before `limit`.
+	Total int64 `json:"total"`
+}
+
+func (v *ModelPickerResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ModelPickerResult", v.decodeFrom)
+}
+
+func (v *ModelPickerResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ModelPickerResult
+	d := fieldDecoder{raw: raw, owner: "ModelPickerResult"}
+	d.required("rows", &out.Rows)
+	d.required("recent", &out.Recent)
+	d.required("total", &out.Total)
 	if d.err != nil {
 		return d.err
 	}
@@ -3613,6 +3714,26 @@ func (v *CacheWarmingPhase) UnmarshalJSON(data []byte) error {
 	return unknownValue("CacheWarmingPhase", s)
 }
 
+type CacheWarmingMethod string
+
+const (
+	CacheWarmingMethodPrewarm CacheWarmingMethod = "prewarm"
+	CacheWarmingMethodReplay  CacheWarmingMethod = "replay"
+)
+
+func (v *CacheWarmingMethod) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "CacheWarmingMethod")
+	if err != nil {
+		return err
+	}
+	switch value := CacheWarmingMethod(s); value {
+	case CacheWarmingMethodPrewarm, CacheWarmingMethodReplay:
+		*v = value
+		return nil
+	}
+	return unknownValue("CacheWarmingMethod", s)
+}
+
 type CacheWarmingOutcome string
 
 const (
@@ -4044,7 +4165,7 @@ func (v AutoCompactionEndEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"auto_compaction_end"`, nil)
 }
 
-// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+// A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle.
 type ManualCompactionStartEvent struct {
 	// The `/compact <mode>` subcommand, when one was given.
 	Mode *string `json:"mode,omitempty"`
@@ -4173,9 +4294,10 @@ func (v AutoRetryEndEvent) MarshalJSON() ([]byte, error) {
 
 // A prompt-cache refresh was handed to the provider.
 type CacheWarmingStartEvent struct {
-	Phase    CacheWarmingPhase `json:"phase"`
-	Provider string            `json:"provider"`
-	Model    string            `json:"model"`
+	Phase    CacheWarmingPhase  `json:"phase"`
+	Method   CacheWarmingMethod `json:"method"`
+	Provider string             `json:"provider"`
+	Model    string             `json:"model"`
 }
 
 func (v *CacheWarmingStartEvent) UnmarshalJSON(data []byte) error {
@@ -4187,6 +4309,7 @@ func (v *CacheWarmingStartEvent) decodeFrom(raw map[string]json.RawMessage) erro
 	d := fieldDecoder{raw: raw, owner: "CacheWarmingStartEvent"}
 	d.constant("type", "cache_warming_start")
 	d.required("phase", &out.Phase)
+	d.required("method", &out.Method)
 	d.required("provider", &out.Provider)
 	d.required("model", &out.Model)
 	if d.err != nil {
@@ -4204,6 +4327,7 @@ func (v CacheWarmingStartEvent) MarshalJSON() ([]byte, error) {
 // Outcome of the refresh announced by the matching `cache_warming_start`.
 type CacheWarmingEndEvent struct {
 	Phase    CacheWarmingPhase   `json:"phase"`
+	Method   CacheWarmingMethod  `json:"method"`
 	Provider string              `json:"provider"`
 	Model    string              `json:"model"`
 	Outcome  CacheWarmingOutcome `json:"outcome"`
@@ -4222,6 +4346,7 @@ func (v *CacheWarmingEndEvent) decodeFrom(raw map[string]json.RawMessage) error 
 	d := fieldDecoder{raw: raw, owner: "CacheWarmingEndEvent"}
 	d.constant("type", "cache_warming_end")
 	d.required("phase", &out.Phase)
+	d.required("method", &out.Method)
 	d.required("provider", &out.Provider)
 	d.required("model", &out.Model)
 	d.required("outcome", &out.Outcome)
@@ -5886,6 +6011,37 @@ func (v AskUiRequest) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_request","method":"ask"`, nil)
 }
 
+// The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.
+type FormUiRequest struct {
+	ID      string `json:"id"`
+	HTML    string `json:"html"`
+	Timeout *int64 `json:"timeout,omitempty"`
+}
+
+func (v *FormUiRequest) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "FormUiRequest", v.decodeFrom)
+}
+
+func (v *FormUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
+	var out FormUiRequest
+	d := fieldDecoder{raw: raw, owner: "FormUiRequest"}
+	d.constant("type", "extension_ui_request")
+	d.required("id", &out.ID)
+	d.constant("method", "form")
+	d.required("html", &out.HTML)
+	d.optional("timeout", &out.Timeout)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v FormUiRequest) MarshalJSON() ([]byte, error) {
+	type plain FormUiRequest
+	return encodeObject(plain(v), `"type":"extension_ui_request","method":"form"`, nil)
+}
+
 // Close the dialog opened by request `targetId`; a later answer to it is ignored.
 type CancelUiRequest struct {
 	ID       string `json:"id"`
@@ -6112,6 +6268,7 @@ func (ConfirmUiRequest) isExtensionUiRequest()       {}
 func (InputUiRequest) isExtensionUiRequest()         {}
 func (EditorUiRequest) isExtensionUiRequest()        {}
 func (AskUiRequest) isExtensionUiRequest()           {}
+func (FormUiRequest) isExtensionUiRequest()          {}
 func (CancelUiRequest) isExtensionUiRequest()        {}
 func (NotifyUiRequest) isExtensionUiRequest()        {}
 func (SetStatusUiRequest) isExtensionUiRequest()     {}
@@ -6145,6 +6302,8 @@ func (v *ExtensionUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[EditorUiRequest](raw)
 	case "ask":
 		value, err = decodeVariant[AskUiRequest](raw)
+	case "form":
+		value, err = decodeVariant[FormUiRequest](raw)
 	case "cancel":
 		value, err = decodeVariant[CancelUiRequest](raw)
 	case "notify":
@@ -6249,7 +6408,7 @@ func (v ConfirmUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
 }
 
-// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers).
+// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults).
 type CancelUiResponse struct {
 	ID       string `json:"id"`
 	TimedOut *bool  `json:"timedOut,omitempty"`
@@ -6306,6 +6465,35 @@ func (v AnswersUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
 }
 
+// Answers a `form` request with the submitted form data.
+type DataUiResponse struct {
+	ID string `json:"id"`
+	// Submitted values by control `name`: a string, a number, or a string array.
+	Data map[string]json.RawMessage `json:"data"`
+}
+
+func (v *DataUiResponse) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DataUiResponse", v.decodeFrom)
+}
+
+func (v *DataUiResponse) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DataUiResponse
+	d := fieldDecoder{raw: raw, owner: "DataUiResponse"}
+	d.constant("type", "extension_ui_response")
+	d.required("id", &out.ID)
+	d.required("data", &out.Data)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DataUiResponse) MarshalJSON() ([]byte, error) {
+	type plain DataUiResponse
+	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
+}
+
 // Host reply to an extension UI request; variants share `type` and differ by their payload key.
 type ExtensionUiResponse struct {
 	// Value holds one variant. Encode-only: no discriminator tells the variants apart.
@@ -6321,6 +6509,7 @@ func (ValueUiResponse) isExtensionUiResponse()   {}
 func (ConfirmUiResponse) isExtensionUiResponse() {}
 func (CancelUiResponse) isExtensionUiResponse()  {}
 func (AnswersUiResponse) isExtensionUiResponse() {}
+func (DataUiResponse) isExtensionUiResponse()    {}
 
 func (v ExtensionUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeVariant("ExtensionUiResponse", v.Value)
@@ -6673,6 +6862,7 @@ func (ValueUiResponse) isRpcInbound()   {}
 func (ConfirmUiResponse) isRpcInbound() {}
 func (CancelUiResponse) isRpcInbound()  {}
 func (AnswersUiResponse) isRpcInbound() {}
+func (DataUiResponse) isRpcInbound()    {}
 func (HostToolUpdate) isRpcInbound()    {}
 func (HostToolResult) isRpcInbound()    {}
 func (HostUriResult) isRpcInbound()     {}
@@ -7224,6 +7414,25 @@ func (v *NegotiateProtocolResult) decodeFrom(raw map[string]json.RawMessage) err
 	var out NegotiateProtocolResult
 	d := fieldDecoder{raw: raw, owner: "NegotiateProtocolResult"}
 	d.required("protocolVersion", &out.ProtocolVersion)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type AbortAndDeliverQueueResult struct {
+	Aborted bool `json:"aborted"`
+}
+
+func (v *AbortAndDeliverQueueResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "AbortAndDeliverQueueResult", v.decodeFrom)
+}
+
+func (v *AbortAndDeliverQueueResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out AbortAndDeliverQueueResult
+	d := fieldDecoder{raw: raw, owner: "AbortAndDeliverQueueResult"}
+	d.required("aborted", &out.Aborted)
 	if d.err != nil {
 		return d.err
 	}
@@ -7909,6 +8118,18 @@ func (c Commands) AbortAndRestoreQueue(ctx context.Context) (AbortAndRestoreQueu
 	return out, err
 }
 
+// AbortAndDeliverQueue sends "abort_and_deliver_queue": Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input.
+func (c Commands) AbortAndDeliverQueue(ctx context.Context) (AbortAndDeliverQueueResult, error) {
+	var out AbortAndDeliverQueueResult
+	err := c.call(ctx, "abort_and_deliver_queue", nil, 0, &out)
+	return out, err
+}
+
+// Resume sends "resume": Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way.
+func (c Commands) Resume(ctx context.Context) error {
+	return c.call(ctx, "resume", nil, 0, nil)
+}
+
 // NewSessionCommand holds the parameters of "new_session".
 type NewSessionCommand struct {
 	ParentSession *string `json:"parentSession,omitempty"`
@@ -8187,6 +8408,10 @@ func (c Commands) DictationStop(ctx context.Context) (string, error) {
 type SetModelCommand struct {
 	Provider string `json:"provider"`
 	ModelID  string `json:"modelId"`
+	// Thinking level to run the model at, clamped to it; omitted re-applies the session's level.
+	ThinkingLevel *ConfiguredThinkingLevel `json:"thinkingLevel,omitempty"`
+	// Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted.
+	Role *string `json:"role,omitempty"`
 }
 
 // SetModel sends "set_model": Select a model by provider and id.
@@ -8210,9 +8435,25 @@ func (c Commands) GetAvailableModels(ctx context.Context) ([]ModelInfo, error) {
 	return out.Models, err
 }
 
+// GetModelPickerCommand holds the parameters of "get_model_picker".
+type GetModelPickerCommand struct {
+	// Search text; blank browses every model, `provider/` limits matches to a provider.
+	Query *string `json:"query,omitempty"`
+	// Most rows to return; default 100.
+	Limit *int64 `json:"limit,omitempty"`
+}
+
+// GetModelPicker sends "get_model_picker": Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles.
+func (c Commands) GetModelPicker(ctx context.Context, p GetModelPickerCommand) (ModelPickerResult, error) {
+	var out ModelPickerResult
+	err := c.call(ctx, "get_model_picker", p, 0, &out)
+	return out, err
+}
+
 // SetThinkingLevelCommand holds the parameters of "set_thinking_level".
 type SetThinkingLevelCommand struct {
-	Level ThinkingLevel `json:"level"`
+	// `auto` lets omp pick the effort per turn.
+	Level ConfiguredThinkingLevel `json:"level"`
 }
 
 // SetThinkingLevel sends "set_thinking_level": Set the thinking level.

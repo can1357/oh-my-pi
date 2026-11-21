@@ -63,18 +63,18 @@ await sh(command, { cwd?, timeout? })  await sh`cmd ${arg}` — embedded bash en
 {{else}}
 <namespaces>
 More globals; `read` the linked docs before first use:
-- `judge`, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, `completion`: classification, bulk judgment, model calls → xd://eval/judge
-- `%load`{{#if py}}, `%pip`{{/if}}{{#if js}}, `%bun add`{{/if}}, `budget`{{#if evalTools}}, `@tool`/`tool(fn)`{{/if}}: setup, installs, utilities → xd://eval/helpers
+- `judge`, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, `completion`: classification, bulk judgment, model calls → help://eval/judge
+- `%load`{{#if py}}, `%pip`{{/if}}{{#if js}}, `%bun add`{{/if}}, `budget`{{#if evalTools}}, `@tool`/`tool(fn)`{{/if}}: setup, installs, utilities → help://eval/helpers
 {{#if spawns}}
-- `agent`, `workpool`: background subagents, DAG waves → xd://eval/agents
+- `agent`, `workpool`: background subagents, DAG waves → help://eval/agents
 {{/if}}
 {{#each preludes}}
-- `{{name}}`: {{summary}} → xd://eval/{{name}}
+- `{{name}}`{{#if summary}}: {{summary}}{{/if}} → help://eval/{{name}}
 {{/each}}
 {{#if firstCallPreludes}}
 No `read` needed before first use; the guide follows the first call's result (full reference linked):
 {{#each firstCallPreludes}}
-- `{{name}}`: {{summary}} → `xd://eval/{{name}}`
+- `{{name}}`{{#if summary}}: {{summary}}{{/if}} → `help://eval/{{name}}`
 {{/each}}
 {{/if}}
 </namespaces>

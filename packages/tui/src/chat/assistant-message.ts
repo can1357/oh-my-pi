@@ -31,7 +31,7 @@ import { Memo } from "../native/memo";
 import { DEFAULT_SPINNER_INTERVAL_MS, spinnerAnimated, spinnerInterval } from "../spinner-clock";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
-import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "../png-conversion";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
 import { resolveAssistantErrorPresentation } from "./transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";

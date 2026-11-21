@@ -4940,10 +4940,14 @@ describe("AgentSession retry fallback", () => {
 			expect(answer.content).toEqual([{ type: "text", text: "Claude answer" }]);
 		});
 
-		it("walks the fallback chain without a same-model retry when the refused request carried no reasoning", async () => {
-			const { requests } = await promptThroughRefusals([reasoningRefusal(undefined)]);
+		it("resamples a mid-stream refusal that carried no reasoning once, then walks the fallback chain", async () => {
+			const { requests } = await promptThroughRefusals([reasoningRefusal(undefined), reasoningRefusal(undefined)]);
 
-			expect(requests).toEqual(["anthropic/claude-sonnet-4-5 omit=false", "openai/gpt-4o-mini omit=false"]);
+			expect(requests).toEqual([
+				"anthropic/claude-sonnet-4-5 omit=false",
+				"anthropic/claude-sonnet-4-5 omit=false",
+				"openai/gpt-4o-mini omit=false",
+			]);
 		});
 
 		it("walks the fallback chain when the refusal outlives the strip", async () => {

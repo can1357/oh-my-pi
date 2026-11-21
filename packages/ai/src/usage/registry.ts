@@ -8,7 +8,6 @@ import { commandCodeRankingStrategy, commandCodeUsageProvider } from "./commandc
 import { cursorRankingStrategy, cursorUsageProvider } from "./cursor";
 import { devinUsageProvider } from "./devin";
 import { factoryDroidRankingStrategy, factoryDroidUsageProvider } from "./factory-droid";
-import { googleGeminiCliUsageProvider } from "./gemini";
 import { githubCopilotUsageProvider } from "./github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
@@ -34,7 +33,6 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	minimaxCodeUsageProvider,
 	museCodeUsageProvider,
 	antigravityUsageProvider,
-	googleGeminiCliUsageProvider,
 	ollamaUsageProvider,
 	factoryDroidUsageProvider,
 	ollamaCloudUsageProvider,

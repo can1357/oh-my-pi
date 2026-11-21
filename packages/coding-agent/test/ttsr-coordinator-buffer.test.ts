@@ -1,6 +1,6 @@
 import { describe, expect, it, type Mock, vi } from "bun:test";
-import type { Agent, AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
+import type { AfterToolCallContext, Agent, AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@oh-my-pi/pi-ai";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
@@ -380,6 +380,27 @@ describe("TTSR stream buffers", () => {
 
 		const isTrigger = (event: AgentSessionEvent): boolean => event.type === "ttsr_triggered";
 		expect(emitSessionEvent.mock.calls.filter(([event]) => isTrigger(event))).toHaveLength(1);
+	});
+
+	it("reminds a tool call of a non-interrupting rule when its toolcall_end never arrived", async () => {
+		const { host } = makeHost();
+		const manager = new TtsrManager({ enabled: true, contextMode: "discard", interruptMode: "never" });
+		expect(manager.addRule(makeRule("tool:bash"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call-1",
+			name: "bash",
+			arguments: { command: `echo ${CONDITION}` },
+		};
+		const message = assistantMessage([toolCall]);
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(toolDelta(message, JSON.stringify(toolCall.arguments)));
+		coordinator.onAssistantMessageEnd({ ...message, stopReason: "toolUse" } as AssistantMessage);
+
+		const result = coordinator.afterToolCall({ toolCall } as AfterToolCallContext);
+		expect(result?.additionalContext).toContain("Test reminder");
 	});
 });
 

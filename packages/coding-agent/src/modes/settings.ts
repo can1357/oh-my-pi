@@ -393,19 +393,6 @@ export const cfgTuiResizeScrollback = register({
 	},
 });
 
-export const cfgTuiCompleteScrollback = register({
-	id: "tui.completeScrollback",
-	type: "boolean",
-	default: false,
-	ui: {
-		tab: "appearance",
-		group: "Display",
-		label: "Complete Scrollback",
-		description:
-			"Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback; when it shrinks, blank rows sit between the transcript and the input until new output fills them",
-	},
-});
-
 export const cfgTerminalShowProgress = register({
 	id: "terminal.showProgress",
 	type: "boolean",
@@ -1184,7 +1171,7 @@ export const cfgSpellingAutocomplete = register({
 export const cfgComposerPredictions = register({
 	id: "composer.predictions",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "interaction",
 		group: "Input",
@@ -1480,6 +1467,19 @@ export const cfgAskNotify = register({
 		group: "Notifications",
 		label: "Ask Notification",
 		description: "Notify when the ask tool is waiting for input",
+	},
+});
+
+export const cfgPtyNotify = register({
+	id: "pty.notify",
+	type: "enum",
+	values: ["on", "off"] as const,
+	default: "on",
+	ui: {
+		tab: "interaction",
+		group: "Notifications",
+		label: "Console Notification",
+		description: "Notify when an interactive console (bash `pty`) is waiting on you",
 	},
 });
 

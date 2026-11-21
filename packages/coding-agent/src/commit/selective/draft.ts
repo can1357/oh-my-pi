@@ -3,9 +3,12 @@
  *
  * {@link createDraft} reads every changed path of the repository (HEAD vs worktree), attributes
  * its change lines to agents from the session's {@link ChangeJournal}, and preselects the lines
- * of the agents in scope. The calling agent reviews what the journal could not decide, adjusts
- * the selection with {@link Draft.take}/{@link Draft.drop}/{@link Draft.only}, and hands
- * {@link Draft.selection} to `apply.ts`, which commits exactly that content.
+ * of the agents in scope. Only writes of the edit tools and of the shell's own builtins and
+ * redirections are journaled: whatever a spawned program (a script, a formatter) or the user
+ * changed is unrecorded and never preselected. The calling agent adds the unrecorded
+ * changes that belong to its work and settles what the journal could not decide with
+ * {@link Draft.take}/{@link Draft.drop}/{@link Draft.only}, and hands {@link Draft.selection} to
+ * `apply.ts`, which commits exactly that content.
  *
  * Scope: by default the calling agent plus its subagents; `"self"` for the caller alone, `"*"`
  * for every agent of the session, or agent ids (each with its own subagents).
@@ -27,28 +30,32 @@ import {
 	GAP,
 	type Hunk,
 	historySteps,
+	isPseudoActor,
 	PRE,
 	type RecordedEdit,
+	REORDERED,
 	type ReviewReason,
 	TAIL,
 	toLines,
 	UNRECORDED,
 } from "./attribution";
-import type { CallRecord, ChangeJournal, ChangeRecord } from "./journal";
+import type { ChangeJournal, ChangeRecord } from "./journal";
 import { formatTextPatch } from "./patch";
 
 /** Files above this size are selected whole, without line attribution. */
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
 /** Git mode of a symlink. */
 const SYMLINK_MODE = "120000";
-/** Tolerance when matching a file's ctime to a tool call window (event and fs clock skew). */
-const WINDOW_SLACK_MS = 1500;
-/** Path-like runs of a call script; anything else (space, quotes, `=`, `,`, glob characters) separates them. */
-const PATH_TOKEN = /[\p{L}\p{N}_.+@/-]+/gu;
 /** Concurrent file reads while building a draft. */
 const READ_CONCURRENCY = 16;
+/** First-parent commits walked back from HEAD to find where it was when recording began. */
+const RECENT_COMMIT_LIMIT = 256;
+/** Author dates have whole seconds; a commit in the same second as a record counts as after it. */
+const COMMIT_DATE_SLACK_MS = 1000;
 /** Display cap for one change line. */
 const LINE_DISPLAY_CHARS = 160;
+/** Unrecorded paths the summary names; the rest are counted. */
+const UNRECORDED_LIST_LIMIT = 12;
 
 /** Scope selector: `undefined` → caller + subagents; `"self"`; `"*"`; agent id(s), each with its subagents. */
 export type ScopeSpec = string | readonly string[] | undefined;
@@ -101,28 +108,22 @@ interface FileChange {
 	headMode: string | null;
 	/** Git mode in the worktree; `null` when the file is deleted. */
 	mode: string | null;
-	/** Set exactly when `attribution` is absent: the file selects whole. */
+	/** Set exactly when the change has no line attribution: the file selects whole. */
 	whole?: WholeReason;
-	/** Line attribution of the content change. */
+	/**
+	 * Line attribution of the content change, kept only when recorded edits shaped it. A file no
+	 * usable record explains is one unrecorded step from `head` to `work`, which
+	 * {@link lineAttribution} rebuilds on use: kept for every untracked file of a worktree, its
+	 * per-line objects cost tens of times the files' size.
+	 */
 	attribution?: Attribution;
+	/** Line counts of every change op; zero for a whole-file change. */
+	counts: Counts;
 	classification?: Classification;
 	selected: Set<number>;
 	wholeSelected: boolean;
 	/** Agents with recorded edits of this path. */
 	editors: string[];
-	/**
-	 * For a file no usable record explains: the call whose window covers its last change, or, once
-	 * the file is deleted (`mode: null`), the call whose script names it.
-	 */
-	hint?: CallRecord;
-}
-
-/** In-scope calls that may explain a change no edit record covers; built by {@link createDraft}. */
-interface CallEvidence {
-	/** The single in-scope call whose window covers `ms`; none when out-of-scope calls overlap too. */
-	during(ms: number | undefined): CallRecord | undefined;
-	/** The latest in-scope call whose script names deleted `file`; none when an out-of-scope call names it too. */
-	naming(file: string): Promise<CallRecord | undefined>;
 }
 
 /**
@@ -147,49 +148,21 @@ function actorName(actor: string): string {
 		case GAP:
 		case TAIL:
 		case UNRECORDED:
+		case REORDERED:
 			return "unrecorded";
 		default:
 			return actor;
 	}
 }
 
-function clock(ms: number): string {
-	const date = new Date(ms);
-	return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function describeCall(call: CallRecord): string {
-	return `${call.agent}'s ${call.tool} \`${call.label}\` (${clock(call.end)})`;
-}
-
-/** How `hint` ties a file no edit record explains to a call; see {@link FileChange.hint}. */
-function describeHint(file: FileChange, hint: CallRecord): string {
-	return file.mode === null ? `deleted; named in ${describeCall(hint)}` : `modified during ${describeCall(hint)}`;
-}
-
-/** Path-like tokens of a script, without `./` prefixes or trailing slashes: `rm -r ./src/old/` names `src/old`. */
-function pathTokens(script: string): Set<string> {
-	const tokens = new Set<string>();
-	for (const [token] of script.matchAll(PATH_TOKEN)) {
-		const trimmed = token.replace(/^(?:\.\/)+|\/+$/g, "");
-		if (trimmed) tokens.add(trimmed);
-	}
-	return tokens;
-}
-
-/**
- * Tokens a script may spell repo-relative `file` with: absolute under any of `roots`, or any
- * trailing run of its segments, since the script may have run (or `cd`ed) anywhere above it.
- */
-function spellings(file: string, roots: readonly string[]): string[] {
-	const segments = file.split("/");
-	return [...roots.map(root => path.join(root, file)), ...segments.map((_, index) => segments.slice(index).join("/"))];
-}
-
 function describeReason(reason: ReviewReason): string {
 	switch (reason.kind) {
+		case "reordered":
+			return "replayed edits disagree with the HEAD-to-worktree diff after a reorder; review the net change";
 		case "entangled":
 			return `edits lines added by ${reason.with.map(actorName).join(", ")} that were never committed`;
+		case "placement":
+			return `placement depends on an uncommitted replacement by ${reason.with.map(actorName).join(", ")}`;
 		case "rewritten":
 			return reason.by === GAP || reason.by === TAIL
 				? `in-scope lines rewritten afterwards by an unrecorded change${reason.by === GAP ? " before a later edit" : ""}`
@@ -255,26 +228,15 @@ function resolveScope(spec: ScopeSpec, caller: string, parents: Map<string, stri
 	return subtree(ids, children);
 }
 
-/** Recorded edit history of one file, as consecutive content snapshots; `undefined` when unusable. */
-async function loadEdits(
-	journal: ChangeJournal,
-	records: readonly ChangeRecord[],
-	calls: CallEvidence,
-): Promise<RecordedEdit[] | undefined> {
-	const edits: RecordedEdit[] = [];
-	for (const record of records) {
-		if (record.before === undefined || record.after === undefined) return undefined;
-		const before = record.before === null ? null : await journal.blob(record.before);
-		const after = record.after === null ? null : await journal.blob(record.after);
-		if (before === undefined || after === undefined) return undefined;
-		edits.push({
-			actor: record.agent,
-			before: toLines(before),
-			after: toLines(after),
-			gapHint: edits.length > 0 ? calls.during(record.beforeMtimeMs)?.agent : undefined,
-		});
-	}
-	return edits;
+/**
+ * A changed text-or-binary file whose worktree bytes and recorded snapshots still need converting to
+ * their git form (EOL attributes, `core.autocrlf`, clean filters such as Git LFS), as `git add` would.
+ */
+interface PendingFile {
+	/** Contents to convert, all under the file's path. */
+	inputs: Array<{ path: string; data: Uint8Array }>;
+	/** The change once `cleaned` holds `inputs` in their git form, in order; `undefined` when nothing changed. */
+	finish(cleaned: readonly Uint8Array[]): FileChange | undefined;
 }
 
 /**
@@ -295,54 +257,7 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 		if (!parents.has(record.agent) || record.parent !== undefined) parents.set(record.agent, record.parent);
 	}
 	const scope = resolveScope(source.agents, source.caller, parents);
-	const calls = records.filter((record): record is CallRecord => record.type === "call");
-	const [realRoot, realCwd] = await Promise.all([
-		fs.realpath(root).catch(() => root),
-		fs.realpath(source.cwd).catch(() => source.cwd),
-	]);
-	// Scripts spell absolute paths the way the session cwd does, which may run through a symlink.
-	const roots = [...new Set([root, realRoot, path.resolve(source.cwd, path.relative(realCwd, realRoot))])];
-	/** Path tokens per call script; built on first use, since only deleted files consult them. */
-	let callTokens: Array<Set<string>> | undefined;
-	/** Whether a repo-relative directory is gone, i.e. may have been removed along with a deleted file. */
-	const removedDirs = new Map<string, Promise<boolean>>();
-	const isRemoved = (dir: string): Promise<boolean> => {
-		let removed = removedDirs.get(dir);
-		if (!removed) {
-			removed = fs.lstat(path.join(root, dir)).then(
-				stat => !stat.isDirectory(),
-				() => true,
-			);
-			removedDirs.set(dir, removed);
-		}
-		return removed;
-	};
-	const evidence: CallEvidence = {
-		during(ms) {
-			if (ms === undefined) return undefined;
-			const covering = calls.filter(call => call.start - WINDOW_SLACK_MS <= ms && ms <= call.end + WINDOW_SLACK_MS);
-			if (covering.length === 0 || covering.some(call => !scope.has(call.agent))) return undefined;
-			return covering[covering.length - 1];
-		},
-		async naming(file) {
-			// `rm -r old/` names the directory, not the file; a directory that still exists names nothing
-			// (`cd pkg && bun test` must not claim every file someone deleted under `pkg`).
-			const targets = [file];
-			for (
-				let dir = path.posix.dirname(file);
-				dir !== "." && (await isRemoved(dir));
-				dir = path.posix.dirname(dir)
-			) {
-				targets.push(dir);
-			}
-			const names = targets.flatMap(target => spellings(target, roots));
-			callTokens ??= calls.map(call => pathTokens(call.script ?? ""));
-			const tokens = callTokens;
-			const naming = calls.filter((_, index) => names.some(name => tokens[index].has(name)));
-			if (naming.length === 0 || naming.some(call => !scope.has(call.agent))) return undefined;
-			return naming[naming.length - 1];
-		},
-	};
+	const realRoot = await fs.realpath(root).catch(() => root);
 	// Journaled paths keep the spelling the agent used, which may run through a symlinked
 	// directory (`~/.agent` → `~/.dotfiles/agent`). Resolve the directory, not the file: the
 	// file may be a symlink itself or already deleted.
@@ -378,27 +293,40 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 			? (await repo.lsTree(head, tracked, source.signal)).map(entry => [entry.path, entry.mode])
 			: [],
 	);
+	const recent = head && byPath.size > 0 ? await recentCommits(repo, head, byPath, source.signal) : [];
 	const files: FileChange[] = [];
 	const skipped: string[] = [];
-	const load = async (entry: { path: string }) => {
-		const result = await loadFile(
+	const load = (entry: { path: string }) =>
+		loadFile(
 			repo,
 			root,
-			{ sha: head, mode: headModes.get(entry.path) ?? null },
+			{ sha: head, mode: headModes.get(entry.path) ?? null, recent },
 			entry.path,
 			byPath.get(entry.path) ?? [],
 			source.journal,
-			evidence,
 		);
-		if (result === "skip") skipped.push(entry.path);
-		else if (result) files.push(result);
-	};
 	for (let start = 0; start < dirty.length; start += READ_CONCURRENCY) {
 		source.signal?.throwIfAborted();
-		await Promise.all(dirty.slice(start, start + READ_CONCURRENCY).map(load));
+		const chunk = dirty.slice(start, start + READ_CONCURRENCY);
+		const results = await Promise.all(chunk.map(load));
+		// One conversion per chunk: each call loads the index and attributes afresh.
+		const pending = results.filter(
+			(result): result is PendingFile => typeof result === "object" && "finish" in result,
+		);
+		const inputs = pending.flatMap(file => file.inputs);
+		const cleaned = inputs.length > 0 ? await repo.worktreeToGit(inputs, source.signal) : [];
+		let offset = 0;
+		results.forEach((result, index) => {
+			if (result === "skip") skipped.push(chunk[index].path);
+			else if (result && "finish" in result) {
+				const change = result.finish(cleaned.slice(offset, (offset += result.inputs.length)));
+				if (change) files.push(change);
+			} else if (result) files.push(result);
+		});
 	}
 	files.sort((a, b) => a.path.localeCompare(b.path));
 	for (const file of files) {
+		// A file without kept attribution has only unrecorded lines, all `other`: nothing to select.
 		if (file.attribution) {
 			file.classification = classify(file.attribution, scope);
 			for (const op of file.attribution.ops) {
@@ -422,22 +350,71 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 		files,
 		staged,
 		skipped,
+		journaled: source.journal !== null,
 	});
+}
+
+/** A first-parent commit on HEAD and its parent (`undefined` for a root commit). */
+interface RecentCommit {
+	time: number;
+	parent: string | undefined;
+}
+
+/** First-parent commits on `head` made since the earliest recorded edit, newest first. */
+async function recentCommits(
+	repo: VcsGitRepo,
+	head: string,
+	byPath: ReadonlyMap<string, readonly ChangeRecord[]>,
+	signal: AbortSignal | undefined,
+): Promise<RecentCommit[]> {
+	let since = Number.POSITIVE_INFINITY;
+	for (const list of byPath.values()) since = Math.min(since, list[0].at);
+	const commits: RecentCommit[] = [];
+	for (let rev: string | undefined = head; rev !== undefined && commits.length < RECENT_COMMIT_LIMIT;) {
+		const details = await repo.commitDetails(rev, signal);
+		const time = Date.parse(details.author.date ?? "");
+		if (!(time + COMMIT_DATE_SLACK_MS > since)) break;
+		rev = details.parents[0];
+		commits.push({ time, parent: rev });
+	}
+	return commits;
+}
+
+/**
+ * Whether a commit changed `file` after its first recorded edit at `since`: its blob at HEAD
+ * differs from the one in the commit HEAD was on then. Author dates can predate a rebase or a
+ * pull, so a miss leaves attribution as plain replay.
+ */
+async function headMovedSince(
+	repo: VcsGitRepo,
+	head: string,
+	file: string,
+	since: number,
+	recent: readonly RecentCommit[],
+): Promise<boolean> {
+	const after = recent.filter(commit => commit.time + COMMIT_DATE_SLACK_MS > since);
+	if (after.length === 0) return false;
+	const base = after[after.length - 1].parent;
+	const [now, then] = await Promise.all([
+		repo.resolveRef(`${head}:${file}`),
+		base === undefined ? undefined : repo.resolveRef(`${base}:${file}`),
+	]);
+	return (now ?? null) !== (then ?? null);
 }
 
 /**
  * One changed path of the worktree against `head` (`sha: null` on an unborn HEAD; `mode: null`
- * when HEAD lacks the path). `"skip"` for submodules and other directories.
+ * when HEAD lacks the path). `"skip"` for submodules and other directories; a {@link PendingFile}
+ * for content compared in its git form.
  */
 async function loadFile(
 	repo: VcsGitRepo,
 	root: string,
-	head: { sha: string | null; mode: string | null },
+	head: { sha: string | null; mode: string | null; recent: readonly RecentCommit[] },
 	file: string,
 	records: readonly ChangeRecord[],
 	journal: ChangeJournal | null,
-	calls: CallEvidence,
-): Promise<FileChange | "skip" | undefined> {
+): Promise<FileChange | PendingFile | "skip" | undefined> {
 	const absolute = path.join(root, file);
 	if (head.mode === "160000") {
 		const stat = await fs.lstat(absolute).catch(error => {
@@ -460,15 +437,13 @@ async function loadFile(
 			selected: new Set<number>(),
 			wholeSelected: false,
 			editors: [],
+			counts: { added: 0, removed: 0 },
 		};
 	}
 	let workBytes: Uint8Array | null = null;
-	let changedMs: number | undefined;
 	let mode: string | null = null;
 	try {
 		const stat = await fs.lstat(absolute);
-		// ctime, not mtime: `mv` and `cp -p` keep the mtime but bump the ctime.
-		changedMs = stat.ctimeMs;
 		if (stat.isSymbolicLink()) mode = SYMLINK_MODE;
 		else if (!stat.isFile()) return "skip";
 		else {
@@ -479,8 +454,6 @@ async function loadFile(
 		if (!isEnoent(error)) throw error;
 	}
 	if (head.mode === null && mode === null) return undefined;
-	// A deletion leaves no timestamp to match against a call window.
-	const lastCall = mode === null ? await calls.naming(file) : calls.during(changedMs);
 	const base = {
 		path: file,
 		headMode: head.mode,
@@ -488,31 +461,49 @@ async function loadFile(
 		selected: new Set<number>(),
 		wholeSelected: false,
 		editors: [...new Set(records.map(record => record.agent))],
+		counts: { added: 0, removed: 0 },
 	};
-	const whole = (reason: WholeReason): FileChange => ({
-		...base,
-		head: null,
-		work: null,
-		whole: reason,
-		hint: records.length === 0 ? lastCall : undefined,
-	});
+	const whole = (reason: WholeReason): FileChange => ({ ...base, head: null, work: null, whole: reason });
 	// Symlinks commit as their link target, whole; this also covers a file replaced by a link and back.
 	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) return whole("symlink");
 	const headBytes = head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`)).data : null;
-	const headText = headBytes === null ? null : decodeText(headBytes);
-	const workText = workBytes === null ? null : decodeText(workBytes);
-	if (headText === undefined || workText === undefined) return whole("content");
-	if (headText === workText) return head.mode === mode ? undefined : whole("mode");
-	const headLines = toLines(headText);
-	const workLines = toLines(workText);
-	const edits = journal && records.length > 0 ? await loadEdits(journal, records, calls) : undefined;
-	const steps = historySteps(headLines, edits ?? [], workLines, lastCall?.agent);
+	const [snapshots, headMoved] = await Promise.all([
+		journal && records.length > 0 ? journal.snapshots(records) : undefined,
+		head.sha && head.mode && records.length > 0
+			? headMovedSince(repo, head.sha, file, records[0].at, head.recent)
+			: false,
+	]);
+	const encoder = new TextEncoder();
+	const recorded = (snapshots ?? []).flatMap(snapshot => [snapshot.before, snapshot.after]);
+	const inputs = [
+		...(workBytes === null ? [] : [workBytes]),
+		...recorded.flatMap(text => (text === null ? [] : [encoder.encode(text)])),
+	].map(data => ({ path: file, data }));
 	return {
-		...base,
-		head: headText,
-		work: workText,
-		attribution: attribute(headLines, steps, workLines),
-		hint: edits === undefined ? lastCall : undefined,
+		inputs,
+		finish(cleaned) {
+			let next = 0;
+			const gitForm = workBytes === null ? null : cleaned[next++];
+			const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+			const snapshotLines = (text: string | null) => toLines(text === null ? null : decoder.decode(cleaned[next++]));
+			const headText = headBytes === null ? null : decodeText(headBytes);
+			const workText = gitForm === null ? null : decodeText(gitForm);
+			if (headText === undefined || workText === undefined) return whole("content");
+			if (headText === workText) return head.mode === mode ? undefined : whole("mode");
+			const headLines = toLines(headText);
+			const workLines = toLines(workText);
+			const edits = snapshots?.map((snapshot): RecordedEdit => ({
+				actor: snapshot.agent,
+				before: snapshotLines(snapshot.before),
+				after: snapshotLines(snapshot.after),
+			}));
+			const steps = historySteps(headLines, edits ?? [], workLines);
+			const attribution = attribute(headLines, steps, workLines, headMoved);
+			const change: FileChange = { ...base, head: headText, work: workText };
+			change.counts = countOps(change, attribution);
+			if (edits !== undefined) change.attribution = attribution;
+			return change;
+		},
 	};
 }
 
@@ -526,6 +517,7 @@ interface DraftInit {
 	files: FileChange[];
 	staged: readonly string[];
 	skipped: readonly string[];
+	journaled: boolean;
 }
 
 /** Line counts of a set of change ops. */
@@ -535,11 +527,11 @@ interface Counts {
 }
 
 /**
- * Line counts of `file`'s ops (all of them, or `ops`). A created or deleted file's final newline
- * is an op of its own (an empty last line, see `toLines`) and is not counted as a line.
+ * Line counts of `attribution`'s ops in `file` (all of them, or `ops`). A created or deleted file's
+ * final newline is an op of its own (an empty last line, see `toLines`) and is not counted as a line.
  */
-function countOps(file: FileChange, ops: Iterable<ChangeOp> = file.attribution?.ops ?? []): Counts {
-	const last = file.attribution?.ops.at(-1);
+function countOps(file: FileChange, attribution: Attribution, ops: Iterable<ChangeOp> = attribution.ops): Counts {
+	const last = attribution.ops.at(-1);
 	const newline = (file.head === null || file.work === null) && last?.text === "" ? last : undefined;
 	const counts = { added: 0, removed: 0 };
 	for (const op of ops) {
@@ -548,6 +540,14 @@ function countOps(file: FileChange, ops: Iterable<ChangeOp> = file.attribution?.
 		else counts.removed++;
 	}
 	return counts;
+}
+
+/** Line attribution of a file that is not whole, rebuilt when not kept (see {@link FileChange.attribution}). */
+function lineAttribution(file: FileChange): Attribution {
+	if (file.attribution) return file.attribution;
+	const head = toLines(file.head);
+	const work = toLines(file.work);
+	return attribute(head, historySteps(head, [], work), work);
 }
 
 /** ` mode 100644 → 100755` when a file that exists on both sides changes mode; empty otherwise. */
@@ -590,6 +590,8 @@ export class Draft {
 	readonly staged: readonly string[];
 	/** Paths the draft cannot handle (submodules, nested repositories). */
 	readonly skipped: readonly string[];
+	/** Whether the session keeps a change journal; without one nothing is attributed. */
+	readonly journaled: boolean;
 	#files: FileChange[];
 
 	constructor(init: DraftInit) {
@@ -601,6 +603,7 @@ export class Draft {
 		this.agents = init.agents;
 		this.staged = init.staged;
 		this.skipped = init.skipped;
+		this.journaled = init.journaled;
 		this.#files = init.files;
 	}
 
@@ -613,7 +616,7 @@ export class Draft {
 	selection(): SelectedChange[] {
 		const changes: SelectedChange[] = [];
 		for (const file of this.#files) {
-			if (!file.attribution) {
+			if (file.whole) {
 				if (!file.wholeSelected) continue;
 				if (file.whole === "gitlink") {
 					changes.push({
@@ -628,7 +631,7 @@ export class Draft {
 				continue;
 			}
 			if (file.selected.size === 0) continue;
-			const content = fromLines(buildContent(file.attribution, file.selected));
+			const content = fromLines(buildContent(lineAttribution(file), file.selected));
 			// A partly reverted deletion keeps the file, with its HEAD mode.
 			const mode = file.mode ?? file.headMode;
 			const before = file.head === null || file.headMode === null ? null : { text: file.head, mode: file.headMode };
@@ -711,13 +714,13 @@ export class Draft {
 		units: readonly string[] | undefined,
 		pattern: RegExp | undefined,
 	): ChangeOp[] | "whole" {
-		if (!file.attribution) {
+		if (file.whole) {
 			if (units?.length && !units.every(unit => unit === "1" || unit === "1a")) {
 				throw new Error(`${file.path} is a whole-file change; it has only unit 1.`);
 			}
 			return "whole";
 		}
-		const { hunks } = file.attribution;
+		const { hunks } = lineAttribution(file);
 		const ops: ChangeOp[] = [];
 		const wanted = units?.length ? units : undefined;
 		const known = new Set<string>();
@@ -775,16 +778,24 @@ export class Draft {
 			`HEAD ${this.head?.slice(0, 10) ?? "(no commits yet)"}${this.branch ? ` on ${this.branch}` : ""} · scope: ${scopeNames}` +
 				(running.length > 0 ? ` (still running: ${running.join(", ")})` : ""),
 		];
+		if (!this.journaled) {
+			lines.push(
+				"No change journal: this session keeps no artifacts, so nothing is attributed; select with take().",
+			);
+		}
 		const selected: string[] = [];
 		const review: string[] = [];
 		const otherAgents = new Map<string, number>();
-		let notYours = 0;
+		/** Changed by nobody on record: nothing selected, nothing to review, no agent outside the scope. */
+		const unrecorded: FileChange[] = [];
 		for (const file of this.#files) {
 			const counted = this.#describeFile(file);
 			if (counted.selected) selected.push(counted.selected);
 			review.push(...counted.review);
 			for (const agent of counted.outOfScopeAgents) otherAgents.set(agent, (otherAgents.get(agent) ?? 0) + 1);
-			if (!counted.selected && counted.review.length === 0 && counted.outOfScopeAgents.size === 0) notYours++;
+			if (!counted.selected && counted.review.length === 0 && counted.outOfScopeAgents.size === 0) {
+				unrecorded.push(file);
+			}
 		}
 		lines.push(selected.length > 0 ? "Selected:" : "Selected: nothing", ...selected);
 		if (review.length > 0) lines.push("Review:", ...review);
@@ -795,28 +806,37 @@ export class Draft {
 			});
 			lines.push(`Other agents of this session, not in scope: ${parts.join(", ")}`);
 		}
-		const tail = [`Not yours: ${notYours} path(s).`];
+		if (unrecorded.length > 0) {
+			lines.push(
+				`Unrecorded: ${unrecorded.length} path(s) changed by other programs or by hand; take() the ones your commands produced.`,
+			);
+			for (const file of unrecorded.slice(0, UNRECORDED_LIST_LIMIT)) {
+				const size = file.whole ? `whole ${wholeLabel(file)}` : `${formatCounts(file.counts)}${modeChange(file)}`;
+				lines.push(`  · ${file.path}  ${size}`);
+			}
+			if (unrecorded.length > UNRECORDED_LIST_LIMIT) {
+				lines.push(`  … ${unrecorded.length - UNRECORDED_LIST_LIMIT} more`);
+			}
+		}
+		const tail: string[] = [];
 		if (this.staged.length > 0) tail.push(`Staged by others: ${this.staged.length} path(s), left staged.`);
 		if (this.skipped.length > 0) tail.push(`Skipped: ${this.skipped.join(", ")} (submodule or nested repository).`);
-		lines.push(tail.join(" "));
+		if (tail.length > 0) lines.push(tail.join(" "));
 		return lines.join("\n");
 	}
 
 	#describeFile(file: FileChange): { selected?: string; review: string[]; outOfScopeAgents: Set<string> } {
 		const outOfScopeAgents = new Set(file.editors.filter(agent => !this.scope.has(agent)));
-		if (!file.attribution) {
+		if (file.whole) {
 			const label = wholeLabel(file);
 			if (file.wholeSelected) return { selected: `  ✓ ${file.path}  whole ${label}`, review: [], outOfScopeAgents };
-			const reason = file.hint
-				? describeHint(file, file.hint)
-				: file.editors.some(agent => this.scope.has(agent))
-					? `edited by ${file.editors.join(", ")}`
-					: file.whole === "gitlink"
-						? "select explicitly to update the submodule pointer"
-						: undefined;
+			const reason = this.#wholeReviewReason(file);
 			return { review: reason ? [`  ? ${file.path}  whole ${label}; ${reason}`] : [], outOfScopeAgents };
 		}
-		const { ops, hunks } = file.attribution;
+		// Unkept attribution has no review or out-of-scope lines (see createDraft): rebuild it only for a selection.
+		const attribution = file.attribution ?? (file.selected.size > 0 ? lineAttribution(file) : undefined);
+		const ops = attribution?.ops ?? [];
+		const hunks = attribution?.hunks ?? [];
 		const status = file.classification?.status ?? [];
 		const chosen = ops.filter(op => file.selected.has(op.id));
 		const review: string[] = [];
@@ -831,22 +851,23 @@ export class Draft {
 			);
 			review.push(`  ? ${file.path}  hunk ${index + 1}: ${[...reasons].join("; ") || "needs review"}`);
 		});
-		if (chosen.length === 0 && file.hint && review.length === 0) {
+		// Edits the journal cannot replay leave every line unrecorded: the agent picks its own.
+		if (!file.attribution && chosen.length === 0 && file.editors.some(agent => this.scope.has(agent))) {
 			review.push(
-				`  ? ${file.path}  ${formatCounts(countOps(file))}${modeChange(file)}; no edit record; ${describeHint(file, file.hint)}`,
+				`  ? ${file.path}  ${formatCounts(file.counts)}${modeChange(file)}; edited by ${file.editors.join(", ")}, but the edit record cannot be replayed`,
 			);
 		}
 		for (const op of ops) {
-			if (status[op.id] === "other" && !op.by.startsWith("~") && !this.scope.has(op.by)) outOfScopeAgents.add(op.by);
+			if (status[op.id] === "other" && !isPseudoActor(op.by) && !this.scope.has(op.by)) outOfScopeAgents.add(op.by);
 		}
-		if (chosen.length === 0) return { review, outOfScopeAgents };
+		if (!attribution || chosen.length === 0) return { review, outOfScopeAgents };
 		const leftOut = ops.filter(op => !file.selected.has(op.id));
-		const owners = [...new Set(chosen.map(op => (op.by.startsWith("~") && op.hint ? op.hint : op.by)))];
+		const owners = [...new Set(chosen.map(op => op.by))];
 		const mark = leftOut.length === 0 ? "✓" : "◐";
-		let line = `  ${mark} ${file.path}  ${formatCounts(countOps(file, chosen))}${modeChange(file)}`;
+		let line = `  ${mark} ${file.path}  ${formatCounts(countOps(file, attribution, chosen))}${modeChange(file)}`;
 		if (leftOut.length > 0) {
 			const others = [...new Set(leftOut.map(op => actorName(op.by)))];
-			line += ` of ${formatCounts(countOps(file))}; left out: ${others.join(", ")}`;
+			line += ` of ${formatCounts(file.counts)}; left out: ${others.join(", ")}`;
 		}
 		return { selected: `${line}  [${owners.map(actorName).join(", ")}]`, review, outOfScopeAgents };
 	}
@@ -861,25 +882,32 @@ export class Draft {
 		return files.map(file => this.#renderFile(file)).join("\n\n");
 	}
 
+	/** Partially selected, or listed under Review in {@link summary}. */
 	#needsAttention(file: FileChange): boolean {
-		if (!file.attribution) return (file.hint !== undefined || file.whole === "gitlink") && !file.wholeSelected;
-		const status = file.classification?.status ?? [];
 		const selected = file.selected.size;
-		if (selected > 0 && selected < file.attribution.ops.length) return true;
-		return file.attribution.ops.some(op => status[op.id] === "review" && !file.selected.has(op.id));
+		if (selected > 0 && !file.whole && selected < lineAttribution(file).ops.length) return true;
+		return this.#describeFile(file).review.length > 0;
+	}
+
+	/** Why an unselected whole-file change needs review; `undefined` when it is simply not in scope. */
+	#wholeReviewReason(file: FileChange): string | undefined {
+		if (file.editors.some(agent => this.scope.has(agent))) return `edited by ${file.editors.join(", ")}`;
+		if (file.whole === "gitlink") return "select explicitly to update the submodule pointer";
+		return undefined;
 	}
 
 	#renderFile(file: FileChange): string {
-		if (!file.attribution) {
-			const mark = file.wholeSelected ? "✓" : file.hint || file.whole === "gitlink" ? "?" : "·";
-			const hint = file.hint ? `; ${describeHint(file, file.hint)}` : "";
-			return `${file.path}  whole-file change (${wholeLabel(file)})${hint}\n  1 ${mark} whole file`;
+		if (file.whole) {
+			const reason = file.wholeSelected ? undefined : this.#wholeReviewReason(file);
+			const mark = file.wholeSelected ? "✓" : reason ? "?" : "·";
+			return `${file.path}  whole-file change (${wholeLabel(file)})${reason ? `; ${reason}` : ""}\n  1 ${mark} whole file`;
 		}
-		const { ops, hunks } = file.attribution;
+		const attribution = lineAttribution(file);
+		const { ops, hunks } = attribution;
 		const status = file.classification?.status ?? [];
 		const chosen = ops.filter(op => file.selected.has(op.id));
 		const lines = [
-			`${file.path}  ${formatCounts(countOps(file, chosen))} of ${formatCounts(countOps(file))} selected${modeChange(file)}`,
+			`${file.path}  ${formatCounts(countOps(file, attribution, chosen))} of ${formatCounts(file.counts)} selected${modeChange(file)}`,
 		];
 		hunks.forEach((hunk, hunkIndex) => {
 			const headRange = `${hunk.headStart + (hunk.headCount > 0 ? 1 : 0)},${hunk.headCount}`;
@@ -894,11 +922,7 @@ export class Draft {
 			let header: string | undefined;
 			for (const op of hunk.ops) {
 				const mark = file.selected.has(op.id) ? "✓" : status[op.id] === "review" ? "?" : "·";
-				const owner =
-					op.by.startsWith("~") && op.hint && file.classification?.likely.has(op.id)
-						? `${actorName(op.by)}, during ${op.hint}'s call`
-						: actorName(op.by);
-				const next = `  ${unitOf.get(op.id)} ${mark} ${owner}`;
+				const next = `  ${unitOf.get(op.id)} ${mark} ${actorName(op.by)}`;
 				if (next !== header) {
 					header = next;
 					lines.push(header);

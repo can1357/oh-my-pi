@@ -139,6 +139,7 @@ export type ThemeColor =
 	| "thinkingMax"
 	| "bashMode"
 	| "pythonMode"
+	| "btwMode"
 	| "statusLineSep"
 	| "statusLineModel"
 	| "statusLinePath"
@@ -210,6 +211,7 @@ const THEME_COLOR_RECORD = {
 	thinkingMax: true,
 	bashMode: true,
 	pythonMode: true,
+	btwMode: true,
 	statusLineSep: true,
 	statusLineModel: true,
 	statusLinePath: true,

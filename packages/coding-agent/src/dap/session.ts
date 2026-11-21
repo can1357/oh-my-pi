@@ -961,7 +961,21 @@ export class DapSessionManager {
 		// the waiter subscribes, burning the whole timeout.
 		const stoppedPromise = session.client.waitForEvent<DapStoppedEventBody>("stopped", undefined, signal, timeoutMs);
 		stoppedPromise.catch(() => {});
-		await this.#sendRequestWithConfig(session, "pause", { threadId } satisfies DapPauseArguments, signal, timeoutMs);
+		try {
+			await this.#sendRequestWithConfig(
+				session,
+				"pause",
+				{ threadId } satisfies DapPauseArguments,
+				signal,
+				timeoutMs,
+			);
+		} catch (error) {
+			// gdb's DAP answers a pause it cannot deliver with the bare reason "notStopped".
+			if (error instanceof Error && error.message.trim() === "notStopped") {
+				throw new Error("The debug adapter refused to pause (notStopped): the target is still running.");
+			}
+			throw error;
+		}
 		if (!isStopped()) {
 			try {
 				await untilAborted(signal, stoppedPromise);

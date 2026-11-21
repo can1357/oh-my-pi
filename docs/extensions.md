@@ -39,7 +39,7 @@ Import host values from the package root, `@oh-my-pi/pi-coding-agent`. Deeper pa
 
 - `formTheme`, `editorKey`, `editorKeys` and `formatKeyHint` for settings dialogs and key hints
 - `styledSpans` and `compactText` to turn ANSI-styled text into `TspText`, such as a transcript presenter's `{ compact: { label, rows } }`, and `rowsText` to wrap pre-rendered rows in one native text node; `styleSpans`, `plainText`, `plainLine`, `spansLine` and `styledBackground` cover the other conversions between ANSI text and spans
-- `parseXdUrl` to read the device name from an `xd://` URL, plus `parseXdTopicUrl`, `stripXdUrlPrefix`, `couldBecomeXdUrl` and `XD_URL_PREFIX`
+- `toolCommandCallName` to read the command word a `bash` call invokes, and `toolCommandDispatches` for the dispatch records on a bash result
 - `unwrapHashlineHeaderPath` to turn a `[path#TAG]` write/edit target into its plain path
 - `cfgExtensionTranscriptPresenters`, the handle of the `extensionRenderers.transcriptPresenters` setting
 
@@ -235,6 +235,26 @@ usage provider's `cacheVersion`, normalized base URL, and credential identity. W
 distinct from the built-in one so processes without the extension (older sessions,
 `--no-extensions` runs, SDK scripts) never serve their reports to yours, or yours to them.
 
+#### Taking over a built-in provider
+
+Four fields let an extension replace parts of an existing provider without redefining its models. The models keep their `api`, so option mapping, credentials, and catalog policy behave as before:
+
+- `stream(model, context, options)`: handles every request to the provider's models instead of the built-in adapter for their api. `options` are already mapped for that api (for example `GoogleGeminiCliOptions`) and carry the provider's key.
+- `generateImage(model, request, options)`: handles image generation for the provider's image models.
+- `webSearch(params)`: runs the grounded search request for the provider's models. Availability checks and labels still come from the model's grounding backend.
+- `discoverModels({ accounts, baseUrl, fetch })`: fetches the provider's model list in place of its built-in discovery request. It runs once with all signed-in accounts (a configured key counts as one account). Return `null` to keep the cached catalog. The built-in discovery still caches the rows, merges them, and applies policy.
+- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "prompt-perturbation": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
+
+```ts
+pi.registerProvider("google-generative-ai", {
+	stream: myGeminiStream,
+	generateImage: myImageGenerator,
+	rules: { "prompt-perturbation": true },
+});
+```
+
+These overrides last only while the registration is active. Unregistering the provider or unloading the extension restores the built-in behavior. Subagents in worker threads run these hooks on the main thread. Thread-local stream state, such as `providerSessionState`, stays in the worker.
+
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 
 A provider's `apiKey` (a literal key or an environment variable name) normally overrides any stored OAuth or `/login` credential for that provider. When the registration also supplies `oauth`, `apiKey` becomes a fallback instead: the key the user saved with `/login` wins, and `apiKey` is used only when no stored login credential exists. This keeps an unset env-var name from being sent as the literal key. Registering a built-in provider id with both `oauth` and a gateway `apiKey` therefore lets a stored upstream credential take precedence over the gateway key.
@@ -364,6 +384,17 @@ re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
 
+Set `excludeFromContext: true` on the payload for a row that is drawn and saved
+but never sent to the model, like a `!!` bash run: per-turn stats or status
+lines. The flag is persisted on the `custom_message` entry, so the row stays out
+of context after resume, compaction and branch summaries. Such a row never
+starts or extends a turn: `triggerTurn` and `"aside"` are ignored. Sent while a
+run is live, it is queued like a `!!` bash row and drawn and saved when the run
+ends or the next prompt starts; a `/new` or session switch that interrupts the
+run saves it to the session being left. Like `!!` and `$$` runs, it leaves a
+shown composer prediction in place and does not hold back a queued follow-up,
+since the model's view is unchanged.
+
 ## 2) Handler context (`ExtensionContext`)
 
 Handlers and tool `execute` receive `ctx` with:
@@ -381,8 +412,8 @@ Handlers and tool `execute` receive `ctx` with:
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
-- `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
-- `getPendingPlanReview()`: the open interactive plan review still awaiting an answer, in the `plan_review_requested` shape, or `undefined`; use it to answer a review that opened before the extension loaded or reconnected
+- `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable (with `input.role`, availability is judged on that tier, so `keep` can be accepted for a larger-context tier the slider is not on), `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
+- `getPendingPlanReview()`: the open interactive plan review still awaiting an answer, in the `plan_review_requested` shape with `options` re-measured for the tier currently selected in the slider, or `undefined`; use it to answer a review that opened before the extension loaded or reconnected
 - `openPlanReview()`: open the interactive plan review on the newest plan file, like `/plan-review`; resolves `true` once a review awaits an answer, without waiting for a choice. An already-open review is kept rather than replaced. Unlike `/plan-review` it never aborts work: it resolves `false`, silently, while the agent is streaming or compacting, when plan mode is inactive, or when no non-empty plan file exists
 - `sessionModes` (interactive TUI sessions only; `undefined` in print, JSON, RPC, ACP, and subagents): direct control of the built-in plan, vibe, goal, and loop modes without slash commands or dialogs. `getState()` returns a detached snapshot (`plan`/`goal`: `inactive | active | paused`, `vibe`: `inactive | active`, `loop`: `inactive | active | paused`, plus the plan file and goal objective/budget), so an extension that loaded late can read the current state. `set(request)` runs one explicit transition: `{ mode: "plan" | "vibe", action: "enter" | "exit" }`, `{ mode: "goal", action: "enter", objective, tokenBudget? }`, `{ mode: "goal", action: "pause" | "resume" | "drop" }`, `{ mode: "loop", action: "enter", prompt?, limit?, condition? }`, or `{ mode: "loop", action: "exit" }`. Requesting a state that already holds returns `{ ok: true, changed: false }`. Refusals return `{ ok: false, code, message, state }` with `code` `busy` (a turn, compaction, or another mode transition is running; the session is still restoring its saved modes, as during `session_start` or a session switch; or a completed goal is still being torn down), `conflict` (another mode blocks it, as with the slash commands), `disabled` (`extensionHandlers.modeControl` off, or `plan.enabled` / `goal.enabled` off), or `invalid_request`. No transition submits a prompt — send one separately; goal continuation and loop repetition start once the next turn ends. Loop `prompt` is the text repeated after each turn (without it, the user's next typed prompt); on an active loop it replaces that text, and `enter` on a paused loop resumes it. Plan `exit` leaves plan mode fully, restoring tools and model, without approving the plan or deleting its draft. Setting `extensionHandlers.modeControl: false` refuses every `set()` while `getState()` and `mode_changed` keep working.
 
@@ -583,9 +614,13 @@ Cancellation stops the host from waiting but cannot stop extension code or undo 
 - `before_provider_request` — receives `{ payload }`; return the replacement payload itself (not `{ payload }`). Handlers chain. Provider transports must invoke `onPayload`; `devin-agent` does not.
 - `after_provider_response` — notification before response-body consumption: `{ status, headers, requestId?, metadata? }`. Provider request/response handlers receive the model used for that request in `ctx.model`.
 - `context` — receives conversation messages and may return `{ messages }`; replacements chain without rewriting persisted history
-- `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
+- `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only.
+  For extensions, `agent_end.messages` contains the active session context at the loop's end, not just
+  the messages produced by that loop. Earlier messages can appear again in later notifications;
+  compaction or branch changes can change which messages remain in that context. Track processed
+  message IDs when an action should happen once per message, rather than treating this array as a delta.
 - `session_stop` — main-session stop hook, awaited before settle. Advisory `{ continue: true, additionalContext }` requests are capped at 8 continuations. Explicit `{ decision: "block", reason }` refusals take precedence over advisory requests, do not consume that allowance, and remain blocking until the hook allows completion or the operator interrupts. A refusal without a reason receives a diagnostic continuation rather than permission to finish. This event never fires for task/subagent sessions and defers until agent-owned background jobs are fully idle (`#hasPendingAsyncWake` in `session/agent-session.ts`).
-- `cache_warming_decision` — fired before each prompt-cache warming refresh with the warmer's economics (`warmCost`, `missCost`, `continuationProbability`, `action`). Return `{ action: "warm" | "stop" }` to override; the last handler returning an action wins, handler failures or answers slower than 2 seconds leave the warmer's decision standing, and a `"stop"` override ends warming until the next real request. Only the main agent loop warms; task/subagent sessions never fire this. The refresh itself replays the real request through the same provider path, so `before_provider_request` and `after_provider_response` fire for it too; a replacement payload must stay byte-identical to the real one for the refresh to hit the cache.
+- `cache_warming_decision` — fired before each prompt-cache warming decision with the warmer's economics: `method` (`"prewarm"` for a `max_tokens: 0` pre-warm, `"replay"` for a one-token replay; absent when the request cannot be refreshed safely), `warmCost` (a cache read of the prompt, plus the expected billed output for a replay), `missCost` (re-writing the prompt instead of reading it), `compactCost` (bridging the wait with compaction; absent when compaction is not an option), `spentCost` (refresh spend since the last real request), `continuationProbability`, and `action` (`"warm"`, `"compact"`, or `"stop"`). Return `{ action }` to override; the last handler returning an action wins, handler failures or answers slower than 2 seconds leave the warmer's decision standing, and so does an override the warmer cannot carry out (`"warm"` without a `method`, `"compact"` without `compactCost` or later than a minute before the entry expires). A `"stop"` override ends warming until the next real request. The main agent loop warms in any mode and task subagents up to `streaming`; one-shot sessions never fire this. The refresh itself goes through the same provider path as the real request, so `before_provider_request` and `after_provider_response` fire for it too; a replacement payload must stay byte-identical to the real one for the refresh to hit the cache.
 - `turn_start` / `turn_end`
 - `assistant_message` — awaited once per finalized assistant message before agent context, persistence, `message_end`, or tool dispatch. Return `{ content }` to replace text for history, persistence, `message_end` consumers, and the next provider request; handlers chain. Text already delivered through streaming updates (`message_update`, ACP/RPC chunks) is not retracted, so clients that render from the stream may keep showing the original text. Text blocks must retain their count, order, and positions; only their text may change. All non-text blocks and other block metadata must remain unchanged. Unchanged text retains its original `textSignature` (even if the handler drops or changes it); edited text loses its signature so provider replay state is never reused for different text. Invalid replacements and handler errors are reported and skipped. If aborted while a handler is pending, completed rewrites so far are retained and remaining handlers are skipped.
 - `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached snapshot, so in-place changes cannot rewrite agent or provider context
@@ -651,11 +686,13 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
+`tool_call` and `tool_result` identify the call with `toolCallId`. When a JS or Python eval cell or kernel-defined tool calls a session tool, both events also carry `parentToolCallId`: the ID of the invocation that made the nested call, not the ID of the eval that defined the tool. Direct calls omit this field.
+
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
 
 ### Plan review lifecycle
 
-- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` writes the plan under the default file name without opening the path prompt and leaves the review open, still answerable (it fires no `plan_review_resolved`). The overlay shows Refine only while the plan has comments; `refine` with `input.feedback` is accepted either way.
+- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count measured against the context window of the tier selected when the review opened (moving the slider re-measures it; read `ctx.getPendingPlanReview()` for the current state). An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` writes the plan under the default file name without opening the path prompt and leaves the review open, still answerable (it fires no `plan_review_resolved`). The overlay shows Refine only while the plan has comments; `refine` with `input.feedback` is accepted either way.
 - An approval answered by an extension runs on the tier named by `input.role`, or the one currently selected in the overlay's model slider when `role` is omitted; `plan_review_requested` lists the selectable `tiers` (`role`, `provider`, `model`, and `thinkingLevel` when the role pins one; absent when fewer than two resolve). The approval executes the plan as it is at pick time: in-overlay edits if any, otherwise the plan file re-read from disk. That can differ from the reported `planContent`; an extension may write the plan file before answering to execute its own revision.
 - Tier order follows the configured role cycle, not the selected tier. The slider initially selects `default` when available; a remote `input.role` updates the displayed tier and commits the answer, preventing later terminal input from changing it.
 - `plan_review_resolved` reports how that review closed, with the selected choice id (or `undefined` when dismissed or cancelled by a session switch, a replacement review, or shutdown) and `by: "local" | "extension"`. It fires when the overlay actually closes, after every `plan_review_requested` handler has returned, so `plan_review_requested` handlers should hand off long work (a remote round-trip, a `ctx.ui` dialog) instead of awaiting it.
@@ -763,8 +800,7 @@ discarded.
 
 Registered tools can add context during execution through
 `ctx.addAdditionalContext?.("...")`. Context a tool adds itself is kept even when the tool then
-returns an error. Within one call, the tool's own context (including tools reached through nested
-`xd://` dispatch) comes before `tool_call` handler context.
+returns an error. Within one call, the tool's own context (including tools run as commands inside a nested `bash` call) comes before `tool_call` handler context.
 Calls Cursor executes on its exec channel deliver context after their buffered results, on the next
 provider request.
 

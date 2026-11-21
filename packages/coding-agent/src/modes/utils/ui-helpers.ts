@@ -57,7 +57,7 @@ import {
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { noticeRow, TranscriptNotice } from "@oh-my-pi/pi-tui/chrome/transcript-notice";
 import { span } from "@oh-my-pi/pi-tui/native/describe";
-import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { createToolCallBlock } from "../../modes/controllers/tool-call-block";
@@ -567,6 +567,10 @@ export class UiHelpers {
 		let pendingReadUsageCallIds: string[] | undefined;
 		let pendingUsageTurnElapsed: number | undefined;
 		let turnStartedAt: number | undefined;
+		// Rebuild-time mirror of the controller's turn tally: the message that ends
+		// a run gets the turn's totals, and with them the native footer under its
+		// answer (`⧉ · 12.4s · 19K tok this turn`) whose Copy copies the answer.
+		const turnUsage = new TurnUsageTally();
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usageAttached =
@@ -684,6 +688,8 @@ export class UiHelpers {
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
+				// The turn's footer goes under the last answer drawn, as live.
+				let lastSegment: AssistantMessageComponent | undefined;
 				const appendAssistantSegment = (toolCallId: string) => {
 					const segment = timeline.afterToolCalls.get(toolCallId);
 					if (!segment || !assistantHasVisibleContent(segment)) return;
@@ -694,6 +700,7 @@ export class UiHelpers {
 						timeline.contentOffsets.get(toolCallId),
 					);
 					this.ctx.chatContainer.addChild(component);
+					lastSegment = component;
 				};
 
 				// Render tool call components
@@ -802,6 +809,8 @@ export class UiHelpers {
 						new StrippedToolCallsPlaceholder(strippedToolCalls, !this.ctx.hideToolActivity),
 					);
 				}
+				const turnSummary = turnUsage.add(message, turnStartedAt);
+				if (turnSummary) (lastSegment ?? assistantComponent)?.setTurnUsage(turnSummary);
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(this.ctx.settings) && assistantUsageIsBilled(message.usage)
 						? message.usage
@@ -928,7 +937,10 @@ export class UiHelpers {
 				if (message.role === "user") resolveTodoSnapshot();
 				// Only genuinely user-attributed prompts anchor the delta; a mid-run
 				// agent-attributed `user` message (advisor tool-loop redirect) must not.
-				if (message.role === "user" && message.attribution !== "agent") turnStartedAt = message.timestamp;
+				if (message.role === "user" && message.attribution !== "agent") {
+					turnStartedAt = message.timestamp;
+					turnUsage.reset();
+				}
 				// A synthetic developer message initiates a fresh run (auto-continue,
 				// /goal, approved plan): replay must not inherit the preceding user
 				// prompt's timestamp, mirroring the live agent_start clear. Same-turn
@@ -939,9 +951,11 @@ export class UiHelpers {
 					// turn's own prompt: anchor the delta to it instead of clearing.
 					if (message.userInitiated) turnStartedAt = message.timestamp;
 					else turnStartedAt = undefined;
+					turnUsage.reset();
 				}
 				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
 					turnStartedAt = message.timestamp;
+					turnUsage.reset();
 				}
 				// All other messages use standard rendering
 				this.ctx.addMessageToChat(message, { reuseSettledComponent: options.reuseSettledComponents });
@@ -994,6 +1008,9 @@ export class UiHelpers {
 				if (text) this.ctx.chatContainer.addChild(new RecapNotice(text));
 			}
 		}
+		// A compaction (or model/plan-mode switch) after the last assistant turn
+		// rewrote the prompt prefix: the next live turn's miss is expected.
+		if (sessionContext.nextCacheMissExplained) this.ctx.lastAssistantUsage = undefined;
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed
 		// during the replay — with `keepInFlightToolCalls` these are exactly the

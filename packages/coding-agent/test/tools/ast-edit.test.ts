@@ -20,9 +20,9 @@ function createTestSession(cwd = "/tmp/test", overrides: Partial<ToolSession> = 
 		hasUI: true,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		// xdev mounting (default-on) would unmount the discoverable ast_edit
-		// into xd://; these tests need it in the returned toolset.
-		settings: Settings.isolated({ "tools.xdev": false }),
+		// Tool command mounting (default-on) would turn the discoverable ast_edit
+		// into a bash command; these tests need it in the returned toolset.
+		settings: Settings.isolated({ "tools.commands": false }),
 		...overrides,
 	};
 }
@@ -132,6 +132,44 @@ describe("ast_edit tool schema", () => {
 			).toBe(1);
 			const updated = await Bun.file(filePath).text();
 			expect(updated).toContain("modernWrap(x, value)");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("reports and applies explicit file targets under their own paths", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-files-"));
+		try {
+			await fs.mkdir(path.join(tempDir, "server", "public"), { recursive: true });
+			const first = path.join(tempDir, "server", "public", "session.ts");
+			const second = path.join(tempDir, "client.ts");
+			await Bun.write(first, "legacyWrap(a, b)\n");
+			await Bun.write(second, "legacyWrap(c, d)\n");
+			const queue = new ToolChoiceQueue();
+			const tools = await createTools(
+				createTestSession(tempDir, {
+					getToolChoiceQueue: () => queue,
+					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+					steer: () => {},
+				}),
+				["ast_edit"],
+			);
+			const tool = tools.find(entry => entry.name === "ast_edit")!;
+
+			const previewResult = await tool.execute("ast-edit-files", {
+				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+				paths: ["server/public/session.ts", "client.ts"],
+			});
+			const files = (previewResult.details as { files?: string[] }).files ?? [];
+			expect([...files].sort()).toEqual(["client.ts", "server/public/session.ts"]);
+
+			const applyResult = (await queue.peekPendingInvoker()!({
+				action: "apply",
+				reason: "apply previewed AST edit",
+			})) as InvokedToolResult;
+			expect(applyResult.isError).toBeUndefined();
+			expect(await Bun.file(first).text()).toBe("modernWrap(a, b)\n");
+			expect(await Bun.file(second).text()).toBe("modernWrap(c, d)\n");
 		} finally {
 			await removeWithRetries(tempDir);
 		}

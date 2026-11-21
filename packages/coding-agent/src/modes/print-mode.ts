@@ -217,8 +217,8 @@ async function runPrintModeCore(
 	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
 	// human can review the plan before it executes. Headless print mode has no
 	// surface to review, approve, or exit a plan from, and the turn carries no
-	// deterministic way out of plan mode — the model must voluntarily emit a valid
-	// `xd://propose` execute-dispatch, and when it does not the run strands until
+	// deterministic way out of plan mode — the model must voluntarily submit a
+	// valid plan with `propose`, and when it does not the run strands until
 	// the deadline (issue #8272). So do not honor the startup default here; the
 	// supported headless plan flow is `--plan-yolo` (auto-approve → implement),
 	// which is wired independently through the prewalk coordinator.
@@ -313,7 +313,7 @@ async function runPrintModeCore(
 	let costCapRefusalBeforeTurn = session.costCapRefusal;
 	// The print-mode-dispatched commands. Only commands whose runtime hooks
 	// are real in the headless runtime belong here: each runs a session API
-	// (`/mcp reauth` engine, `session.compact`, `session.handoff`,
+	// (`/mcp reauth` engine, `session.compact`,
 	// `session.retry`). Commands whose hooks would be stubs
 	// (`/reload-plugins` and friends) stay undispatched, and so does
 	// `/stats`: its dashboard server is in-process (`Bun.serve` inside this

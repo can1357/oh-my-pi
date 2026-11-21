@@ -142,8 +142,27 @@ describe("write tool hashline header", () => {
 		expect(resultText(dumpResult)).not.toContain("auto-stripped");
 		expect(await Bun.file(dumpPath).text()).toBe(dump);
 
+		const tsvPath = path.join(tmpDir, "manual_000.tsv");
+		const tsv = "1|alpha\tone\n2|beta\ttwo\n";
+		const tsvResult = await tool.execute("call-2", { path: tsvPath, content: tsv });
+		expect(resultText(tsvResult)).not.toContain("auto-stripped");
+		expect(await Bun.file(tsvPath).text()).toBe(tsv);
+
+		const headerPath = path.join(tmpDir, "header.ts");
+		await tool.execute("call-3", {
+			path: headerPath,
+			content: "[header.ts#1A2B]\n1:const a = 1;\n2:const b = 2;\n",
+		});
+		expect(await Bun.file(headerPath).text()).toBe("const a = 1;\nconst b = 2;\n");
+
 		const echoPath = path.join(tmpDir, "echo.ts");
-		await tool.execute("call-2", { path: echoPath, content: "1:const a = 1;\n2:const b = 2;\n" });
-		expect(await Bun.file(echoPath).text()).toBe("const a = 1;\nconst b = 2;\n");
+		await Bun.write(echoPath, "const a = 1;\nconst b = 2;\n");
+		getEditStore(session).recordSnapshot(echoPath, "const a = 1;\nconst b = 2;\n");
+		const echoResult = await tool.execute("call-4", {
+			path: echoPath,
+			content: "1:const a = 1;\n2:const b = 2;\n3:const c = 3;\n",
+		});
+		expect(resultText(echoResult)).toContain("auto-stripped");
+		expect(await Bun.file(echoPath).text()).toBe("const a = 1;\nconst b = 2;\nconst c = 3;\n");
 	});
 });

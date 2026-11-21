@@ -9,7 +9,8 @@ import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
 import { InternalUrlRouter } from "../internal-urls";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
-import { encodeLocalPath, sessionLocalProtocolOptions } from "../modes/local-file-editor";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
+import { encodeLocalPath } from "../modes/local-file-editor";
 import { createModelBrowserSource } from "../modes/model-browser-source";
 import {
 	createModelMentionSource,

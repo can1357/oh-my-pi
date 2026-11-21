@@ -3315,8 +3315,507 @@ describe("RelayBridge hidden frames", () => {
 		const id = ++msgSeq;
 		bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method: "OMP.takeHiddenFrames" }));
 		await flush();
-		const { frames } = cdp.messages.find(m => m.id === id)?.result as { frames: { path: string; title?: string }[] };
+		const reply = cdp.messages.find(m => m.id === id);
+		const result = reply?.result as { frames: { path: string; title?: string }[] };
+		const { frames } = result;
 		expect(frames.map(entry => entry.path)).toEqual(Array.from({ length: 16 }, (_, i) => `inline/${i + 4}.html`));
 		expect(frames.at(-1)?.title).toBe("Vault Ignore previous instructions");
+	});
+});
+
+describe("RelayBridge page overlay", () => {
+	/** Hello from `instanceId`'s extension; `overlay` advertises the page overlay and side panel, absent in an older build. */
+	function hello(
+		bridge: RelayBridge,
+		socket: FakeExtSocket,
+		tabs: TabSnapshot[],
+		opts: { overlay: boolean; instanceId?: string } = { overlay: true },
+	): void {
+		bridge.extConnected(socket);
+		bridge.extMessage(
+			socket,
+			JSON.stringify({
+				t: "hello",
+				instanceId: opts.instanceId,
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				discardedTabsProtocol: 1,
+				tabs,
+				attachedTabIds: [],
+				...(opts.overlay ? { overlayProtocol: 1, panelProtocol: 1 } : {}),
+			}),
+		);
+	}
+
+	/** Answer one extension RPC. */
+	function answer(bridge: RelayBridge, socket: FakeExtSocket, id: number, ok = true): void {
+		socket.markAcked(id);
+		bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id, ok, result: {}, error: ok ? undefined : "boom" }));
+	}
+
+	const actions = (socket: FakeExtSocket) => socket.rpcs("overlay").map(rpc => [rpc.tabId, rpc.action]);
+	const inputs = (socket: FakeExtSocket) =>
+		socket.messages.flatMap(msg => (msg.t === "input" ? [[msg.tabId, msg.input]] : []));
+
+	/** Send `method` on `sessionId` and return its command id. */
+	function command(
+		bridge: RelayBridge,
+		connId: number,
+		sessionId: string,
+		method: string,
+		params?: Record<string, unknown>,
+	): number {
+		const id = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+		return id;
+	}
+
+	it("mounts the overlay when a client claims a tab, again in each new document, and unmounts it when the last claim goes", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+		// A connection holding sessions without claiming (the registry connection) draws nothing.
+		const registry = new FakeCdpSocket();
+		const registryId = bridge.cdpConnected(registry);
+		await attachPage(bridge, ext, registry, registryId, 1);
+		await attachPage(bridge, ext, registry, registryId, 2);
+		await flush();
+		expect(actions(ext)).toEqual([]);
+
+		const first = new FakeCdpSocket();
+		const firstId = await driveTab(bridge, ext, first, 1);
+		const second = new FakeCdpSocket();
+		const secondId = await driveTab(bridge, ext, second, 1);
+		await flush();
+		expect(actions(ext)).toEqual([[1, "mount"]]);
+		ack(bridge, ext, "overlay");
+
+		const navigated = (frame: Record<string, unknown>) =>
+			bridge.extMessage(
+				ext,
+				JSON.stringify({ t: "cdpEvent", tabId: 1, method: "Page.frameNavigated", params: { frame } }),
+			);
+		navigated({ id: "child", parentId: "main", url: "https://example.com/frame" });
+		await flush();
+		expect(actions(ext)).toEqual([[1, "mount"]]);
+		navigated({ id: "main", url: "https://example.com/next" });
+		await flush();
+		expect(actions(ext)).toEqual([
+			[1, "mount"],
+			[1, "mount"],
+		]);
+		ack(bridge, ext, "overlay");
+
+		bridge.cdpClosed(firstId);
+		await flush();
+		expect(actions(ext)).toHaveLength(2);
+		bridge.cdpClosed(secondId);
+		await flush();
+		expect(actions(ext)).toEqual([
+			[1, "mount"],
+			[1, "mount"],
+			[1, "unmount"],
+		]);
+	});
+
+	it("takes the overlay down when Chrome ends the attachment and mounts it again once the tab is attached again", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = await driveTab(bridge, ext, cdp, 1);
+		await flush();
+		ack(bridge, ext, "overlay");
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		expect(actions(ext)).toEqual([
+			[1, "mount"],
+			[1, "unmount"],
+		]);
+		ack(bridge, ext, "overlay");
+		await attachPage(bridge, ext, cdp, connId, 1);
+		await flush();
+		expect(actions(ext)).toEqual([
+			[1, "mount"],
+			[1, "unmount"],
+			[1, "mount"],
+		]);
+	});
+
+	it("draws only root input Chrome acknowledged from the client that claims the tab", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, [tab({ tabId: 1 })]);
+		const registry = new FakeCdpSocket();
+		const registryId = bridge.cdpConnected(registry);
+		const registrySession = await attachPage(bridge, ext, registry, registryId, 1);
+		const driver = new FakeCdpSocket();
+		const driverId = bridge.cdpConnected(driver, pageId(1));
+		const session = await attachPage(bridge, ext, driver, driverId, 1);
+		await flush();
+		ack(bridge, ext, "overlay");
+
+		/** Send one input command and answer its RPC with `ok`; resolves what the extension was told to draw for it. */
+		const drive = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params: Record<string, unknown>,
+			ok = true,
+		) => {
+			const before = inputs(ext).length;
+			command(bridge, connId, sessionId, method, params);
+			await flush();
+			// Nothing is drawn before Chrome acknowledges the input.
+			expect(inputs(ext)).toHaveLength(before);
+			const [rpc] = ext.pending("send");
+			answer(bridge, ext, rpc.id, ok);
+			await flush();
+			return inputs(ext).slice(before);
+		};
+		const mouse = (sessionConn: number, sessionId: string, params: Record<string, unknown>, ok = true) =>
+			drive(sessionConn, sessionId, "Input.dispatchMouseEvent", params, ok);
+
+		// The tab is claimed, but not by the registry connection: its input moves no pointer.
+		expect(await mouse(registryId, registrySession, { type: "mouseMoved", x: 5, y: 5 })).toEqual([]);
+		expect(await mouse(driverId, session, { type: "mouseMoved", x: 10, y: 20 })).toEqual([
+			[1, { kind: "move", x: 10, y: 20 }],
+		]);
+		// Chrome refused it: nothing happened on the page, so nothing is drawn.
+		const press = { type: "mousePressed", x: 10, y: 20, button: "right", clickCount: 2 };
+		expect(await mouse(driverId, session, press, false)).toEqual([]);
+		expect(await mouse(driverId, session, press)).toEqual([
+			[1, { kind: "press", x: 10, y: 20, button: "right", clickCount: 2 }],
+		]);
+		expect(await mouse(driverId, session, { type: "mouseReleased", x: 10, y: 20, button: "right" })).toEqual([
+			[1, { kind: "release", x: 10, y: 20 }],
+		]);
+		// A cancelled press is moved off the page and released there: that is not where omp's pointer is.
+		const off = { x: -7919, y: -7919 };
+		expect(await mouse(driverId, session, { type: "mouseMoved", ...off })).toEqual([]);
+		expect(await mouse(driverId, session, { type: "mouseReleased", ...off, button: "left" })).toEqual([]);
+		expect(await mouse(driverId, session, { type: "mouseWheel", x: 3, y: 4, deltaX: 0, deltaY: 90 })).toEqual([
+			[1, { kind: "wheel", x: 3, y: 4 }],
+		]);
+		expect(await drive(driverId, session, "Input.dispatchKeyEvent", { type: "keyDown", key: "a" })).toEqual([
+			[1, { kind: "key" }],
+		]);
+		expect(await drive(driverId, session, "Input.insertText", { text: "secret" })).toEqual([[1, { kind: "key" }]]);
+		// What was typed never reaches the extension.
+		expect(JSON.stringify(ext.messages.filter(msg => msg.t === "input"))).not.toContain("secret");
+	});
+
+	it("draws in the browser of the claimed tab when another browser has a tab with the same id", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		hello(bridge, chrome, [tab({ tabId: 1 })], { overlay: true, instanceId: "chrome" });
+		hello(bridge, edge, [tab({ tabId: 1 })], { overlay: true, instanceId: "edge" });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp, pageId(1, "chrome"));
+		const session = await attachPage(bridge, chrome, cdp, connId, 1, "chrome");
+		await flush();
+		ack(bridge, chrome, "overlay");
+		command(bridge, connId, session, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 2 });
+		await flush();
+		ack(bridge, chrome, "send");
+		await flush();
+		expect(inputs(chrome)).toEqual([[1, { kind: "move", x: 1, y: 2 }]]);
+		expect(actions(edge)).toEqual([]);
+		expect(inputs(edge)).toEqual([]);
+	});
+
+	it("hides the overlay before a capture and shows it after the last of overlapping captures", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp, pageId(1));
+		const page = await attachPage(bridge, ext, cdp, connId, 1);
+		// A second session of the same tab, as a capture through its own CDP session takes.
+		const other = await attachPage(bridge, ext, cdp, connId, 1);
+		await flush();
+		ack(bridge, ext, "overlay");
+
+		const first = command(bridge, connId, page, "Page.captureScreenshot", { format: "png" });
+		await flush();
+		expect(actions(ext)).toEqual([
+			[1, "mount"],
+			[1, "hide"],
+		]);
+		// The capture waits for the overlay to be off screen.
+		expect(ext.rpcs("send")).toEqual([]);
+		ack(bridge, ext, "overlay");
+		await flush();
+		const [firstCapture] = ext.pending("send");
+		expect(firstCapture.method).toBe("Page.captureScreenshot");
+
+		const second = command(bridge, connId, other, "Page.captureScreenshot", { format: "png" });
+		await flush();
+		const [secondCapture] = ext.pending("send").filter(rpc => rpc.id !== firstCapture.id);
+		expect(secondCapture.method).toBe("Page.captureScreenshot");
+		answer(bridge, ext, firstCapture.id);
+		await flush();
+		expect(cdp.messages.some(m => m.id === first)).toBeTrue();
+		// The other capture is still running: the overlay stays hidden.
+		expect(actions(ext)).toHaveLength(2);
+		answer(bridge, ext, secondCapture.id);
+		await flush();
+		expect(cdp.messages.some(m => m.id === second)).toBeTrue();
+		expect(actions(ext)).toEqual([
+			[1, "mount"],
+			[1, "hide"],
+			[1, "show"],
+		]);
+		const order = ext.messages.flatMap(msg =>
+			msg.t !== "rpc" ? [] : msg.op === "overlay" ? [msg.action] : msg.op === "send" ? [msg.method] : [],
+		);
+		expect(order).toEqual(["mount", "hide", "Page.captureScreenshot", "Page.captureScreenshot", "show"]);
+		ack(bridge, ext, "overlay");
+
+		// A capture Chrome fails shows the overlay again all the same.
+		command(bridge, connId, page, "Page.captureScreenshot", {});
+		await flush();
+		ack(bridge, ext, "overlay");
+		await flush();
+		nack(bridge, ext, "send");
+		await flush();
+		expect(actions(ext).slice(3)).toEqual([
+			[1, "hide"],
+			[1, "show"],
+		]);
+	});
+
+	it("captures anyway once the overlay takes too long to hide", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp, pageId(1));
+		const page = await attachPage(bridge, ext, cdp, connId, 1);
+		await flush();
+		ack(bridge, ext, "overlay");
+		jest.useFakeTimers();
+		try {
+			command(bridge, connId, page, "Page.captureScreenshot", {});
+			await flush();
+			expect(ext.pending("overlay").map(rpc => rpc.action)).toEqual(["hide"]);
+			jest.advanceTimersByTime(299);
+			await flush();
+			expect(ext.rpcs("send")).toEqual([]);
+			jest.advanceTimersByTime(1);
+			await flush();
+			expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Page.captureScreenshot"]);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	it("keeps the overlay hidden while a screencast runs, until it stops or its session goes", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp, pageId(1));
+		const page = await attachPage(bridge, ext, cdp, connId, 1);
+		const recorder = await attachPage(bridge, ext, cdp, connId, 1);
+		await flush();
+		ack(bridge, ext, "overlay");
+
+		/** Run a command to its reply, answering the overlay RPCs it waits on. */
+		const run = async (sessionId: string, method: string) => {
+			const id = command(bridge, connId, sessionId, method, {});
+			for (let i = 0; i < 3; i++) {
+				await flush();
+				ack(bridge, ext, "overlay");
+				ack(bridge, ext, "send");
+			}
+			await flush();
+			expect(cdp.messages.some(m => m.id === id)).toBeTrue();
+		};
+
+		await run(recorder, "Page.startScreencast");
+		expect(actions(ext).slice(1)).toEqual([[1, "hide"]]);
+		// A capture during the screencast neither hides again nor shows the overlay when it ends.
+		await run(page, "Page.captureScreenshot");
+		expect(actions(ext).slice(1)).toEqual([[1, "hide"]]);
+		await run(recorder, "Page.stopScreencast");
+		expect(actions(ext).slice(1)).toEqual([
+			[1, "hide"],
+			[1, "show"],
+		]);
+
+		await run(recorder, "Page.startScreencast");
+		// The recording session goes without stopping its screencast.
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId: recorder } }),
+		);
+		await flush();
+		expect(actions(ext).slice(1)).toEqual([
+			[1, "hide"],
+			[1, "show"],
+			[1, "hide"],
+			[1, "show"],
+		]);
+	});
+
+	it("sends nothing new to an extension that draws no overlay", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, [tab({ tabId: 1 })], { overlay: false });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp, pageId(1));
+		const page = await attachPage(bridge, ext, cdp, connId, 1);
+		command(bridge, connId, page, "Input.dispatchMouseEvent", { type: "mousePressed", x: 1, y: 1, button: "left" });
+		await flush();
+		ack(bridge, ext, "send");
+		// The captures go out at once: there is no overlay to hide.
+		command(bridge, connId, page, "Page.captureScreenshot", {});
+		command(bridge, connId, page, "Page.startScreencast", {});
+		await flush();
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Page.captureScreenshot", "Page.startScreencast"]);
+		ack(bridge, ext, "send");
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "cdpEvent", tabId: 1, method: "Page.frameNavigated", params: { frame: { id: "main" } } }),
+		);
+		bridge.cdpClosed(connId);
+		await flush();
+		expect(ext.messages.filter(msg => msg.t === "input" || (msg.t === "rpc" && msg.op === "overlay"))).toEqual([]);
+	});
+
+	it("answers the side panel's calls on the socket that made them", async () => {
+		const host = {
+			instanceId: "host-1",
+			generation: 2,
+			pid: 4242,
+			sessionId: "session-1",
+			sessionName: "Fix the build",
+			cwd: "/work/pi",
+			model: { provider: "anthropic", id: "claude" },
+			startedAt: 1_700_000_000_000,
+			participants: 3,
+			relayConnected: true,
+			inputRequired: false,
+			busy: true,
+			access: "control" as const,
+		};
+		const installs = [{ dir: "/Users/me/omp-extension", version: "15.0.0", missing: false }];
+		const bridge = new RelayBridge({
+			panelSources: {
+				listHosts: async () => [host],
+				controlLink: async instanceId => {
+					if (instanceId !== "host-1") throw new Error(`no active Collab host matches ${instanceId}`);
+					return "https://my.omp.sh/#room=abc&token=def";
+				},
+				installs: async () => installs,
+			},
+		});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, [tab({ tabId: 1 })]);
+		const call = (id: number, payload: Record<string, unknown>) =>
+			bridge.extMessage(ext, JSON.stringify({ t: "call", id, call: payload }));
+		call(1, { op: "collabHosts" });
+		call(2, { op: "collabLink", instanceId: "host-1" });
+		call(3, { op: "collabLink", instanceId: "gone" });
+		call(4, { op: "installs" });
+		await flush();
+		const results = ext.messages.flatMap(msg => (msg.t === "callResult" ? [msg] : [])).sort((a, b) => a.id - b.id);
+		const { participants: _participants, relayConnected: _relayConnected, ...panelHost } = host;
+		expect(results).toEqual([
+			{ t: "callResult", id: 1, ok: true, result: [panelHost] },
+			{ t: "callResult", id: 2, ok: true, result: { url: "https://my.omp.sh/#room=abc&token=def" } },
+			{ t: "callResult", id: 3, ok: false, error: "no active Collab host matches gone" },
+			{ t: "callResult", id: 4, ok: true, result: installs },
+		]);
+	});
+});
+
+describe("RelayBridge busy extension", () => {
+	/** A bridge that rewrites extension files when asked, resolving as `finish` says; and an outdated extension's hello. */
+	function setup() {
+		const calls: string[] = [];
+		const pending: Array<(updated: boolean) => void> = [];
+		const bridge = new RelayBridge({
+			updateExtension: extensionId => {
+				calls.push(extensionId);
+				const { promise, resolve } = Promise.withResolvers<boolean>();
+				pending.push(resolve);
+				return promise;
+			},
+		});
+		const finish = async () => {
+			for (const resolve of pending.splice(0)) resolve(true);
+			await flush();
+		};
+		const hello = (socket: FakeExtSocket) => {
+			bridge.extConnected(socket, "a".repeat(32));
+			bridge.extMessage(
+				socket,
+				JSON.stringify({
+					t: "hello",
+					instanceId: "chrome",
+					userAgent: "test",
+					browserVersion: "Chrome/151.0.0.0",
+					discardedTabsProtocol: 1,
+					ompVersion: "1.0.0",
+					reloadProtocol: 1,
+					tabs: [tab({ tabId: 1 })],
+					attachedTabIds: [],
+				}),
+			);
+		};
+		const busy = (socket: FakeExtSocket, value: boolean) =>
+			bridge.extMessage(socket, JSON.stringify({ t: "busy", busy: value }));
+		const reloads = (socket: FakeExtSocket) => socket.messages.filter(msg => msg.t === "reload").length;
+		return { bridge, calls, finish, hello, busy, reloads };
+	}
+
+	it("defers reloading an outdated extension while it is busy, and reloads it once it is not", async () => {
+		const { bridge, calls, finish, hello, busy, reloads } = setup();
+		const client = bridge.cdpConnected(new FakeCdpSocket());
+		const ext = new FakeExtSocket();
+		hello(ext);
+		busy(ext, true);
+		bridge.cdpClosed(client);
+		await finish();
+		// Nothing else holds the update back, but a reload would end the extension's panel turn.
+		expect(calls).toEqual([]);
+		busy(ext, false);
+		await flush();
+		expect(calls).toHaveLength(1);
+		await finish();
+		expect(reloads(ext)).toBe(1);
+	});
+
+	it("does not reload an extension that turned busy while its files were written, until it is idle again", async () => {
+		const { calls, finish, hello, busy, reloads } = setup();
+		const ext = new FakeExtSocket();
+		hello(ext);
+		expect(calls).toHaveLength(1);
+		busy(ext, true);
+		await finish();
+		expect(reloads(ext)).toBe(0);
+		busy(ext, false);
+		await flush();
+		expect(calls).toHaveLength(2);
+		await finish();
+		expect(reloads(ext)).toBe(1);
+	});
+
+	it("starts a new socket of the same browser idle", async () => {
+		const { bridge, calls, finish, hello, busy, reloads } = setup();
+		const client = bridge.cdpConnected(new FakeCdpSocket());
+		const old = new FakeExtSocket();
+		hello(old);
+		busy(old, true);
+		const fresh = new FakeExtSocket();
+		hello(fresh);
+		bridge.cdpClosed(client);
+		await finish();
+		expect(calls).toHaveLength(1);
+		await finish();
+		expect(reloads(fresh)).toBe(1);
 	});
 });

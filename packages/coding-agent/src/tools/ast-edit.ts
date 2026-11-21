@@ -25,7 +25,7 @@ import type { ToolSession } from ".";
 import { resolveToolTier, strictestApproval, truncateForPrompt } from "./approval";
 import { parseReadUrlTarget } from "./fetch";
 import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
-import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
+import { createFileRecorder, formatResultPath, resultSnapshotPath, targetResultBase } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 
 import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
@@ -87,6 +87,22 @@ async function runAstEditTargets(
 	let filesSearched = 0;
 	let limitReached = false;
 	let applied = !options.dryRun;
+	// Stage every target before writing any: a target whose rewrite fails
+	// (an ambiguous overlap) must not leave the targets before it written.
+	if (!options.dryRun && targets.length > 1) {
+		for (const target of targets) {
+			await astEdit({
+				rewrites: options.rewrites,
+				path: target.basePath,
+				glob: target.glob,
+				dryRun: true,
+				maxFiles: options.maxFiles,
+				failOnParseError: options.failOnParseError,
+				signal: options.signal,
+				filesystem: options.filesystem,
+			});
+		}
+	}
 	for (const target of targets) {
 		const targetResult = await astEdit({
 			rewrites: options.rewrites,
@@ -104,12 +120,13 @@ async function runAstEditTargets(
 		applied = applied && targetResult.applied;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
+		const resultBase = await targetResultBase(target.basePath);
 		for (const change of targetResult.changes) {
-			const absolute = resolveSearchResultPath(target.basePath, change.path);
+			const absolute = resolveSearchResultPath(resultBase, change.path);
 			aggregatedChanges.push({ ...change, path: relativeSearchResultPath(commonBasePath, absolute) });
 		}
 		for (const fileChange of targetResult.fileChanges) {
-			const absolute = resolveSearchResultPath(target.basePath, fileChange.path);
+			const absolute = resolveSearchResultPath(resultBase, fileChange.path);
 			const rebased = relativeSearchResultPath(commonBasePath, absolute);
 			fileCounts.set(rebased, (fileCounts.get(rebased) ?? 0) + fileChange.count);
 		}
@@ -468,7 +485,6 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								tool: "ast_edit",
 								before: before.text,
 								after: after.text,
-								beforeMtimeMs: before.mtimeMs,
 							});
 						}
 						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(

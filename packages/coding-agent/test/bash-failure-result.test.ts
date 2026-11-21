@@ -9,6 +9,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { Shell } from "@oh-my-pi/pi-natives";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
+import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 afterEach(() => {
 	mock.restore();
@@ -264,13 +265,14 @@ describe("BashTool execution results", () => {
 			});
 		});
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-meta-"));
-		const ids: Record<string, string> = { bash: "1", "bash-original": "2" };
+		// Sequential ids like the session's spill manager: the output spill gets 1, the raw original 2.
+		let nextId = 1;
 		const session = {
 			...makeSession(),
-			allocateOutputArtifact: async (kind: string) => ({
-				id: ids[kind],
-				path: path.join(artifactsDir, `${kind}.log`),
-			}),
+			allocateOutputArtifact: async () => {
+				const id = String(nextId++);
+				return { id, path: path.join(artifactsDir, `${id}.log`) };
+			},
 		} as unknown as ToolSession;
 
 		try {
@@ -284,9 +286,9 @@ describe("BashTool execution results", () => {
 				artifactId: "2",
 			});
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
-			expect(text).toContain("[raw output: artifact://2]");
+			expect(text).toContain(formatRawOutputNotice("2"));
 			expect(text).not.toContain("Minimized");
-			expect(await Bun.file(path.join(artifactsDir, "bash-original.log")).text()).toBe(rawOutput);
+			expect(await Bun.file(path.join(artifactsDir, "2.log")).text()).toBe(rawOutput);
 
 			const theme = await getThemeByName("dark");
 			if (!theme) throw new Error("Expected dark theme");
@@ -296,7 +298,7 @@ describe("BashTool execution results", () => {
 					.render(160)
 					.join("\n"),
 			);
-			expect(rendered).toContain("Minimized: lint 1.9KB → 27B");
+			expect(rendered).toContain(`${theme.icon.minimize} lint 1.9KB → 27B`);
 			const view = JSON.stringify(
 				bashToolRenderer.describeResult(result, { expanded: false, isPartial: false }, args),
 			);

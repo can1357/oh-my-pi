@@ -4,8 +4,8 @@ import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 
-/** The shipped JS facade, wired to a host that records every call it receives. */
-function facade() {
+/** The shipped JS facade, wired to a host that records every call it receives and answers `diff` with `diff`. */
+function facade(diff: unknown = "patch") {
 	const session: ToolSession = {
 		cwd: process.cwd(),
 		hasUI: false,
@@ -14,16 +14,20 @@ function facade() {
 		settings: Settings.isolated({}),
 	};
 	const calls: unknown[] = [];
+	const printed: unknown[] = [];
 	const context = createContext({
-		__omp_log__: () => {},
-		__omp_prelude__: async (_name: string, parameters: unknown) => {
+		__omp_log__: (_level: string, text: unknown) => {
+			printed.push(text);
+		},
+		__omp_prelude__: async (_name: string, parameters: { action: string }) => {
 			calls.push(parameters);
+			if (parameters.action === "diff") return diff;
 			return { text: "summary", details: { id: "d1", remaining: { id: "d2" } } };
 		},
 	});
 	runInContext(createCommitPrelude(session).javascript, context);
 	const run = (code: string): Promise<unknown> => runInContext(`(async () => { ${code} })()`, context);
-	return { calls, run };
+	return { calls, printed, run };
 }
 
 describe("commit JavaScript facade", () => {
@@ -34,8 +38,6 @@ describe("commit JavaScript facade", () => {
 		await expect(run(`await commit.draft({ cwd: "../ws" })`)).rejects.toThrow(
 			'draft(): unknown option "cwd"; expected agents, repo, silent',
 		);
-		// Python-style positional scope is not an options object.
-		await expect(run(`await commit.draft("ParserFix")`)).rejects.toThrow("draft() takes an options object");
 		expect(calls).toEqual([]);
 
 		await run(`globalThis.d = await commit.draft({ repo: "../ws", agents: "self" })`);
@@ -46,5 +48,45 @@ describe("commit JavaScript facade", () => {
 		);
 		await expect(run(`await d.take("a.ts", { unit: ["1a"] })`)).rejects.toThrow('take(): unknown option "unit"');
 		expect(calls).toHaveLength(1);
+	});
+
+	it("accepts the documented positional arguments", async () => {
+		const { calls, run } = facade();
+
+		await run(`globalThis.d = await commit.draft("ParserFix", { repo: "../ws" })`);
+		await run(`await d.only("a.ts", "b.ts", { silent: true })`);
+		await run(`await d.only(["c.ts", "d.ts"])`);
+		await run(`await d.take("a.ts", "2a", 3)`);
+		await run(`await d.drop("a.ts", { units: ["1b"] })`);
+		await run(`await d.commit("fix: x", ["- body"], { fixes: 12 })`);
+		expect(calls).toEqual([
+			{ action: "draft", agents: "ParserFix", repo: "../ws" },
+			{ action: "only", draft: "d1", globs: ["a.ts", "b.ts"] },
+			{ action: "only", draft: "d1", globs: ["c.ts", "d.ts"] },
+			{ action: "take", draft: "d1", path: "a.ts", units: ["2a", "3"] },
+			{ action: "drop", draft: "d1", path: "a.ts", units: ["1b"] },
+			{ action: "commit", draft: "d1", subject: "fix: x", body: ["- body"], fixes: [12] },
+		]);
+
+		await expect(run(`await d.commit("fix: x", ["- a"], { body: ["- b"] })`)).rejects.toThrow(
+			"commit(): body given both positionally and as an option",
+		);
+		await expect(run(`await d.take("a.ts", "1a", { units: ["2a"] })`)).rejects.toThrow(
+			"take(): units given both positionally and as an option",
+		);
+		await expect(run(`await d.show("a.ts", "b.ts")`)).rejects.toThrow("show() takes at most 1 positional argument");
+		expect(calls).toHaveLength(6);
+	});
+
+	it("returns the patch from diff(), also when a long line printed as a word row", async () => {
+		// The bridge hands over bare text when the print is the patch itself.
+		const plain = facade("-old\n+new\n");
+		await plain.run(`globalThis.d = await commit.draft()`);
+		expect(await plain.run(`return await d.diff()`)).toBe("-old\n+new\n");
+
+		const folded = facade({ text: "!…[-old-]{+new+}…\n", details: { patch: "-long old\n+long new\n" } });
+		await folded.run(`globalThis.d = await commit.draft()`);
+		expect(await folded.run(`return await d.diff()`)).toBe("-long old\n+long new\n");
+		expect(folded.printed.at(-1)).toBe("!…[-old-]{+new+}…\n");
 	});
 });

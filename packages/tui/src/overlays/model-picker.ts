@@ -66,6 +66,11 @@ export interface ModelPickerCallbacks {
 	 * picker shortcut again). Session-only: the host applies a runtime override.
 	 */
 	onPickTask?: (model: Model, selector: string) => void;
+	/**
+	 * The picker is closing on the current model's row with the slider moved: keep `level`
+	 * (clamped to that model) as the session's thinking level. {@link onCancel} follows.
+	 */
+	onKeepThinking?: (level: ConfiguredThinkingLevel) => void;
 	/** The picker was dismissed. */
 	onCancel: () => void;
 }
@@ -86,9 +91,10 @@ export interface ModelPickerOptions {
 	/** `provider/id` highlighted and preselected in task mode (current Task subagent model). */
 	taskSelector?: string;
 	/**
-	 * Thinking selector picking `model` applies when the slider is untouched
-	 * (its role's level, else what the session carries over). Enables the
-	 * session-mode thinking slider; absent, the picker shows none.
+	 * Level the untouched slider shows for `model` (clamped to its ladder): the
+	 * session's current level. An untouched pick carries the session's own
+	 * selection over instead. Enables the session-mode thinking slider; absent,
+	 * the picker shows none.
 	 */
 	thinkingLevelFor?: (model: Model) => ConfiguredThinkingLevel | undefined;
 }
@@ -136,7 +142,7 @@ const FROZEN_THINKING_STEPS: readonly ConfiguredThinkingLevel[] = [
 const THINKING_KEYS = ["left", "right"];
 
 /** The thinking slider for one model: its steps low to high, the shown step, and why it is frozen. */
-interface ThinkingSlider {
+export interface ThinkingSlider {
 	steps: readonly ConfiguredThinkingLevel[];
 	value: ConfiguredThinkingLevel;
 	disabled?: string;
@@ -165,6 +171,16 @@ function thinkingStep(
 	if (steps.includes(wanted)) return wanted;
 	if (wanted === AUTO_THINKING || wanted === ThinkingLevel.Off) return ThinkingLevel.Off;
 	return clampThinkingLevelForModel(model, wanted) ?? ThinkingLevel.Off;
+}
+
+/**
+ * `model`'s thinking slider showing `level` (clamped to its ladder; unset or inherit as its default level), frozen at
+ * off when it has no effort to pick. The alt+p picker's slider, and RPC's `get_model_picker` rows.
+ */
+export function thinkingSlider(model: Model, level: ConfiguredThinkingLevel | undefined): ThinkingSlider {
+	const { steps, disabled } = thinkingSteps(model);
+	if (disabled) return { steps, value: ThinkingLevel.Off, disabled };
+	return { steps, value: thinkingStep(model, steps, level) };
 }
 
 /** Footer hint for the active mode; keys resolve at render time so theme/keybinding changes apply. */
@@ -208,7 +224,7 @@ export class ModelPickerComponent implements Component {
 	#taskModeKey: KeyId | undefined;
 	#taskSelector: string | undefined;
 	#thinkingLevelFor: ((model: Model) => ConfiguredThinkingLevel | undefined) | undefined;
-	/** The slider's pending level; undefined while untouched (each model shows what picking it applies). */
+	/** The slider's pending level; undefined while untouched (each model shows the session's current level). */
 	#thinking: ConfiguredThinkingLevel | undefined;
 	/** Active scope: {@link ALL_SCOPE} or `provider:<id>`. */
 	#scope = ALL_SCOPE;
@@ -280,7 +296,13 @@ export class ModelPickerComponent implements Component {
 				thinkingLevel === undefined ? { overContext } : { overContext, thinkingLevel },
 			);
 		};
-		this.#browser.onCancel = () => callbacks.onCancel();
+		this.#browser.onCancel = () => {
+			const selected = this.#browser.getSelected();
+			const kept =
+				selected && selected.selector === this.#currentSelector ? this.#pendingThinking(selected.model) : undefined;
+			if (kept !== undefined) callbacks.onKeepThinking?.(kept);
+			callbacks.onCancel();
+		};
 		this.#browser.onQueryChange = query => this.#syncItemsForQuery(query);
 
 		// Hydrate synchronously from the current registry snapshot so the first
@@ -436,16 +458,14 @@ export class ModelPickerComponent implements Component {
 		if (!levelFor || this.#mode() !== "session" || this.#browser.pickerSelected === null) return undefined;
 		const model = this.#browser.getSelected()?.model;
 		if (!model) return undefined;
-		const { steps, disabled } = thinkingSteps(model);
-		if (disabled) return { steps, value: ThinkingLevel.Off, disabled };
-		return { steps, value: thinkingStep(model, steps, this.#thinking ?? levelFor(model)) };
+		return thinkingSlider(model, this.#thinking ?? levelFor(model));
 	}
 
 	/** The pending level as picking `model` applies it; undefined when untouched or the model has no effort. */
 	#pendingThinking(model: Model): ConfiguredThinkingLevel | undefined {
 		if (this.#thinking === undefined || this.#mode() !== "session") return undefined;
-		const { steps, disabled } = thinkingSteps(model);
-		return disabled ? undefined : thinkingStep(model, steps, this.#thinking);
+		const slider = thinkingSlider(model, this.#thinking);
+		return slider.disabled ? undefined : slider.value;
 	}
 
 	/** Move the pending level one step along the highlighted model's slider, stopping at its ends. */

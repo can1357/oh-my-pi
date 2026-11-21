@@ -484,7 +484,7 @@ describe("AuthStorage usage cache: Claude rate limits", () => {
 		let usageRequests = 0;
 		const usageFetch = (async (input: string | URL | Request) => {
 			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-			if (url.search === "") usageRequests += 1;
+			if (url.pathname.endsWith("/usage") && url.search === "") usageRequests += 1;
 			if (usageRequests === 1) {
 				return Response.json(
 					{ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } },

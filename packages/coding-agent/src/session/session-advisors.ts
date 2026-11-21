@@ -37,7 +37,7 @@ import type {
 	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
+import { completeSimple, isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -105,6 +105,7 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
 import { type CustomMessage, type CustomMessagePayload, isUserAuthoredMessage, isUserTurnInitiator } from "./messages";
+import { journalCompletion } from "./model-usage-journal";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	calculateRetryBackoffDelayMs,
@@ -2645,6 +2646,11 @@ export class SessionAdvisors {
 		// Instrument the advisor's overflow-compaction one-shot like the primary
 		// compaction path so the advisor model's maintenance call also emits spans.
 		const telemetry = resolveTelemetry(agent.telemetry, advisorProviderSessionId);
+		// Billed to the primary session; the summary stays in the advisor's own history.
+		const journal = journalCompletion(this.#host.sessionManager, {
+			purpose: "compaction:advisor",
+			usageOnly: true,
+		});
 
 		const codexCompaction = this.#host.createCodexCompactionContext({
 			trigger: "auto",
@@ -2701,6 +2707,13 @@ export class SessionAdvisors {
 						preferWebsockets: this.#host.preferWebsockets(candidate),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						codexCompaction,
+						// The default transport, wrapped so every provider attempt is journaled.
+						completeImpl: async (requestModel, requestContext, requestOptions) => {
+							const message = await completeSimple(requestModel, requestContext, requestOptions);
+							journal?.(message);
+							return message;
+						},
+						onRemoteUsage: journal,
 					},
 				);
 				break;
