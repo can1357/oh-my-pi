@@ -83,6 +83,33 @@ pub(crate) fn update_reference(
 	Ok(())
 }
 
+/// Translate a lost compare-and-swap on HEAD into [`Error::HeadMoved`], the
+/// failure [`CommitOptions::expected_head`] documents. Returns `None` for
+/// reference errors that are not precondition failures (locks, IO, name
+/// validation), which stay backend errors.
+///
+/// `expected` is the commit the update started from. `actual` is the value that
+/// broke the swap; a reference that disappeared leaves it `None`, the same way
+/// an unborn HEAD is reported.
+fn head_moved_at_commit(
+	expected: gix::hash::ObjectId,
+	err: &gix::reference::edit::Error,
+) -> Option<Error> {
+	let gix::reference::edit::Error::FileTransactionPrepare(prepare) = err else {
+		return None;
+	};
+	let actual = match prepare {
+		gix::refs::file::transaction::prepare::Error::ReferenceOutOfDate {
+			actual: gix::refs::Target::Object(id),
+			..
+		} => Some(id.to_hex().to_string()),
+		gix::refs::file::transaction::prepare::Error::ReferenceOutOfDate { .. }
+		| gix::refs::file::transaction::prepare::Error::MustExist { .. } => None,
+		_ => return None,
+	};
+	Some(Error::HeadMoved { expected: expected.to_hex().to_string(), actual })
+}
+
 impl GitRepo {
 	/// Stage worktree files, or every change when `files` is empty.
 	///
@@ -325,28 +352,35 @@ impl GitRepo {
 			.map_or(gix::refs::transaction::PreviousValue::MustNotExist, |old| {
 				gix::refs::transaction::PreviousValue::MustExistAndMatch(old.into())
 			});
-		repo
-			.edit_reference(gix::refs::transaction::RefEdit {
-				change: gix::refs::transaction::Change::Update {
-					log: gix::refs::transaction::LogChange {
-						mode:                gix::refs::transaction::RefLog::AndReference,
-						force_create_reflog: false,
-						message:             if options.amend {
-							"commit (amend)"
-						} else {
-							"commit"
-						}
-						.into(),
-					},
-					expected,
-					new: gix::refs::Target::Object(id),
+		let edit = repo.edit_reference(gix::refs::transaction::RefEdit {
+			change: gix::refs::transaction::Change::Update {
+				log: gix::refs::transaction::LogChange {
+					mode:                gix::refs::transaction::RefLog::AndReference,
+					force_create_reflog: false,
+					message:             if options.amend {
+						"commit (amend)"
+					} else {
+						"commit"
+					}
+					.into(),
 				},
-				name:   "HEAD"
-					.try_into()
-					.map_err(|err| Error::backend("git commit", err))?,
-				deref:  true,
-			})
-			.map_err(|err| Error::backend("git commit", err))?;
+				expected,
+				new: gix::refs::Target::Object(id),
+			},
+			name:   "HEAD"
+				.try_into()
+				.map_err(|err| Error::backend("git commit", err))?,
+			deref:  true,
+		});
+		if let Err(err) = edit {
+			// HEAD moved after the check above, inside the hook/signing window:
+			// the swap lost, which is the `HeadMoved` this option documents, not
+			// a backend failure. Everything else keeps its backend error.
+			if let Some(moved) = old_commit.and_then(|old| head_moved_at_commit(old, &err)) {
+				return Err(moved);
+			}
+			return Err(Error::backend("git commit", err));
+		}
 		let _ = run_commit_hook(self, "post-commit", &[], index_path);
 		Ok(id.to_hex().to_string())
 	}

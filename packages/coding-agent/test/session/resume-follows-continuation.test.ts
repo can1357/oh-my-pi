@@ -753,3 +753,27 @@ describe("--resume of a session that continued in a sibling file", () => {
 		}
 	}, 30_000);
 });
+
+describe("--continue while the picked session is open in another live process", () => {
+	it("starts a new session, as a plain launch does, when --continue picks a session another live process writes", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const holder = await Holder.resume(tempDir, original);
+		try {
+			await holder.append("holder turn");
+			const args = continueArgs(tempDir.path());
+			const manager = await createSessionManager(args, tempDir.path(), stubSettings);
+			try {
+				// Resuming would duplicate the running conversation into a sibling on the first write.
+				expect(manager?.getSessionFile()).not.toBe(original);
+				expect(manager?.getEntries()).toEqual([]);
+				// Startup then runs as a plain launch, not as a resume.
+				expect(args.continue).toBe(false);
+			} finally {
+				await manager?.close();
+			}
+		} finally {
+			await holder.exit();
+		}
+	}, 30_000);
+});

@@ -189,6 +189,14 @@ class NativeContext implements DescribeContext {
 		return this.#features.has(name);
 	}
 
+	/** Adopts the features a `features` event lists; whether they differ from the ones held. */
+	setFeatures(features: readonly string[]): boolean {
+		const next = new Set(features);
+		if (sameSet(next, this.#features)) return false;
+		this.#features = next;
+		return true;
+	}
+
 	/** Whether `other` advertises exactly the same kinds and features. */
 	sameVocabulary(other: NativeContext): boolean {
 		return sameSet(this.#kinds, other.#kinds) && sameSet(this.#features, other.#features);
@@ -836,6 +844,16 @@ export class NativeBackend {
 			case "motion":
 				this.#cx.reduceMotion = event.reduce;
 				this.#host.motionChanged(event.reduce);
+				return;
+			case "features":
+				// A setting changed what the terminal does (Tern's Agents tray): kept for a
+				// resumed surface too, and every component describes itself again, as after a
+				// `hello` with another vocabulary.
+				this.#hello = { ...this.#hello, features: event.features };
+				if (!this.#cx.setFeatures(event.features)) return;
+				setNativePacing(this.#cx.feature("pace"));
+				this.#host.invalidate();
+				this.#host.requestRender();
 				return;
 			case "visible":
 				return;

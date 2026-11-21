@@ -1,5 +1,6 @@
 auth "devin" {
 	name "Devin"
+	org-scoped-identity #true
 	login "oauth-code" {
 		authorize-url "https://app.devin.ai/auth/cli/continue"
 		pkce #true
@@ -23,6 +24,9 @@ auth "devin" {
 			api-endpoint literal="https://api.devin.ai"
 			enterprise-url literal="https://app.devin.ai"
 		}
+		// Identity from the seat-status call `/usage` makes; one user can sign in
+		// to several organizations, each with its own plan.
+		after-exchange hook="devin-identity"
 	}
 	refresh "none"
 }

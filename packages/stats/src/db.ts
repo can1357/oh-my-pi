@@ -497,10 +497,13 @@ export async function initDb(): Promise<Database> {
 	// sentinel write (process killed in between) still reclassifies on the next
 	// init instead of silently leaving every row as the 'main' default. A
 	// brand-new empty table has nothing to reclassify, so it settles COMPLETE.
-	db.query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
-		AGENT_TYPE_BACKFILL_KEY,
-		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
-	);
+	// Checked before writing: an open of a settled database takes no write lock.
+	if (!db.query("SELECT 1 FROM meta WHERE key = ?").get(AGENT_TYPE_BACKFILL_KEY)) {
+		db.query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
+			AGENT_TYPE_BACKFILL_KEY,
+			messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
+		);
+	}
 	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_agent_type ON messages(timestamp, agent_type)");
 	// Each behavior-metric bump invalidates previously-ingested rows. We detect
 	// the stale schema by column name and drop the table; `IF NOT EXISTS` above
@@ -1389,9 +1392,36 @@ export function getMessageById(id: number): MessageStats | null {
  * raw rows while its rebuild backlog is too large for exact reads.
  */
 export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]> {
-	const database = await initDb();
+	return dailyActivity(await initDb(), days);
+}
+
+/**
+ * {@link getDailyActivity} from the stored rows through a connection of its
+ * own that never writes: no schema setup or one-time pass runs first, so
+ * another process holding the write lock never delays or fails it (WAL
+ * readers do not wait for writers). Returns null when the stats database
+ * cannot be opened, as before one exists.
+ */
+export function readDailyActivity(days = 371): DailyActivityPoint[] | null {
+	let reader: Database;
+	try {
+		reader = new Database(getStatsDbPath(), { readwrite: true, create: false });
+	} catch {
+		// `create: false` refuses to open a database that does not exist yet.
+		return null;
+	}
+	try {
+		reader.run("PRAGMA busy_timeout = 5000");
+		reader.run("PRAGMA query_only = 1");
+		return dailyActivity(reader, days);
+	} finally {
+		reader.close();
+	}
+}
+
+function dailyActivity(database: Database, days: number): DailyActivityPoint[] {
 	const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-	const rolled = getDailyActivityFromRollup(cutoff);
+	const rolled = getDailyActivityFromRollup(cutoff, database);
 	if (rolled) return rolled;
 	const stmt = database.query(`
 		SELECT

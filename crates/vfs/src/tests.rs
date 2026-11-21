@@ -858,3 +858,103 @@ fn fifo_write_opens_through_a_cancellable_view_wait_for_a_reader_and_observe_the
 		}
 	}
 }
+
+/// Records what a [`ChangeSink`] is told, as `name: before -> after` lines
+/// (`-` for no file), and refuses paths named `ignored`.
+#[derive(Default)]
+struct ChangeLog(Mutex<Vec<String>>);
+
+impl ChangeSink for ChangeLog {
+	fn wants(&self, path: &Path) -> bool {
+		path.file_name() != Some(OsStr::new("ignored"))
+	}
+
+	fn changed(&self, path: PathBuf, before: Option<Vec<u8>>, after: Option<Vec<u8>>) {
+		let text = |side: Option<Vec<u8>>| {
+			side.map_or_else(|| "-".to_owned(), |b| String::from_utf8(b).unwrap())
+		};
+		let name = path.file_name().unwrap().to_string_lossy().into_owned();
+		self
+			.0
+			.lock()
+			.push(format!("{name}: {} -> {}", text(before), text(after)));
+	}
+}
+
+impl ChangeLog {
+	/// What one unit of work on `dir` reports, sorted.
+	fn of(work: impl FnOnce(&BlockingFs)) -> Vec<String> {
+		let log = Arc::new(Self::default());
+		let fs = Fs::native().with_change_sink(log.clone()).blocking();
+		work(&fs.begin_changes());
+		let mut lines = std::mem::take(&mut *log.0.lock());
+		lines.sort();
+		lines
+	}
+}
+
+#[test]
+fn change_scope_reports_net_file_changes_once_its_views_are_dropped() {
+	let dir = TempDir::new("changes");
+	let at = |name: &str| dir.0.join(name);
+	for name in ["edited", "appended", "removed", "untouched", "same", "ignored"] {
+		std::fs::write(at(name), name).unwrap();
+	}
+	std::fs::write(at("binary"), b"\0old").unwrap();
+
+	let lines = ChangeLog::of(|fs| {
+		// A temporary file renamed over its target is one change, of the target.
+		let (temp, mut file) = fs.create_temp(&dir.0, &TempOptions::new()).unwrap();
+		file.write_all(b"rewritten").unwrap();
+		drop(file);
+		fs.rename(&temp, at("edited")).unwrap();
+		let mut append = fs
+			.open_with(at("appended"), OpenOptions::new().append(true))
+			.unwrap();
+		append.write_all(b"+more").unwrap();
+		fs.remove_file(at("removed")).unwrap();
+		fs.write(at("created"), "new").unwrap();
+		fs.write(at("same"), "same").unwrap();
+		fs.write(at("ignored"), "changed").unwrap();
+		fs.write(at("binary"), b"\0new").unwrap();
+		fs.copy(at("untouched"), at("copied")).unwrap();
+	});
+
+	assert_eq!(lines, [
+		"appended: appended -> appended+more",
+		"copied: - -> untouched",
+		"created: - -> new",
+		"edited: edited -> rewritten",
+		"removed: removed -> -",
+	]);
+}
+
+#[test]
+fn change_scope_reports_the_files_of_moved_and_removed_directories() {
+	let dir = TempDir::new("change-dirs");
+	std::fs::create_dir_all(dir.0.join("old/sub")).unwrap();
+	std::fs::create_dir(dir.0.join("gone")).unwrap();
+	std::fs::write(dir.0.join("old/a"), "a").unwrap();
+	std::fs::write(dir.0.join("old/sub/b"), "b").unwrap();
+	std::fs::write(dir.0.join("gone/c"), "c").unwrap();
+
+	let lines = ChangeLog::of(|fs| {
+		fs.rename(dir.0.join("old"), dir.0.join("new")).unwrap();
+		// A caller removing a tree by descriptor declares it first.
+		fs.note_change(dir.0.join("gone"));
+		std::fs::remove_dir_all(dir.0.join("gone")).unwrap();
+	});
+
+	// Each moved file is reported at both of its paths.
+	assert_eq!(lines, ["a: - -> a", "a: a -> -", "b: - -> b", "b: b -> -", "c: c -> -"]);
+}
+
+#[test]
+fn views_without_a_begun_scope_report_nothing() {
+	let dir = TempDir::new("change-unscoped");
+	let log = Arc::new(ChangeLog::default());
+	let fs = Fs::native().with_change_sink(log.clone()).blocking();
+	fs.write(dir.0.join("file"), "content").unwrap();
+	drop(fs);
+	assert!(log.0.lock().is_empty());
+}

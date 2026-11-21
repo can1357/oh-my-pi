@@ -30,10 +30,7 @@ import {
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import {
-	googleAntigravityModelManagerOptions,
-	googleGeminiCliModelManagerOptions,
-} from "@oh-my-pi/pi-catalog/provider-models/google";
+import { googleAntigravityModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/google";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function requireReviewedTable(provider: string): VariantCollapseTable {
@@ -45,7 +42,6 @@ function requireReviewedTable(provider: string): VariantCollapseTable {
 const antigravityTable = requireReviewedTable("google-antigravity");
 const cursorTable = requireReviewedTable("cursor");
 const devinTable = requireReviewedTable("devin");
-const geminiCliTable = requireReviewedTable("google-gemini-cli");
 
 function memberSpec(
 	id: string,
@@ -499,20 +495,6 @@ describe("collapseVariants with a reviewed table", () => {
 		expect(merged).toHaveLength(1);
 		expect(merged[0]?.antigravityWireProfiles).toEqual({
 			"gemini-3-flash-agent": { modelEnum: "M3", thinkingBudget: 1000 },
-		});
-	});
-
-	it("keeps gemini-cli flash on the level transport with the original routing", () => {
-		const out = collapseVariants(FLASH_TRIPLET(), { table: geminiCliTable });
-		const flash = out.find(m => m.id === "gemini-3.5-flash");
-		expect(flash?.thinking?.mode).toBe("google-level");
-		expect(flash?.thinking?.effortBudgets).toBeUndefined();
-		expect(flash?.thinking?.effortRouting).toEqual({
-			off: "gemini-3.5-flash-extra-low",
-			minimal: "gemini-3-flash-agent",
-			low: "gemini-3.5-flash-extra-low",
-			medium: "gemini-3.5-flash-extra-low",
-			high: "gemini-3.5-flash-low",
 		});
 	});
 
@@ -1359,7 +1341,6 @@ describe("variant aliases", () => {
 	it("resolves members and recycled ids per provider", () => {
 		expect(resolveVariantSelector("google-antigravity", "gemini-3.5-flash-low")).toBe("gemini-3.5-flash");
 		expect(resolveVariantSelector("google-antigravity", "gemini-3.7-flash-tiered")).toBe("gemini-3.7-flash");
-		expect(resolveVariantSelector("google-gemini-cli", "gemini-pro-agent")).toBe("gemini-3.1-pro");
 		expect(resolveVariantSelector("google-antigravity", "gemini-3-flash")).toBe("gemini-3.5-flash");
 		expect(resolveVariantSelector("google-antigravity", "gemini-2.5-flash-thinking")).toBe("gemini-2.5-flash");
 		expect(resolveVariantSelector("google-antigravity", "gemini-2.5-flash-lite")).toBeUndefined();
@@ -1370,7 +1351,6 @@ describe("variant aliases", () => {
 		const hit = resolveBareVariantSelector("GEMINI-3.5-FLASH-LOW");
 		expect(hit?.id).toBe("gemini-3.5-flash");
 		expect(hit?.providers).toContain("google-antigravity");
-		expect(hit?.providers).toContain("google-gemini-cli");
 		expect(resolveBareVariantSelector("gpt-4o")).toBeUndefined();
 	});
 
@@ -1716,28 +1696,6 @@ describe("antigravity discovery collapsing", () => {
 			}
 		});
 
-		it("leaves google-gemini-cli discovery rows unreferenced and unpriced", async () => {
-			const options = googleGeminiCliModelManagerOptions({
-				oauthToken: "t",
-				endpoint: "https://cca.test",
-				fetch: sparseFetcherFor({
-					"gemini-2.5-flash-lite": { displayName: "Gemini 2.5 Flash Lite" },
-					"gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true },
-					"gemini-3.1-pro-high": { displayName: "Gemini 3.1 Pro (High)", supportsThinking: true },
-				}),
-			});
-			const models = (await options.fetchDynamicModels?.()) ?? [];
-
-			const lite = models.find(m => m.id === "gemini-2.5-flash-lite");
-			expect(lite?.provider).toBe("google-gemini-cli");
-			expect(lite?.reasoning).toBe(false);
-			expect(lite?.input).toEqual(["text"]);
-			expect(models.find(m => m.id === "gemini-3.1-pro")).toBeDefined();
-			for (const model of models) {
-				expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-			}
-		});
-
 		it("prices Antigravity rows through the shared pricing-peer rule", async () => {
 			const models = await discover(antigravityRowReference);
 			// The generator prices the same zero-cost logical rows from the same rule.
@@ -1797,39 +1755,6 @@ describe("antigravity discovery collapsing", () => {
 		});
 
 		expect(bodies).toEqual([{ project: "p-1" }, {}]);
-	});
-
-	it("discovers Gemini models through Antigravity before provisioning Cloud Code Assist", async () => {
-		const requestedUrls: string[] = [];
-		const geminiCliFetcher = Object.assign(
-			(input: string | URL | Request, _init?: RequestInit) => {
-				const url = String(input);
-				requestedUrls.push(url);
-				if (!url.startsWith(ANTIGRAVITY_PRIMARY_ENDPOINT)) {
-					return Promise.resolve(new Response("Forbidden", { status: 403 }));
-				}
-				return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
-			},
-			{ preconnect: fetch.preconnect },
-		);
-		const options = googleGeminiCliModelManagerOptions({
-			oauthToken: "t",
-			endpoint: "https://cca.test",
-			fetch: geminiCliFetcher,
-		});
-		const models = await options.fetchDynamicModels?.();
-
-		expect(requestedUrls).toContain(`${ANTIGRAVITY_PRIMARY_ENDPOINT}/v1internal:fetchAvailableModels`);
-		expect(models?.some(m => m.id === "claude-sonnet-4-6")).toBe(false);
-		expect(models?.every(m => m.baseUrl === "https://cca.test")).toBe(true);
-		const flash = models?.find(m => m.id === "gemini-3.5-flash");
-		expect(flash?.provider).toBe("google-gemini-cli");
-		expect(flash?.requestModelId).toBe("gemini-3.5-flash-extra-low");
-		expect(flash?.thinking?.effortRouting?.off).toBe("gemini-3.5-flash-extra-low");
-		const flash37 = models?.find(m => m.id === "gemini-3.7-flash");
-		expect(flash37?.requestModelId).toBe("gemini-3.7-flash-low");
-		expect(flash37?.thinking?.requiresEffort).toBe(true);
-		expect(flash37?.thinking?.effortRouting?.[Effort.High]).toBe("gemini-3.7-flash-high");
 	});
 
 	it("uses the primary daily endpoint by default", async () => {
@@ -1914,49 +1839,6 @@ describe("antigravity discovery collapsing", () => {
 		expect(hydrogen?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
 		expect(hydrogen?.thinking?.effortRouting?.[Effort.XHigh]).toBe("gemini-4-hydrogen-xhigh");
 		expect(hydrogen?.thinking?.effortRouting?.[Effort.Low]).toBe("gemini-4-hydrogen-low");
-	});
-
-	it("collapses Gemini 4 SKUs on the google-gemini-cli manager path into one hydrogen row", async () => {
-		// The `google-gemini-cli` model manager injects its own reviewed
-		// collapse table (not the `google-antigravity` one discovery specs
-		// carry), so that table must declare the Gemini 4 families too;
-		// otherwise the four hydrogen tier SKUs pass through as raw rows and
-		// `gemini-4-hydrogen` never appears in the picker.
-		const fetcher = Object.assign(
-			(input: string | URL | Request, _init?: RequestInit) =>
-				Promise.resolve(
-					String(input).includes(":fetchAvailableModels")
-						? Response.json({
-								models: Object.fromEntries(
-									["low", "medium", "high", "xhigh"].map(tier => [
-										`gemini-4-hydrogen-${tier}`,
-										{
-											displayName: `Gemini 4 Hydrogen (${tier})`,
-											supportsThinking: true,
-											thinkingLevel: { low: 1, medium: 2, high: 3, xhigh: 100 }[tier],
-											thinkingBudget: -1,
-											maxTokens: 1_048_576,
-											maxOutputTokens: 65_536,
-										},
-									]),
-								),
-							})
-						: new Response("version: 2.19.1\n"),
-				),
-			{ preconnect: fetch.preconnect },
-		);
-		const options = googleGeminiCliModelManagerOptions({ oauthToken: "t", fetch: fetcher });
-		const models = await options.fetchDynamicModels?.();
-
-		expect(models?.filter(model => model.id.includes("hydrogen")).map(model => model.id)).toEqual([
-			"gemini-4-hydrogen",
-		]);
-		const hydrogen = models?.find(model => model.id === "gemini-4-hydrogen");
-		expect(hydrogen?.provider).toBe("google-gemini-cli");
-		expect(hydrogen?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
-		expect(hydrogen?.thinking?.effortRouting?.[Effort.XHigh]).toBe("gemini-4-hydrogen-xhigh");
-		expect(hydrogen?.thinking?.effortRouting?.[Effort.Low]).toBe("gemini-4-hydrogen-low");
-		expect(resolveWireModelId(hydrogen!, Effort.XHigh)).toBe("gemini-4-hydrogen-xhigh");
 	});
 
 	it("drops bundled rows the account roster does not serve, and keeps them when discovery fails", async () => {

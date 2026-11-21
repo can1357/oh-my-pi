@@ -525,6 +525,7 @@ mod tests {
 			Arc::new(Self { configured: true, ..Self::default() })
 		}
 
+		#[cfg(unix)]
 		fn unconfigured() -> Arc<Self> {
 			Arc::new(Self::default())
 		}
@@ -569,6 +570,7 @@ mod tests {
 	}
 
 	/// One program the system fallback ran.
+	#[cfg_attr(not(unix), allow(dead_code, reason = "only the unix tests read a run"))]
 	#[derive(Clone, Debug, Default)]
 	struct Ran {
 		argv:  Vec<String>,
