@@ -303,9 +303,8 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		expect(await fileExists(sessionFile)).toBe(false);
 	});
 
-	// A draft still on disk at close time is the whole reason the session
-	// file was materialized in the first place (`--resume` needs to find
-	// this session's file to reattach the draft). Never drop it.
+	// A partially-written record from another process must not turn a session
+	// with a draft into a dropped file: the GC keeps any file it cannot parse.
 	it("keeps the session file when its current contents include a malformed record", async () => {
 		using tempDir = TempDir.createSync("@pi-session-close-keep-malformed-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
@@ -322,6 +321,9 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		expect(await fileExists(sessionFile)).toBe(true);
 	});
 
+	// A draft still on disk at close time is the whole reason the session
+	// file was materialized in the first place (`--resume` needs to find
+	// this session's file to reattach the draft). Never drop it.
 	it("keeps the session file when a draft sidecar is still present at close", async () => {
 		using tempDir = TempDir.createSync("@pi-session-close-keep-draft-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
