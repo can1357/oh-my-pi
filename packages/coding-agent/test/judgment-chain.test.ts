@@ -101,6 +101,15 @@ const OPENAI_DECISIONS_BACKUP = {
 	name: "GPT-6 Luna Decisions Backup",
 } as Model<Api>;
 
+const LIQUID_D1 = {
+	...JEV_PREVIEW,
+	id: "d1.1",
+	api: "liquid-systemone",
+	provider: "liquid",
+	baseUrl: "https://api.liquid.ai",
+	input: ["text", "image"],
+} as Model<Api>;
+
 const IMAGE_ONE: ImageContent = {
 	type: "image",
 	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -944,22 +953,14 @@ describe("ChainJudge", () => {
 	});
 
 	it("splits a request-wide patch cap across images that each fit it alone", async () => {
-		const liquid = {
-			...JEV_PREVIEW,
-			id: "d1.1",
-			api: "liquid-systemone",
-			provider: "liquid",
-			baseUrl: "https://api.liquid.ai",
-			input: ["text", "image"],
-		} as Model<Api>;
-		const settings = Settings.isolated({ modelRoles: { judge: `${liquid.provider}/${liquid.id}` } });
-		const registry = makeRegistry([liquid], { liquid: "liquid_key" });
+		const settings = Settings.isolated({ modelRoles: { judge: `${LIQUID_D1.provider}/${LIQUID_D1.id}` } });
+		const registry = makeRegistry([LIQUID_D1], { liquid: "liquid_key" });
 		let images: string[] = [];
 		vi.spyOn(globalThis, "fetch").mockImplementation(
 			asGlobalFetch(async (_url, init) => {
 				images = JSON.parse(String(init?.body)).images;
 				return Response.json({
-					model: liquid.id,
+					model: LIQUID_D1.id,
 					answers: { visible: { type: "noul", noul: 0.75 } },
 					usage: { input_tokens: 8, output_tokens: 0 },
 				});
@@ -987,6 +988,41 @@ describe("ChainJudge", () => {
 		}
 		expect(images).toHaveLength(2);
 		expect(patches).toBeLessThanOrEqual(10_000);
+	});
+
+	it("re-encodes a GIF as PNG for Liquid, whose API answers GIFs with 422", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: `${LIQUID_D1.provider}/${LIQUID_D1.id}` } });
+		const registry = makeRegistry([LIQUID_D1], { liquid: "liquid_key" });
+		let images: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				images = JSON.parse(String(init?.body)).images;
+				return Response.json({
+					model: LIQUID_D1.id,
+					answers: { visible: { type: "noul", noul: 0.75 } },
+					usage: { input_tokens: 8, output_tokens: 0 },
+				});
+			}),
+		);
+		// 1x1 transparent GIF.
+		const gif: ImageContent = {
+			type: "image",
+			data: "R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
+			mimeType: "image/gif",
+		};
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "look at this",
+			questions: { visible: { type: "noul", instructions: "Is an object visible?" } },
+			images: [gif],
+		});
+
+		expect(result.answers.visible.noul).toBe(0.75);
+		expect(images).toHaveLength(1);
+		const [header, data] = images[0].split(",");
+		expect(header).toBe("data:image/png;base64");
+		const sent = await new Bun.Image(Buffer.from(data, "base64")).metadata();
+		expect([sent.width, sent.height]).toEqual([1, 1]);
 	});
 
 	it("measures box answers on the source image its question names, not the padded fit sent", async () => {

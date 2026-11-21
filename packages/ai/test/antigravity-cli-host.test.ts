@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
@@ -19,6 +20,7 @@ import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mc
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
 
@@ -174,6 +176,12 @@ class FakeAgy implements AgyTransport {
 		this.options.onUpdate({
 			sessionId: this.currentId,
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+		});
+	}
+	thought(text: string): void {
+		this.options.onUpdate({
+			sessionId: this.currentId,
+			update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text } },
 		});
 	}
 	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
@@ -848,7 +856,7 @@ describe("AgyHost stateful steps", () => {
 		writer.text("late");
 		writer.thinking("late");
 		writer.usage(999);
-		writer.fail("error", "late failure");
+		writer.fail({ stopReason: "error", message: "late failure", status: 500, id: 500 });
 		expect(JSON.stringify(writer.output)).toBe(snapshot);
 		expect(stream.queue.map(event => event.type)).toEqual([
 			"start",
@@ -871,5 +879,91 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("AgyHost quota retry notices", () => {
+	async function quotaFailure(notify: (fake: FakeAgy, text: string) => void, notice: string) {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		notify(fake, notice);
+		// agy keeps retrying until cancelled; later notices must not reach the transcript either.
+		fake.text("⚠ API error (attempt 2): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted.");
+		const error: unknown = await run.done.then(
+			() => undefined,
+			cause => cause,
+		);
+		return { fake, run, error };
+	}
+
+	for (const [kind, notify] of [
+		["message", (fake: FakeAgy, text: string) => fake.text(text)],
+		["thought", (fake: FakeAgy, text: string) => fake.thought(text)],
+	] as const) {
+		it(`cancels the turn and fails with a 429 when a ${kind} chunk reports quota exhaustion`, async () => {
+			const { fake, run, error } = await quotaFailure(
+				notify,
+				"⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).",
+			);
+			await fake.cancellations.next();
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(result.message).toContain("RESOURCE_EXHAUSTED (code 429)");
+			expect(AIError.isUsageLimitOutcome(result.status, result.message)).toBe(true);
+			expect(run.writer.output.content).toEqual([]);
+			expect(fake.closed).toBe(true);
+		});
+
+		it(`detects a quota notice split across ${kind} chunks`, async () => {
+			const { fake, run, error } = await quotaFailure((fake, text) => {
+				for (const chunk of text.split("|")) notify(fake, chunk);
+			}, "⚠ API |error (attempt 1): |RESOURCE_|EXHAUSTED (code 429): Resource has been exhausted.");
+			await fake.cancellations.next();
+			const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+			expect(result.status).toBe(429);
+			expect(result.message).toContain("RESOURCE_EXHAUSTED (code 429)");
+			expect(run.writer.output.content).toEqual([]);
+		});
+	}
+
+	it("streams lines before a split notice and still fails with a 429", async () => {
+		const { fake, run, error } = await quotaFailure((fake, text) => {
+			for (const chunk of text.split("|")) fake.text(chunk);
+		}, "Working on it.\n⚠ API error (attempt 1): |RESOURCE_EXHAUSTED (code 429): quota.");
+		await fake.cancellations.next();
+		const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+		expect(result.status).toBe(429);
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "Working on it.\n" }]);
+	});
+
+	it("carries agy's reset window as a retry hint for the credential block", async () => {
+		const { error } = await quotaFailure(
+			(fake, text) => fake.text(text),
+			"\n⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 3h40m0s.",
+		);
+		const result = await AIError.finalize(error, { api: model.api, provider: model.provider, model: model.id });
+		expect(extractProviderRetryHint(model.provider, result.message)).toBe((3 * 60 + 40) * 60_000);
+	});
+
+	it("keeps prose about API errors and quota codes as visible text", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("explain the error")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const prose = [
+			"An API error (attempt 3): RESOURCE_EXHAUSTED means the quota ran out.",
+			"\nRetry when you see code 429.",
+			"\nAPI error (attempt 1): UNAVAILABLE ",
+			"(code 503): try again.",
+			"\nAPI",
+			" errors are rare.",
+		];
+		for (const chunk of prose) fake.text(chunk);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: prose.join("") }]);
+		expect(fake.closed).toBe(false);
 	});
 });

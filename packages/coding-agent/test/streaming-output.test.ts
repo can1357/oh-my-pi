@@ -20,6 +20,8 @@ import { stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { flush } from "./helpers/fake-clock";
+import { spillTo } from "./helpers/spill";
 
 const createdTempDirs: string[] = [];
 const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
@@ -322,12 +324,68 @@ describe("OutputSink", () => {
 		expect(dumped.outputBytes).toBe(5);
 	});
 
-	test("spills full output to artifact file when artifact path is provided", async () => {
+	test("output that fits inline never claims a spill file", async () => {
+		let claims = 0;
+		const sink = new OutputSink({
+			allocateArtifact: async () => {
+				claims++;
+				return {};
+			},
+			spillThreshold: 16,
+		});
+
+		sink.push("short\n");
+		const dumped = await sink.dump();
+
+		expect(claims).toBe(0);
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.artifactId).toBeUndefined();
+	});
+
+	test("an empty spill claim keeps the inline tail without reporting a broken artifact", async () => {
+		let claims = 0;
+		const sink = new OutputSink({
+			allocateArtifact: async () => {
+				claims++;
+				return {};
+			},
+			spillThreshold: 4,
+		});
+
+		sink.push("abcdef");
+		await flush();
+		sink.push("ghij");
+		const dumped = await sink.dump();
+
+		expect(claims).toBe(1);
+		expect(dumped.truncated).toBe(true);
+		expect(dumped.output).toBe("ghij");
+		expect(dumped.artifactId).toBeUndefined();
+		expect(dumped.artifactError).toBeUndefined();
+	});
+
+	test("chunks pushed while the spill file is claimed reach it in order", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "late.log");
+		const claim = Promise.withResolvers<{ id: string; path: string }>();
+		const sink = new OutputSink({ allocateArtifact: () => claim.promise, spillThreshold: 4, headBytes: 2 });
+
+		sink.push("ab");
+		sink.push("cd");
+		sink.push("efgh"); // overflows: starts the claim
+		sink.push("ijkl");
+		claim.resolve({ id: "late", path: artifactPath });
+		const dumped = await sink.dump();
+
+		expect(dumped.artifactId).toBe("late");
+		expect(await Bun.file(artifactPath).text()).toBe("abcdefghijkl");
+	});
+
+	test("spills full output to artifact file when an allocator is provided", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "output.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "artifact-1",
+			allocateArtifact: spillTo(artifactPath, "artifact-1"),
 			spillThreshold: 5,
 		});
 
@@ -346,8 +404,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "output.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "artifact-2",
+			allocateArtifact: spillTo(artifactPath, "artifact-2"),
 			spillThreshold: 5,
 			headBytes: 4,
 		});
@@ -424,8 +481,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "capped.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-cap",
+			allocateArtifact: spillTo(artifactPath, "art-cap"),
 			spillThreshold: 16,
 			artifactMaxBytes: 32,
 			artifactHeadBytes: 16,
@@ -453,8 +509,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "small.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-small",
+			allocateArtifact: spillTo(artifactPath, "art-small"),
 			spillThreshold: 4,
 			artifactMaxBytes: 64,
 			artifactHeadBytes: 32,
@@ -478,8 +533,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "spilled.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-spilled",
+			allocateArtifact: spillTo(artifactPath, "art-spilled"),
 			spillThreshold: 8,
 			artifactMaxBytes: 32,
 			artifactHeadBytes: 16,
@@ -499,8 +553,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "stream.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-stream",
+			allocateArtifact: spillTo(artifactPath, "art-stream"),
 			spillThreshold: 16,
 			artifactMaxBytes: 32,
 			artifactHeadBytes: 16,
@@ -526,8 +579,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "head-capped.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-head-cap",
+			allocateArtifact: spillTo(artifactPath, "art-head-cap"),
 			spillThreshold: 4,
 			headBytes: 8,
 			artifactMaxBytes: 16,
@@ -553,8 +605,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "uncapped.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-uncapped",
+			allocateArtifact: spillTo(artifactPath, "art-uncapped"),
 			spillThreshold: 16,
 			artifactMaxBytes: 0,
 		});
@@ -571,7 +622,7 @@ describe("OutputSink", () => {
 	test("default sink caps an oversized artifact at 16 MiB with a truncation notice between head and tail", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "oversized.log");
-		const sink = new OutputSink({ artifactPath, artifactId: "art-oversized" });
+		const sink = new OutputSink({ allocateArtifact: spillTo(artifactPath, "art-oversized") });
 
 		const line = `${"x".repeat(1023)}\n`;
 		const block = line.repeat(64); // 64 KiB, a typical pipe read
@@ -596,7 +647,7 @@ describe("OutputSink", () => {
 	test("default sink keeps a spilled artifact below the cap lossless", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "spilled-small.log");
-		const sink = new OutputSink({ artifactPath, artifactId: "art-small-default" });
+		const sink = new OutputSink({ allocateArtifact: spillTo(artifactPath, "art-small-default") });
 
 		const payload = Array.from({ length: 4096 }, (_, i) => `line ${i} ${"y".repeat(40)}`).join("\n");
 		sink.push(payload);
@@ -614,8 +665,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "small-cap.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-small-cap",
+			allocateArtifact: spillTo(artifactPath, "art-small-cap"),
 			spillThreshold: 8,
 			artifactMaxBytes: 64,
 		});
@@ -634,8 +684,7 @@ describe("OutputSink", () => {
 	test("a capped artifact is advertised as a head/tail sample, not as full output", async () => {
 		const dir = await createTempDir();
 		const sink = new OutputSink({
-			artifactPath: path.join(dir, "sampled.log"),
-			artifactId: "art-sampled",
+			allocateArtifact: spillTo(path.join(dir, "sampled.log"), "art-sampled"),
 			spillThreshold: 16,
 			maxColumns: 8,
 			artifactMaxBytes: 32,
@@ -1022,7 +1071,11 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 	test("column-cap notice names a raw artifact line per cut line", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "output.log");
-		const sink = new OutputSink({ artifactPath, artifactId: "77", maxColumns: 8, spillThreshold: 100_000 });
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "77"),
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
 		const wideX = "x".repeat(50);
 		const wideY = "y".repeat(50);
 		// Split chunks so a cut line straddles a push boundary.
@@ -1044,8 +1097,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 	test("column-cap notice names one line, not a span a single read cannot return", async () => {
 		const dir = await createTempDir();
 		const sink = new OutputSink({
-			artifactPath: path.join(dir, "output.log"),
-			artifactId: "77",
+			allocateArtifact: spillTo(path.join(dir, "output.log"), "77"),
 			maxColumns: 8,
 			spillThreshold: 100_000,
 		});
@@ -1086,8 +1138,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 	test("replace() withholds the cut-line range because the artifact keeps the original stream", async () => {
 		const dir = await createTempDir();
 		const sink = new OutputSink({
-			artifactPath: path.join(dir, "output.log"),
-			artifactId: "77",
+			allocateArtifact: spillTo(path.join(dir, "output.log"), "77"),
 			maxColumns: 8,
 			spillThreshold: 100_000,
 		});

@@ -1,37 +1,28 @@
-Anchored edit patch: Find quotes existing text; Replace replaces it; Insert Before/Insert After add lines without replacing it.
+One `input` string = one complete patch. Start `*** Edit File: path`; repeat operations under it. Use current text from a read or the user's quote. Read only for missing context.
 
-<ops>
-- `*** Edit File: path` opens a file; bare `*** Edit File:` continues it. Repeat for more files. Append ` all` to either opener to change every match. JSON-quote ambiguous paths.
-- `*** Find` MUST match once unless `all`. Copy exact text/indentation from the latest verbatim file read, not Markdown, diffs, or summaries. Use the smallest unique anchor; ambiguity requires parent context, NEVER retry the bare line.
-- Follow Find with `*** Replace` (complete final text; empty deletes), `*** Insert Before` (add lines before first matched line), or `*** Insert After` (add lines after last matched line). Inserts keep the match. Replacement MUST quote part of the changed line; insertion MUST quote adjacent anchor and contain new lines. Changing an anchor requires Replace. Omitting an action does not delete.
-- Headers MUST stand alone; bodies are raw lines until next header or EOF, no closing delimiter or `*** End …` line. NEVER use diff prefixes `+`/`-`/space or `@@` hunks. Edits address the original file, not positions shifted by earlier edits; an edit overlapping an earlier one applies to its result.
-- Find `…` captures omitted text: mid-line gaps stay on that line; line-end gaps span lines. Each Replace `…` re-emits the next capture. A whole `…` line without a capture errors: type those lines out. Insert `…` is literal. Avoid retyping unchanged lines: use Insert or captures.
-- Replace/Insert indentation verbatim; whitespace, operators, delimiters are NEVER repaired. A failing edit is rejected alone; the rest apply. Resend ONLY rejected edits, using any copy-ready correction verbatim; NEVER resend applied ones. “No change” means Replace already equals file text; look elsewhere. File contains a standalone edit header? Use `write`.
-</ops>
+**Whole function, conditional, class or multiline call:** put the action and the start of its opening line in ONE header. The tool locates the closing line. NEVER quote the old body, even when rewriting or dedenting every line.
 
-<example>
-Move code: delete with empty Replace, insert ahead of an unchanged anchor:
 ```text
-*** Edit File: src/util.ts
-*** Find
-const helper = () => 1;
-*** Replace
-*** Find
-run(target);
-*** Insert Before
-const helper = () => 1;
+*** Edit File: queue.ts
+*** Replace Block: if (useLegacyQueue) {
+if (useLegacyQueue) {
+  drain(queue);
+}
+*** Delete Block: function obsolete(
+*** Cut Block: async function flushPending(
+*** Paste Before Block: export function shutdown(
 ```
 
-Keep skipped lines and part of a line:
+`Replace Block:` uses the header only to locate the old block. Give the complete final code below it, including the opening line if it stays. `Delete Block:` has no body. To remove one of two adjacent identical copies, name the duplicated opener. Otherwise the opening-line prefix must be unique. Cut takes whole lines; paste once in the same file. To land beside one line instead of a block use `*** Find` plus `*** Paste Before`/`*** Paste After`.
+
+**Small changes:** `*** Find` is the old side, not a search call. Append the action AND its body to the SAME string before sending. Use the shortest unique fragment. Editing a one-line doc comment? Quote its actual delimiters, not a ` * ` continuation. `*** Find all` renames every whole-word match of a bare identifier:
+
 ```text
-*** Edit File: src/users.ts
-*** Find
-function load(…){
-…
-return old(…);
+*** Edit File: jobs.ts
+*** Find all
+retrunValue
 *** Replace
-function load(…){
-…
-return fresh(…);
+returnValue
 ```
-</example>
+
+For arbitrary ranges or unsupported syntax, Find the first line, a literal `…` line, then the last line. Add a distinctive neighbour if ambiguous, not the middle of the block. `*** Replace` writes the new span (header alone deletes); `…` in a text Replace reuses its Find capture. `*** Insert Before` / `*** Insert After` keeps the anchor; supply only new lines. `*** Cut` followed by a destination Find/Paste moves a text range. Indentation is literal.
