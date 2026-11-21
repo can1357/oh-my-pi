@@ -141,8 +141,10 @@ export interface HtmlFormDialogOptions {
 	claimKeys?(): void;
 	/** Esc, or Tab past Submit: the host hands the keyboard to the composer under the form. */
 	releaseKeys?(): void;
-	/** Called on every multi-line editor the form creates (textareas, option notes), e.g. to turn on Vim mode. */
+	/** Called on every editor the form creates (textareas, notes, Vim-mode one-line boxes), e.g. to wire Vim mode and the clipboard. */
 	configureEditor?(editor: Editor): void;
+	/** Vim mode: one-line boxes (text inputs, Other answers) become Vim-mode editors, and `j`/`k` step between rows. */
+	vimMode?: boolean;
 	onSubmit(data: HtmlFormData, notes: OptionNote[]): void;
 	onCancel(): void;
 }
@@ -665,18 +667,17 @@ export class HtmlFormDialog implements Component, Focusable {
 			this.#dropdownInput(this.#open, data);
 			return;
 		}
-		// A textarea or Other answer in Vim mode takes Esc first: it leaves Insert mode or cancels a half-typed command.
-		const textStop = this.#stops[this.#focus];
-		const vimBox =
-			this.#hidden || textStop === undefined
-				? undefined
-				: textStop.kind === "text"
-					? this.#editors.get(textStop.field)
-					: textStop.kind === "other"
-						? this.#others.get(textStop.field)
-						: undefined;
-		if (vimBox instanceof Editor && vimBox.vimConsumesEscape() && matchesKey(data, "escape")) {
-			vimBox.handleInput(data);
+		const stop = this.#stops[this.#focus]!;
+		// A text box in Vim mode takes Esc first: it leaves Insert mode or cancels a half-typed command.
+		const box = this.#hidden
+			? undefined
+			: stop.kind === "text"
+				? this.#editors.get(stop.field)
+				: stop.kind === "other"
+					? this.#others.get(stop.field)
+					: undefined;
+		if (box instanceof Editor && box.vimConsumesEscape() && matchesKey(data, "escape")) {
+			box.handleInput(data);
 			return;
 		}
 		// Esc hands the keys to the composer, where Esc interrupts the turn and so cancels the ask.
@@ -689,16 +690,20 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		const confirm = getKeybindings().matches(data, "tui.select.confirm");
-		if (this.#peek && !matchesSelectUp(data)) {
+		const step = this.#vimStep(stop, data);
+		if (this.#peek && !matchesSelectUp(data) && step !== -1) {
 			// Focus sits below the rows shown: the keys that would act on it bring it back instead of acting unseen.
 			this.#peek = false;
-			if (matchesSelectDown(data) || matchesKey(data, "space") || confirm) return;
+			if (matchesSelectDown(data) || step === 1 || matchesKey(data, "space") || confirm) return;
 		}
 		if (matchesSelectPageDown(data) || matchesSelectPageUp(data)) {
 			this.#jumpQuestion(matchesSelectPageDown(data) ? 1 : -1);
 			return;
 		}
-		const stop = this.#stops[this.#focus]!;
+		if (step !== 0) {
+			this.#moveStop(step);
+			return;
+		}
 		if (matchesKey(data, "tab") && stop.kind === "submit") {
 			this.#options.releaseKeys?.();
 			return;
@@ -745,6 +750,15 @@ export class HtmlFormDialog implements Component, Focusable {
 			if (!stop.field.multi || this.#checked.get(stop.field)?.size === 0) this.#toggle(stop.field, stop.option);
 			this.#advance();
 		}
+	}
+
+	/**
+	 * `j`/`k` in Vim mode on a row that takes no typing (an option, a closed dropdown, Submit): one row
+	 * down or up, as ↓/↑. 0 for any other key or row; text boxes and an open dropdown keep their letters.
+	 */
+	#vimStep(stop: Stop, data: string): -1 | 0 | 1 {
+		if (!this.#options.vimMode || stop.kind === "text" || stop.kind === "other") return 0;
+		return matchesKey(data, "j") ? 1 : matchesKey(data, "k") ? -1 : 0;
 	}
 
 	/** Clicks on folded fields, their pills, option rows and the action bar of the native description. */
@@ -955,7 +969,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	#initText(field: TextField): void {
 		if (field.multiline) {
 			const editor = new Editor(getEditorTheme());
-			this.#options.configureEditor?.(editor);
+			this.#configureEditor(editor);
 			editor.setBorderVisible(false);
 			editor.setMaxHeight(this.#textareaRows(field));
 			// Enter leaves the field (handled before the editor); Shift+Enter inserts newlines.
@@ -986,12 +1000,12 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	/**
 	 * A one-line answer box (an `<input>`, a group's Other) as a Vim-mode editor, or undefined when
-	 * the host leaves Vim mode off and the box stays a plain input.
+	 * Vim mode is off and the box stays a plain input.
 	 */
 	#vimLineEditor(placeholder: string | undefined): Editor | undefined {
+		if (!this.#options.vimMode) return undefined;
 		const editor = new Editor(getEditorTheme());
-		this.#options.configureEditor?.(editor);
-		if (!editor.vimEnabled) return undefined;
+		this.#configureEditor(editor);
 		editor.setBorderVisible(false);
 		editor.setMaxHeight(LINE_MAX_ROWS);
 		// Enter moves on to the next field (handled before the editor).
@@ -999,6 +1013,13 @@ export class HtmlFormDialog implements Component, Focusable {
 		editor.placeholder = () => placeholder;
 		editor.onChange = () => this.#resetCountdown();
 		return editor;
+	}
+
+	/** The host's wiring, then the form's Vim mode, always starting in Insert mode (a reopened note too). */
+	#configureEditor(editor: Editor): void {
+		this.#options.configureEditor?.(editor);
+		editor.setVimMode(false);
+		if (this.#options.vimMode) editor.setVimMode(true);
 	}
 
 	/** Fixed textarea height: the `rows` asked for, grown to fit a prefilled draft, capped. */
@@ -1153,8 +1174,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (option === undefined || stop.field.options[option]?.disabled !== false) return;
 		const editor = (this.#savedNoteEditor ??= new Editor(getEditorTheme()));
 		// Each note opens in Insert mode, wherever Vim mode was left when the last one closed.
-		if (editor.vimEnabled) editor.setVimMode(false);
-		this.#options.configureEditor?.(editor);
+		this.#configureEditor(editor);
 		editor.setBorderVisible(false);
 		editor.setMaxHeight(4);
 		editor.disableSubmit = true;

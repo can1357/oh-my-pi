@@ -29,6 +29,7 @@ import type {
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
+import { cfgTuiVimMode } from "../settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
@@ -1001,6 +1002,7 @@ export class ExtensionUiController {
 				claimKeys: () => this.focusAsk(),
 				releaseKeys: () => this.#focusComposer(),
 				configureEditor: editor => this.ctx.configureDialogEditor(editor),
+				vimMode: cfgTuiVimMode.get(this.ctx.settings),
 			});
 			const slot = this.#mountAsk(dialog);
 			return () => {

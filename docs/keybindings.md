@@ -108,7 +108,7 @@ The prompt starts in Insert mode. `Escape` switches to Normal mode; the prompt b
 
 The status line also shows the mode, pending command, and multi-line Visual selection size. **Vim Mode Indicator** (`tui.vimModeDisplay`) selects `text` (default), `icon`, or `none` (hides the whole Vim status segment).
 
-Text boxes in dialogs use the same Vim mode: ask-form textareas, one-line text fields, "Other" answers, and option notes, and the ask tool's typed answers and extension text prompts. There `Escape` first leaves Insert mode, and only a second `Escape` closes the note, hands the keys back to the composer, or cancels the prompt. Password fields stay plain. The terminal cursor shape follows whichever box has the keys.
+Text boxes in dialogs use the same Vim mode: ask-form textareas, one-line text fields, "Other" answers, and option notes, and the ask tool's typed answers and extension text prompts. There `Escape` first leaves Insert mode, and only a second `Escape` closes the note, hands the keys back to the composer, or cancels the prompt. Password fields stay plain. The terminal cursor shape follows whichever box has the keys. On an ask form's option rows, dropdowns, and Submit, `j` and `k` move down and up like the arrow keys.
 
 | Mode        | Enter with              | Leave with                             |
 | ----------- | ----------------------- | -------------------------------------- |
