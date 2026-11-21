@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- Fixed the TUI freezing at 100% CPU while streaming text that begins with a blank line followed by a line containing `|`.
 - Fixed light-theme detection inside Zellij when the terminal reports a light background.
 - Preserved custom foreground colors and text styles in status-line segments while continuing to apply the accent color to unstyled statuses.
 - Fixed transcript rows and tool cards disappearing or appearing truncated when overlays and panels were open.
