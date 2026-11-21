@@ -267,6 +267,10 @@ impl Win32Ax {
 			let Some((pattern, container)) = found else {
 				continue;
 			};
+			// A route that cannot serve the point still leaves the wheel to
+			// takeover. Once eligible, validate both axes before the first step.
+			super::input::background_wheel(horizontal)?;
+			super::input::background_wheel(vertical)?;
 			eligible = true;
 			let mut anchor = None;
 			for _ in 0..steps {

@@ -991,10 +991,12 @@ public static class Fixture {
 			worker.execute(&request, &token).map(drop)
 		};
 		let initial = list.state();
-		let error = scroll(x, y, (0.0, 100.0), None).unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
-		assert_eq!(list.state(), initial);
-		assert_eq!(foreground(), list.other);
+		for dy in [100.0, 27_400.0] {
+			let error = scroll(x, y, (0.0, dy), None).unwrap_err();
+			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+			assert_eq!(list.state(), initial);
+			assert_eq!(foreground(), list.other);
+		}
 		scroll(width * 0.85, y, (0.0, 100.0), None).unwrap();
 		let hosted = list.state();
 		assert!(hosted[HOSTED] > initial[HOSTED]);
@@ -1022,6 +1024,10 @@ public static class Fixture {
 		assert!(!window::has_chromium_descendant(list.window));
 		list.post(FRONT);
 		assert!(window::wait_for_foreground(list.window, Duration::from_secs(2)).unwrap());
+		let before = list.state();
+		let error = scroll(x, y, (100.0, 27_400.0), None).unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
+		assert_eq!(list.state(), before, "neither axis may scroll an oversized request");
 		scroll(x, y, (100.0, 0.0), None).unwrap();
 		let across = list.state();
 		assert!(across[ACROSS] > initial[ACROSS]);
