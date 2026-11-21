@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `omp://` documentation links in the transcript open the doc in every install, not only a source checkout: the embedded doc is materialized into a read-only cache copy and linked, while the label still shows the `omp://` URL ([#18647](https://github.com/can1357/oh-my-pi/pull/18647) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Breaking Changes
 
 - Removed the `tui.completeScrollback` setting; transcript rows covered by the HUD, dialogs, or draft now always move to scrollback, and the input returns to the bottom row when overlays close.
