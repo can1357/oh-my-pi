@@ -2793,6 +2793,16 @@ describe("provider routing selector (@upstream)", () => {
 });
 
 describe("filterAvailableModelsByEnabledPatterns", () => {
+	test("uses settings provider order for ordinary selectors in scopes and allow-lists", async () => {
+		const registry = { getAvailable: () => openaiGpt55Models };
+		const settings = Settings.isolated({ modelProviderOrder: ["openai", "openai-codex"] });
+		const scoped = await resolveModelScope(["gpt-5.5"], registry, undefined, settings);
+		const allowed = filterAvailableModelsByEnabledPatterns(openaiGpt55Models, ["gpt-5.5"], settings);
+
+		expect(scoped.map(entry => entry.model.provider)).toEqual(["openai"]);
+		expect(allowed.map(model => model.provider)).toEqual(["openai"]);
+	});
+
 	const models = mockModels as Model[];
 	test("returns all models when patterns is empty", () => {
 		expect(filterAvailableModelsByEnabledPatterns(models, [])).toEqual(models);

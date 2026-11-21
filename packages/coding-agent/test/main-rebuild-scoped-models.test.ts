@@ -5,6 +5,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { cfgModelProviderOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions,
@@ -13,6 +14,7 @@ import {
 	resolveScopedModels,
 	type ScopedModelSink,
 	toSessionScopedModels,
+	watchScopedModelSettings,
 } from "@oh-my-pi/pi-coding-agent/main";
 import { createSetupHost } from "@oh-my-pi/pi-coding-agent/modes/setup";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -58,18 +60,25 @@ class FakeRegistry {
 	async awaitBackgroundRefresh(): Promise<void> {
 		this.onRefresh?.();
 	}
+	reapplyModelPolicies(): Promise<void> {
+		return this.refresh();
+	}
 }
 
 class FakeSession implements ScopedModelSink {
 	isDisposed = false;
 	scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	setCalls = 0;
+	disposers: Array<() => void> = [];
 	constructor(initial: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>) {
 		this.scopedModels = initial;
 	}
 	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
 		this.setCalls += 1;
 		this.scopedModels = scopedModels;
+	}
+	addDisposer(dispose: () => void): void {
+		this.disposers.push(dispose);
 	}
 }
 
@@ -80,6 +89,30 @@ async function startupScope(
 ): Promise<Array<{ model: Model; thinkingLevel?: ThinkingLevel }>> {
 	return toSessionScopedModels(await resolveModelScope(patterns, registry, undefined, settings), settings);
 }
+
+describe("watchScopedModelSettings", () => {
+	it("updates the cycling scope when provider preference changes an enabled model", async () => {
+		const id = "anthropic/claude-preset-fixture";
+		const patterns = [id];
+		const settings = Settings.isolated({ enabledModels: patterns, modelProviderOrder: ["openrouter"] });
+		const registry = new FakeRegistry(
+			["openrouter", "vercel-ai-gateway"].map(provider => ({ ...model(id), provider })),
+		);
+		const session = new FakeSession(await startupScope(patterns, registry, settings));
+		expect(session.scopedModels.map(entry => entry.model.provider)).toEqual(["openrouter"]);
+
+		watchScopedModelSettings(session, parseArgs([]), registry, settings);
+		try {
+			cfgModelProviderOrder.override(settings, ["vercel-ai-gateway"]);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			expect(session.scopedModels.map(entry => entry.model.provider)).toEqual(["vercel-ai-gateway"]);
+		} finally {
+			for (const dispose of session.disposers) dispose();
+		}
+	});
+});
 
 describe("rebuildScopedModelsAfterDiscovery", () => {
 	it("adds an enabledModels model that only materializes after background discovery", async () => {
