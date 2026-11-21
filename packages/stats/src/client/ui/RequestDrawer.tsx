@@ -1,208 +1,185 @@
-import { Clock, Coins, Gauge, Hash, Star, X, Zap } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { GitBranch } from "lucide-react";
 import { getRequestDetails } from "../api";
-import { formatDurationMs, formatInteger, formatMessageCost } from "../data/formatters";
+import {
+	formatCost,
+	formatDurationMs,
+	formatFolder,
+	formatInteger,
+	formatMessageCost,
+	formatRelativeTime,
+	formatTimestamp,
+	formatTokensPerSecond,
+} from "../data/formatters";
+import { useQuery } from "../data/query";
+import { buildHash, parseHash } from "../data/useHashRoute";
+import { type RequestStatus, requestStatus } from "../data/view-models";
 import type { RequestDetails } from "../types";
+import { Badge, type Tone } from "./Badge";
+import { Drawer, KeyValues } from "./Drawer";
 import { JsonBlock } from "./JsonBlock";
-import { Skeleton } from "./Skeleton";
-import { StatusPill } from "./StatusPill";
+import { ErrorState, Skeleton } from "./States";
+import "./request-drawer.css";
+
+/** Label and tone for each request outcome; shared by the request tables. */
+export const REQUEST_STATUS: Record<RequestStatus, { label: string; tone: Tone }> = {
+	ok: { label: "OK", tone: "ok" },
+	aborted: { label: "Aborted", tone: "warn" },
+	failed: { label: "Failed", tone: "bad" },
+};
 
 export interface RequestDrawerProps {
 	id: number | null;
 	onClose: () => void;
 }
 
+/** Full detail sheet for one model request: timing, tokens, cost, ids, error, and the raw session entry. */
 export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
-	const [details, setDetails] = useState<RequestDetails | null>(null);
-	const [loading, setLoading] = useState(false);
-	const [error, setError] = useState<Error | null>(null);
-	const previousActiveElement = useRef<HTMLElement | null>(null);
-	const closeButtonRef = useRef<HTMLButtonElement>(null);
-
-	useEffect(() => {
-		if (id === null) {
-			setDetails(null);
-			return;
-		}
-
-		previousActiveElement.current = document.activeElement as HTMLElement | null;
-		setLoading(true);
-		setError(null);
-		setDetails(null);
-
-		const controller = new AbortController();
-		getRequestDetails(id, controller.signal)
-			.then(data => {
-				if (controller.signal.aborted) return;
-				setDetails(data);
-				// Focus the close button for accessibility
-				setTimeout(() => closeButtonRef.current?.focus(), 50);
-			})
-			.catch(err => {
-				if (controller.signal.aborted) return;
-				setError(err instanceof Error ? err : new Error(String(err)));
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) setLoading(false);
-			});
-
-		return () => controller.abort();
-	}, [id]);
-
-	useEffect(() => {
-		if (id === null) return;
-
-		const handleKeyDown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				onClose();
-			}
-		};
-
-		window.addEventListener("keydown", handleKeyDown);
-		return () => {
-			window.removeEventListener("keydown", handleKeyDown);
-			if (previousActiveElement.current) {
-				previousActiveElement.current.focus();
-			}
-		};
-	}, [id, onClose]);
-
-	if (id === null) return null;
-
-	const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>) => {
-		if (e.target === e.currentTarget) {
-			onClose();
-		}
-	};
+	const query = useQuery(["request", id], ({ signal }) => getRequestDetails(id ?? 0, signal), {
+		enabled: id !== null,
+	});
+	// Never show the previous request's payload under a new id.
+	const details = query.stale ? null : query.data;
+	const status = details ? REQUEST_STATUS[requestStatus(details)] : null;
 
 	return (
-		<div className="stats-drawer-overlay" onClick={handleOverlayClick} role="presentation">
-			<div className="stats-drawer" role="dialog" aria-modal="true" aria-label="Request details">
-				{/* Drawer Header */}
-				<div className="stats-drawer-header">
-					<div className="stats-drawer-header-left">
-						<h2 className="stats-drawer-title">Request Details</h2>
-						{details && <span className="stats-drawer-id">ID: {id}</span>}
+		<Drawer
+			open={id !== null}
+			onClose={onClose}
+			width={620}
+			title={details ? <span className="mono">{details.model}</span> : "Request"}
+			subtitle={
+				details ? (
+					<>
+						{details.provider} ·{" "}
+						<span title={formatTimestamp(details.timestamp)}>{formatRelativeTime(details.timestamp)}</span>
+					</>
+				) : id !== null ? (
+					<span className="mono">#{id}</span>
+				) : undefined
+			}
+			actions={
+				details && status ? (
+					<div className="row" style={{ gap: 6 }}>
+						<a
+							className="btn"
+							data-size="sm"
+							data-variant="ghost"
+							href={buildHash({
+								...parseHash(window.location.hash),
+								section: "traces",
+								session: details.sessionFile,
+							})}
+							onClick={onClose}
+							title="Open this request's session in the trace view"
+						>
+							<GitBranch size={13} /> Trace
+						</a>
+						<Badge tone={status.tone}>{status.label}</Badge>
 					</div>
-					<button
-						ref={closeButtonRef}
-						type="button"
-						onClick={onClose}
-						className="stats-drawer-close-btn"
-						aria-label="Close request details"
-					>
-						<X size={18} />
-					</button>
+				) : undefined
+			}
+		>
+			{details ? (
+				<RequestDetailsBody details={details} aborted={requestStatus(details) === "aborted"} />
+			) : query.error ? (
+				<ErrorState error={query.error} onRetry={query.refetch} />
+			) : (
+				<div className="stack" style={{ gap: 12 }}>
+					<Skeleton height={56} />
+					<Skeleton height={120} />
+					<Skeleton height={120} />
+					<Skeleton height={220} />
 				</div>
+			)}
+		</Drawer>
+	);
+}
 
-				<div className="stats-drawer-body">
-					{loading && (
-						<div className="stats-drawer-loading">
-							<Skeleton variant="text" width="60%" height={24} className="mb-4" />
-							<Skeleton variant="rect" width="100%" height={80} className="mb-4" />
-							<Skeleton variant="rect" width="100%" height={120} className="mb-4" />
-							<Skeleton variant="rect" width="100%" height={200} />
-						</div>
-					)}
+function RequestDetailsBody({ details, aborted }: { details: RequestDetails; aborted: boolean }) {
+	const { usage } = details;
+	const throughput =
+		details.duration !== null && details.duration > 0 && usage.output > 0
+			? (usage.output * 1000) / details.duration
+			: null;
+	// The stats row as ingested, without the session payload shown separately below.
+	const { messages, output, ...row } = details;
 
-					{error && (
-						<div className="stats-drawer-error">
-							<p className="stats-drawer-error-title">Failed to load request details</p>
-							<p className="stats-drawer-error-message">{error.message}</p>
-						</div>
-					)}
+	return (
+		<>
+			{details.errorMessage && (
+				<section className="request-drawer-error" data-tone={aborted ? "warn" : "bad"} role="note">
+					<div className="request-drawer-error-label">{aborted ? "Aborted" : "Error"}</div>
+					<pre className="request-drawer-error-text">{details.errorMessage}</pre>
+				</section>
+			)}
 
-					{details && (
-						<div className="stats-drawer-content">
-							{/* Status Card */}
-							<div className="stats-drawer-status-card">
-								<div className="stats-drawer-status-row">
-									<div>
-										<div className="stats-drawer-model">{details.model}</div>
-										<div className="stats-drawer-provider">{details.provider}</div>
-									</div>
-									<StatusPill variant={details.errorMessage ? "danger" : "success"}>
-										{details.errorMessage ? "Error" : "Success"}
-									</StatusPill>
-								</div>
-								{details.errorMessage && (
-									<div className="stats-drawer-error-block">
-										<div className="stats-drawer-error-label">Error Message</div>
-										<div className="stats-drawer-error-text">{details.errorMessage}</div>
-									</div>
-								)}
-							</div>
+			<section>
+				<div className="section-label">Timing</div>
+				<KeyValues
+					items={[
+						{ key: "at", label: "Started", value: formatTimestamp(details.timestamp) },
+						{ key: "duration", label: "Duration", value: formatDurationMs(details.duration) },
+						{ key: "ttft", label: "Time to first token", value: formatDurationMs(details.ttft) },
+						{ key: "tps", label: "Output tokens/s", value: formatTokensPerSecond(throughput) },
+					]}
+				/>
+			</section>
 
-							{/* Metrics Grid */}
-							<div className="stats-drawer-metrics-grid">
-								<div className="stats-drawer-metric-card">
-									<div className="stats-drawer-metric-label">
-										<Coins size={14} className="stats-drawer-metric-icon" />
-										API-equivalent estimate
-									</div>
-									<div className="stats-drawer-metric-value">{formatMessageCost(details, 4)}</div>
-								</div>
+			<section>
+				<div className="section-label">Tokens</div>
+				<KeyValues
+					items={[
+						{ key: "input", label: "Uncached input", value: formatInteger(usage.input) },
+						{ key: "cacheRead", label: "Cache read", value: formatInteger(usage.cacheRead) },
+						{ key: "cacheWrite", label: "Cache write", value: formatInteger(usage.cacheWrite) },
+						{ key: "output", label: "Output", value: formatInteger(usage.output) },
+						{ key: "total", label: "Total", value: formatInteger(usage.totalTokens) },
+						{
+							key: "premium",
+							label: "Premium requests",
+							value: formatInteger(Math.round((usage.premiumRequests ?? 0) * 100) / 100),
+						},
+					]}
+				/>
+			</section>
 
-								<div className="stats-drawer-metric-card">
-									<div className="stats-drawer-metric-label">
-										<Star size={14} className="stats-drawer-metric-icon" />
-										Premium
-									</div>
-									<div className="stats-drawer-metric-value">
-										{formatInteger(details.usage.premiumRequests ?? 0)}
-									</div>
-								</div>
+			<section>
+				<div className="section-label">API-equivalent cost</div>
+				<KeyValues
+					items={[
+						{ key: "total", label: "Total", value: formatMessageCost(details, 4) },
+						{ key: "input", label: "Input", value: formatCost(usage.cost.input, 4) },
+						{ key: "cacheRead", label: "Cache read", value: formatCost(usage.cost.cacheRead, 4) },
+						{ key: "cacheWrite", label: "Cache write", value: formatCost(usage.cost.cacheWrite, 4) },
+						{ key: "output", label: "Output", value: formatCost(usage.cost.output, 4) },
+					]}
+				/>
+			</section>
 
-								<div className="stats-drawer-metric-card">
-									<div className="stats-drawer-metric-label">
-										<Hash size={14} className="stats-drawer-metric-icon" />
-										Total Tokens
-									</div>
-									<div className="stats-drawer-metric-value">{formatInteger(details.usage.totalTokens)}</div>
-									<div className="stats-drawer-metric-sub">
-										{formatInteger(details.usage.input)} in · {formatInteger(details.usage.output)} out
-									</div>
-								</div>
-
-								<div className="stats-drawer-metric-card">
-									<div className="stats-drawer-metric-label">
-										<Clock size={14} className="stats-drawer-metric-icon" />
-										Duration
-									</div>
-									<div className="stats-drawer-metric-value">{formatDurationMs(details.duration)}</div>
-								</div>
-
-								<div className="stats-drawer-metric-card">
-									<div className="stats-drawer-metric-label">
-										<Zap size={14} className="stats-drawer-metric-icon" />
-										TTFT
-									</div>
-									<div className="stats-drawer-metric-value">{formatDurationMs(details.ttft)}</div>
-								</div>
-
-								{details.duration && details.usage.output > 0 && (
-									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">
-											<Gauge size={14} className="stats-drawer-metric-icon" />
-											Throughput
-										</div>
-										<div className="stats-drawer-metric-value">
-											{((details.usage.output * 1000) / details.duration).toFixed(1)}
-										</div>
-										<div className="stats-drawer-metric-sub">tokens/second</div>
-									</div>
-								)}
-							</div>
-
-							{/* JSON blocks */}
-							<div className="stats-drawer-json-blocks">
-								<JsonBlock data={details.output} title="Output Payload" initialCollapsed={false} />
-								<JsonBlock data={details} title="Raw Request Metadata" initialCollapsed={true} />
-							</div>
-						</div>
-					)}
+			<section>
+				<div className="section-label">Identity</div>
+				<KeyValues
+					items={[
+						{ key: "id", label: "Request id", value: details.id ?? "–" },
+						{ key: "entry", label: "Entry id", value: details.entryId },
+						{ key: "stop", label: "Stop reason", value: details.stopReason },
+						{ key: "api", label: "API", value: details.api },
+						{
+							key: "project",
+							label: "Project",
+							value: <span title={details.folder}>{formatFolder(details.folder)}</span>,
+						},
+					]}
+				/>
+				<div className="request-drawer-file">
+					<span className="kv-key">Session file</span>
+					<span className="kv-value">{details.sessionFile}</span>
 				</div>
-			</div>
-		</div>
+			</section>
+
+			{output != null && <JsonBlock data={output} title="Output message" />}
+			<JsonBlock data={messages} title="Session entry" initialCollapsed />
+			<JsonBlock data={row} title="Stats row" initialCollapsed />
+		</>
 	);
 }

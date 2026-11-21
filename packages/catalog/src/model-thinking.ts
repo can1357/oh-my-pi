@@ -7,7 +7,17 @@
  * id parsing, no host matching, no compat detection per request.
  */
 import { Effort, THINKING_EFFORTS } from "./effort";
-import type { Api, Model, ModelSpec } from "./types";
+import type { Api, Model, ModelSpec, ThinkingConfig } from "./types";
+
+/** Default positive Google thinking budgets, shared by request sizing and unknown-model probes. */
+export const GOOGLE_THINKING_BUDGETS: Readonly<Record<Effort, number>> = {
+	minimal: 1024,
+	low: 4096,
+	medium: 8192,
+	high: 16384,
+	xhigh: 24575,
+	max: 32768,
+};
 
 /**
  * Runtime helpers read baked metadata only, so they accept both pre-build
@@ -28,7 +38,22 @@ export function getSupportedEfforts<TApi extends Api>(model: ApiModel<TApi>): re
 }
 
 /**
+ * Neutral view of a model whose thinking ladder is unverified: `reasoning: false`
+ * and no ladder. Requests without an effort use this view so
+ * no reasoning or disable fields reach an upstream that may reject them.
+ */
+export function withoutUnverifiedThinking<T extends { reasoning?: boolean; thinking?: ThinkingConfig }>(model: T): T {
+	if (!model.thinking?.unverified) return model;
+	const { thinking: _derived, ...rest } = model;
+	return { ...rest, reasoning: false } as T;
+}
+
+/**
  * Clamps a requested thinking level against explicit model metadata.
+ *
+ * An unserved level first follows `thinking.effortMap` when the map sends it to
+ * a served tier that reaches the wire unchanged (a gateway answering `medium`
+ * as `high`); otherwise it climbs down to the nearest lower tier.
  *
  * Non-reasoning models always resolve to `undefined`.
  */
@@ -46,6 +71,12 @@ export function clampThinkingLevelForModel<TApi extends Api>(
 	const levels = getSupportedEfforts(model);
 	if (levels.includes(requested)) {
 		return requested;
+	}
+
+	const effortMap = model.thinking?.effortMap;
+	const aliased = effortMap?.[requested] as Effort | undefined;
+	if (aliased !== undefined && levels.includes(aliased) && (effortMap![aliased] ?? aliased) === aliased) {
+		return aliased;
 	}
 
 	const requestedIndex = THINKING_EFFORTS.indexOf(requested);
@@ -77,15 +108,18 @@ export function requireSupportedEffort<TApi extends Api>(model: ApiModel<TApi>, 
 	return effort;
 }
 
-/** Maps a normalized thinking effort to Google's `thinkingLevel` enum values.
+/** Maps a normalized thinking effort to Google's `thinkingLevel` values.
  * When a collapsed family routes `minimal` onto the same wire id as `low`
  * (Antigravity Gemini 3.6/3.7 Flash), emit `LOW` — Cloud Code Assist rejects
- * `MINIMAL` on those `-low` SKUs.
+ * `MINIMAL` on those `-low` SKUs. `xhigh` reaches here only for ladders that
+ * expose it (Gemini 4 Hydrogen); the Gemini API documents it as lowercase
+ * `xhigh`, which the SDK enum does not mirror yet.
+ * https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
  */
 export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
 	effort: Effort,
 	model?: ApiModel<TApi>,
-): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" {
+): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "xhigh" {
 	if (effort === Effort.Minimal) {
 		const routing = model?.thinking?.effortRouting;
 		if (routing?.[Effort.Minimal] && routing[Effort.Minimal] === routing[Effort.Low]) {
@@ -99,28 +133,32 @@ export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
 		case Effort.Medium:
 			return "MEDIUM";
 		case Effort.High:
-		case Effort.XHigh:
 		case Effort.Max:
 			return "HIGH";
+		case Effort.XHigh:
+			return "xhigh";
 	}
 }
 
 /**
  * Maps a normalized thinking effort to Anthropic adaptive effort values via
  * the model's baked `thinking.effortMap` (identity for unmapped efforts).
+ *
+ * The Anthropic adaptive wire vocabulary has no `minimal` tier (valid values:
+ * `low`, `medium`, `high`, `xhigh`, `max`); a model ladder that exposes
+ * `minimal` — custom `anthropic-messages` providers do, unlike the built-in
+ * Claude ladders — would otherwise serialize `output_config.effort: "minimal"`
+ * and 400 (`level "minimal" not supported`). Clamp it to the lowest real tier,
+ * mirroring {@link mapEffortToGoogleThinkingLevel}'s `minimal` handling.
  */
 export function mapEffortToAnthropicAdaptiveEffort<TApi extends Api>(
 	model: ApiModel<TApi>,
 	effort: Effort,
 ): "low" | "medium" | "high" | "xhigh" | "max" | "adaptive" {
 	const supported = requireSupportedEffort(model, effort);
-	return (model.thinking?.effortMap?.[supported] ?? supported) as
-		| "low"
-		| "medium"
-		| "high"
-		| "xhigh"
-		| "max"
-		| "adaptive";
+	const mapped = model.thinking?.effortMap?.[supported] ?? supported;
+	if (mapped === Effort.Minimal) return "low";
+	return mapped as "low" | "medium" | "high" | "xhigh" | "max" | "adaptive";
 }
 
 /**

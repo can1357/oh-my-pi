@@ -1,4 +1,19 @@
 /**
+ * Options for {@link TerminalQueryResponder}.
+ */
+export interface TerminalQueryResponderOptions {
+	/**
+	 * The PTY host opens the session with its own cursor-position query
+	 * (`CSI 6 n`), which the PTY layer has already answered — ConPTY's
+	 * `PSEUDOCONSOLE_INHERIT_CURSOR` handshake. Leave that first cursor query
+	 * unanswered: the host consumes exactly one report, so a second one would
+	 * reach the program as input it never asked for. Every later cursor query
+	 * is answered. Defaults to `false`.
+	 */
+	hostCursorHandshake?: boolean;
+}
+
+/**
  * Answers terminal capability queries emitted by programs on a headless PTY.
  *
  * A PTY that advertises `TERM=xterm-256color` but has no terminal behind it
@@ -17,6 +32,12 @@
 export class TerminalQueryResponder {
 	/** Trailing bytes that may be the start of an unfinished query escape. */
 	#residual = "";
+	/** Whether the next cursor query is the host's already-answered session-start handshake. */
+	#hostCursorHandshakePending: boolean;
+
+	constructor(options: TerminalQueryResponderOptions = {}) {
+		this.#hostCursorHandshakePending = options.hostCursorHandshake ?? false;
+	}
 
 	/**
 	 * Feed one raw PTY output chunk. Returns the reply bytes to write back into
@@ -29,7 +50,12 @@ export class TerminalQueryResponder {
 		QUERY.lastIndex = 0;
 		for (let match = QUERY.exec(buffer); match !== null; match = QUERY.exec(buffer)) {
 			lastEnd = match.index + match[0].length;
-			replies += replyFor(match);
+			const reply = replyFor(match);
+			if (reply === CURSOR_POSITION_REPORT && this.#hostCursorHandshakePending) {
+				this.#hostCursorHandshakePending = false;
+				continue;
+			}
+			replies += reply;
 		}
 		// Keep only a short unmatched trailing escape: a query split across
 		// chunks completes on the next feed, while a long tail is ordinary output
@@ -40,6 +66,9 @@ export class TerminalQueryResponder {
 		return replies;
 	}
 }
+
+/** Cursor position report for the home position: there is no screen to locate the cursor on. */
+const CURSOR_POSITION_REPORT = "\x1b[1;1R";
 
 /** Longest query escape we answer, bounding the cross-chunk residual. */
 const MAX_PARTIAL_QUERY = 32;
@@ -63,7 +92,7 @@ function replyFor(match: RegExpExecArray): string {
 		}
 		if (intermediate !== "") return ""; // private DSR forms (DECXCPR, appearance) stay unanswered
 		const selector = params.split(";", 1)[0];
-		if (selector === "6") return "\x1b[1;1R"; // cursor position: home, there is no screen
+		if (selector === "6") return CURSOR_POSITION_REPORT;
 		if (selector === "5") return "\x1b[0n"; // device status: OK
 		return "";
 	}

@@ -15,9 +15,13 @@ import {
 	truncateMiddle,
 	truncateTail,
 	truncateTailBytes,
-} from "@oh-my-pi/pi-coding-agent/session/streaming-output";
-import { formatOutputNotice, outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { flush } from "./helpers/fake-clock";
+import { spillTo } from "./helpers/spill";
 
 const createdTempDirs: string[] = [];
 const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
@@ -194,6 +198,45 @@ describe("TailBuffer", () => {
 		expect(tail.text()).toBe("x");
 		expect(tail.bytes()).toBe(1);
 	});
+
+	test("streams the same window as tail-truncating the whole output", () => {
+		const series = [
+			["abc", "de\n", "fghij", "k"],
+			["ab", "é中", "😀x", "line\n", "✓ ok", "yy😀", "z"],
+		];
+		for (const chunks of series) {
+			for (const max of [3, 4, 5, 7, 9, 12, 20]) {
+				const tail = new TailBuffer(max);
+				let all = "";
+				for (let round = 0; round < 3; round++) {
+					for (const chunk of chunks) {
+						tail.append(chunk);
+						all += chunk;
+						const expected = truncateTailBytes(all, max);
+						expect(tail.text()).toBe(expected.text);
+						expect(tail.bytes()).toBe(expected.bytes);
+					}
+				}
+			}
+		}
+	});
+
+	test("joins a surrogate pair split across appends before trimming", () => {
+		const tail = new TailBuffer(6);
+		tail.append("ab\uD83D");
+		expect(tail.text()).toBe("ab\uD83D");
+		tail.append("\uDE00cd");
+		expect(tail.text()).toBe("😀cd");
+		expect(tail.bytes()).toBe(6);
+	});
+
+	test("keeps the character after a lone surrogate when trimming a budget-sized chunk", () => {
+		const tail = new TailBuffer(6);
+		tail.append("ab\uD800x");
+		tail.append("yzw");
+		expect(tail.text()).toBe("xyzw");
+		expect(tail.bytes()).toBe(4);
+	});
 });
 
 describe("OutputSink", () => {
@@ -231,14 +274,6 @@ describe("OutputSink", () => {
 		expect(dumped.totalLines).toBe(4);
 		expect(dumped.outputLines).toBe(4);
 	});
-	test("invokes onChunk callback with sanitized text", async () => {
-		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
-		await sink.push("abc");
-		await sink.push("def");
-		expect(chunks).toEqual(["abc", "def"]);
-	});
-
 	test("normalizes carriage-return progress frames across chunk boundaries", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
@@ -289,12 +324,68 @@ describe("OutputSink", () => {
 		expect(dumped.outputBytes).toBe(5);
 	});
 
-	test("spills full output to artifact file when artifact path is provided", async () => {
+	test("output that fits inline never claims a spill file", async () => {
+		let claims = 0;
+		const sink = new OutputSink({
+			allocateArtifact: async () => {
+				claims++;
+				return {};
+			},
+			spillThreshold: 16,
+		});
+
+		sink.push("short\n");
+		const dumped = await sink.dump();
+
+		expect(claims).toBe(0);
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.artifactId).toBeUndefined();
+	});
+
+	test("an empty spill claim keeps the inline tail without reporting a broken artifact", async () => {
+		let claims = 0;
+		const sink = new OutputSink({
+			allocateArtifact: async () => {
+				claims++;
+				return {};
+			},
+			spillThreshold: 4,
+		});
+
+		sink.push("abcdef");
+		await flush();
+		sink.push("ghij");
+		const dumped = await sink.dump();
+
+		expect(claims).toBe(1);
+		expect(dumped.truncated).toBe(true);
+		expect(dumped.output).toBe("ghij");
+		expect(dumped.artifactId).toBeUndefined();
+		expect(dumped.artifactError).toBeUndefined();
+	});
+
+	test("chunks pushed while the spill file is claimed reach it in order", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "late.log");
+		const claim = Promise.withResolvers<{ id: string; path: string }>();
+		const sink = new OutputSink({ allocateArtifact: () => claim.promise, spillThreshold: 4, headBytes: 2 });
+
+		sink.push("ab");
+		sink.push("cd");
+		sink.push("efgh"); // overflows: starts the claim
+		sink.push("ijkl");
+		claim.resolve({ id: "late", path: artifactPath });
+		const dumped = await sink.dump();
+
+		expect(dumped.artifactId).toBe("late");
+		expect(await Bun.file(artifactPath).text()).toBe("abcdefghijkl");
+	});
+
+	test("spills full output to artifact file when an allocator is provided", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "output.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "artifact-1",
+			allocateArtifact: spillTo(artifactPath, "artifact-1"),
 			spillThreshold: 5,
 		});
 
@@ -313,8 +404,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "output.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "artifact-2",
+			allocateArtifact: spillTo(artifactPath, "artifact-2"),
 			spillThreshold: 5,
 			headBytes: 4,
 		});
@@ -391,8 +481,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "capped.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-cap",
+			allocateArtifact: spillTo(artifactPath, "art-cap"),
 			spillThreshold: 16,
 			artifactMaxBytes: 32,
 			artifactHeadBytes: 16,
@@ -420,8 +509,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "small.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-small",
+			allocateArtifact: spillTo(artifactPath, "art-small"),
 			spillThreshold: 4,
 			artifactMaxBytes: 64,
 			artifactHeadBytes: 32,
@@ -445,8 +533,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "spilled.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-spilled",
+			allocateArtifact: spillTo(artifactPath, "art-spilled"),
 			spillThreshold: 8,
 			artifactMaxBytes: 32,
 			artifactHeadBytes: 16,
@@ -466,8 +553,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "stream.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-stream",
+			allocateArtifact: spillTo(artifactPath, "art-stream"),
 			spillThreshold: 16,
 			artifactMaxBytes: 32,
 			artifactHeadBytes: 16,
@@ -493,8 +579,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "head-capped.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-head-cap",
+			allocateArtifact: spillTo(artifactPath, "art-head-cap"),
 			spillThreshold: 4,
 			headBytes: 8,
 			artifactMaxBytes: 16,
@@ -520,8 +605,7 @@ describe("OutputSink", () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "uncapped.log");
 		const sink = new OutputSink({
-			artifactPath,
-			artifactId: "art-uncapped",
+			allocateArtifact: spillTo(artifactPath, "art-uncapped"),
 			spillThreshold: 16,
 			artifactMaxBytes: 0,
 		});
@@ -533,6 +617,97 @@ describe("OutputSink", () => {
 
 		expect(artifactText).toBe(payload);
 		expect(artifactText).not.toContain("[ARTIFACT TRUNCATED:");
+	});
+
+	test("default sink caps an oversized artifact at 16 MiB with a truncation notice between head and tail", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "oversized.log");
+		const sink = new OutputSink({ allocateArtifact: spillTo(artifactPath, "art-oversized") });
+
+		const line = `${"x".repeat(1023)}\n`;
+		const block = line.repeat(64); // 64 KiB, a typical pipe read
+		sink.push("HEAD-START\n");
+		for (let i = 0; i < 320; i++) sink.push(block); // 20 MiB
+		sink.push("TAIL-END\n");
+		const summary = await sink.dump();
+		const artifactText = await Bun.file(artifactPath).text();
+
+		expect(summary.artifactId).toBe("art-oversized");
+		expect(artifactText.startsWith("HEAD-START\n")).toBe(true);
+		expect(artifactText.endsWith(`${line}TAIL-END\n`)).toBe(true);
+		const notices = artifactText.match(/\[ARTIFACT TRUNCATED:[^\]]+\]/g) ?? [];
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("elided from the middle");
+		const stripped = artifactText.replace(/\n?\[ARTIFACT TRUNCATED:[^\]]+\]\n?/g, "");
+		expect(byteLength(stripped)).toBe(16 * 1024 * 1024);
+		// The head window is the stream's first 3 MiB, verbatim.
+		expect(artifactText.indexOf("[ARTIFACT TRUNCATED:")).toBe(3 * 1024 * 1024 + 1);
+	});
+
+	test("default sink keeps a spilled artifact below the cap lossless", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "spilled-small.log");
+		const sink = new OutputSink({ allocateArtifact: spillTo(artifactPath, "art-small-default") });
+
+		const payload = Array.from({ length: 4096 }, (_, i) => `line ${i} ${"y".repeat(40)}`).join("\n");
+		sink.push(payload);
+		const summary = await sink.dump();
+
+		expect(summary.truncated).toBe(true);
+		expect(summary.artifactId).toBe("art-small-default");
+		expect(summary.artifactElidedBytes).toBeUndefined();
+		expect(await Bun.file(artifactPath).text()).toBe(payload);
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(summary, { direction: "tail" }).get());
+		expect(notice).toContain("Read local://art-small-default.log for full output");
+	});
+
+	test("a small cap without an explicit head budget still keeps the most recent output", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "small-cap.log");
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "art-small-cap"),
+			spillThreshold: 8,
+			artifactMaxBytes: 64,
+		});
+
+		const payload = Array.from({ length: 50 }, (_, i) => String(i).padStart(4, "0")).join(""); // 200 bytes
+		sink.push(payload);
+		await sink.dump();
+		const artifactText = await Bun.file(artifactPath).text();
+
+		expect(artifactText.startsWith(payload.slice(0, 32))).toBe(true);
+		expect(artifactText.endsWith(payload.slice(-32))).toBe(true);
+		const stripped = artifactText.replace(/\n?\[ARTIFACT TRUNCATED:[^\]]+\]\n?/g, "");
+		expect(stripped).toBe(payload.slice(0, 32) + payload.slice(-32));
+	});
+
+	test("a capped artifact is advertised as a head/tail sample, not as full output", async () => {
+		const dir = await createTempDir();
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(path.join(dir, "sampled.log"), "art-sampled"),
+			spillThreshold: 16,
+			maxColumns: 8,
+			artifactMaxBytes: 32,
+			artifactHeadBytes: 16,
+		});
+
+		// 136 bytes of 17-byte lines: over the 32-byte artifact cap and the 8-byte column cap.
+		sink.push("0123456789ABCDEF\n".repeat(8));
+		const summary = await sink.dump();
+		expect(summary.artifactId).toBe("art-sampled");
+		expect(summary.artifactElidedBytes).toBe(136 - 32);
+
+		const meta = outputMeta().truncationFromSummary(summary, { direction: "tail" }).get();
+		expect(meta?.truncation?.artifactElidedBytes).toBe(104);
+		expect(meta?.limits?.columnTruncated?.artifactElidedBytes).toBe(104);
+		const notice = formatOutputNotice(meta);
+		// Both the truncation and the column-cap notices carry the reference.
+		expect(
+			notice.match(
+				/Read local:\/\/art-sampled\.log for a head\/tail sample of the output; 104B from its middle was not saved/g,
+			),
+		).toHaveLength(2);
+		expect(notice).not.toContain("for full output");
 	});
 	test("createInput decodes streamed UTF-8 chunks correctly", async () => {
 		const sink = new OutputSink();
@@ -585,7 +760,7 @@ describe("truncation notice formatting", () => {
 
 	test("formatHeadTruncationNotice formats head truncation range", () => {
 		const lineTruncation = truncateHead("l1\nl2\nl3", { maxLines: 2, maxBytes: 100 });
-		expect(formatHeadTruncationNotice(lineTruncation)).toBe("\n\n[Showing lines 1-2 of 3. Use :3 to continue]");
+		expect(formatHeadTruncationNotice(lineTruncation)).toBe("\n\n[Showing lines 1-2 of 3. Use :3- to continue]");
 
 		const byteTruncation = truncateHead("12345\nabc\nz", { maxLines: 10, maxBytes: 7 });
 		expect(
@@ -593,7 +768,7 @@ describe("truncation notice formatting", () => {
 				startLine: 100,
 				totalFileLines: 500,
 			}),
-		).toBe("\n\n[Showing lines 100-100 of 500. Use :101 to continue]");
+		).toBe("\n\n[Showing lines 100-100 of 500. Use :101- to continue]");
 	});
 });
 
@@ -708,15 +883,32 @@ describe("OutputSink head-retain mode", () => {
 		expect(dumped.totalBytes).toBe(byteLength(lines));
 	});
 
-	test("disabled (headBytes=0) preserves tail-only behavior", async () => {
-		const sink = new OutputSink({ spillThreshold: 5, headBytes: 0 });
-		await sink.push("abc");
-		await sink.push("def");
+	test("middle elision keeps whole lines, and its notice names the lines shown", async () => {
+		const sink = new OutputSink({ headBytes: 20 * 1024 });
+		const text = `${Array.from({ length: 5200 }, (_, i) => `sync batch ${i + 1}: wrote ${(i * 37) % 1000} rows ok`).join("\n")}\n`;
+		// Chunk sizes that land the head window's end and the tail window's start mid-line.
+		for (let at = 0; at < text.length; at += 4093) sink.push(text.slice(at, at + 4093));
 
 		const dumped = await sink.dump();
-		expect(dumped.truncated).toBe(true);
-		expect(dumped.output).toBe("bcdef");
-		expect(dumped.elidedBytes).toBeUndefined();
+		const shown = dumped.output.split("\n");
+		const marker = shown.findIndex(line => line.startsWith("[…"));
+		const head = shown[marker - 1];
+		const tail = shown[marker + 1];
+		const batch = (line: string) => Number(/^sync batch (\d+): wrote \d+ rows ok$/.exec(line)?.[1]);
+		expect(batch(head)).toBeGreaterThan(0);
+		expect(batch(tail)).toBeGreaterThan(batch(head));
+		expect(formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get())).toContain(
+			`Showing lines 1-${batch(head)} and ${batch(tail)}-5200 of 5200`,
+		);
+
+		// A timeout notice the sink puts above the head is not a head line: the ranges stay the same.
+		const timedOut = new OutputSink({ headBytes: 20 * 1024 });
+		for (let at = 0; at < text.length; at += 4093) timedOut.push(text.slice(at, at + 4093));
+		const withNotice = await timedOut.dump("Command timed out after 1 seconds");
+		expect(withNotice.output.startsWith("[Command timed out after 1 seconds]\n")).toBe(true);
+		expect(formatOutputNotice(outputMeta().truncationFromSummary(withNotice, { direction: "tail" }).get())).toContain(
+			`Showing lines 1-${batch(head)} and ${batch(tail)}-5200 of 5200`,
+		);
 	});
 
 	test("head fills cleanly across chunks without elision when total fits", async () => {
@@ -740,16 +932,16 @@ describe("OutputSink head-retain mode", () => {
 		await sink.push(noisy);
 
 		sink.replace("OK\n");
-		await sink.push("[raw output: artifact://8]\n");
+		await sink.push("[raw output: local://8.log]\n");
 
 		const dumped = await sink.dump();
-		expect(dumped.output).toBe("OK\n[raw output: artifact://8]\n");
+		expect(dumped.output).toBe("OK\n[raw output: local://8.log]\n");
 		expect(dumped.output).not.toContain("elided");
 		expect(dumped.elidedBytes).toBeUndefined();
 		expect(dumped.elidedLines).toBeUndefined();
 		expect(dumped.truncated).toBe(false);
 		// Counters realign to the authoritative buffer + the subsequent push.
-		expect(dumped.totalBytes).toBe(byteLength("OK\n[raw output: artifact://8]\n"));
+		expect(dumped.totalBytes).toBe(byteLength("OK\n[raw output: local://8.log]\n"));
 	});
 
 	test("middle-elided dump body fits the inline budget (no double truncation)", async () => {
@@ -757,7 +949,7 @@ describe("OutputSink head-retain mode", () => {
 		// so an elided dump body could reach headBytes + spillThreshold and
 		// re-trip enforceInlineByteCap at the tool-result boundary — truncating
 		// a second time and saving a duplicate artifact whose id disagreed with
-		// the truncation notice's `Read artifact://N for full output`.
+		// the truncation notice's `Read local://N.log for full output`.
 		const spillThreshold = 1000;
 		const sink = new OutputSink({ spillThreshold, headBytes: 400 });
 		const lines = Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n");
@@ -780,6 +972,29 @@ describe("OutputSink head-retain mode", () => {
 		});
 		expect(capped).toBe(dumped.output);
 		expect(saved).toBeUndefined();
+	});
+
+	test("preview() matches the dump body mid-stream and onChunk already sees the chunk", async () => {
+		const previews: string[] = [];
+		const sink: OutputSink = new OutputSink({
+			spillThreshold: 64,
+			headBytes: 16,
+			onChunk: () => previews.push(sink.preview()),
+		});
+		for (let i = 0; i < 40; i++) sink.push(`row ${i}\n`);
+		expect(previews.at(-1)).toEndWith("row 39\n");
+		const preview = sink.preview();
+		const dumped = await sink.dump();
+		expect(preview).toBe(dumped.output);
+		expect(preview).toStartWith("row 0\n");
+		expect(preview).toContain("elided");
+	});
+
+	test("preview() omits the newline dump() adds after a trailing carriage return", async () => {
+		const sink = new OutputSink({ spillThreshold: 1024 });
+		sink.push("progress 50%\r");
+		expect(sink.preview()).toBe("progress 50%");
+		expect((await sink.dump()).output).toBe("progress 50%\n");
 	});
 });
 
@@ -809,7 +1024,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 	test("column-cap-only output surfaces a column notice, not a window/byte truncation footer", async () => {
 		// Regression for #4735: fully-shown output whose only trimming was the
 		// per-line column cap must not emit "Showing lines X-Y of Z (…B limit).
-		// Read artifact://… for full output" — every line is present.
+		// Read local://….log for full output" — every line is present.
 		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
 		const lines = ["a", "b", "c", "x".repeat(50), "d"];
 		await sink.push(`${lines.join("\n")}\n`);
@@ -818,13 +1033,163 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
 		// No window truncation → no styled TUI warning and no range/limit footer.
 		expect(meta?.truncation).toBeUndefined();
-		expect(meta?.limits?.columnTruncated).toEqual({ maxColumn: 8 });
+		expect(meta?.limits?.columnTruncated).toEqual({ maxColumn: 8, unit: "bytes" });
 
 		const notice = formatOutputNotice(meta);
-		expect(notice).toContain("Some lines truncated to 8 chars");
+		expect(notice).toContain("Some lines truncated to 8 bytes");
 		expect(notice).not.toContain("Showing lines");
 		expect(notice).not.toContain("limit");
-		expect(notice).not.toContain("artifact://");
+		expect(notice).not.toMatch(/local:\/\/\d+\.log/);
+	});
+
+	test("column-cap notice advertises the mirrored artifact when one exists", async () => {
+		// Regression for #10877: when the per-line cap drops bytes and the raw
+		// stream was mirrored into an output artifact, the notice must point at
+		// that artifact — matching the tail-truncation notice's recovery pointer.
+		const summary = {
+			output: "a\nb\nc\n" + "x".repeat(8) + "…\nd",
+			truncated: false,
+			totalLines: 5,
+			totalBytes: 100,
+			outputLines: 5,
+			outputBytes: 20,
+			columnTruncatedLines: 1,
+			columnDroppedBytes: 42,
+			columnMax: 8,
+			artifactId: "77",
+		};
+
+		const meta = outputMeta().truncationFromSummary(summary, { direction: "tail" }).get();
+		expect(meta?.truncation).toBeUndefined();
+		expect(meta?.limits?.columnTruncated).toEqual({ maxColumn: 8, unit: "bytes", artifactId: "77" });
+
+		const notice = formatOutputNotice(meta);
+		expect(notice).toContain("Some lines truncated to 8 bytes");
+		expect(notice).toContain("Read local://77.log for full output");
+	});
+
+	test("column-cap notice names a raw artifact line per cut line", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(artifactPath, "77"),
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		const wideX = "x".repeat(50);
+		const wideY = "y".repeat(50);
+		// Split chunks so a cut line straddles a push boundary.
+		await sink.push(`a\n${wideX.slice(0, 20)}`);
+		await sink.push(`${wideX.slice(20)}\nb\n${wideY}\nc\n`);
+		const dumped = await sink.dump();
+		expect(dumped.columnTruncatedRange).toEqual({ first: 2, last: 4 });
+
+		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
+		expect(formatOutputNotice(meta)).toContain(
+			"Some lines truncated to 8 bytes. Use local://77.log:raw:2-2 to read line 2 whole; cut lines run to line 4, each read the same way",
+		);
+		// The named lines are the cut lines, whole, in the artifact.
+		const artifactLines = (await Bun.file(artifactPath).text()).split("\n");
+		expect(artifactLines[1]).toBe(wideX);
+		expect(artifactLines[3]).toBe(wideY);
+	});
+
+	test("column-cap notice names one line, not a span a single read cannot return", async () => {
+		const dir = await createTempDir();
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(path.join(dir, "output.log"), "77"),
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		const lines = Array.from({ length: 8000 }, (_, i) => (i === 0 || i === 7999 ? "w".repeat(50) : `${i + 1}`));
+		await sink.push(`${lines.join("\n")}\n`);
+		const dumped = await sink.dump();
+		expect(dumped.columnTruncatedRange).toEqual({ first: 1, last: 8000 });
+
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get());
+		expect(notice).toContain("Use local://77.log:raw:1-1 to read line 1 whole; cut lines run to line 8000");
+		expect(notice).not.toContain(":raw:1-8000");
+	});
+
+	test("column-cap notice keeps the plain artifact pointer when the artifact is a head/tail sample", () => {
+		const meta = outputMeta()
+			.truncationFromSummary(
+				{
+					output: "x…",
+					truncated: false,
+					totalLines: 1,
+					totalBytes: 100,
+					outputLines: 1,
+					outputBytes: 4,
+					columnTruncatedLines: 1,
+					columnTruncatedRange: { first: 1, last: 1 },
+					columnMax: 8,
+					artifactId: "77",
+					artifactElidedBytes: 1024,
+				},
+				{ direction: "tail" },
+			)
+			.get();
+		const notice = formatOutputNotice(meta);
+		expect(notice).not.toContain(":raw:");
+		expect(notice).toContain("Read local://77.log for a head/tail sample");
+	});
+
+	test("replace() withholds the cut-line range because the artifact keeps the original stream", async () => {
+		const dir = await createTempDir();
+		const sink = new OutputSink({
+			allocateArtifact: spillTo(path.join(dir, "output.log"), "77"),
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		await sink.push("one\ntwo\n");
+		sink.replace("rewrote\n");
+		await sink.push(`${"z".repeat(50)}\n`);
+		const dumped = await sink.dump();
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnTruncatedRange).toBeUndefined();
+	});
+
+	test("replace() holds the replacement to the column cap", async () => {
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
+		await sink.push("raw\n");
+		const replacement = `ok\n${"x".repeat(50)}\n`;
+		sink.replace(replacement);
+		const dumped = await sink.dump();
+		expect(dumped.output).toBe("ok\nxxxxx…\n");
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.totalBytes).toBe(byteLength(replacement));
+	});
+
+	test("multibyte line: cap counts UTF-8 bytes and the notice says bytes", async () => {
+		// Regression for #10888: a 385-char line is 770 UTF-8 bytes. A char cap of
+		// 768 would leave it untouched; the sink enforces bytes, so it trims. The
+		// notice must name the enforced unit, not "chars".
+		const sink = new OutputSink({ maxColumns: 768, spillThreshold: 100_000 });
+		await sink.push("é".repeat(385));
+		const dumped = await sink.dump();
+
+		expect(dumped.columnTruncatedLines).toBe(1);
+		// 3 bytes reserved for "…" inside the 768-byte cap → 765 bytes of room →
+		// 382 two-byte "é" (764 bytes) kept, then the ellipsis.
+		const keptAccents = (dumped.output.match(/é/g) ?? []).length;
+		expect(keptAccents).toBe(382);
+		expect(dumped.output).toContain("…");
+
+		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
+		expect(formatOutputNotice(meta)).toContain("Some lines truncated to 768 bytes");
+	});
+
+	test("legacy metadata without a unit falls back to chars", () => {
+		// Sessions persisted before the unit field carry `{ maxColumn }` only.
+		// Resuming one must not render "768 undefined", and the reconstructed
+		// notice must still match the persisted "768 chars" text so stripping works.
+		const legacyMeta = { limits: { columnTruncated: { maxColumn: 768 } } };
+		const notice = formatOutputNotice(legacyMeta);
+		expect(notice).toContain("Some lines truncated to 768 chars");
+		expect(notice).not.toContain("undefined");
+		expect(stripOutputNotice(`body${notice}`, legacyMeta)).toBe("body");
 	});
 
 	test("persists per-line state across chunk boundaries", async () => {

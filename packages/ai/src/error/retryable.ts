@@ -1,6 +1,10 @@
 import { isRetryableError, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
+import { getHeadersFromError, getShouldRetryFromHeaders } from "../utils/retry-after";
 import {
+	ALIYUN_MM_GATEWAY_PATTERN,
+	CODEX_HTTP_BODY_READ_ERROR_PATTERN,
 	isRetryableStreamEnvelopeError,
+	isTransientStreamDropError,
 	isTransientStreamParseError,
 	isUsageLimit,
 	status,
@@ -38,21 +42,31 @@ function isTransientTransportMessage(message: string): boolean {
  *
  * Every 4xx other than 408/429 is terminal: a request the provider rejected
  * as malformed, unauthorized, or unentitled fails identically on replay.
+ *
+ * A captured `x-should-retry` response header overrides the status and text
+ * heuristics below: a server or gateway that already retried and answered
+ * `false` must not be replayed by provider retry loops.
  */
 export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (isUsageLimit(error)) return false;
+	const verdict = getShouldRetryFromHeaders(getHeadersFromError(error));
+	if (verdict !== undefined) return verdict;
 	const httpStatus = status(error);
 	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 429) {
-		return false;
+		// Aliyun's multimodal gateway 400s are flaky, not malformed — the same
+		// payload succeeds on replay (see the pattern's rationale in flags.ts).
+		return ALIYUN_MM_GATEWAY_PATTERN.test(error.message);
 	}
 	const msg = error.message.toLowerCase();
 	if (
 		isUnexpectedSocketCloseMessage(msg) ||
 		isTransientTransportMessage(msg) ||
 		TRANSIENT_TRANSPORT_PATTERN.test(msg) ||
+		CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(msg) ||
 		PROVIDER_TRANSIENT_EXTRA_PATTERN.test(msg) ||
 		isTransientStreamParseError(error) ||
+		isTransientStreamDropError(error) ||
 		isRetryableStreamEnvelopeError(error)
 	) {
 		return true;

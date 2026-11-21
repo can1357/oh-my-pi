@@ -82,6 +82,14 @@ function invalidReasoningResponse(param: "reasoning_effort" | "reasoning.effort"
 		{ status: 400, headers: { "content-type": "application/json" } },
 	);
 }
+
+function camelCaseReasoningEffortResponse(): Response {
+	const message = "field ReasoningEffort invalid, should be one of: low, medium, high, xhigh, none";
+	return new Response(JSON.stringify({ error: { message, type: "invalid_request_error" } }), {
+		status: 400,
+		headers: { "content-type": "application/json" },
+	});
+}
 function invalidMediumReasoningResponse(): Response {
 	return new Response(
 		JSON.stringify({
@@ -169,10 +177,10 @@ function templateKwargRejectionResponse(): Response {
 	return new Response(
 		JSON.stringify({
 			error: {
-				message: "chat_template_kwargs.reasoning_effort is not supported",
+				message: "chat_template_kwargs.ReasoningEffort is not supported",
 				type: "invalid_request_error",
 				code: "unknown_parameter",
-				param: "chat_template_kwargs.reasoning_effort",
+				param: "chat_template_kwargs.ReasoningEffort",
 			},
 		}),
 		{ status: 400, headers: { "content-type": "application/json" } },
@@ -261,6 +269,21 @@ function createNoneEffortCompletionsModel(): Model<"openai-completions"> {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128_000,
 		maxTokens: 16_384,
+	});
+}
+
+function createAzureAstraCompletionsModel(): Model<"openai-completions"> {
+	return buildModel({
+		id: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		api: "openai-completions",
+		provider: "azure",
+		baseUrl: "https://resource.openai.azure.com/openai/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 128_000,
 	});
 }
 
@@ -354,6 +377,73 @@ describe("OpenAI reasoning effort fallback retry", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(bodies.map(body => body.reasoning_effort)).toEqual(["xhigh", "max"]);
+	});
+
+	it("retries CamelCase ReasoningEffort rejections with the nearest supported tier", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const body = parseJsonBody(init);
+				bodies.push(body);
+				return bodies.length === 1 ? camelCaseReasoningEffortResponse() : createChatSseResponse();
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const result = await streamOpenAICompletions(createCompletionsModel(), testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "xhigh",
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(bodies.map(body => body.reasoning_effort)).toEqual(["xhigh", "high"]);
+	});
+
+	it("does not apply a cached enabled-effort fallback to tool-suppressed Azure Astra requests", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const body = parseJsonBody(init);
+				bodies.push(body);
+				return bodies.length === 1 ? invalidReasoningResponse("reasoning_effort", "max") : createChatSseResponse();
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const model = createAzureAstraCompletionsModel();
+
+		const first = await streamOpenAICompletions(model, testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "max",
+			providerSessionState,
+		}).result();
+		expect(first.stopReason).toBe("stop");
+
+		const second = await streamOpenAICompletions(
+			model,
+			{
+				messages: testContext.messages,
+				tools: [
+					{
+						name: "read",
+						description: "Read a file",
+						parameters: { type: "object", properties: {} },
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning: "max",
+				providerSessionState,
+			},
+		).result();
+
+		expect(second.stopReason).toBe("stop");
+		expect(bodies.map(body => body.reasoning_effort)).toEqual(["max", "high", "none"]);
+		expect(bodies[2]!.tools).toHaveLength(1);
 	});
 
 	it("retries Responses xhigh as provider max and stores the successful fallback params", async () => {

@@ -127,7 +127,10 @@ export const GOOGLE_QUERY_SYNTAX: QuerySyntax = {
 
 /** Result of {@link applyQueryConstraints}. */
 export interface ConstraintFilterResult {
-	/** Sources surviving the lenient filter — never empty when the input was non-empty. */
+	/**
+	 * Sources surviving the filter. Empty only when the input was empty or no
+	 * source matched a scope directive ({@link scopeConstraints}).
+	 */
 	sources: SearchSource[];
 	/**
 	 * Directive renderings (`site:arxiv.org`, `before:2024-01-01`, …) of the
@@ -757,6 +760,12 @@ export function matchesQueryConstraints(source: SearchSource, q: StructuredQuery
 interface ConstraintDimension {
 	/** Directive rendering for relaxation notes (`site:arxiv.org`). */
 	label: string;
+	/**
+	 * Scope directives (`site:`, `inurl:`, and every exclusion) are enforced
+	 * even when nothing matches: a source outside the requested scope, or one
+	 * the query excluded, is never an answer. The rest relax.
+	 */
+	scope: boolean;
 	pred: (source: SearchSource) => boolean;
 }
 
@@ -767,48 +776,56 @@ function constraintDimensions(q: StructuredQuery): ConstraintDimension[] {
 	if (q.sites.length > 0) {
 		dims.push({
 			label: q.sites.map(s => `site:${s}`).join(" OR "),
+			scope: true,
 			pred: src => q.sites.some(site => matchesSite(src.url, site)),
 		});
 	}
 	if (q.excludedSites.length > 0) {
 		dims.push({
 			label: q.excludedSites.map(s => `-site:${s}`).join(" "),
+			scope: true,
 			pred: src => !q.excludedSites.some(site => matchesSite(src.url, site)),
 		});
 	}
 	if (q.inUrl.length > 0) {
 		dims.push({
 			label: q.inUrl.map(v => `inurl:${v}`).join(" "),
+			scope: true,
 			pred: src => q.inUrl.every(v => lower(src.url).includes(v.toLowerCase())),
 		});
 	}
 	if (q.excludedInUrl.length > 0) {
 		dims.push({
 			label: q.excludedInUrl.map(v => `-inurl:${v}`).join(" "),
+			scope: true,
 			pred: src => !q.excludedInUrl.some(v => lower(src.url).includes(v.toLowerCase())),
 		});
 	}
 	if (q.inTitle.length > 0) {
 		dims.push({
 			label: q.inTitle.map(v => `intitle:${v}`).join(" "),
+			scope: false,
 			pred: src => q.inTitle.every(v => lower(src.title).includes(v.toLowerCase())),
 		});
 	}
 	if (q.excludedInTitle.length > 0) {
 		dims.push({
 			label: q.excludedInTitle.map(v => `-intitle:${v}`).join(" "),
+			scope: true,
 			pred: src => !q.excludedInTitle.some(v => lower(src.title).includes(v.toLowerCase())),
 		});
 	}
 	if (q.filetypes.length > 0) {
 		dims.push({
 			label: q.filetypes.map(f => `filetype:${f}`).join(" OR "),
+			scope: false,
 			pred: src => q.filetypes.some(ext => matchesFiletype(src.url, ext)),
 		});
 	}
 	if (q.excludedFiletypes.length > 0) {
 		dims.push({
 			label: q.excludedFiletypes.map(f => `-filetype:${f}`).join(" "),
+			scope: true,
 			pred: src => !q.excludedFiletypes.some(ext => matchesFiletype(src.url, ext)),
 		});
 	}
@@ -818,6 +835,7 @@ function constraintDimensions(q: StructuredQuery): ConstraintDimension[] {
 		const label = [q.after ? `after:${q.after}` : "", q.before ? `before:${q.before}` : ""].filter(Boolean).join(" ");
 		dims.push({
 			label,
+			scope: false,
 			pred: src => {
 				const time = sourceTime(src);
 				if (time === undefined) return true; // undated → cannot prove violation
@@ -831,11 +849,12 @@ function constraintDimensions(q: StructuredQuery): ConstraintDimension[] {
 }
 
 /**
- * Lenient post-filter: applies each constraint dimension of `q` in turn,
- * skipping (and reporting) any dimension that would eliminate every
- * remaining source. Guarantees a non-empty result for a non-empty input, so
- * a mis-scoped directive degrades to unfiltered results plus a note instead
- * of a dead search.
+ * Post-filter: applies each constraint dimension of `q` in turn. A scope
+ * directive (`site:`, `inurl:`, exclusions) is always enforced, so a source
+ * outside the requested scope never comes back; any other dimension that
+ * would eliminate every remaining source is skipped and reported, so a
+ * mis-scoped `intitle:`/`filetype:`/date degrades to a note instead of a
+ * dead search.
  */
 export function applyQueryConstraints(sources: readonly SearchSource[], q: StructuredQuery): ConstraintFilterResult {
 	let current = [...sources];
@@ -843,8 +862,25 @@ export function applyQueryConstraints(sources: readonly SearchSource[], q: Struc
 	if (current.length === 0) return { sources: current, dropped };
 	for (const dim of constraintDimensions(q)) {
 		const kept = current.filter(dim.pred);
-		if (kept.length > 0) current = kept;
+		if (kept.length > 0 || dim.scope) current = kept;
 		else dropped.push(dim.label);
+		if (current.length === 0) break;
 	}
 	return { sources: current, dropped };
+}
+
+/**
+ * The scope directives of `q` (`site:`, `inurl:`, and every exclusion) as one
+ * rendering and one predicate, for results {@link applyQueryConstraints} does
+ * not see (answer citations); `undefined` when `q` has none.
+ */
+export function scopeConstraints(
+	q: StructuredQuery,
+): { label: string; matches: (source: SearchSource) => boolean } | undefined {
+	const dims = constraintDimensions(q).filter(dim => dim.scope);
+	if (dims.length === 0) return undefined;
+	return {
+		label: dims.map(dim => dim.label).join(" "),
+		matches: source => dims.every(dim => dim.pred(source)),
+	};
 }

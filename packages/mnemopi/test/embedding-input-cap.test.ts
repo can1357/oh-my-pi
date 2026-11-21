@@ -111,12 +111,31 @@ describe("embed() input cap (#3126)", () => {
 		expect(seen).toContain("[...]");
 	});
 
-	it("returns the original array reference when no input needs trimming", async () => {
+	it("never splits a surrogate pair at the head or tail cut (#19455)", async () => {
 		const provider = captureProvider();
 		setEmbeddingProviderForTests(provider);
 
-		await withEnvValue("1024", () => embed(["fits", "still fits"]));
+		// Default cap 8192 → head 4091 / tail 4092 units. The padding puts the head
+		// cut after the high half of an emoji and the tail cut before a low half;
+		// a lone surrogate serializes as `\ud83d` and strict servers 400 the request.
+		const transcript = `${"a".repeat(4090)}${"🔍".repeat(4000)}b`;
+		await withEnvValue(undefined, () => embed([transcript]));
 
-		expect(provider.calls[0]).toEqual(["fits", "still fits"]);
+		const seen = provider.calls[0]?.[0] ?? "";
+		expect(seen.isWellFormed()).toBe(true);
+		expect(seen.startsWith(`${"a".repeat(4090)}\n`)).toBe(true);
+		expect(seen.endsWith("🔍b")).toBe(true);
+		expect(seen.length).toBe(8190);
+	});
+
+	it("never splits a surrogate pair in the tail-only clip for tiny caps (#19455)", async () => {
+		const provider = captureProvider();
+		setEmbeddingProviderForTests(provider);
+
+		await withEnvValue(undefined, () =>
+			withMnemopiRuntimeOptions({ embeddings: { maxInputChars: 9 } }, () => embed(["🔍".repeat(20)])),
+		);
+
+		expect(provider.calls[0]?.[0]).toBe("🔍".repeat(4));
 	});
 });

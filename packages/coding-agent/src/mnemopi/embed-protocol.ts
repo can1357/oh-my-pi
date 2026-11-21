@@ -1,13 +1,21 @@
 /**
- * Wire types between the parent (`MnemopiEmbedClient`) and the local
- * embeddings subprocess. The parent owns the subprocess lifecycle (graceful
- * work, hard `SIGKILL` on shutdown); the protocol carries no explicit close
- * handshake — once the parent decides to terminate, it signals the OS to reap
- * the child so `onnxruntime-node`'s NAPI finalizer never runs in the main
- * agent address space (it crashes Bun on Windows shutdown — issue #3031, the
- * mnemopi sibling of the tiny-model fix from #1606/#1607). See
- * `embed-client.ts` for the spawn/kill glue.
+ * Wire types for local mnemopi embeddings. The onnxruntime worker
+ * (`embed-worker.ts`) is a child of the omp daemon's `infer` module and reads
+ * {@link MnemopiEmbedWorkerInbound} lines on stdin, writing
+ * {@link MnemopiEmbedWorkerOutbound} lines on stdout; clients speak the same
+ * lines over their daemon tunnel. The daemon SIGKILLs the worker (on wedge,
+ * idle, or stop) and the worker SIGKILLs itself when stdin closes, so
+ * `onnxruntime-node`'s NAPI finalizer never runs (it crashes Bun on Windows
+ * shutdown — issue #3031, the mnemopi sibling of #1606/#1607).
  */
+
+/**
+ * Hidden subcommand on the main CLI that boots the onnxruntime embeddings
+ * worker. Kept in sync with the dispatch in `cli.ts`.
+ */
+export const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
+/** Env var overriding the unit's idle grace (milliseconds); for tests. */
+export const MNEMOPI_EMBED_IDLE_MS_ENV = "OMP_MNEMOPI_EMBED_IDLE_MS";
 
 /** Identifier of the fastembed model the worker should load (e.g. `fast-bge-base-en-v1.5`). */
 export type MnemopiEmbedModelId = string;
@@ -29,7 +37,5 @@ export type MnemopiEmbedWorkerOutbound =
 	| { type: "error"; id: string; error: string }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> };
 
-export interface MnemopiEmbedTransport {
-	send(message: MnemopiEmbedWorkerOutbound): void;
-	onMessage(handler: (message: MnemopiEmbedWorkerInbound) => void): () => void;
-}
+/** Model work a client sends. */
+export type MnemopiEmbedCall = Extract<MnemopiEmbedWorkerInbound, { type: "init" | "embed" }>;

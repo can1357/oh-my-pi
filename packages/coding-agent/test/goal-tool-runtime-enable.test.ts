@@ -8,6 +8,9 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+import { cfgAsyncEnabled, cfgToolsCommands } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgGoalEnabled } from "@oh-my-pi/pi-coding-agent/goals/settings";
+
 describe("goal tool registration when goal mode is enabled at runtime", () => {
 	let tempDir: TempDir;
 	let session: AgentSession | undefined;
@@ -27,13 +30,13 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 
 	async function makeSession(goalEnabledAtStartup: boolean): Promise<AgentSession> {
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		const settings = Settings.instance;
-		settings.set("async.enabled", false);
-		settings.set("tools.xdev", true);
-		settings.set("goal.enabled", goalEnabledAtStartup);
+		cfgAsyncEnabled.set(settings, false);
+		cfgToolsCommands.set(settings, true);
+		cfgGoalEnabled.set(settings, goalEnabledAtStartup);
 		const { session: created } = await createAgentSession({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
@@ -77,22 +80,19 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 	it("exposes the goal tool when goal.enabled is turned on after session start", async () => {
 		// Regression for #9444: enabling goal mode at runtime (settings UI / config
 		// reload) left the tool registry without `goal`, so entering goal mode
-		// silently dropped the name and `xd://goal` failed with "No such tool".
+		// silently dropped the name.
 		session = await makeSession(false);
-		Settings.instance.set("goal.enabled", true);
+		cfgGoalEnabled.set(Settings.instance, true);
 
 		await enterGoalMode(session);
 
 		expect(session.getEnabledToolNames()).toContain("goal");
 
-		// The failing path in the report: a real xd://goal dispatch via the write
-		// transport must now resolve the tool instead of throwing.
-		const writeTool = session.agent.state.tools.find(t => t.name === "write");
-		expect(writeTool).toBeDefined();
-		const result = await writeTool!.execute("call_goal", {
-			path: "xd://goal",
-			content: JSON.stringify({ op: "get" }),
-		} as never);
+		// The tool does not opt into the command transport, so with `bash` active it
+		// stays a top-level tool and must execute directly instead of being unknown.
+		const goalTool = session.agent.state.tools.find(tool => tool.name === "goal");
+		expect(goalTool).toBeDefined();
+		const result = await goalTool!.execute("call_goal", { op: "get" });
 		expect(result.isError ?? false).toBe(false);
 		const text = result.content?.map(c => ("text" in c && typeof c.text === "string" ? c.text : "")).join("\n");
 		expect(text).toContain("test goal");

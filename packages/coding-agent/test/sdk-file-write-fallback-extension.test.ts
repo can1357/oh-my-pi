@@ -46,7 +46,7 @@ function initializeRunnerForTest(runner: ExtensionRunner | undefined): void {
 	if (!runner) return;
 	const actions: ExtensionActions = {
 		sendMessage: () => {},
-		sendUserMessage: () => {},
+		sendUserMessage: async () => {},
 		appendEntry: () => {},
 		setLabel: () => {},
 		getActiveTools: () => [],
@@ -137,6 +137,8 @@ describe("registerFileWriteFallback end-to-end (real extension, real session)", 
 	});
 
 	afterAll(() => {
+		// The discovered auth DB lives in registryAuthDir; Windows cannot delete it while open.
+		modelRegistry.authStorage.close();
 		removeSyncWithRetries(registryAuthDir);
 	});
 

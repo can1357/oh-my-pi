@@ -3,8 +3,8 @@
 // selection never reached the wire. `mapOptionsForApi` now resolves the effort
 // to a routed wire id; `buildGrpcRequest` splits an OpenAI effort suffix off
 // `options.wireModelId` into a `reasoning` parameter (suffixed sibling ids
-// trigger Cursor's 528384) and sends the base id on both `requestedModel` and
-// `modelDetails`, keeping the logical id only as the display id.
+// trigger Cursor's 528384), sends the rich base through `requestedModel`, and
+// retains the usable sibling through legacy `modelDetails`.
 // buildGrpcRequest is exercised directly (the transport is HTTP/2)
 // and the serialized run request is decoded back from the wire bytes.
 import { describe, expect, it } from "bun:test";
@@ -60,7 +60,7 @@ describe("cursor effort routing", () => {
 		);
 		const run = decodeRunRequest(requestBytes).value;
 		expect(run.requestedModel.modelId).toBe("gpt-5.6-terra");
-		expect(run.modelDetails.modelId).toBe("gpt-5.6-terra");
+		expect(run.modelDetails.modelId).toBe("gpt-5.6-terra-medium");
 		expect(run.requestedModel.parameters).toEqual([expect.objectContaining({ id: "reasoning", value: "medium" })]);
 
 		// Logical id stays as the display id for local attribution.
@@ -74,9 +74,10 @@ describe("cursor effort routing", () => {
 		});
 		const run = decodeRunRequest(requestBytes).value;
 		// The routed off-tier sibling still normalizes: suffixed sibling ids
-		// trigger Cursor's 528384, so -none goes out as the bare base id.
+		// trigger Cursor's 528384, so -none goes out as the bare base id, with
+		// the usable sibling retained on legacy modelDetails.
 		expect(run.requestedModel.modelId).toBe("gpt-5.6-terra");
-		expect(run.modelDetails.modelId).toBe("gpt-5.6-terra");
+		expect(run.modelDetails.modelId).toBe("gpt-5.6-terra-none");
 		expect(run.requestedModel.parameters).toEqual([]);
 	});
 });

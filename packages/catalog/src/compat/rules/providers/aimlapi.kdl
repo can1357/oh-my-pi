@@ -1,6 +1,11 @@
 // Provider-wire compat for "aimlapi"; regenerated from the frozen census using deployment contract selectors.
 
 provider "aimlapi" {
+	default-model "gpt-5.5-2026-04-23"
+	env "AIMLAPI_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="AIML API"
+
 	thinking-mode "effort"
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek/deepseek-chat-v3.1" {

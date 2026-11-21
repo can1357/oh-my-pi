@@ -1,7 +1,7 @@
 import { bytesMatchAscii, UTF8_DECODER } from "./bytes";
 import { ensureParentDirectories, upsertArchiveEntry } from "./entries";
 import { ArchiveError } from "./error";
-import { type ArchiveLimits, assertArchiveMemberSize, assertEntryCount, assertIndexSize } from "./limits";
+import { type ArchiveLimits, assertArchiveMemberSizeField, assertEntryCount, assertIndexSize } from "./limits";
 import { assertArchivePathBytes, normalizeArchiveEntryPath } from "./paths";
 import { type ByteSource, memoryByteSource, readMemoryRange } from "./source";
 import type { ArchiveIndexEntry, FormatReader, FormatReadOptions, MemberSource } from "./types";
@@ -166,7 +166,7 @@ function materializeEntries(
 		}
 		if (isMetadataName(name)) continue;
 		assertArchivePathBytes(nameByteLength, "member path", options.limits.maxPathBytes);
-		assertArchiveMemberSize(record.size, name, options.limits);
+		assertArchiveMemberSizeField(record.size, name);
 		const path = normalizeArchiveEntryPath(name);
 		if (!path) continue;
 		const isDirectory = record.mode !== undefined && (record.mode & FILE_TYPE_MASK) === DIRECTORY_TYPE;

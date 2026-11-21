@@ -10,14 +10,6 @@ import {
 // per-token rates for the identical GLM ids, matching how other subscription
 // providers surface comparison pricing in `/models`.
 describe("zai GLM pricing sources the PAYG stencil.so key (issue #5598)", () => {
-	test("descriptor maps the `zai` stencil.so key, not `zai-coding-plan`", () => {
-		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(d => d.providerId === "zai");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.modelsDevKey).toBe("zai");
-		expect(descriptor?.api).toBe("anthropic-messages");
-		expect(descriptor?.baseUrl).toBe("https://api.z.ai/api/anthropic");
-	});
-
 	test("mapped zai models carry the PAYG per-token costs, not the coding-plan $0 rates", () => {
 		const payload = {
 			zai: {

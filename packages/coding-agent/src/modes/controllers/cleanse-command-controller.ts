@@ -4,9 +4,11 @@
  * cancel-then-dismiss (mirroring the `/omfg` panel).
  */
 import { runCleanse } from "../../cleanse";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { CleanseBoardModel } from "@oh-my-pi/pi-tui/apps/cleanse-board";
 import type { CleanseCheckerDescriptor } from "../../cleanse/checkers";
-import type { CleanseTargetChoice } from "../../cleanse/types";
-import { CleansePanelComponent } from "../components/cleanse-panel";
+import type { CleanseTargetChoice } from "@oh-my-pi/pi-tui/apps/cleanse-picker";
+import { CleansePanelComponent } from "@oh-my-pi/pi-tui/overlays/cleanse-panel";
 import type { InteractiveModeContext } from "../types";
 
 interface CleanseRun {
@@ -57,7 +59,9 @@ export class CleanseCommandController {
 
 	async start(args: string): Promise<void> {
 		if (this.#active) {
-			this.ctx.showStatus("A /cleanse run is already active — Esc cancels it.");
+			this.ctx.showStatus(
+				`A /cleanse run is already active — ${appKey(this.ctx.keybindings, "app.interrupt")} cancels it.`,
+			);
 			return;
 		}
 		const parsed = parseCleanseArgs(args);
@@ -66,7 +70,11 @@ export class CleanseCommandController {
 			return;
 		}
 		const run: CleanseRun = {
-			panel: new CleansePanelComponent({ request: parsed.request, tui: this.ctx.ui }),
+			panel: new CleansePanelComponent({
+				request: parsed.request,
+				tui: this.ctx.ui,
+				model: new CleanseBoardModel(),
+			}),
 			abortController: new AbortController(),
 			settled: false,
 		};

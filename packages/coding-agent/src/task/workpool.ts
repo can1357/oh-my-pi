@@ -1,4 +1,4 @@
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import workpoolBatchTemplate from "../prompts/tools/workpool-batch.md" with { type: "text" };
 import workpoolTurnResultTemplate from "../prompts/tools/workpool-turn-result.md" with { type: "text" };
@@ -6,16 +6,20 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { CustomMessage } from "../session/messages";
 import type { ToolSession } from "../tools";
-import { isIrcEnabled } from "../tools/hub";
-import { ToolError } from "../tools/tool-errors";
-import { runSubagentFollowUpTurn } from "./executor";
+import { isIrcEnabled } from "../irc/messaging";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isCompletionProbeEnabled } from "./completion-probe";
+import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
 	runStructuredSubagent,
 } from "./structured-subagent";
-import { type AgentProgress, oneLineLabel, type SingleResult, type TaskToolDetails } from "./types";
+import { type AgentProgress, oneLineLabel, type SingleResult, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { buildWorkPoolOutputSchema, type WorkPoolYieldItem } from "./workpool-yield";
+
+import { cfgEvalWorkpoolFreshAgents } from "../eval/settings";
+import { cfgTaskMaxConcurrency, cfgTaskMaxRuntimeMs } from "./settings";
 
 /** One user-supplied unit tracked through a workpool batch. */
 export interface WorkPoolItem {
@@ -85,6 +89,8 @@ export interface WorkPoolPeekResult {
 /** Resolved policy and optional shared context used to create a pool. */
 export interface WorkPoolCreateOptions {
 	name: string;
+	/** Raw selector applied to each worker at creation, never to follow-up turns. */
+	model?: string;
 	policy: EffectiveSubagentPolicy;
 	context?: string;
 	customTools?: CustomTool[];
@@ -95,6 +101,7 @@ interface TurnOutcome {
 	output: string;
 	error?: string;
 	aborted?: boolean;
+	extractedToolData?: Record<string, unknown[]>;
 	abortReason?: string;
 }
 
@@ -106,6 +113,7 @@ export class WorkPool {
 	readonly ownerId: string;
 	readonly session: ToolSession;
 	readonly policy: EffectiveSubagentPolicy;
+	readonly #model?: string;
 	readonly context?: string;
 	readonly customTools: CustomTool[];
 	readonly freshAgents: boolean;
@@ -128,9 +136,10 @@ export class WorkPool {
 		this.ownerId = session.getAgentId?.() ?? MAIN_AGENT_ID;
 		this.session = session;
 		this.policy = options.policy;
+		this.#model = options.model;
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
-		this.freshAgents = session.settings.get("eval.workpool.freshAgents");
+		this.freshAgents = cfgEvalWorkpoolFreshAgents.get(session.settings);
 		if (!session.asyncJobManager) {
 			throw new ToolError("workpool() needs the session's async job manager; unavailable here");
 		}
@@ -141,7 +150,7 @@ export class WorkPool {
 
 	/** Current worker ceiling from the live `task.maxConcurrency` setting. */
 	limit(): number {
-		const configured = this.session.settings.get("task.maxConcurrency");
+		const configured = cfgTaskMaxConcurrency.get(this.session.settings);
 		return configured > 0 ? configured : Infinity;
 	}
 
@@ -380,6 +389,7 @@ export class WorkPool {
 							assignment: message,
 							...(this.context ? { context: this.context } : {}),
 							agent: this.policy.agentName,
+							...(this.#model !== undefined ? { perCallModel: this.#model } : {}),
 							identity: { id: agent.id },
 							customTools: this.customTools,
 							outputSchema,
@@ -387,7 +397,6 @@ export class WorkPool {
 							workPoolYieldItems,
 							keepAlive: true,
 							retainArtifacts: true,
-							shareEvalSession: false,
 							enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 							signal,
 							onProgress,
@@ -407,7 +416,9 @@ export class WorkPool {
 							eventBus: this.session.eventBus,
 							subagentEventBus: this.session.subagentEventBus,
 							artifactsDir: this.session.getSessionFile()?.slice(0, -6),
-							maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
+							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
+							completionProbe: isCompletionProbeEnabled(this.session.settings, this.session.taskDepth ?? 0),
+							...softRequestBudgetFor(this.policy.agent.name, this.session.settings),
 						});
 					}
 				} catch (error) {
@@ -433,7 +444,15 @@ export class WorkPool {
 	async #finishTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): Promise<void> {
 		batch.status = result.aborted ? "cancelled" : result.exitCode !== 0 || result.error ? "failed" : "completed";
 		batch.output = result.output;
-		for (const item of batch.items) item.status = batch.status;
+		const failedItems = new Set<string>();
+		for (const yielded of result.extractedToolData?.yield ?? []) {
+			if (!isRecord(yielded) || yielded.status !== "success" || typeof yielded.error !== "string") continue;
+			if (Array.isArray(yielded.type) && yielded.type.length === 1 && typeof yielded.type[0] === "string") {
+				failedItems.add(yielded.type[0]);
+			}
+		}
+		for (const item of batch.items)
+			item.status = batch.status === "completed" && failedItems.has(item.id) ? "failed" : batch.status;
 		agent.turns++;
 		agent.jobId = undefined;
 		const ref = AgentRegistry.global().get(agent.id);

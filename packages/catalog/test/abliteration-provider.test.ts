@@ -2,55 +2,21 @@ import { describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import {
-	ABLITERATION_STATIC_MODELS,
-	abliterationModelManagerOptions,
-} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
+import { abliterationModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 
 function seed(id: string): Model<"openai-responses"> {
-	const spec = ABLITERATION_STATIC_MODELS.find(model => model.id === id);
+	const spec = seedModels<"openai-responses">("abliteration").find(model => model.id === id);
 	if (!spec) throw new Error(`missing abliteration seed ${id}`);
 	return buildModel(spec);
 }
 
 describe("Abliteration provider support", () => {
-	test("registers descriptor, default model, and bundled abliterated models", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "abliteration");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("abliterated-model");
-		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER.abliteration).toBe("abliterated-model");
-
-		const bundled = getBundledModels("abliteration");
-		expect(bundled.map(model => model.id).sort()).toEqual([
-			"abliterated-model",
-			"abliterated-model-large",
-			"abliterated-model-large-v2",
-		]);
-
-		// Documented limits and USD pricing with 10% cache-read billing
-		// (docs.abliteration.ai/models, /pricing).
-		const base = bundled.find(model => model.id === "abliterated-model")!;
-		expect(base.api).toBe("openai-responses");
-		expect(base.input).toEqual(["text", "image"]);
-		expect(base.contextWindow).toBe(262_144);
-		expect(base.maxTokens).toBe(262_134);
-		expect(base.cost).toEqual({ input: 3, output: 3, cacheRead: 0.3, cacheWrite: 0 });
-
-		const large = bundled.find(model => model.id === "abliterated-model-large")!;
-		expect(large.input).toEqual(["text"]);
-		expect(large.contextWindow).toBe(1_000_000);
-		expect(large.maxTokens).toBe(999_990);
-		expect(large.cost).toEqual({ input: 5, output: 5, cacheRead: 0.5, cacheWrite: 0 });
-	});
-
 	test("derives the documented reasoning surface from the GLM lineage rules", () => {
 		// The gateway never returns encrypted reasoning items and streams long
 		// reasoning turns without keepalives.
-		for (const model of ABLITERATION_STATIC_MODELS.map(spec => buildModel(spec))) {
+		for (const model of seedModels<"openai-responses">("abliteration").map(spec => buildModel(spec))) {
 			expect(model.reasoning).toBe(true);
 			expect(model.compat.includeEncryptedReasoning).toBe(false);
 			expect(model.compat.streamIdleTimeoutMs).toBe(0);

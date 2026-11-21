@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import { ArchiveError } from "../../src/ar/error";
 import { DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
 import { readRar, sniffRar } from "../../src/ar/rar";
 import { memoryByteSource } from "../../src/ar/source";
 import type { ArchiveIndexEntry } from "../../src/ar/types";
-import { arFixture as fixture } from "./fixtures";
+import { arFixture as fixture, extractLargestMember } from "./fixtures";
 
 const EXPECTED_HASHES: Record<string, string> = {
 	"input/hello.txt": "7f1620bec2523375e14494eade9ebdc362926b11904813809c503f2eb691aeff",
@@ -31,7 +30,7 @@ async function extract(entry: ArchiveIndexEntry): Promise<Uint8Array> {
 }
 
 function sha256(bytes: Uint8Array): string {
-	return crypto.createHash("sha256").update(bytes).digest("hex");
+	return Bun.SHA256.hash(bytes, "hex");
 }
 
 describe("RAR5", () => {
@@ -170,9 +169,9 @@ test("RAR corruption, traversal, and limits fail safely", async () => {
 	damagedPayload[payloadOffset] ^= 1;
 	const damagedEntries = await readRar(memoryByteSource(damagedPayload), { limits: DEFAULT_ARCHIVE_LIMITS });
 	await expect(extract(findEntry(damagedEntries, "input/hello.txt"))).rejects.toThrow("CRC32 mismatch");
-	await expect(
-		readRar(memoryByteSource(original), { limits: { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 5 } }),
-	).rejects.toThrow("too large");
+	const memberLimits = { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 5 };
+	const memberIndex = await readRar(memoryByteSource(original), { limits: memberLimits });
+	await expect(extractLargestMember("rar", memberIndex, memberLimits)).rejects.toThrow("too large");
 	await expect(
 		readRar(memoryByteSource(original), { limits: { ...DEFAULT_ARCHIVE_LIMITS, maxEntries: 1 } }),
 	).rejects.toThrow("too many entries");

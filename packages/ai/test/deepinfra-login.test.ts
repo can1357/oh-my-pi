@@ -1,5 +1,4 @@
 import { describe, expect, test, vi } from "bun:test";
-import { getOAuthProviders } from "../src/registry/oauth";
 import { getProviderDefinition } from "../src/registry/registry";
 import type { FetchImpl } from "../src/types";
 
@@ -7,11 +6,6 @@ const loginDeepinfra = getProviderDefinition("deepinfra")?.login;
 if (!loginDeepinfra) throw new Error("DeepInfra login is not registered");
 
 describe("DeepInfra login", () => {
-	test("registers DeepInfra as an available API-key provider", () => {
-		const provider = getOAuthProviders().find(item => item.id === "deepinfra");
-		expect(provider).toMatchObject({ id: "deepinfra", name: "DeepInfra", available: true });
-	});
-
 	test("validates the pasted key against the OpenAI-compatible chat completions endpoint", async () => {
 		const authEvents: Array<{ url: string; instructions?: string }> = [];
 		const requests: Array<{

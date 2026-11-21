@@ -1,7 +1,10 @@
 import { scheduler } from "node:timers/promises";
 
-// "reset after 1h2m3s" / "10m15s" / "39s"
-const QUOTA_RESET_PATTERN = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i;
+// Google's structured metadata uses Go duration strings, including abbreviated durations like `30m`.
+const GOOGLE_RPC_RESET_DELAY_PATTERN =
+	/"quotaResetDelay"\s*:\s*"((?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)(ms|s))?)"/i;
+// "reset after 1h2m3s" / "10m15s" / "39s" / "Resets in 71h48m47s" / "835ms"
+const QUOTA_RESET_PATTERN = /(?:reset after|resets?\s+in)\s*(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)(ms|s)\b/i;
 // "Please retry in 250ms" / "Please retry in 12s"
 const PLEASE_RETRY_PATTERN = /Please retry in ([0-9.]+)(ms|s)/i;
 // JSON field: "retryDelay": "34.074824224s"
@@ -11,17 +14,48 @@ const RETRY_DELAY_FIELD_PATTERN = /"retryDelay":\s*"([0-9.]+)(ms|s)"/i;
 // "try again in 90 minutes" / "try again in 1 hour"
 const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
 // "Your limit will reset in 13 minutes" / "reset in 13 minutes" / "will reset in 2h"
-const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
+// OpenCode Go quota errors use "Resets in …" with day units and compound
+// remainders ("Resets in 3 days", "Resets in 2hr 15min", "Resets in 45min").
+const WILL_RESET_IN_PATTERN =
+	/(?:will\s+)?resets?\s+in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i;
+// OpenCode Go compound remainder: "Resets in 2hr 15min".
+const RESET_IN_HR_MIN_PATTERN = /resets?\s+in\s+~?\s*(\d+(?:\.\d+)?)\s*hr\s*(\d+(?:\.\d+)?)\s*min\b/i;
 // "Your limit will reset at 2026-09-01 09:44:51" / "reset at 2026-09-01T09:44:51Z"
 const WILL_RESET_AT_PATTERN =
 	/(?:will\s+)?reset at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
+// Both grammars carry a timezone-naive wall clock. The default reading is UTC;
+// a provider-specific offset (Z.AI/Zhipu Beijing time) is applied only through
+// `RetryHintOptions.naiveResetTimezoneOffset`, never inferred from the language.
 const CN_RESET_AT_PATTERN = /将在\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})\s*重置/;
+// Google Cloud Code Assist structured RPC error timestamp ("quotaResetTimeStamp": "2026-10-31T20:38:36Z")
+const GOOGLE_RPC_RESET_TIMESTAMP_PATTERN =
+	/"quotaResetTimeStamp":\s*"([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z)"/i;
+const RESET_AT_PATTERNS: readonly RegExp[] = [
+	WILL_RESET_AT_PATTERN,
+	CN_RESET_AT_PATTERN,
+	GOOGLE_RPC_RESET_TIMESTAMP_PATTERN,
+];
 // "retry-after-ms=98497000" / "retry-after-ms: 7200000" / "retry-after-ms = 7200000"
 const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 
+// A timezone-naive `reset at` stamp (no `Z`/offset) is the provider's
+// wall clock in an unknown zone: it cannot be converted to a delay without
+// guessing the zone, so it resolves only as a fallback when the body
+// carries no unambiguous relative signal.
+
+// A conflict probe needs no new signal: when a naive `reset at` wall stamp
+// disagrees with the merged relative wait, the merged wait (which already
+// ignores the naive stamp) sleeps first, and the retry after it is the
+// probe — success proves skew, a fresh 429 re-anchors with live timing.
+
+/** Provider-specific interpretation for timezone-naive retry timestamps. */
+export interface RetryHintOptions {
+	/** UTC offset appended to an absolute reset stamp that omits its timezone. */
+	naiveResetTimezoneOffset?: string;
+}
+
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
- * by the OpenAI Codex and Google Gemini retry helpers.
  *
  * Header sources (checked in order):
  *  - `retry-after-ms` (milliseconds)
@@ -31,18 +65,24 @@ const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
  *  - `x-ratelimit-reset-after` (seconds)
  *
  * Body patterns:
- *  - `Your quota will reset after 18h31m10s` / `10m15s` / `39s`
+ *  - `Your quota will reset after 18h31m10s` / `10m15s` / `39s` / `Resets in 71h48m47s`
  *  - `Please retry in 250ms` / `Please retry in 12s`
- *  - `"retryDelay": "34.074824224s"` (JSON error detail field)
+ *  - `"retryDelay": "34.074824224s"` / `"quotaResetDelay": "17h48m25.5s"` (JSON error detail fields)
  *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
  *  - `retry-after-ms=98497000` / `retry-after-ms: 7200000` / `retry-after-ms = 7200000`
- *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置`
+ *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置` / `"quotaResetTimeStamp": "..."`
+ *    (a provider offset makes a naive wall clock authoritative; otherwise it
+ *    resolves only when no relative signal is present)
  *
  * Returns `undefined` if no signal is found, or `0` when the provider
  * explicitly asks for an immediate retry (`retry-after…=0`, or an absolute
  * reset timestamp that has already elapsed).
  */
-export function extractRetryHint(source: Response | Headers | null | undefined, body?: string): number | undefined {
+export function extractRetryHint(
+	source: Response | Headers | null | undefined,
+	body?: string,
+	options?: RetryHintOptions,
+): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
 	if (headers) {
 		const retryAfterMs = headers.get("retry-after-ms");
@@ -98,6 +138,15 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 	// when the parse returns undefined, which would sleep a session the
 	// provider told to retry immediately.
 	let retryNow = false;
+
+	// Timezone-naive `reset at` stamps (no `Z`/offset) are the provider's
+	// wall clock in an unknown zone — converting them to a delay requires
+	// guessing the zone. They resolve AFTER every unambiguous signal below,
+	// and only as a fallback when none was found.
+	let longestNaiveMs: number | undefined;
+	const considerNaive = (ms: number | undefined): void => {
+		if (ms !== undefined && ms > 0 && (longestNaiveMs === undefined || ms > longestNaiveMs)) longestNaiveMs = ms;
+	};
 	const consider = (ms: number | undefined): void => {
 		if (ms !== undefined && ms > 0 && (longestMs === undefined || ms > longestMs)) longestMs = ms;
 	};
@@ -107,29 +156,57 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 		else retryNow = true;
 	};
 
-	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);
+	// Prefer structured quota timing to a display-oriented reset message.
+	// Independent RetryInfo, timestamp, and header signals still participate.
+	const quotaResetDelay = GOOGLE_RPC_RESET_DELAY_PATTERN.exec(body);
+	const quotaResetDelayMs = quotaResetDelay?.[1]
+		? Math.floor(
+				Number(quotaResetDelay[2] ?? 0) * 3_600_000 +
+					Number(quotaResetDelay[3] ?? 0) * 60_000 +
+					Number(quotaResetDelay[4] ?? 0) * (quotaResetDelay[5]?.toLowerCase() === "ms" ? 1 : 1_000),
+			)
+		: undefined;
+	const hasStructuredQuotaDelay = quotaResetDelayMs !== undefined && Number.isFinite(quotaResetDelayMs);
+	if (hasStructuredQuotaDelay) considerClamped(quotaResetDelayMs);
+
+	const quotaMatch = hasStructuredQuotaDelay ? null : QUOTA_RESET_PATTERN.exec(body);
 	if (quotaMatch) {
 		const hours = quotaMatch[1] ? Number.parseInt(quotaMatch[1], 10) : 0;
 		const minutes = quotaMatch[2] ? Number.parseInt(quotaMatch[2], 10) : 0;
 		const seconds = Number.parseFloat(quotaMatch[3]!);
 		if (!Number.isNaN(seconds)) {
-			const totalMs = ((hours * 60 + minutes) * 60 + seconds) * 1000;
+			const subMinuteMs = quotaMatch[4]!.toLowerCase() === "ms" ? seconds : seconds * 1000;
+			const totalMs = (hours * 60 + minutes) * 60_000 + subMinuteMs;
 			consider(totalMs > 0 ? totalMs : undefined);
 		}
 	}
-	for (const pattern of [WILL_RESET_AT_PATTERN, CN_RESET_AT_PATTERN]) {
+	for (const pattern of RESET_AT_PATTERNS) {
 		const match = pattern.exec(body);
-		if (match?.[1]) {
-			// Provider timestamps without an explicit offset are interpreted as UTC.
-			const normalized = match[1].replace(" ", "T");
-			const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
-			const parsed = Date.parse(hasOffset ? normalized : `${normalized}Z`);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) {
-				consider(parsed - Date.now());
-			}
+		if (!match?.[1]) continue;
+		// Offset-bearing stamps are unambiguous and compete by longest-wins.
+		// A configured provider offset makes an otherwise naive wall clock
+		// unambiguous too. Without one, preserve the relative-signal-first
+		// fallback and interpret the wall clock as UTC only when it stands alone.
+		const normalized = match[1].replace(" ", "T");
+		const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
+		const configuredOffset = options?.naiveResetTimezoneOffset;
+		const parsed = Date.parse(hasOffset ? normalized : `${normalized}${configuredOffset ?? "Z"}`);
+		if (!Number.isNaN(parsed) && parsed > Date.now()) {
+			if (hasOffset || configuredOffset !== undefined) consider(parsed - Date.now());
+			else considerNaive(parsed - Date.now());
 		}
 	}
-	const accountResetMatch = WILL_RESET_IN_PATTERN.exec(body);
+	// OpenCode Go compound remainder ("Resets in 2hr 15min"): the generic
+	// pattern only captures the leading "2hr", so add the trailing minutes.
+	const compoundResetMatch = hasStructuredQuotaDelay ? null : RESET_IN_HR_MIN_PATTERN.exec(body);
+	if (compoundResetMatch?.[1] && compoundResetMatch[2]) {
+		const hours = Number.parseFloat(compoundResetMatch[1]);
+		const minutes = Number.parseFloat(compoundResetMatch[2]);
+		if (Number.isFinite(hours) && Number.isFinite(minutes) && hours >= 0 && minutes > 0) {
+			consider(hours * 60 * 60_000 + minutes * 60_000);
+		}
+	}
+	const accountResetMatch = hasStructuredQuotaDelay ? null : WILL_RESET_IN_PATTERN.exec(body);
 	if (accountResetMatch?.[1]) {
 		const value = Number.parseFloat(accountResetMatch[1]);
 		if (Number.isFinite(value) && value > 0) {
@@ -188,7 +265,9 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 			considerClamped(resetSeconds > 1_000_000_000 ? resetSeconds * 1000 - Date.now() : resetSeconds * 1000);
 		}
 	}
-	return longestMs ?? (retryNow ? 0 : undefined);
+	// Elapsed naive stamps were ignored before this change and stay ignored:
+	// only an explicit zero/expired relative signal is authoritative retry-now.
+	return longestMs ?? longestNaiveMs ?? (retryNow ? 0 : undefined);
 }
 
 function unitToMs(unit: string): number | undefined {
@@ -210,6 +289,10 @@ function unitToMs(unit: string): number | undefined {
 		case "hour":
 		case "hours":
 			return 60 * 60_000;
+		case "d":
+		case "day":
+		case "days":
+			return 24 * 60 * 60_000;
 		default:
 			return undefined;
 	}
@@ -323,6 +406,8 @@ export async function fetchWithRetry(
 		if (hint !== undefined && hint > maxDelayMs) return response;
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
+		// The retried response is discarded; release its unread tee branch.
+		if (!response.bodyUsed) response.body?.cancel().catch(() => {});
 		await waitForRetry(delayMs, signal);
 	}
 }
@@ -355,7 +440,11 @@ function wrapNetworkError(error: unknown): Error {
 			return new Error("Request was aborted");
 		}
 		if (error.message === "fetch failed" && error.cause instanceof Error) {
-			return new Error(`Network error: ${error.cause.message}`);
+			// Keep the original rejection as `cause`: undici nests the errno under
+			// `fetch failed` (often through an AggregateError), and
+			// classifyNetworkCause (packages/ai/src/error/network-cause.ts) walks
+			// `cause`/`errors` off this error. Flattening to text alone loses it.
+			return new Error(`Network error: ${error.cause.message}`, { cause: error });
 		}
 		return error;
 	}

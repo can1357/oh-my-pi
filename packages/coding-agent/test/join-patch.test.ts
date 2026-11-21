@@ -23,14 +23,6 @@ describe("joinPatch", () => {
 		expect(result.replace(/[ \t]+$/, "")).toEqual(result); // No trailing spaces should be removed
 	});
 
-	test("normalizes multiple trailing newlines in parts", () => {
-		const parts = ["line1\n", "line2\n", "line3"];
-		const result = vcs.joinPatches(parts);
-
-		// Should join with single newlines and end with one newline
-		expect(result.endsWith("\n")).toBe(true);
-	});
-
 	test("adds newline to parts that are missing them", () => {
 		const parts = ["line1", "line2"];
 		const result = vcs.joinPatches(parts);
@@ -38,6 +30,18 @@ describe("joinPatch", () => {
 		// Should add newlines to both parts
 		expect(result.includes("line1\n")).toBe(true);
 		expect(result.endsWith("line2\n")).toBe(true);
+	});
+});
+
+describe("parseFileDiffs path parsing", () => {
+	test("keeps edits visible for quoted Unicode filenames", () => {
+		const diff =
+			'diff --git "a/emoji 😀 \\"name\\".txt" "b/emoji 😀 \\"name\\".txt"\n' +
+			'--- "a/emoji 😀 \\"name\\".txt"\n' +
+			'+++ "b/emoji 😀 \\"name\\".txt"\n' +
+			"@@ -1 +1 @@\n-old\n+new\n";
+
+		expect(parseFileDiffs(diff).map(file => file.filename)).toEqual(['emoji 😀 "name".txt']);
 	});
 });
 

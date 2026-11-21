@@ -1,10 +1,15 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
+import type { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { Text, type TUI } from "@oh-my-pi/pi-tui";
+import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import type { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 
 beforeAll(async () => {
 	await initTheme();
@@ -32,15 +37,17 @@ function createEditorSlot(...initial: unknown[]): EditorSlot {
 	};
 }
 
-function createCtx(slot: EditorSlot, editor: unknown) {
+function createCtx(slot: EditorSlot, editor: unknown, focused: unknown = editor, extra: object = {}) {
 	const setFocus = vi.fn();
 	const ctx = {
 		editor,
 		editorContainer: slot,
 		ui: {
+			getFocused: vi.fn(() => focused),
 			setFocus,
 			requestRender: vi.fn(),
 		},
+		...extra,
 	} as unknown as InteractiveModeContext;
 	return { ctx, setFocus };
 }
@@ -91,6 +98,53 @@ describe("SelectorController.focusActiveEditorArea", () => {
 	});
 });
 
+describe("SelectorController.showSelector", () => {
+	it("restores an ask dialog and its draft editor after history search closes", () => {
+		const editor = new Text("editor", 0, 0);
+		const askDialog = new Text("ask", 0, 0);
+		const historySearch = new Text("history", 0, 0);
+		const slot = createEditorSlot(askDialog, editor);
+		const { ctx, setFocus } = createCtx(slot, editor, askDialog);
+		let finish: (() => void) | undefined;
+
+		new SelectorController(ctx).showSelector(done => {
+			finish = done;
+			return { component: historySearch, focus: historySearch };
+		});
+
+		expect(slot.children).toEqual([historySearch]);
+		expect(setFocus).toHaveBeenLastCalledWith(historySearch);
+		if (!finish) throw new Error("selector did not provide its completion callback");
+		finish();
+		expect(slot.children).toEqual([askDialog, editor]);
+		expect(setFocus).toHaveBeenLastCalledWith(askDialog);
+	});
+});
+
+describe("SelectorController.showHistorySearch", () => {
+	it("delivers the picked entry to the focused ask prompt, not the hidden composer", () => {
+		const storage = {
+			getRecent: () => [{ id: 1, prompt: "deploy the release", created_at: 0, useCount: 1 }],
+			search: () => [],
+		} as unknown as HistoryStorage;
+		const editor = { setText: vi.fn() };
+		const onSubmit = vi.fn();
+		const tui = { terminal: { columns: 120 } } as unknown as TUI;
+		const prompt = new HookEditorComponent(tui, "Other", undefined, onSubmit, vi.fn(), { promptStyle: true });
+		const slot = createEditorSlot(prompt);
+		const { ctx } = createCtx(slot, editor, prompt, { historyStorage: storage });
+
+		new SelectorController(ctx).showHistorySearch();
+		const [history] = slot.children;
+		if (!(history instanceof HistorySearchComponent)) throw new Error("history search was not mounted");
+		history.handleInput("\n");
+
+		expect(editor.setText).not.toHaveBeenCalled();
+		prompt.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
+		expect(onSubmit).toHaveBeenCalledWith("deploy the release");
+	});
+});
+
 describe("SelectorController session replacement overlay", () => {
 	it("keeps the fullscreen selector visible until the resumed transcript is ready", async () => {
 		const session: SessionInfo = {
@@ -105,7 +159,11 @@ describe("SelectorController session replacement overlay", () => {
 			firstMessage: "first",
 			allMessagesText: "first second",
 		};
-		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		const listed = [session];
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue({
+			sessions: listed,
+			complete: Promise.resolve(listed),
+		});
 
 		const overlayHidden = Promise.withResolvers<void>();
 		const hide = vi.fn(() => overlayHidden.resolve());
@@ -115,9 +173,13 @@ describe("SelectorController session replacement overlay", () => {
 		const ctx = {
 			editor,
 			editorContainer,
+			settings: Settings.isolated(),
 			sessionManager: {
 				getCwd: () => "/tmp",
 				getSessionDir: () => "/tmp",
+				// Live-session path: keeps the picker's current-marker/focus code live
+				// during the overlay assertions (single-row list stays deterministic).
+				getSessionFile: () => session.path,
 			},
 			ui: {
 				showOverlay: vi.fn(component => {
@@ -141,7 +203,7 @@ describe("SelectorController session replacement overlay", () => {
 		selector!.handleInput("\n");
 		await resumeStarted.promise;
 
-		expect(handleResume).toHaveBeenCalledWith(session.path);
+		expect(handleResume).toHaveBeenCalledWith(session.path, { followContinuation: true });
 		expect(hide).not.toHaveBeenCalled();
 
 		// The selector remains mounted until resume finishes, but it must not accept

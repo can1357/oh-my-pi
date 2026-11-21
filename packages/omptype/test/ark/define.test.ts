@@ -10,13 +10,6 @@ it("ark", () => {
 	const _assert1: Eq<typeof def, { a: "string|number"; b: readonly ["boolean"] }> = true;
 });
 
-it.todo("type attached");
-
-it("ark error", () => {
-	// currently is a no-op, so only has type error
-	void (() => type.define({ a: "boolean|foo" }));
-});
-
 it("custom scope", () => {
 	const $ = scope({
 		a: "string[]",

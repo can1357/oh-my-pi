@@ -1,0 +1,47 @@
+Preserve the selected Bazel Zig target and its glibc floor for all code.
+
+cc-rs probes compiler identity with a standalone CC --version. Zig 0.14
+main.zig punts no-input commands directly to clangMain with the original
+arguments. Clang cannot parse the wrapper's Zig-only glibc suffix in
+-target aarch64-linux-gnu.2.17 and reports an invalid
+aarch64-unknown-linux-gnu.2.17 triple. A standalone version query needs no
+target; do not add one. Every preprocessing, compile and link invocation
+still gets the authoritative Zig target, including its glibc 2.17 floor.
+
+rustc also passes -Wl,-O1 for optimized Linux links. Zig 0.14's main.zig
+only records this option to emit "ignoring deprecated linker optimization
+setting '1'"; it never affects the link. Omit that exact no-op, without
+suppressing diagnostics or changing C/C++ optimization flags.
+
+Applied after hermetic_cc_toolchain-drop-cortex-a53-link-arg.patch.
+
+diff --git a/toolchain/zig-wrapper.zig b/toolchain/zig-wrapper.zig
+--- a/toolchain/zig-wrapper.zig
++++ b/toolchain/zig-wrapper.zig
+@@ -261,7 +261,10 @@
+     while (argv_it.next()) |arg| {
++        // Zig ignores this deprecated rustc linker setting already.
++        if (run_mode == RunMode.cc and mem.eql(u8, arg, "-Wl,-O1"))
++            continue;
+         // rustc adds this on aarch64 linux (rust-lang/rust#155453); zig cc
+         // rejects both spellings.
+         if (run_mode == RunMode.cc and (mem.eql(u8, arg, "-Wl,--fix-cortex-a53-843419") or mem.eql(u8, arg, "-mfix-cortex-a53-843419")))
+             continue;
+         try args.append(arena, arg);
+     }
+@@ -301,10 +304,14 @@
+     // Add -target as the last parameter. The wrapper should overwrite
+     // the target specified by other tools calling the wrapper.
+     // Some tools might pass LLVM target triple, which are rejected by zig.
+     // https://github.com/uber/hermetic_cc_toolchain/issues/222
+-    if (run_mode == RunMode.cc) {
++    // Zig punts a standalone --version query directly to Clang, which
++    // rejects Zig's glibc suffix. No code is built by this version query;
++    // keep it target-independent and retain the pinned target for all code.
++    const version_query = args.items.len == 3 and mem.eql(u8, args.items[2], "--version");
++    if (run_mode == RunMode.cc and !version_query) {
+         try args.appendSlice(arena, &[_][]const u8{
+             "-target",
+             run_mode.cc,
+         });
+     }

@@ -64,7 +64,7 @@ describe("AgentSession steer idle drain", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-steer-idle-drain-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 

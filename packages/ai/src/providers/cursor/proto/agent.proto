@@ -836,6 +836,11 @@ message ShellOutputDeltaUpdate {
 }
 
 message TurnEndedUpdate {
+   optional int64 input_tokens = 1;
+   optional int64 output_tokens = 2;
+   optional int64 cache_read_tokens = 3;
+   optional int64 cache_write_tokens = 4;
+   optional int64 reasoning_tokens = 5;
 }
 
 // Only: user message appended update
@@ -850,6 +855,10 @@ message StepStartedUpdate {
 message StepCompletedUpdate {
    uint64 step_id = 1;
    int64 step_duration_ms = 2;
+}
+
+message ToolRequestsListedUpdate {
+   uint32 call_count = 1;
 }
 
 message InteractionUpdate {
@@ -871,6 +880,7 @@ message InteractionUpdate {
       TurnEndedUpdate turn_ended = 14;
       StepStartedUpdate step_started = 16;
       StepCompletedUpdate step_completed = 17;
+      ToolRequestsListedUpdate tool_requests_listed = 27;
    }
 }
 

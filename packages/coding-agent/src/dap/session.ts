@@ -512,7 +512,7 @@ export class DapSessionManager {
 						);
 					} catch (error) {
 						logger.warn("Failed to synchronize breakpoint request with child debug session", {
-							sessionId: session.id,
+							debugSessionId: session.id,
 							command,
 							error: toErrorMessage(error),
 						});
@@ -961,7 +961,21 @@ export class DapSessionManager {
 		// the waiter subscribes, burning the whole timeout.
 		const stoppedPromise = session.client.waitForEvent<DapStoppedEventBody>("stopped", undefined, signal, timeoutMs);
 		stoppedPromise.catch(() => {});
-		await this.#sendRequestWithConfig(session, "pause", { threadId } satisfies DapPauseArguments, signal, timeoutMs);
+		try {
+			await this.#sendRequestWithConfig(
+				session,
+				"pause",
+				{ threadId } satisfies DapPauseArguments,
+				signal,
+				timeoutMs,
+			);
+		} catch (error) {
+			// gdb's DAP answers a pause it cannot deliver with the bare reason "notStopped".
+			if (error instanceof Error && error.message.trim() === "notStopped") {
+				throw new Error("The debug adapter refused to pause (notStopped): the target is still running.");
+			}
+			throw error;
+		}
 		if (!isStopped()) {
 			try {
 				await untilAborted(signal, stoppedPromise);
@@ -1014,7 +1028,7 @@ export class DapSessionManager {
 				// of degrading a cancelled call into a successful partial result.
 				if (signal?.aborted) throw error;
 				logger.warn("Failed to list threads for debug session", {
-					sessionId: target.id,
+					debugSessionId: target.id,
 					error: toErrorMessage(error),
 				});
 				continue;
@@ -1161,7 +1175,8 @@ export class DapSessionManager {
 
 	#startCleanupTimer(): void {
 		if (this.#cleanupLoopPromise) return;
-		this.#cleanupLoopPromise = this.#runCleanupLoop();
+		// The manager serves every session in the process; its sweep names none.
+		this.#cleanupLoopPromise = logger.withoutContext(() => this.#runCleanupLoop());
 	}
 
 	async #runCleanupLoop(): Promise<void> {
@@ -1259,7 +1274,7 @@ export class DapSessionManager {
 				session.breakpoints.set(sourcePath, this.#mapSourceBreakpoints(entries, response?.breakpoints));
 			} catch (error) {
 				logger.warn("Failed to bind source breakpoints in child debug session", {
-					sessionId: session.id,
+					debugSessionId: session.id,
 					sourcePath,
 					error: toErrorMessage(error),
 				});
@@ -1281,7 +1296,7 @@ export class DapSessionManager {
 				session.functionBreakpoints = this.#mapFunctionBreakpoints(root.functionBreakpoints, response?.breakpoints);
 			} catch (error) {
 				logger.warn("Failed to bind function breakpoints in child debug session", {
-					sessionId: session.id,
+					debugSessionId: session.id,
 					error: toErrorMessage(error),
 				});
 			}
@@ -1297,7 +1312,7 @@ export class DapSessionManager {
 				session.instructionBreakpoints = root.instructionBreakpoints.map(entry => ({ ...entry }));
 			} catch (error) {
 				logger.warn("Failed to bind instruction breakpoints in child debug session", {
-					sessionId: session.id,
+					debugSessionId: session.id,
 					error: toErrorMessage(error),
 				});
 			}
@@ -1313,7 +1328,7 @@ export class DapSessionManager {
 				session.dataBreakpoints = root.dataBreakpoints.map(entry => ({ ...entry }));
 			} catch (error) {
 				logger.debug("Failed to bind data breakpoints in child debug session", {
-					sessionId: session.id,
+					debugSessionId: session.id,
 					error: toErrorMessage(error),
 				});
 			}
@@ -1396,7 +1411,7 @@ export class DapSessionManager {
 				startArgs.configuration && typeof startArgs.configuration === "object" ? startArgs.configuration : {};
 			logger.debug("Adapter requested child debug session", {
 				adapter: session.adapter.name,
-				sessionId: session.id,
+				debugSessionId: session.id,
 				request,
 				name: typeof configuration.name === "string" ? configuration.name : undefined,
 			});
@@ -1463,7 +1478,7 @@ export class DapSessionManager {
 	#buildInitializeArguments(adapter: DapResolvedAdapter): DapInitializeArguments {
 		return {
 			clientID: "omp",
-			clientName: "Oh My Pi",
+			clientName: "omp",
 			adapterID: adapter.name,
 			locale: "en-US",
 			linesStartAt1: true,
@@ -1556,7 +1571,7 @@ export class DapSessionManager {
 			this.#applyTopFrame(session, session.lastStackFrames[0]);
 		} catch (error) {
 			logger.debug("Failed to capture stopped frame", {
-				sessionId: session.id,
+				debugSessionId: session.id,
 				error: toErrorMessage(error),
 			});
 		}

@@ -1,6 +1,7 @@
 /** Benchmark adapters normalize native artifacts into manager runs and traces. */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { conversationDumpRelativePath } from "../adapters/edit/dump-path";
 import { aggregate, readJobResult, readTrials } from "./runner";
 import type { BenchmarkKind } from "./store";
 
@@ -163,7 +164,7 @@ function readEditSnapshot(jobDir: string): BenchmarkSnapshot {
 				costUsd: 0,
 				durationMs: run.duration,
 				detail: JSON.stringify({ name: task.name, error: run.error ?? null, tools: run.toolCalls ?? null }),
-				tracePath: path.join("result.dump", task.id.replace(/[^a-zA-Z0-9._-]/g, "_"), `run-${runNumber}.md`),
+				tracePath: path.join("result.dump", conversationDumpRelativePath(task.id, runNumber)),
 			});
 		}
 	}

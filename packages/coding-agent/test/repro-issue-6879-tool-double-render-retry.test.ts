@@ -4,7 +4,7 @@ import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -51,16 +51,12 @@ function assistantMessage(content: AssistantMessage["content"], stopReason: stri
 	} as unknown as AssistantMessage;
 }
 
+/**
+ * Transcript cards showing {@link CMD}. Counts cards, not text: a streaming card
+ * draws the command through the shell visualization, a finished one as `$ cmd`.
+ */
 function countCommand(mode: InteractiveMode): number {
-	const rendered = Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
-	let count = 0;
-	let index = 0;
-	while (true) {
-		const found = rendered.indexOf(`$ ${CMD}`, index);
-		if (found === -1) return count;
-		count++;
-		index = found + CMD.length;
-	}
+	return mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)).length;
 }
 
 describe("issue #6879 — tool output appears twice after a superseded turn", () => {

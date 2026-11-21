@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as mcpConfigWriter from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
+import { HostLink } from "@oh-my-pi/pi-coding-agent/mcp/link";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getProjectDir, removeWithRetries, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import {
@@ -25,6 +26,24 @@ type RenderableBlock = {
 
 function isRenderableBlock(component: Component): component is Component & RenderableBlock {
 	return "isTranscriptBlockFinalized" in component && typeof component.isTranscriptBlockFinalized === "function";
+}
+
+/** What a successful `connectToServer` hands back. Its link is never attached: every client call on it is stubbed. */
+function githubConnection(): mcpClient.HostedMCPConnection {
+	const config = { type: "stdio" as const, command: "github-mcp-server", args: ["serve"] };
+	return {
+		name: "github",
+		config,
+		transport: new HostLink({
+			name: "github",
+			spec: mcpClient.buildServerSpec(config),
+			instance: "issue-956",
+			roots: () => [],
+			idleMs: 0,
+		}),
+		serverInfo: { name: "GitHub MCP", version: "1.0.0" },
+		capabilities: {},
+	};
 }
 
 function createController(overrides: ContextOverrides = {}) {
@@ -81,19 +100,7 @@ describe("interactive /mcp test", () => {
 
 	it("tests a discovered server and keeps its advertised Esc cancellation grace", async () => {
 		vi.useFakeTimers();
-		const transport = {
-			connected: true,
-			request: vi.fn(),
-			notify: vi.fn(),
-			close: vi.fn(async () => {}),
-		};
-		const connection = {
-			name: "github",
-			config: { type: "stdio" as const, command: "github-mcp-server", args: ["serve"] },
-			transport,
-			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
-			capabilities: {},
-		};
+		const connection = githubConnection();
 		const connectToServer = vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
 		const listTools = vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
 		const disconnectServer = vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
@@ -110,7 +117,6 @@ describe("interactive /mcp test", () => {
 		// impossible, or a later press kills the running agent turn instead.
 		const rendered = ctx.chatContainer.children.map(block => block.render(80).join("\n")).join("\n");
 		expect(rendered).toContain(`Tested connection to "github".`);
-		expect(rendered).not.toContain("(esc to cancel)");
 
 		// The grace window still holds while untouched...
 		vi.advanceTimersByTime(4_999);
@@ -206,25 +212,11 @@ describe("interactive /mcp test", () => {
 		expect(presented).toHaveLength(1);
 		const rendered = presented.map(block => block.render(80).join("\n")).join("\n");
 		expect(rendered).toContain(`Cancelled connection test for "github".`);
-		expect(rendered).not.toContain("(esc to cancel)");
 		expect(presented[0]?.isTranscriptBlockFinalized()).toBe(true);
 	});
 
 	it("treats an abort landing during manager sync as a completed test", async () => {
-		const transport = {
-			connected: true,
-			request: vi.fn(),
-			notify: vi.fn(),
-			close: vi.fn(async () => {}),
-		};
-		const connection = {
-			name: "github",
-			config: { type: "stdio" as const, command: "github-mcp-server", args: ["serve"] },
-			transport,
-			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
-			capabilities: {},
-		};
-		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(githubConnection());
 		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
 		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
 		const { promise: hintPresented, resolve: hintResolve } = Promise.withResolvers<void>();
@@ -334,28 +326,6 @@ describe("interactive /mcp test", () => {
 		expect(presentCommandOutput).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith(`Cancelled MCP test for "github"`);
 		expect(mcpTestEscapeHandlers).toHaveLength(0);
-	});
-
-	it("claims Esc ownership before the awaited server lookup", async () => {
-		const connection = {
-			name: "github",
-			config: { type: "stdio" as const, command: "github-mcp-server", args: ["serve"] },
-			transport: { connected: true, request: vi.fn(), notify: vi.fn(), close: vi.fn(async () => {}) },
-			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
-			capabilities: {},
-		};
-		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
-		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
-		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
-		const mcpTestEscapeHandlers = new Set<() => void>();
-		const { controller } = createController({ mcpTestEscapeHandlers });
-
-		// Do not await: the handler must be registered synchronously, before the
-		// awaited `#resolveServerForAuth()` config read can suspend and let Esc
-		// fall through to aborting the agent turn.
-		const pending = controller.handle("/mcp test github");
-		expect(mcpTestEscapeHandlers).toHaveLength(1);
-		await pending;
 	});
 
 	it("releases Esc immediately when lookup fails before the hint is shown", async () => {

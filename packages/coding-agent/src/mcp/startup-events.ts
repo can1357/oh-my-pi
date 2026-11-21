@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	replaceTabs,
@@ -5,7 +6,7 @@ import {
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
-} from "../tools/render-utils";
+} from "@oh-my-pi/pi-tui/render/render-utils";
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 
@@ -91,13 +92,9 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 	return "";
 }
 
-function isRecord(data: unknown): data is Record<string, unknown> {
-	return typeof data === "object" && data !== null;
-}
-
-function isStringArray(data: unknown): data is string[] {
-	return Array.isArray(data) && data.every(item => typeof item === "string");
-}
+const McpConnectionStatusEventShape = type({ type: "'connecting'", serverNames: "string[]" })
+	.or({ type: "'reconnecting' | 'connected'", serverName: "string" })
+	.or({ type: "'failed'", serverName: "string", error: "string", "sourcePath?": "string | undefined" });
 
 /**
  * Runtime validator for the cross-module event payload. The event bus is
@@ -105,21 +102,5 @@ function isStringArray(data: unknown): data is string[] {
  * rather than trusting a cast — a malformed emit is ignored instead of throwing.
  */
 export function isMcpConnectionStatusEvent(data: unknown): data is McpConnectionStatusEvent {
-	if (!isRecord(data) || typeof data.type !== "string") return false;
-	switch (data.type) {
-		case "connecting":
-			return isStringArray(data.serverNames);
-		case "reconnecting":
-			return typeof data.serverName === "string";
-		case "connected":
-			return typeof data.serverName === "string";
-		case "failed":
-			return (
-				typeof data.serverName === "string" &&
-				typeof data.error === "string" &&
-				(data.sourcePath === undefined || typeof data.sourcePath === "string")
-			);
-		default:
-			return false;
-	}
+	return McpConnectionStatusEventShape.allows(data);
 }

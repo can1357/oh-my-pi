@@ -14,16 +14,18 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import "./setup";
-import { cmdRemember } from "@oh-my-pi/pi-mnemopi/cli";
+import { cmdRemember, withMemory } from "@oh-my-pi/pi-mnemopi/cli";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import {
 	type ResolvedMnemopiRuntimeOptions,
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { withBeam } from "@oh-my-pi/pi-mnemopi/mcp";
 
 interface EmbeddingRow {
 	readonly memory_id: string;
@@ -198,6 +200,95 @@ describe("issue #1832 — embedding write/read coverage", () => {
 		});
 	});
 
+	it("a late remember embedding cannot overwrite a completed update embedding", async () => {
+		const oldContent = "alpha facts about migration";
+		const updatedContent = "gamma postmortem";
+		const updatedVector = [0, 0, 1, 0];
+		const rememberStarted = Promise.withResolvers<void>();
+		const releaseRemember = Promise.withResolvers<void>();
+		const provider = async function* (texts: readonly string[]) {
+			if (texts.includes(oldContent)) {
+				rememberStarted.resolve();
+				await releaseRemember.promise;
+			}
+			yield texts.map(text => {
+				if (text === oldContent) return [1, 0, 0, 0];
+				if (text === updatedContent) return updatedVector;
+				return [0, 0, 0, 1];
+			});
+		};
+		const memory = new Mnemopi({
+			db: new Database(":memory:"),
+			embeddings: { provider },
+		});
+		try {
+			const id = memory.remember(oldContent, { source: "test" });
+			await rememberStarted.promise;
+
+			const pendingBeforeUpdate = new Set(memory.beam.pendingExtractions);
+			expect(memory.update(id, updatedContent)).toBe(true);
+			const updateEmbedding = [...memory.beam.pendingExtractions].find(task => !pendingBeforeUpdate.has(task));
+			expect(updateEmbedding).toBeDefined();
+			await updateEmbedding;
+
+			releaseRemember.resolve();
+			await memory.flushExtractions();
+
+			const results = await memory.recall("unrelated lexical query", 5, {
+				queryEmbedding: updatedVector,
+				vecWeight: 1,
+				ftsWeight: 0,
+				importanceWeight: 0,
+			});
+			const updated = results.find(result => result.id === id);
+			expect(updated?.content).toBe(updatedContent);
+			expect(updated?.dense_score).toBe(1);
+		} finally {
+			releaseRemember.resolve();
+			await memory.flushExtractions();
+			memory.close();
+		}
+	});
+
+	it("forget during embedding does not recreate a persisted vector", async () => {
+		const content = "alpha facts about migration";
+		const embedStarted = Promise.withResolvers<void>();
+		const releaseEmbed = Promise.withResolvers<void>();
+		const provider = async function* (texts: readonly string[]) {
+			if (texts.includes(content)) {
+				embedStarted.resolve();
+				await releaseEmbed.promise;
+			}
+			yield texts.map(() => [1, 0, 0, 0]);
+		};
+		const memory = new Mnemopi({
+			db: new Database(":memory:"),
+			embeddings: { provider },
+		});
+		try {
+			const id = memory.remember(content, { source: "test" });
+			await embedStarted.promise;
+
+			expect(memory.forget(id)).toBe(true);
+			let invalidations = 0;
+			(memory.beam.caches as { queryCache?: { invalidate: () => void } }).queryCache = {
+				invalidate: () => {
+					invalidations += 1;
+				},
+			};
+
+			releaseEmbed.resolve();
+			await memory.flushExtractions();
+
+			expect(readEmbeddings(memory)).toEqual([]);
+			expect(invalidations).toBe(0);
+		} finally {
+			releaseEmbed.resolve();
+			await memory.flushExtractions();
+			memory.close();
+		}
+	});
+
 	it("consolidateToEpisodic() writes an embedding for the new episodic id", async () => {
 		await withFakeMemory(async memory => {
 			const wmId = memory.remember("alpha launch checklist", { source: "test" });
@@ -253,6 +344,108 @@ describe("issue #1832 — embedding write/read coverage", () => {
 		} finally {
 			fresh.close();
 			rmSync(dbPath, { force: true });
+		}
+	});
+
+	it("drains pending embeddings before close even when the CLI handler throws", async () => {
+		// Regression for #15804: `withMemory` (the wrapper behind `mnemopi store`)
+		// only drained on the success path, so a handler that called remember() and
+		// then threw closed the SQLite handle before the in-flight embed() committed
+		// and the memory_embeddings row was silently dropped. This goes through the
+		// exported wrapper with an OWNED file-backed DB so the invariant is pinned on
+		// the CLI path too, not just on flushExtractions() itself.
+		const { provider, calls } = fakeProvider();
+		const dataDir = `${tmpdir()}/mnemopi-15804-cli-${randomBytes(6).toString("hex")}`;
+		mkdirSync(dataDir, { recursive: true });
+		const dbPath = join(dataDir, "mnemopi.db");
+		const runtimeOptions: ResolvedMnemopiRuntimeOptions = {
+			embeddings: { provider },
+		};
+
+		let thrown: unknown;
+		await withMnemopiRuntimeOptions(runtimeOptions, async () => {
+			try {
+				await withMemory({ dbPath }, async memory => {
+					memory.remember("alpha cli throw-path regression", { source: "test", importance: 0.5 });
+					throw new Error("simulated CLI handler failure");
+				});
+			} catch (error) {
+				thrown = error;
+			}
+		});
+		// The CLI reports a handler failure to the user, so `withMemory` must
+		// rethrow; assert that first, before the persistence check below.
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toBe("simulated CLI handler failure");
+
+		// Re-open as a separate session to verify the embedding survived the throw.
+		const fresh = new BeamMemory({ dbPath });
+		try {
+			const rows = fresh.db.query("SELECT memory_id, embedding_json FROM memory_embeddings").all() as {
+				memory_id: string;
+				embedding_json: string;
+			}[];
+			expect(rows).toHaveLength(1);
+			expect(JSON.parse(rows[0]?.embedding_json ?? "[]")).toEqual([1, 0, 0, 0]);
+			expect(calls()).toBeGreaterThanOrEqual(1);
+		} finally {
+			fresh.close();
+			rmSync(dataDir, { recursive: true, force: true });
+		}
+	});
+
+	it("drains pending embeddings before close even when the MCP handler throws", async () => {
+		// Regression for #15804: withBeam's flushExtractions() must run in a finally
+		// block so that a throw from the handler still drains before close. Without
+		// this, a throwing MCP remember handler would silently drop the embedding row.
+		const { provider, calls } = fakeProvider();
+		const dataDir = `${tmpdir()}/mnemopi-15804-${randomBytes(6).toString("hex")}`;
+		mkdirSync(dataDir, { recursive: true });
+		const dbPath = join(dataDir, "mnemopi.db");
+		const runtimeOptions: ResolvedMnemopiRuntimeOptions = {
+			embeddings: { provider },
+		};
+
+		const originalDataDir = process.env.MNEMOPI_DATA_DIR;
+		process.env.MNEMOPI_DATA_DIR = dataDir;
+		let thrown: unknown;
+		try {
+			await withMnemopiRuntimeOptions(runtimeOptions, async () => {
+				try {
+					await withBeam({ bank: "default" }, async beam => {
+						beam.remember("alpha throw-path regression", { source: "test", importance: 0.5 });
+						throw new Error("simulated handler failure");
+					});
+				} catch (error) {
+					thrown = error;
+				}
+			});
+		} finally {
+			if (originalDataDir === undefined) {
+				delete process.env.MNEMOPI_DATA_DIR;
+			} else {
+				process.env.MNEMOPI_DATA_DIR = originalDataDir;
+			}
+		}
+		// MCP reports handler failures to the client through isError, which depends
+		// on withBeam PROPAGATING the rejection. Assert that first: without it a
+		// wrapper that swallows the failure still passes the persistence check.
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toBe("simulated handler failure");
+
+		// Re-open as a separate session to verify the embedding survived the throw.
+		const fresh = new BeamMemory({ dbPath });
+		try {
+			const rows = fresh.db.query("SELECT memory_id, embedding_json FROM memory_embeddings").all() as {
+				memory_id: string;
+				embedding_json: string;
+			}[];
+			expect(rows).toHaveLength(1);
+			expect(JSON.parse(rows[0]?.embedding_json ?? "[]")).toEqual([1, 0, 0, 0]);
+			expect(calls()).toBeGreaterThanOrEqual(1);
+		} finally {
+			fresh.close();
+			rmSync(dataDir, { recursive: true, force: true });
 		}
 	});
 

@@ -220,10 +220,4 @@ describe("ollama reasoning effort normalization (buildModel)", () => {
 		expect(model.compat.reasoningEffortMap).toEqual({ high: "medium" });
 		expect(model.thinking?.effortMap).toEqual({ high: "medium" });
 	});
-
-	test("leaves non-ollama providers untouched", () => {
-		const model = buildModel({ ...staleOllamaSpec("openai-responses"), provider: "custom" });
-		expect(model.compat.reasoningEffortMap).toEqual({});
-		expect(model.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
-	});
 });

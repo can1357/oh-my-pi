@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
-import { DeferredMCPTool, MCPTool, type MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp";
+import { MCPTool, type MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -74,6 +74,33 @@ async function createLocalImageContext(
 }
 
 describe("MCP tool arguments", () => {
+	it("forwards nested nullable arguments unchanged to tools/call", async () => {
+		const calls: CapturedRequest[] = [];
+		const tool = new MCPTool(createCapturedConnection(calls), {
+			name: "nullable_payload",
+			inputSchema: {
+				type: "object",
+				properties: {
+					payload: {
+						type: "object",
+						properties: { keep: { type: "null" } },
+						required: ["keep"],
+					},
+				},
+				required: ["payload"],
+			},
+		});
+
+		await tool.execute("nullable-boundary", { payload: { keep: null } }, undefined, unusedContext);
+
+		expect(calls).toEqual([
+			{
+				method: "tools/call",
+				params: { name: "nullable_payload", arguments: { payload: { keep: null } } },
+			},
+		]);
+	});
+
 	it("omits optional empty placeholders before tools/call", async () => {
 		const calls: CapturedRequest[] = [];
 		const tool = new MCPTool(createCapturedConnection(calls), createSearchToolDefinition());
@@ -92,30 +119,6 @@ describe("MCP tool arguments", () => {
 				params: {
 					name: "search",
 					arguments: { symbol: "Foo", language: "", line: 0, exact: false },
-				},
-			},
-		]);
-	});
-
-	it("omits optional empty placeholders for deferred MCP tools", async () => {
-		const calls: CapturedRequest[] = [];
-		const connection = createCapturedConnection(calls);
-		const tool = new DeferredMCPTool("intellij-index", createSearchToolDefinition(), async () => connection);
-
-		await tool.execute(
-			"call-1",
-			{ symbol: "Foo", language: "TypeScript", file: "", column: "", filters: {} },
-			undefined,
-			unusedContext,
-			undefined,
-		);
-
-		expect(calls).toEqual([
-			{
-				method: "tools/call",
-				params: {
-					name: "search",
-					arguments: { symbol: "Foo", language: "TypeScript" },
 				},
 			},
 		]);
@@ -142,27 +145,6 @@ describe("MCP tool arguments", () => {
 			{
 				method: "tools/call",
 				params: { name: "search", arguments: { symbol: "Foo", language: "TypeScript" } },
-			},
-		]);
-	});
-
-	it("strips the harness intent field for deferred MCP tools", async () => {
-		const calls: CapturedRequest[] = [];
-		const connection = createCapturedConnection(calls);
-		const tool = new DeferredMCPTool("intellij-index", createSearchToolDefinition(), async () => connection);
-
-		await tool.execute(
-			"call-1",
-			{ [INTENT_FIELD]: "deferred lookup", symbol: "Bar", language: "TypeScript" },
-			undefined,
-			unusedContext,
-			undefined,
-		);
-
-		expect(calls).toEqual([
-			{
-				method: "tools/call",
-				params: { name: "search", arguments: { symbol: "Bar", language: "TypeScript" } },
 			},
 		]);
 	});
@@ -394,6 +376,22 @@ describe("MCP tool arguments", () => {
 				method: "tools/call",
 				params: { name: "read_image_with_model", arguments: { image_path: expectedPath } },
 			},
+		]);
+	});
+
+	it("forwards free text that mentions a path-prefixed local:// URL unchanged", async () => {
+		using tempDir = TempDir.createSync("@pi-mcp-local-text-");
+		const calls: CapturedRequest[] = [];
+		const { context } = await createLocalImageContext(tempDir);
+		const tool = new MCPTool(createCapturedConnection(calls), imageToolDefinition);
+		// The router repairs `<cwd>/local://x` for path arguments; an MCP string
+		// that only mentions one must not be replaced by the backing file path.
+		const text = "Attached notes/local://image-issue.png";
+
+		await tool.execute("call-1", { image_path: text }, undefined, context, undefined);
+
+		expect(calls).toEqual([
+			{ method: "tools/call", params: { name: "read_image_with_model", arguments: { image_path: text } } },
 		]);
 	});
 });

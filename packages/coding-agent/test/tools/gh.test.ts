@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -15,12 +14,27 @@ import {
 	parseSearchDateBound,
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
-import { parseIssueUrl, parsePullRequestUrl } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
+import {
+	parseIssueUrl,
+	parsePullRequestUrl,
+	tryResolveCurrentRepoFresh,
+} from "@oh-my-pi/pi-coding-agent/tools/gh-common";
+import { sanitizeRemoteName } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getAgentDir, hashPath, normalizePathForComparison, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	hashPath,
+	normalizePathForComparison,
+	removeWithRetries,
+	setAgentDir,
+	spillFileName,
+} from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -59,11 +73,11 @@ function createSession(
 		getSessionFile: () => null,
 		getArtifactsDir: () => artifactsDir ?? null,
 		allocateOutputArtifact: artifactsDir
-			? async toolType => {
+			? async () => {
 					const artifactId = String(nextArtifactId++);
 					return {
 						id: artifactId,
-						path: path.join(artifactsDir, `${artifactId}-${toolType}.md`),
+						path: path.join(artifactsDir, spillFileName(artifactId)),
 					};
 				}
 			: undefined,
@@ -122,6 +136,10 @@ async function buildPrFixtureTemplate(): Promise<PrFixture> {
 
 	await fs.mkdir(repoRoot, { recursive: true });
 	runGit(baseDir, ["init", "-b", "main", repoRoot]);
+	// createPrFixture copies this tree with fs.cp; a background
+	// `git maintenance run --auto` lock would race the copy.
+	runGit(repoRoot, ["config", "maintenance.auto", "false"]);
+	runGit(repoRoot, ["config", "gc.auto", "0"]);
 	await fs.writeFile(path.join(repoRoot, "README.md"), "base\n");
 	runGit(repoRoot, ["add", "README.md"]);
 	runGit(repoRoot, ["commit", "-m", "base commit"]);
@@ -230,6 +248,13 @@ async function expectedWorktreePath(home: string, primaryRoot: string, localBran
 	const segment = `${prNumber}-${hashPath(primaryRoot)}`;
 	return fs.realpath(path.join(home, ".omp", "wt", segment));
 }
+
+describe("sanitizeRemoteName", () => {
+	it("prefixes sanitized fork owners and falls back to a bare fork remote", () => {
+		expect(sanitizeRemoteName("Octo_Cat.Org")).toBe("fork-octo-cat-org");
+		expect(sanitizeRemoteName("__")).toBe("fork");
+	});
+});
 
 describe("parsePrUnifiedDiff", () => {
 	it("parses quoted diff headers instead of falling back to unknown paths", () => {
@@ -393,6 +418,84 @@ describe("getOrFetchPrDiff diff-too-large fallback", () => {
 	});
 });
 
+describe("GitHub command runner", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("preserves structured API validation details hidden by generic stderr", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: JSON.stringify({
+				message: "Validation Failed",
+				errors: [
+					{
+						message:
+							"The search contains only logical operators without search terms. " +
+							"Logical operators only apply to text, not to qualifiers.",
+					},
+				],
+			}),
+			stderr: "gh: Validation Failed (HTTP 422)",
+		});
+
+		await expect(github.json("/tmp", ["api", "-X", "GET", "/search/issues"])).rejects.toThrow(
+			"gh: Validation Failed (HTTP 422)\n" +
+				"GitHub details:\n" +
+				"- The search contains only logical operators without search terms. " +
+				"Logical operators only apply to text, not to qualifiers.",
+		);
+	});
+
+	it("formats structured API field errors that carry no message", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: JSON.stringify({
+				message: "Validation Failed",
+				errors: [{ resource: "Search", field: "q", code: "missing" }],
+			}),
+			stderr: "gh: Validation Failed (HTTP 422)",
+		});
+
+		await expect(github.json("/tmp", ["api", "-X", "GET", "/search/issues"])).rejects.toThrow(
+			"gh: Validation Failed (HTTP 422)\nGitHub details:\n- Search.q: missing",
+		);
+	});
+
+	it("does not duplicate structured details already rendered by gh", async () => {
+		const detail = "Field 'fieldThatDoesNotExist' doesn't exist on type 'Repository'";
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: JSON.stringify({ errors: [{ message: detail }] }),
+			stderr: `gh: ${detail}`,
+		});
+
+		await expect(github.json("/tmp", ["api", "graphql"])).rejects.toThrow(new RegExp(`^gh: ${detail}$`));
+	});
+
+	it("retains the existing error when stdout is not structured JSON", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: "upstream proxy returned HTML",
+			stderr: "gh: request failed (HTTP 502)",
+		});
+
+		await expect(github.json("/tmp", ["api", "-X", "GET", "/user"])).rejects.toThrow("gh: request failed (HTTP 502)");
+	});
+
+	it("preserves translated authentication failures without extra API details", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 1,
+			stdout: JSON.stringify({ message: "Bad credentials" }),
+			stderr: "gh: To authenticate, run gh auth login",
+		});
+
+		await expect(github.json("/tmp", ["api", "/user"])).rejects.toThrow(
+			/^GitHub CLI is not authenticated\. Run `gh auth login`\.$/,
+		);
+	});
+});
+
 describe("github tool", () => {
 	beforeAll(async () => {
 		prFixtureTemplate = await buildPrFixtureTemplate();
@@ -474,6 +577,20 @@ describe("github tool", () => {
 			undefined,
 			{ repoProvided: true, trimOutput: false },
 		);
+	});
+
+	it("adds repository, revision, and path context to file-read failures", async () => {
+		vi.spyOn(github, "json").mockRejectedValue(new ToolError("gh: Not Found (HTTP 404)"));
+		const tool = new GithubTool(createSession());
+
+		await expect(
+			tool.execute("file-read", {
+				op: "file_read",
+				repo: "openai/codex",
+				branch: "main",
+				path: "Cargo.toml",
+			}),
+		).rejects.toThrow("GitHub file read failed for 'openai/codex@main:Cargo.toml': gh: Not Found (HTTP 404)");
 	});
 
 	it("returns GitHub images as model image content", async () => {
@@ -588,14 +705,14 @@ describe("github tool", () => {
 		expect(viewArgs.slice(0, 3)).toEqual(["pr", "view", "77"]);
 		expect(viewArgs).toEqual(expect.arrayContaining(["--repo", "owner/repo"]));
 
-		// Output: PR number + summary rendered, URL surfaces, body block included.
+		// Output: PR number + summary rendered, URL surfaces, body is not echoed.
 		expect(text).toContain("# Created Pull Request #77: Add gizmo");
 		expect(text).toContain("URL: https://github.com/owner/repo/pull/77");
 		expect(text).toContain("Draft: true");
 		expect(text).toContain("Base: main");
 		expect(text).toContain("Head: feature/gizmo");
 		expect(text).toContain("Labels: enhancement");
-		expect(text).toContain("Adds a gizmo.");
+		expect(text).not.toContain("Adds a gizmo.");
 	});
 
 	it("rejects pr_create when neither title nor fill is supplied", async () => {
@@ -1104,40 +1221,6 @@ describe("github tool", () => {
 				// Existing URL is preserved — we never overwrote it.
 				expect(runGit(fixture.repoRoot, ["remote", "get-url", "forksrc"])).toBe(fixture.forkBare);
 			});
-			it("does not depend on localized git remote-add stderr for existing remotes", async () => {
-				// The shim is a bash script resolved via `which`; neither exists on Windows.
-				if (process.platform === "win32") return;
-				const originalPath = process.env.PATH;
-				const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-"));
-				const realGitResult = Bun.spawnSync(["which", "git"], { stdout: "pipe", stderr: "pipe" });
-				expect(realGitResult.exitCode).toBe(0);
-				const realGit = new TextDecoder().decode(realGitResult.stdout).trim();
-				const fakeGit = path.join(fakeBin, "git");
-				await fs.writeFile(
-					fakeGit,
-					`#!/usr/bin/env bash
-while [[ "$1" == "-c" ]]; do shift 2; done
-if [[ "$1" == "remote" && "$2" == "add" && "$3" == "forksrc" ]]; then
-	echo "本地化错误：远程 forksrc 已经存在。" >&2
-	exit 3
-fi
-exec ${JSON.stringify(realGit)} "$@"
-`,
-				);
-				await fs.chmod(fakeGit, 0o755);
-
-				try {
-					process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
-					await vcs.requireGit(fixture.repoRoot).remoteAdd("forksrc", fixture.forkBare);
-				} finally {
-					if (originalPath === undefined) {
-						delete process.env.PATH;
-					} else {
-						process.env.PATH = originalPath;
-					}
-					await removeWithRetries(fakeBin);
-				}
-			});
 		});
 	});
 
@@ -1192,7 +1275,7 @@ echo ok
 				child.exited,
 			]);
 			expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-			expect(JSON.parse(stdout)).toEqual({ exitCode: 0, stderr: "", stdout: "ok" });
+			expect(JSON.parse(stdout)).toEqual({ exitCode: 0, stderr: "", stdout: "ok", stdoutTruncated: false });
 		} finally {
 			await removeWithRetries(fakeBin);
 		}
@@ -1315,16 +1398,13 @@ echo ok
 					originMainBefore,
 				);
 			});
-		});
-	});
 
-	it("exposes a flat op-based schema without legacy run_watch parameters", () => {
-		const tool = new GithubTool(createSession());
-		const wire = toolWireSchema(tool);
-		const properties = wire.properties as Record<string, unknown>;
-		expect(properties.op).toBeDefined();
-		expect(properties.interval).toBeUndefined();
-		expect(properties.grace).toBeUndefined();
+			it("pushes the branch pr_checkout made for the named PR, not the current branch", async () => {
+				const tool = new GithubTool(createSession(fixture.repoRoot));
+				const result = await tool.execute("pr-push-named", { op: "pr_push", pr: "100" });
+				expect(result.details).toMatchObject({ branch: "pr-100", remoteBranch: fixture.headRefName });
+			});
+		});
 	});
 
 	it("tails failed job logs inline and saves the full failed-job logs as an artifact", async () => {
@@ -1390,14 +1470,14 @@ echo ok
 			expect(text).toContain("zeta");
 			expect(text).not.toContain("alpha");
 			expect(text).toContain("Run failed.");
-			expect(text).toContain("Full failed-job logs: artifact://0");
+			expect(text).toContain("Full failed-job logs: local://0.log");
 			expect(result.details?.artifactId).toBe("0");
 			expect(result.details?.watch?.mode).toBe("run");
 			expect(result.details?.watch?.state).toBe("completed");
 			expect(result.details?.watch?.failedLogs?.[0]?.jobName).toBe("test");
 			expect(result.details?.watch?.failedLogs?.[0]?.tail).toContain("zeta");
 
-			const artifactText = await Bun.file(path.join(artifactsDir, "0-github.md")).text();
+			const artifactText = await Bun.file(path.join(artifactsDir, spillFileName(0))).text();
 			expect(artifactText).toContain("# GitHub Actions Run #77");
 			expect(artifactText).toContain("Full log:");
 			expect(artifactText).toContain("alpha");
@@ -1410,6 +1490,201 @@ echo ok
 			await removeWithRetries(artifactsDir);
 		}
 	});
+
+	for (const mode of ["run", "commit"] as const) {
+		it(`streams normalized GitHub Actions step progress in ${mode} watch details`, async () => {
+			mockSchedulerWaitWithClock();
+			const observedAt = Date.parse("2026-11-11T12:00:30Z");
+			vi.spyOn(Date, "now").mockReturnValue(observedAt);
+
+			const sentinelTimestamp = "0001-01-01T00:00:00Z";
+			const liveSteps = [
+				{
+					number: 1,
+					name: "Checkout",
+					status: "completed",
+					conclusion: "success",
+					started_at: "2026-11-11T12:00:20Z",
+					completed_at: "2026-11-11T12:00:22Z",
+				},
+				{
+					number: 2,
+					name: "Run tests",
+					status: "in_progress",
+					started_at: "2026-11-11T12:00:25Z",
+					completed_at: sentinelTimestamp,
+				},
+				{
+					number: 3,
+					name: "Wait for deployment",
+					status: "queued",
+					started_at: sentinelTimestamp,
+					completed_at: sentinelTimestamp,
+				},
+				{ number: 4, status: "queued", started_at: sentinelTimestamp },
+				{ name: "No GitHub step number", status: "completed" },
+				{ number: 0, name: "Invalid zero step number", status: "completed" },
+				{ number: "5", name: "Invalid string step number", status: "completed" },
+			];
+			const completedSteps = [
+				liveSteps[0],
+				{
+					number: 2,
+					name: "Run tests",
+					status: "completed",
+					conclusion: "success",
+					started_at: "2026-11-11T12:00:25Z",
+					completed_at: "2026-11-11T12:00:34Z",
+				},
+				{
+					number: 3,
+					name: "Wait for deployment",
+					status: "queued",
+					started_at: sentinelTimestamp,
+					completed_at: sentinelTimestamp,
+				},
+				{ number: 4, status: "queued", started_at: sentinelTimestamp },
+				...liveSteps.slice(4),
+			];
+			const runSnapshots = [
+				{
+					id: 77,
+					name: "CI",
+					display_title: "Step progress",
+					status: "in_progress",
+					head_branch: "main",
+					head_sha: "0123456789abcdef",
+					html_url: "https://github.com/owner/repo/actions/runs/77",
+				},
+				{
+					id: 77,
+					name: "CI",
+					display_title: "Step progress",
+					status: "completed",
+					conclusion: "success",
+					head_branch: "main",
+					head_sha: "0123456789abcdef",
+					html_url: "https://github.com/owner/repo/actions/runs/77",
+				},
+			];
+			const jobSnapshots = [
+				[
+					{
+						id: 201,
+						name: "build",
+						status: "in_progress",
+						started_at: "2026-11-11T12:00:20Z",
+						steps: liveSteps,
+					},
+					{ id: 202, name: "legacy-job", status: "completed", conclusion: "success" },
+					{ id: 203, name: "empty-job", status: "completed", conclusion: "success", steps: [] },
+				],
+				[
+					{
+						id: 201,
+						name: "build",
+						status: "completed",
+						conclusion: "success",
+						started_at: "2026-11-11T12:00:20Z",
+						completed_at: "2026-11-11T12:00:35Z",
+						steps: completedSteps,
+					},
+					{ id: 202, name: "legacy-job", status: "completed", conclusion: "success" },
+					{ id: 203, name: "empty-job", status: "completed", conclusion: "success", steps: [] },
+				],
+			];
+			let runPoll = 0;
+			let jobsPoll = 0;
+			const runSpy = vi.spyOn(github, "run").mockImplementation(async (_cwd, args) => {
+				const endpoint = args.find(arg => arg.startsWith("/repos/"));
+				if (!endpoint) throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+
+				let response: unknown;
+				if (endpoint === "/repos/owner/repo/branches/main") {
+					response = { commit: { sha: "0123456789abcdef" } };
+				} else if (endpoint === "/repos/owner/repo/actions/runs/77") {
+					response = runSnapshots[Math.min(runPoll++, runSnapshots.length - 1)];
+				} else if (endpoint === "/repos/owner/repo/actions/runs") {
+					response = { workflow_runs: [runSnapshots[Math.min(runPoll++, runSnapshots.length - 1)]] };
+				} else if (endpoint === "/repos/owner/repo/actions/runs/77/jobs") {
+					response = {
+						total_count: jobSnapshots[Math.min(jobsPoll, jobSnapshots.length - 1)].length,
+						jobs: jobSnapshots[Math.min(jobsPoll++, jobSnapshots.length - 1)],
+					};
+				} else {
+					throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+				}
+
+				return { exitCode: 0, stdout: JSON.stringify(response), stderr: "" };
+			});
+
+			const updates: GhToolDetails[] = [];
+			const tool = new GithubTool(createSession("/tmp/gh-run-watch-steps"));
+			const result = await tool.execute(
+				"watch-steps",
+				{
+					op: "run_watch",
+					repo: "owner/repo",
+					...(mode === "run" ? { run: "77" } : { branch: "main" }),
+				},
+				undefined,
+				update => {
+					if (update.details) updates.push(update.details);
+				},
+			);
+			const getRun = (details: GhToolDetails | undefined) => {
+				const watch = details?.watch;
+				return watch?.mode === "run" ? watch.run : watch?.runs?.[0];
+			};
+			const liveDetails = updates.find(update => update.watch?.pollCount === 1);
+			expect(liveDetails?.watch?.state).toBe("watching");
+			const liveJob = getRun(liveDetails)?.jobs[0];
+			expect(liveJob?.steps?.map(step => step.number)).toEqual([1, 2, 3, 4]);
+			expect(liveJob?.steps).toMatchObject([
+				{ number: 1, name: "Checkout", status: "completed", conclusion: "success", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "in_progress", durationSeconds: 5 },
+				{ number: 3, name: "Wait for deployment", status: "queued" },
+				{ number: 4, name: "step-4", status: "queued" },
+			]);
+			expect(liveJob?.steps?.[2]?.durationSeconds).toBeUndefined();
+			expect(liveJob?.steps?.[3]?.durationSeconds).toBeUndefined();
+			expect(getRun(liveDetails)?.jobs[1]?.steps).toBeUndefined();
+			expect(getRun(liveDetails)?.jobs[2]?.steps).toEqual([]);
+			const finalPollDetails = updates.find(
+				update => update.watch?.pollCount === 2 && update.watch.note === undefined,
+			);
+			expect(finalPollDetails?.watch?.state).toBe("watching");
+			expect(getRun(finalPollDetails)?.jobs[0]?.steps?.slice(0, 2)).toMatchObject([
+				{ number: 1, name: "Checkout", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "completed", conclusion: "success", durationSeconds: 9 },
+			]);
+
+			expect(result.details?.watch?.mode).toBe(mode);
+			expect(result.details?.watch?.state).toBe("completed");
+			const finalJob = getRun(result.details)?.jobs[0];
+			expect(finalJob?.steps?.map(step => step.number)).toEqual([1, 2, 3, 4]);
+			expect(finalJob?.steps).toMatchObject([
+				{ number: 1, name: "Checkout", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "completed", conclusion: "success", durationSeconds: 9 },
+				{ number: 3, name: "Wait for deployment", status: "queued" },
+				{ number: 4, name: "step-4", status: "queued" },
+			]);
+			expect(finalJob?.steps?.[2]?.durationSeconds).toBeUndefined();
+			expect(finalJob?.steps?.[3]?.durationSeconds).toBeUndefined();
+			expect(getRun(result.details)?.jobs[1]?.steps).toBeUndefined();
+			expect(getRun(result.details)?.jobs[2]?.steps).toEqual([]);
+			// Steps are display data: a passing run's text result lists jobs only.
+			const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+			expect(text).toContain("- [success] build");
+			expect(text).not.toContain("Checkout");
+			expect(text).not.toContain("0001-01-01");
+
+			const jobsCalls = runSpy.mock.calls.filter(([, args]) =>
+				args.includes("/repos/owner/repo/actions/runs/77/jobs"),
+			);
+			expect(jobsCalls).toHaveLength(2);
+		});
+	}
 
 	it("honors the explicit `repo` argument and does not fall back to the cwd repo (issue #1949)", async () => {
 		// Reporter's scenario: cwd lives in repo A (`cagedbird043/cagedbird-ecosystem`),
@@ -1796,5 +2071,44 @@ describe("GitHub URL parsing", () => {
 		return expect(resolveDefaultRepoMemoized(`/tmp/gh-canonical-identity-${Date.now()}`)).resolves.toBe(
 			"acme/widgets",
 		);
+	});
+});
+
+describe("current checkout repository with an upstream remote", () => {
+	let repoDir: string;
+
+	beforeEach(async () => {
+		repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-upstream-remote-"));
+		runGit(repoDir, ["init", "-q"]);
+		runGit(repoDir, ["remote", "add", "origin", "git@github.com:acme/product.git"]);
+		runGit(repoDir, ["remote", "add", "upstream", "https://github.com/vendor/engine.git"]);
+		// `gh` ranks `upstream` above `origin`, so its unconfigured pick is the upstream.
+		vi.spyOn(github, "text").mockResolvedValue("https://github.com/vendor/engine\n");
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await removeWithRetries(repoDir);
+	});
+
+	function mockOriginView(parent: { name: string; owner: { login: string } } | null) {
+		return vi.spyOn(github, "json").mockResolvedValue({ url: "https://github.com/acme/product", parent });
+	}
+
+	it("resolves to origin when origin is not a fork of the upstream gh picked", async () => {
+		mockOriginView(null);
+		expect(await tryResolveCurrentRepoFresh(repoDir, undefined)).toBe("acme/product");
+	});
+
+	it("keeps the upstream when origin is its fork", async () => {
+		mockOriginView({ name: "engine", owner: { login: "vendor" } });
+		expect(await tryResolveCurrentRepoFresh(repoDir, undefined)).toBe("vendor/engine");
+	});
+
+	it("keeps gh's pick when `gh repo set-default` chose a remote", async () => {
+		runGit(repoDir, ["config", "remote.upstream.gh-resolved", "base"]);
+		const jsonSpy = mockOriginView(null);
+		expect(await tryResolveCurrentRepoFresh(repoDir, undefined)).toBe("vendor/engine");
+		expect(jsonSpy).not.toHaveBeenCalled();
 	});
 });

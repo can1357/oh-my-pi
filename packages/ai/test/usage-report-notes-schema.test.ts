@@ -1,12 +1,11 @@
 /**
  * Regression for #3268: provider-level `notes` on `UsageReport` must survive
  * the broker wire schema. The broker client validates `/v1/usage` responses
- * against `usageResponseSchema`, which uses `"+": "reject"` — unknown fields
- * at the envelope level are rejected, not silently stripped. Both the
- * `usage.ts` schema and the `auth-broker/wire-schemas.ts` copy must declare
- * `notes?: string[]` at the report level, or the field is lost on
- * deserialization. `usageReportSchema` (the non-broker copy) must also accept
- * the field so local `AuthStorage.fetchUsageReports` results type-check.
+ * against `usageResponseSchema`; both the `usage.ts` schema and the
+ * `auth-broker/wire-schemas.ts` copy must declare `notes?: string[]` at the
+ * report level, or the field is not type-checked on deserialization.
+ * `usageReportSchema` (the non-broker copy) must also accept the field so
+ * local `AuthStorage.usage.reports` results type-check.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -42,7 +41,7 @@ describe("usage report notes wire schema", () => {
 		expect(validated).toHaveProperty("notes", [PROVIDER_NOTE]);
 	});
 
-	it("usageResponseSchema preserves report-level notes through the broker reject gate", () => {
+	it("usageResponseSchema preserves report-level notes", () => {
 		const response = {
 			generatedAt: Date.now(),
 			reports: [reportWithNotes()],
@@ -56,9 +55,8 @@ describe("usage report notes wire schema", () => {
 	});
 
 	it("both schema copies accept the credits unit (Z.AI GLM Coding Plan reports)", () => {
-		// `usage.ts` and `wire-schemas.ts` keep separate copies of the unit enum;
-		// a new unit added to only one copy makes broker `/v1/usage` responses
-		// containing it fail the `"+": "reject"` gate client-side.
+		// `wire-schemas.ts` reads the unit through `usage.ts`'s enum; a unit
+		// missing there reads as "unknown" in broker `/v1/usage` responses.
 		const report = {
 			provider: "zai",
 			fetchedAt: Date.now(),
@@ -79,6 +77,45 @@ describe("usage report notes wire schema", () => {
 		expect(local).not.toBeInstanceOf(type.errors);
 
 		const brokered = usageResponseSchema({ generatedAt: Date.now(), reports: [report] });
+		expect(brokered).toMatchObject({ reports: [{ limits: [{ amount: { unit: "credits" } }] }] });
+	});
+
+	it("both schema copies preserve normalized reset eligibility and credit metadata", () => {
+		const report = {
+			...reportWithNotes(),
+			resetCredits: {
+				availableCount: 2,
+				redeemableCount: 2,
+				nextCreditId: "grant_1",
+				eligible: true,
+				cooldownUntil: "2099-09-28T00:00:00.000Z",
+				credits: [
+					{
+						id: "grant_1",
+						title: "Anytime reset",
+						program: "cedar_ember",
+						remainingCount: 2,
+						usable: true,
+						requiresLimit: false,
+						clears: ["anthropic:5h", "anthropic:7d:opus"],
+						blocking: ["anthropic:7d"],
+						usedFractions: { "anthropic:5h": 1, "anthropic:7d": 0.75 },
+						grantedAt: "2026-09-01T00:00:00.000Z",
+						expiresAt: "2099-10-01T00:00:00.000Z",
+						status: "available",
+					},
+				],
+			},
+		};
+
+		const local = usageReportSchema(report);
+		expect(local).not.toBeInstanceOf(type.errors);
+		if (local instanceof type.errors) throw new Error("expected valid local report");
+		expect(local.resetCredits).toEqual(report.resetCredits);
+
+		const brokered = usageResponseSchema({ generatedAt: Date.now(), reports: [report] });
 		expect(brokered).not.toBeInstanceOf(type.errors);
+		if (brokered instanceof type.errors) throw new Error("expected valid broker response");
+		expect(brokered.reports[0]?.resetCredits).toEqual(report.resetCredits);
 	});
 });

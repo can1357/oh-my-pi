@@ -44,6 +44,8 @@ const VENDOR_FILES: Array<[string, string]> = [
 // `window`.
 const ENTRY_SOURCE = `
 import { generateAriaTree, renderAriaTree } from "./injected/ariaSnapshot";
+import type { AriaNode } from "./isomorphic/ariaSnapshot";
+import { normalizeWhiteSpace } from "./isomorphic/stringUtils";
 
 export interface AriaSnapshotRequest {
 	depth?: number;
@@ -62,14 +64,84 @@ function walkElements(fn: (el: Element) => void): void {
 }
 type RefElement = Element & { _ariaRef?: { role: string; name: string; ref: string } };
 
-export function ariaSnapshot(root: Element | null, request: AriaSnapshotRequest = {}): string {
-	walkElements(el => {
-		if ((el as RefElement)._ariaRef) delete (el as RefElement)._ariaRef;
+// Masks every [text, bullets] pair in every name, prop and text child of the tree. Matches are found
+// in the original text, so overlapping passwords (\`abc\`, \`bcd\` in \`abcd\`) are masked whole.
+function maskAriaNode(node: AriaNode, forms: Array<[string, string]>): void {
+	const mask = (text: string): string => {
+		// [start, end, bullets minus matched length] of every match, merged where they overlap.
+		const hits: Array<[number, number, number]> = [];
+		for (const [form, bullets] of forms) {
+			for (let at = text.indexOf(form); at >= 0; at = text.indexOf(form, at + 1)) {
+				hits.push([at, at + form.length, bullets.length - form.length]);
+			}
+		}
+		if (!hits.length) return text;
+		hits.sort((a, b) => a[0] - b[0]);
+		let out = "";
+		let cursor = 0;
+		for (let i = 0; i < hits.length; ) {
+			let [start, end, extra] = hits[i++];
+			while (i < hits.length && hits[i][0] < end) {
+				end = Math.max(end, hits[i][1]);
+				extra = Math.max(extra, hits[i++][2]);
+			}
+			out += text.slice(cursor, start) + "\\u2022".repeat(end - start + extra);
+			cursor = end;
+		}
+		return out + text.slice(cursor);
+	};
+	node.name = mask(node.name);
+	for (const key of Object.keys(node.props)) node.props[key] = mask(node.props[key]);
+	node.children = node.children.map(child => {
+		if (typeof child === "string") return mask(child);
+		maskAriaNode(child, forms);
+		return child;
 	});
+}
+
+export function ariaSnapshot(root: Element | null, request: AriaSnapshotRequest = {}): string {
 	const target = root ?? document.body ?? document.documentElement;
 	const options = { mode: "ai", depth: request.depth, boxes: request.boxes } as const;
-	const tree = generateAriaTree(target, options);
-	return renderAriaTree(tree, options).text;
+	// Playwright reads a text input's live value for the textbox's child text and for the
+	// accessible name of any control that labels itself by it (aria-labelledby, embedded
+	// controls), password fields included. While the tree is built, every password input
+	// reports one bullet per character instead, as the screen and Chrome's accessibility
+	// tree do, so a typed or saved password never reaches a snapshot. Matching by local
+	// name covers XHTML pages and inputs adopted from another frame. No page task runs
+	// before the getters are removed; an own \`value\` property the page installed (React
+	// tracks input changes with one) is put back as it was. A value the page made
+	// unpatchable (non-configurable, or a non-extensible input) is masked in the built tree
+	// instead, before rendering escapes it, in its raw and whitespace-normalized forms. A
+	// page getter that throws reads as empty here, so one odd field cannot fail the snapshot.
+	const masked: Array<[HTMLInputElement, PropertyDescriptor | undefined]> = [];
+	const pinned: Array<[string, string]> = [];
+	try {
+		walkElements(el => {
+			if ((el as RefElement)._ariaRef) delete (el as RefElement)._ariaRef;
+			const input = el as HTMLInputElement;
+			if (input.localName !== "input" || input.type !== "password") return;
+			const own = Object.getOwnPropertyDescriptor(input, "value");
+			let value = "";
+			try {
+				value = input.value;
+			} catch {}
+			const bullets = "\\u2022".repeat(value.length);
+			if (own ? !own.configurable : !Object.isExtensible(input)) {
+				for (const form of new Set([value, normalizeWhiteSpace(value)])) if (form) pinned.push([form, bullets]);
+				return;
+			}
+			Object.defineProperty(input, "value", { configurable: true, get: () => bullets });
+			masked.push([input, own]);
+		});
+		const tree = generateAriaTree(target, options);
+		if (pinned.length) maskAriaNode(tree.root, pinned);
+		return renderAriaTree(tree, options).text;
+	} finally {
+		for (const [input, own] of masked) {
+			if (own) Object.defineProperty(input, "value", own);
+			else Reflect.deleteProperty(input, "value");
+		}
+	}
 }
 
 export function resolveAriaRef(ref: string): Element | null {

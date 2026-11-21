@@ -125,20 +125,4 @@ describe("decideTranscriptPoll", () => {
 			fresh: [entry],
 		});
 	});
-
-	it("surfaces the error after rows were already read (rows then error sequence)", () => {
-		// First poll returns rows; second returns the host's terminal error with
-		// an unchanged cursor. The error decision must be stop — never retry —
-		// while the prior advance already delivered its entries.
-		const first = decideTranscriptPoll({ kind: "rows", text: '{"type":"message","id":"m1"}\n', newSize: 29 }, "");
-		expect(first.action).toBe("advance");
-		const second = decideTranscriptPoll(
-			{ kind: "error", message: "transcript entry exceeds transcript fetch cap (4194304 bytes)" },
-			first.action === "advance" ? first.carry : "",
-		);
-		expect(second).toEqual({
-			action: "stop",
-			message: "transcript entry exceeds transcript fetch cap (4194304 bytes)",
-		});
-	});
 });

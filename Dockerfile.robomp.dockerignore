@@ -66,7 +66,7 @@ packages/natives/native/.build/
 packages/natives/native/pi_natives.darwin-*.node
 packages/natives/native/pi_natives.dev.node
 packages/ai/test/.temp-images/
-python/omp-rpc/src/omp_rpc.egg-info/
+sdk/python/omp-rpc/src/omp_rpc.egg-info/
 python/robomp/data/
 python/robomp/.cache/
 python/robomp/src/robomp/static/
@@ -91,6 +91,7 @@ pi-*.html
 # pyproject + src + entrypoint. Everything below is dead weight in the
 # robomp build context.
 crates/
+sdk/
 docs/
 assets/
 scripts/

@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import {
 	decodeStreamedToolArgs,
 	streamingStringKeysForTool,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/tool-args-reveal";
-import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
+import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 const stripAnsi = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, "");
@@ -89,7 +89,7 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 			options,
 			uiTheme!,
 		);
-		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+		if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 
 		const first = component.render(80);
 		const second = component.render(120);
@@ -111,7 +111,7 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 			{ expanded: true, isPartial: true, spinnerFrame: 0 },
 			uiTheme,
 		);
-		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+		if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("object first");

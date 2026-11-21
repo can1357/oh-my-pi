@@ -1,7 +1,7 @@
 ---
 name: security-reviewer
 description: "Read-only security specialist for evidence-backed repository vulnerability discovery"
-tools: read, grep, glob, lsp, ast_grep
+tools: read, find, grep, glob, lsp, ast_grep
 output:
   properties:
     coverage_summary:
@@ -47,11 +47,11 @@ output:
               optionalProperties:
                 excerpt:
                   type: string
-          optionalProperties:
-            anchor:
-              type: string
-            remediation:
-              type: string
+        optionalProperties:
+          anchor:
+            type: string
+          remediation:
+            type: string
     reviewed_paths:
       elements:
         type: string

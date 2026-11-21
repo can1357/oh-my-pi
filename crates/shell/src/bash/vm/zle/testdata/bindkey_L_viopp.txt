@@ -1,0 +1,13 @@
+bindkey -M viopp "^[" vi-cmd-mode
+bindkey -M viopp "^[OA" up-line
+bindkey -M viopp "^[OB" down-line
+bindkey -M viopp "^[[A" up-line
+bindkey -M viopp "^[[B" down-line
+bindkey -M viopp "aW" select-a-blank-word
+bindkey -M viopp "aa" select-a-shell-word
+bindkey -M viopp "aw" select-a-word
+bindkey -M viopp "iW" select-in-blank-word
+bindkey -M viopp "ia" select-in-shell-word
+bindkey -M viopp "iw" select-in-word
+bindkey -M viopp "j" down-line
+bindkey -M viopp "k" up-line

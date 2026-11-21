@@ -183,8 +183,6 @@ it("chained", () => {
 	expect(T.allows({ a: 1, b: "bad" })).toBe(false);
 });
 
-it.todo("root autocompletion");
-
 it("bad reference", () => {
 	expect(() => type("number|strng")).toThrow();
 });

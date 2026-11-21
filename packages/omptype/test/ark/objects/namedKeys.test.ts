@@ -120,12 +120,6 @@ it("intersections", () => {
 	const _type28: Eq<typeof Abc.infer, { a?: string; b: string; c?: string }> = true;
 });
 
-it("intersection", () => {
-	const T = type({ a: "number" }).and({ b: "boolean" });
-	// Should be simplified from {a: number} & {b: boolean} to {a: number, b: boolean}
-	const _typeIntersection: Eq<typeof T.infer, { a: number; b: boolean }> = true;
-});
-
 it("escaped optional token", () => {
 	const T = type({ "a\\?": "string" });
 	const _type33: Eq<typeof T.infer, { "a?": string }> = true;
@@ -177,7 +171,3 @@ it("morphed", () => {
 
 	expect(ProcessForm({ bool_value: true }).toString()).toBe("bool_value must be a string (was boolean)");
 });
-
-it.todo("required key homomorphic");
-
-it.todo("optional value homomorphic");

@@ -1,0 +1,22 @@
+--- a/cargo/private/cargo_build_script_runner/lib.rs
++++ b/cargo/private/cargo_build_script_runner/lib.rs
+@@ -181,7 +181,9 @@
+         outputs: &[BuildScriptOutput],
+         crate_links: &str,
+         exec_root: &str,
+-        out_dir: &str,
++        // Unused: dependents' build scripts never resolve the `${out_dir}`
++        // token, so dep env paths keep the full exec-root-relative out_dir.
++        _out_dir: &str,
+     ) -> String {
+         let prefix = format!("DEP_{}_", crate_links.replace('-', "_").to_uppercase());
+         outputs
+@@ -191,7 +193,7 @@
+                     Some(format!(
+                         "{}{}",
+                         prefix,
+-                        Self::escape_for_serializing(Self::redact_paths(env, exec_root, out_dir))
++                        Self::escape_for_serializing(Self::redact_exec_root(env, exec_root))
+                     ))
+                 } else {
+                     None

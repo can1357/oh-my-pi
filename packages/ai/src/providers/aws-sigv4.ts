@@ -11,6 +11,10 @@
  *  - `x-amz-security-token` (only when credentials carry a sessionToken)
  *  - `authorization`
  */
+import { asStrictBytes } from "@oh-my-pi/pi-utils/bytes";
+
+/** @deprecated Use `asStrictBytes` from `@oh-my-pi/pi-utils`. */
+export { asStrictBytes as asStrict } from "@oh-my-pi/pi-utils/bytes";
 
 export interface AwsCredentials {
 	accessKeyId: string;
@@ -57,18 +61,6 @@ const UNSIGNABLE: Record<string, true> = {
 	"x-amzn-trace-id": true,
 };
 
-/** Coerce a possibly-ArrayBufferLike-backed `Uint8Array` into one over a fresh
- * `ArrayBuffer`, which is what `crypto.subtle.{digest,sign,importKey}` requires
- * under the strict TS DOM typings. No-op when already strict.
- */
-function asStrict(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-	if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-		return bytes as Uint8Array<ArrayBuffer>;
-	}
-	const copy = new Uint8Array(bytes.byteLength);
-	copy.set(bytes);
-	return copy;
-}
 const subtle = globalThis.crypto.subtle;
 
 const HEX = "0123456789abcdef";
@@ -82,7 +74,7 @@ export function toHex(bytes: Uint8Array): string {
 }
 
 export async function sha256(data: Uint8Array | string): Promise<Uint8Array> {
-	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : asStrict(data);
+	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : asStrictBytes(data);
 	const digest = await subtle.digest("SHA-256", bytes);
 	return new Uint8Array(digest);
 }
@@ -92,8 +84,10 @@ export async function sha256Hex(data: Uint8Array | string): Promise<string> {
 }
 
 async function hmac(key: Uint8Array, data: string | Uint8Array): Promise<Uint8Array> {
-	const cryptoKey = await subtle.importKey("raw", asStrict(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : asStrict(data);
+	const cryptoKey = await subtle.importKey("raw", asStrictBytes(key), { name: "HMAC", hash: "SHA-256" }, false, [
+		"sign",
+	]);
+	const bytes = typeof data === "string" ? new TextEncoder().encode(data) : asStrictBytes(data);
 	const sig = await subtle.sign("HMAC", cryptoKey, bytes);
 	return new Uint8Array(sig);
 }
@@ -137,18 +131,29 @@ function encodeRfc3986(str: string): string {
 	return encodeURIComponent(str).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-function canonicalQuery(query: string | undefined): string {
+/**
+ * AWS's canonical-request spec encodes each name/value first, THEN sorts by
+ * the encoded form ("Sort the encoded parameter names by character code" —
+ * https://docs.aws.amazon.com/IAM/latest/UserGuide/create-canonical-request.html).
+ * Sorting the decoded form instead gives the wrong order whenever encoding
+ * changes a character's relative position — e.g. raw key `%7B` (decodes to
+ * `{`, 0x7B) vs `x` (0x78): decoded, `x` < `{`; encoded, `%` (0x25) < `x`, so
+ * `%7B` sorts first. A gateway that validates SigV4 (or AWS itself) computes
+ * the signature over ITS OWN canonicalization and rejects ours if the two
+ * disagree on order.
+ */
+export function canonicalQuery(query: string | undefined): string {
 	if (!query) return "";
 	const pairs: Array<[string, string]> = [];
 	for (const part of query.split("&")) {
 		if (!part) continue;
 		const eq = part.indexOf("=");
-		const k = eq === -1 ? part : part.slice(0, eq);
-		const v = eq === -1 ? "" : part.slice(eq + 1);
-		pairs.push([decodeURIComponent(k), decodeURIComponent(v)]);
+		const rawKey = eq === -1 ? part : part.slice(0, eq);
+		const rawValue = eq === -1 ? "" : part.slice(eq + 1);
+		pairs.push([encodeRfc3986(decodeURIComponent(rawKey)), encodeRfc3986(decodeURIComponent(rawValue))]);
 	}
 	pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
-	return pairs.map(([k, v]) => `${encodeRfc3986(k)}=${encodeRfc3986(v)}`).join("&");
+	return pairs.map(([k, v]) => `${k}=${v}`).join("&");
 }
 
 export interface SignedHeaders {

@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { calculateCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { commandCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec, Usage } from "@oh-my-pi/pi-catalog/types";
 
 const originalPrimaryKey = Bun.env.COMMAND_CODE_API_KEY;
 const originalLegacyKey = Bun.env.COMMANDCODE_API_KEY;
@@ -18,6 +20,136 @@ afterEach(() => {
 	else Bun.env.COMMANDCODE_API_KEY = originalLegacyKey;
 	vi.restoreAllMocks();
 });
+
+// Snapshot of GET /provider/v1/models ids on 2026-09-29. A newly served id
+// without a cost-patch rule fails the pricing test instead of silently billing
+// at zero.
+const servedIds = [
+	"MiniMaxAI/MiniMax-M2.5",
+	"MiniMaxAI/MiniMax-M2.7",
+	"MiniMaxAI/MiniMax-M3",
+	"Qwen/Qwen3.6-Max-Preview",
+	"Qwen/Qwen3.6-Plus",
+	"Qwen/Qwen3.7-Flash",
+	"Qwen/Qwen3.7-Max",
+	"Qwen/Qwen3.7-Plus",
+	"Qwen/Qwen3.8-27B",
+	"Qwen/Qwen3.8-Flash",
+	"Qwen/Qwen3.8-Max",
+	"Qwen/Qwen3.8-Max-0902",
+	"Qwen/Qwen3.8-Omni-Flash",
+	"claude-fable-5",
+	"claude-fable-5-1",
+	"claude-haiku-4-5-20251001",
+	"claude-opus-4-7",
+	"claude-opus-4-8",
+	"claude-opus-5",
+	"claude-opus-5-5",
+	"claude-sonnet-4-6",
+	"claude-sonnet-5",
+	"claude-sonnet-5-5",
+	"deepseek/deepseek-v4-flash",
+	"deepseek/deepseek-v4-flash-fast",
+	"deepseek/deepseek-v4-flash-vision-exp",
+	"deepseek/deepseek-v4-pro",
+	"deepseek/deepseek-v4.1-flash",
+	"deepseek/deepseek-v4.1-flash-fast",
+	"google/gemini-3.1-flash-lite",
+	"google/gemini-3.5-flash",
+	"google/gemini-3.5-flash-lite",
+	"google/gemini-3.6-flash",
+	"google/gemini-3.7-flash",
+	"google/gemini-3.8-flash",
+	"gpt-5.3-codex",
+	"gpt-5.4",
+	"gpt-5.4-mini",
+	"gpt-5.5",
+	"gpt-5.6-luna",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-6-astra",
+	"gpt-6-luna",
+	"gpt-6-sol",
+	"inclusionai/ling-3.0-flash-sante:free",
+	"meituan/LongCat-2.0",
+	"meta/muse-spark-1.1",
+	"meta/muse-spark-1.2",
+	"meta/muse-spark-1.2-contributor",
+	"meta/muse-spark-1.3",
+	"meta/muse-spark-1.3-contributor",
+	"moonshotai/Kimi-K2.5",
+	"moonshotai/Kimi-K2.6",
+	"moonshotai/Kimi-K2.7-Code",
+	"moonshotai/Kimi-K2.7-Code-Highspeed",
+	"moonshotai/Kimi-K3",
+	"nvidia/nemotron-3-ultra-550b-a55b",
+	"poolside/laguna-s-2.1-free",
+	"sakana/fugu-ultra",
+	"stealth/pixel-canary",
+	"stealth/space-bunny-alpha",
+	"stepfun/Step-3.5-Flash",
+	"stepfun/Step-3.7-Flash",
+	"stepfun/Step-5-Preview",
+	"tencent/hy3-paid",
+	"tencent/hy4-preview",
+	"thinkingmachines/inkling",
+	"thinkingmachines/inkling-small",
+	"xai/grok-4.5",
+	"xai/grok-4.6",
+	"xai/grok-4.7",
+	"xiaomi/mimo-v2.5",
+	"xiaomi/mimo-v2.5-pro",
+	"xiaomi/mimo-v2.6-flash",
+	"xiaomi/mimo-v2.6-pro",
+	"xiaomi/mimo-v2.6-pro-ultraspeed",
+	"z-ai/glm-5.3-flash",
+	"z-ai/glm-5.3-flashx",
+	"zai-org/GLM-5",
+	"zai-org/GLM-5.1",
+	"zai-org/GLM-5.2",
+	"zai-org/GLM-5.2-Fast",
+	"zai-org/GLM-5.3",
+];
+
+const textOnlyIds: Record<string, true> = {
+	"MiniMaxAI/MiniMax-M2.5": true,
+	"MiniMaxAI/MiniMax-M2.7": true,
+	"Qwen/Qwen3.6-Max-Preview": true,
+	"Qwen/Qwen3.7-Max": true,
+	"deepseek/deepseek-v4-flash": true,
+	"deepseek/deepseek-v4-flash-fast": true,
+	"deepseek/deepseek-v4-pro": true,
+	"inclusionai/ling-3.0-flash-sante:free": true,
+	"meituan/LongCat-2.0": true,
+	"nvidia/nemotron-3-ultra-550b-a55b": true,
+	"poolside/laguna-s-2.1-free": true,
+	"stepfun/Step-3.5-Flash": true,
+	"tencent/hy3-paid": true,
+	"tencent/hy4-preview": true,
+	"xiaomi/mimo-v2.5-pro": true,
+	"zai-org/GLM-5": true,
+	"zai-org/GLM-5.1": true,
+	"zai-org/GLM-5.2": true,
+	"zai-org/GLM-5.2-Fast": true,
+	"zai-org/GLM-5.3": true,
+};
+
+function chatModels(specs: readonly ModelSpec[] | null | undefined) {
+	return (specs ?? []).map(spec => buildModel(spec)).filter(model => model.kind !== "judge");
+}
+
+type ServedRow = { id: string; name?: string; context_length?: number };
+
+async function discoverModels(rows: ReadonlyArray<string | ServedRow>) {
+	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+		expect(init?.method).toBe("GET");
+		return Response.json({
+			data: rows.map(row => (typeof row === "string" ? { id: row, name: row, context_length: 1_000_000 } : row)),
+		});
+	});
+	const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+	return chatModels(await options.fetchDynamicModels?.());
+}
 
 describe("Command Code provider support", () => {
 	test("discovers mixed-protocol models with Command Code deployment policy", async () => {
@@ -33,6 +165,7 @@ describe("Command Code provider support", () => {
 						context_length: 1_000_000,
 					},
 					{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", context_length: 1_050_000 },
+					{ id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", context_length: 1_000_000 },
 				],
 			});
 		});
@@ -51,9 +184,9 @@ describe("Command Code provider support", () => {
 			api: "anthropic-messages",
 			baseUrl: "https://api.commandcode.ai/provider",
 			reasoning: true,
-			// Neutral discovery default: the catalog row carries no modality
-			// metadata, so no bundled reference may advertise image support.
-			input: ["text"],
+			// KDL grants image input from the command-code@1.67.0 registry; the
+			// discovery row carries no modality metadata of its own.
+			input: ["text", "image"],
 			contextWindow: 1_000_000,
 			maxTokens: 65_536,
 			thinking: {
@@ -62,7 +195,7 @@ describe("Command Code provider support", () => {
 			},
 		});
 		expect(models.find(model => model.id === "gpt-5.6-sol")).toMatchObject({
-			api: "openai-completions",
+			api: "openai-responses",
 			baseUrl: "https://api.commandcode.ai/provider/v1",
 			reasoning: true,
 			contextWindow: 1_050_000,
@@ -74,10 +207,246 @@ describe("Command Code provider support", () => {
 			compat: {
 				supportsDeveloperRole: false,
 				supportsReasoningEffort: true,
-				supportsStore: false,
-				maxTokensField: "max_tokens",
 			},
 		});
+		expect(models.find(model => model.id === "deepseek/deepseek-v4-flash")).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://api.commandcode.ai/provider/v1",
+			compat: { reasoningDisableMode: "none-effort", supportsNamedToolChoice: false },
+		});
+	});
+
+	test("discovers the typesafe/jev judge model beside the served roster", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			Response.json({
+				data: [{ id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", context_length: 1_000_000 }],
+			}),
+		);
+		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		const specs = await options.fetchDynamicModels?.();
+		const models = (specs ?? []).map(spec => buildModel(spec));
+
+		expect(models.find(model => model.id === "typesafe/jev")).toMatchObject({
+			api: "typesafe",
+			baseUrl: "https://api.commandcode.ai/provider",
+			kind: "judge",
+			cost: { input: 0.042, output: 0 },
+		});
+		expect(models.filter(model => model.kind !== "judge").map(model => model.id)).toEqual([
+			"deepseek/deepseek-v4-flash",
+		]);
+
+		const proxied = commandCodeModelManagerOptions({
+			apiKey: "user_test",
+			baseUrl: "https://proxy.example/provider/v1",
+			fetch: fetchMock,
+		});
+		const proxiedModels = ((await proxied.fetchDynamicModels?.()) ?? []).map(spec => buildModel(spec));
+		expect(proxiedModels.find(model => model.id === "typesafe/jev")?.baseUrl).toBe("https://proxy.example/provider");
+	});
+
+	test("keeps one System One jev row when the models route also lists it", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			Response.json({
+				data: [
+					{ id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", context_length: 1_000_000 },
+					{ id: "typesafe/jev", name: "TypeSafe Jev", context_length: 32_000 },
+				],
+			}),
+		);
+		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		const models = ((await options.fetchDynamicModels?.()) ?? []).map(spec => buildModel(spec));
+
+		const jevRows = models.filter(model => model.id === "typesafe/jev");
+		expect(jevRows).toHaveLength(1);
+		expect(jevRows[0]).toMatchObject({ api: "typesafe", kind: "judge" });
+	});
+
+	test("returns null from a failed discovery instead of the jev seed alone", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => new Response("unavailable", { status: 503 }));
+		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		expect(await options.fetchDynamicModels?.()).toBeNull();
+	});
+
+	test("resolves DeepSeek V4.1 Flash's rule-owned surface over neutral discovery metadata", async () => {
+		// The Provider API ships no capability metadata for this id, so the
+		// ladder, image input, and DeepSeek reasoning-content contract have to
+		// arrive through `buildModel`. Without them a regenerated catalog
+		// silently returns the model to an empty thinking control and stripped
+		// attachments, and compat resolves against the discovery row's missing
+		// reasoning instead of the capability the provider contract declares.
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			Response.json({
+				object: "list",
+				data: [{ id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", context_length: 1_000_000 }],
+			}),
+		);
+		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		const specs = await options.fetchDynamicModels?.();
+		const models = (specs ?? []).map(spec => buildModel(spec));
+
+		expect(models.find(model => model.id === "deepseek/deepseek-v4.1-flash")).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://api.commandcode.ai/provider/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			thinking: { mode: "effort", efforts: ["low", "high", "max"] },
+			compat: {
+				supportsReasoningEffort: true,
+				stripImageInput: false,
+				disableReasoningOnToolChoice: true,
+				requiresReasoningContentForToolCalls: true,
+				requiresReasoningContentForAllAssistantTurns: true,
+				allowsSyntheticReasoningContentForToolCalls: false,
+			},
+		});
+	});
+
+	test("thinking off sends a real Responses off switch, never a chat-completions `none`", async () => {
+		// Chat completions only accepts low|medium|high|xhigh|max, so the old
+		// chat route clamped "off" to `reasoning_effort: "low"` and the model
+		// kept thinking. Responses accepts `reasoning.effort: "none"`.
+		const models = await discoverModels([
+			"deepseek/deepseek-v4.1-flash",
+			"deepseek/deepseek-v4-flash-fast",
+			"tencent/hy4-flash",
+		]);
+		const responses = models.filter(model => model.id !== "deepseek/deepseek-v4-flash-fast");
+		const chatOnly = models.find(model => model.id === "deepseek/deepseek-v4-flash-fast");
+		if (responses.length !== 2 || !chatOnly) throw new Error("Expected Command Code reasoning fixtures");
+		for (const model of responses) expect(model.api, model.id).toBe("openai-responses");
+		expect(chatOnly.api).toBe("openai-completions");
+		const bodies: { url: string; body: Record<string, unknown> }[] = [];
+		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			bodies.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+			return new Response("stop", { status: 400 });
+		});
+		const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 0 }] };
+		for (const model of [...responses, chatOnly]) {
+			await streamSimple(model, context, { apiKey: "user_test", fetch: fetchMock, disableReasoning: true }).result();
+		}
+		const responsesBodies = bodies.filter(entry => entry.url.endsWith("/provider/v1/responses"));
+		expect(responsesBodies).toHaveLength(2);
+		for (const { body } of responsesBodies) expect(body.reasoning).toEqual({ effort: "none" });
+		const chatBodies = bodies.filter(entry => entry.url.endsWith("/chat/completions"));
+		expect(chatBodies.length).toBeGreaterThan(0);
+		for (const { body } of chatBodies) expect(body.reasoning_effort).not.toBe("none");
+	});
+
+	test.each([
+		["discovery", "gpt-6.1-sol"],
+		["discovery", "gpt-6.1-terra"],
+		["bundled", "gpt-6.1-sol"],
+		["bundled", "gpt-6.1-terra"],
+	])("%s %s uses lowest effort for off and preserves explicit effort", async (source, id) => {
+		const models = source === "discovery" ? await discoverModels([id]) : getBundledModels("commandcode");
+		const model = models.find(model => model.id === id);
+		if (!model) throw new Error(`Missing Command Code fixture: ${source}/${id}`);
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = vi.fn(async (input, init) => {
+			expect(String(input)).toBe("https://api.commandcode.ai/provider/v1/responses");
+			bodies.push(JSON.parse(String(init?.body)));
+			return new Response("stop", { status: 400 });
+		});
+		const context = { messages: [{ role: "user" as const, content: "Reply OK", timestamp: 0 }] };
+		await streamSimple(model, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+			reasoning: Effort.High,
+			maxHttpAttempts: 1,
+		}).result();
+		expect(bodies.at(-1)?.reasoning).toMatchObject({ effort: "high" });
+		await streamSimple(model, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+			disableReasoning: true,
+			maxHttpAttempts: 1,
+		}).result();
+		expect(bodies).toHaveLength(2);
+		expect(bodies[1]?.reasoning).toEqual({ effort: "low" });
+	});
+
+	test("sends each advertised Command Code Qwen effort and preserves off", async () => {
+		const models = await discoverModels(["Qwen/Qwen3.8-Max-Prime", "Qwen/Qwen4-Max"]);
+		const context = { messages: [{ role: "user" as const, content: "Reply OK", timestamp: 0 }] };
+		for (const model of models) {
+			if (!model.thinking) throw new Error(`Missing effort controls for ${model.id}`);
+			const bodies: Record<string, unknown>[] = [];
+			const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
+				bodies.push(JSON.parse(String(init?.body)));
+				return new Response("stop", { status: 400 });
+			});
+			for (const effort of model.thinking.efforts) {
+				await streamSimple(model, context, {
+					apiKey: "user_test",
+					fetch: fetchMock,
+					reasoning: effort,
+					maxHttpAttempts: 1,
+				}).result();
+				const body = bodies.at(-1)!;
+				expect(body.enable_thinking, model.id).toBe(true);
+				expect(body.reasoning_effort, model.id).toBe(effort);
+				expect(body.chat_template_kwargs, model.id).toMatchObject({ reasoning_effort: effort });
+			}
+			await streamSimple(model, context, {
+				apiKey: "user_test",
+				fetch: fetchMock,
+				disableReasoning: true,
+				maxHttpAttempts: 1,
+			}).result();
+			const off = bodies.at(-1)!;
+			expect(off.enable_thinking, model.id).toBe(false);
+			expect(off.reasoning_effort, model.id).toBeUndefined();
+			expect(
+				(off.chat_template_kwargs as Record<string, unknown> | undefined)?.reasoning_effort,
+				model.id,
+			).toBeUndefined();
+			expect(bodies).toHaveLength(model.thinking.efforts.length + 1);
+		}
+	});
+
+	test("routes effort-ladder ids to Responses with the right off switch", async () => {
+		// supported_endpoints on 2026-10-01: these ladder ids lack /responses.
+		// Qwen3.8 stays on chat because `enable_thinking: false` already disables it there.
+		// glm-5.3-flash left /responses later: chat-only by 2026-10-14.
+		const chatLadderIds: Record<string, true> = {
+			"deepseek/deepseek-v4-flash-fast": true,
+			"google/gemini-3.7-flash": true,
+			"Qwen/Qwen3.8-27B": true,
+			"Qwen/Qwen3.8-Flash": true,
+			"Qwen/Qwen3.8-Max": true,
+			"Qwen/Qwen3.8-Max-0902": true,
+			"Qwen/Qwen3.8-Omni-Flash": true,
+			"stealth/space-bunny-alpha": true,
+			"tencent/hy4-preview": true,
+			"z-ai/glm-5.3-flash": true,
+		};
+		// First-party OpenAI accepts `none` only on GPT-5.6; other GPT ids keep the lowest effort.
+		const lowestEffortGptIds: Record<string, true> = {
+			"gpt-5.3-codex": true,
+			"gpt-5.4": true,
+			"gpt-5.4-mini": true,
+			"gpt-5.5": true,
+			"gpt-6-astra": true,
+			"gpt-6-luna": true,
+			"gpt-6-sol": true,
+		};
+		const models = await discoverModels(servedIds);
+		for (const model of models) {
+			if (model.api === "anthropic-messages" || !model.thinking?.efforts?.length) continue;
+			const onResponses = !chatLadderIds[model.id];
+			const compat = model.compat;
+			const disableMode =
+				compat !== undefined && "reasoningDisableMode" in compat ? compat.reasoningDisableMode : undefined;
+			expect({ id: model.id, api: model.api, none: disableMode === "none-effort" }).toEqual({
+				id: model.id,
+				api: onResponses ? "openai-responses" : "openai-completions",
+				// `none-effort` on chat completions would 400; on Responses it is the off switch.
+				none: onResponses && !lowestEffortGptIds[model.id],
+			});
+			if (lowestEffortGptIds[model.id]) expect(disableMode).toBe("lowest-effort");
+			if (model.id.startsWith("Qwen/")) expect(disableMode).toBe("qwen-enable-thinking-false");
+		}
 	});
 
 	test("discovers the public catalog without credentials", async () => {
@@ -90,25 +459,26 @@ describe("Command Code provider support", () => {
 		});
 		const options = commandCodeModelManagerOptions({ fetch: fetchMock });
 		const specs = await options.fetchDynamicModels?.();
-		expect(specs).toHaveLength(1);
+		const models = chatModels(specs);
+		expect(models).toHaveLength(1);
 		expect(requestHeaders).not.toHaveProperty("Authorization");
 	});
 
-	test("preserves disjoint cache usage and timing through both native transports", async () => {
+	test("preserves disjoint cache usage and timing through the chat-completions and Messages transports", async () => {
 		const catalog = commandCodeModelManagerOptions({
 			fetch: async () =>
 				Response.json({
 					data: [
-						{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", context_length: 1_050_000 },
+						{ id: "xiaomi/mimo-v2.5", name: "MiMo V2.5", context_length: 1_050_000 },
 						{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context_length: 1_000_000 },
 					],
 				}),
 		});
 		const specs = await catalog.fetchDynamicModels?.();
 		const models = (specs ?? []).map(spec => buildModel(spec));
-		const gpt = models.find(model => model.id === "gpt-5.6-sol");
+		const completions = models.find(model => model.id === "xiaomi/mimo-v2.5");
 		const claude = models.find(model => model.id === "claude-sonnet-4-6");
-		if (!gpt || !claude) throw new Error("Expected Command Code transport fixtures");
+		if (!completions || !claude) throw new Error("Expected Command Code transport fixtures");
 		let clock = 0;
 		vi.spyOn(performance, "now").mockImplementation(() => ++clock);
 
@@ -117,8 +487,8 @@ describe("Command Code provider support", () => {
 			if (url.endsWith("/chat/completions")) {
 				return new Response(
 					[
-						'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
-						'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}',
+						'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"xiaomi/mimo-v2.5","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
+						'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"xiaomi/mimo-v2.5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}',
 						"data: [DONE]",
 						"",
 					].join("\n\n"),
@@ -142,11 +512,14 @@ describe("Command Code provider support", () => {
 			return new Response("unexpected route", { status: 404 });
 		});
 		const context = { messages: [{ role: "user" as const, content: "Reply ok", timestamp: Date.now() }] };
-		const gptResult = await streamSimple(gpt, context, { apiKey: "user_test", fetch: fetchMock }).result();
+		const completionsResult = await streamSimple(completions, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+		}).result();
 		const claudeResult = await streamSimple(claude, context, { apiKey: "user_test", fetch: fetchMock }).result();
 
 		expect(fetchMock).toHaveBeenCalledTimes(2);
-		expect(gptResult.usage).toMatchObject({
+		expect(completionsResult.usage).toMatchObject({
 			input: 5,
 			output: 2,
 			cacheRead: 3,
@@ -160,7 +533,7 @@ describe("Command Code provider support", () => {
 			cacheWrite: 2,
 			totalTokens: 12,
 		});
-		for (const result of [gptResult, claudeResult]) {
+		for (const result of [completionsResult, claudeResult]) {
 			expect(result.duration).toBeGreaterThan(0);
 			expect(result.ttft).toBeGreaterThan(0);
 			expect(result.ttft).toBeLessThanOrEqual(result.duration ?? 0);
@@ -170,13 +543,13 @@ describe("Command Code provider support", () => {
 	test("registers discovery, defaults, and both API key environment names", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "commandcode");
 		expect(descriptor).toMatchObject({
-			defaultModel: "claude-sonnet-4-6",
+			defaultModel: "claude-sonnet-5",
 			allowUnauthenticated: true,
 			dynamicModelsAuthoritative: true,
 			catalogDiscovery: { label: "Command Code", allowUnauthenticated: true },
 			skipCrossProviderReferenceFills: true,
 		});
-		expect(DEFAULT_MODEL_PER_PROVIDER.commandcode).toBe("claude-sonnet-4-6");
+		expect(DEFAULT_MODEL_PER_PROVIDER.commandcode).toBe("claude-sonnet-5");
 		// Fresh installs resolve the default synchronously from the bundle:
 		// dropping the default id from models.json must fail here, not at boot.
 		expect(getBundledModels("commandcode").some(model => model.id === DEFAULT_MODEL_PER_PROVIDER.commandcode)).toBe(
@@ -190,39 +563,82 @@ describe("Command Code provider support", () => {
 		expect(getEnvApiKey("commandcode")).toBe("primary-key");
 	});
 
-	test("accepts a pasted Provider API key through the login selector", async () => {
+	test("validates a pasted Provider API key against the whoami endpoint", async () => {
 		const provider = getOAuthProviders().find(item => item.id === "commandcode");
 		expect(provider?.name).toBe("Command Code");
 		const login = getProviderDefinition("commandcode")?.login;
 		expect(login).toBeDefined();
+
+		const probed: string[] = [];
+		const probeFetch: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			probed.push(`${new Headers(init?.headers).get("authorization")} ${String(input)}`);
+			return Response.json({ success: true, user: { id: "user_1" }, org: null });
+		};
 		const onAuth = vi.fn();
 		await expect(
 			login?.({
 				onAuth,
 				onPrompt: async () => "  user_test  ",
+				fetch: probeFetch,
 			}),
 		).resolves.toBe("user_test");
 		expect(onAuth).toHaveBeenCalledWith({
 			url: "https://commandcode.ai/studio",
 			instructions: "Create or copy a Provider API key from Command Code Studio",
 		});
+		expect(probed).toEqual(["Bearer user_test https://api.commandcode.ai/alpha/whoami"]);
+	});
+
+	test("rejects a key the whoami endpoint refuses", async () => {
+		const login = getProviderDefinition("commandcode")?.login;
+		const unauthorizedFetch: FetchImpl = async () =>
+			Response.json({ success: false, error: { code: "UNAUTHORIZED" } }, { status: 401 });
+
+		await expect(
+			login?.({ onAuth: vi.fn(), onPrompt: async () => "user_bogus", fetch: unauthorizedFetch }),
+		).rejects.toMatchObject({ status: 401, code: "UNAUTHORIZED" });
+	});
+
+	test("trusts a pasted key when the whoami route is unavailable", async () => {
+		const login = getProviderDefinition("commandcode")?.login;
+		for (const status of [404, 503]) {
+			const unavailableFetch: FetchImpl = async () => new Response("unavailable", { status });
+			await expect(
+				login?.({ onAuth: vi.fn(), onPrompt: async () => "user_test", fetch: unavailableFetch }),
+			).resolves.toBe("user_test");
+		}
+	});
+
+	test("trusts a pasted key when the whoami route answers 403", async () => {
+		const login = getProviderDefinition("commandcode")?.login;
+		const forbiddenFetch: FetchImpl = async () =>
+			Response.json({ success: false, error: { code: "FORBIDDEN" } }, { status: 403 });
+
+		await expect(
+			login?.({ onAuth: vi.fn(), onPrompt: async () => "  user_test  ", fetch: forbiddenFetch }),
+		).resolves.toBe("user_test");
+	});
+
+	test("still rejects a 403 from an optional probe that does not trust it", async () => {
+		const login = getProviderDefinition("nvidia")?.login;
+		const forbiddenFetch: FetchImpl = async () => Response.json({ error: { message: "forbidden" } }, { status: 403 });
+
+		await expect(
+			login?.({ onAuth: vi.fn(), onPrompt: async () => "nvapi-test", fetch: forbiddenFetch }),
+		).rejects.toMatchObject({ status: 403 });
 	});
 
 	test("prices live-discovered models from the Command Code rate card", async () => {
-		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-			expect(init?.method).toBe("GET");
-			return Response.json({
-				data: [
-					{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context_length: 1_000_000 },
-					{ id: "Qwen/Qwen3.7-Flash", name: "Qwen 3.7 Flash", context_length: 1_000_000 },
-					{ id: "xai/grok-4.6", name: "Grok 4.6", context_length: 500_000 },
-					{ id: "poolside/laguna-s-2.1-free", name: "Laguna S 2.1", context_length: 256_000 },
-				],
-			});
-		});
-		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
-		const specs = await options.fetchDynamicModels?.();
-		const models = (specs ?? []).map(spec => buildModel(spec));
+		const models = await discoverModels([
+			{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context_length: 1_000_000 },
+			{ id: "Qwen/Qwen3.7-Flash", name: "Qwen 3.7 Flash", context_length: 1_000_000 },
+			{ id: "xai/grok-4.6", name: "Grok 4.6", context_length: 500_000 },
+			{ id: "xai/grok-4.7", name: "Grok 4.7", context_length: 500_000 },
+			{ id: "claude-sonnet-5", name: "Claude Sonnet 5", context_length: 1_000_000 },
+			{ id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", context_length: 1_000_000 },
+			{ id: "google/gemini-4-argon", name: "Gemini 4 Argon", context_length: 1_000_000 },
+			{ id: "poolside/laguna-s-2.1-free", name: "Laguna S 2.1", context_length: 256_000 },
+		]);
 
 		expect(models.find(model => model.id === "claude-sonnet-4-6")).toMatchObject({
 			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
@@ -240,17 +656,29 @@ describe("Command Code provider support", () => {
 			},
 		});
 
-		// Grok 4.6's whole-request 2x tier above 200K input, as absolute rates
-		// (the xai class multiplier rule is scoped to xai/xai-oauth and never
-		// matches this provider).
-		expect(models.find(model => model.id === "xai/grok-4.6")).toMatchObject({
-			cost: {
-				input: 2,
-				output: 6,
-				cacheRead: 0.5,
-				cacheWrite: 0,
-				longContext: { inputThreshold: 200_000, input: 4, output: 12, cacheRead: 1, cacheWrite: 0 },
-			},
+		// Grok 4.6 and 4.7 share a whole-request 2x tier above 200K input, as
+		// absolute rates (the xai class multiplier rule is scoped to xai/xai-oauth
+		// and never matches this provider).
+		for (const id of ["xai/grok-4.6", "xai/grok-4.7"]) {
+			expect(models.find(model => model.id === id)).toMatchObject({
+				cost: {
+					input: 2,
+					output: 6,
+					cacheRead: 0.5,
+					cacheWrite: 0,
+					longContext: { inputThreshold: 200_000, input: 4, output: 12, cacheRead: 1, cacheWrite: 0 },
+				},
+			});
+		}
+		// Sonnet 5.5 reads cache at half Sonnet 5's rate (command-code@1.88.5).
+		expect(models.find(model => model.id === "claude-sonnet-5")).toMatchObject({
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+		});
+		expect(models.find(model => model.id === "claude-sonnet-5-5")).toMatchObject({
+			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+		});
+		expect(models.find(model => model.id === "google/gemini-4-argon")).toMatchObject({
+			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
 		});
 		// Documented-free model keeps the zero discovery default.
 		expect(models.find(model => model.id === "poolside/laguna-s-2.1-free")).toMatchObject({
@@ -259,92 +687,13 @@ describe("Command Code provider support", () => {
 	});
 
 	test("prices every served catalog id; only documented-free models stay zero", async () => {
-		// Snapshot of GET /provider/v1/models ids on 2026-09-09. A newly
-		// served id without a cost-patch rule fails here instead of silently
-		// billing at zero.
-		const servedIds = [
-			"MiniMaxAI/MiniMax-M2.5",
-			"MiniMaxAI/MiniMax-M2.7",
-			"MiniMaxAI/MiniMax-M3",
-			"Qwen/Qwen3.6-Max-Preview",
-			"Qwen/Qwen3.6-Plus",
-			"Qwen/Qwen3.7-Flash",
-			"Qwen/Qwen3.7-Max",
-			"Qwen/Qwen3.7-Plus",
-			"Qwen/Qwen3.8-27B",
-			"Qwen/Qwen3.8-Flash",
-			"Qwen/Qwen3.8-Max",
-			"Qwen/Qwen3.8-Max-0902",
-			"claude-fable-5",
-			"claude-fable-5-1",
-			"claude-haiku-4-5-20251001",
-			"claude-opus-4-7",
-			"claude-opus-4-8",
-			"claude-opus-5",
-			"claude-sonnet-4-6",
-			"claude-sonnet-5",
-			"deepseek/deepseek-v4-flash",
-			"deepseek/deepseek-v4-flash-fast",
-			"deepseek/deepseek-v4-flash-vision-exp",
-			"deepseek/deepseek-v4.1-flash",
-			"google/gemini-3.1-flash-lite",
-			"google/gemini-3.5-flash",
-			"google/gemini-3.5-flash-lite",
-			"google/gemini-3.6-flash",
-			"google/gemini-3.7-flash",
-			"google/gemini-3.8-flash",
-			"gpt-5.3-codex",
-			"gpt-5.4",
-			"gpt-5.4-mini",
-			"gpt-5.5",
-			"gpt-5.6-luna",
-			"gpt-5.6-sol",
-			"gpt-5.6-terra",
-			"inclusionai/ling-3.0-flash-sante:free",
-			"meituan/LongCat-2.0:free",
-			"meta/muse-spark-1.1",
-			"meta/muse-spark-1.2",
-			"meta/muse-spark-1.2-contributor",
-			"meta/muse-spark-1.3",
-			"meta/muse-spark-1.3-contributor",
-			"moonshotai/Kimi-K2.5",
-			"moonshotai/Kimi-K2.6",
-			"moonshotai/Kimi-K2.7-Code",
-			"moonshotai/Kimi-K2.7-Code-Highspeed",
-			"moonshotai/Kimi-K3",
-			"nvidia/nemotron-3-ultra-550b-a55b",
-			"poolside/laguna-s-2.1-free",
-			"sakana/fugu-ultra",
-			"stepfun/Step-3.5-Flash",
-			"stepfun/Step-3.7-Flash",
-			"tencent/hy3-paid",
-			"tencent/hy4-preview",
-			"thinkingmachines/inkling",
-			"thinkingmachines/inkling-small",
-			"xai/grok-4.5",
-			"xai/grok-4.6",
-			"xiaomi/mimo-v2.5",
-			"xiaomi/mimo-v2.5-pro",
-			"z-ai/glm-5.3-flash",
-			"zai-org/GLM-5",
-			"zai-org/GLM-5.1",
-			"zai-org/GLM-5.2",
-			"zai-org/GLM-5.2-Fast",
-			"zai-org/GLM-5.3",
-		];
 		const freeIds: Record<string, true> = {
 			"inclusionai/ling-3.0-flash-sante:free": true,
-			"meituan/LongCat-2.0:free": true,
 			"poolside/laguna-s-2.1-free": true,
+			"stealth/pixel-canary": true,
+			"stealth/space-bunny-alpha": true,
 		};
-		const fetchMock: FetchImpl = vi.fn(async () =>
-			Response.json({
-				data: servedIds.map(id => ({ id, name: id, context_length: 1_000_000 })),
-			}),
-		);
-		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
-		const specs = await options.fetchDynamicModels?.();
-		const models = (specs ?? []).map(spec => buildModel(spec));
+		const models = await discoverModels(servedIds);
 		expect(models).toHaveLength(servedIds.length);
 		for (const model of models) {
 			if (freeIds[model.id]) {
@@ -355,6 +704,304 @@ describe("Command Code provider support", () => {
 			}
 		}
 	});
+
+	test("prices ids served after the 2026-09-29 snapshot from command-code@1.88.5", async () => {
+		const laterIds = [
+			"claude-haiku-5-5",
+			"deepseek/deepseek-v4.1-flash-ultrafast",
+			"gpt-6.1-sol",
+			"gpt-6.1-terra",
+			"inclusionai/ling-3.1-flash",
+			"inclusionai/ling-3.1-flash-1019",
+			"meta/muse-spark-open",
+			"meta/muse-wonder-1.0",
+			"minimax/minimax-m3.1-flash",
+			"mistral/mistral-large-4",
+			"moonshotai/Kimi-K3.1-Pro",
+			"nvidia/nemotron-3.5-super-vl",
+			"ornith/ornith-1.5-122b",
+			"Qwen/Qwen3.8-Max-Prime",
+		];
+		const models = await discoverModels(laterIds);
+		expect(models).toHaveLength(laterIds.length);
+		for (const model of models) {
+			expect(model.cost.input).toBeGreaterThan(0);
+			expect(model.cost.output).toBeGreaterThan(0);
+		}
+		// Two-tier `contextTiers` cards land in the long-context slot at the first tier's maxContext.
+		expect(models.find(model => model.id === "claude-haiku-5-5")?.cost).toMatchObject({
+			input: 0.1,
+			output: 0.5,
+			cacheRead: 0.01,
+			cacheWrite: 0.125,
+			longContext: { inputThreshold: 100_000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
+		});
+		expect(models.find(model => model.id === "gpt-6.1-sol")?.cost).toMatchObject({
+			input: 2,
+			output: 10,
+			cacheRead: 0.1,
+			cacheWrite: 2.5,
+			longContext: { inputThreshold: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 },
+		});
+	});
+
+	// Provider client catalog c8a96b62: neutral discovery must recover these deployment capabilities.
+	test("exposes newly documented image inputs and effort controls after discovery", async () => {
+		const groups = [
+			{
+				ids: [
+					"claude-fable-5-2",
+					"claude-haiku-5-5",
+					"gpt-6.1-sol",
+					"gpt-6.1-terra",
+					"meta/muse-ember",
+					"minimax/minimax-m3.1-flash",
+				],
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			},
+			{
+				ids: ["deepseek/deepseek-v4.1-flash-ultrafast", "moonshotai/Kimi-K3.1-Pro"],
+				efforts: [Effort.Low, Effort.High, Effort.Max],
+			},
+			{
+				ids: [
+					"inclusionai/ling-3.1-flash",
+					"inclusionai/ling-3.1-flash-1019",
+					"meta/muse-spark-open",
+					"mistral/mistral-large-4",
+					"nvidia/nemotron-3.5-super-vl",
+				],
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+			},
+			{
+				ids: ["meta/muse-wonder-1.0", "stealth/glyph-cluster:free"],
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+			{ ids: ["Qwen/Qwen3.8-Max-Prime"], efforts: [Effort.Low, Effort.Medium, Effort.XHigh] },
+			{ ids: ["Qwen/Qwen4-Max"], efforts: [Effort.Low, Effort.High, Effort.XHigh] },
+			{
+				ids: ["thinkingmachines/inkling-2-small:free"],
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max],
+			},
+			{ ids: ["google/gemini-4-carbon"], efforts: [Effort.Low, Effort.Medium, Effort.High] },
+			{ ids: ["ornith/ornith-1.5-122b"], efforts: undefined },
+		];
+		const textOnly: Record<string, true> = {
+			"inclusionai/ling-3.1-flash": true,
+			"inclusionai/ling-3.1-flash-1019": true,
+			"stealth/glyph-cluster:free": true,
+		};
+		const chatOnly: Record<string, true> = {
+			"inclusionai/ling-3.1-flash": true,
+			"inclusionai/ling-3.1-flash-1019": true,
+			"minimax/minimax-m3.1-flash": true,
+			"ornith/ornith-1.5-122b": true,
+			"thinkingmachines/inkling-2-small:free": true,
+			"Qwen/Qwen3.8-Max-Prime": true,
+			"Qwen/Qwen4-Max": true,
+		};
+		const models = await discoverModels(groups.flatMap(group => group.ids));
+		for (const group of groups) {
+			for (const id of group.ids) {
+				const model = models.find(model => model.id === id);
+				expect(model?.input, id).toEqual(textOnly[id] ? ["text"] : ["text", "image"]);
+				expect(model?.thinking?.efforts, id).toEqual(group.efforts);
+				expect(model?.api, id).toBe(
+					id.startsWith("claude-")
+						? "anthropic-messages"
+						: chatOnly[id]
+							? "openai-completions"
+							: "openai-responses",
+				);
+			}
+		}
+	});
+
+	test("prices newly documented paid deployments instead of reporting zero usage cost", async () => {
+		const cards = [
+			{ id: "claude-fable-5-2", input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 },
+			{ id: "google/gemini-4-carbon", input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+			{ id: "meta/muse-ember", input: 0.1, output: 0.5, cacheRead: 0.004, cacheWrite: 0 },
+			{ id: "Qwen/Qwen4-Max", input: 1.5, output: 4.5, cacheRead: 0.075, cacheWrite: 1.875 },
+		];
+		const models = await discoverModels(cards.map(card => card.id));
+		for (const { id, ...cost } of cards) expect(models.find(model => model.id === id)?.cost).toEqual(cost);
+	});
+
+	test("prices published premium bands without shrinking deployment windows", async () => {
+		const cards = [
+			{
+				id: "gpt-5.6-luna",
+				window: 1_050_000,
+				threshold: 272_000,
+				base: [0.2, 1.2, 0.02, 0.25],
+				premium: [0.4, 1.8, 0.04, 0.5],
+			},
+			{
+				id: "gpt-5.6-sol",
+				window: 1_050_000,
+				threshold: 272_000,
+				base: [5, 30, 0.5, 6.25],
+				premium: [10, 45, 1, 12.5],
+			},
+			{
+				id: "gpt-5.6-terra",
+				window: 1_050_000,
+				threshold: 272_000,
+				base: [2, 12, 0.2, 2.5],
+				premium: [4, 18, 0.4, 5],
+			},
+			{
+				id: "Qwen/Qwen3.6-Plus",
+				window: 200_000,
+				threshold: 256_000,
+				base: [0.5, 3, 0.1, 0],
+				premium: [2, 6, 0.2, 0],
+			},
+		];
+		const models = await discoverModels(cards.map(card => ({ id: card.id, context_length: card.window })));
+		for (const card of cards) {
+			const model = models.find(model => model.id === card.id);
+			if (!model) throw new Error(`Missing ${card.id}`);
+			expect(model.contextWindow, card.id).toBe(card.window);
+			if (card.id.startsWith("gpt-")) expect(model.longContextWindowUncapped, card.id).toBe(true);
+			for (const promptTokens of [card.threshold - 1, card.threshold, card.threshold + 1]) {
+				const usage: Usage = {
+					input: promptTokens - 3_000,
+					output: 7,
+					cacheRead: 2_000,
+					cacheWrite: 1_000,
+					totalTokens: promptTokens + 7,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				};
+				const [input, output, cacheRead, cacheWrite] = promptTokens > card.threshold ? card.premium : card.base;
+				calculateCost(model, usage);
+				expect(usage.cost.input, card.id).toBeCloseTo((usage.input * input) / 1e6, 10);
+				expect(usage.cost.output, card.id).toBeCloseTo((usage.output * output) / 1e6, 10);
+				expect(usage.cost.cacheRead, card.id).toBeCloseTo((usage.cacheRead * cacheRead) / 1e6, 10);
+				expect(usage.cost.cacheWrite, card.id).toBeCloseTo((usage.cacheWrite * cacheWrite) / 1e6, 10);
+			}
+		}
+	});
+
+	test("prices vision-exp at the current shared Flash rates", async () => {
+		const [model] = await discoverModels(["deepseek/deepseek-v4-flash-vision-exp"]);
+		if (!model) throw new Error("Missing vision-exp");
+		const usage: Usage = {
+			input: 10_000,
+			output: 1_000,
+			cacheRead: 10_000,
+			cacheWrite: 10_000,
+			totalTokens: 31_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		expect(calculateCost(model, usage).total).toBeCloseTo(0.00213, 10);
+	});
+
+	test("keeps Command Code context budgets below inherited model-lineage maxima", async () => {
+		const models = await discoverModels([
+			{ id: "gpt-5.4", context_length: 400_000 },
+			{ id: "gpt-5.3-codex", context_length: 400_000 },
+		]);
+		expect(Object.fromEntries(models.map(model => [model.id, [model.contextWindow, model.maxTokens]]))).toEqual({
+			"gpt-5.4": [400_000, 65_536],
+			"gpt-5.3-codex": [272_000, 65_536],
+		});
+	});
+
+	test("exposes Hy4 Flash image input, high effort, and nonzero prices", async () => {
+		const [model] = await discoverModels([{ id: "tencent/hy4-flash", context_length: 1_024_000 }]);
+		expect(model).toMatchObject({
+			api: "openai-responses",
+			input: ["text", "image"],
+			thinking: { efforts: [Effort.High] },
+			cost: { input: 0.07, output: 0.281, cacheRead: 0.003, cacheWrite: 0 },
+		});
+	});
+
+	test("follows the command-code@1.67.0 effort registry", async () => {
+		const models = await discoverModels([
+			"claude-opus-5-5",
+			"deepseek/deepseek-v4-pro",
+			"z-ai/glm-5.3-flashx",
+			"MiniMaxAI/MiniMax-M3",
+			"xai/grok-4.7",
+			"stealth/pixel-canary",
+			"sakana/fugu-ultra",
+			"meta/muse-spark-1.2",
+			"meta/muse-spark-1.3",
+		]);
+		expect(Object.fromEntries(models.map(model => [model.id, model.thinking?.efforts]))).toEqual({
+			"claude-opus-5-5": [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			"deepseek/deepseek-v4-pro": [Effort.High, Effort.Max],
+			"z-ai/glm-5.3-flashx": [Effort.Low, Effort.High, Effort.Max],
+			"MiniMaxAI/MiniMax-M3": [Effort.Low, Effort.Medium, Effort.High],
+			"xai/grok-4.7": [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			"stealth/pixel-canary": [Effort.Low, Effort.Medium, Effort.XHigh],
+			"sakana/fugu-ultra": [Effort.High, Effort.XHigh],
+			"meta/muse-spark-1.2": [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			"meta/muse-spark-1.3": [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+		});
+	});
+
+	test("keeps Responses-routed GPT rows off hosted image generation, the image model, and named tool choice", async () => {
+		const models = await discoverModels(["gpt-6-luna", "gpt-5.4-mini", "gpt-5.3-codex"]);
+		expect(models).toHaveLength(3);
+		for (const model of models) {
+			expect(model.api).toBe("openai-responses");
+			expect(model.hostedImage).not.toBe(true);
+			expect(model.imageModel).toBeUndefined();
+			expect(model.compat).toMatchObject({ supportsNamedToolChoice: false });
+			expect(model.webSearch).toBe("openai");
+		}
+	});
+
+	test("leaves other gpt-prefixed ids on chat completions without the Responses opt-outs", async () => {
+		const [model] = await discoverModels(["gpt-oss-120b"]);
+		if (!model) throw new Error("Expected the gpt-oss-120b fixture");
+		expect(model.api).toBe("openai-completions");
+		expect(model.baseUrl).toBe("https://api.commandcode.ai/provider/v1");
+		expect(model.compat).not.toMatchObject({ supportsNamedToolChoice: false });
+	});
+
+	test("clears hosted image generation from a bundled GPT row that still carries it", async () => {
+		const [discovered] = await discoverModels(["gpt-6-luna"]);
+		if (!discovered) throw new Error("Expected the gpt-6-luna fixture");
+		const rebuilt = buildModel({ ...discovered, hostedImage: true });
+		expect(rebuilt.hostedImage).toBeUndefined();
+	});
+
+	test("clears the image model from a bundled GPT row that still carries it", async () => {
+		const [discovered] = await discoverModels(["gpt-6-luna"]);
+		if (!discovered) throw new Error("Expected the gpt-6-luna fixture");
+		const rebuilt = buildModel({ ...discovered, imageModel: "gpt-image-2" });
+		expect(rebuilt.imageModel).toBeUndefined();
+	});
+
+	test("advertises image input exactly outside the text-only set", async () => {
+		const models = await discoverModels(servedIds);
+		expect(models).toHaveLength(servedIds.length);
+		expect(models.filter(model => textOnlyIds[model.id])).toHaveLength(Object.keys(textOnlyIds).length);
+		for (const model of models) {
+			expect(model.input).toEqual(textOnlyIds[model.id] ? ["text"] : ["text", "image"]);
+		}
+		// Gemini 4 Argon postdates the snapshot; command-code@1.88.5 lists it with image input.
+		const [argon] = await discoverModels(["google/gemini-4-argon"]);
+		expect(argon?.input).toEqual(["text", "image"]);
+	});
+
+	test("applies the command-code@1.67.0 per-model output caps", async () => {
+		const models = await discoverModels([
+			"inclusionai/ling-3.0-flash-sante:free",
+			"z-ai/glm-5.3-flashx",
+			"stealth/space-bunny-alpha",
+		]);
+		expect(Object.fromEntries(models.map(model => [model.id, model.maxTokens]))).toEqual({
+			"inclusionai/ling-3.0-flash-sante:free": 32_768,
+			"z-ai/glm-5.3-flashx": 131_072,
+			"stealth/space-bunny-alpha": 524_288,
+		});
+	});
 	test("omits effort controls for ids outside the verified effort registry", async () => {
 		// Negative contract: ids absent from the exact `thinking-efforts`
 		// groups expose no effort dial upstream. Discovery stays neutral
@@ -364,19 +1011,12 @@ describe("Command Code provider support", () => {
 		// `supports-reasoning-effort #false` — including on the Anthropic
 		// route, where a fallback ladder would otherwise emit an
 		// unsupported thinking payload.
-		const fetchMock: FetchImpl = vi.fn(async () =>
-			Response.json({
-				data: [
-					{ id: "moonshotai/Kimi-K2.7-Code", name: "Kimi K2.7 Code", context_length: 262_144 },
-					{ id: "moonshotai/Kimi-K2.5", name: "Kimi K2.5", context_length: 262_144 },
-					{ id: "Qwen/Qwen3.7-Max", name: "Qwen 3.7 Max", context_length: 1_000_000 },
-					{ id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", context_length: 200_000 },
-				],
-			}),
-		);
-		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
-		const specs = await options.fetchDynamicModels?.();
-		const models = (specs ?? []).map(spec => buildModel(spec));
+		const models = await discoverModels([
+			{ id: "moonshotai/Kimi-K2.7-Code", name: "Kimi K2.7 Code", context_length: 262_144 },
+			{ id: "moonshotai/Kimi-K2.5", name: "Kimi K2.5", context_length: 262_144 },
+			{ id: "Qwen/Qwen3.7-Max", name: "Qwen 3.7 Max", context_length: 1_000_000 },
+			{ id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", context_length: 200_000 },
+		]);
 		expect(models).toHaveLength(4);
 		for (const model of models) {
 			expect(model.reasoning).toBe(false);
@@ -396,21 +1036,11 @@ describe("Command Code provider support", () => {
 		// A catalog row that omits or misreports `context_length` retains a
 		// null window rather than inheriting another provider's deployment
 		// limit; verified corrections arrive through KDL, never the mapper.
-		const fetchMock: FetchImpl = vi.fn(async () =>
-			Response.json({
-				data: [
-					{ id: "mystery-model", name: "Mystery Model" },
-					{ id: "broken-model", name: "Broken Model", context_length: -5 },
-				],
-			}),
-		);
-		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
-		const specs = await options.fetchDynamicModels?.();
-		expect(specs).toHaveLength(2);
-		for (const spec of specs ?? []) {
-			expect(spec.contextWindow).toBeNull();
-		}
-		const models = (specs ?? []).map(spec => buildModel(spec));
+		const models = await discoverModels([
+			{ id: "mystery-model", name: "Mystery Model" },
+			{ id: "broken-model", name: "Broken Model", context_length: -5 },
+		]);
+		expect(models).toHaveLength(2);
 		for (const model of models) {
 			expect(model.contextWindow).toBeNull();
 			expect(model.input).toEqual(["text"]);

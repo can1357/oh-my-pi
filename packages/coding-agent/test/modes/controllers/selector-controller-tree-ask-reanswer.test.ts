@@ -10,7 +10,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
@@ -37,13 +37,8 @@ function askResultEntry(id: string): SessionEntry {
 			role: "toolResult",
 			toolCallId: "call-1",
 			toolName: "ask",
-			content: [{ type: "text", text: "User selected: staging" }],
-			details: {
-				question: "Which deploy target?",
-				options: ["staging", "production"],
-				multi: false,
-				selectedOptions: ["staging"],
-			},
+			content: [{ type: "text", text: 'User answers:\n{\n  "deploy_target": "staging"\n}' }],
+			details: { answers: [{ name: "deploy_target", question: "Which deploy target?", answer: "staging" }] },
 			isError: false,
 			timestamp: Date.now(),
 		},
@@ -105,10 +100,12 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 			getTree: () => tree,
 			getLeafId: () => leafEntry.id,
 			getEntry: (id: string) => (id === leafEntry.id ? leafEntry : undefined),
+			getSessionName: () => undefined,
 		},
 		session: { navigateTree, resumeAfterAskReanswer },
 		ui: {
 			setFocus: vi.fn(),
+			getFocused: () => undefined,
 			requestRender: vi.fn(),
 			terminal: { rows: 24 },
 		},
@@ -150,15 +147,10 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 
 	it("falls through to navigateTree with allowAskReopen when the active leaf is an ask toolResult", async () => {
 		const entry = askResultEntry("leaf-ask");
-		const reopenQuestions = [
-			{
-				id: "deploy_target",
-				question: "Which deploy target?",
-				options: [{ label: "staging" }, { label: "production" }],
-			},
-		];
+		const reopenHtml =
+			'<form><label><input type="radio" name="deploy_target" value="staging" checked> staging</label></form>';
 		const { ctx, editorContainer, navigateTree, showStatus, showError } = createCtx(entry, {
-			reopenAsk: { questions: reopenQuestions },
+			reopenAsk: { toolCallId: "call-1", html: reopenHtml },
 		});
 		const controller = new SelectorController(ctx);
 

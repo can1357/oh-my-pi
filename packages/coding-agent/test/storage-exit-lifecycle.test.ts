@@ -31,12 +31,12 @@ afterEach(async () => {
 });
 
 /**
- * Prompt submission is human-paced, so history writes through synchronously:
- * every accepted prompt is durable the moment `add()` resolves, with no batch
- * window a fast exit could race.
+ * Submitting a prompt never waits on disk: `add()` shows the prompt to recall
+ * and search at once and queues its write, which a later macrotask, `flush()`,
+ * or `close()` (run by the exit hook) commits in one transaction.
  */
-describe("HistoryStorage write-through", () => {
-	it("persists each submitted prompt without waiting on a timer", async () => {
+describe("HistoryStorage deferred writes", () => {
+	it("lists submitted prompts newest first", async () => {
 		const storage = await freshStorage();
 		await storage.add("first prompt");
 		await storage.add("second prompt");
@@ -54,16 +54,101 @@ describe("HistoryStorage write-through", () => {
 		expect(entries).toHaveLength(1);
 		expect(entries[0]).toMatchObject({ prompt: "repeat", cwd: "/second", sessionId: "session-b" });
 	});
+
+	it("shows a submitted prompt in process at once and writes it once, in order, when flushed", async () => {
+		const storage = await freshStorage();
+		await storage.add("before");
+		void storage.add("submitted", "/repo", "session-a");
+		const peer = new Database(path.join(tempDir, "history.db"));
+		const stored = () =>
+			peer
+				.query<{ prompt: string; use_count: number }, []>("SELECT prompt, use_count FROM history ORDER BY id")
+				.all();
+		try {
+			// Another connection does not see the queued prompt yet...
+			expect(stored()).toEqual([{ prompt: "before", use_count: 1 }]);
+			// ...while recall and search in this process already list it.
+			expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["submitted", "before"]);
+			expect(storage.search("submit", 10)).toMatchObject([
+				{ prompt: "submitted", cwd: "/repo", sessionId: "session-a", useCount: 1 },
+			]);
+			expect(stored()).toEqual([{ prompt: "before", use_count: 1 }]);
+
+			await storage.flush();
+			expect(stored()).toEqual([
+				{ prompt: "before", use_count: 1 },
+				{ prompt: "submitted", use_count: 1 },
+			]);
+
+			await storage.add("after");
+			HistoryStorage.close();
+			expect(stored()).toEqual([
+				{ prompt: "before", use_count: 1 },
+				{ prompt: "submitted", use_count: 1 },
+				{ prompt: "after", use_count: 1 },
+			]);
+		} finally {
+			peer.close();
+		}
+	});
+
+	it("writes every queued prompt when closed without waiting", async () => {
+		const storage = await freshStorage();
+		void storage.add("alpha", "/repo", "session-a");
+		void storage.add("beta", "/repo", "session-a");
+		void storage.add("alpha", "/other", "session-b");
+		void storage.add("gamma", "/repo", "session-a");
+		HistoryStorage.close();
+
+		const db = new Database(path.join(tempDir, "history.db"));
+		try {
+			expect(db.query("SELECT prompt, use_count, cwd, session_id FROM history ORDER BY id").all()).toEqual([
+				{ prompt: "alpha", use_count: 2, cwd: "/other", session_id: "session-b" },
+				{ prompt: "beta", use_count: 1, cwd: "/repo", session_id: "session-a" },
+				{ prompt: "gamma", use_count: 1, cwd: "/repo", session_id: "session-a" },
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("folds a queued resubmission into its stored prompt and deletes a queued prompt from recall", async () => {
+		const storage = await freshStorage();
+		await storage.add("repeat", "/first", "session-a");
+		const storedId = storage.getRecent(1)[0]?.id;
+		void storage.add("repeat", "/second", "session-b");
+		void storage.add("typo");
+
+		expect(storage.getRecent(10)).toMatchObject([
+			{ prompt: "typo", useCount: 1 },
+			{ id: storedId, prompt: "repeat", cwd: "/second", sessionId: "session-b", useCount: 2 },
+		]);
+		const typo = storage.search("typo", 10)[0]!;
+		storage.delete(typo.id);
+		expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["repeat"]);
+		HistoryStorage.close();
+
+		const db = new Database(path.join(tempDir, "history.db"));
+		try {
+			expect(db.query("SELECT id, prompt, use_count, cwd, session_id FROM history").all()).toEqual([
+				{ id: storedId, prompt: "repeat", use_count: 2, cwd: "/second", session_id: "session-b" },
+			]);
+		} finally {
+			db.close();
+		}
+	});
 });
 
 describe("storage process-exit cleanup", () => {
-	it("persists a synchronous prompt and flushes the deferred perf sample before a hard exit", async () => {
+	it("flushes the queued prompt and the deferred perf sample before a hard exit", async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-storage-exit-"));
 		const historyDbPath = path.join(tempDir, "history.db");
 		const agentDbPath = path.join(tempDir, "agent.db");
 		const historyModule = HISTORY_STORAGE_MODULE;
 		const agentModule = AGENT_STORAGE_MODULE;
 		const script = [
+			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { HistoryStorage } from ${JSON.stringify(historyModule)};`,
 			`import { AgentStorage } from ${JSON.stringify(agentModule)};`,
 			`const history = HistoryStorage.open(${JSON.stringify(historyDbPath)});`,
@@ -88,8 +173,8 @@ describe("storage process-exit cleanup", () => {
 		]);
 
 		// Read copies of the main database files without their WALs. Both rows are
-		// visible only if process-exit cleanup flushed the deferred perf batch and
-		// checkpointed committed frames into the main file.
+		// visible only if process-exit cleanup flushed the queued prompt and the
+		// deferred perf batch and checkpointed committed frames into the main file.
 		// Writable open: SQLite rejects read-only access to a WAL-mode file with no
 		// -shm/-wal beside it; the copies still expose only main-file content.
 		const historyDb = new Database(historyCheckpoint);
@@ -117,6 +202,7 @@ describe("storage process-exit cleanup", () => {
 		const agentDbPath = path.join(tempDir, "agent.db");
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { HistoryStorage } from ${JSON.stringify(HISTORY_STORAGE_MODULE)};`,
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"await postmortem.cleanup();",
@@ -127,8 +213,8 @@ describe("storage process-exit cleanup", () => {
 			"const prompts = reopenedHistory.getRecent(10).map(row => row.prompt);",
 			"HistoryStorage.close();",
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
-			'agent.recordCommandUsage("after-cleanup");',
-			"const commands = agent.listCommandUsage();",
+			'agent.recordUsage("command", "after-cleanup");',
+			'const commands = agent.listUsage("command");',
 			"AgentStorage.close();",
 			"console.log(JSON.stringify({ prompts, commands }));",
 		].join("\n");
@@ -155,6 +241,7 @@ describe("storage process-exit cleanup", () => {
 		const checkpointed = path.join(tempDir, "agent-checkpoint.db");
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"const gate = Promise.withResolvers();",
 			'postmortem.register("blocker", () => gate.promise);',
@@ -203,6 +290,7 @@ describe("storage process-exit cleanup", () => {
 		// not re-arm, the exit callback would never fire and the sample would be lost.
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"await postmortem.cleanup();",
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
@@ -240,13 +328,14 @@ describe("storage process-exit cleanup", () => {
 		// finalized, so writes through the same handle keep working afterward.
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
-			'agent.recordCommandUsage("before-cleanup");',
+			'agent.recordUsage("command", "before-cleanup");',
 			"await postmortem.cleanup();",
 			// Same handle after cleanup: writing here throws if statements were finalized.
-			'agent.recordCommandUsage("after-cleanup");',
-			"console.log(JSON.stringify(agent.listCommandUsage()));",
+			'agent.recordUsage("command", "after-cleanup");',
+			'console.log(JSON.stringify(agent.listUsage("command")));',
 			"process.exit(0);",
 		].join("\n");
 		const child = Bun.spawn([process.execPath, "--eval", script], {

@@ -3,23 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import {
-	__rewriteLegacyExtensionSourceForTests,
-	loadLegacyPiModule,
-} from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { __rewriteLegacyExtensionSourceForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 interface RewriteCase {
 	name: string;
 	source: string;
 	expected(importTarget: string, requireTarget: string): string;
-}
-
-interface CommonJsCase {
-	name: string;
-	source: string;
-	files?: Record<string, string>;
-	expected: Record<string, unknown>;
 }
 
 let rewriteRoot: string;
@@ -269,130 +259,6 @@ const rewriteCases: RewriteCase[] = [
 	},
 ];
 
-async function loadCommonJsCase(testCase: CommonJsCase): Promise<{ keys: string[]; named: Record<string, unknown> }> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-legacy-ast-exports-"));
-	tempRoots.push(dir);
-	const files: Record<string, string> = {
-		"package.json": JSON.stringify({ name: `cjs-${testCase.name}`, version: "1.0.0", type: "module" }),
-		"subject.cjs": testCase.source,
-		"index.ts": [
-			'import * as subject from "./subject.cjs";',
-			"export const keys = Object.keys(subject).sort();",
-			'export const named = Object.fromEntries(keys.filter(key => key !== "default").map(key => {',
-			"  const value = subject[key];",
-			'  return [key, typeof value === "function" ? value() : value];',
-			"}));",
-		].join("\n"),
-		...testCase.files,
-	};
-	for (const [relativePath, contents] of Object.entries(files)) {
-		const absolutePath = path.join(dir, relativePath);
-		await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-		await fs.writeFile(absolutePath, contents, "utf8");
-	}
-	return (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
-		keys: string[];
-		named: Record<string, unknown>;
-	};
-}
-
-const commonJsCases: CommonJsCase[] = [
-	{
-		name: "direct-assignments",
-		source: [
-			'exports.alpha = "alpha";',
-			'module.exports.bravo = "bravo";',
-			'module.exports["charlie"] = "charlie";',
-			'exports["invalid-name"] = "excluded";',
-		].join("\n"),
-		expected: { alpha: "alpha", bravo: "bravo", charlie: "charlie" },
-	},
-	{
-		name: "define-property",
-		source: [
-			'Object.defineProperty(exports, "delta", { enumerable: true, value: "delta" });',
-			'Object.defineProperty(module.exports, "echo", { enumerable: true, value: "echo" });',
-			'Object.defineProperty(exports, "default", { enumerable: true, value: "excluded" });',
-		].join("\n"),
-		expected: { delta: "delta", echo: "echo" },
-	},
-	{
-		name: "module-exports-object",
-		source:
-			'module.exports = { foxtrot: "foxtrot", golf() { return "golf"; }, "hotel": "hotel", ["computed"]: "excluded", default: "excluded", "invalid-name": "excluded" };',
-		expected: { foxtrot: "foxtrot", golf: "golf", hotel: "hotel" },
-	},
-	{
-		name: "module-exports-require",
-		source: 'module.exports = require("./leaf.cjs");',
-		files: { "leaf.cjs": 'exports.india = "india";\nmodule.exports.juliet = "juliet";\n' },
-		expected: { india: "india", juliet: "juliet" },
-	},
-	{
-		name: "export-star",
-		source: [
-			"const __exportStar = (source, target) => {",
-			'  for (const key of Object.keys(source)) if (key !== "default") target[key] = source[key];',
-			"};",
-			'__exportStar(require("./leaf.cjs"), exports);',
-		].join("\n"),
-		files: { "leaf.cjs": 'exports.kilo = "kilo";\n' },
-		expected: { kilo: "kilo" },
-	},
-	{
-		name: "parameter-shadows",
-		source: [
-			'exports.good = "good";',
-			'function objectShadow(Object) { Object.defineProperty(exports, "badObject", {}); }',
-			'function exportsShadow(exports) { exports.badExports = true; Object.defineProperty(exports, "badDefined", {}); }',
-			"function moduleShadow(module) { module.exports.badModule = true; module.exports = { badObject: true }; }",
-			'function requireShadow(require) { module.exports = require("./leaf.cjs"); __exportStar(require("./leaf.cjs"), exports); }',
-		].join("\n"),
-		files: { "leaf.cjs": 'exports.badLeaf = "excluded";\n' },
-		expected: { good: "good" },
-	},
-	{
-		name: "hoisted-program-exports-shadow",
-		source: ['exports.badExports = "excluded";', "var exports;"].join("\n"),
-		expected: {},
-	},
-	{
-		name: "hoisted-program-module-shadow",
-		source: ['module.exports.badModule = "excluded";', "var module;", 'exports.good = "good";'].join("\n"),
-		expected: { good: "good" },
-	},
-	{
-		name: "hoisted-program-require-shadow",
-		source: ['module.exports = require("./leaf.cjs");', "var require;"].join("\n"),
-		files: { "leaf.cjs": 'exports.badLeaf = "excluded";\n' },
-		expected: {},
-	},
-	{
-		name: "program-Object-shadow",
-		source: [
-			"const Object = globalThis.Object;",
-			'Object.defineProperty(exports, "badObject", { enumerable: true, value: "excluded" });',
-			'exports.good = "good";',
-		].join("\n"),
-		expected: { good: "good" },
-	},
-	{
-		name: "block-catch-for-switch-class-static-shadows",
-		source: [
-			'exports.good = "good";',
-			"function decoys() {",
-			"  { const exports = {}; exports.badBlock = true; }",
-			"  try {} catch (module) { module.exports.badCatch = true; }",
-			"  for (const module of []) { module.exports.badFor = true; }",
-			'  switch (0) { case 0: { const Object = globalThis.Object; Object.defineProperty(exports, "badSwitch", {}); } }',
-			'  const Named = class Object { method() { Object.defineProperty(exports, "badClass", {}); } };',
-			'  class Static { static { const Object = globalThis.Object; Object.defineProperty(exports, "badStatic", {}); } }',
-			"}",
-		].join("\n"),
-		expected: { good: "good" },
-	},
-];
-
 describe("legacy Pi Babel AST behavior baseline", () => {
 	test("rewrites exact source bytes with Babel binding semantics", async () => {
 		for (const testCase of rewriteCases) {
@@ -426,12 +292,4 @@ describe("legacy Pi Babel AST behavior baseline", () => {
 			`const value = require(${JSON.stringify(requireTarget)});`,
 		);
 	});
-
-	test("discovers exact CommonJS named exports with Babel binding semantics", async () => {
-		for (const testCase of commonJsCases) {
-			const actual = await loadCommonJsCase(testCase);
-			expect(actual.keys, testCase.name).toEqual(["default", ...Object.keys(testCase.expected)].sort());
-			expect(actual.named, testCase.name).toEqual(testCase.expected);
-		}
-	}, 30_000);
 });

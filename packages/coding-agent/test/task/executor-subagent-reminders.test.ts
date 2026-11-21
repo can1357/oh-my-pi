@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AgentBusyError, type AgentTelemetryConfig, type Tracer } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
+import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionActions, LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -13,9 +14,11 @@ import {
 	finalizeSubprocessOutput,
 	runSubagentFollowUpTurn,
 	runSubprocess,
+	SUBAGENT_WARNING_EMPTY_MESSAGE,
 	SUBAGENT_WARNING_MISSING_YIELD,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
@@ -78,6 +81,7 @@ function createMockSession(
 		prompt: async (text: string, options?: PromptOptions) => {
 			promptIndex += 1;
 			await onPrompt({ text, options, promptIndex, emit, state });
+			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 	};
@@ -203,7 +207,7 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("splices the subagent role prompt before the trailing system section", async () => {
+	it("appends the per-spawn subagent prompt after the default blocks so the static prefix stays shared", async () => {
 		let userPrompt = "";
 		const session = createMockSession(({ text, emit }) => {
 			userPrompt = text;
@@ -229,22 +233,29 @@ describe("runSubprocess yield reminders", () => {
 		const systemPromptBuilder = createAgentSessionSpy.mock.calls[0]?.[0]?.systemPrompt;
 		expect(systemPromptBuilder).toBeFunction();
 		if (typeof systemPromptBuilder !== "function") throw new Error("Expected system prompt builder");
-		const systemPrompt = systemPromptBuilder(["system", "project", "now"]);
+		const systemPrompt = systemPromptBuilder(["system", "<project-context>\ncwd\n</project-context>"]);
 
-		expect(systemPrompt).toHaveLength(4);
+		expect(systemPrompt).toHaveLength(3);
 		expect(systemPrompt?.[0]).toBe("system");
-		expect(systemPrompt?.[1]).toBe("project");
+		expect(systemPrompt?.[1]).toBe("<project-context>\ncwd\n</project-context>");
 		expect(systemPrompt?.[2]).toContain(baseAgent.systemPrompt);
 		// The parent-conversation CONTEXT section is gone: subagents get their
 		// background inside the assignment (or a local:// file), never a dump.
 		expect(systemPrompt?.[2]).not.toMatch(/CONTEXT\n=+/);
-		expect(systemPrompt?.[3]).toBe("now");
 		expect(userPrompt).not.toMatch(/CONTEXT\n=+/);
 	});
-	it("does not let an intervening wake yield satisfy the batch after a lost prompt race", async () => {
+	it("resets yield state after an intervening wake wins the follow-up prompt race", async () => {
 		let prompts = 0;
 		let wakeEmitted = false;
 		let emitWake: ((event: AgentSessionEvent) => void) | undefined;
+		const yieldTool = new YieldTool({
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			outputSchema: {},
+		});
 		const session = createMockSession(({ emit }) => {
 			emitWake ??= emit;
 			prompts++;
@@ -261,29 +272,29 @@ describe("runSubprocess yield reminders", () => {
 				isError: false,
 			});
 		});
-		const mutable = session as unknown as {
-			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
-			waitForIdle: () => Promise<void>;
-		};
-		mutable.setWorkPoolYieldItems = async () => {};
-		mutable.waitForIdle = async () => {
-			// The wake turn yields while the batch backs off. The batch monitor
-			// must be detached, so this yield neither marks the batch yielded
-			// nor leaks wake output into the batch result.
-			if (!wakeEmitted) {
-				wakeEmitted = true;
-				emitWake?.({
-					type: "tool_execution_end",
-					toolCallId: "tool-wake",
-					toolName: "yield",
-					result: {
-						content: [{ type: "text", text: "Wake done." }],
-						details: { status: "success", data: { intruder: true } },
-					},
-					isError: false,
-				});
-			}
-		};
+		Object.assign(session, {
+			getToolByName: (name: string) => (name === "yield" ? yieldTool : undefined),
+			setWorkPoolYieldItems: async () => {},
+			waitForIdle: async () => {
+				// The wake turn yields while the batch backs off. The batch monitor
+				// must be detached, so this yield neither marks the batch yielded
+				// nor leaks wake output into the batch result.
+				if (!wakeEmitted) {
+					wakeEmitted = true;
+					emitWake?.({
+						type: "tool_execution_end",
+						toolCallId: "tool-wake",
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Wake done." }],
+							details: { status: "success", data: { intruder: true } },
+						},
+						isError: false,
+					});
+					await yieldTool.execute("wake-section", { type: ["findings"], data: "wake section" });
+				}
+			},
+		});
 		AgentRegistry.global().register({
 			id: "subagent-race",
 			displayName: "subagent-race",
@@ -292,11 +303,17 @@ describe("runSubprocess yield reminders", () => {
 			session,
 		});
 		try {
-			const result = await runSubagentFollowUpTurn({ ...baseOptions, id: "subagent-race", message: "batch work" });
+			const result = await runSubagentFollowUpTurn({
+				...baseOptions,
+				id: "subagent-race",
+				message: "batch work",
+				outputSchema: {},
+			});
 			expect(prompts).toBe(2);
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain('"batch": true');
 			expect(result.output).not.toContain("intruder");
+			await expect(yieldTool.execute("empty-after-race", { type: "result" })).rejects.toThrow(/none were submitted/);
 		} finally {
 			AgentRegistry.global().unregister("subagent-race");
 		}
@@ -499,10 +516,7 @@ describe("runSubprocess yield reminders", () => {
 		// Parking swaps the worker mid-install while an IRC delivery revives the
 		// replacement straight into an ordinary wake: the follow-up must wait out
 		// that wake before installing the keyed contract, not reject its yield.
-		const ensureLive = vi
-			.spyOn(AgentLifecycleManager.global(), "ensureLive")
-			.mockResolvedValueOnce(stale)
-			.mockResolvedValue(revived);
+		vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockResolvedValueOnce(stale).mockResolvedValue(revived);
 		try {
 			const result = await runSubagentFollowUpTurn({
 				...baseOptions,
@@ -542,13 +556,149 @@ describe("runSubprocess yield reminders", () => {
 
 		mockCreateAgentSession(session);
 
-		const result = await runSubprocess(baseOptions);
+		const result = await runSubprocess({ ...baseOptions, outputSchema: {} });
 		expect(prompts.length).toBe(2);
 		expect(promptOptions).toHaveLength(2);
 		expect(promptOptions[0]?.attribution).toBe("agent");
 		expect(promptOptions[1]?.attribution).toBe("agent");
 		expect(result.output).toContain('"done": true');
 		expect(result.output.includes("SYSTEM WARNING")).toBe(false);
+	});
+
+	it("returns the final message verbatim, with no yield tool or reminders, when unstructured", async () => {
+		const report = "## Summary\nAuth lives in `src/auth.ts:10-40`.";
+		const prompts: string[] = [];
+		const session = createMockSession(({ text, emit, state }) => {
+			prompts.push(text);
+			const working: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				content: [
+					{ type: "text", text: "Looking at auth first." },
+					{ type: "toolCall", id: "tool-read", name: "read", arguments: { path: "src/auth.ts" } },
+				],
+				stopReason: "toolUse",
+			};
+			const final = createAssistantStopMessage(report);
+			state.messages.push(working, final);
+			emit({ type: "message_end", message: working });
+			emit({ type: "message_end", message: final });
+			emit({ type: "agent_end", messages: [working, final] });
+		});
+		const createAgentSessionSpy = mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-prose",
+			agent: { ...baseAgent, tools: ["read", "yield"] },
+		});
+
+		const sessionOptions = createAgentSessionSpy.mock.calls[0]?.[0];
+		expect(sessionOptions?.requireYieldTool).toBe(false);
+		expect(sessionOptions?.toolNames).toEqual(["read"]);
+		const systemPromptBuilder = sessionOptions?.systemPrompt;
+		if (typeof systemPromptBuilder !== "function") throw new Error("Expected system prompt builder");
+		expect(systemPromptBuilder(["system"])?.at(-1)).toContain("your final message is your result");
+		expect(prompts).toHaveLength(1);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe(report);
+	});
+
+	it("returns only the text after Cursor's last server-resolved tool call", async () => {
+		const report = "## Result\nThe auth lookup is complete.";
+		const session = createMockSession(({ emit, state }) => {
+			const edit = {
+				type: "toolCall" as const,
+				id: "tool-edit",
+				name: "edit",
+				arguments: { path: "src/auth.ts" },
+				[kCursorExecResolved]: true as const,
+			};
+			const read = {
+				type: "toolCall" as const,
+				id: "tool-read",
+				name: "read",
+				arguments: { path: "src/auth.ts" },
+				[kCursorExecResolved]: true as const,
+			};
+			const final: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				api: "cursor-agent",
+				provider: "cursor",
+				content: [{ type: "text", text: "Checking auth." }, edit, read, { type: "text", text: report }],
+			};
+			state.messages.push(final);
+			emit({ type: "message_end", message: final });
+			emit({ type: "agent_end", messages: [final] });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-cursor-final" });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe(report);
+	});
+
+	it("collects each stopped loop's output once across pauses and the run end", async () => {
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			if (promptIndex > 1) return;
+			const first = createAssistantStopMessage("First.");
+			const second = createAssistantStopMessage("Second.");
+			emit({ type: "agent_start" } as AgentSessionEvent);
+			state.messages.push(first);
+			emit({ type: "message_end", message: first });
+			emit({ type: "agent_pause", messages: [first], yielded: false, awaiting: false });
+			emit({ type: "agent_start" } as AgentSessionEvent);
+			state.messages.push(second);
+			emit({ type: "message_end", message: second });
+			emit({ type: "agent_pause", messages: [second], yielded: true, awaiting: true });
+			// Nothing woke the paused run: it ends with the paused loop's messages again.
+			emit({ type: "agent_end", messages: [second] });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-pause-output", outputSchema: {} });
+
+		// Accumulated loop output is only the fallback of a yield-bound run; it
+		// rides under the missing-yield warning, each stopped loop counted once.
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
+		expect(result.output).toBe(`${SUBAGENT_WARNING_MISSING_YIELD}\n\nFirst.Second.`);
+	});
+
+	it("rejects prose after a locally runnable tool call in a stop turn", async () => {
+		const session = createMockSession(({ emit, state }) => {
+			const unfinished = createAssistantStopMessage("");
+			unfinished.content = [
+				{ type: "toolCall", id: "tool-read", name: "read", arguments: { path: "src/auth.ts" } },
+				{ type: "text", text: "The auth lookup is complete." },
+			];
+			state.messages.push(unfinished);
+			emit({ type: "message_end", message: unfinished });
+			emit({ type: "agent_end", messages: [unfinished] });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-local-tool-prose" });
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_EMPTY_MESSAGE);
+	});
+
+	it("fails an unstructured run that ends without a final message", async () => {
+		const prompts: string[] = [];
+		const session = createMockSession(({ text, emit, state }) => {
+			prompts.push(text);
+			const empty = createAssistantStopMessage("");
+			state.messages.push(empty);
+			emit({ type: "message_end", message: empty });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-prose-empty" });
+
+		expect(prompts).toHaveLength(1);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_EMPTY_MESSAGE);
 	});
 
 	it("keeps null yield warning when subagent submits success without data", async () => {
@@ -573,7 +723,7 @@ describe("runSubprocess yield reminders", () => {
 
 		mockCreateAgentSession(session);
 
-		const result = await runSubprocess({ ...baseOptions, id: "subagent-2" });
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-2", outputSchema: {} });
 		expect(result.output).toContain("SYSTEM WARNING: Subagent called yield with null data.");
 	});
 
@@ -611,7 +761,7 @@ describe("runSubprocess yield reminders", () => {
 
 		mockCreateAgentSession(session);
 
-		const result = await runSubprocess({ ...baseOptions, id: "subagent-err-then-success" });
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-err-then-success", outputSchema: {} });
 		expect(prompts).toHaveLength(2);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain('"ok": true');
@@ -794,7 +944,11 @@ describe("runSubprocess yield reminders", () => {
 		mockCreateAgentSession(session);
 
 		let settled = false;
-		const resultPromise = runSubprocess({ ...baseOptions, id: "subagent-yield-abort-cleanup" }).finally(() => {
+		const resultPromise = runSubprocess({
+			...baseOptions,
+			id: "subagent-yield-abort-cleanup",
+			outputSchema: {},
+		}).finally(() => {
 			settled = true;
 		});
 
@@ -1062,6 +1216,7 @@ describe("runSubprocess yield reminders", () => {
 			...baseOptions,
 			id: "subagent-abort-during-reminder",
 			signal: abortController.signal,
+			outputSchema: {},
 		});
 
 		expect(result.aborted).toBe(true);

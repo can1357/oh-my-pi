@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import { ptree } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { AfterExchangeHook, ExchangeContext } from "../hooks/types";
 import type { FetchImpl } from "../../types";
@@ -28,8 +29,8 @@ const museCodeKeyResponseSchema = type({
 	"user_email?": "string",
 	"user_id?": "string",
 	"is_subs_active?": "boolean",
-	"subs_tier_id?": "string",
-	"subs_tier_name?": "string",
+	"subs_tier_id?": "string | null",
+	"subs_tier_name?": "string | null",
 	"subs_usage?": subscriptionUsageSchema.or("null"),
 });
 export type MuseCodeKeyResponse = typeof museCodeKeyResponseSchema.infer;
@@ -44,11 +45,6 @@ export interface MuseCodeKeyRequestOptions {
 	signal?: AbortSignal;
 	/** Ask Meta to onboard the account during an interactive login exchange. */
 	onboard?: boolean;
-}
-
-function requestSignal(signal?: AbortSignal): AbortSignal {
-	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 export function parseMuseCodeCredential(value: string): MuseCodeCredential {
@@ -83,7 +79,7 @@ export async function requestMuseCodeKey(
 		},
 		body: JSON.stringify(options.onboard ? { onboard: true } : {}),
 		redirect: "error",
-		signal: requestSignal(options.signal),
+		signal: ptree.combineSignals(options.signal, REQUEST_TIMEOUT_MS),
 	});
 	const text = await response.text();
 	if (!response.ok) {

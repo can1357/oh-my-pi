@@ -17,11 +17,11 @@ async function bootGateway(): Promise<GatewayHarness> {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-response-headers-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.setRuntimeApiKey("openrouter", "test-key");
+	storage.keys.setRuntime("openrouter", "test-key");
 	const mock = createMockModel({ provider: "openrouter", id: "mock/header-model" });
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["t"],
+		bearerTokens: ["gw-test-token"],
 		storage,
 		resolveModel: () => mock.model,
 		version: "test",
@@ -56,7 +56,7 @@ describe("auth-gateway diagnostic response headers", () => {
 			});
 			const res = await fetch(`${gw.url}/v1/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "mock/header-model",
 					messages: [{ role: "user", content: "hi" }],
@@ -84,7 +84,7 @@ describe("auth-gateway diagnostic response headers", () => {
 			gw.mock.push({ content: ["ok"] });
 			const res = await fetch(`${gw.url}/v1/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "mock/header-model",
 					messages: [{ role: "user", content: "send this" }],
@@ -114,7 +114,7 @@ describe("auth-gateway diagnostic response headers", () => {
 			gw.mock.push({ content: ["hello"] });
 			const res = await fetch(`${gw.url}/v1/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "mock/header-model",
 					messages: [{ role: "user", content: "hi" }],

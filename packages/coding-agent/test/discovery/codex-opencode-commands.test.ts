@@ -6,14 +6,12 @@ import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability
 import { type SlashCommand, slashCommandCapability } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
-import {
-	commandInspectorData,
-	commandPreview,
-} from "@oh-my-pi/pi-coding-agent/modes/components/extensions/inspector-model";
-import { InspectorPanel } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/inspector-panel";
-import { applyFilter } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
-import type { Extension } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/types";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
+import { commandInspectorData, commandPreview } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
+import { InspectorPanel } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-panel";
+import { applyFilter } from "@oh-my-pi/pi-tui/overlays/extensions/state-manager";
+import type { Extension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const COMMAND_FILE = `---
@@ -159,6 +157,30 @@ describe("Codex and OpenCode slash-command frontmatter", () => {
 		expect(data.usesArguments).toBe(true);
 
 		expect(applyFilter([ext], "Deploy a service").map(item => item.name)).toEqual(["deploy"]);
+	});
+
+	test("Codex and OpenCode side: true commands load as side commands; quoted true does not", async () => {
+		const sideFile = ["---", "description: Situation report", "side: true", "---", "Report status", ""].join("\n");
+		const quotedFile = ["---", "description: Quoted flag", 'side: "true"', "---", "Body", ""].join("\n");
+		for (const [dir, prefix] of [
+			[".codex", "codex"],
+			[".opencode", "opencode"],
+		] as const) {
+			const commandsDir = path.join(project, dir, "commands");
+			await fs.mkdir(commandsDir, { recursive: true });
+			await fs.writeFile(path.join(commandsDir, `${prefix}-sitrep.md`), sideFile);
+			await fs.writeFile(path.join(commandsDir, `${prefix}-quoted.md`), quotedFile);
+		}
+
+		const commands = await loadSlashCommands({ cwd: project });
+		for (const prefix of ["codex", "opencode"]) {
+			const sitrep = commands.find(command => command.name === `${prefix}-sitrep`);
+			const quoted = commands.find(command => command.name === `${prefix}-quoted`);
+			expect(sitrep?.side).toBe(true);
+			expect(sitrep?.content.trim()).toBe("Report status");
+			expect(quoted).toBeDefined();
+			expect(quoted?.side).toBeUndefined();
+		}
 	});
 
 	test("frontmatter-only command preview keeps an empty body", () => {

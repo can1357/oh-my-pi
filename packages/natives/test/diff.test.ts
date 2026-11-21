@@ -6,6 +6,7 @@ import {
 	DiffSide,
 	DiffStream,
 	diffLineRuns,
+	diffLineRunsWithin,
 	diffLines,
 	diffWords,
 	type PatchHunk,
@@ -221,6 +222,15 @@ describe("native diff correctness", () => {
 		]);
 		expect(structuredPatchHunks(a, b, 3).length).toBeGreaterThan(0);
 		verifyDiffInvariants(a, b);
+	});
+
+	test("bounded line runs stop exactly past the edit limit", () => {
+		// One line replaced by two: three edits.
+		const before = "a\nb\nc\nd";
+		const after = "a\nx\ny\nc\nd";
+		expect(diffLineRunsWithin(before, after, 3)).toEqual(diffLineRuns(before, after));
+		expect(diffLineRunsWithin(before, after, 2)).toBeNull();
+		expect(diffLineRunsWithin(before, before, 0)).toEqual([{ count: 4, added: false, removed: false }]);
 	});
 
 	test("seeded random word diffs reconstruct the new text exactly", () => {

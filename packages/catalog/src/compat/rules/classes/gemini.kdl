@@ -66,18 +66,126 @@ class "gemini" {
 			}
 		}
 	}
-	// Gemini 3.7 Flash is the one Flash revision whose native thinkingLevel does
-	// not accept `minimal` (400 THINKING_LEVEL_MINIMAL). Only the direct
+	// Gemini 3.7+ Flash and Gemini 4 native thinkingLevel does not accept
+	// `minimal` (400 THINKING_LEVEL_MINIMAL; observed on Flash 3.7 and 3.8, and
+	// documented as a Gemini 4 change in Google's migration guide). Only the direct
 	// google-level transports emit `thinkingLevel` on the wire, so the tier is
 	// dropped there; budget (anthropic-messages) and reasoning_effort resellers
 	// never send the rejected value and keep the four-tier ladder. The collapsed
-	// google-antigravity / google-gemini-cli variants remap minimal -> LOW and
+	// google-antigravity variants remap minimal -> LOW and
 	// carry their own explicit ladder, so they are unaffected.
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
 	// https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
 	on "google" "google-vertex" "opencode-zen" {
 		family "flash" {
-			revision ">=3.7 <3.8" {
+			revision ">=3.7" {
 				thinking-efforts "low" "medium" "high"
+			}
+		}
+		// Exact ids: a revision-wide rule would tie with the Pro low/high ladder.
+		// Gemini API discovery infers `reasoning: false` for a Gemini 4 id with no
+		// bundled reference; repair it so the ladder is selectable.
+		models "gemini-4-argon" "gemini-4-argon-cyber-permissive" "gemini-4-carbon" {
+			thinking-upgrade-neutral #true
+			thinking-efforts "low" "medium" "high"
+		}
+		// Gemini 4 Hydrogen and Neon add an `xhigh` level (default `high`).
+		models "gemini-4-hydrogen" "gemini-4-neon" {
+			thinking-upgrade-neutral #true
+			thinking-efforts "low" "medium" "high" "xhigh"
+		}
+	}
+	// Gemini 4 Neon ends about half of the requests that close on a user
+	// message directly after a function response with native finish reason
+	// MALFORMED_RESPONSE: thousands of reasoning tokens, then an empty reply.
+	// Agent harnesses produce that shape whenever a steering, IRC, or async
+	// notification lands mid tool loop. Observed through OpenRouter's Google
+	// endpoint (google/gemini-4-neon-20261118): 32 of 62 such turns failed,
+	// against 1 of 738 turns ending on a tool result; Gemini 3.x Flash and 3.1
+	// Pro on the same route took 1,515 such turns without one. Replaying one
+	// failing 456k-token state with the message folded into the preceding tool
+	// result succeeded 5 of 5 times; a synthetic assistant turn between the
+	// tool result and the message (requires-assistant-after-tool-result) still
+	// failed 4 of 4. Applied to every Gemini 4 model (Argon, Carbon, Hydrogen,
+	// Neon): they share the lineage, and folding is harmless where the failure
+	// does not reproduce.
+	revision ">=4 <5" {
+		fold-user-after-tool-result #true
+	}
+	// Gemini 4 models decode past one 65,536-token streaming segment only when
+	// the request's `maxOutputTokens` is larger (up to 1,048,576 minus input);
+	// the provider then follows Google's continuation tokens. The reported caps
+	// (65,536 on Vertex, and the 32,768 non-streaming segment that the Gemini
+	// API's models.get lists for Argon and Carbon) end every long answer with
+	// MAX_TOKENS at the first segment, often before any visible text. 262,144
+	// is the output cap Google's own Antigravity client advertises for Carbon
+	// and Hydrogen; Neon, adapted from Carbon, documents the same long decode.
+	// Zen is left alone: its continuation passthrough is unverified.
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen#long-decodes
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
+	on "google" "google-vertex" {
+		models "gemini-4-argon" "gemini-4-carbon" "gemini-4-hydrogen" "gemini-4-neon" {
+			limits-patch {
+				max-tokens 262144
+			}
+		}
+	}
+	// Gemini 4 Argon's and Carbon's introductory list price ($2/$10, $0.10
+	// cached) ends 2026-11-30; from 2026-12-01 Google bills $4/$20, $0.20
+	// cached, on the Gemini API and Vertex global endpoint alike. Cloud Billing
+	// days start at midnight US Pacific. Both cards are pinned over whatever
+	// stencil.so or the bundled pricing peer reports: the switch needs no
+	// regeneration, and a row built after upstream catches up still prices
+	// earlier requests at the introductory rate.
+	// https://aistudio.google.com/docs/pricing
+	// https://cloud.google.com/vertex-ai/generative-ai/pricing
+	// https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/
+	on "google" "google-vertex" "google-antigravity" {
+		models "gemini-4-argon" "gemini-4-carbon" {
+			cost-patch {
+				input 2
+				output 10
+				cache-read 0.1
+				cache-write 0
+				effective-rates {
+					list-price {
+						effective-from "2026-12-01T08:00:00Z"
+						input 4
+						output 20
+						cache-read 0.2
+						cache-write 0
+					}
+				}
+			}
+		}
+	}
+
+	// Gemini 4 Hydrogen: $1.50/$7.50, cache read $0.075 on the Gemini API and
+	// Vertex; Antigravity discovery reports $0, so the collapsed row is pinned to
+	// the same card.
+	// https://aistudio.google.com/docs/whats-new-gemini-4-hydrogen
+	on "google-antigravity" {
+		models "gemini-4-hydrogen" {
+			cost-patch {
+				input 1.5
+				output 7.5
+				cache-read 0.075
+				cache-write 0
+			}
+		}
+	}
+
+	// Gemini 4 Neon: $3/$15, cache read $0.15 on the paid Gemini API tier;
+	// Antigravity discovery reports $0, so the collapsed row is pinned to the
+	// same card.
+	// https://aistudio.google.com/docs/pricing
+	on "google" "google-antigravity" {
+		models "gemini-4-neon" {
+			cost-patch {
+				input 3
+				output 15
+				cache-read 0.15
+				cache-write 0
 			}
 		}
 	}
@@ -87,6 +195,13 @@ class "gemini" {
 		multimodal-function-response #true
 		// Replaces the Gemini 3+ mandatory-reasoning fallback.
 		thinking-requires-effort #true
+	}
+	// Gemini 3+ takes `thinkingLevel` on the native Google transports; Gemini 4
+	// rejects `thinkingBudget` outright (400 "Use thinking level instead").
+	on-api "google-generative-ai" "google-gemini-cli" "google-vertex" {
+		revision ">=3" {
+			thinking-mode "google-level"
+		}
 	}
 	// Public Gemini requires the bypass sentinel on every unsigned call and
 	// supports function-part ids. Scope by adapter so custom providers using
@@ -98,12 +213,40 @@ class "gemini" {
 			supports-function-part-id #true
 		}
 	}
-	on "google-antigravity" "google-gemini-cli" {
+	on-api "google-vertex" {
+		revision ">=3" {
+			requires-skip-thought-signature-on-first-function-call #true
+		}
+	}
+	on "google-antigravity" {
 		family "flash" {
 			stream-first-event-timeout-ms 60000
 			flash-stream-leak-workaround #true
 		}
 	}
 
-	thinking-loop-guard "gemini"
+	thinking-loop-guard "semantic"
+}
+
+// Google Search grounding is a Gemini 2+ lineage capability on every Gemini transport.
+class "gemini" {
+	on-api "google-generative-ai" "google-gemini-cli" {
+		revision ">=2" {
+			web-search "gemini"
+			web-search-model "gemini-2.5-flash"
+			image-model "gemini-3-pro-image"
+		}
+	}
+}
+
+// Gemini 3+ bills a fixed `media_resolution` budget per image regardless of
+// pixels; the default for images is HIGH, 1,120 tokens.
+// https://ai.google.dev/gemini-api/docs/media-resolution
+class "gemini" {
+	revision ">=3" {
+		image-tokenization {
+			regime "fixed"
+			tokens 1120
+		}
+	}
 }

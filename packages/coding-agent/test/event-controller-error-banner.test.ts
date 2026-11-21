@@ -11,13 +11,16 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { ErrorBannerComponent } from "@oh-my-pi/pi-coding-agent/modes/components/error-banner";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { ErrorBannerComponent } from "@oh-my-pi/pi-tui/overlays/error-banner";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { Loader } from "@oh-my-pi/pi-tui";
+import { PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+
+import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 	return {
@@ -47,7 +50,7 @@ beforeAll(async () => {
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	settings.set("display.smoothStreaming", false);
+	cfgDisplaySmoothStreaming.set(settings, false);
 });
 
 afterEach(() => {
@@ -116,6 +119,26 @@ function createFixture(streamingMessage?: AssistantMessage) {
 }
 
 describe("EventController error banner", () => {
+	it("bounds and sanitizes multiline provider errors in fallback warnings", async () => {
+		const { controller, ctx } = createFixture();
+		const showWarning = vi.spyOn(ctx, "showWarning");
+		const reason = `Request failed: \u001b[31m503 unavailable\u001b[0m\n${"<html>error</html>\n".repeat(1000)}`;
+		await controller.handleEvent({
+			type: "retry_fallback_applied",
+			from: "source/model",
+			to: "target/model",
+			role: "default",
+			reason,
+		});
+		const warning = showWarning.mock.calls[0][0];
+		expect(warning).toContain("source/model -> target/model");
+		const lines = warning.split("\n");
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain("503 unavailable");
+		expect(lines[1]).not.toContain("\u001b");
+		expect(Bun.stringWidth(lines[1])).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE * PREVIEW_LIMITS.COLLAPSED_LINES);
+	});
+
 	it("pins the provider error above the editor when an assistant turn ends on stopReason error", async () => {
 		const errorMessage = "Output blocked by content filtering policy";
 		const message = makeAssistantMessage({ stopReason: "error", errorMessage });
@@ -236,8 +259,8 @@ describe("EventController error banner", () => {
 			errorMessage: providerError,
 			errorId: message.errorId,
 		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
+		expect(clearPinnedError).toHaveBeenCalled();
 		showPinnedError.mockClear();
-		clearPinnedError.mockClear();
 		showError.mockClear();
 		setErrorPinned.mockClear();
 
@@ -250,7 +273,6 @@ describe("EventController error banner", () => {
 		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
 
 		expect(showPinnedError).not.toHaveBeenCalled();
-		expect(clearPinnedError).toHaveBeenCalledTimes(1);
 		expect(setErrorPinned).toHaveBeenCalledWith(false);
 		expect(showError).toHaveBeenCalledWith(`Retry failed after 1 attempts: ${finalError}`);
 	});
@@ -287,14 +309,15 @@ describe("EventController error banner", () => {
 		expect(setErrorPinned).toHaveBeenCalledWith(false);
 	});
 
-	it("clears retryable thinking-loop banners without restoring the dropped inline error", async () => {
-		const errorMessage = "loop guard stopped repeated reasoning";
+	it("keeps a recovered attempt's error out of the banner and transcript", async () => {
+		const errorMessage = "The socket connection was closed unexpectedly before the response completed";
 		const message = makeAssistantMessage({
+			content: [{ type: "thinking", thinking: "Partial reasoning" }],
 			stopReason: "error",
 			errorMessage,
-			errorId: AIError.create(AIError.Flag.ThinkingLoop),
+			errorId: AIError.create(AIError.Flag.Transient),
 		});
-		const { controller, clearPinnedError, setErrorPinned } = createFixture(message);
+		const { controller, ctx, clearPinnedError, setErrorPinned, streamingComponent } = createFixture(message);
 
 		await controller.handleEvent({ type: "message_end", message } as Extract<
 			AgentSessionEvent,
@@ -306,19 +329,39 @@ describe("EventController error banner", () => {
 		await controller.handleEvent({
 			type: "auto_retry_start",
 			attempt: 1,
-			maxAttempts: 2,
-			delayMs: 0,
+			maxAttempts: 3,
+			delayMs: 500,
 			errorMessage,
-			errorId: AIError.create(AIError.Flag.ThinkingLoop),
+			errorId: message.errorId,
 		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
 
 		expect(clearPinnedError).toHaveBeenCalledTimes(1);
+		const status = Bun.stripANSI(ctx.retryLoader!.render(200).join("\n"));
+		expect(status).toContain("Retrying (1/3) in 500ms · The socket connection was closed");
+
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
 		expect(setErrorPinned).not.toHaveBeenCalledWith(false);
+
+		const retryRecovery = {
+			kind: "auto-retry",
+			status: "recovered",
+			attempt: 1,
+			recovery: "plain",
+			note: "error; retried",
+		} as const;
 		await controller.handleEvent({
 			type: "auto_retry_end",
 			success: true,
 			attempt: 1,
+			retryErrors: [
+				{ entryId: "entry", persistenceKey: "test-persistence-key", note: "error; retried", retryRecovery },
+			],
 		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(streamingComponent.applyRetryRecovery).toHaveBeenCalledWith(retryRecovery);
+		const transcript = Bun.stripANSI(streamingComponent.render(120).join("\n"));
+		expect(transcript).not.toContain(errorMessage);
+		expect(transcript).toContain("error; retried");
 	});
 
 	it("does not pin a banner for a normal assistant stop", async () => {
@@ -520,13 +563,6 @@ describe("EventController working loader reconciliation", () => {
 });
 
 describe("ErrorBannerComponent", () => {
-	it("renders the provider error message", () => {
-		const banner = new ErrorBannerComponent("Output blocked by content filtering policy");
-		const rendered = Bun.stripANSI(banner.render(120).join("\n"));
-		expect(rendered).toContain("Output blocked by content filtering policy");
-		expect(rendered).toContain("Dismissed when you send your next message.");
-	});
-
 	it("caps an oversized multi-line error to a few rows and points at expansion", () => {
 		const huge = Array.from({ length: 50 }, (_, i) => `error detail line ${i}`).join("\n");
 		const banner = new ErrorBannerComponent(huge);

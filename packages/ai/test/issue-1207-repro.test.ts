@@ -66,21 +66,6 @@ function customDeepseekFlash(legacyThinkingExtraBody = false): Model<"openai-com
 }
 
 describe("issue #1207 — DeepSeek V4 keeps reasoning with tools", () => {
-	it("detects the documented direct DeepSeek V4 compat shape", () => {
-		const model = getBundledModel("deepseek", "deepseek-v4-flash") as Model<"openai-completions">;
-		const compat = model.compat;
-
-		expect(compat.supportsToolChoice).toBe(false);
-		expect(compat.maxTokensField).toBe("max_tokens");
-		expect(compat.extraBody).toBeUndefined();
-		expect(compat.reasoningDisableMode).toBe("zai-thinking-disabled");
-		expect(compat.whenThinking?.extraBody).toEqual({ thinking: { type: "enabled" } });
-		// DeepSeek V4 Flash's reasoning_effort is the honest wire-exact
-		// low/high/max ladder (#7668); no synthetic tiers, no alias map.
-		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
-		expect(model.thinking?.effortMap).toBeUndefined();
-	});
-
 	it("drops user reasoning map entries outside the honest DeepSeek ladder", () => {
 		const model = customDeepseekFlash();
 

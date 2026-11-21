@@ -1,1 +1,16 @@
-Generate a speech audio file from text and write it to output_path. Three backends, selected by the providers.tts setting (auto|local|xai|deepinfra): local = on-device neural TTS (Kokoro-82M via the bundled ONNX runtime, no network, output is always WAV/PCM16; voice set by the tts.localVoice setting — {{localVoices}}); xai = xAI Grok Voice cloud (built-in voices: {{xaiVoices}}; custom voice IDs accepted; MP3 or WAV); deepinfra = DeepInfra speech cloud (MP3 or WAV; voice_id is forwarded only when explicitly set). auto prefers local, but routes an .mp3 request to xAI when credentials exist (only the cloud paths emit MP3); otherwise an .mp3 path is written as a sibling .wav. Cloud codec is inferred from the output_path suffix. Max {{maxLength}} characters.
+Generate a speech audio file from text and write it to output_path.
+
+Models are selected through the speech role and its fallback chain:
+- local-inference: on-device neural TTS (Phonon 31M, native runtime)
+  - no network; always WAV/PCM16
+  - voice set by tts.localVoice — {{localVoices}}
+- xai-tts: xAI Grok Voice; MP3 or WAV
+  - built-in voices: {{xaiVoices}}; custom voice IDs accepted
+- openai-speech: the selected model's compatible cloud endpoint; MP3 or WAV
+  - voice_id is forwarded only when explicitly set
+
+Ordering and output:
+- MP3 request: unconfigured cloud candidates are tried before unconfigured local candidates; explicitly configured speech candidates keep their order.
+- Chain reaches local for a non-WAV path → output is written to the sibling .wav file.
+- Cloud codec is inferred from the output_path suffix.
+- Max {{maxLength}} characters.

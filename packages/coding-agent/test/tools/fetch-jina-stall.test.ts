@@ -134,7 +134,7 @@ describe("renderHtmlToText: Jina response validation", () => {
 		const tempDir = TempDir.createSync("@omp-jina-reader-auth-");
 		try {
 			const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
-			storage.replaceAuthCredentialsForProvider("jina", [{ type: "api_key", key: "stored-jina-key" }]);
+			await storage.replaceAuthCredentials("jina", [{ type: "api_key", key: "stored-jina-key" }]);
 			const settings = Settings.isolated({ "providers.fetch": "jina" });
 			let requestHeaders: Headers | undefined;
 			const markdown = `# Authenticated article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
@@ -158,6 +158,36 @@ describe("renderHtmlToText: Jina response validation", () => {
 		} finally {
 			AgentStorage.close();
 			await tempDir.remove().catch(() => {});
+			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
+			else process.env.JINA_API_KEY = originalApiKey;
+		}
+	});
+
+	it("never calls the keyless reader when providers.webKeyless is off", async () => {
+		const originalApiKey = process.env.JINA_API_KEY;
+		delete process.env.JINA_API_KEY;
+		try {
+			const settings = Settings.isolated({ "providers.fetch": "jina", "providers.webKeyless": false });
+			const article = `<p>${"Substantive article content for the native renderer to keep. ".repeat(8)}</p>`;
+			let jinaRequests = 0;
+			const fetchMock = asGlobalFetch(input => {
+				if (String(input).startsWith("https://r.jina.ai/")) jinaRequests++;
+				return new Response("", { status: 404 });
+			});
+
+			const result = await renderHtmlToText(
+				"https://example.com/article",
+				`<html><body><article><h1>Example</h1>${article}</article></body></html>`,
+				1,
+				settings,
+				undefined,
+				null,
+				fetchMock,
+			);
+
+			expect(jinaRequests).toBe(0);
+			expect(result).toMatchObject({ ok: true, method: "native" });
+		} finally {
 			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
 			else process.env.JINA_API_KEY = originalApiKey;
 		}
@@ -221,4 +251,78 @@ describe("renderHtmlToText: Jina response validation", () => {
 			expect(result.content).toContain("Fallback article");
 		});
 	}
+});
+
+describe("renderHtmlToText: Firecrawl response validation", () => {
+	it("falls back when Firecrawl's own fetch of the page got an error status", async () => {
+		const originalApiKey = process.env.FIRECRAWL_API_KEY;
+		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
+		try {
+			const settings = Settings.isolated({ "providers.fetch": "firecrawl" });
+			const paragraph =
+				"This locally rendered article contains enough meaningful prose to satisfy the shared reader quality gate. ";
+			const html = `<html><body><article><h1>Fallback article</h1><p>${paragraph.repeat(4)}</p></article></body></html>`;
+			const fetchMock = asGlobalFetch(() =>
+				Response.json({
+					success: true,
+					data: {
+						markdown: "The page you were looking for could not be found on this server. ".repeat(3),
+						metadata: { statusCode: 404 },
+					},
+				}),
+			);
+
+			const result = await renderHtmlToText(
+				"https://example.com/article",
+				html,
+				1,
+				settings,
+				undefined,
+				null,
+				fetchMock,
+			);
+
+			expect(result.method).toBe("native");
+			expect(result.content).toContain("Fallback article");
+		} finally {
+			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
+			else process.env.FIRECRAWL_API_KEY = originalApiKey;
+		}
+	});
+
+	it("goes on to the next remote reader when Firecrawl is served a block page", async () => {
+		const originalApiKey = process.env.FIRECRAWL_API_KEY;
+		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
+		try {
+			const markdown = `# Extracted article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
+			const fetchMock = asGlobalFetch(input =>
+				String(input).startsWith("https://r.jina.ai/")
+					? new Response(`Markdown Content:\n${markdown}`)
+					: Response.json({
+							success: true,
+							data: {
+								markdown:
+									"You've been blocked by network security. To continue, log in to your account or use your developer token. If you think you've been blocked by mistake, file a ticket.",
+								metadata: { statusCode: 200 },
+							},
+						}),
+			);
+
+			const result = await renderHtmlToText(
+				"https://example.com/article",
+				"",
+				1,
+				Settings.isolated(),
+				undefined,
+				null,
+				fetchMock,
+				["firecrawl", "jina"],
+			);
+
+			expect(result).toEqual({ content: markdown, ok: true, method: "jina" });
+		} finally {
+			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
+			else process.env.FIRECRAWL_API_KEY = originalApiKey;
+		}
+	});
 });

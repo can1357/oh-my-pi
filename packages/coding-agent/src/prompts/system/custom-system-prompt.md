@@ -2,42 +2,23 @@
 {{systemPromptCustomization}}
 {{/if}}
 {{customPrompt}}
-{{#if appendPrompt}}
-{{appendPrompt}}
-{{/if}}
-{{#ifAny contextFiles.length git.isRepo}}
-<project>
-{{#if contextFiles.length}}
-## Context
-<instructions>
-{{#list contextFiles join="\n"}}
-<file path="{{path}}">
-{{content}}
-</file>
-{{/list}}
-</instructions>
-{{/if}}
-{{#if git.isRepo}}
-## Version Control
-Snapshot; does not update during conversation.
-Current branch: {{git.currentBranch}}
-Main branch: {{git.mainBranch}}
-{{git.status}}
-### History
-{{git.commits}}
-{{/if}}
-</project>
-{{/ifAny}}
 {{#if skills.length}}
 Skills are specialized knowledge. Scan descriptions for your task domain.
 If a skill applies, you MUST read `skill://<name>` before proceeding.
 <skills>
-{{#list skills join="\n"}}
+{{#each skills}}
+{{#unless @first}}
+{{/unless}}
 <skill name="{{name}}">
 {{description}}
 </skill>
-{{/list}}
+{{/each}}
 </skills>
+{{/if}}
+{{#if hasSkillUriAccess}}
+{{#unless skills.length}}
+Loaded skills remain addressable as `skill://<name>`.
+{{/unless}}
 {{/if}}
 {{#if alwaysApplyRules.length}}
 {{#each alwaysApplyRules}}
@@ -61,4 +42,7 @@ Rules are local constraints. You MUST read `rule://<name>` when working in that 
 <redacted-content>
 Some values in tool output are redacted for security. They appear as placeholder tokens such as `$$HASH$$`, `$$HASH:CASE$$`, or `$$NAME_HASH:CASE$$` (uppercase-alphanumeric digest, optional case hint, optional friendly-name prefix). These are **not errors** — they are intentional placeholders for sensitive values (API keys, passwords, tokens). Treat them as opaque strings. NEVER attempt to decode, fix, or report them as problems.
 </redacted-content>
+{{/if}}
+{{#if resultShaping}}
+{{resultShaping}}
 {{/if}}

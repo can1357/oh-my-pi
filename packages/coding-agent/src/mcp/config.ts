@@ -4,13 +4,14 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 
-import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
-import { readDisabledServers, readEnabledServers } from "./config-writer";
-import type { MCPServerConfig } from "./types";
+import { readMCPConfigFile } from "./config-writer";
+import { builtinDropFor, type MCPDroppedServer, type MCPTransformContext } from "./transforms";
+import type { MCPConfigFile, MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
 export interface LoadMCPConfigsOptions {
@@ -22,6 +23,11 @@ export interface LoadMCPConfigsOptions {
 	filterBrowser?: boolean;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
+	/**
+	 * What the session offers natively, so built-in transforms (`./transforms`) can drop
+	 * the servers it makes redundant. Omitted: no built-in transform applies.
+	 */
+	builtinTransforms?: MCPTransformContext;
 }
 
 /** Result of loading MCP configs */
@@ -32,6 +38,8 @@ export interface LoadMCPConfigsResult {
 	exaApiKeys: string[];
 	/** Source metadata for each server */
 	sources: Record<string, SourceMeta>;
+	/** Servers a built-in transform dropped, by name; absent when there are none. */
+	dropped?: Record<string, MCPDroppedServer>;
 }
 
 /**
@@ -44,6 +52,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		enabled: server.enabled,
 		timeout: server.timeout,
 		requestIdFormat: server.requestIdFormat,
+		instructions: server.instructions,
 		auth: server.auth,
 		oauth: server.oauth,
 	};
@@ -106,11 +115,26 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 
 	// Load user-level disable/force-enable lists. The denylist always wins; the
 	// allowlist overrides a non-writable source config's `enabled: false`.
+	// A malformed or unreadable user mcp.json must not take down the whole MCP
+	// stack (docs/mcp-config.md: the file simply contributes no entries): its
+	// servers are already skipped by the mcp-json provider with a warning, so
+	// the lists degrade to empty here instead of rejecting every source.
 	const userPath = getMCPConfigPath("user", cwd);
-	const [disabledServers, forcedEnabled] = await Promise.all([
-		readDisabledServers(userPath).then(list => new Set(list)),
-		readEnabledServers(userPath).then(list => new Set(list)),
-	]);
+	let userConfig: MCPConfigFile;
+	try {
+		const config: unknown = await readMCPConfigFile(userPath);
+		// JSON.parse also accepts bare `null`, numbers, strings, and arrays;
+		// only an object carries the server map and the lists read below.
+		if (config === null || typeof config !== "object" || Array.isArray(config)) {
+			throw new Error("user MCP config must be a JSON object");
+		}
+		userConfig = config as MCPConfigFile;
+	} catch (error) {
+		logger.warn("Ignoring unreadable user MCP config for server lists", { path: userPath, error: String(error) });
+		userConfig = { mcpServers: {} };
+	}
+	const disabledServers = new Set(Array.isArray(userConfig.disabledServers) ? userConfig.disabledServers : []);
+	const forcedEnabled = new Set(Array.isArray(userConfig.enabledServers) ? userConfig.enabledServers : []);
 
 	// Scope exclusions drop entries entirely BEFORE deduplication: with project
 	// config disabled, a project entry must not shadow anything.
@@ -122,10 +146,29 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	// lower-priority user `foo` disabled), but never equivalence-shadow a
 	// differently-named enabled server — otherwise the disabled alias would be
 	// removed downstream and starve the surviving connection.
+	//
+	// A built-in drop suppresses the same way, as if the entry said
+	// `enabled: false`, except that an explicit enable outranks it. Items arrive
+	// highest priority first, so only the first entry of a name is the one that
+	// would have connected; a drop of a later one is not worth reporting.
+	const transformContext = options?.builtinTransforms;
+	const claimed = new Set<string>();
+	let dropped: Record<string, MCPDroppedServer> | undefined;
 	const suppressServer = (server: MCPServer & { _source: SourceMeta }): boolean => {
+		const owner = !claimed.has(server.name);
+		claimed.add(server.name);
 		if (disabledServers.has(server.name)) return true;
-		if (server.enabled === false && !forcedEnabled.has(server.name)) return true;
-		return false;
+		const forced = forcedEnabled.has(server.name);
+		if (server.enabled === false && !forced) return true;
+		if (!transformContext || forced || server.enabled === true) return false;
+		const drop = builtinDropFor(server, transformContext);
+		if (!drop) return false;
+		if (owner) {
+			dropped ??= {};
+			dropped[server.name] = { reason: drop.reason, source: server._source };
+			logger.debug("Built-in MCP transform dropped a server", { server: server.name, transform: drop.id });
+		}
+		return true;
 	};
 
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -134,6 +177,11 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		filter: includeServer,
 		suppress: suppressServer,
 	});
+
+	// Discovery warnings (e.g. a Claude plugin manifest timeout below Claude
+	// Code's 1000ms minimum) must reach the user, not vanish with the
+	// CapabilityResult.
+	for (const warning of result.warnings) logger.warn(warning);
 
 	// Convert to legacy format and preserve source metadata.
 	let configs: Record<string, MCPServerConfig> = {};
@@ -158,7 +206,9 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		sources = browserResult.sources;
 	}
 
-	return { configs, exaApiKeys, sources };
+	const loaded: LoadMCPConfigsResult = { configs, exaApiKeys, sources };
+	if (dropped) loaded.dropped = dropped;
+	return loaded;
 }
 
 /** Pattern to match Exa MCP servers */

@@ -12,13 +12,20 @@
  * Usage: `installInMemoryRelay()` in `beforeAll`/`beforeEach`,
  * `uninstallInMemoryRelay()` in the matching `afterAll`/`afterEach`.
  */
+import { type Mock, spyOn } from "bun:test";
+import * as os from "node:os";
 import { rewriteEnvelopePeer, unpackEnvelope } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { refreshDirsFromEnv, TempDir } from "@oh-my-pi/pi-utils";
 
 /** Active relay the fake transport routes through; set between install/uninstall. */
 let activeRelay: InMemoryRelay | null = null;
 
-/** Pristine constructor captured before any test swaps it. */
+/** Pristine constructor and home directory captured before any test swaps them. */
 const RealWebSocket = globalThis.WebSocket;
+const RealHomedir = os.homedir();
+
+let relayHomeDir: TempDir | null = null;
+let relayHomedirSpy: Mock<typeof os.homedir> | null = null;
 
 export class FakeWebSocket {
 	static readonly CONNECTING = 0;
@@ -27,6 +34,8 @@ export class FakeWebSocket {
 	static readonly CLOSED = 3;
 
 	binaryType = "blob";
+	/** Always 0 unless a test drives it; CollabSocket reads it as its high-water mark. */
+	bufferedAmount = 0;
 	readyState: number = FakeWebSocket.CONNECTING;
 	readonly role: "host" | "guest";
 	peerId = 0;
@@ -35,6 +44,7 @@ export class FakeWebSocket {
 	onerror: (() => void) | null = null;
 	onclose: ((event: { code: number; reason: string }) => void) | null = null;
 	readonly #relay: InMemoryRelay;
+	readonly #pongListeners: Array<() => void> = [];
 
 	constructor(url: string) {
 		const relay = activeRelay;
@@ -52,9 +62,27 @@ export class FakeWebSocket {
 	send(data: Uint8Array): void {
 		if (this.readyState !== FakeWebSocket.OPEN) return;
 		// Snapshot: the relay rewrites the peerId in place, and the sender may
-		// reuse the buffer once send() returns.
+		// reuse the buffer once send() returns. Routing happens now, against the
+		// room as it is at send time, so a frame written just before close() still
+		// reaches peers the close will retire; delivery itself stays asynchronous.
 		const bytes = new Uint8Array(data);
-		queueMicrotask(() => this.#relay.forward(this, bytes));
+		this.#relay.forward(this, bytes);
+	}
+
+	addEventListener(type: string, listener: () => void): void {
+		if (type === "pong") this.#pongListeners.push(listener);
+	}
+
+	/** The relay answers every ping, as a live one does. */
+	ping(): void {
+		if (this.readyState !== FakeWebSocket.OPEN) return;
+		queueMicrotask(() => {
+			for (const listener of this.#pongListeners) listener();
+		});
+	}
+
+	terminate(): void {
+		this.close();
 	}
 
 	close(_code?: number): void {
@@ -62,6 +90,13 @@ export class FakeWebSocket {
 		this.readyState = FakeWebSocket.CLOSED;
 		this.#relay.disconnect(this);
 		queueMicrotask(() => this.onclose?.({ code: 1000, reason: "closed" }));
+	}
+
+	/** Relay-initiated close with a fatal code, as when the room disappears. */
+	closeFatal(): void {
+		if (this.readyState === FakeWebSocket.CLOSED) return;
+		this.readyState = FakeWebSocket.CLOSED;
+		queueMicrotask(() => this.onclose?.({ code: 4001, reason: "room closed" }));
 	}
 
 	/** Relay → this socket: a binary frame, delivered as ArrayBuffer (binaryType "arraybuffer"). */
@@ -111,7 +146,14 @@ export class InMemoryRelay {
 
 	disconnect(ws: FakeWebSocket): void {
 		if (ws.role === "host") {
-			if (this.#host === ws) this.#host = null;
+			if (this.#host !== ws) return;
+			this.#host = null;
+			// Mirrors local-relay.ts: losing the host destroys the room. Every guest
+			// is closed with the fatal 4001, and a reconnecting host gets a fresh
+			// room that issues peer ids from 1 again.
+			for (const guest of this.#guests.values()) guest.closeFatal();
+			this.#guests.clear();
+			this.#nextPeerId = 1;
 			return;
 		}
 		this.#guests.delete(ws.peerId);
@@ -120,21 +162,56 @@ export class InMemoryRelay {
 }
 
 /**
- * Create a fresh relay and route `new WebSocket(...)` through it.
+ * Redirect an unmocked `os.homedir()` / `getConfigRootDir()` into a temporary
+ * directory. Suites that stand up a real `Bun.serve` relay instead of
+ * {@link installInMemoryRelay} call this directly and pair it with
+ * {@link uninstallTestCollabHome}.
+ */
+export function installTestCollabHome(): void {
+	if (os.homedir() === RealHomedir) {
+		relayHomeDir ??= TempDir.createSync("@omp-relay-home-");
+		relayHomedirSpy ??= spyOn(os, "homedir").mockReturnValue(relayHomeDir.path());
+		refreshDirsFromEnv();
+	}
+}
+
+/**
+ * Restore `os.homedir()` and remove any temporary home directory created by
+ * {@link installTestCollabHome} or {@link installInMemoryRelay}.
+ */
+export function uninstallTestCollabHome(): void {
+	const homeDir = relayHomeDir;
+	const homedirSpy = relayHomedirSpy;
+	relayHomeDir = null;
+	relayHomedirSpy = null;
+	if (homedirSpy) {
+		homedirSpy.mockRestore();
+		refreshDirsFromEnv();
+	}
+	homeDir?.removeSync();
+}
+
+/**
+ * Create a fresh relay, isolate `os.homedir()` / `getConfigRootDir()` into a
+ * temporary directory unless the caller already redirected `os.homedir()`, and
+ * route `new WebSocket(...)` through the relay.
  * Pair with {@link uninstallInMemoryRelay} in the matching after-hook.
  */
 export function installInMemoryRelay(): InMemoryRelay {
+	installTestCollabHome();
 	activeRelay = new InMemoryRelay();
 	globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 	return activeRelay;
 }
 
 /**
- * Restore the real WebSocket constructor and drop the active relay. Sockets
- * already constructed keep their own relay reference, so in-flight teardown
- * (e.g. `host.stop()`) still works after uninstall.
+ * Restore the real WebSocket constructor, drop the active relay, and remove
+ * any temporary home directory installed by {@link installInMemoryRelay}.
+ * Stop active `CollabHost` / `CollabGuestLink` instances before calling so IPC
+ * sockets and replica files close before the temporary home is deleted.
  */
 export function uninstallInMemoryRelay(): void {
 	globalThis.WebSocket = RealWebSocket;
 	activeRelay = null;
+	uninstallTestCollabHome();
 }

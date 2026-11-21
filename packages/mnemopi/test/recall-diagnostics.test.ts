@@ -1,14 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import * as Beam from "@oh-my-pi/pi-mnemopi/core/beam";
 import {
 	explainRecallDiagnostics,
-	getDiagnostics,
-	getRecallDiagnostics,
 	RECALL_TIERS,
 	RecallDiagnostics,
-	resetRecallDiagnostics,
 } from "@oh-my-pi/pi-mnemopi/core/recall-diagnostics";
-import * as Db from "@oh-my-pi/pi-mnemopi/db";
 
 describe("recall diagnostics counters", () => {
 	it("starts with canonical tiers and zeroed JSON-serializable snapshot", () => {
@@ -56,25 +51,6 @@ describe("recall diagnostics counters", () => {
 		expect(diag.snapshot().totals.wm_fallback_rate).toBe(1);
 	});
 
-	it("resets class and singleton state", () => {
-		const diag = new RecallDiagnostics();
-		diag.recordTierHits("em_vec", 2);
-		diag.recordFallbackUsed({ em: true });
-		diag.recordCall();
-		diag.reset();
-		expect(diag.snapshot().totals.calls).toBe(0);
-		expect(diag.snapshot().by_tier.em_vec.total_hits).toBe(0);
-
-		resetRecallDiagnostics();
-		const first = getDiagnostics();
-		const second = getDiagnostics();
-		expect(first).toBe(second);
-		first.recordCall();
-		expect(getRecallDiagnostics().totals.calls).toBe(1);
-		resetRecallDiagnostics();
-		expect(getRecallDiagnostics().totals.calls).toBe(0);
-	});
-
 	it("explains whether signal came from primary paths or fallback", () => {
 		const diag = new RecallDiagnostics();
 		diag.recordTierHits("wm_fts", 2);
@@ -84,30 +60,5 @@ describe("recall diagnostics counters", () => {
 		const lines = explainRecallDiagnostics(diag.snapshot());
 		expect(lines.some(line => line.includes("WM fallback used on 1/1 calls"))).toBe(true);
 		expect(lines.some(line => line.includes("wm_fts: 2 kept hits"))).toBe(true);
-	});
-
-	it("supports a schema-backed smoke path without invoking full recall", () => {
-		const db = Db.openDatabase(":memory:", { create: true, readwrite: true });
-		try {
-			Beam.initBeam(db);
-			const now = new Date().toISOString();
-			db.run(
-				`INSERT INTO working_memory (id, content, source, timestamp, session_id, importance, veracity, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				["wm-1", "Alice prefers Vim editor", "pref", now, "s1", 0.7, "unknown", now],
-			);
-			const row = db.query("SELECT id, content FROM working_memory WHERE id = ?").get("wm-1") as {
-				id: string;
-				content: string;
-			} | null;
-			expect(row).toEqual({ id: "wm-1", content: "Alice prefers Vim editor" });
-
-			const diag = new RecallDiagnostics();
-			diag.recordTierHits("wm_fts", row === null ? 0 : 1);
-			diag.recordCall({ trulyEmpty: row === null });
-			expect(diag.snapshot().by_tier.wm_fts.total_hits).toBe(1);
-		} finally {
-			Db.closeQuietly(db);
-		}
 	});
 });

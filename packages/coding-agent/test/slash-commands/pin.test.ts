@@ -57,6 +57,7 @@ function createRuntime(activeSessionId?: string, cwd = tempDir, sessionDir = tem
 				getSessionDir: () => sessionDir,
 				getSessionId: () => activeSessionId ?? "",
 			},
+			applySessionPin: vi.fn(),
 		} as unknown as InteractiveModeContext,
 	};
 }
@@ -109,5 +110,20 @@ describe("/pin slash command", () => {
 		const handled = await executeBuiltinSlashCommand("/pin nonexistent-session-xyz", runtime);
 		expect(handled).toBe(true);
 		expect(runtime.showStatus).toHaveBeenCalledWith('Session "nonexistent-session-xyz" not found.');
+	});
+});
+
+describe("/unpin slash command", () => {
+	it("unpins a pinned session and reports when there was nothing to unpin", async () => {
+		const activeId = "active-session-unpin";
+		const runtime = createRuntime(activeId);
+		await executeBuiltinSlashCommand("/pin", runtime);
+
+		expect(await executeBuiltinSlashCommand("/unpin", runtime)).toBe(true);
+		expect(runtime.showStatus).toHaveBeenLastCalledWith("Session unpinned.");
+		expect((await loadPinnedSessionIds(path.join(tempDir, "agent"))).has(activeId)).toBe(false);
+
+		await executeBuiltinSlashCommand("/unpin", runtime);
+		expect(runtime.showStatus).toHaveBeenLastCalledWith("Session is not pinned.");
 	});
 });

@@ -126,10 +126,10 @@ export class StreamMarkupHealing {
 	}
 
 	/**
-	 * Flush held-back stream-end fragments as ordered events. Partial tool-call
-	 * sections/envelopes are dropped by the delegated scanners; unterminated
-	 * thinking blocks are emitted as thinking, matching the previous MiniMax parser
-	 * behavior.
+	 * Flush held-back stream-end fragments as ordered events. Partial tool calls
+	 * are dropped by the delegated scanners; a DSML wrapper without an invoke
+	 * remains visible for agent-layer leak recovery. Unterminated thinking blocks
+	 * are emitted as thinking.
 	 */
 	flushEvents(): StreamMarkupHealingEvent[] {
 		const tail = this.#toolScanner ? this.#healThinking(this.#toolScanner.flush()) : [];

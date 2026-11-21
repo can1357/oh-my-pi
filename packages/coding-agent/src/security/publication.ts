@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { ToolDefinition } from "../extensibility/extensions";
 import securityPublishDescription from "../prompts/tools/security-publish.md" with { type: "text" };
@@ -80,9 +82,20 @@ export const securityPublishSchema = type({
 
 export type SecurityPublishParams = typeof securityPublishSchema.infer;
 
+export type SecurityFindingDropReason = "path_absent" | "line_out_of_range";
+
+export interface DroppedSecurityFinding {
+	ruleId: string;
+	title: string;
+	path: string;
+	startLine: number;
+	reason: SecurityFindingDropReason;
+}
+
 export interface SecurityPublishDetails {
 	scanId: string;
 	findingCount: number;
+	droppedFindings: DroppedSecurityFinding[];
 	status: "completed";
 }
 
@@ -93,6 +106,13 @@ export interface SecurityPublicationOptions {
 	startedAt: string;
 	sessionId?: string;
 	operationId?: string;
+	/**
+	 * Root directory used to verify that cited locations resolve to real files
+	 * and lines. Defaults to `plan.repositoryRoot`. `ref_diff` scans must pass
+	 * the detached worktree the review session actually read, because their
+	 * findings cite paths and line numbers as they exist at the head revision.
+	 */
+	resolutionRoot?: string;
 	onPublished?: (bundle: SecurityScanBundle) => void | Promise<void>;
 }
 
@@ -127,6 +147,65 @@ function toLocation(
 	if (input.end_column !== undefined) location.endColumn = input.end_column;
 	if (input.role !== undefined) location.role = input.role;
 	return location;
+}
+
+async function countResolvedFileLines(absolutePath: string): Promise<number | null> {
+	let text: string;
+	try {
+		const stats = await fs.stat(absolutePath);
+		if (!stats.isFile()) return null;
+		text = await fs.readFile(absolutePath, "utf8");
+	} catch {
+		return null;
+	}
+	if (text.length === 0) return 0;
+	const segments = text.split("\n").length;
+	return text.endsWith("\n") ? segments - 1 : segments;
+}
+
+function citedLocationsOf(
+	input: SecurityPublishParams["findings"][number],
+): SecurityPublishParams["findings"][number]["locations"] {
+	const locations = [...input.locations];
+	for (const item of input.evidence ?? []) {
+		if (item.location !== undefined) locations.push(item.location);
+	}
+	return locations;
+}
+
+async function findUnresolvableLocation(
+	input: SecurityPublishParams["findings"][number],
+	resolutionRoot: string,
+	lineCounts: Map<string, number | null>,
+): Promise<DroppedSecurityFinding | undefined> {
+	for (const location of citedLocationsOf(input)) {
+		const normalizedPath = normalizePublishedPath(location.path);
+		let lineCount = lineCounts.get(normalizedPath);
+		if (lineCount === undefined) {
+			lineCount = await countResolvedFileLines(path.join(resolutionRoot, normalizedPath));
+			lineCounts.set(normalizedPath, lineCount);
+		}
+		if (lineCount === null) {
+			return {
+				ruleId: input.rule_id,
+				title: input.title,
+				path: normalizedPath,
+				startLine: location.start_line,
+				reason: "path_absent",
+			};
+		}
+		const lastCitedLine = Math.max(location.start_line, location.end_line ?? location.start_line);
+		if (lastCitedLine > lineCount) {
+			return {
+				ruleId: input.rule_id,
+				title: input.title,
+				path: normalizedPath,
+				startLine: location.start_line,
+				reason: "line_out_of_range",
+			};
+		}
+	}
+	return undefined;
 }
 
 function coverageMode(plan: SecurityScanPlan): SecurityCoverage["mode"] {
@@ -267,8 +346,20 @@ export function createSecurityPublicationTool(
 			let persisted = false;
 			try {
 				const completedAt = new Date().toISOString();
-				const findingsByFingerprint = new Map<string, SecurityFinding>();
+				const resolutionRoot = options.resolutionRoot ?? options.plan.repositoryRoot;
+				const lineCounts = new Map<string, number | null>();
+				const droppedFindings: DroppedSecurityFinding[] = [];
+				const groundedInputs: SecurityPublishParams["findings"] = [];
 				for (const input of params.findings) {
+					const dropped = await findUnresolvableLocation(input, resolutionRoot, lineCounts);
+					if (dropped) {
+						droppedFindings.push(dropped);
+						continue;
+					}
+					groundedInputs.push(input);
+				}
+				const findingsByFingerprint = new Map<string, SecurityFinding>();
+				for (const input of groundedInputs) {
 					const finding = buildFinding(input, options, completedAt);
 					if (!findingsByFingerprint.has(finding.fingerprint)) {
 						findingsByFingerprint.set(finding.fingerprint, finding);
@@ -308,14 +399,21 @@ export function createSecurityPublicationTool(
 				await options.store.putBundle(bundle);
 				persisted = true;
 				await options.onPublished?.(bundle);
+				const lines = [`Published security scan ${options.scanId} with ${findings.length} finding(s).`];
+				if (droppedFindings.length > 0) {
+					lines.push(
+						`Withheld ${droppedFindings.length} finding(s) whose cited locations could not be resolved:`,
+						...droppedFindings.map(item => `- ${item.ruleId}: ${item.path}:${item.startLine} (${item.reason})`),
+					);
+				}
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Published security scan ${options.scanId} with ${findings.length} finding(s).`,
+							text: lines.join("\n"),
 						},
 					],
-					details: { scanId: options.scanId, findingCount: findings.length, status: "completed" },
+					details: { scanId: options.scanId, findingCount: findings.length, droppedFindings, status: "completed" },
 				};
 			} catch (error) {
 				if (!persisted) published = false;

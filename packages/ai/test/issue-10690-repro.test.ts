@@ -4,8 +4,10 @@ import {
 	convertResponsesAssistantMessage,
 	SYNTHETIC_REASONING_REPLAY_PLACEHOLDER,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Issue #10690: follow-up to #8248. The Responses reasoning synthesizer replays a
@@ -168,5 +170,115 @@ describe("issue #10690: DeepSeek Responses replay must never synthesize empty re
 		const reasoning = reasoningItems(payload);
 		expect(reasoning).toHaveLength(1);
 		expect(reasoningTextOf(reasoning[0]!)).toBe("Inspect bar.ts before editing.");
+	});
+
+	it("fills the required item with another model's demoted thinking instead of the placeholder", async () => {
+		// After a model switch, every prior turn's foreign thinking is demoted to
+		// text. A placeholder in each required item became a few-shot pattern:
+		// DeepSeek and Kimi echoed "reasoning unavailable" as their own reasoning.
+		const prior: AssistantMessage = {
+			role: "assistant",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-opus-4-5",
+			stopReason: "toolUse",
+			usage,
+			content: [
+				{ type: "thinking", thinking: "Inspect bar.ts before editing.", thinkingSignature: "sig_anthropic" },
+				{ type: "toolCall", id: "toolu_read", name: "read", arguments: { path: "bar.ts" } },
+			],
+			timestamp: Date.now(),
+		};
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Edit bar", timestamp: Date.now() },
+				prior,
+				{
+					role: "toolResult",
+					toolCallId: "toolu_read",
+					toolName: "read",
+					content: [{ type: "text", text: "contents" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const payload = await capture(deepseek, context);
+		const reasoning = reasoningItems(payload);
+		expect(reasoning).toHaveLength(1);
+		expect(reasoningTextOf(reasoning[0]!)).toBe("Inspect bar.ts before editing.");
+	});
+
+	it("adds required reasoning before native history from a custom DeepSeek Responses model", async () => {
+		const customDeepseek = buildModel({
+			id: "deepseek-flash",
+			name: "DeepSeek Flash",
+			api: "openai-responses",
+			provider: "custom-deepseek",
+			baseUrl: "https://api.deepseek.com",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.High },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_000,
+		});
+		const prior: AssistantMessage = {
+			role: "assistant",
+			api: customDeepseek.api,
+			provider: customDeepseek.provider,
+			model: customDeepseek.id,
+			stopReason: "stop",
+			usage,
+			content: [{ type: "text", text: "Done." }],
+			providerPayload: createOpenAIResponsesHistoryPayload(
+				customDeepseek.provider,
+				[
+					{ role: "user", content: [{ type: "input_text", text: "Inspect and edit." }] },
+					{
+						type: "message",
+						role: "assistant",
+						content: [{ type: "output_text", text: "Inspecting." }],
+						status: "completed",
+					},
+					{ type: "function_call", call_id: "call_read", name: "read", arguments: "{}" },
+					{ type: "function_call_output", call_id: "call_read", output: "contents" },
+					{
+						type: "message",
+						role: "assistant",
+						content: [{ type: "output_text", text: "Edited." }],
+						status: "completed",
+					},
+				],
+				false,
+			),
+			timestamp: Date.now(),
+		};
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Edit bar", timestamp: Date.now() },
+				prior,
+				{ role: "user", content: "Run the tests", timestamp: Date.now() },
+			],
+		};
+
+		const payload = await capture(customDeepseek, context);
+		const input = payload.input ?? [];
+		const reasoning = reasoningItems(payload);
+		expect(reasoning).toHaveLength(2);
+		for (const item of reasoning) {
+			expect(reasoningTextOf(item)).toBe(SYNTHETIC_REASONING_REPLAY_PLACEHOLDER);
+		}
+		expect(input.map(item => item.type ?? item.role)).toEqual([
+			"user",
+			"reasoning",
+			"message",
+			"function_call",
+			"function_call_output",
+			"reasoning",
+			"message",
+			"user",
+		]);
 	});
 });

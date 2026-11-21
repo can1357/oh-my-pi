@@ -1,0 +1,249 @@
+{
+	"Type": "File",
+	"Pos": {
+		"Offset": 0,
+		"Line": 1,
+		"Col": 1
+	},
+	"End": {
+		"Offset": 11,
+		"Line": 1,
+		"Col": 12
+	},
+	"Stmts": [
+		{
+			"Pos": {
+				"Offset": 0,
+				"Line": 1,
+				"Col": 1
+			},
+			"End": {
+				"Offset": 7,
+				"Line": 1,
+				"Col": 8
+			},
+			"Cmd": {
+				"Type": "Block",
+				"Pos": {
+					"Offset": 0,
+					"Line": 1,
+					"Col": 1
+				},
+				"End": {
+					"Offset": 6,
+					"Line": 1,
+					"Col": 7
+				},
+				"Lbrace": {
+					"Offset": 0,
+					"Line": 1,
+					"Col": 1
+				},
+				"Rbrace": {
+					"Offset": 5,
+					"Line": 1,
+					"Col": 6
+				},
+				"Stmts": [
+					{
+						"Pos": {
+							"Offset": 2,
+							"Line": 1,
+							"Col": 3
+						},
+						"End": {
+							"Offset": 4,
+							"Line": 1,
+							"Col": 5
+						},
+						"Cmd": {
+							"Type": "CallExpr",
+							"Pos": {
+								"Offset": 2,
+								"Line": 1,
+								"Col": 3
+							},
+							"End": {
+								"Offset": 3,
+								"Line": 1,
+								"Col": 4
+							},
+							"Args": [
+								{
+									"Pos": {
+										"Offset": 2,
+										"Line": 1,
+										"Col": 3
+									},
+									"End": {
+										"Offset": 3,
+										"Line": 1,
+										"Col": 4
+									},
+									"Parts": [
+										{
+											"Type": "Lit",
+											"Pos": {
+												"Offset": 2,
+												"Line": 1,
+												"Col": 3
+											},
+											"End": {
+												"Offset": 3,
+												"Line": 1,
+												"Col": 4
+											},
+											"ValuePos": {
+												"Offset": 2,
+												"Line": 1,
+												"Col": 3
+											},
+											"ValueEnd": {
+												"Offset": 3,
+												"Line": 1,
+												"Col": 4
+											},
+											"Value": "a"
+										}
+									]
+								}
+							]
+						},
+						"Position": {
+							"Offset": 2,
+							"Line": 1,
+							"Col": 3
+						},
+						"Semicolon": {
+							"Offset": 3,
+							"Line": 1,
+							"Col": 4
+						}
+					}
+				]
+			},
+			"Position": {
+				"Offset": 0,
+				"Line": 1,
+				"Col": 1
+			},
+			"Semicolon": {
+				"Offset": 6,
+				"Line": 1,
+				"Col": 7
+			}
+		},
+		{
+			"Pos": {
+				"Offset": 8,
+				"Line": 1,
+				"Col": 9
+			},
+			"End": {
+				"Offset": 11,
+				"Line": 1,
+				"Col": 12
+			},
+			"Cmd": {
+				"Type": "Subshell",
+				"Pos": {
+					"Offset": 8,
+					"Line": 1,
+					"Col": 9
+				},
+				"End": {
+					"Offset": 11,
+					"Line": 1,
+					"Col": 12
+				},
+				"Lparen": {
+					"Offset": 8,
+					"Line": 1,
+					"Col": 9
+				},
+				"Rparen": {
+					"Offset": 10,
+					"Line": 1,
+					"Col": 11
+				},
+				"Stmts": [
+					{
+						"Pos": {
+							"Offset": 9,
+							"Line": 1,
+							"Col": 10
+						},
+						"End": {
+							"Offset": 10,
+							"Line": 1,
+							"Col": 11
+						},
+						"Cmd": {
+							"Type": "CallExpr",
+							"Pos": {
+								"Offset": 9,
+								"Line": 1,
+								"Col": 10
+							},
+							"End": {
+								"Offset": 10,
+								"Line": 1,
+								"Col": 11
+							},
+							"Args": [
+								{
+									"Pos": {
+										"Offset": 9,
+										"Line": 1,
+										"Col": 10
+									},
+									"End": {
+										"Offset": 10,
+										"Line": 1,
+										"Col": 11
+									},
+									"Parts": [
+										{
+											"Type": "Lit",
+											"Pos": {
+												"Offset": 9,
+												"Line": 1,
+												"Col": 10
+											},
+											"End": {
+												"Offset": 10,
+												"Line": 1,
+												"Col": 11
+											},
+											"ValuePos": {
+												"Offset": 9,
+												"Line": 1,
+												"Col": 10
+											},
+											"ValueEnd": {
+												"Offset": 10,
+												"Line": 1,
+												"Col": 11
+											},
+											"Value": "b"
+										}
+									]
+								}
+							]
+						},
+						"Position": {
+							"Offset": 9,
+							"Line": 1,
+							"Col": 10
+						}
+					}
+				]
+			},
+			"Position": {
+				"Offset": 8,
+				"Line": 1,
+				"Col": 9
+			}
+		}
+	]
+}

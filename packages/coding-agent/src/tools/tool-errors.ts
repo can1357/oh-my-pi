@@ -5,24 +5,7 @@
  * The agent loop catches and renders them appropriately.
  */
 
-/**
- * Base error for tool execution failures.
- * Override render() for custom LLM-facing formatting.
- */
-export class ToolError extends Error {
-	constructor(
-		message: string,
-		readonly context?: Record<string, unknown>,
-	) {
-		super(message);
-		this.name = "ToolError";
-	}
-
-	/** Render error for LLM consumption. Override for custom formatting. */
-	render(): string {
-		return this.message;
-	}
-}
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /**
  * Error thrown when a tool operation is aborted (e.g., via AbortSignal).
@@ -59,4 +42,27 @@ export function renderError(e: unknown): string {
 		return e.message;
 	}
 	return String(e);
+}
+
+/** Clone-safe error metadata a tool worker sends back across the worker boundary. */
+export interface WorkerErrorPayload {
+	name: string;
+	message: string;
+	stack?: string;
+	isToolError: boolean;
+	isAbort: boolean;
+}
+
+/** Serialize a thrown value into {@link WorkerErrorPayload} for a worker `tool-reply`. */
+export function toWorkerErrorPayload(error: unknown): WorkerErrorPayload {
+	if (error instanceof Error) {
+		return {
+			name: error.name,
+			message: error.message,
+			stack: error.stack,
+			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
+			isToolError: error instanceof ToolError || error.name === "ToolError",
+		};
+	}
+	return { name: "Error", message: String(error), isAbort: false, isToolError: false };
 }

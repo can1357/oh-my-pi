@@ -7,10 +7,12 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CopySelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/copy-selector";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { CopySelectorComponent, type CopyPickSource, turnPreview } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import type { OutlineTarget } from "@oh-my-pi/pi-tui/chat/transcript-outline";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
@@ -64,6 +66,97 @@ function makeEntries(assistantText = ASSISTANT_TEXT): SessionMessageEntry[] {
 }
 
 const GROUPED_READ_YIELD = "The write landed; here is the yield.";
+
+const REPLY_FENCE = "flux reconcile kustomization apps";
+const REPLY_TEXT = `DEVX-1468 status:\n\nnongprod branch created.\n\n\`\`\`sh\n${REPLY_FENCE}\n\`\`\``;
+const REPLY_PLACEHOLDER = "Shown to the user.";
+const INTRO_TEXT = "Checking the branches now.";
+const TASK_RESULT = "Spawned 2 background agents using reviewer.\n- `StandardsReview` (job `StandardsReview`)";
+
+/**
+ * user → assistant(`write out://` reply + task call) → both results. The reply
+ * draws as assistant prose in the transcript, so the turn copies as prose.
+ */
+function makeReplyTurnEntries(): SessionMessageEntry[] {
+	return [
+		entry("u-r", null, { role: "user", content: "status?", timestamp: 1 } as AgentMessage),
+		entry("a-r", "u-r", {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: "reply-1", name: "write", arguments: { path: "out://", content: REPLY_TEXT } },
+				{ type: "toolCall", id: "task-1", name: "task", arguments: { tasks: [] } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 2,
+		} as unknown as AgentMessage),
+		entry("t-reply", "a-r", {
+			role: "toolResult",
+			toolCallId: "reply-1",
+			toolName: "write",
+			content: [{ type: "text", text: REPLY_PLACEHOLDER }],
+			isError: false,
+			timestamp: 3,
+		} as unknown as AgentMessage),
+		entry("t-task", "a-r", {
+			role: "toolResult",
+			toolCallId: "task-1",
+			toolName: "task",
+			content: [{ type: "text", text: TASK_RESULT }],
+			isError: false,
+			timestamp: 4,
+		} as unknown as AgentMessage),
+	];
+}
+
+/**
+ * user → assistant(bash call, plus `intro` text when given) → bash result carrying the `> out://`
+ * reply in its `details.replies`.
+ */
+function makeBashReplyEntries(options: { intro?: string; replies?: readonly string[] } = {}): SessionMessageEntry[] {
+	return [
+		entry("u-b", null, { role: "user", content: "status?", timestamp: 1 } as AgentMessage),
+		entry("a-b", "u-b", {
+			role: "assistant",
+			content: [
+				...(options.intro === undefined ? [] : [{ type: "text" as const, text: options.intro }]),
+				{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "printf '%s' x > out://" } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 2,
+		} as unknown as AgentMessage),
+		entry("t-bash", "a-b", {
+			role: "toolResult",
+			toolCallId: "bash-1",
+			toolName: "bash",
+			content: [{ type: "text", text: "12 pass" }],
+			details: options.replies === undefined ? undefined : { replies: [...options.replies] },
+			isError: false,
+			timestamp: 3,
+		} as unknown as AgentMessage),
+	];
+}
 
 /** user → assistant(yield + write + two filesystem reads) → write result → two read results. */
 function makeGroupedReadEntries(): SessionMessageEntry[] {
@@ -128,12 +221,16 @@ function makeSelector(
 	onCancel = () => {},
 	opens?: Array<{ href: string; label: string }>,
 	entries: SessionMessageEntry[] = makeEntries(),
+	sources?: CopyPickSource[],
 ): CopySelectorComponent {
 	return new CopySelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
-		onPick: (content, label) => picks.push({ content, label }),
+		onPick: (content, label, source) => {
+			picks.push({ content, label });
+			sources?.push(source);
+		},
 		onOpen: opens ? (href, label) => opens.push({ href, label }) : undefined,
 		onCancel,
 	});
@@ -152,17 +249,64 @@ describe("CopySelectorComponent", () => {
 		resetSettingsForTest();
 	});
 
-	it("copies the outlined turn's prose on Enter", () => {
+	it("keeps whole-turn picks exact and ties them to the native transcript entries", () => {
+		const entries = makeEntries();
 		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
+		const sources: CopyPickSource[] = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries, sources);
 		selector.render(100);
 
 		selector.handleInput(ENTER);
+		selector.handleInput(UP);
+		selector.handleInput(ENTER);
 		selector.dispose();
 
-		// The newest item is the assistant turn (bash result folded into it);
-		// its item-level copy is the assistant prose, not tool noise.
-		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
+		expect(picks).toEqual([
+			{ content: ASSISTANT_TEXT, label: "assistant message" },
+			{ content: "fix the logging", label: "user message" },
+		]);
+		expect(sources).toEqual([{ entry: entries[1] }, { entry: entries[0] }]);
+	});
+
+	it("keeps block content and metadata exact while retaining each block's source entry", () => {
+		const quote = "quoted first line\nquoted second line";
+		const assistantText = `${ASSISTANT_TEXT}\n> ${quote.replace("\n", "\n> ")}`;
+		const entries = makeEntries(assistantText);
+		const assistantEntry = entries[1]!;
+		const toolResultEntry = entries[2]!;
+		const picks: Array<{ content: string; label: string }> = [];
+		const sources: CopyPickSource[] = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries, sources);
+		selector.render(100);
+		selector.handleInput(RIGHT);
+
+		for (let index = 0; index < 5; index++) {
+			selector.handleInput(ENTER);
+			if (index < 4) selector.handleInput("\x1b[B");
+		}
+		selector.dispose();
+
+		expect(picks).toEqual([
+			{ content: CODE, label: "ts code" },
+			{ content: quote, label: "quote" },
+			{ content: LINK, label: `link${theme.sep.dot}the PR` },
+			{ content: "bun test", label: "bash command" },
+			{ content: "12 pass", label: "bash result" },
+		]);
+		expect(sources.map(source => source.entry)).toEqual([
+			assistantEntry,
+			assistantEntry,
+			assistantEntry,
+			assistantEntry,
+			toolResultEntry,
+		]);
+		expect(sources.map(source => source.block)).toEqual([
+			{ content: CODE, label: "ts code", entry: assistantEntry, language: "ts", kind: "code" },
+			{ content: quote, label: "quote", entry: assistantEntry, kind: "quote" },
+			{ content: LINK, label: `link${theme.sep.dot}the PR`, entry: assistantEntry, href: LINK },
+			{ content: "bun test", label: "bash command", entry: assistantEntry, language: "bash", kind: "command" },
+			{ content: "12 pass", label: "bash result", entry: toolResultEntry },
+		]);
 	});
 
 	it("folds lazily created grouped reads into the assistant turn so Enter copies the yield", () => {
@@ -183,40 +327,89 @@ describe("CopySelectorComponent", () => {
 		expect(picks).toEqual([{ content: GROUPED_READ_YIELD, label: "assistant message" }]);
 	});
 
-	it("descends into inner blocks with Right and copies the block verbatim", () => {
+	it("copies a turn whose prose is an out:// reply, not its placeholder result", () => {
 		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
+		const selector = makeSelector(picks, () => {}, undefined, makeReplyTurnEntries());
 		selector.render(100);
 
+		// Blocks: the reply's own fence, then the task result. The write's result is
+		// a placeholder the transcript never draws, so it must not surface either.
 		selector.handleInput(RIGHT);
+		for (let index = 0; index < 2; index++) {
+			selector.handleInput(ENTER);
+			if (index < 1) selector.handleInput("\x1b[B");
+		}
+		selector.handleInput(LEFT);
 		selector.handleInput(ENTER);
 		selector.dispose();
 
-		// First block of the turn is the fenced code — copied without fences.
-		expect(picks).toEqual([{ content: CODE, label: "ts code" }]);
+		expect(picks).toEqual([
+			{ content: REPLY_FENCE, label: "sh code" },
+			{ content: TASK_RESULT, label: "task result" },
+			{ content: REPLY_TEXT, label: "assistant message" },
+		]);
 	});
 
-	it("steps through command and tool-output blocks of the same turn", () => {
+	it("copies the reply a command sent through out:// after the turn's own text", () => {
 		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
+		const selector = makeSelector(
+			picks,
+			() => {},
+			undefined,
+			makeBashReplyEntries({ intro: INTRO_TEXT, replies: [REPLY_TEXT] }),
+		);
 		selector.render(100);
-
-		selector.handleInput(RIGHT);
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
-		selector.handleInput(ENTER);
-		selector.handleInput(RIGHT);
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
 		selector.handleInput(ENTER);
 		selector.dispose();
 
-		// Block order within the turn: code fence, link, bash command, bash result.
-		expect(picks).toEqual([
-			{ content: "bun test", label: "bash command" },
-			{ content: "12 pass", label: "bash result" },
-		]);
+		expect(picks).toEqual([{ content: `${INTRO_TEXT}\n\n${REPLY_TEXT}`, label: "assistant message" }]);
+	});
+
+	it("keeps adjacent assistant text blocks concatenated verbatim", () => {
+		const entries = makeEntries();
+		entries[1] = entry("a1", "u1", {
+			...(entries[1]!.message as unknown as Record<string, unknown>),
+			content: [
+				{ type: "text", text: "hello " },
+				{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "bun test" } },
+				{ type: "text", text: "world" },
+			],
+		} as unknown as AgentMessage);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries);
+		selector.render(100);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: "hello world", label: "assistant message" }]);
+	});
+
+	it("separates a reply write from the text on either side of it", () => {
+		const entries = makeReplyTurnEntries();
+		entries[1] = entry("a-r", "u-r", {
+			...(entries[1]!.message as unknown as Record<string, unknown>),
+			content: [
+				{ type: "text", text: "Intro." },
+				{ type: "toolCall", id: "reply-1", name: "write", arguments: { path: "out://", content: REPLY_TEXT } },
+				{ type: "text", text: "Done." },
+			],
+		} as unknown as AgentMessage);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries);
+		selector.render(100);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: `Intro.\n\n${REPLY_TEXT}\n\nDone.`, label: "assistant message" }]);
+	});
+
+	it("previews a command reply as markdown, like the transcript draws it", () => {
+		// No assistant text at all: the reply in the result is the turn's only prose.
+		const replied = { entries: makeBashReplyEntries({ replies: [REPLY_TEXT] }).slice(1) } as unknown as OutlineTarget;
+		expect(turnPreview(replied, `${REPLY_TEXT}\n\n12 pass`).k).toBe("md");
+		// A turn with no prose at all keeps its joined commands/results as plain output.
+		const bare = { entries: makeBashReplyEntries().slice(1) } as unknown as OutlineTarget;
+		expect(turnPreview(bare, "12 pass").k).toBe("code");
 	});
 
 	it("lists the turn's links as blocks after code and commands; Enter copies the URL, o opens it", () => {
@@ -367,23 +560,9 @@ describe("CopySelectorComponent", () => {
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
 
-	it("Left/Up navigate: user prompt copies its raw text", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
-		selector.render(100);
-
-		selector.handleInput(UP);
-		selector.handleInput(ENTER);
-		selector.dispose();
-
-		expect(picks).toEqual([{ content: "fix the logging", label: "user message" }]);
-	});
-
 	it("renders the descended block stack with captions and dotted outline", () => {
 		const selector = makeSelector([]);
-		const itemView = selector.render(100).map(line => Bun.stripANSI(line));
-		// The outline advertises the descent affordance before Right is pressed.
-		expect(itemView.join("\n")).toContain("4 blocks →");
+		selector.render(100);
 		selector.handleInput(RIGHT);
 		const lines = selector.render(100).map(line => Bun.stripANSI(line));
 		selector.handleInput(LEFT);
@@ -480,6 +659,20 @@ describe("CopySelectorComponent", () => {
 
 			selector.handleInput(ENTER);
 			expect(picks).toEqual([{ content: "prompt 897", label: "user message" }]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("steps Up past the oldest replayed turn into the earlier history", () => {
+		const entries = promptChain(900);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = pickerOver(entries, picks);
+		try {
+			selector.render(100);
+			for (let index = entries.length; index > 0; index--) selector.handleInput(UP);
+			selector.handleInput(ENTER);
+			expect(picks).toEqual([{ content: "prompt 0", label: "user message" }]);
 		} finally {
 			selector.dispose();
 		}

@@ -93,6 +93,8 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 	#verifier = "";
 	#clientId?: string;
 	#clientSecret?: string;
+	#base?: string;
+	#auth?: string;
 
 	constructor(
 		ctrl: OAuthController,
@@ -123,6 +125,8 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 		const signal = this.ctrl.signal;
 		this.#clientId = rule.clientId ? await resolveValue(rule.clientId, signal) : undefined;
 		this.#clientSecret = rule.clientSecret ? await resolveValue(rule.clientSecret, signal) : undefined;
+		this.#base = rule.baseUrl ? (await resolveValue(rule.baseUrl, signal)).replace(/\/+$/, "") : undefined;
+		this.#auth = rule.authUrl ? (await resolveValue(rule.authUrl, signal)).replace(/\/+$/, "") : undefined;
 		let challenge: string | undefined;
 		if (rule.pkce) {
 			const pkce = await generatePKCE();
@@ -136,6 +140,8 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 			scope,
 			state,
 			code_challenge: challenge,
+			base: this.#base,
+			auth: this.#auth,
 		};
 		const params = new URLSearchParams();
 		if (rule.standardAuthorizeParams) {
@@ -150,7 +156,7 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 			if (state) params.set("state", state);
 		}
 		for (const key in rule.authorizeParams) params.set(key, template(rule.authorizeParams[key], vars));
-		const authorizeUrl = await resolveValue(rule.authorizeUrl, signal);
+		const authorizeUrl = template(await resolveValue(rule.authorizeUrl, signal), vars);
 		return { url: `${authorizeUrl}?${params.toString()}`, instructions: rule.instructions };
 	}
 
@@ -185,6 +191,8 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 			code_verifier: rule.pkce ? this.#verifier : undefined,
 			client_id: this.#clientId,
 			client_secret: this.#clientSecret,
+			base: this.#base,
+			auth: this.#auth,
 		};
 		const context = { provider: this.#provider, fetch: this.#fetch, signal };
 		const { body } = await postTokenRequest(
@@ -203,7 +211,7 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 		);
 		throwIfCancelled(signal);
 		let credentials = mapCredentials(rule.credential, body, this.#provider);
-		credentials = await applyUserinfo(rule.userinfo, credentials, context);
+		credentials = await applyUserinfo(rule.userinfo, credentials, context, vars);
 		throwIfCancelled(signal);
 		return applyAfterExchange(rule.afterExchange, credentials, {
 			provider: this.#provider,

@@ -1,18 +1,18 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ThinkingContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const recordToolSchema = type({ value: type("string") });
 
@@ -20,12 +20,12 @@ type Harness = {
 	session: AgentSession;
 	tempDir: TempDir;
 };
-type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
+type SettingsOverrides = Record<string, unknown>;
 
 const activeHarnesses: Harness[] = [];
 const sharedDir = TempDir.createSync("@pi-empty-stop-guard-shared-");
 const sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
-sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+sharedAuthStorage.keys.setRuntime("mock", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 
 afterAll(() => {
@@ -61,22 +61,11 @@ function emptyStop(): MockResponse {
 	};
 }
 
-// A zero-block `stop` for which the provider still billed output tokens: content
-// was generated and dropped downstream (e.g. a filter/refusal flattened to
-// `finish_reason: "stop"` by a proxy), so the context/`/shake images` hint is wrong.
-function filteredEmptyStop(): MockResponse {
+function reportedOutputEmptyStop(reasoningTokens?: number): MockResponse {
 	return {
 		content: [],
 		stopReason: "stop",
-		usage: { output: 126, cacheRead: 100 },
-	};
-}
-
-function reasoningOnlyEmptyStop(): MockResponse {
-	return {
-		content: [],
-		stopReason: "stop",
-		usage: { output: 126, reasoningTokens: 126, cacheRead: 100 },
+		usage: { output: 126, cacheRead: 100, ...(reasoningTokens === undefined ? {} : { reasoningTokens }) },
 	};
 }
 
@@ -127,7 +116,7 @@ async function createHarness(
 	const authStorage = sharedAuthStorage;
 
 	const mock = createMockModel({ provider: options.provider, id: options.id, responses });
-	authStorage.setRuntimeApiKey(mock.provider, "test-key");
+	authStorage.keys.setRuntime(mock.provider, "test-key");
 	const modelRegistry = sharedModelRegistry;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
@@ -294,7 +283,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("caps provider-empty recovery without consuming generic retries and accepts the next prompt", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[emptyProviderResponse(), emptyProviderResponse(), emptyProviderResponse(), emptyProviderResponse()],
 			{
@@ -337,11 +326,13 @@ describe("AgentSession empty stop guard", () => {
 		expect(assistantText(session.agent.state.messages)).toContain("fresh final answer");
 	});
 
-	it("accepts a signed thinking-only stop without retrying", async () => {
-		const { session, mock } = await createHarness([
-			signedThinkingOnlyStop(),
-			{ content: ["must not be requested"], stopReason: "stop" },
-		]);
+	it("keeps a signed thinking-only stop instead of discarding it as empty", async () => {
+		// Unexpected-stop recovery owns signed thinking-only stops; disable it so
+		// only the empty-stop guard decides the turn.
+		const { session, mock } = await createHarness(
+			[signedThinkingOnlyStop(), { content: ["must not be requested"], stopReason: "stop" }],
+			{ "features.unexpectedStopDetection": "none" },
+		);
 
 		await session.prompt("finish with signed thinking");
 		await session.waitForIdle();
@@ -413,7 +404,40 @@ describe("AgentSession empty stop guard", () => {
 		});
 	});
 
-	it("waits for capped empty-stop persistence before removing the active branch entry", async () => {
+	it("does not revive capped empty responses through pending todo reminders", async () => {
+		const { session, mock } = await createHarness(
+			[
+				emptyStop(),
+				emptyStop(),
+				emptyStop(),
+				emptyStop(),
+				{ content: ["Which task should I resume?"], stopReason: "stop" },
+			],
+			{ "todo.enabled": true, "todo.reminders": true, "todo.remindersMax": 3 },
+		);
+		session.setTodoPhases([
+			{ name: "Work", tasks: [{ content: "Finish the pending change", status: "in_progress" }] },
+		]);
+		const retryEnds: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		const todoReminders: Array<Extract<AgentSessionEvent, { type: "todo_reminder" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEnds.push(event);
+			if (event.type === "todo_reminder") todoReminders.push(event);
+		});
+
+		await expectPromptCompletes(session.prompt("continue the pending task"));
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(retryEnds).toEqual([expect.objectContaining({ success: false, attempt: 3 })]);
+		expect(todoReminders).toEqual([]);
+
+		await session.prompt("I am ready to resume");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(5);
+	});
+
+	it("discards the capped empty stop durably without waiting on a stalled message_end hook", async () => {
 		const releaseMessageEnd = Promise.withResolvers<void>();
 		const finalMessageEndEntered = Promise.withResolvers<void>();
 		let assistantMessageEnds = 0;
@@ -435,29 +459,29 @@ describe("AgentSession empty stop guard", () => {
 			{ extensionRunner },
 		);
 
-		let promptSettled = false;
-		const prompt = session.prompt("answer after delayed persistence");
-		void prompt.then(
-			() => {
-				promptSettled = true;
-			},
-			() => {
-				promptSettled = true;
-			},
-		);
+		// Persistence and the capped-stop cleanup run in emission order and must not
+		// be owned by extension listeners: a held message_end hook cannot stall the
+		// prompt, and the discard already waited for the final turn's persistence.
+		const prompt = session.prompt("answer while the final hook is held");
 		await finalMessageEndEntered.promise;
-		await scheduler.yield();
-		expect(promptSettled).toBe(false);
-
-		releaseMessageEnd.resolve();
-		await prompt;
-		await session.waitForIdle();
-
+		await withTimeout(prompt, 2_000, "Prompt stalled behind a held message_end hook");
 		const activeBranchMessages = session.sessionManager
 			.getBranch()
 			.filter(entry => entry.type === "message")
 			.map(entry => entry.message as AgentMessage);
 		expect(emptyAssistantStops(activeBranchMessages)).toHaveLength(0);
+		expect(session.sessionManager.getEntries().at(-1)).toMatchObject({
+			type: "branch_summary",
+			details: { kind: "discarded-entry-branch" },
+		});
+
+		releaseMessageEnd.resolve();
+		await session.waitForIdle();
+		const settledBranchMessages = session.sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message as AgentMessage);
+		expect(emptyAssistantStops(settledBranchMessages)).toHaveLength(0);
 	});
 
 	it("does not let a capped empty stop anchor the next context estimate", async () => {
@@ -495,86 +519,46 @@ describe("AgentSession empty stop guard", () => {
 			success: false,
 			attempt: 3,
 		});
-		expect(retryEndEvents[0]?.finalError).toContain("/shake images");
 	});
 
-	it("names billed output tokens instead of the context hint when a capped empty stop billed output", async () => {
-		const { session, mock } = await createHarness([
-			filteredEmptyStop(),
-			filteredEmptyStop(),
-			filteredEmptyStop(),
-			filteredEmptyStop(),
-		]);
-		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_end") {
-				retryEndEvents.push(event);
+	it.each([
+		["unknown reasoning usage", undefined],
+		["partial reasoning usage", 42],
+		["reasoning-only usage", 126],
+	] as const)(
+		"reports capped empty-stop diagnostics without inventing a cause for %s",
+		async (_label, reasoningTokens) => {
+			const { session } = await createHarness(
+				Array.from({ length: 4 }, () => reportedOutputEmptyStop(reasoningTokens)),
+			);
+			const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_end") retryEndEvents.push(event);
+			});
+
+			await expectPromptCompletes(session.prompt("answer without tools"));
+			await session.waitForIdle();
+
+			expect(retryEndEvents).toEqual([expect.objectContaining({ success: false, attempt: 3 })]);
+			const diagnostic = retryEndEvents[0]?.finalError ?? "";
+			if (reasoningTokens === 126) {
+				expect(diagnostic).toContain("/shake images");
+				expect(diagnostic).not.toContain("provider reported");
+			} else {
+				expect(diagnostic).toContain("126 output tokens");
+				expect(diagnostic).not.toContain("/shake images");
+				if (reasoningTokens === undefined) {
+					expect(diagnostic).not.toContain("reasoning tokens");
+				} else {
+					expect(diagnostic).toContain("42 reasoning tokens");
+				}
 			}
-		});
-
-		await expectPromptCompletes(session.prompt("answer that gets filtered"));
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(4);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]?.success).toBe(false);
-		const finalError = retryEndEvents[0]?.finalError ?? "";
-		expect(finalError).toContain("billed 126 output tokens");
-		expect(finalError).not.toContain("/shake images");
-	});
-
-	it("keeps the context hint when a capped zero-block stop billed only reasoning tokens", async () => {
-		const { session, mock } = await createHarness([
-			reasoningOnlyEmptyStop(),
-			reasoningOnlyEmptyStop(),
-			reasoningOnlyEmptyStop(),
-			reasoningOnlyEmptyStop(),
-		]);
-		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_end") {
-				retryEndEvents.push(event);
-			}
-		});
-
-		await expectPromptCompletes(session.prompt("think without delivering an answer"));
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(4);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]?.success).toBe(false);
-		const finalError = retryEndEvents[0]?.finalError ?? "";
-		expect(finalError).toContain("/shake images");
-		expect(finalError).not.toContain("billed");
-	});
-
-	it("keeps the context hint for a capped thinking-only stop even though it billed output", async () => {
-		const { session, mock } = await createHarness([
-			thinkingOnlyStop(),
-			thinkingOnlyStop(),
-			thinkingOnlyStop(),
-			thinkingOnlyStop(),
-		]);
-		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_end") {
-				retryEndEvents.push(event);
-			}
-		});
-
-		await expectPromptCompletes(session.prompt("think without answering"));
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(4);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]?.success).toBe(false);
-		const finalError = retryEndEvents[0]?.finalError ?? "";
-		expect(finalError).toContain("/shake images");
-		expect(finalError).not.toContain("billed");
-	});
+			expect(diagnostic).not.toMatch(/filter|dropped|generated and/i);
+		},
+	);
 
 	it("ends auto-retry state when empty stop retries hit the cap", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[{ throw: "503 service unavailable: overloaded_error" }, emptyStop(), emptyStop(), emptyStop(), emptyStop()],
 			{
@@ -643,7 +627,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("preserves auto-retry budget across empty stop continuations", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[
 				{ throw: "503 service unavailable: overloaded_error" },
@@ -695,10 +679,10 @@ describe("AgentSession empty stop guard", () => {
 		await session.waitForIdle();
 		// Persisted identity must win regardless of branch enumeration order. The
 		// coarse matcher otherwise selects the commentary when it is encountered first.
-		const getBranch = session.sessionManager.getBranch.bind(session.sessionManager);
+		const getBranchView = session.sessionManager.getBranchView.bind(session.sessionManager);
 		const branchSpy = vi
-			.spyOn(session.sessionManager, "getBranch")
-			.mockImplementation(() => getBranch().slice().reverse());
+			.spyOn(session.sessionManager, "getBranchView")
+			.mockImplementation(() => getBranchView().slice().reverse());
 		await session.followUp("continue after commentary");
 		await session.waitForIdle();
 		branchSpy.mockRestore();

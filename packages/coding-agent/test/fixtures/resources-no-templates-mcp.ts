@@ -14,8 +14,13 @@
  */
 import * as readline from "node:readline";
 
-/** Concrete resource URIs the fixture advertises via `resources/list`. */
-export const RESOURCE_URIS = ["test://alpha", "test://beta", "urn:fixture:gamma"];
+/** Concrete resource URIs the fixture advertises via `resources/list`; the `skill://` one mirrors an MCP-published skill. */
+export const RESOURCE_URIS = [
+	"test://alpha",
+	"test://beta",
+	"urn:fixture:gamma",
+	"skill://fixture/remote-skill/SKILL.md",
+];
 
 /**
  * JSON-RPC error code returned for `resources/templates/list`. Defaults to
@@ -54,9 +59,16 @@ function buildResult(method: string, params?: Record<string, unknown>): Record<s
 	}
 }
 
+/**
+ * Milliseconds to stall the `initialize` reply before responding. Defaults to 0.
+ * `read-cli-mcp-slow-connect.test.ts` sets it above `STARTUP_TIMEOUT_MS` (250 ms)
+ * to force the handshake to outlast the `connectServers` startup race.
+ */
+const HANDSHAKE_DELAY_MS = Number(process.env.FIXTURE_HANDSHAKE_DELAY_MS ?? "0");
+
 function startServer(): void {
 	const rl = readline.createInterface({ input: process.stdin });
-	rl.on("line", line => {
+	rl.on("line", async line => {
 		const trimmed = line.trim();
 		if (trimmed.length === 0) return;
 		let msg: JsonRpcRequest;
@@ -67,6 +79,10 @@ function startServer(): void {
 		}
 		// Notifications (no `id`) get no response.
 		if (msg.id === undefined || msg.id === null) return;
+
+		if (msg.method === "initialize" && HANDSHAKE_DELAY_MS > 0) {
+			await Bun.sleep(HANDSHAKE_DELAY_MS);
+		}
 
 		if (msg.method === "resources/templates/list") {
 			// Optional method this server doesn't implement (or fails, per env).

@@ -15,8 +15,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { antigravityUsageProvider } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -113,6 +115,8 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 	};
 
 	beforeEach(async () => {
+		// Antigravity is paused in its auth rules; its ranking code stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-antigravity-selection-"));
 		dbPath = path.join(tempDir, "agent.db");
 		store = await SqliteAuthCredentialStore.open(dbPath);
@@ -144,7 +148,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 	test("blocks exhausted Antigravity Gemini counter without blocking healthy Claude counter", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
-		await authStorage.set("google-antigravity", [
+		await authStorage.credentials.set("google-antigravity", [
 			{
 				type: "oauth",
 				...createCredential("acct-gemini-exhausted", "proj-gemini-exhausted", "exhausted@example.com"),
@@ -178,14 +182,14 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			}),
 		);
 
-		const geminiKey = await authStorage.getApiKey("google-antigravity", "session-antigravity-gemini", {
+		const geminiKey = await authStorage.keys.get("google-antigravity", "session-antigravity-gemini", {
 			modelId: "gemini-3-flash",
 		});
 		expect(geminiKey).toBe("api-acct-gemini-healthy");
 
 		const counts = new Map<string, number>();
 		for (let i = 0; i < 80; i += 1) {
-			const apiKey = await authStorage.getApiKey("google-antigravity", `session-antigravity-claude-${i}`, {
+			const apiKey = await authStorage.keys.get("google-antigravity", `session-antigravity-claude-${i}`, {
 				modelId: "claude-sonnet-4-5",
 			});
 			if (!apiKey) continue;
@@ -195,10 +199,56 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		expect(counts.get("api-acct-gemini-exhausted") ?? 0).toBeGreaterThan(counts.get("api-acct-gemini-healthy") ?? 0);
 	});
 
+	test("routes Gemini 3.8 Flash to the paid account when only its Argon bucket is exhausted", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const accounts = ["free-a", "free-b", "paid"];
+		await authStorage.credentials.set(
+			"google-antigravity",
+			accounts.map(accountId => ({
+				type: "oauth" as const,
+				...createCredential(accountId, `proj-${accountId}`, `${accountId}@example.com`),
+			})),
+		);
+		for (const accountId of accounts) {
+			const free = accountId !== "paid";
+			const summary = {
+				groups: [
+					{
+						displayName: "Gemini Models",
+						buckets: [
+							{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: free ? 0 : 0.944 },
+							{ bucketId: "gemini-5h", window: "5h", remainingFraction: free ? 0 : 0.949 },
+							{ bucketId: "gemini-argon-wtu-weekly", window: "weekly", remainingFraction: free ? 1 : 0 },
+						],
+					},
+				],
+			};
+			const report = await antigravityUsageProvider.fetchUsage!(
+				{
+					provider: "google-antigravity",
+					credential: {
+						type: "oauth",
+						accessToken: "token",
+						projectId: `proj-${accountId}`,
+						accountId,
+					},
+				},
+				{ fetch: async () => new Response(JSON.stringify(summary), { status: 200 }) },
+			);
+			if (!report) throw new Error("expected usage report");
+			usageByAccount.set(accountId, report);
+		}
+
+		const key = await authStorage.keys.get("google-antigravity", "session-flash-with-argon-exhausted", {
+			modelId: "gemini-3.8-flash",
+		});
+		expect(key).toBe("api-paid");
+	});
+
 	test("ranks by bottleneck counter instead of healthier secondary counter", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
-		await authStorage.set("google-antigravity", [
+		await authStorage.credentials.set("google-antigravity", [
 			{
 				type: "oauth",
 				...createCredential("acct-gemini-hot", "proj-gemini-hot", "hot@example.com"),
@@ -234,7 +284,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 
 		const counts = new Map<string, number>();
 		for (let i = 0; i < 80; i += 1) {
-			const apiKey = await authStorage.getApiKey("google-antigravity", `session-antigravity-bottleneck-${i}`, {
+			const apiKey = await authStorage.keys.get("google-antigravity", `session-antigravity-bottleneck-${i}`, {
 				modelId: "gemini-3-flash",
 			});
 			if (!apiKey) continue;
@@ -243,12 +293,12 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 
 		expect(counts.get("api-acct-balanced") ?? 0).toBeGreaterThan(counts.get("api-acct-gemini-hot") ?? 0);
 	});
-	test("a healthy Gemini counter report clears a stale counter block without touching a still-exhausted sibling counter", async () => {
+	test("heals a stale Argon block from a legacy report's shared Google counter", async () => {
 		if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
 			throw new Error("test setup failed");
 		}
 
-		await authStorage.set("google-antigravity", [
+		await authStorage.credentials.set("google-antigravity", [
 			{
 				type: "oauth",
 				...createCredential("acct-recovered", "proj-recovered", "recovered@example.com"),
@@ -264,6 +314,12 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			credentialId: row.id,
 			providerKey: "google-antigravity:oauth",
 			blockScope: "counter:google",
+			blockedUntilMs: weekAhead,
+		});
+		store.upsertCredentialBlock({
+			credentialId: row.id,
+			providerKey: "google-antigravity:oauth",
+			blockScope: "counter:google-argon",
 			blockedUntilMs: weekAhead,
 		});
 		store.upsertCredentialBlock({
@@ -291,21 +347,92 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 			}),
 		);
 
-		await authStorage.fetchUsageReports();
+		await authStorage.usage.reports();
 
 		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google")).toBeUndefined();
+		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google-argon")).toBeUndefined();
 		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:anthropic")).toBe(weekAhead);
 
-		const geminiKey = await authStorage.getApiKey("google-antigravity", "session-antigravity-recovered", {
+		const geminiKey = await authStorage.keys.get("google-antigravity", "session-antigravity-recovered", {
 			modelId: "gemini-3-flash",
 		});
 		expect(geminiKey).toBe("api-acct-recovered");
+		const argonKey = await authStorage.keys.get("google-antigravity", "session-antigravity-argon-recovered", {
+			modelId: "gemini-4-argon",
+		});
+		expect(argonKey).toBe("api-acct-recovered");
 	});
+
+	for (const { name, fiveHourLeft, healed } of [
+		{ name: "heals", fiveHourLeft: 0.98, healed: true },
+		{ name: "keeps", fiveHourLeft: 0, healed: false },
+	]) {
+		test(`${name} a stale Argon block when the quota summary drops the Argon bucket and shared Gemini quota is ${healed ? "left" : "exhausted"}`, async () => {
+			if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
+				throw new Error("test setup failed");
+			}
+
+			await authStorage.credentials.set("google-antigravity", [
+				{
+					type: "oauth",
+					...createCredential("acct-upgraded", "proj-upgraded", "upgraded@example.com"),
+				},
+			]);
+			const row = store.listAuthCredentials("google-antigravity")[0];
+			if (!row) throw new Error("expected credential row");
+
+			// The Argon weekly bucket ran out and a 429 blocked Argon until its
+			// reset. The plan then changed, and the quota summary stopped
+			// reporting a separate Argon bucket.
+			const weekAhead = Date.now() + 6 * 24 * HOUR_MS;
+			store.upsertCredentialBlock({
+				credentialId: row.id,
+				providerKey: "google-antigravity:oauth",
+				blockScope: "counter:google-argon",
+				blockedUntilMs: weekAhead,
+			});
+			ageCredentialBlockRows(dbPath);
+			store.cleanExpiredCredentialBlocks?.(Date.now() + STALE_BLOCK_GUARD_MS);
+
+			const summary = {
+				groups: [
+					{
+						displayName: "Gemini Models",
+						buckets: [
+							{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.98 },
+							{ bucketId: "gemini-5h", window: "5h", remainingFraction: fiveHourLeft },
+						],
+					},
+				],
+			};
+			const report = await antigravityUsageProvider.fetchUsage!(
+				{
+					provider: "google-antigravity",
+					credential: {
+						type: "oauth",
+						accessToken: "token",
+						projectId: "proj-upgraded",
+						email: "upgraded@example.com",
+						accountId: "acct-upgraded",
+					},
+				},
+				{ fetch: async () => new Response(JSON.stringify(summary), { status: 200 }) },
+			);
+			if (!report) throw new Error("expected usage report");
+			usageByAccount.set("acct-upgraded", report);
+
+			await authStorage.usage.reports();
+
+			expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google-argon")).toBe(
+				healed ? undefined : weekAhead,
+			);
+		});
+	}
 
 	test("prefers less-pressured antigravity account when neither is exhausted", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
-		await authStorage.set("google-antigravity", [
+		await authStorage.credentials.set("google-antigravity", [
 			{
 				type: "oauth",
 				...createCredential("acct-loaded", "proj-loaded", "loaded@example.com"),
@@ -337,7 +464,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		// account by a clear margin even though both are unblocked.
 		const counts = new Map<string, number>();
 		for (let i = 0; i < 60; i += 1) {
-			const apiKey = await authStorage.getApiKey("google-antigravity", `session-antigravity-fresh-${i}`, {
+			const apiKey = await authStorage.keys.get("google-antigravity", `session-antigravity-fresh-${i}`, {
 				modelId: "gemini-3-flash",
 			});
 			if (!apiKey) continue;

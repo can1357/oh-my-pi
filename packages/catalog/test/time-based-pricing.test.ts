@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -10,11 +9,13 @@ import {
 	calculateUncachedInputCost,
 	calculateUsageCost,
 	getBundledModel,
+	getEffectiveTokenCost,
 	getBundledModels,
 	getNextTimeBasedPricingTransition,
 	getTimeBasedPricingPeriod,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost, ModelSpec, Usage } from "@oh-my-pi/pi-catalog/types";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isTimeBasedCost, materializeTimeBasedCost } from "../src/pricing";
 
 function spec(id = "deepseek-v4-flash", provider = "deepseek"): ModelSpec<"openai-completions"> {
@@ -96,18 +97,19 @@ describe("time-based token pricing", () => {
 		expect(first.cost.total + second.cost.total).toBeCloseTo(2.259, 12);
 	});
 
-	it("switches Pro to Flash prices exactly at the dated cutoff, then resumes Flash peak rates", () => {
-		const model = buildModel(spec("deepseek-v4-pro"));
+	it("keeps Pro billing distinct from Flash after the canceled September transition", () => {
 		const cutoff = Date.parse("2026-09-14T04:00:00Z");
-		const before = calculateCost(model, usage(), cutoff - 1);
-		const after = calculateCost(model, usage(), cutoff);
-		const nextPeak = calculateCost(model, usage(), Date.parse("2026-09-14T06:00:00Z"));
-		expect(before.input).toBeCloseTo(1.32, 12);
-		expect(before.output).toBeCloseTo(3.96, 12);
-		expect(before.cacheRead).toBeCloseTo(0.044, 12);
-		expect(before.total).toBeCloseTo(5.324, 12);
-		expect(after.total).toBeCloseTo(0.753, 12);
-		expect(nextPeak.total).toBeCloseTo(1.506, 12);
+		const nextPeak = Date.parse("2026-09-14T06:00:00Z");
+		const proCard = { input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 };
+		const flashCard = { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 };
+		for (const pro of [buildModel(spec("deepseek-v4-pro")), getBundledModel("deepseek", "deepseek-v4-pro")]) {
+			expect(getEffectiveTokenCost(pro.cost, cutoff)).toMatchObject(proCard);
+			expect(getEffectiveTokenCost(pro.cost, nextPeak)).toMatchObject(proCard);
+			expect(calculateCost(pro, usage(), cutoff - 1).total).toBeCloseTo(5.324, 12);
+			expect(calculateCost(pro, usage(), cutoff).total).toBeCloseTo(2.662, 12);
+			expect(calculateCost(pro, usage(), nextPeak).total).toBeCloseTo(5.324, 12);
+		}
+		expect(getEffectiveTokenCost(buildModel(spec("deepseek-flash")).cost, nextPeak)).toMatchObject(flashCard);
 	});
 
 	it("applies first-party policies to documented aliases but not reseller or expiring products", () => {
@@ -350,32 +352,28 @@ describe("financial schedule validation", () => {
 			}),
 		).toBe(false);
 	});
+
+	it("rejects malformed cost-patch and cost-fallback dated cards instead of keeping the old price", () => {
+		const card = { effectiveFrom: "2026-12-01T08:00:00Z", input: 4, output: 20 };
+		const invalid = [
+			{ ...card, effectiveFrom: "2026-12-01" },
+			{ ...card, effectiveFrom: "2026-02-30T08:00:00Z" },
+			{ ...card, input: -1 },
+			{ ...card, cache_read: 0.2 },
+		];
+		for (const axis of ["costPatch", "costFallback"] as const) {
+			const name = axis === "costPatch" ? "cost-patch" : "cost-fallback";
+			for (const effectiveRate of invalid) {
+				const catalog = { [axis]: { input: 2, output: 10, effectiveRates: { listPrice: effectiveRate } } };
+				expect(() => applyCatalogCorrections(spec("custom-model", "custom"), catalog)).toThrow(`Invalid ${name}`);
+			}
+			const duplicate = { [axis]: { input: 2, output: 10, effectiveRates: { first: card, second: card } } };
+			expect(() => applyCatalogCorrections(spec("custom-model", "custom"), duplicate)).toThrow(`Invalid ${name}`);
+		}
+	});
 });
 
 describe("pricing discovery and cache", () => {
-	it("reapplies current first-party policy to stale cached rates without a schedule", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-scheduled-cache-"));
-		const dbPath = path.join(tempDir, "models.db");
-		const options = { providerId: "deepseek", staticModels: [], cacheDbPath: dbPath };
-		try {
-			const online = await resolveProviderModels<"openai-completions">(
-				{ ...options, fetchDynamicModels: async () => [spec()] },
-				"online",
-			);
-			expect(calculateCost(online.models[0]!, usage(), offPeak).total).toBeCloseTo(0.753, 12);
-			const db = new Database(dbPath);
-			try {
-				db.run("UPDATE model_cache SET models = ? WHERE provider_id = ?", [JSON.stringify([spec()]), "deepseek"]);
-			} finally {
-				db.close();
-			}
-			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
-			expect(calculateCost(offline.models[0]!, usage(), offPeak).total).toBeCloseTo(0.753, 12);
-		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
-	});
-
 	it("retains custom static schedules when merging discovery ratecards and restoring cache", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-scheduled-merge-"));
 		const base = spec("scheduled-model", "custom-scheduled");
@@ -419,12 +417,27 @@ describe("deepseek provider metadata corrections", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
-	it("materializes the bare Flash alias limits in the bundled row for offline startup", () => {
-		// The registry serves committed rows verbatim on the cacheless,
-		// pre-discovery path, so the documented 1M/384K limits must live in
-		// models.json itself — not only in the live KDL rule.
+	it("resolves the V4.1 thinking ladder for the bare Flash alias", () => {
 		const bundled = getBundledModels("deepseek").find(model => model.id === "deepseek-flash");
-		expect(bundled?.contextWindow).toBe(1_000_000);
-		expect(bundled?.maxTokens).toBe(384_000);
+		if (!bundled) throw new Error("Expected a bundled deepseek-flash row");
+		const resolved = buildModel(bundled as ModelSpec<"openai-completions">);
+		expect(resolved.reasoning).toBe(true);
+		expect(resolved.thinking).toEqual({ mode: "effort", efforts: [Effort.Low, Effort.High, Effort.Max] });
+	});
+	it("upgrades a stale non-reasoning Flash alias spec to the V4.1 ladder", () => {
+		const resolved = buildModel({ ...spec("deepseek-flash"), reasoning: false });
+		expect(resolved.reasoning).toBe(true);
+		expect(resolved.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+	});
+	it("resolves the V4.1 tool-call replay contract for the bare Flash alias", () => {
+		const bundled = getBundledModels("deepseek").find(model => model.id === "deepseek-flash");
+		if (!bundled) throw new Error("Expected a bundled deepseek-flash row");
+		const resolved = buildModel(bundled as ModelSpec<"openai-completions">);
+		expect(resolved.compat.supportsToolChoice).toBe(false);
+		expect(resolved.compat.maxTokensField).toBe("max_tokens");
+		expect(resolved.compat.reasoningContentField).toBe("reasoning_content");
+		expect(resolved.compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(resolved.compat.requiresAssistantContentForToolCalls).toBe(true);
+		expect(resolved.compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
 	});
 });

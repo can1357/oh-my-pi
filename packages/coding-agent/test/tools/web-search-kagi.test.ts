@@ -1,18 +1,26 @@
-import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type KagiSearchRequest, searchWithKagi } from "@oh-my-pi/pi-coding-agent/web/kagi";
 import { KagiProvider, searchKagi } from "@oh-my-pi/pi-coding-agent/web/search/providers/kagi";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+
+const providerAuthStorage = createInMemoryAuthStorage();
+providerAuthStorage.keys.setRuntime("kagi", "test-kagi-key");
+const modelRegistry = new ModelRegistry(providerAuthStorage);
+const kagiModel = modelRegistry.find("web", "kagi");
+if (!kagiModel) throw new Error("Expected bundled web/kagi model");
+
+afterAll(() => {
+	providerAuthStorage.close();
+});
 
 const fakeAuthStorage = {
-	async getApiKey() {
-		return process.env.KAGI_API_KEY ?? undefined;
-	},
-	resolver() {
-		return async () => process.env.KAGI_API_KEY ?? undefined;
-	},
-	hasAuth() {
-		return Boolean(process.env.KAGI_API_KEY);
+	keys: {
+		get: async () => process.env.KAGI_API_KEY ?? undefined,
+		resolver: () => async () => process.env.KAGI_API_KEY ?? undefined,
+		source: () => (process.env.KAGI_API_KEY ? { kind: "env", concrete: true } : undefined),
 	},
 } as unknown as AuthStorage;
 
@@ -101,7 +109,9 @@ describe("Kagi web search error handling", () => {
 		await new KagiProvider().search({
 			query: "slow kagi search",
 			systemPrompt: "",
-			authStorage: fakeAuthStorage,
+			authStorage: providerAuthStorage,
+			model: kagiModel,
+			modelRegistry,
 			timeoutMs: 180_000,
 			fetch: fetchMock,
 		});

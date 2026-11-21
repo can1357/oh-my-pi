@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import type { GoogleGeminiCliOptions } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
-import { buildGoogleGenerateContentParams } from "@oh-my-pi/pi-ai/providers/google-shared";
+import { buildGoogleGenerateContentParams, mapGoogleUsage } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { streamGoogleVertex } from "@oh-my-pi/pi-ai/providers/google-vertex";
 import { parseRequest as parsePiNativeRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
@@ -353,22 +353,28 @@ describe("Google caller-owned cachedContent", () => {
 			expect(done.message.usage.totalTokens).toBe(105);
 		}
 	});
+});
 
-	it("does not invoke Google cache lifecycle endpoints when referencing cached content", async () => {
-		const { fetch, calls } = capturingFetch();
-		await drain(
-			streamGoogle(geminiModel, cacheOnlyContext, {
-				apiKey: "k",
-				cachedContent: CACHE_NAME,
-				fetch,
-			}),
-		);
-		const urls = calls().map(c => c.url);
-		expect(urls).toHaveLength(1);
-		expect(urls[0]).toMatch(/models\/gemini-2\.5-flash:streamGenerateContent/);
-		for (const url of urls) {
-			expect(url).not.toMatch(/\/cachedContents(?:\/[^:]*)?(?:\?|$)/);
-			expect(url).not.toMatch(/cachedContents.*:(?:create|delete|patch)/i);
-		}
+describe("mapGoogleUsage", () => {
+	it("never reports negative input when promptTokenCount is missing or below the cache count", () => {
+		// Antigravity usage seen in the wild: no promptTokenCount and a cache
+		// count larger than the prompt implied by the total.
+		const usage = mapGoogleUsage({
+			cachedContentTokenCount: 303_104,
+			candidatesTokenCount: 35,
+			thoughtsTokenCount: 12,
+			totalTokenCount: 297_578,
+		});
+		expect(usage.input).toBe(0);
+		expect(usage.cacheRead).toBe(297_531);
+		expect(usage.output).toBe(47);
+
+		const partial = mapGoogleUsage({
+			cachedContentTokenCount: 80_000,
+			candidatesTokenCount: 10,
+			totalTokenCount: 100_010,
+		});
+		expect(partial.input).toBe(20_000);
+		expect(partial.cacheRead).toBe(80_000);
 	});
 });

@@ -30,7 +30,7 @@ describe("AgentSession advisor descriptor thinking level", () => {
 
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const anthropic = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!anthropic) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
@@ -88,7 +88,6 @@ describe("AgentSession advisor descriptor thinking level", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 	});
 

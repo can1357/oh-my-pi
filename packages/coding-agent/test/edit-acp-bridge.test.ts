@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { hashlineFileHash } from "@oh-my-pi/pi-natives";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { EditTool, type EditToolDetails } from "@oh-my-pi/pi-coding-agent/edit";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { type EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
@@ -80,6 +81,22 @@ describe("EditTool ACP write routing", () => {
 		expect((result.details as EditToolDetails).newText).toBe("new content\n");
 	});
 
+	it("fails a bridged write the client never persisted", async () => {
+		const target = path.join(tmpDir, "buffer-only.txt");
+		await Bun.write(target, "old content\n");
+		const bridge: ClientBridge = { capabilities: { writeTextFile: true }, writeTextFile: async () => undefined };
+
+		const result = await new EditTool(createSession(tmpDir, { bridge }), "replace").execute("replace", {
+			path: "buffer-only.txt",
+			old_string: "old content",
+			new_string: "new content",
+		});
+
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("file content did not change on disk");
+		expect(await Bun.file(target).text()).toBe("old content\n");
+	});
+
 	it("routes patch writes through the ACP bridge", async () => {
 		const target = path.join(tmpDir, "patch.txt");
 		await Bun.write(target, "a\n");
@@ -132,7 +149,9 @@ describe("EditTool ACP write routing", () => {
 		expect(persisted).toBe("function f() {\n\treturn 2;\n}\n");
 		expect((result.details as EditToolDetails).newText).toBe(persisted);
 		expect(text).toContain("Warnings:");
-		expect(text).toMatch(/reformatted it on save/);
+		expect(text).toMatch(/reformatted on write/);
+		expect(text).toContain("2:\treturn 2;");
+		expect(text).not.toContain("    return 2;");
 		expect(text).toContain(`#${hashlineFileHash(persisted)}]`);
 	});
 
@@ -146,7 +165,7 @@ describe("EditTool ACP write routing", () => {
 		const result = await new EditTool(createSession(tmpDir, { bridge }), "hashline").execute("hashline", { input });
 
 		expect(result.isError).not.toBe(true);
-		expect(resultText(result)).not.toMatch(/reformatted it on save/);
+		expect(resultText(result)).not.toMatch(/reformatted on write/);
 		expect((result.details as EditToolDetails).newText).toBe("hello\nearth\n");
 	});
 });

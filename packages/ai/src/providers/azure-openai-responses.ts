@@ -1,11 +1,10 @@
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, type ServerSentEvent } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { getEnvApiKey } from "../stream";
+import { getEnvApiKey } from "../env-api-key";
 import type {
 	AssistantMessage,
 	Context,
 	Model,
-	RawSseEvent,
 	ServiceTier,
 	StreamFunction,
 	StreamOptions,
@@ -24,6 +23,7 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
+import { isOpenAIResponsesProgressEvent } from "../utils/websocket";
 import {
 	applyOpenAIReasoningEffortFallback,
 	createOpenAIReasoningEffortFallbackKey,
@@ -37,7 +37,6 @@ import {
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
-	isOpenAIResponsesProgressEvent,
 	parseAzureDeploymentNameMap,
 	processResponsesStream,
 } from "./openai-shared";
@@ -104,7 +103,7 @@ const streamAzureOpenAIResponsesOnce = (
 		const { requestAbortController, requestSignal } = abortTracker;
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent
-			? (event: RawSseEvent) => {
+			? (event: ServerSentEvent) => {
 					if (!event.event && event.data && event.data !== "[DONE]") {
 						try {
 							const parsed = JSON.parse(event.data);
@@ -120,7 +119,7 @@ const streamAzureOpenAIResponsesOnce = (
 							}
 						} catch {}
 					}
-					onSseEvent(event, model);
+					onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model);
 				}
 			: undefined;
 

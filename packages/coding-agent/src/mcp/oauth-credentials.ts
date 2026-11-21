@@ -1,4 +1,5 @@
-import { isDefinitiveOAuthFailure, REMOTE_REFRESH_SENTINEL, type StoredOAuthRefreshResult } from "@oh-my-pi/pi-ai";
+import { REMOTE_REFRESH_SENTINEL, type StoredOAuthRefreshResult } from "@oh-my-pi/pi-ai";
+import { isDefinitiveOAuthFailure } from "@oh-my-pi/pi-ai/error";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import { expandEnvVarsDeep } from "../discovery/helpers";
@@ -48,14 +49,14 @@ export function lookupMcpOAuthCredentialForServer(
 		auth?.credentialId &&
 		(!auth.credentialId.startsWith("mcp_oauth:profile:") || urlKeyedCredentialIds.includes(auth.credentialId))
 	) {
-		const credential = authStorage.get(auth.credentialId);
+		const credential = authStorage.credentials.get(auth.credentialId);
 		if (credential?.type === "oauth") {
 			return { credentialId: auth.credentialId, credential };
 		}
 	}
 	if (options.allowUrlKeyedFallback === false) return undefined;
 	for (const credentialId of urlKeyedCredentialIds) {
-		const credential = authStorage.get(credentialId);
+		const credential = authStorage.credentials.get(credentialId);
 		if (credential?.type === "oauth") {
 			return { credentialId, credential };
 		}
@@ -116,6 +117,7 @@ export function refreshManagedMcpOAuthCredential(
 	return refreshMCPOAuthToken(tokenUrl, credential.refresh, material?.clientId, material?.clientSecret, resource, {
 		authorizationUrl,
 		stripSameOriginResource: resourceIsFallback,
+		scope: credential.scope,
 		signal: opts.signal,
 	});
 }
@@ -126,7 +128,7 @@ async function refreshBrokeredMcpOAuthCredential(
 	provider: string,
 	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
-	const entry = await authStorage.forceRefreshCredentialById(credentialId, signal);
+	const entry = await authStorage.oauth.refresh(credentialId, signal);
 	if (entry.credential.type !== "oauth") {
 		throw new Error(`Broker returned non-OAuth credential for ${provider}`);
 	}
@@ -168,8 +170,8 @@ export async function refreshStoredManagedMcpOAuthCredential(
 		onRefreshFailure?: (error: unknown) => void;
 	} = {},
 ): Promise<StoredOAuthRefreshResult<MCPStoredOAuthCredential>> {
-	const row = authStorage
-		.listStoredCredentials(provider)
+	const row = authStorage.credentials
+		.list(provider)
 		.find(
 			entry =>
 				entry.credential.type === "oauth" && (opts.credentialId === undefined || entry.id === opts.credentialId),
@@ -181,7 +183,7 @@ export async function refreshStoredManagedMcpOAuthCredential(
 	const serverUrl =
 		opts.serverUrl ??
 		(opts.recoverServerUrlFromCredentialId ? mcpOAuthServerUrlFromCredentialId(provider) : undefined);
-	return authStorage.refreshStoredOAuthCredential<MCPStoredOAuthCredential>(provider, {
+	return authStorage.oauth.refreshStored<MCPStoredOAuthCredential>(provider, {
 		credentialId: row.id,
 		observedCredential,
 		credentialFromRow: credential => credential,
@@ -226,8 +228,8 @@ export async function removeManagedMcpOAuthCredential(
 	if (!isManagedMCPOAuthCredentialId(credentialId)) return false;
 	const scopedProfile = mcpOAuthCredentialProfile(credentialId);
 	if (scopedProfile !== undefined && scopedProfile !== (getActiveProfile() ?? "default")) return false;
-	if (authStorage.get(credentialId)?.type !== "oauth") return false;
-	await authStorage.remove(credentialId);
+	if (authStorage.credentials.get(credentialId)?.type !== "oauth") return false;
+	await authStorage.credentials.remove(credentialId);
 	return true;
 }
 

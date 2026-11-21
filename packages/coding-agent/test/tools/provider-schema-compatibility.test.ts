@@ -18,7 +18,7 @@ interface ToolSchemaEntry {
 	schema: Record<string, unknown>;
 }
 
-const testSettings = Settings.isolated({ "tools.xdev": false });
+const testSettings = Settings.isolated({ "tools.commands": false });
 
 function createTestSession(): ToolSession {
 	return {

@@ -63,7 +63,7 @@ describe("SDK workpool yield schema", () => {
 		registryDir = path.join(os.tmpdir(), `pi-workpool-yield-${Snowflake.next()}`);
 		fs.mkdirSync(registryDir, { recursive: true });
 		authStorage = await AuthStorage.create(path.join(registryDir, "auth.db"));
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -349,6 +349,7 @@ describe("SDK workpool yield schema", () => {
 						planReference: "",
 						planReferencePath: "",
 						worktree: "",
+						structured: true,
 						outputSchema: undefined,
 						outputSchemaOverridesAgent: false,
 						workPoolYieldItems: live?.getWorkPoolYieldItems() ?? [],

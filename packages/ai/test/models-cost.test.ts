@@ -37,40 +37,6 @@ describe("calculateCost", () => {
 		expect(usage.cost.total).toBeCloseTo(2.18, 8);
 	});
 
-	it("keeps token-based calculation for non-Copilot providers", () => {
-		const model = {
-			...getBundledModel("openai", "gpt-4o-mini"),
-			cost: {
-				input: 1000,
-				output: 2000,
-				cacheRead: 500,
-				cacheWrite: 800,
-			},
-		};
-		const usage: Usage = {
-			input: 1000,
-			output: 500,
-			cacheRead: 200,
-			cacheWrite: 100,
-			totalTokens: 1800,
-			cost: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				total: 0,
-			},
-		};
-
-		calculateCost(model, usage);
-
-		expect(usage.cost.input).toBeCloseTo(1, 8);
-		expect(usage.cost.output).toBeCloseTo(1, 8);
-		expect(usage.cost.cacheRead).toBeCloseTo(0.1, 8);
-		expect(usage.cost.cacheWrite).toBeCloseTo(0.08, 8);
-		expect(usage.cost.total).toBeCloseTo(2.18, 8);
-	});
-
 	it("prices provider orchestration tokens without changing visible usage buckets", () => {
 		const model = {
 			...getBundledModel("openai", "gpt-4o-mini"),

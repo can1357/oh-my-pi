@@ -412,9 +412,9 @@ describe("bench cache mode", () => {
 				stdoutIsTTY: false,
 			},
 		);
-		expect(summary.runs).toBe(9);
+		expect(summary.runs).toBe(10);
 		expect(summary.maxTokens).toBeUndefined();
-		expect(summary.profile).toBe("mix");
+		expect(summary.profile).toBe("chat");
 		expect(maxActive).toBe(4);
 		await expect(
 			runBenchCommand(

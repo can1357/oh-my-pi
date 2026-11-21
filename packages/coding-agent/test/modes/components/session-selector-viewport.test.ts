@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 
 beforeAll(() => {
@@ -24,7 +24,7 @@ function makeTitledSessions(count: number): SessionInfo[] {
 	}));
 }
 
-function makeSelector(rows: number): SessionSelectorComponent {
+function makeSelector(rows: number): SessionSelectorComponent<SessionInfo> {
 	return new SessionSelectorComponent(
 		makeTitledSessions(50),
 		() => {},
@@ -69,5 +69,44 @@ describe("SessionSelectorComponent viewport fit", () => {
 		// Default fallback is 24 rows; the picker must still fit it.
 		expect(lines.length).toBeLessThanOrEqual(24);
 		expect(visibleEntries(lines)).toBeGreaterThanOrEqual(2);
+	});
+
+	it("retains the top visible entry until the cursor navigates past the viewport edge", () => {
+		const selector = makeSelector(24);
+		const initialLines = selector.render(80);
+		const visibleCount = visibleEntries(initialLines);
+		expect(visibleCount).toBeGreaterThanOrEqual(3);
+
+		// Navigate cursor down within the visible viewport (indices 1 to visibleCount - 1)
+		for (let i = 1; i < visibleCount; i++) {
+			selector.handleInput("\x1b[B"); // down arrow
+			const lines = selector.render(80);
+			// The top entry (TITLE_0) must remain pinned and visible while cursor is within viewport
+			expect(lines.some(l => l.includes("TITLE_0"))).toBe(true);
+		}
+
+		// Navigating one past visible bottom triggers the 1-by-1 shift
+		selector.handleInput("\x1b[B"); // down arrow past visible edge
+		const scrolledLines = selector.render(80);
+		expect(scrolledLines.some(l => l.includes("TITLE_0"))).toBe(false);
+		expect(scrolledLines.some(l => l.includes("TITLE_1"))).toBe(true);
+	});
+
+	it("seeds the initial window centered around a pre-selected current session", () => {
+		const sessions = makeTitledSessions(50);
+		const selector = new SessionSelectorComponent(
+			sessions,
+			() => {},
+			() => {},
+			() => {},
+			{
+				getTerminalRows: () => 24,
+				currentSessionPath: sessions[10]?.path,
+			},
+		);
+		const initialLines = selector.render(80);
+		expect(initialLines.some(l => l.includes("TITLE_10"))).toBe(true);
+		expect(initialLines.some(l => l.includes("TITLE_9"))).toBe(true);
+		expect(initialLines.some(l => l.includes("TITLE_11"))).toBe(true);
 	});
 });

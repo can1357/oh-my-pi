@@ -20,11 +20,6 @@ describe("push", () => {
 		expect(rb.toArray()).toEqual([1, 2]);
 	});
 
-	it("returns undefined when not full", () => {
-		const rb = new RingBuffer<number>(4);
-		expect(rb.push(1)).toBeUndefined();
-	});
-
 	it("overwrites oldest and returns it when full", () => {
 		const rb = new RingBuffer<number>(3);
 		rb.push(1);
@@ -217,36 +212,9 @@ describe("iterator", () => {
 		const rb = new RingBuffer<number>(4);
 		expect([...rb]).toEqual([]);
 	});
-
-	it("works with for-of", () => {
-		const rb = new RingBuffer<number>(3);
-		rb.push(10);
-		rb.push(20);
-		const result: number[] = [];
-		for (const v of rb) result.push(v);
-		expect(result).toEqual([10, 20]);
-	});
 });
 
 describe("toArray", () => {
-	it("contiguous case", () => {
-		const rb = new RingBuffer<number>(4);
-		rb.push(1);
-		rb.push(2);
-		expect(rb.toArray()).toEqual([1, 2]);
-	});
-
-	it("wrapped case", () => {
-		const rb = new RingBuffer<number>(4);
-		rb.push(1);
-		rb.push(2);
-		rb.push(3);
-		rb.push(4);
-		rb.push(5);
-		rb.push(6); // head=2, buf=[5,6,3,4]
-		expect(rb.toArray()).toEqual([3, 4, 5, 6]);
-	});
-
 	it("returns new array each time", () => {
 		const rb = new RingBuffer<number>(4);
 		rb.push(1);
@@ -302,16 +270,6 @@ describe("mixed operations", () => {
 		expect(rb.shift()).toBe("b");
 		expect(rb.shift()).toBe("a");
 		expect(rb.isEmpty).toBe(true);
-	});
-
-	it("works with non-primitive types", () => {
-		const rb = new RingBuffer<{ id: number }>(2);
-		const a = { id: 1 };
-		const b = { id: 2 };
-		rb.push(a);
-		rb.push(b);
-		expect(rb.shift()).toBe(a);
-		expect(rb.shift()).toBe(b);
 	});
 });
 

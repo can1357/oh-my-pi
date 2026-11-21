@@ -56,11 +56,16 @@ function escapeAttribute(value: string): string {
 abstract class HtmlNode implements TurndownNode {
 	parentNode: HtmlNode | null = null;
 	readonly childNodes: HtmlNode[] = [];
+	/** Position in the parent's `childNodes`; assigned on append (the tree is immutable after parse). */
+	index = -1;
+	/** Position in the parent's `children`; -1 for non-element nodes. */
+	elementIndex = -1;
+	readonly #elements: HtmlNode[] = [];
 	abstract readonly nodeType: number;
 	abstract readonly nodeName: string;
 
-	get children(): HtmlNode[] {
-		return this.childNodes.filter(child => child.nodeType === 1);
+	get children(): readonly HtmlNode[] {
+		return this.#elements;
 	}
 
 	get firstChild(): HtmlNode | null {
@@ -72,19 +77,29 @@ abstract class HtmlNode implements TurndownNode {
 	}
 
 	get previousSibling(): HtmlNode | null {
-		if (!this.parentNode) return null;
-		const index = this.parentNode.childNodes.indexOf(this);
-		return index > 0 ? (this.parentNode.childNodes[index - 1] ?? null) : null;
+		if (!this.parentNode || this.index <= 0) return null;
+		return this.parentNode.childNodes[this.index - 1] ?? null;
 	}
 
 	get nextSibling(): HtmlNode | null {
 		if (!this.parentNode) return null;
-		const index = this.parentNode.childNodes.indexOf(this);
-		return index >= 0 ? (this.parentNode.childNodes[index + 1] ?? null) : null;
+		return this.parentNode.childNodes[this.index + 1] ?? null;
 	}
 
 	get textContent(): string {
-		return this.childNodes.map(child => child.textContent).join("");
+		const parts: string[] = [];
+		const stack: HtmlNode[] = [];
+		for (let index = this.childNodes.length - 1; index >= 0; index--) stack.push(this.childNodes[index]!);
+		while (stack.length > 0) {
+			const node = stack.pop()!;
+			if (node instanceof HtmlText) {
+				parts.push(node.value);
+				continue;
+			}
+			const childNodes = node.childNodes;
+			for (let index = childNodes.length - 1; index >= 0; index--) stack.push(childNodes[index]!);
+		}
+		return parts.join("");
 	}
 
 	abstract get outerHTML(): string;
@@ -99,7 +114,12 @@ abstract class HtmlNode implements TurndownNode {
 
 	append(child: HtmlNode): void {
 		child.parentNode = this;
+		child.index = this.childNodes.length;
 		this.childNodes.push(child);
+		if (child.nodeType === 1) {
+			child.elementIndex = this.#elements.length;
+			this.#elements.push(child);
+		}
 	}
 }
 

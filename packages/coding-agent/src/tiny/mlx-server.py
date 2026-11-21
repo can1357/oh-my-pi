@@ -1,16 +1,16 @@
-# MLX tiny-model worker: one process per local model, owning that model's
-# socket and speaking the same JSON-lines protocol as the ONNX worker
-# (`title-protocol.ts`). Started by `title-client.ts` from the mlx-lm venv;
-# serves every omp process on the machine; exits on its own once idle.
+# MLX tiny-model worker: one process per local model, a child of the omp
+# daemon's `infer` module (launched from the mlx-lm venv with the command
+# `title-client.ts` hands the daemon). Speaks the same JSON-lines protocol as
+# the ONNX worker (`title-protocol.ts`) over stdin/stdout, one request at a
+# time; logs go to stderr. Exits when stdin closes.
 #
-# Requests (one object per line):
-#   {"type": "ping", "id"}                        -> pong (with the launch tag)
+# Requests (one object per line on stdin):
+#   {"type": "ping", "id"}                        -> pong
 #   {"type": "load", "id"}                        -> progress* then loaded | error
 #   {"type": "chat", "id", "messages", "prefill"?, "stop"?, "maxNewTokens"}
 #                                                 -> text | error
-#   {"type": "shutdown", "id"}                    -> process exits
-# Responses:
-#   {"type": "pong", "id", "tag"}
+# Responses (one object per line on stdout):
+#   {"type": "pong", "id"}
 #   {"type": "progress", "id", "event": {modelKey, status, file?, progress?, loaded?, total?, ...}}
 #   {"type": "loaded", "id"}
 #   {"type": "text", "id", "text"}
@@ -20,12 +20,9 @@
 # per-byte progress can be reported; mlx-lm then loads that directory.
 
 import argparse
-import fcntl
 import json
 import os
-import socket
 import sys
-import threading
 import time
 import traceback
 import urllib.request
@@ -52,7 +49,6 @@ DOWNLOAD_PATTERNS = (
 COMPLETE_MARKER = ".omp-complete.json"
 PROGRESS_INTERVAL_S = 0.1
 CHUNK_BYTES = 1 << 20
-IDLE_POLL_S = 5.0
 
 
 def log(message):
@@ -116,7 +112,8 @@ def download_repo(emit, request_id, model_key, repo, model_dir):
                 "id": request_id,
                 "event": {
                     "modelKey": model_key,
-                    "status": "progress",
+                    # Running total across the repo, tagged with the current file.
+                    "status": "progress_total",
                     "file": name,
                     "progress": (loaded / total * 100.0) if total else 0.0,
                     "loaded": loaded,
@@ -208,133 +205,69 @@ class Model:
         return text
 
 
-# ── Socket server ──────────────────────────────────────────────────
+# ── Stdio loop ─────────────────────────────────────────────────────
 
 
-class Server:
-    """Owns one endpoint; requests from every connection are serialized through one lock."""
+def _claim_stdout():
+    """Keep fd 1 for protocol lines: library prints, warnings, and native
+    writes to fd 1 land on stderr; replies go to a private dup of the pipe."""
+    sys.stdout.flush()
+    channel = os.fdopen(os.dup(1), "w", encoding="utf-8", newline="\n")
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    return channel
 
-    def __init__(self, model, tag, idle_seconds):
-        self.model = model
-        self.tag = tag
-        self.idle_seconds = idle_seconds
-        self.lock = threading.Lock()
-        self.activity_lock = threading.Lock()
-        self.last_activity = time.monotonic()
-        self.in_flight = 0
-        self.socket_path = None
 
-    def _touch(self, delta):
-        with self.activity_lock:
-            self.in_flight += delta
-            self.last_activity = time.monotonic()
+PROTOCOL_OUT = _claim_stdout()
 
-    def _exit(self, reason):
-        log(f"{reason}; exiting")
+
+def emit(obj):
+    PROTOCOL_OUT.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    PROTOCOL_OUT.flush()
+
+
+def handle(model, req):
+    kind = req.get("type")
+    request_id = req.get("id")
+    if kind == "ping":
+        emit({"type": "pong", "id": request_id})
+        return
+    if kind == "load":
+        model.ensure(emit, request_id)
+        model.send_ready(emit, request_id)
+        emit({"type": "loaded", "id": request_id})
+        return
+    if kind == "chat":
+        emit({"type": "text", "id": request_id, "text": model.chat(emit, req)})
+        return
+    raise ValueError(f"unknown request type: {kind!r}")
+
+
+def serve(model):
+    for raw in sys.stdin.buffer:
+        line = raw.strip()
+        if not line:
+            continue
         try:
-            os.unlink(self.socket_path)
-        except OSError:
-            pass
-        os._exit(0)
-
-    def _idle_watchdog(self):
-        while True:
-            time.sleep(IDLE_POLL_S)
-            with self.activity_lock:
-                idle = self.in_flight == 0 and time.monotonic() - self.last_activity >= self.idle_seconds
-            if idle:
-                self._exit(f"idle for {self.idle_seconds:.0f}s")
-
-    def handle(self, emit, req):
-        kind = req.get("type")
-        request_id = req.get("id")
-        if kind == "ping":
-            emit({"type": "pong", "id": request_id, "tag": self.tag})
-            return
-        if kind == "shutdown":
-            self._exit("shutdown requested")
-        if kind not in ("load", "chat"):
-            raise ValueError(f"unknown request type: {kind!r}")
-        self._touch(+1)
+            req = json.loads(line)
+        except ValueError:
+            log(f"malformed request line: {line[:200]!r}")
+            continue
         try:
-            with self.lock:
-                if kind == "load":
-                    self.model.ensure(emit, request_id)
-                    self.model.send_ready(emit, request_id)
-                    result = {"type": "loaded", "id": request_id}
-                else:
-                    result = {"type": "text", "id": request_id, "text": self.model.chat(emit, req)}
-        finally:
-            self._touch(-1)
-        emit(result)
-
-    def serve_connection(self, conn):
-        write_lock = threading.Lock()
-
-        def emit(obj):
-            data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-            with write_lock:
-                conn.sendall(data)
-
-        try:
-            with conn, conn.makefile("rb") as reader:
-                for raw in reader:
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    req = json.loads(line)
-                    try:
-                        self.handle(emit, req)
-                    except Exception:  # noqa: BLE001 - every failure is reported to the client
-                        emit({"type": "error", "id": req.get("id"), "error": traceback.format_exc()})
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            # Client went away mid-request; nothing left to report to.
-            pass
-
-    def _bind(self, socket_path):
-        """Clear a stale socket file (dead predecessor) but defer to a live one (a concurrent spawn that won)."""
-        # Same lock file `worker-server.ts` takes (`withFileLock` appends `.lock`).
-        lock_fd = os.open(f"{socket_path}.bind.lock", os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
-            if os.path.exists(socket_path):
-                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                try:
-                    probe.connect(socket_path)
-                    probe.close()
-                    raise RuntimeError(f"tiny worker already listening on {socket_path}")
-                except (ConnectionRefusedError, FileNotFoundError):
-                    os.unlink(socket_path)
-            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            server.bind(socket_path)
-            os.chmod(socket_path, 0o600)
-            server.listen(16)
-            return server
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
-
-    def serve(self, socket_path):
-        self.socket_path = socket_path
-        server = self._bind(socket_path)
-        threading.Thread(target=self._idle_watchdog, daemon=True).start()
-        sys.stdout.write(f"omp tiny worker listening on {socket_path}\n")
-        sys.stdout.flush()
-        while True:
-            conn, _ = server.accept()
-            threading.Thread(target=self.serve_connection, args=(conn,), daemon=True).start()
+            handle(model, req)
+        except Exception:  # noqa: BLE001 - every failure is reported to the client
+            emit({"type": "error", "id": req.get("id"), "error": traceback.format_exc()})
+    log("stdin closed; exiting")
+    os._exit(0)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--socket", required=True)
-    parser.add_argument("--tag", required=True, help="launch identity echoed by ping so stale workers get replaced")
     parser.add_argument("--model-key", required=True)
     parser.add_argument("--repo", required=True, help="Hub repo holding the MLX weights")
     parser.add_argument("--dir", required=True, help="local weights directory")
-    parser.add_argument("--idle-seconds", type=float, required=True, help="exit after this long without a request")
     args = parser.parse_args()
-    Server(Model(args.model_key, args.repo, args.dir), args.tag, args.idle_seconds).serve(args.socket)
+    serve(Model(args.model_key, args.repo, args.dir))
 
 
 if __name__ == "__main__":

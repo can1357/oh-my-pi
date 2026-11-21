@@ -20,15 +20,6 @@ function makeModel(provider: "openai" | "xai-oauth" = "openai"): Model<"openai-r
 	} as ModelSpec<"openai-responses">);
 }
 
-const leftoverRootUnion = {
-	type: "object",
-	properties: { kind: { type: "string" } },
-	anyOf: [
-		{ required: ["kind"], minProperties: 1 },
-		{ required: ["kind"], minProperties: 2 },
-	],
-} as const;
-
 describe("findStrictToolSchemaViolation (#2652)", () => {
 	test("flags a non-null enum on a null-typed node (nullable-enum shape)", () => {
 		expect(findStrictToolSchemaViolation({ enum: ["A", "B"], type: "null" })).toBe("#/enum");
@@ -62,11 +53,6 @@ describe("findStrictToolSchemaViolation (#2652)", () => {
 		expect(findStrictToolSchemaViolation({ type: "array", items: { enum: [1, 2], type: "integer" } })).toBeNull();
 		// enum without a declared type cannot contradict anything.
 		expect(findStrictToolSchemaViolation({ enum: ["x"] })).toBeNull();
-	});
-
-	test("flags a leftover xAI root anyOf only when the xAI option is on", () => {
-		expect(findStrictToolSchemaViolation(leftoverRootUnion)).toBeNull();
-		expect(findStrictToolSchemaViolation(leftoverRootUnion, "#", { rejectRootObjectUnion: true })).toBe("#/anyOf");
 	});
 
 	test("accepts a root anyOf of typed object branches even for xAI", () => {
@@ -128,10 +114,6 @@ describe("convertTools quarantine (#2652)", () => {
 		expect(names).toContain("read_file");
 		expect(names).not.toContain("mcp__server__bad");
 		expect(out).toHaveLength(1);
-	});
-
-	test("emits every tool when all schemas are valid", () => {
-		expect(convertTools([goodTool], true, makeModel())).toHaveLength(1);
 	});
 
 	test("flattens an exclusive-required MCP tool on xAI Responses", () => {

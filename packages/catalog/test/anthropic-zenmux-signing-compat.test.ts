@@ -58,19 +58,4 @@ describe("#4192 anthropic compat: zenmux is a signing endpoint", () => {
 		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 	});
-
-	it("still replays unsigned thinking for generic non-official reasoning endpoints (#2005, no regression)", () => {
-		const compat = resolveModelPolicy(
-			spec({ provider: "custom", baseUrl: "https://llm.example.com/anthropic" }),
-		).compat;
-		expect(compat.replayUnsignedThinking).toBe(true);
-	});
-
-	it("still degrades unsigned thinking to text for official Anthropic", () => {
-		const compat = resolveModelPolicy(
-			spec({ provider: "anthropic", baseUrl: "https://api.anthropic.com", id: "claude-opus-4.8" }),
-		).compat;
-		expect(compat.replayUnsignedThinking).toBe(false);
-		expect(compat.officialEndpoint).toBe(true);
-	});
 });

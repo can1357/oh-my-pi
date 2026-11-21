@@ -121,10 +121,6 @@ it("within scope", () => {
 	expect(sixtyCount).toEqual(1);
 });
 
-it.todo("properly propagates errors from invalid type definitions in `when`");
-
-it.todo("properly propagates errors from invalid type definitions in `cases`");
-
 it("semantic error in case", () => {
 	expect(() =>
 		match({
@@ -157,8 +153,6 @@ it("from exhaustive", () => {
 	// @ts-expect-error
 	expect(() => matcher(true)).toThrow("must be a string or a number (was boolean)");
 });
-
-it.todo("argless `in` type error");
 
 it("allows ordered overlapping", () => {
 	const m = match({
@@ -303,12 +297,6 @@ describe("at", () => {
 				.at("bar");
 		}).toThrow();
 	});
-});
-
-it("attached to type", () => {
-	const _attestActual37 = type.match;
-	const _attestType37: Eq<typeof _attestActual37, typeof match> = true;
-	expect(_attestActual37).toEqual(match);
 });
 
 it("initial case", () => {
@@ -592,10 +580,6 @@ it("string literal matcher", () => {
 	// @ts-expect-error
 	expect(() => discriminate({ kind: "d", value: "d" })).toThrow('kind must be "a", "b" or "c" (was "d")');
 });
-
-it.todo("invalid string key");
-
-it.todo("lone invalid string key");
 
 it("string cases no default", () => {
 	const check = match
