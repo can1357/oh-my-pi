@@ -25,6 +25,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
 	cfgCompactionEnabled,
 	cfgCompactionHandoffSaveToDisk,
+	cfgCompactionNumberCheck,
 	cfgCompactionMethodOrder,
 	cfgCompactionThresholdPercent,
 	cfgContextPromotionEnabled,
@@ -1026,6 +1027,28 @@ describe("AgentSession handoff", () => {
 		expect(session.agent.state.messages.some(message => message.role === "compactionSummary")).toBe(true);
 		const persistedSessionText = await Bun.file(sessionFile).text();
 		expect(persistedSessionText).toContain(JSON.stringify(handoffText));
+	});
+
+	it("records the number check on the handoff compaction entry when compaction.numberCheck is on", async () => {
+		cfgCompactionNumberCheck.set(session.settings, true);
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async (_context, _model, options) => {
+			if (!options.numberCheck) throw new Error("Expected the number check to be enabled");
+			// The writer's fix reply fails, so the fabricated count is blanked.
+			return options.numberCheck.verify(
+				"## Goal\n- 9731 files left",
+				compactionModule.numbersSeenIn([]),
+				async () => undefined,
+			);
+		});
+
+		const result = await session.compact(undefined, { mode: "handoff" });
+		const compaction = sessionManager.getBranch().at(-1);
+
+		expect(result.summary).toContain("## Goal\n- ? files left");
+		expect(result.details).toMatchObject({ numberCheck: { unseenNumbers: ["9731"], blanked: ["9731"] } });
+		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
+		expect(compaction.summary).toContain("- ? files left");
+		expect(compaction.details).toMatchObject({ numberCheck: { unseenNumbers: ["9731"], blanked: ["9731"] } });
 	});
 
 	it("does not run auto maintenance when strategy is off", async () => {

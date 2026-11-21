@@ -381,6 +381,19 @@ export const cfgCompactionDropUseless = register({
 	},
 });
 
+export const cfgCompactionNumberCheck = register({
+	id: "compaction.numberCheck",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Check Summary Numbers",
+		description:
+			"Send numbers a summary or handoff gives that its input never showed back to the writer once, then replace any left with ?",
+	},
+});
+
 /** Every `compaction.*` setting as one memoized snapshot (the configured compaction policy). */
 export const cfgCompaction = combine({
 	enabled: cfgCompactionEnabled,
@@ -402,6 +415,7 @@ export const cfgCompaction = combine({
 	idleTimeoutSeconds: cfgCompactionIdleTimeoutSeconds,
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
+	numberCheck: cfgCompactionNumberCheck,
 });
 
 /**

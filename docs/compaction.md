@@ -10,6 +10,7 @@ Both are persisted as session entries and converted back into user-context messa
 ## Key implementation files
 
 - `packages/agent/src/compaction/compaction.ts` (context-full summarization and handoff generation)
+- `packages/agent/src/compaction/number-check.ts` (opt-in numeric faithfulness check on summaries)
 - `packages/snapcompact/src/snapcompact.ts` (snapcompact strategy: history archived as dense bitmap images)
 - `packages/agent/src/compaction/branch-summarization.ts`
 - `packages/agent/src/compaction/pruning.ts`
@@ -35,7 +36,7 @@ Compaction and branch summaries are first-class session entries, not plain assis
    - `summary`, optional `shortSummary`
    - `firstKeptEntryId` (compaction boundary)
    - `tokensBefore`
-   - optional `details`, `preserveData`, `fromExtension`
+   - optional `details`, `preserveData`, `fromExtension` (`details` carries `readFiles`/`modifiedFiles`, plus `numberCheck` when the [number check](#number-check) found unseen numbers)
    - optional `method`, `tokensAfter`, `warning` (maintenance/display metadata)
    - optional `providerReplayThroughEntryId` (last entry covered by a native replay snapshot)
 - `BranchSummaryEntry`
@@ -367,6 +368,17 @@ Advisor runtimes retain native `preserveData` for subsequent maintenance and att
 
 When `compaction.handoffSaveToDisk` is enabled, an **automatically triggered** handoff also writes `handoff-<ISO timestamp>.md` in the persisted session's artifact directory. Manual handoffs are not written by this setting, and non-persisted sessions have no artifact directory.
 
+### Number check
+
+With `compaction.numberCheck` enabled (default `false`), every locally generated summary (each folded window and the split-turn prefix) and every handoff document is checked for numbers its writer was never shown. The check is ported from nace-ai/intern (Apache-2.0).
+
+1. Numbers are extracted from the summary as standalone tokens: integers, decimals, thousands-grouped values (`1,234.5`), dotted versions (`18.20.2`), and numbers with one unit suffix (`88.4%`, `73.25s`, `4KB`, `3x`). Digits inside an identifier are not numbers the summary states and are never checked: `base64url`, `IPv6`, `HTTP/2`, `claude-sonnet-4-5`, `oauth2.ts` and commit hashes stay as written. Fenced code blocks and inline code spans are skipped, and so are a list item's own number at the start of a line (`2. step`, `3) step`) and a heading's section number (`## 2. Next`, `### 1.2 Scope`).
+2. Each number is compared by value (`1,234.50` equals `1234.5`) with every number in the request the writer received: system prompt, tool descriptions, message text, reasoning, tool-call arguments and tool results. A packed list such as `120,126` counts as seen only when one list in the input holds every item.
+3. When numbers are unseen, they are named back to the writer once, each with the summary line that holds it, as the next user turn after its own reply with the same request options, so the provider reuses the cached prefix of the summary request. The writer replies with `OLD:`/`NEW:` line pairs. A pair applies only when its `OLD` line matches exactly one summary line that holds an unseen number, so the fix round can only rewrite or drop lines that hold an unseen number.
+4. Numbers still unseen after that round are replaced with `?`.
+
+The check never blocks compaction: a failed or empty fix reply skips straight to blanking, and only an abort propagates. Findings are stored on the entry as `details.numberCheck = { unseenNumbers, blanked }` (absent when every number was seen). Remote summarizer endpoints (`compaction.remoteEndpoint`) and provider-native compaction are not checked, since they offer no request fork to send the fix through.
+
 ### File-operation context in summaries
 
 Compaction tracks cumulative file activity using assistant tool calls:
@@ -547,6 +559,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.idleTimeoutSeconds` = `300` (fallback unless a confirmed 1h prompt-cache entry sets the timing)
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
+- `compaction.numberCheck` = `false`. Opt-in numeric faithfulness check on local summaries and handoff documents; see [Number check](#number-check).
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
 - `snapcompact.toolResults` = `false` (transient imaging of large tool results, the newest one included; `read` results stay text unless the model's catalog rule sets `snapcompact-image-reads` (Opus 5.5+). An imaged `read` draws each row's leading indentation as a count bracket (`[»2]` two tabs, `[·4]` four spaces) because frames collapse whitespace, and keeps its `[path#TAG]` header as text beside the frames, so edits can copy both. The planner keeps a result in the form it was first sent in until the `snapcompact.*` settings, the model or earlier history change, or later images push the request past the provider's image cap; a downstream request-byte limit can still drop older inline frames, as it can any inline image)
 - `snapcompact.shape` = `"auto"`
