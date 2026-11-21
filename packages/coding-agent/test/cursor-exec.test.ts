@@ -357,7 +357,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// `getEditReplaceTool` — otherwise every modern edit answers
 		// `Tool "edit" not available` and the file is untouched.
 		// (Not the `getTool` fallback: that resolver also serves the agent
-		// loop's unadvertised calls, so it stays device-only.)
+		// loop's unadvertised calls, so it stays mounted-tool-only.)
 
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
@@ -1464,7 +1464,7 @@ describe("CursorExecHandlers argument validation", () => {
 });
 
 describe("CursorExecHandlers mounted tool bridge", () => {
-	it("executes MCP tools resolved from the xd:// registry", async () => {
+	it("executes mounted MCP tools resolved by bare name", async () => {
 		const mountedTool: AgentTool = {
 			name: "mcp__fixture_report",
 			label: "Fixture Report",
@@ -1493,12 +1493,12 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect(result.content).toEqual([{ type: "text", text: "reported" }]);
 	});
 
-	it("routes wrapped mounted devices through the approval gate", async () => {
+	it("routes wrapped mounted tools through the approval gate", async () => {
 		let executed = false;
-		const device: AgentTool = {
+		const mounted: AgentTool = {
 			name: "ast_edit",
 			label: "AST Edit",
-			description: "structural edit device",
+			description: "structural edit tool",
 			parameters: type({}),
 			async execute() {
 				executed = true;
@@ -1508,7 +1508,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		// The deny path throws inside resolveApproval before any handler runs;
 		// the stub only needs the loop-emission marker probe the wrapper always
 		// consults first.
-		const wrapped = new ExtensionToolWrapper(device, {
+		const wrapped = new ExtensionToolWrapper(mounted, {
 			consumeToolCallEmitted: () => false,
 		} as unknown as ExtensionRunner);
 		const settings = Settings.isolated({ "tools.approval": { ast_edit: "deny" } });
@@ -1516,15 +1516,15 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			cwd: ".",
 			// The canonical map contains the undecorated mounted tool. The execution
 			// override must win or Cursor bypasses the approval gate.
-			tools: new Map([[device.name, device]]),
-			getExecutableTool: name => (name === device.name ? (wrapped as unknown as AgentTool) : undefined),
+			tools: new Map([[mounted.name, mounted]]),
+			getExecutableTool: name => (name === mounted.name ? (wrapped as unknown as AgentTool) : undefined),
 			getToolContext: () => ({ settings }) as AgentToolContext,
 		});
 
 		const result = await handlers.mcp({
-			name: device.name,
+			name: mounted.name,
 			providerIdentifier: "pi-agent",
-			toolName: device.name,
+			toolName: mounted.name,
 			toolCallId: "call-denied",
 			args: {},
 			rawArgs: {},

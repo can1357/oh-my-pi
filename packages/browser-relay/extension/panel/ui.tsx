@@ -304,8 +304,14 @@ export function Menu(props: {
 	empty?: string;
 	/** Filter field above the rows; the owner narrows `entries` as `value` changes. */
 	search?: { value: string; placeholder: string; onChange(value: string): void };
+	/** Below the rows, inside the popover (the model picker's thinking slider). */
+	footer?: ReactNode;
+	/** The highlighted row changed. */
+	onActiveChange?(id: string | null): void;
+	/** Owner keys, tried before the menu's own; true when consumed. */
+	onKey?(event: ReactKeyboardEvent): boolean;
 }): ReactNode {
-	const { entries, onClose, search } = props;
+	const { entries, onClose, search, onActiveChange } = props;
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const searchRef = useRef<HTMLInputElement | null>(null);
 	const items = selectable(entries);
@@ -318,6 +324,11 @@ export function Menu(props: {
 		if (active?.id !== activeId) setActiveId(active?.id ?? null);
 		if (submenu !== null && !items.some(item => item.id === submenu.parent)) setSubmenu(null);
 	}, [active, activeId, items, submenu]);
+
+	const highlighted = active?.id ?? null;
+	useEffect(() => {
+		onActiveChange?.(highlighted);
+	}, [highlighted, onActiveChange]);
 
 	useEscape(true, () => {
 		if (submenu !== null) setSubmenu(null);
@@ -408,7 +419,8 @@ export function Menu(props: {
 			tabIndex={-1}
 			style={props.width === undefined ? undefined : { width: props.width }}
 			onKeyDown={event => {
-				if (props.autoFocus && !event.nativeEvent.isComposing && handleKey(event)) event.preventDefault();
+				if (!props.autoFocus || event.nativeEvent.isComposing) return;
+				if (props.onKey?.(event) || handleKey(event)) event.preventDefault();
 			}}
 		>
 			{search === undefined ? (
@@ -433,6 +445,7 @@ export function Menu(props: {
 					<div className="pn-menu-scroll">{rows}</div>
 				</>
 			)}
+			{props.footer}
 		</div>
 	);
 }

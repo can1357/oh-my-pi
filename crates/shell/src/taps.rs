@@ -12,6 +12,12 @@
 //! every regular file a redirection opens for writing
 //! ([`crate::bash::PipeTap::file`]) and lists it as a stream too, read from
 //! the file itself: nothing is copied.
+//!
+//! On a run that also folds a [`RunTrace`](crate::bash::trace::RunTrace),
+//! each stream names its writer's node in the trace
+//! ([`PipeStreamInfo::node`]): the run links the two through
+//! [`PipeTaps::open_pipe`] and [`PipeTaps::add_file`]. Without a trace (the
+//! [`PipeTap`] impl) streams name none.
 
 use std::{
 	collections::VecDeque,
@@ -19,12 +25,13 @@ use std::{
 	io::{self, Read, Seek, SeekFrom},
 	path::{Path, PathBuf},
 	sync::Arc,
+	time::SystemTime,
 };
 
 use bstr::{BStr, ByteSlice};
 use parking_lot::Mutex;
 
-use crate::bash::{PipeMirror, PipeTap};
+use crate::bash::{PipeMirror, PipeTap, TapSite, trace::viz::model::NodeKey};
 
 /// Bytes kept per stream: its most recent output.
 const RETAINED_BYTES: usize = 1 << 20;
@@ -62,6 +69,7 @@ struct FileStream {
 	id:      u32,
 	command: String,
 	path:    PathBuf,
+	node:    Option<NodeKey>,
 }
 
 /// One tapped pipe: the producing and consuming stages and the tail of what
@@ -70,15 +78,18 @@ pub struct PipeStream {
 	id:       u32,
 	producer: String,
 	consumer: String,
+	node:     Option<NodeKey>,
 	state:    Mutex<StreamState>,
 }
 
 struct StreamState {
 	/// The last [`RETAINED_BYTES`] bytes written.
-	tail:  VecDeque<u8>,
+	tail:     VecDeque<u8>,
 	/// Every byte ever written, retained or not.
-	total: u64,
-	open:  bool,
+	total:    u64,
+	open:     bool,
+	/// When the last bytes were written; when the pipe opened before any.
+	modified: SystemTime,
 }
 
 /// A tapped pipe or redirected file as [`PipeTaps::list`] reports it.
@@ -98,6 +109,12 @@ pub struct PipeStreamInfo {
 	pub open:     bool,
 	/// The stream is a redirected file, read from disk.
 	pub file:     bool,
+	/// Trace key of the stage writing into the pipe, or of the command whose
+	/// redirection opened the file; `None` without a trace to resolve it in.
+	pub node:     Option<NodeKey>,
+	/// When it was last written: a pipe's last write (its opening before
+	/// any), a file's modification time (the epoch when unreadable).
+	pub modified: SystemTime,
 }
 
 /// Retained bytes of one stream, as stream offsets `start..end`.
@@ -133,16 +150,25 @@ impl PipeTaps {
 					total:    state.total,
 					open:     state.open,
 					file:     false,
+					node:     stream.node,
+					modified: state.modified,
 				}
 			})
 			.collect();
-		list.extend(files.into_iter().map(|file| PipeStreamInfo {
-			id:       file.id,
-			total:    fs::metadata(&file.path).map_or(0, |meta| meta.len()),
-			producer: file.command,
-			consumer: file.path.to_string_lossy().into_owned(),
-			open:     !ended,
-			file:     true,
+		list.extend(files.into_iter().map(|file| {
+			let meta = fs::metadata(&file.path).ok();
+			PipeStreamInfo {
+				id:       file.id,
+				total:    meta.as_ref().map_or(0, fs::Metadata::len),
+				modified: meta
+					.and_then(|meta| meta.modified().ok())
+					.unwrap_or(SystemTime::UNIX_EPOCH),
+				producer: file.command,
+				consumer: file.path.to_string_lossy().into_owned(),
+				open:     !ended,
+				file:     true,
+				node:     file.node,
+			}
 		}));
 		list.sort_unstable_by_key(|stream| stream.id);
 		list
@@ -187,30 +213,17 @@ impl PipeTaps {
 			open: state.open,
 		})
 	}
-}
 
-/// The last [`RETAINED_BYTES`] of the file at `path` from offset `from` on.
-fn read_file(path: &Path, from: Option<u64>, open: bool) -> PipeStreamRead {
-	let read = || -> io::Result<(u64, Vec<u8>)> {
-		let mut file = File::open(path)?;
-		let len = file.metadata()?.len();
-		let retained_from = len.saturating_sub(RETAINED_BYTES as u64);
-		let start = from
-			.filter(|&from| from <= len)
-			.map_or(retained_from, |from| from.max(retained_from));
-		file.seek(SeekFrom::Start(start))?;
-		let mut data = Vec::new();
-		// Bounded by the size read above: a file growing meanwhile is caught
-		// up on by the next read.
-		file.take(len - start).read_to_end(&mut data)?;
-		Ok((start, data))
-	};
-	let (start, data) = read().unwrap_or_default();
-	PipeStreamRead { start, end: start + data.len() as u64, data, open }
-}
-
-impl PipeTap for PipeTaps {
-	fn open(&self, producer: &BStr, consumer: &BStr) -> Option<Arc<dyn PipeMirror>> {
+	/// Tap a new pipe from stage `producer` to stage `consumer` (their source
+	/// text), written by the trace node `node`: [`PipeTap::open`] with the
+	/// writer's node already resolved. `None` once every slot is taken by an
+	/// open stream.
+	pub fn open_pipe(
+		&self,
+		producer: &BStr,
+		consumer: &BStr,
+		node: Option<NodeKey>,
+	) -> Option<Arc<dyn PipeMirror>> {
 		let mut inner = self.inner.lock();
 		let mut finished = inner
 			.streams
@@ -234,16 +247,26 @@ impl PipeTap for PipeTaps {
 		}
 		inner.opened += 1;
 		let stream = Arc::new(PipeStream {
-			id:       inner.opened,
+			id: inner.opened,
 			producer: producer.to_string(),
 			consumer: consumer.to_string(),
-			state:    Mutex::new(StreamState { tail: VecDeque::new(), total: 0, open: true }),
+			node,
+			state: Mutex::new(StreamState {
+				tail:     VecDeque::new(),
+				total:    0,
+				open:     true,
+				modified: SystemTime::now(),
+			}),
 		});
 		inner.streams.push(Arc::clone(&stream));
 		Some(stream)
 	}
 
-	fn file(&self, command: &BStr, path: &BStr) {
+	/// List the regular file at the absolute `path` that a redirection of
+	/// `command` (its source text), trace node `node`, opened:
+	/// [`PipeTap::file`] with the writer's node already resolved. A path
+	/// listed before stays its first stream.
+	pub fn add_file(&self, command: &BStr, path: &BStr, node: Option<NodeKey>) {
 		let path = path.to_path_lossy().into_owned();
 		// The engine's file may be a provider's (a URL path, a mount): only a
 		// file of the host's own filesystem can be read back here.
@@ -262,7 +285,38 @@ impl PipeTap for PipeTaps {
 		let id = inner.opened;
 		inner
 			.files
-			.push(FileStream { id, command: command.to_string(), path });
+			.push(FileStream { id, command: command.to_string(), path, node });
+	}
+}
+
+/// The last [`RETAINED_BYTES`] of the file at `path` from offset `from` on.
+fn read_file(path: &Path, from: Option<u64>, open: bool) -> PipeStreamRead {
+	let read = || -> io::Result<(u64, Vec<u8>)> {
+		let mut file = File::open(path)?;
+		let len = file.metadata()?.len();
+		let retained_from = len.saturating_sub(RETAINED_BYTES as u64);
+		let start = from
+			.filter(|&from| from <= len)
+			.map_or(retained_from, |from| from.max(retained_from));
+		file.seek(SeekFrom::Start(start))?;
+		let mut data = Vec::new();
+		// Bounded by the size read above: a file growing meanwhile is caught
+		// up on by the next read.
+		file.take(len - start).read_to_end(&mut data)?;
+		Ok((start, data))
+	};
+	let (start, data) = read().unwrap_or_default();
+	PipeStreamRead { start, end: start + data.len() as u64, data, open }
+}
+
+/// Streams of a run without a trace: no stream names its writer's node.
+impl PipeTap for PipeTaps {
+	fn open(&self, producer: TapSite<'_>, consumer: &BStr) -> Option<Arc<dyn PipeMirror>> {
+		self.open_pipe(producer.text, consumer, None)
+	}
+
+	fn file(&self, command: TapSite<'_>, path: &BStr) {
+		self.add_file(command.text, path, None);
 	}
 }
 
@@ -270,6 +324,7 @@ impl PipeMirror for PipeStream {
 	fn write(&self, bytes: &[u8]) {
 		let mut state = self.state.lock();
 		state.total += bytes.len() as u64;
+		state.modified = SystemTime::now();
 		let kept = &bytes[bytes.len().saturating_sub(RETAINED_BYTES)..];
 		let overflow = (state.tail.len() + kept.len()).saturating_sub(RETAINED_BYTES);
 		state.tail.drain(..overflow);
@@ -297,7 +352,7 @@ mod tests {
 
 	fn finish(taps: &PipeTaps, bytes: &[u8]) -> u32 {
 		let mirror = taps
-			.open(BStr::new("producer"), BStr::new("consumer"))
+			.open_pipe(BStr::new("producer"), BStr::new("consumer"), None)
 			.expect("a free slot");
 		mirror.write(bytes);
 		mirror.close();
@@ -310,7 +365,7 @@ mod tests {
 	fn keeps_the_newest_bytes_and_resumes_from_an_offset() {
 		let taps = PipeTaps::new();
 		let mirror = taps
-			.open(BStr::new("yes"), BStr::new("head"))
+			.open_pipe(BStr::new("yes"), BStr::new("head"), None)
 			.expect("a free slot");
 		mirror.write(&vec![b'a'; RETAINED_BYTES]);
 		mirror.write(b"tail");
@@ -337,8 +392,8 @@ mod tests {
 		fs::write(&path, "one\ntwo\n").expect("write log");
 		let name = path.to_string_lossy().into_owned();
 		let taps = PipeTaps::new();
-		taps.file(BStr::new("make > build.log"), BStr::new(&name));
-		taps.file(BStr::new("make >> build.log"), BStr::new(&name));
+		taps.add_file(BStr::new("make > build.log"), BStr::new(&name), None);
+		taps.add_file(BStr::new("make >> build.log"), BStr::new(&name), None);
 
 		assert_eq!(taps.list(), [PipeStreamInfo {
 			id:       1,
@@ -347,6 +402,10 @@ mod tests {
 			total:    8,
 			open:     true,
 			file:     true,
+			node:     None,
+			modified: fs::metadata(&path)
+				.and_then(|meta| meta.modified())
+				.expect("log mtime"),
 		}]);
 		let all = taps.read(1, None).expect("stream 1");
 		assert_eq!((all.start, all.end, all.data.as_slice()), (0, 8, b"one\ntwo\n".as_slice()));
@@ -372,7 +431,7 @@ mod tests {
 		let dir = tempfile::tempdir().expect("directory");
 		let taps = PipeTaps::new();
 		for path in ["/dev/null", "skill://notes/out.txt", &dir.path().to_string_lossy()] {
-			taps.file(BStr::new("cmd"), BStr::new(path));
+			taps.add_file(BStr::new("cmd"), BStr::new(path), None);
 		}
 		assert!(taps.list().is_empty(), "listed: {:?}", taps.list());
 	}
@@ -396,13 +455,21 @@ mod tests {
 		let open: Vec<_> = (0..MAX_STREAMS)
 			.map(|_| {
 				taps
-					.open(BStr::new("a"), BStr::new("b"))
+					.open_pipe(BStr::new("a"), BStr::new("b"), None)
 					.expect("a free slot")
 			})
 			.collect();
-		assert!(taps.open(BStr::new("a"), BStr::new("b")).is_none());
+		assert!(
+			taps
+				.open_pipe(BStr::new("a"), BStr::new("b"), None)
+				.is_none()
+		);
 		open[0].close();
-		assert!(taps.open(BStr::new("a"), BStr::new("b")).is_some());
+		assert!(
+			taps
+				.open_pipe(BStr::new("a"), BStr::new("b"), None)
+				.is_some()
+		);
 		assert_eq!(taps.list().len(), MAX_STREAMS);
 	}
 }

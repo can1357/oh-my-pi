@@ -553,7 +553,7 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 				agent: {
 					...baseAgent,
 					model: [
-						options.openRouter ? "openrouter/anthropic/claude-sonnet-4" : `${primary.provider}/${primary.id}`,
+						options.openRouter ? "openrouter/anthropic/claude-sonnet-4.6" : `${primary.provider}/${primary.id}`,
 					],
 				},
 			});

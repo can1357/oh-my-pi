@@ -3702,7 +3702,7 @@ export class Settings {
 
 		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
 		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
-		// replacement (`tools.xdev` stays at its own default). Dead keys are
+		// replacement (`tools.commands` stays at its own default). Dead keys are
 		// deleted so they stop lingering in config.yml.
 		const toolsObj = raw.tools as Record<string, unknown> | undefined;
 		if (toolsObj) {
@@ -3773,11 +3773,7 @@ export class Settings {
 				const selector = bundledSelector(provider, model => model.webSearchModel);
 				return selector ? [selector] : [];
 			};
-			const geminiSelectors = (model: string): string[] => [
-				`google-gemini-cli/${model}`,
-				`google-antigravity/${model}`,
-				`google/${model}`,
-			];
+			const geminiSelectors = (model: string): string[] => [`google-antigravity/${model}`, `google/${model}`];
 			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
