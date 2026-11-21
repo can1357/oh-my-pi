@@ -1313,6 +1313,8 @@ describe("wave 3 commands", () => {
 			await git("init", "-q", "-b", "main");
 			await git("config", "user.email", "t@example.com");
 			await git("config", "user.name", "t");
+			// A hooks directory of its own: `/wt` runs post-checkout, and the host's global hooks must stay out.
+			await git("config", "core.hooksPath", path.join(root, "hooks"));
 			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
 			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
 			await git("add", "-A");
@@ -1370,6 +1372,8 @@ describe("wave 3 commands", () => {
 			// The reset source is compared byte-for-byte; Git for Windows'
 			// system `core.autocrlf=true` would restore it as CRLF.
 			await git("config", "core.autocrlf", "false");
+			// A hooks directory of its own: `/wt` runs post-checkout, and the host's global hooks must stay out.
+			await git("config", "core.hooksPath", path.join(root, "hooks"));
 			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
 			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
 			await git("add", "-A");
@@ -1404,6 +1408,67 @@ describe("wave 3 commands", () => {
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
+
+	it.skipIf(process.platform === "win32").each([
+		["and reports its failure", false],
+		["and drops its warning once the prompt was cancelled", true],
+	])(
+		"/wt: reports the move, then runs the post-checkout hook after the source cleanup %s",
+		async (_what, cancelled) => {
+			const { output, runtime, fakeSessionManager } = createRuntime();
+			const prompt = new AbortController();
+			cfgWorktreeCleanSource.override(runtime.settings, true);
+			cfgOvnfsPath.override(runtime.settings, "/nonexistent/ovnfs");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-hook-"));
+			const repoDir = path.join(root, "repo");
+			const hook = path.join(root, "hooks", "post-checkout");
+			const originalProjectDir = process.cwd();
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			process.env.OMP_WORKTREE_DIR = path.join(root, "wt");
+			const git = async (...args: string[]) => {
+				const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "ignore", stderr: "ignore" });
+				expect(await proc.exited).toBe(0);
+			};
+			try {
+				await fs.mkdir(repoDir, { recursive: true });
+				await git("init", "-q", "-b", "main");
+				await git("config", "user.email", "t@example.com");
+				await git("config", "user.name", "t");
+				await git("commit", "-q", "--allow-empty", "-m", "init");
+				// The repo's own hooks directory, so the host's global hooks stay out.
+				await git("config", "core.hooksPath", path.dirname(hook));
+				await Bun.write(hook, `#!/bin/sh\nls "${repoDir}" > .source-at-hook\necho not today >&2\nexit 3\n`);
+				await fs.chmod(hook, 0o755);
+				await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+				fakeSessionManager._cwd = repoDir;
+
+				// The summary comes before the hook starts: a cancel then is a cancel while the hook runs.
+				const result = await executeAcpBuiltinSlashCommand("/wt feature/hook", {
+					...runtime,
+					signal: prompt.signal,
+					output: text => {
+						runtime.output(text);
+						if (cancelled) prompt.abort();
+					},
+				});
+
+				expect(result).toEqual({ consumed: true });
+				const movedTo = fakeSessionManager._movedTo;
+				expect(output).toEqual([
+					expect.stringContaining(`Moved to worktree ${movedTo} on branch feature/hook`),
+					...(cancelled ? [] : ["Warning: Worktree created, but post-checkout hook exited with 3: not today"]),
+				]);
+				// The hook ran in the worktree, and the carried-over file had already left the source.
+				expect(await Bun.file(path.join(movedTo!, ".source-at-hook")).text()).toBe("");
+				expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
+			} finally {
+				setProjectDir(originalProjectDir);
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();

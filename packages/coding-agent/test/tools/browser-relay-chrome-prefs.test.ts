@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as authenticators from "../../src/tools/browser/relay/chrome/authenticators";
 import {
 	authenticator,
 	authenticatorSamples,
@@ -10,6 +11,7 @@ import {
 	type AuthenticatorSample,
 } from "../../src/tools/browser/relay/chrome/authenticators";
 import { chromiumJson, type JsonValue } from "../../src/tools/browser/relay/chrome/canonical-json";
+import * as oscrypt from "../../src/tools/browser/relay/chrome/oscrypt";
 import { registerUnpackedExtension } from "../../src/tools/browser/relay/chrome/secure-store";
 import type { ChromiumBrowser } from "../../src/tools/browser/relay/chromium-profiles";
 
@@ -196,7 +198,15 @@ const browser = {
 } satisfies ChromiumBrowser;
 
 describe("registerUnpackedExtension", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	test("writes a loadable record with an authenticator and refreshed super authenticators", async () => {
+		// The profile's authenticators were made on the machine DEVICE names; Chrome reads its id from the host (empty
+		// on Linux), and macOS's encrypted hashes need the login keychain's Chrome Safe Storage key.
+		vi.spyOn(authenticators, "deviceId").mockResolvedValue(DEVICE);
+		vi.spyOn(oscrypt, "encryptString").mockImplementation((_service, data) => data.toString("base64"));
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-profile-"));
 		const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extension-"));
 		const profileDir = path.join(dir, "Default");
