@@ -113,6 +113,22 @@ export interface RuntimeChildrenOptions {
 	 * next prompt) reads as its tail, and keeps its block when it moves in.
 	 */
 	readonly nativeTail?: readonly Container[];
+	/**
+	 * Below-transcript roots that cover the transcript while the user has them
+	 * open (a docked report); a popup inside any other root reports its rows
+	 * through {@link Component.coveringRows}. Their rows do not count toward retirement: the
+	 * transcript rows they cover stay live, clipped off the top of the frame,
+	 * and return when they close, instead of going to scrollback and leaving
+	 * the screen blank above the input.
+	 */
+	readonly coveringChrome?: readonly Component[];
+}
+
+/** Popup rows in `root`'s last render: its own, or those of the children of a plain container. */
+function coveringRowsOf(root: Component): number {
+	let rows = root.coveringRows?.() ?? 0;
+	if (root instanceof Container) for (const child of root.children) rows += child.coveringRows?.() ?? 0;
+	return rows;
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -223,6 +239,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#runtimeChildren: readonly Component[] = [];
 	#nativeDock: readonly (Component | FeatureDockEntry)[] | undefined;
 	#nativeTail: readonly Container[] = [];
+	#coveringChrome: ReadonlySet<Component> = new Set();
 	/** Cache-driven status line shown until {@link setStatusComponent} mounts the session's. */
 	#startupStatus: StatusLineComponent | undefined;
 	#runtimeMounted = false;
@@ -383,15 +400,21 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const after: string[] = [];
 		const afterSpans: ViewportClickSpan[] = [];
 		const ends: { root: Component; end: number }[] = [];
+		let coveringRows = 0;
 		for (const root of afterRoots) {
+			const start = after.length;
 			this.#renderBelowRoot(root, width, after, afterSpans);
+			coveringRows += this.#coveringChrome.has(root) ? after.length - start : coveringRowsOf(root);
 			ends.push({ root, end: after.length });
 		}
 		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
 		// Retirement and the live tail both use the rows the chrome below leaves
 		// right now: a row the chrome pushes off screen goes straight to native
 		// history, so every transcript row is on screen or in scrollback. Chrome
-		// that later shrinks leaves blank rows (see the slack below).
+		// that later shrinks leaves blank rows (see the slack below). Covering
+		// chrome is the exception: the rows it covers stay live and are clipped
+		// off the top by the `drop` slice below until it closes.
+		const chromeRows = after.length - coveringRows;
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
@@ -401,14 +424,14 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// Retirement measures the same live blocks the viewport lays out below;
 		// one open frame renders each of them once for both.
 		transcript.beginFrame(frame);
-		const history = this.#offerHistory(transcript, width, rows, preRoots.length + after.length);
+		const history = this.#offerHistory(transcript, width, rows, preRoots.length + chromeRows);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
 		// The live tail is laid out against the same height retirement uses, so
 		// its compaction allocator (one row per block, no inter-block blanks)
 		// engages only when a block genuinely cannot retire.
-		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - after.length), frame);
+		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - chromeRows), frame);
 		const activeSpans: ViewportClickSpan[] = [];
 		for (const span of transcript.getLastViewportSpans()) {
 			const ids = (span.component as Partial<{ getClickFocusAgentIds(): string[] }>).getClickFocusAgentIds?.();
@@ -1031,6 +1054,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (this.#stopped) return;
 		this.#nativeDock = options.nativeDock;
 		this.#nativeTail = options.nativeTail ?? [];
+		this.#coveringChrome = new Set(options.coveringChrome);
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);

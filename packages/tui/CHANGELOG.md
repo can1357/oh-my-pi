@@ -15,7 +15,7 @@
 
 ### Changed
 
-- Rows that chrome below the transcript pushes off screen go straight to scrollback; when that chrome shrinks, the input stays on the bottom row and the freed rows stay blank until new output fills them
+- Rows that chrome below the transcript pushes off screen go straight to scrollback; when that chrome shrinks, the input stays on the bottom row and the freed rows stay blank until new output fills them. A docked report and the editor's completion list are the exception: the rows they cover come back when they close
 - Native chats no longer show a crossed-out Spotlight star or leave an empty row under unchanged tool results.
 - Native web search cards send their sources as one `omp.tool.sources` grid, answered or not; a search without an answer puts each page excerpt inside its source row (`omp.tool.excerpt`), which Tern shows once the card is unfolded, and titles take up to two lines
 - Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`

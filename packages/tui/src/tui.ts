@@ -323,6 +323,13 @@ export interface Component {
 	nativeTrailers?(): readonly Component[];
 
 	/**
+	 * Rows of the last render that are a popup over the transcript (the editor's completion
+	 * list). Below the transcript the composer keeps the rows they cover live, so they return
+	 * when the popup closes instead of going to scrollback.
+	 */
+	coveringRows?(): number;
+
+	/**
 	 * Pure preflight for focused input that must precede TUI-wide input listeners
 	 * and debug shortcuts. A true result routes the event to this component first.
 	 */

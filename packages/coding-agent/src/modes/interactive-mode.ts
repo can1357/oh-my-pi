@@ -2809,6 +2809,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				// end, where they stay when they move in, not pinned over the composer.
 				// An ask waiting for answers follows them, right above the composer.
 				nativeTail: [this.pendingShellContainer, this.askContainer],
+				// A docked report covers the transcript while it is open; closing it
+				// brings the rows back instead of leaving them in scrollback.
+				coveringChrome: [this.reportContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
