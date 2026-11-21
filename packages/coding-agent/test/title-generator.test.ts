@@ -777,6 +777,43 @@ describe("title generator", () => {
 		]);
 	});
 
+	it("keeps titles off the session model's fallback chain when title.followCurrentModelChain is off", async () => {
+		// The title model returns no title. The session model's own chain (and
+		// the default chain, which a helper role opts out of with an empty chain
+		// of its own) ends at a paid fallback model that only the main session
+		// should use.
+		const current = getModelOrThrow("claude-opus-4-8");
+		const titleModel = getModelFor("openai", "gpt-4o-mini");
+		const paid = getModelFor("openrouter", "anthropic/claude-opus-4.5");
+		const paidSelector = `${paid.provider}/${paid.id}`;
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(
+			async model =>
+				({
+					stopReason: "stop",
+					content: [{ type: "text", text: model.id === paid.id ? "<title>Paid title</title>" : "" }],
+				}) as never,
+		);
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${titleModel.provider}/${titleModel.id}` },
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { tiny: [], default: [paidSelector], "anthropic/*": [paidSelector] },
+			"title.followCurrentModelChain": false,
+		});
+		const registry = {
+			getAvailable: () => [current, titleModel, paid],
+			getApiKey: async () => "test-key",
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const title = await generateSessionTitle("Investigate the resolver", registry, settings, undefined, current);
+
+		expect(title).toBeNull();
+		const attempted = completeSimpleMock.mock.calls.map(call => (call[0] as Model<Api>).id);
+		expect(attempted).toEqual([titleModel.id, current.id]);
+	});
+
 	it("expands appended currentModel fallbackChains without merging role chains", async () => {
 		const current = getModelOrThrow("claude-opus-4-8");
 		const currentFallback = getModelOrThrow("claude-sonnet-4-5");

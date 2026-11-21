@@ -34,6 +34,7 @@ import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
+import { cfgTitleFollowCurrentModelChain } from "./title-settings";
 import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
@@ -182,8 +183,12 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
 	) {
 		// Append currentModel and expand its own chain separately — never merge it
 		// into the tiny/commit/smol role collection (that would apply role defaults).
+		// With title.followCurrentModelChain off, the current model goes alone.
 		const seen = new Set(models.map(formatModelStringWithRouting));
-		for (const model of expandOnlineTinyModelFallbacks(currentModel, settings, availableModels)) {
+		const appended = cfgTitleFollowCurrentModelChain.get(settings)
+			? expandOnlineTinyModelFallbacks(currentModel, settings, availableModels)
+			: [currentModel];
+		for (const model of appended) {
 			const key = formatModelStringWithRouting(model);
 			if (seen.has(key)) continue;
 			seen.add(key);
