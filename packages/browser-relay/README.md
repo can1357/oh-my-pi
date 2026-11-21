@@ -26,7 +26,8 @@ After that, updates need no action. omp keeps registered folders current: `omp u
 
 ## Development
 
-- `bun run build` (after `bun install --frozen-lockfile` at the repository root) bundles the extension into `dist/extension/`, zips it for GitHub releases, and regenerates the embedded CLI install assets under `packages/coding-agent/src/tools/browser/relay/extension-assets/` (**commit those**).
+- `bun run build` (after `bun install --frozen-lockfile` at the repository root) bundles the extension into `dist/extension/`, zips it for GitHub releases, and regenerates the CLI's embedded copy under `packages/coding-agent/src/tools/browser/relay/extension-assets/`.
+- That embedded copy is generated, not committed: `bun install` (root `prepare`), binary and npm builds, and the release scripts write it with `bun run gen:embedded`. Run that after changing the extension to test `omp browser-relay install` from source.
 - `bun scripts/smoke.ts [relay-url] [target-substring]` — end-to-end smoke replicating omp's supervisor + tab-worker double-connection pattern against a live relay.
 
 ## Limitations

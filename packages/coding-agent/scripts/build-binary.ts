@@ -66,6 +66,8 @@ async function main(): Promise<void> {
 		// Embed metadata for the same content-addressed viewer used by source exports.
 		// Generate here too for clean checkouts that skipped install hooks.
 		await runCommand(["bun", "--cwd=../collab-web", "run", "gen:export-viewer"]);
+		// The relay extension `omp browser-relay install` writes is generated, not committed.
+		await runCommand(["bun", "--cwd=../browser-relay", "run", "gen:embedded"]);
 		await compileCodingAgent({
 			repoRoot,
 			entrypoint: path.join(packageDir, "src", "cli.ts"),

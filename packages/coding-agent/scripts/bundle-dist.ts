@@ -97,6 +97,8 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
 	// afterwards to keep the checked-in placeholder empty.
 	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
+	// The relay extension `omp browser-relay install` writes is generated, not committed; `src` ships it too.
+	await runCommand(["bun", "--cwd=../browser-relay", "run", "gen:embedded"]);
 	// One payload for both consumers: inlined into dist/cli.js via `--define` for
 	// the bundled CLI entrypoint, and written to dist/docs-index.generated.txt so
 	// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no

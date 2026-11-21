@@ -69,6 +69,7 @@ pi-*.html
 
 # Generated files
 packages/coding-agent/export-assets/
+packages/coding-agent/src/tools/browser/relay/extension-assets/
 packages/natives/npm/
 /runs/
 sdk/python/omp-rpc/src/omp_rpc.egg-info/
