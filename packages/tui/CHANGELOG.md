@@ -9,12 +9,6 @@
 ### Fixed
 
 - Fixed typed prose such as `SK whatevertext` rendering as a skill chip and deleting as one unit in the prompt and in sent messages; only skills invoked with `/skill:<name>` are styled as chips ([#17287](https://github.com/can1357/oh-my-pi/issues/17287), [#19973](https://github.com/can1357/oh-my-pi/pull/19973) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Preserved custom foreground colors and text styles in status-line segments while continuing to apply the accent color to unstyled statuses.
-- Preserved background colors on truncated rows while scrolling.
-- Fixed WebP and JPEG images rendering as blank gaps on Kitty graphics-compatible terminals when displayed through a bare `Image`.
-- Improved terminal output handling so large repaints remain row-safe and slow or unavailable terminal writers no longer freeze input.
-- Preserved prefilled or hidden `__proto__` controls when ask HTML forms time out.
-- A single-question ask form now submits on the first Enter press.
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.0] - 2026-11-21
