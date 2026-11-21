@@ -105,12 +105,59 @@ export function formatTurnUsage(summary: TurnUsageSummary): { text: string; titl
 }
 
 /** Output tokens per second over the whole request; undefined when the duration is too short to mean anything. */
-function usageThroughput(usage: Usage, durationMs: number | undefined): number | undefined {
+export function usageThroughput(usage: { output: number }, durationMs: number | undefined): number | undefined {
 	if (!durationMs || durationMs <= MIN_DURATION_MS || usage.output <= 0) return undefined;
 	// TPS over the total request duration — the post-TTFT window undercounts
 	// generation time when reasoning tokens are hidden before the first
 	// visible byte, inflating the rate.
 	return (usage.output / durationMs) * 1000;
+}
+
+/** Find the newest assistant message with valid generation duration and compute its throughput. */
+export function lastAssistantThroughput(messages: readonly unknown[] | undefined): number | undefined {
+	if (!Array.isArray(messages)) return undefined;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (
+			m &&
+			typeof m === "object" &&
+			"role" in m &&
+			m.role === "assistant" &&
+			"duration" in m &&
+			typeof m.duration === "number" &&
+			"usage" in m &&
+			m.usage &&
+			typeof m.usage === "object" &&
+			"output" in m.usage &&
+			typeof m.usage.output === "number"
+		) {
+			const tps = usageThroughput({ output: m.usage.output }, m.duration);
+			if (tps !== undefined) return tps;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Resolves current throughput for a session: live streaming rate when the meter has
+ * accumulated enough evidence, falling back to the latest completed assistant turn.
+ */
+export function sessionThroughput(
+	session:
+		| {
+				isStreaming?: boolean;
+				tokenRate?: { rate: () => number | null };
+				agent?: { state?: { messages?: readonly unknown[] } };
+		  }
+		| null
+		| undefined,
+): number | undefined {
+	if (!session) return undefined;
+	if (session.isStreaming && session.tokenRate) {
+		const rate = session.tokenRate.rate();
+		if (rate !== null && Number.isFinite(rate)) return rate;
+	}
+	return lastAssistantThroughput(session.agent?.state?.messages);
 }
 
 /** Every metric except throughput, which the native row declares as a `rate`. */

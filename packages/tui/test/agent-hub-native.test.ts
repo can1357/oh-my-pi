@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import type { TspKind, TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { AgentHubOverlayComponent } from "../src/overlays/agent-hub";
+import { formatMetrics, metricsText } from "../src/overlays/agent-hub-renderer";
+import type { AgentMetrics } from "../src/overlays/agent-hub-projection";
 import type { AgentRecordLike } from "../src/overlays/agent-hub-types";
 import {
 	type EventBusLike,
@@ -51,9 +53,11 @@ function createHub(
 	agents: AgentRecordLike[],
 	focused: string[] = [],
 	observers = new SessionObserverRegistry(),
+	showTokenRate?: () => boolean,
 ): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
 		observers,
+		showTokenRate,
 		transcript: { fs, parseEntries: () => [] },
 		loadPersisted: async () => {},
 		hubKeys: [],
@@ -228,4 +232,55 @@ test("a follow-up turn does not age the previous turn's snapshot across the idle
 	} finally {
 		hub.dispose();
 	}
+});
+
+test("shows Tok/s column and facts when showTokenRate is enabled", () => {
+	const messages = [
+		{
+			role: "assistant",
+			duration: 2000,
+			content: [],
+			usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } },
+		},
+	];
+	const session = {
+		agent: { state: { messages } },
+		getSessionStats: () => ({
+			tokens: { input: 10, output: 150, cacheWrite: 0 },
+			assistantMessages: 1,
+			toolCalls: 0,
+			cost: 0.01,
+		}),
+	};
+	const worker = agent("Worker", 1_000_000, { session: session as unknown as AgentRecordLike["session"] });
+	const hubEnabled = createHub([worker], [], new SessionObserverRegistry(), () => true);
+	const hubDisabled = createHub([worker], [], new SessionObserverRegistry(), () => false);
+
+	try {
+		const propsEnabled = pickerProps(hubEnabled);
+		expect(propsEnabled.columns?.some(col => col.id === "rate")).toBe(true);
+		expect(propsEnabled.items?.find(item => item.id === "Worker")?.facts?.rate).toBe("75.0/s");
+
+		const propsDisabled = pickerProps(hubDisabled);
+		expect(propsDisabled.columns?.some(col => col.id === "rate")).toBe(false);
+		expect(propsDisabled.items?.find(item => item.id === "Worker")?.facts?.rate).toBeUndefined();
+	} finally {
+		hubEnabled.dispose();
+		hubDisabled.dispose();
+	}
+});
+
+test("formatMetrics and metricsText only append tok/s when showTokenRate is true", () => {
+	const metrics: AgentMetrics = {
+		tokens: 100,
+		requests: 1,
+		tools: 0,
+		cost: 0.01,
+		durationMs: 1000,
+		tokensPerSecond: 60.0,
+	};
+	expect(metricsText(metrics, false)).not.toContain("tok/s");
+	expect(metricsText(metrics, true)).toContain("60.0 tok/s");
+	expect(formatMetrics(metrics, false)).not.toContain("tok/s");
+	expect(formatMetrics(metrics, true)).toContain("60.0 tok/s");
 });

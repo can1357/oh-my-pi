@@ -756,6 +756,18 @@ export const cfgDisplaySubagentLivePreview = register({
 	},
 });
 
+export const cfgDisplaySubagentTokenRate = register({
+	id: "display.subagentTokenRate",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Subagent Generation Rate",
+		description: "Show generation tok/s for subagents in the Agent Hub and subagent summaries",
+	},
+});
+
 export const cfgDisplaySmoothStreaming = register({
 	id: "display.smoothStreaming",
 	type: "boolean",
