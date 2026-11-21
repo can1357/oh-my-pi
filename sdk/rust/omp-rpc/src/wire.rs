@@ -5394,6 +5394,11 @@ pub struct AbortAndPromptParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AbortAndDeliverQueueResult {
+	pub aborted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewSessionParams {
 	#[serde(rename = "parentSession", default, skip_serializing_if = "Option::is_none")]
 	pub parent_session: Option<String>,
@@ -6482,6 +6487,35 @@ impl Command for AbortAndRestoreQueueCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<AbortAndRestoreQueueResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AbortAndDeliverQueueCommand {}
+
+impl Command for AbortAndDeliverQueueCommand {
+	const NAME: &'static str = "abort_and_deliver_queue";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = AbortAndDeliverQueueResult;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<AbortAndDeliverQueueResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResumeCommand {}
+
+impl Command for ResumeCommand {
+	const NAME: &'static str = "resume";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = ();
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		let _ = data;
+		Ok(())
 	}
 }
 

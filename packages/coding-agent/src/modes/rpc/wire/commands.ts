@@ -72,6 +72,15 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: "AbortAndRestoreQueueResult",
 	},
 	{
+		name: "abort_and_deliver_queue",
+		doc: "Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input.",
+		result: { aborted: "boolean" },
+	},
+	{
+		name: "resume",
+		doc: "Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way.",
+	},
+	{
 		name: "new_session",
 		doc: "Start a new session.",
 		params: { "parentSession?": "string" },

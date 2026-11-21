@@ -8,6 +8,8 @@
 
 - Added the `features` terminal event: the terminal's feature list changed (a setting), replacing the `hello` reply's
 
+- Added the `resume` and `deliver-queue` collab guest frames and `followUp` on `prompt`
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

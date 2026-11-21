@@ -1663,6 +1663,10 @@ export interface AbortAndPromptParams {
 	images?: ImageContent[];
 }
 
+export interface AbortAndDeliverQueueResult {
+	aborted: boolean;
+}
+
 export interface NewSessionParams {
 	parentSession?: string;
 }
@@ -2020,6 +2024,8 @@ export interface RpcWireCommands {
 	abort: { params: undefined; result: undefined };
 	abort_and_prompt: { params: AbortAndPromptParams; result: undefined };
 	abort_and_restore_queue: { params: undefined; result: AbortAndRestoreQueueResult };
+	abort_and_deliver_queue: { params: undefined; result: AbortAndDeliverQueueResult };
+	resume: { params: undefined; result: undefined };
 	new_session: { params: NewSessionParams; result: CancellationResult };
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };

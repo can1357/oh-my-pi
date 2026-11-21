@@ -61,6 +61,8 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort_and_restore_queue" }
+	| { id?: string; type: "abort_and_deliver_queue" }
+	| { id?: string; type: "resume" }
 	| { id?: string; type: "new_session"; parentSession?: string }
 	| { id?: string; type: "open_session"; sessionDir: string; provider?: string; modelId?: string }
 
@@ -473,6 +475,8 @@ export type RpcResponse =
 			success: true;
 			data: RpcAbortAndRestoreQueueResult;
 	  }
+	| { id?: string; type: "response"; command: "abort_and_deliver_queue"; success: true; data: { aborted: boolean } }
+	| { id?: string; type: "response"; command: "resume"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "open_session"; success: true; data: RpcOpenSessionResult }
 

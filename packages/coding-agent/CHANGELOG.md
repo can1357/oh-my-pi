@@ -6,6 +6,8 @@
 
 - `get_model_picker` RPC command: omp's session model picker (Recent block, search ranking, role chips, `@` quick roles, thinking slider) for remote pickers such as the Chrome side panel.
 - `get_state` reports `configuredThinkingLevel` and `thinkingLevels`; `set_model` takes `thinkingLevel` and `role`, and `set_thinking_level` accepts `auto`.
+- `resume` and `abort_and_deliver_queue` RPC commands: the TUI's `.`/`c` continue shortcut and its empty-Enter interrupt that sends the queued messages.
+- Collab guests can continue the host's agent, interrupt it to send queued messages, and queue a prompt as a follow-up instead of steering.
 
 ### Breaking Changes
 

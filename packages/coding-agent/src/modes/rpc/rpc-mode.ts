@@ -468,6 +468,7 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
  * behind a keystroke. `live_start`, `live_connect` and `dictation_start` respond only once
  * connected or recording, so they are backgrounded and their stop commands can cancel them.
  * `handoff` leaves the queue free for steering and `abort` while its compaction is preparing.
+ * `resume` and `abort_and_deliver_queue` wait behind earlier user input, so they run in the background like `prompt`.
  * Response correlation is preserved via each command's `id`; ordering across
  * concurrent commands is not guaranteed and clients MUST match on `id`.
  *
@@ -500,6 +501,8 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 		BACKGROUND_COMMANDS.has(command.type) ||
 		command.type === "prompt" ||
 		command.type === "steer" ||
+		command.type === "resume" ||
+		command.type === "abort_and_deliver_queue" ||
 		command.type === "dictation_start" ||
 		command.type === "follow_up" ||
 		command.type === "steer_subagent" ||
@@ -527,6 +530,8 @@ const USER_INPUT_TYPES: Record<string, true> = {
 	steer: true,
 	follow_up: true,
 	abort_and_prompt: true,
+	abort_and_deliver_queue: true,
+	resume: true,
 };
 
 const SESSION_CHANGE_TYPES: Record<string, true> = {
@@ -2291,6 +2296,32 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				abortBuiltinCommands("RPC command aborted by host");
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return fitAbortAndRestoreQueueResponse(id, restored, frameEncoder.maxIntactFrameBytes);
+			}
+
+			case "abort_and_deliver_queue": {
+				// The TUI's empty Enter. Ordered behind earlier input, so a message sent just
+				// before is queued by the time this runs and is the one the continuation takes.
+				const aborted = await inputGate.enqueue(async () => {
+					if (!inputGate.isCurrent(command) || !session.isStreaming || !session.hasInterruptibleInput) {
+						return false;
+					}
+					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					return true;
+				});
+				return success(id, "abort_and_deliver_queue", { aborted });
+			}
+
+			case "resume": {
+				// The TUI's `.`/`c`, ordered behind earlier input like abort_and_deliver_queue.
+				// Answer once the continuation is under way; a failure after that is a late error.
+				await inputGate.enqueue(async () => {
+					if (!inputGate.isCurrent(command) || shutdownState.requested) return;
+					const admitted = Promise.withResolvers<void>();
+					const resuming = session.resume({ onAdmitted: admitted.resolve });
+					await Promise.race([resuming, admitted.promise]);
+					resuming.catch(onPromptError(id, "resume"));
+				});
+				return success(id, "resume");
 			}
 
 			case "abort_and_prompt": {

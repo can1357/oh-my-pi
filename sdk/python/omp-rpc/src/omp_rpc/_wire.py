@@ -1763,6 +1763,11 @@ class NegotiateProtocolResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class AbortAndDeliverQueueResult:
+    aborted: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class LiveConnectResult:
     voice: str
     sdp_answer: str
@@ -3334,6 +3339,13 @@ def parse_negotiate_protocol_result(value: object, path: str = "NegotiateProtoco
     )
 
 
+def parse_abort_and_deliver_queue_result(value: object, path: str = "AbortAndDeliverQueueResult") -> AbortAndDeliverQueueResult:
+    payload = expect_object(value, path)
+    return AbortAndDeliverQueueResult(
+        aborted=required(payload, "aborted", decode_bool, path),
+    )
+
+
 def parse_live_connect_result(value: object, path: str = "LiveConnectResult") -> LiveConnectResult:
     payload = expect_object(value, path)
     return LiveConnectResult(
@@ -3525,6 +3537,16 @@ class WireClient:
         """Withdraw queued user input, then abort the current run; returns the withdrawn input."""
         params: dict[str, object] = {}
         return parse_abort_and_restore_queue_result(self._command("abort_and_restore_queue", params), "abort_and_restore_queue")
+
+    def abort_and_deliver_queue(self) -> AbortAndDeliverQueueResult:
+        """Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input."""
+        params: dict[str, object] = {}
+        return parse_abort_and_deliver_queue_result(self._command("abort_and_deliver_queue", params), "abort_and_deliver_queue")
+
+    def resume(self) -> None:
+        """Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way."""
+        params: dict[str, object] = {}
+        self._command("resume", params)
 
     def new_session(self, parent_session: str | None = None) -> CancellationResult:
         """Start a new session."""
@@ -4164,6 +4186,7 @@ class WireClient:
 
 
 __all__ = [
+    "AbortAndDeliverQueueResult",
     "AbortAndRestoreQueueResult",
     "AdvisorCostChangedEvent",
     "AdvisorYieldedEvent",
@@ -4372,6 +4395,7 @@ __all__ = [
     "UserContent",
     "UserMessage",
     "WidgetPlacement",
+    "parse_abort_and_deliver_queue_result",
     "parse_abort_and_restore_queue_result",
     "parse_advisor_cost_changed_event",
     "parse_advisor_yielded_event",
