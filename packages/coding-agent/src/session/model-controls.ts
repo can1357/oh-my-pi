@@ -21,10 +21,12 @@ import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
 	findScopedModelIndex,
+	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
+	routedModelsAreEqual,
 } from "../config/model-resolver";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
@@ -87,12 +89,23 @@ export function resolveRoleModelCycle(
 	const matchPreferences = getModelMatchPreferences(settings);
 	const models: ResolvedRoleModel[] = [];
 	for (const role of roleOrder) {
-		const roleModelStr =
-			role === "default"
-				? (settings.getModelRole("default") ?? formatModelStringWithRouting(currentModel))
-				: settings.getModelRole(role);
+		const configuredRole = settings.getModelRole(role);
+		const implicitDefault = role === "default" && configuredRole === undefined;
+		const roleModelStr = implicitDefault ? formatModelStringWithRouting(currentModel) : configuredRole;
 		if (!roleModelStr) continue;
-		const resolved = resolveModelRoleValue(roleModelStr, availableModels, { settings, matchPreferences });
+		const options = { settings, matchPreferences };
+		let resolved = resolveModelRoleValue(roleModelStr, availableModels, options);
+		if (implicitDefault && resolved.model && roleModelStr !== formatModelString(currentModel)) {
+			const selector = roleModelStr.toLowerCase();
+			if (formatModelString(resolved.model).toLowerCase() === selector) {
+				// Explicit selectors prefer literal IDs; here the active model tells us it was a pin.
+				resolved = resolveModelRoleValue(
+					roleModelStr,
+					availableModels.filter(model => formatModelString(model).toLowerCase() !== selector),
+					options,
+				);
+			}
+		}
 		if (!resolved.model) continue;
 		models.push({
 			role,
@@ -109,12 +122,11 @@ export function resolveRoleModelCycle(
 	// pointing at a model the session no longer runs; cycling from that
 	// stale slot lands on the wrong neighbor and reads as a skipped entry.
 	let currentIndex = lastRole ? models.findIndex(entry => entry.role === lastRole) : -1;
-	const currentSelector = formatModelStringWithRouting(currentModel);
-	if (currentIndex !== -1 && formatModelStringWithRouting(models[currentIndex].model) !== currentSelector) {
+	if (currentIndex !== -1 && !routedModelsAreEqual(models[currentIndex].model, currentModel)) {
 		currentIndex = -1;
 	}
 	if (currentIndex === -1) {
-		currentIndex = models.findIndex(entry => formatModelStringWithRouting(entry.model) === currentSelector);
+		currentIndex = models.findIndex(entry => routedModelsAreEqual(entry.model, currentModel));
 	}
 	if (currentIndex === -1) currentIndex = 0;
 	return { models, currentIndex };

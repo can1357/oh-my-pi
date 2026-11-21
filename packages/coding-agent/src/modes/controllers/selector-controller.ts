@@ -34,7 +34,7 @@ import {
 	modelPresetSavedMessage,
 	saveModelPreset,
 } from "../../config/model-presets";
-import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
+import { resolveAdvisorRoleSelection, resolveModelRoleValue, routedModelsAreEqual } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -128,7 +128,12 @@ import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-
 
 import { cfgAdvisorSyncBacklog } from "../../advisor/settings";
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
-import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
+import {
+	cfgCycleOrder,
+	cfgDisabledProviders,
+	cfgEnabledModels,
+	cfgModelRoleStorage,
+} from "../../config/model-settings";
 import { cfgDefaultThinkingLevel, cfgRetryFallbackChains, cfgSessionWorktreeScope } from "../../session/settings";
 import {
 	cfgStatusLineCompactThinkingLevel,
@@ -1045,18 +1050,19 @@ export class SelectorController {
 							const exposesPersistedFallback =
 								fallbackProvenance === "project" || fallbackProvenance === "global";
 							if (fallbackRoleValue && exposesPersistedFallback) {
-								const scopedModels = this.ctx.session.scopedModels.map(sm => sm.model);
+								const session = this.ctx.session;
+								const explicitScope = session.scopedModelsFromSettings ? [] : session.scopedModels;
+								const hasScope = explicitScope.length > 0 || cfgEnabledModels.get(this.ctx.settings).length > 0;
 								const availableModels =
-									scopedModels.length > 0 ? scopedModels : this.ctx.session.getAvailableModels();
+									explicitScope.length > 0
+										? explicitScope.map(entry => entry.model)
+										: session.getAvailableModels();
 								const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
 									settings: this.ctx.settings,
+									respectUpstreamPins: hasScope,
+									modelLookup: session.modelRegistry,
 								});
-								const live = this.ctx.session.model;
-								const liveDiffers =
-									!live ||
-									!resolved.model ||
-									live.provider !== resolved.model.provider ||
-									live.id !== resolved.model.id;
+								const liveDiffers = !routedModelsAreEqual(session.model, resolved.model);
 								if (resolved.model && (fallbackRoleValue !== previousEffectiveRoleValue || liveDiffers)) {
 									const fallbackModel = resolved.model;
 									const isAuto = resolved.thinkingLevel === AUTO_THINKING;

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -427,6 +428,92 @@ describe("AgentSession model persistence", () => {
 			expect.objectContaining({ model: smolSelector, role: "smol" }),
 			expect.objectContaining({ model: defaultSelector, role: "default" }),
 		]);
+	});
+
+	it.each([["slow"], [undefined]] as const)("cycles from the active pin with recorded role %s", async recordedRole => {
+		const routed = routedModel("cerebras");
+		const literal = { ...routed, id: `${routed.id}@cerebras`, compat: undefined };
+		const selector = formatModelStringWithRouting(routed);
+		expect(formatModelStringWithRouting(literal)).toBe(selector);
+		const created = await createSession({ initialModel: routed, modelRoles: { slow: selector } });
+		const available = created.modelRegistry.getAvailable();
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue([...available, literal]);
+		try {
+			if (recordedRole) created.session.sessionManager.appendModelChange(selector, recordedRole);
+			expect(created.session.sessionManager.getLastModelChangeRole()).toBe(recordedRole);
+			const order = ["slow", "default"];
+			const cycle = created.session.getRoleModelCycle(order);
+			expect(cycle?.models[0]?.model.id).toBe(literal.id);
+			expect(cycle?.models[1]?.model.id).toBe(routed.id);
+			expect(formatModelStringWithRouting(cycle!.models[1].model)).toBe(selector);
+
+			const result = await created.session.cycleRoleModels(order);
+			expect(result?.role).toBe("slow");
+			expect(created.session.model?.id).toBe(literal.id);
+		} finally {
+			getAvailable.mockRestore();
+		}
+	});
+
+	it("cycles from an implicit default pinned to a variant using refreshed model metadata", async () => {
+		const base = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!base) throw new Error("Expected the OpenRouter base model");
+		const selector = "openrouter/z-ai/glm-4.7:nitro@cerebras";
+		const initialModel = parseModelPattern(selector, [base]).model;
+		if (!initialModel) throw new Error(`Expected ${selector} to resolve from the base model`);
+		const created = await createSession({ initialModel, modelRoles: { slow: modelValue(base) } });
+		const refreshedBase = { ...base, contextWindow: Math.floor(base.contextWindow / 2) };
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue([refreshedBase]);
+		try {
+			const order = ["slow", "default"];
+			const cycle = created.session.getRoleModelCycle(order);
+			expect(cycle?.models.map(entry => [entry.role, formatModelStringWithRouting(entry.model)])).toEqual([
+				["slow", modelValue(base)],
+				["default", selector],
+			]);
+			expect(cycle?.models[1]?.model.contextWindow).toBe(refreshedBase.contextWindow);
+			const result = await created.session.cycleRoleModels(order);
+			expect(result?.role).toBe("slow");
+			expect(formatModelStringWithRouting(created.session.model!)).toBe(modelValue(base));
+		} finally {
+			getAvailable.mockRestore();
+		}
+	});
+
+	it("keeps the implicit default role when the active model ID becomes an alias", async () => {
+		const logical = buildModel({
+			id: "kimi-k2",
+			name: "Kimi K2",
+			provider: "venice",
+			api: "openai-completions",
+			baseUrl: "https://api.venice.ai/api/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 1024,
+			reasoning: true,
+		});
+		const created = await createSession({ initialModel: { ...logical, id: "kimi-k2-thinking" } });
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue([logical]);
+		try {
+			const cycle = created.session.getRoleModelCycle(["default"]);
+			expect(cycle?.models.map(entry => [entry.role, entry.model.id])).toEqual([["default", "kimi-k2"]]);
+		} finally {
+			getAvailable.mockRestore();
+		}
+	});
+
+	it("omits the implicit default role when the active provider is no longer available", async () => {
+		const created = await createSession({ modelRoles: { slow: "openrouter/z-ai/glm-4.7" } });
+		const active = created.session.model!;
+		const available = created.modelRegistry.getAvailable().filter(model => model.provider !== active.provider);
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue(available);
+		try {
+			const cycle = created.session.getRoleModelCycle(["default", "slow"]);
+			expect(cycle?.models.map(entry => entry.role)).toEqual(["slow"]);
+		} finally {
+			getAvailable.mockRestore();
+		}
 	});
 
 	describe.each(["startup resume", "switch session"] as const)("%s route journal replay", restorePath => {

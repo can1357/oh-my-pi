@@ -239,10 +239,8 @@ export class PrewalkCoordinator {
 
 	/** Whether the session still sits on the model and effort `handoff` switched to. */
 	#onHandoffTarget(handoff: PrewalkHandoff): boolean {
-		const current = this.#host.model();
 		return (
-			current?.provider === handoff.target.provider &&
-			current?.id === handoff.target.id &&
+			routedModelsAreEqual(this.#host.model(), handoff.target) &&
 			this.#host.configuredThinkingLevel() === handoff.targetThinkingLevel
 		);
 	}
