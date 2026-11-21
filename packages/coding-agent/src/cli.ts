@@ -27,6 +27,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 
+import { materializeDatalessFiles } from "@oh-my-pi/pi-utils/dataless-files";
 import { raiseInteractiveQos } from "@oh-my-pi/pi-utils/process-qos";
 import {
 	declareWorkerHostEntry,
@@ -534,6 +535,9 @@ export async function runCli(argv: string[]): Promise<void> {
 	// workers: on macOS its main thread runs above the default class a busy
 	// machine's builds compete in.
 	if (isProcessEntry) raiseInteractiveQos();
+	// Before anything is spawned: worker subprocesses, shells and tools
+	// inherit the policy, so reads of cloud-only files download everywhere.
+	if (isProcessEntry) materializeDatalessFiles();
 
 	if (resolvedArgv[0] === "--license") {
 		// Command boundary: bundled notices are read only when requested.

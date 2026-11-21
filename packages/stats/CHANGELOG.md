@@ -5,6 +5,13 @@
 ### Fixed
 
 - Fixed the Spotlight headline's and step rows' holdout baseline mixing results plain showed whole with results plain truncated, whose cuts get fetched beyond plain's page anyway ([#19897](https://github.com/can1357/oh-my-pi/pull/19897) by [@Xytronix](https://github.com/Xytronix))
+### Added
+
+- Added `readDailyActivity()`, which reads the stored daily activity through its own connection that never writes, so another process holding the stats database write lock cannot fail or delay it; it returns null when no stats database exists yet ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Fixed opening an already initialized stats database taking the write lock, and daily activity trusting a rollup built by an older version instead of reading the raw rows ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.0.1] - 2026-11-19
 

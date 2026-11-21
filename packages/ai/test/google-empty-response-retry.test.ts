@@ -112,9 +112,16 @@ const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 
 const antigravityModel: Model<"google-gemini-cli"> = buildModel({
-	...cliModel,
+	id: "gemini-3-flash",
+	name: "Gemini 3 Flash (Antigravity)",
+	api: "google-gemini-cli",
 	provider: "google-antigravity",
 	baseUrl: ANTIGRAVITY_DAILY_ENDPOINT,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 32_000,
 });
 
 function withResponseUrl(response: Response, endpoint: string): Response {
@@ -406,7 +413,7 @@ describe("Google empty-response retry (Cloud Code Assist path)", () => {
 			return response;
 		};
 
-		const stream = streamGoogleGeminiCli(cliModel, context, {
+		const stream = streamGoogleGeminiCli(antigravityModel, context, {
 			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
 			fetch: fetchMock,
 			acceptEmptyResponse: true,
