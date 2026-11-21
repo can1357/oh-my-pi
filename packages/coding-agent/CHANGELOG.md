@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a declarative YAML workload runner for ordered tasks and templated inputs ([#19923](https://github.com/can1357/oh-my-pi/pull/19923) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
