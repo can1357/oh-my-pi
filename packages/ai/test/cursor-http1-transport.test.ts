@@ -8,7 +8,11 @@ import {
 	AgentServerMessageSchema,
 	BidiAppendRequestSchema,
 	BidiRequestIdSchema,
+	ConversationStateStructureSchema,
+	ConversationTokenDetailsSchema,
+	ExecServerMessageSchema,
 	InteractionUpdateSchema,
+	ReadArgsSchema,
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -242,6 +246,98 @@ it(
 		} finally {
 			server.stop(true);
 		}
+	},
+	SETTLE_TIMEOUT_MS,
+);
+
+it(
+	"records the HTTP/1 wrap-up only when its BidiAppend is accepted, even if the reply streams back first",
+	async () => {
+		const runCase = async (appendStatus: number) => {
+			const streamReady = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+			const server = Bun.serve({
+				port: 0,
+				async fetch(request) {
+					const url = new URL(request.url);
+					const body = new Uint8Array(await request.arrayBuffer());
+					if (url.pathname === "/agent.v1.AgentService/RunSSE") {
+						return new Response(
+							new ReadableStream<Uint8Array>({
+								start(controller) {
+									streamReady.resolve(controller);
+								},
+							}),
+							{ headers: { "content-type": "application/connect+proto" } },
+						);
+					}
+					if (url.pathname === "/aiserver.v1.BidiService/BidiAppend") {
+						const append = fromBinary(BidiAppendRequestSchema, body);
+						const clientMsg = fromBinary(AgentClientMessageSchema, append.dataBinary);
+						const controller = await streamReady.promise;
+						if (clientMsg.message.case === "runRequest") {
+							const checkpoint = frameConnectMessage(
+								toBinary(
+									AgentServerMessageSchema,
+									create(AgentServerMessageSchema, {
+										message: {
+											case: "conversationCheckpointUpdate",
+											value: create(ConversationStateStructureSchema, {
+												tokenDetails: create(ConversationTokenDetailsSchema, { usedTokens: 70_000 }),
+											}),
+										},
+									}),
+								),
+							);
+							const readExec = frameConnectMessage(
+								toBinary(
+									AgentServerMessageSchema,
+									create(AgentServerMessageSchema, {
+										message: {
+											case: "execServerMessage",
+											value: create(ExecServerMessageSchema, {
+												id: 1,
+												execId: "exec-1",
+												acceptHookAdditionalContexts: true,
+												message: { case: "readArgs", value: create(ReadArgsSchema, { path: "a.ts" }) },
+											}),
+										},
+									}),
+								),
+							);
+							controller.enqueue(Buffer.concat([checkpoint, readExec]));
+							return new Response(null, { status: 200 });
+						}
+						if (clientMsg.message.case === "execClientMessage") {
+							// The server streams its reply and ends the stream before it answers the append.
+							controller.enqueue(Buffer.concat([textDeltaFrame("wrapped"), turnEndedFrame()]));
+							controller.close();
+							await Bun.sleep(50);
+							return new Response(null, { status: appendStatus });
+						}
+						return new Response(null, { status: 200 });
+					}
+					return new Response(null, { status: 404 });
+				},
+			});
+			try {
+				const response = streamCursor(makeModel(server.url.toString()), context, {
+					apiKey: "test-token",
+					transport: "http1",
+					contextBudgetTokens: 60_000,
+				});
+				const { result } = await drain(response);
+				return result;
+			} finally {
+				server.stop(true);
+			}
+		};
+
+		const rejected = await runCase(500);
+		expect(rejected.stopReason).toBe("stop");
+		expect(rejected.contextBudgetWrapUp).toBeUndefined();
+
+		const accepted = await runCase(200);
+		expect(accepted.contextBudgetWrapUp).toBe(true);
 	},
 	SETTLE_TIMEOUT_MS,
 );

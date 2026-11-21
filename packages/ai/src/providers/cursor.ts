@@ -187,6 +187,7 @@ import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
+	AnsweredSteeringEntry,
 	AssistantMessage,
 	Context,
 	CursorExecFrameContext,
@@ -200,6 +201,7 @@ import type {
 	CursorTodoSnapshotItem,
 	CursorTodoSyncHandler,
 	CursorToolResultHandler,
+	DeveloperMessage,
 	ImageContent,
 	Message,
 	Model,
@@ -212,6 +214,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 	Usage,
+	UserMessage,
 } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import {
@@ -233,6 +236,8 @@ import { waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
+import { CursorSteeringRelay } from "./cursor/steering-relay";
+import { CursorContextBudget } from "./cursor/context-budget";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
@@ -452,6 +457,11 @@ export interface CursorOptions extends StreamOptions {
 	wireModelId?: string;
 	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation or a TLS reset. */
 	transport?: "auto" | "http2" | "http1";
+	/**
+	 * Conversation size at which a turn is asked to wrap up so the host can
+	 * compact between turns; see {@link CursorContextBudget}.
+	 */
+	contextBudgetTokens?: number;
 }
 
 type CursorWireMode = "normalized" | "discovered";
@@ -471,6 +481,7 @@ interface CursorRetryContext {
 	conversationId: string;
 	blobStore: Map<string, Uint8Array>;
 	turnRecords: CursorTurnRecordState;
+	contextBudget: CursorContextBudget | undefined;
 	firstTokenTime?: number;
 	/** Output tokens a relayed run's earlier responses reported (`CursorRelayState.reportedOutput`). */
 	relayReportedOutput?: number;
@@ -792,12 +803,21 @@ function parseConnectEndStream(data: Uint8Array): Error | null {
 	}
 }
 
+interface CursorAdditionalContext {
+	content: string;
+	onDelivered?: () => void;
+}
+
 interface CursorMessageWriter {
-	write(frame: Uint8Array): void;
+	write(frame: Uint8Array, onDelivered?: () => void): void;
+	/** Contexts the host wants the model to read with the next tool result that accepts them. */
+	takeAdditionalContexts?(): CursorAdditionalContext[];
 }
 
 interface CursorRunTransport extends CursorMessageWriter {
 	readonly closed: boolean;
+	/** Whether `write` still sends: false once the transport ended or closed. */
+	readonly writable: boolean;
 	close(): void;
 	/**
 	 * Stop sending after the server's end frame. HTTP/2 half-closes the request
@@ -818,8 +838,14 @@ function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTrans
 		get closed() {
 			return request.closed;
 		},
-		write(frame) {
-			if (!request.writableEnded) request.write(frame);
+		get writable() {
+			return !request.writableEnded && !request.closed;
+		},
+		write(frame, onDelivered) {
+			if (!request.writableEnded && !request.closed) {
+				request.write(frame);
+				onDelivered?.();
+			}
 		},
 		close() {
 			request.close();
@@ -855,6 +881,7 @@ interface CursorHttp1RunTransportOptions {
 interface CursorPendingAppend {
 	seqno: bigint;
 	data: Uint8Array;
+	onDelivered?: () => void;
 }
 
 const CURSOR_HTTP1_APPEND_CONCURRENCY = 16;
@@ -884,15 +911,17 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
 	let activeAppends = 0;
+	const inFlightAppends = new Set<Promise<void>>();
 	let closed = false;
 	let ended = false;
+	let streamEnded = false;
 	let responseListener: (headers: http2.IncomingHttpHeaders) => void = () => {};
 	let dataListener: (chunk: Buffer) => void = () => {};
 	let endListener: () => void = () => {};
 	let errorListener: (error: unknown) => void = () => {};
 
 	const fail = (error: unknown): void => {
-		if (closed) return;
+		if (closed || streamEnded) return;
 		closed = true;
 		pendingAppends.length = 0;
 		abortController.abort(error);
@@ -918,6 +947,7 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
 		});
 		if (response.ok) {
+			append.onDelivered?.();
 			await response.body?.cancel();
 			return;
 		}
@@ -932,12 +962,14 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			const append = pendingAppends.shift();
 			if (!append) return;
 			activeAppends++;
-			void sendAppend(append)
+			const sending: Promise<void> = sendAppend(append)
 				.catch(fail)
 				.finally(() => {
 					activeAppends--;
+					inFlightAppends.delete(sending);
 					pumpAppends();
 				});
+			inFlightAppends.add(sending);
 		}
 	};
 
@@ -967,6 +999,13 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 				dataListener(Buffer.from(chunk));
 			}
 			if (closed) return;
+			// Appends are unary calls that can still be answering when the server has already
+			// streamed its reply: let them settle so each delivery is recorded before the
+			// stream finalizes. A failure from here on no longer changes how the stream ended.
+			streamEnded = true;
+			pendingAppends.length = 0;
+			await Promise.allSettled(inFlightAppends);
+			if (closed) return;
 			closed = true;
 			endListener();
 		} catch (error) {
@@ -975,14 +1014,18 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	};
 	void run();
 	return {
+		get writable() {
+			return !closed && !ended && !streamEnded;
+		},
 		get closed() {
 			return closed;
 		},
-		write(frame) {
-			if (closed || ended) return;
+		write(frame, onDelivered) {
+			if (closed || ended || streamEnded) return;
 			pendingAppends.push({
 				seqno: appendSeqno++,
 				data: readConnectFrameMessage(frame),
+				onDelivered,
 			});
 			pumpAppends();
 		},
@@ -1204,6 +1247,7 @@ function streamCursorWithWireMode(
 	options: CursorOptions | undefined,
 	wireMode: CursorWireMode,
 	timing?: CursorStreamTiming,
+	steering?: CursorSteeringRelay,
 ): AssistantMessageEventStream {
 	// A relayed run outlives its first response: `context`, `options`, `stream`
 	// and `output` (and the response timings) belong to the request currently
@@ -1360,6 +1404,9 @@ function streamCursorWithWireMode(
 			given: new Map(),
 			relayed: false,
 		};
+		const contextBudget =
+			retryContext?.contextBudget ??
+			(options?.contextBudgetTokens ? new CursorContextBudget(options.contextBudgetTokens) : undefined);
 		const hostOnToolResult = options?.onToolResult;
 		const onToolResult: CursorToolResultHandler | undefined = hostOnToolResult
 			? result => {
@@ -1600,12 +1647,32 @@ function streamCursorWithWireMode(
 			// call and runs the handler twice. KV blob replies bypass this writer —
 			// they are idempotent and the server re-requests them on resume.
 			// Heartbeats and the run request write the transport directly.
+			let wrapUpDelivered = false;
 			const resultTransport = runTransport;
 			const resultWriter: CursorMessageWriter = {
-				write(frame) {
+				write(frame, onDelivered) {
 					progressVersion++;
 					checkpointCoversTurn = false;
-					resultTransport.write(frame);
+					resultTransport.write(frame, onDelivered);
+				},
+				takeAdditionalContexts: () => {
+					// A result written after the server's end is dropped; the notice and
+					// steering would never reach the model, so both stay pending.
+					if (!resultTransport.writable) return [];
+					const contexts: CursorAdditionalContext[] = [];
+					const notice = contextBudget?.takeNotice(output.usage.contextTokens);
+					if (notice !== undefined) {
+						contexts.push({
+							content: notice,
+							onDelivered: () => {
+								wrapUpDelivered = true;
+								output.contextBudgetWrapUp = true;
+							},
+						});
+					}
+					const steered = steering?.take(output.content.length);
+					if (steered !== undefined) contexts.push({ content: steered });
+					return contexts;
 				},
 			};
 
@@ -1872,6 +1939,9 @@ function streamCursorWithWireMode(
 							return nextStream;
 						},
 					};
+					if (steering && steering.absorbed.length > 0) output.answeredSteering = [...steering.absorbed];
+					await steering?.close();
+					steering = undefined;
 					relay.states.get(CURSOR_RELAY_SESSION_STATE_KEY)?.close();
 					relay.states.set(CURSOR_RELAY_SESSION_STATE_KEY, parked);
 					const idleTimer = setTimeout(parked.close, CURSOR_RELAY_IDLE_TIMEOUT_MS);
@@ -1889,8 +1959,14 @@ function streamCursorWithWireMode(
 						log("relay", "closed", { transportSettled: h2Settled });
 						return false;
 					}
+					const latestContextTokens = output.usage.contextTokens;
+					const wrappedForBudget = wrapUpDelivered || output.contextBudgetWrapUp === true;
 					({ context, options, stream } = resumption);
+					steering = options.liveSteering ? new CursorSteeringRelay(options.liveSteering) : undefined;
+					if (steering) await Bun.sleep(0);
 					output = createCursorOutput(model, Date.now());
+					if (latestContextTokens !== undefined) output.usage.contextTokens = latestContextTokens;
+					if (wrappedForBudget) output.contextBudgetWrapUp = true;
 					startTime = performance.now();
 					firstTokenTime = undefined;
 					stream.push({ type: "start", partial: output });
@@ -1988,7 +2064,7 @@ function streamCursorWithWireMode(
 			for (const [callId, stored] of turnRecords.stored) {
 				if (hashCursorToolResult(stored) !== turnRecords.given.get(callId)) keptAsSent = false;
 			}
-			output.providerPayload =
+			const historyPayload =
 				checkpointCoversTurn && latestCheckpoint && keptAsSent
 					? captureCursorHistoryPayload(latestCheckpoint, blobStore, turnRequestIds, {
 							wireRoute: builtRequest.wireRoute,
@@ -1997,6 +2073,8 @@ function streamCursorWithWireMode(
 							toolResults: turnRecords.stored,
 						})
 					: undefined;
+			output.providerPayload = historyPayload;
+			if (steering && steering.absorbed.length > 0) output.answeredSteering = [...steering.absorbed];
 
 			// The turn-end counters cover every response a relayed run streamed
 			// into, and the earlier ones already reported their output.
@@ -2005,6 +2083,9 @@ function streamCursorWithWireMode(
 				usage.output = Math.max(usage.output - relay.reportedOutput, 0);
 				usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 			}
+			// Settle steering before the result: whatever no tool result carried
+			// must be back with the caller when it reads this response's outcome.
+			await steering?.close();
 			calculateCost(model, output.usage, output.timestamp);
 
 			output.duration = performance.now() - startTime;
@@ -2036,27 +2117,35 @@ function streamCursorWithWireMode(
 				h2Client?.close();
 				logger.debug("cursor transport falling back to RunSSE", { baseUrl: model.baseUrl || CURSOR_API_URL });
 
-				const http1Stream = streamCursorWithWireMode(model, context, options, wireMode, {
-					startTime,
-					timestamp: output.timestamp,
-					transport: "http1",
-					retry: {
-						attempt: retryContext?.attempt ?? 0,
-						originalRequestId,
-						requestIds: turnRequestIds,
-						checkpoint: retryContext?.checkpoint,
-						checkpointHash: retryContext?.checkpointHash,
-						noProgressResumes: retryContext?.noProgressResumes ?? 0,
-						output,
-						blockState: openBlockState ?? retryContext?.blockState,
-						usageState: usageState ?? retryContext?.usageState,
-						baseConversationId,
-						conversationId,
-						blobStore: activeBlobStore,
-						turnRecords,
-						firstTokenTime,
+				const http1Stream = streamCursorWithWireMode(
+					model,
+					context,
+					options,
+					wireMode,
+					{
+						startTime,
+						timestamp: output.timestamp,
+						transport: "http1",
+						retry: {
+							attempt: retryContext?.attempt ?? 0,
+							originalRequestId,
+							requestIds: turnRequestIds,
+							checkpoint: retryContext?.checkpoint,
+							checkpointHash: retryContext?.checkpointHash,
+							noProgressResumes: retryContext?.noProgressResumes ?? 0,
+							output,
+							blockState: openBlockState ?? retryContext?.blockState,
+							usageState: usageState ?? retryContext?.usageState,
+							baseConversationId,
+							conversationId,
+							blobStore: activeBlobStore,
+							turnRecords,
+							contextBudget,
+							firstTokenTime,
+						},
 					},
-				});
+					steering,
+				);
 				stream.forwardLocalWorkFrom(http1Stream);
 				try {
 					for await (const event of http1Stream) {
@@ -2087,11 +2176,18 @@ function streamCursorWithWireMode(
 				runTransport?.close();
 				h2Client?.close();
 
-				const fallbackStream = streamCursorWithWireMode(model, context, options, "discovered", {
-					startTime,
-					timestamp: output.timestamp,
-					transport: transportMode,
-				});
+				const fallbackStream = streamCursorWithWireMode(
+					model,
+					context,
+					options,
+					"discovered",
+					{
+						startTime,
+						timestamp: output.timestamp,
+						transport: transportMode,
+					},
+					steering,
+				);
 				// The lazy watchdog observes THIS outer stream; the fallback's exec
 				// bridge marks the inner stream busy via `trackLocalWork`. Forward
 				// that busy state so a local tool on the retry turn is not aborted as
@@ -2175,28 +2271,36 @@ function streamCursorWithWireMode(
 					error = waitError;
 				}
 				if (retryDelayCompleted) {
-					const retryStream = streamCursorWithWireMode(model, context, options, wireMode, {
-						startTime,
-						timestamp: output.timestamp,
-						transport: transportMode,
-						retry: {
-							attempt: retryAttempt + 1,
-							originalRequestId: retryOriginalRequestId,
-							requestIds: turnRequestIds,
-							checkpoint: retryCheckpoint,
-							checkpointHash,
-							noProgressResumes,
-							output,
-							blockState: retryBlockState,
-							usageState: retryUsageState,
-							baseConversationId: retryBaseConversationId,
-							conversationId: retryConversationId,
-							blobStore: retryBlobStore,
-							turnRecords,
-							firstTokenTime,
-							relayReportedOutput: relay?.reportedOutput,
+					const retryStream = streamCursorWithWireMode(
+						model,
+						context,
+						options,
+						wireMode,
+						{
+							startTime,
+							timestamp: output.timestamp,
+							transport: transportMode,
+							retry: {
+								attempt: retryAttempt + 1,
+								originalRequestId: retryOriginalRequestId,
+								requestIds: turnRequestIds,
+								checkpoint: retryCheckpoint,
+								checkpointHash,
+								noProgressResumes,
+								output,
+								blockState: retryBlockState,
+								usageState: retryUsageState,
+								baseConversationId: retryBaseConversationId,
+								conversationId: retryConversationId,
+								blobStore: retryBlobStore,
+								turnRecords,
+								contextBudget,
+								firstTokenTime,
+								relayReportedOutput: relay?.reportedOutput,
+							},
 						},
-					});
+						steering,
+					);
 					stream.forwardLocalWorkFrom(retryStream);
 					try {
 						for await (const event of retryStream) {
@@ -2276,6 +2380,8 @@ function streamCursorWithWireMode(
 			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			if (steering && steering.absorbed.length > 0) output.answeredSteering = [...steering.absorbed];
+			await steering?.close();
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
@@ -2307,21 +2413,32 @@ function streamCursorWithWireMode(
 /**
  * The results a request brings for a parked run's held calls, by call id, or
  * `undefined` when the request does not continue the run: its history must end
- * on an assistant message followed by exactly one result for each held call.
+ * on an assistant message followed by exactly one result for each held call
+ * (ignoring host copies of steering that assistant response already absorbed).
  */
 function collectRelayedResults(
 	messages: readonly Message[],
 	held: ReadonlyMap<string, CursorHeldCall>,
 ): Map<string, ToolResultMessage> | undefined {
+	let assistantIndex = messages.length - 1;
+	while (assistantIndex >= 0 && messages[assistantIndex].role !== "assistant") assistantIndex--;
+	if (assistantIndex < 0) return undefined;
+	const assistant = messages[assistantIndex];
+	const answeredCopies = new Set<number>();
+	if (assistant.role === "assistant" && assistant.answeredSteering) {
+		const matched = findSteeringCopies(messages, assistantIndex, assistant.answeredSteering);
+		if (!matched.complete) return undefined;
+		for (const copy of matched.copies) answeredCopies.add(copy.copyIndex);
+	}
 	const results = new Map<string, ToolResultMessage>();
-	let index = messages.length - 1;
-	for (; index >= 0; index--) {
+	for (let index = assistantIndex + 1; index < messages.length; index++) {
+		if (answeredCopies.has(index)) continue;
 		const message = messages[index];
-		if (message.role !== "toolResult") break;
+		if (message.role !== "toolResult") return undefined;
 		if (!held.has(message.toolCallId) || results.has(message.toolCallId)) return undefined;
 		results.set(message.toolCallId, message);
 	}
-	if (results.size !== held.size || messages[index]?.role !== "assistant") return undefined;
+	if (results.size !== held.size) return undefined;
 	return results;
 }
 
@@ -2351,7 +2468,17 @@ function resumeParkedCursorRun(
 /** Streams a Cursor Agent turn, retrying a discovered effort id when its normalized wire id is unavailable. */
 export const streamCursor: StreamFunction<"cursor-agent"> = (model, context, options) => {
 	const turn = withPromptLast(context);
-	return resumeParkedCursorRun(model, turn, options) ?? streamCursorWithWireMode(model, turn, options, "normalized");
+	return (
+		resumeParkedCursorRun(model, turn, options) ??
+		streamCursorWithWireMode(
+			model,
+			turn,
+			options,
+			"normalized",
+			undefined,
+			options?.liveSteering ? new CursorSteeringRelay(options.liveSteering) : undefined,
+		)
+	);
 };
 
 export type ToolCallState = ToolCall & {
@@ -3995,18 +4122,39 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
 	messageCase: TCase,
 	value: Extract<ExecClientMessage["message"], { case: TCase }>["value"],
 ): void {
+	// Stream deltas are not results: a shell's context rides on its final `shellResult`.
+	const additionalContexts =
+		execMsg.acceptHookAdditionalContexts && messageCase !== "shellStream"
+			? (runTransport.takeAdditionalContexts?.() ?? [])
+			: [];
 	const execClientMessage = create(ExecClientMessageSchema, {
 		id: execMsg.id,
 		execId: execMsg.execId,
 		message: { case: messageCase, value } as ExecClientMessage["message"],
+		hookAdditionalContexts: additionalContexts.map(({ content }) => ({ hookEventName: "postToolUse", content })),
 	});
+	if (additionalContexts.length > 0) {
+		log("execClientMessage", "additionalContext", {
+			id: execMsg.id,
+			additionalContexts: additionalContexts.map(({ content }) => content),
+		});
+	}
 
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "execClientMessage", value: execClientMessage },
 	});
 
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	runTransport.write(frameConnectMessage(responseBytes));
+	const onDeliveredCallbacks = additionalContexts
+		.map(item => item.onDelivered)
+		.filter((cb): cb is () => void => cb !== undefined);
+	const onDelivered =
+		onDeliveredCallbacks.length > 0
+			? () => {
+					for (const cb of onDeliveredCallbacks) cb();
+				}
+			: undefined;
+	runTransport.write(frameConnectMessage(responseBytes), onDelivered);
 
 	log("execClientMessage", messageCase, value);
 }
@@ -6389,6 +6537,96 @@ interface CursorRecordReplay {
 }
 
 /**
+ * The host's copies of steering a turn absorbed, by copy index, each mapped to
+ * the turn's index and the content boundary where the model read it, plus the
+ * turns whose every absorbed copy still matches verbatim (eligible for opaque
+ * server-record replay). The host records absorbed steering after the response
+ * that answered it, so a copy is history that belongs inside its turn, never input.
+ */
+interface AnsweredSteeringCopy {
+	turnIndex: number;
+	beforeContentIndex?: number;
+}
+
+interface AnsweredSteering {
+	readonly copies: ReadonlyMap<number, AnsweredSteeringCopy>;
+	readonly completeTurns: ReadonlySet<number>;
+}
+
+function findAnsweredSteering(messages: Message[]): AnsweredSteering {
+	const copies = new Map<number, AnsweredSteeringCopy>();
+	const completeTurns = new Set<number>();
+	for (const [turnIndex, message] of messages.entries()) {
+		if (message.role !== "assistant" || !message.answeredSteering) continue;
+		const matched = findSteeringCopies(messages, turnIndex, message.answeredSteering);
+		for (const copy of matched.copies) {
+			copies.set(copy.copyIndex, { turnIndex, beforeContentIndex: copy.beforeContentIndex });
+		}
+		if (matched.complete) completeTurns.add(turnIndex);
+	}
+	return { copies, completeTurns };
+}
+
+function isTextOnlyMessage(message: UserMessage | DeveloperMessage): boolean {
+	return typeof message.content === "string" || message.content.every(part => part.type === "text");
+}
+
+function isSteeringCopyCandidate(message: Message): message is UserMessage | DeveloperMessage {
+	return (
+		(message.role === "user" || (message.role === "developer" && message.attribution !== "agent")) &&
+		isTextOnlyMessage(message)
+	);
+}
+
+/**
+ * The host's copies of a turn's absorbed steering: the text-only user or
+ * developer messages that follow the turn (past its tool results and the
+ * passive context its tools reported), matched in delivery order. When a copy
+ * was edited, gained an image, or was removed, `complete` is false (invalidating
+ * opaque server records for the turn) while independently matched copies stay
+ * placed inside the fallback rebuild so Cursor does not act on them twice.
+ */
+function findSteeringCopies(
+	messages: readonly Message[],
+	turnIndex: number,
+	answeredSteering: readonly AnsweredSteeringEntry[],
+): { copies: Array<{ copyIndex: number; beforeContentIndex?: number }>; complete: boolean } {
+	const slots: number[] = [];
+	for (let index = turnIndex + 1; index < messages.length && slots.length < answeredSteering.length; index++) {
+		const message = messages[index];
+		if (message.role === "assistant") break;
+		if (precedesSteeringCopy(message)) continue;
+		slots.push(index);
+	}
+	const copies: Array<{ copyIndex: number; beforeContentIndex?: number }> = [];
+	let complete = slots.length === answeredSteering.length;
+	let cursor = 0;
+	for (const entry of answeredSteering) {
+		let matchedSlot = -1;
+		for (let slot = cursor; slot < slots.length; slot++) {
+			const candidate = messages[slots[slot]];
+			if (isSteeringCopyCandidate(candidate) && extractUserMessageText(candidate) === entry.text) {
+				matchedSlot = slot;
+				break;
+			}
+		}
+		if (matchedSlot === -1) {
+			complete = false;
+			continue;
+		}
+		if (matchedSlot !== cursor) complete = false;
+		copies.push({ copyIndex: slots[matchedSlot], beforeContentIndex: entry.beforeContentIndex });
+		cursor = matchedSlot + 1;
+	}
+	return { copies, complete };
+}
+
+/** What the host appends between a turn and its steering copies: tool results and passive tool context. */
+function precedesSteeringCopy(message: Message): boolean {
+	return message.role === "toolResult" || (message.role === "developer" && message.attribution === "agent");
+}
+
+/**
  * Assistant turns that go back as their server records, by message index: turns
  * the target model produced on the same wire route whose opening user message,
  * content and paired results still match the digest taken when they were recorded.
@@ -6400,6 +6638,7 @@ function resolveCursorRecordReplays(
 	modelId: string | undefined,
 	wireRoute: string,
 	{ toolResults }: CursorToolHistory,
+	answered: AnsweredSteering,
 ): Map<number, CursorRecordReplay> {
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const replays = new Map<number, CursorRecordReplay>();
@@ -6423,6 +6662,8 @@ function resolveCursorRecordReplays(
 		if (cursorTurnDigest({ userMessage, content: msg.content, toolResults }) !== msg.providerPayload.digest) {
 			continue;
 		}
+		// The records carry the steering as first read; an edited copy would contradict them.
+		if (msg.answeredSteering && !answered.completeTurns.has(index)) continue;
 		replays.set(index, {
 			records: msg.providerPayload.records.map(record => new TextEncoder().encode(record)),
 			toolCallIds: msg.content.flatMap(block =>
@@ -6611,32 +6852,39 @@ interface CursorAssistantStep {
 	content: CursorRootPromptAssistantContentPart[];
 	/** Raw (un-normalized) ids of the calls this round issued, in order. */
 	callIds: string[];
+	/** Index in `AssistantMessage.content` of this step's first emitted item. */
+	startContentIndex: number;
 }
 
 /**
  * Split one assistant message into the model rounds it recorded. A Cursor
  * server turn persists as a single message whose tool calls interleave with
  * the text and reasoning that followed each result; a round ends at a call
- * followed by anything other than another call. Consecutive calls stay in one
- * round — they were issued together. Hidden reasoning still marks a boundary.
- * A call id repeated within the message — a re-dispatched exec frame recorded
- * before issue #15749 was fixed — is issued once; Cursor rejects a history that
- * repeats it.
+ * followed by anything other than another call, or at a recorded steering
+ * boundary. Consecutive calls stay in one round — they were issued together.
+ * Hidden reasoning still marks a boundary. A call id repeated within the
+ * message — a re-dispatched exec frame recorded before issue #15749 was fixed
+ * — is issued once; Cursor rejects a history that repeats it.
  */
-function buildCursorAssistantSteps(msg: AssistantMessage, targetModelId: string | undefined): CursorAssistantStep[] {
+function buildCursorAssistantSteps(
+	msg: AssistantMessage,
+	targetModelId: string | undefined,
+	steeringBoundaries?: ReadonlySet<number>,
+): CursorAssistantStep[] {
 	const steps: CursorAssistantStep[] = [];
-	let step: CursorAssistantStep = { content: [], callIds: [] };
+	let step: CursorAssistantStep = { content: [], callIds: [], startContentIndex: 0 };
 	const replayThinking = canReplayCursorThinking(msg, targetModelId);
 	const issuedCallIds = new Set<string>();
-	for (const item of msg.content) {
+	for (const [contentIndex, item] of msg.content.entries()) {
 		if (item.type === "toolCall") {
 			if (issuedCallIds.has(item.id)) continue;
 			issuedCallIds.add(item.id);
 		}
-		if (item.type !== "toolCall" && step.callIds.length > 0) {
+		if ((item.type !== "toolCall" || steeringBoundaries?.has(contentIndex)) && step.callIds.length > 0) {
 			steps.push(step);
-			step = { content: [], callIds: [] };
+			step = { content: [], callIds: [], startContentIndex: contentIndex };
 		}
+		if (step.content.length === 0) step.startContentIndex = contentIndex;
 		if (item.type === "text") {
 			if (item.text) step.content.push({ type: "text", text: item.text });
 		} else if (item.type === "thinking") {
@@ -6811,6 +7059,7 @@ function buildRootPromptMessagesJson(
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
 	replays: ReadonlyMap<number, CursorRecordReplay>,
+	answered: AnsweredSteering,
 	{ toolResults, pairedToolCallIds }: CursorToolHistory,
 ): Uint8Array[] {
 	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId, replays);
@@ -6819,6 +7068,10 @@ function buildRootPromptMessagesJson(
 	const pushJson = (obj: unknown) => {
 		const bytes = new TextEncoder().encode(JSON.stringify(obj));
 		entries.push(storeCursorBlob(blobStore, bytes));
+	};
+	const pushUserContent = (content: string | (TextContent | ImageContent)[]) => {
+		const parts = buildCursorRootPromptContent(content);
+		if (parts.length > 0) pushJson({ role: "user", content: parts });
 	};
 	// Results already replayed under the step that issued their call; the
 	// message-order pass below skips them.
@@ -6846,9 +7099,7 @@ function buildRootPromptMessagesJson(
 	for (let i = 0; i < historyEnd; i++) {
 		const msg = messages[i];
 		if (msg.role === "user" || msg.role === "developer") {
-			const content = buildCursorRootPromptContent(msg.content);
-			if (content.length === 0) continue;
-			pushJson({ role: "user", content });
+			if (!answered.copies.has(i)) pushUserContent(msg.content);
 		} else if (msg.role === "assistant") {
 			const replay = replays.get(i);
 			if (replay) {
@@ -6856,8 +7107,38 @@ function buildRootPromptMessagesJson(
 				for (const toolCallId of replay.toolCallIds) emittedResults.add(toolCallId);
 				continue;
 			}
-			const steps = buildCursorAssistantSteps(msg, targetModelId);
+			const turnSteering: Array<{ copyIndex: number; beforeContentIndex?: number }> = [];
+			let steeringBoundaries: Set<number> | undefined;
+			for (const [copyIndex, entry] of answered.copies) {
+				if (entry.turnIndex !== i) continue;
+				turnSteering.push({ copyIndex, beforeContentIndex: entry.beforeContentIndex });
+				if (entry.beforeContentIndex !== undefined) {
+					(steeringBoundaries ??= new Set()).add(entry.beforeContentIndex);
+				}
+			}
+			const steps = buildCursorAssistantSteps(msg, targetModelId, steeringBoundaries);
+			// Place each absorbed steering right before the step that read it; entries
+			// without a recorded boundary fall back to the final step.
+			const steeringByStep = new Map<number, number[]>();
+			if (steps.length > 0) {
+				for (const { copyIndex, beforeContentIndex } of turnSteering) {
+					const targetStep =
+						beforeContentIndex === undefined
+							? steps.length - 1
+							: steps.findIndex(step => step.startContentIndex >= beforeContentIndex);
+					const resolvedStep = targetStep >= 0 ? targetStep : steps.length - 1;
+					const bucket = steeringByStep.get(resolvedStep);
+					if (bucket) bucket.push(copyIndex);
+					else steeringByStep.set(resolvedStep, [copyIndex]);
+				}
+			}
 			for (const [stepIndex, step] of steps.entries()) {
+				for (const copy of steeringByStep.get(stepIndex) ?? []) {
+					const steer = messages[copy];
+					if (steer.role === "user" || steer.role === "developer") {
+						pushUserContent(steer.content);
+					}
+				}
 				pushJson({ role: "assistant", content: step.content });
 				// The final step's results stay in message order below: they are
 				// what the following turn responds to, and may arrive out of order.
@@ -7010,8 +7291,12 @@ function buildConversationTurns(
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
 	replays: ReadonlyMap<number, CursorRecordReplay>,
+	answered: AnsweredSteering,
 	{ toolResults, pairedToolCallIds }: CursorToolHistory,
 ): Uint8Array[] {
+	// Answered steering belongs to the turn that absorbed it and does not open a new one.
+	const continuesTurn = (index: number) =>
+		answered.copies.has(index) || (messages[index].role !== "user" && messages[index].role !== "developer");
 	const turns: Uint8Array[] = [];
 
 	let i = 0;
@@ -7022,6 +7307,10 @@ function buildConversationTurns(
 			continue;
 		}
 		if (i === activeUserMessageIndex) break;
+		if (answered.copies.has(i)) {
+			i++;
+			continue;
+		}
 
 		const userText = extractUserMessageText(msg);
 		if (userText.length === 0 && !hasUserMessageImages(msg)) {
@@ -7038,7 +7327,7 @@ function buildConversationTurns(
 		const stepBlobIds: Uint8Array[] = [];
 		i++;
 
-		while (i < messages.length && messages[i].role !== "user" && messages[i].role !== "developer") {
+		while (i < messages.length && continuesTurn(i)) {
 			const stepMsg = messages[i];
 			if (stepMsg.role === "assistant") {
 				// Mirrors `buildCursorAssistantSteps`: a repeated call id is issued once.
@@ -7116,6 +7405,7 @@ export function buildCursorHistoryForTest(
 	const toolHistory = collectCursorToolHistory(messages, activeUserMessageIndex);
 	// Server records replay only on a resolved wire route, which this helper does not build: every turn rebuilds.
 	const replays = new Map<number, CursorRecordReplay>();
+	const answered = findAnsweredSteering(messages);
 	const rootPromptMessagesJson = buildRootPromptMessagesJson(
 		messages,
 		[],
@@ -7123,6 +7413,7 @@ export function buildCursorHistoryForTest(
 		activeUserMessageIndex,
 		targetModelId,
 		replays,
+		answered,
 		toolHistory,
 	).map(blobId => JSON.parse(new TextDecoder().decode(readCursorBlob(blobStore, blobId))));
 	const turnUserMessagesJson: JsonValue[] = [];
@@ -7133,6 +7424,7 @@ export function buildCursorHistoryForTest(
 		activeUserMessageIndex,
 		targetModelId,
 		replays,
+		answered,
 		toolHistory,
 	)) {
 		const turn = fromBinary(ConversationTurnStructureSchema, readCursorBlob(blobStore, turnBlobId));
@@ -7333,12 +7625,18 @@ async function buildGrpcRequestForWireMode(
 	);
 
 	// The trailing user/developer message rides in the action; anything else
-	// (trailing tool results, a checkpoint resume) is a resumeAction over the
-	// full history.
-	const lastMessage = context.messages.at(-1);
+	// (trailing tool results, a checkpoint resume, steering the last response
+	// already answered) is a resumeAction over the full history.
+	const answered = findAnsweredSteering(context.messages);
+	const lastIndex = context.messages.length - 1;
+	const lastMessage = context.messages[lastIndex];
 	const activeUserMessage =
-		!state.resume && (lastMessage?.role === "user" || lastMessage?.role === "developer") ? lastMessage : undefined;
-	const historyEndIndex = activeUserMessage ? context.messages.length - 1 : -1;
+		!state.resume &&
+		(lastMessage?.role === "user" || lastMessage?.role === "developer") &&
+		!answered.copies.has(lastIndex)
+			? lastMessage
+			: undefined;
+	const historyEndIndex = activeUserMessage ? lastIndex : -1;
 	let userContent: string | (TextContent | ImageContent)[] | undefined;
 	let userText = "";
 	let hasUserImages = false;
@@ -7393,7 +7691,16 @@ async function buildGrpcRequestForWireMode(
 				// its turns hold the partial turn the server resumes from, which
 				// `context.messages` cannot rebuild.
 				{ conversationState: state.conversationState, replayed: false }
-			: buildCursorConversationState(model, context, state, blobStore, systemPromptIds, historyEndIndex, builtRoute);
+			: buildCursorConversationState(
+					model,
+					context,
+					state,
+					blobStore,
+					systemPromptIds,
+					historyEndIndex,
+					answered,
+					builtRoute,
+				);
 	const { conversationState } = built;
 	// Fingerprints of the history as built, to tell which field the hook below edited.
 	const builtRootHash = built.replayed ? hashCursorBlobIds(conversationState.rootPromptMessagesJson) : undefined;
@@ -7435,6 +7742,7 @@ async function buildGrpcRequestForWireMode(
 				blobStore,
 				systemPromptIds,
 				historyEndIndex,
+				answered,
 				wireRoute,
 			).conversationState;
 			if (rootAsBuilt) sentState.rootPromptMessagesJson = rebuilt.rootPromptMessagesJson;
@@ -7493,6 +7801,7 @@ function buildCursorConversationState(
 	blobStore: Map<string, Uint8Array>,
 	systemPromptIds: Uint8Array[],
 	historyEndIndex: number,
+	answered: AnsweredSteering,
 	wireRoute: string,
 ): { conversationState: ConversationStateStructure; replayed: boolean } {
 	const toolHistory = collectCursorToolHistory(context.messages, historyEndIndex);
@@ -7503,6 +7812,7 @@ function buildCursorConversationState(
 		model.id,
 		wireRoute,
 		toolHistory,
+		answered,
 	);
 	if (replays.size > 0) {
 		log("info", "replayedServerRecords", {
@@ -7512,7 +7822,15 @@ function buildCursorConversationState(
 	}
 	// Build conversation turns from prior messages, excluding only the active user message
 	// when the request is sending one. Resume actions must preserve trailing tool results.
-	const turns = buildConversationTurns(context.messages, blobStore, historyEndIndex, model.id, replays, toolHistory);
+	const turns = buildConversationTurns(
+		context.messages,
+		blobStore,
+		historyEndIndex,
+		model.id,
+		replays,
+		answered,
+		toolHistory,
+	);
 
 	// Build `rootPromptMessagesJson` from prior messages. Cursor's server uses this
 	// field (not `turns[]`) to construct the actual model prompt; if we only send the
@@ -7525,6 +7843,7 @@ function buildCursorConversationState(
 		historyEndIndex,
 		model.id,
 		replays,
+		answered,
 		toolHistory,
 	);
 	// The server builds its `<rules>` entry from `requestContext.rules` only for a

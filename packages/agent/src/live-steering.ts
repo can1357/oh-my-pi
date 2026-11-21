@@ -28,6 +28,8 @@ export interface LiveSteeringQueue {
 export class LiveSteeringChannel implements LiveSteering {
 	/** Steering the provider delivered into the in-flight response, in queue order. */
 	readonly accepted: AgentMessage[] = [];
+	/** Steering the in-flight response already answered, in queue order. */
+	readonly absorbed: AgentMessage[] = [];
 	/** Steering taken from the queue but not delivered; always queued after {@link accepted}. */
 	readonly deferred: AgentMessage[] = [];
 	readonly #queue: LiveSteeringQueue;
@@ -78,6 +80,11 @@ export class LiveSteeringChannel implements LiveSteering {
 				if (settled) return;
 				settled = true;
 				this.accepted.push(...messages);
+			},
+			absorb: () => {
+				if (settled) return;
+				settled = true;
+				this.absorbed.push(...messages);
 			},
 			reject: () => {
 				if (settled) return;

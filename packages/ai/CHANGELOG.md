@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added live steering to the Cursor provider: claimed steering rides on the next tool result that accepts hook context, and settles through the new `LiveSteerClaim.absorb()` because the same response answers it ([#16184](https://github.com/can1357/oh-my-pi/pull/16184) by [@joseotaviorf](https://github.com/joseotaviorf))
+- Added `cursorContextBudgetTokens` stream option: a Cursor turn whose conversation crosses it is asked, once, to end with a status so the host can compact between turns ([#16181](https://github.com/can1357/oh-my-pi/pull/16181) by [@joseotaviorf](https://github.com/joseotaviorf))
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))

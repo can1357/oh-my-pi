@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `LiveSteerClaim.absorb()` handling: steering a provider delivered and answered inside one response is recorded after that response without another provider request ([#16184](https://github.com/can1357/oh-my-pi/pull/16184) by [@joseotaviorf](https://github.com/joseotaviorf))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

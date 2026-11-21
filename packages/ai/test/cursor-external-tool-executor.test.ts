@@ -20,6 +20,8 @@ import {
 	type AgentServerMessage,
 	AgentServerMessageSchema,
 	ConversationStateStructureSchema,
+	ConversationTokenDetailsSchema,
+	type ExecClientMessage,
 	type ExecServerMessage,
 	ExecServerMessageSchema,
 	type InteractionUpdate,
@@ -54,10 +56,10 @@ function frame(message: AgentServerMessage["message"]): Buffer {
 	return framed;
 }
 
-function execFrame(id: number, message: ExecServerMessage["message"]): Buffer {
+function execFrame(id: number, message: ExecServerMessage["message"], acceptHookAdditionalContexts = false): Buffer {
 	return frame({
 		case: "execServerMessage",
-		value: create(ExecServerMessageSchema, { id, execId: `exec-${id}`, message }),
+		value: create(ExecServerMessageSchema, { id, execId: `exec-${id}`, acceptHookAdditionalContexts, message }),
 	});
 }
 
@@ -81,11 +83,12 @@ function setBlobFrame(id: number, record: string): Buffer {
 	});
 }
 
-function checkpointFrame(records: string[]): Buffer {
+function checkpointFrame(records: string[], usedTokens?: number): Buffer {
 	return frame({
 		case: "conversationCheckpointUpdate",
 		value: create(ConversationStateStructureSchema, {
 			rootPromptMessagesJson: records.map(record => Buffer.from(blobId(record), "hex")),
+			...(usedTokens !== undefined ? { tokenDetails: create(ConversationTokenDetailsSchema, { usedTokens }) } : {}),
 		}),
 	});
 }
@@ -654,6 +657,7 @@ const fileResult = (n: number): ToolResultMessage => ({
 
 /** A Run stream whose Cursor side the test writes. */
 interface DrivenRun extends ServedRun {
+	execMessages: ExecClientMessage[];
 	/** Writes `frames`, resolving once the client has read them. */
 	send(frames: Buffer): Promise<void>;
 	/** Resolves once the client has answered `n` MCP calls on the stream. */
@@ -696,6 +700,7 @@ function drivenCursor(): { serve: FixtureStream; runs: DrivenRun[]; run(index: n
 		const run: DrivenRun = {
 			action: request.message.value.action?.action.case,
 			answers: [],
+			execMessages: [],
 			cancelled: false,
 			closed: closed.promise,
 			send: frames => {
@@ -714,9 +719,11 @@ function drivenCursor(): { serve: FixtureStream; runs: DrivenRun[]; run(index: n
 			closed.resolve();
 		});
 		receivers.set(stream, received => {
-			const replies = received.flatMap(message =>
-				message.message.case === "execClientMessage" ? [message.message.value.message] : [],
+			const execMessages = received.flatMap(message =>
+				message.message.case === "execClientMessage" ? [message.message.value] : [],
 			);
+			const replies = execMessages.map(message => message.message);
+			run.execMessages = execMessages;
 			run.answers = replies.flatMap(reply => (reply.case === "mcpResult" ? [reply.value] : []));
 			acknowledged = new Set(
 				received.flatMap(message => (message.message.case === "kvClientMessage" ? [message.message.value.id] : [])),
@@ -1090,6 +1097,198 @@ describe("Cursor runs relayed across an external executor's requests", () => {
 			expect(cursor.runs.map(served => served.action)).toEqual(["userMessageAction", "resumeAction"]);
 			expect(text(second)).toBe("Fixed.");
 			expect(first.usage.output + second.usage.output).toBe(12);
+		});
+	});
+
+	it("carries checkpoint context occupancy across relayed responses to emit the budget wrap-up notice", async () => {
+		const cursor = drivenCursor();
+		const states = new Map<string, ProviderSessionState>();
+		const options = relayOptions(states, { contextBudgetTokens: 60_000 });
+		await withCursorServer(cursor.serve, async baseUrl => {
+			const firstReply = respond(baseUrl, [user], options);
+			const run = await cursor.run(0);
+			await run.send(
+				Buffer.concat([
+					checkpointFrame([], 65_000),
+					readStarted(1),
+					execFrame(2, { case: "mcpArgs", value: readArgs(1) }, true),
+					listed(1),
+				]),
+			);
+			const first = await firstReply;
+			expect(first.usage.contextTokens).toBe(65_000);
+
+			const secondReply = respond(baseUrl, [user, first, fileResult(1)], options);
+			await run.answered(1);
+			run.end(finished("Paused for compaction."));
+			const second = await secondReply;
+
+			const mcpExec = run.execMessages.find(message => message.message.case === "mcpResult");
+			expect(mcpExec?.hookAdditionalContexts[0]?.content).toContain("65000");
+			expect(mcpExec?.hookAdditionalContexts[0]?.content).toContain("60000");
+			expect(second.contextBudgetWrapUp).toBe(true);
+			expect(second.usage.contextTokens).toBe(65_000);
+		});
+	});
+
+	it("carries the wrap-up marker across another relayed tool call until the status reply ends", async () => {
+		const cursor = drivenCursor();
+		const states = new Map<string, ProviderSessionState>();
+		const options = relayOptions(states, { contextBudgetTokens: 60_000 });
+		await withCursorServer(cursor.serve, async baseUrl => {
+			const firstReply = respond(baseUrl, [user], options);
+			const run = await cursor.run(0);
+			await run.send(
+				Buffer.concat([
+					checkpointFrame([], 65_000),
+					readStarted(1),
+					execFrame(2, { case: "mcpArgs", value: readArgs(1) }, true),
+					listed(1),
+				]),
+			);
+			const first = await firstReply;
+
+			// Answering call 1 injects the wrap-up notice; Cursor issues one more MCP call before stopping.
+			const secondReply = respond(baseUrl, [user, first, fileResult(1)], options);
+			await run.answered(1);
+			await run.send(
+				Buffer.concat([readStarted(2), execFrame(3, { case: "mcpArgs", value: readArgs(2) }, true), listed(1)]),
+			);
+			const second = await secondReply;
+			expect(second.contextBudgetWrapUp).toBe(true);
+
+			// The shared budget is already spent, yet the eventual status reply must keep the wrap-up marker.
+			const thirdReply = respond(baseUrl, [user, first, fileResult(1), second, fileResult(2)], options);
+			await run.answered(2);
+			run.end(finished("Paused for compaction."));
+			const third = await thirdReply;
+
+			expect(third.contextBudgetWrapUp).toBe(true);
+			expect(third.usage.contextTokens).toBe(65_000);
+			expect(text(third)).toBe("Paused for compaction.");
+		});
+	});
+
+	it("rebinds liveSteering to the resuming request when a parked Cursor run resumes", async () => {
+		const cursor = drivenCursor();
+		const states = new Map<string, ProviderSessionState>();
+		const secondOutcomes: string[] = [];
+		const firstChannel = {
+			wait: async (signal: AbortSignal) => {
+				if (signal.aborted) return;
+				const deferred = Promise.withResolvers<void>();
+				signal.addEventListener("abort", () => deferred.resolve(), { once: true });
+				await deferred.promise;
+			},
+			claim: async () => undefined,
+		};
+		let secondClaimed = false;
+		const secondChannel = {
+			wait: async (signal: AbortSignal) => {
+				if (secondClaimed && !signal.aborted) {
+					const deferred = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => deferred.resolve(), { once: true });
+					await deferred.promise;
+				}
+			},
+			claim: async () => {
+				if (secondClaimed) return undefined;
+				secondClaimed = true;
+				return {
+					messages: [{ role: "user" as const, content: "switch to tabs", timestamp: 2 }],
+					accept: () => secondOutcomes.push("accepted"),
+					absorb: () => secondOutcomes.push("absorbed"),
+					reject: () => secondOutcomes.push("rejected"),
+				};
+			},
+		};
+		// Ensure firstChannel records if anything wrongly tried to claim after parking.
+		const firstClaimSpy = vi.spyOn(firstChannel, "claim");
+
+		await withCursorServer(cursor.serve, async baseUrl => {
+			const firstReply = respond(baseUrl, [user], relayOptions(states, { liveSteering: firstChannel }));
+			const run = await cursor.run(0);
+			await run.send(
+				Buffer.concat([readStarted(1), execFrame(2, { case: "mcpArgs", value: readArgs(1) }, true), listed(1)]),
+			);
+			const first = await firstReply;
+			expect(first.answeredSteering).toBeUndefined();
+
+			const secondReply = respond(
+				baseUrl,
+				[user, first, fileResult(1)],
+				relayOptions(states, { liveSteering: secondChannel }),
+			);
+			await run.answered(1);
+			run.end(finished("Done with tabs."));
+			const second = await secondReply;
+
+			const mcpExec = run.execMessages.find(message => message.message.case === "mcpResult");
+			expect(mcpExec?.hookAdditionalContexts.map(item => item.content)).toEqual(["switch to tabs"]);
+			expect(secondOutcomes).toEqual(["absorbed"]);
+			expect(firstClaimSpy).not.toHaveBeenCalled();
+			expect(second.answeredSteering).toEqual([{ text: "switch to tabs", beforeContentIndex: 0 }]);
+		});
+	});
+
+	it("resumes a parked run in-band when the previous resumed response recorded answeredSteering", async () => {
+		const cursor = drivenCursor();
+		const states = new Map<string, ProviderSessionState>();
+		let claimed = false;
+		const secondChannel = {
+			wait: async (signal: AbortSignal) => {
+				if (claimed && !signal.aborted) {
+					const deferred = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => deferred.resolve(), { once: true });
+					await deferred.promise;
+				}
+			},
+			claim: async () => {
+				if (claimed) return undefined;
+				claimed = true;
+				return {
+					messages: [{ role: "user" as const, content: "switch to tabs", timestamp: 2 }],
+					accept: () => {},
+					absorb: () => {},
+					reject: () => {},
+				};
+			},
+		};
+
+		await withCursorServer(cursor.serve, async baseUrl => {
+			const firstReply = respond(baseUrl, [user], relayOptions(states));
+			const run = await cursor.run(0);
+			await run.send(
+				Buffer.concat([readStarted(1), execFrame(2, { case: "mcpArgs", value: readArgs(1) }, true), listed(1)]),
+			);
+			const first = await firstReply;
+
+			// Second request delivers steering on mcpResult(1) and parks again on mcpCall(2).
+			const secondReply = respond(
+				baseUrl,
+				[user, first, fileResult(1)],
+				relayOptions(states, { liveSteering: secondChannel }),
+			);
+			await run.answered(1);
+			await run.send(
+				Buffer.concat([readStarted(2), execFrame(3, { case: "mcpArgs", value: readArgs(2) }, true), listed(1)]),
+			);
+			const second = await secondReply;
+			expect(second.answeredSteering).toEqual([{ text: "switch to tabs", beforeContentIndex: 0 }]);
+
+			// Agent appends the host steering copy after fileResult(2); the parked run must still resume in-band.
+			const steeringCopy: Message = { role: "user", content: "switch to tabs", timestamp: 2 };
+			const thirdReply = respond(
+				baseUrl,
+				[user, first, fileResult(1), second, fileResult(2), steeringCopy],
+				relayOptions(states),
+			);
+			await run.answered(2);
+			run.end(finished("Done after second park."));
+			const third = await thirdReply;
+
+			expect(cursor.runs).toHaveLength(1);
+			expect(text(third)).toBe("Done after second park.");
 		});
 	});
 });
