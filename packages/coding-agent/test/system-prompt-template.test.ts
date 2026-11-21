@@ -407,13 +407,13 @@ describe("per-model system prompt template", () => {
 		},
 	];
 	for (const { name, content, warning } of fallbackCases) {
-		it(`warns when the selected template is ${name}`, async () => {
+		it(`warns and renders the bundled prompt when the selected template is ${name}`, async () => {
 			await withDiscoveryHome(async ({ cwd }) => {
 				const templatePath = path.join(cwd, "templates", "claude.md");
 				if (content !== undefined) await Bun.write(templatePath, content);
 				const warn = spyOn(logger, "warn").mockImplementation(() => {});
 				try {
-					await buildSystemPrompt(
+					const result = await buildSystemPrompt(
 						options(cwd, {
 							model: "anthropic/claude-test",
 							modelSystemPromptTemplates: compile({ claude: templatePath }),
@@ -426,6 +426,44 @@ describe("per-model system prompt template", () => {
 			});
 		});
 	}
+});
+
+// Cloud Code Assist answers a request whose prompt cites RFC 2119 next to the
+// canonical keyword list with a bare 429 RESOURCE_EXHAUSTED (upstream #18706),
+// so no bundled prompt cites the RFC or spells out the canonical comma run.
+// Historical wordings both regexes must keep catching:
+//   RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.
+//   RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.
+const RFC2119_CITATION = /RFC[\s-]*2119/i;
+const CANONICAL_KEYWORD_RUN = /MUST,\s*REQUIRED,\s*SHOULD,\s*RECOMMENDED,\s*MAY,\s*OPTIONAL/i;
+
+describe("requirement-words conventions line", () => {
+	it("builds a system prompt with no RFC 2119 citation and no canonical keyword run", async () => {
+		await withDiscoveryHome(async ({ cwd }) => {
+			const result = await buildSystemPrompt(options(cwd, { model: "google-antigravity/gemini-3-flash" }));
+			const text = result.systemPrompt.join("\n\n");
+			expect(text).not.toMatch(RFC2119_CITATION);
+			expect(text).not.toMatch(CANONICAL_KEYWORD_RUN);
+		});
+	});
+
+	it("keeps every bundled prompt and shipped skill prompt free of both", async () => {
+		const repoRoot = path.join(import.meta.dir, "..", "..", "..");
+		// Both roots hold only checked-in prompts; the gitignored `.omp/plugins/` install tree sits outside them.
+		const files: string[] = [];
+		for (const root of ["packages/coding-agent/src", ".omp/skills"]) {
+			const found = await Array.fromAsync(new Bun.Glob("**/*.md").scan(path.join(repoRoot, root)));
+			// Every root contributes, so the scan always covers more than src/ alone.
+			expect(found.length).toBeGreaterThan(0);
+			files.push(...found.map(file => path.join(root, file)));
+		}
+		const offenders: string[] = [];
+		for (const file of files.sort()) {
+			const prompt = await Bun.file(path.join(repoRoot, file)).text();
+			if (RFC2119_CITATION.test(prompt) || CANONICAL_KEYWORD_RUN.test(prompt)) offenders.push(file);
+		}
+		expect(offenders).toEqual([]);
+	});
 });
 
 describe("systemPromptTemplates config validation", () => {

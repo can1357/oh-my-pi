@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `omp compress` prompt no longer cites RFC 2119 by number, as a precaution: Google Antigravity rejects that citation followed by the six standard requirement words with a bare `429 RESOURCE_EXHAUSTED` ([#19910](https://github.com/can1357/oh-my-pi/pull/19910) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))

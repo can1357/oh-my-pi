@@ -47,7 +47,7 @@ Articles; copulas; expletive there/it; complementizer `that`; relative pronouns;
 
 ## NEVER delete — this is the payload
 
-- Normative modals: MUST, NEVER, SHOULD, MAY. The RFC 2119 word IS the instruction.
+- Normative modals: MUST, NEVER, SHOULD, MAY. The requirement word IS the instruction.
 - Negation and exception: not, no, never, without, except, unless.
 - Numbers, units, bounds, quantifiers: `at least 5`, `≤100`, `max 1 MiB`, `1-indexed`.
 - Defaults with their direction and unit. A schema rarely carries them and never explains them.
