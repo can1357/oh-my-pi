@@ -818,8 +818,9 @@ export class SelectorController {
 			this.ctx.ui.requestRender();
 		};
 		const isCurrent = () => this.#openMenus.get(menuKind) === menu;
-		// One pick at a time: an Enter repeated while a pick applies is dropped, not applied again.
-		let pickInFlight = false;
+		// One pick per target: an Enter repeated while that pick applies is dropped, but a
+		// pick of a different model or role made meanwhile still applies.
+		let pickInFlightKey: string | null = null;
 		const picker = new ModelPickerComponent(
 			this.ctx.ui,
 			createModelBrowserSource(this.ctx.settings, model => viewed.effectiveServiceTier(model)),
@@ -827,23 +828,25 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext, thinkingLevel }) => {
-					if (!isCurrent() || pickInFlight) return;
-					pickInFlight = true;
+					const key = `model:${selector}:${thinkingLevel ?? ""}`;
+					if (!isCurrent() || pickInFlightKey === key) return;
+					pickInFlightKey = key;
 					try {
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
-						if (overContext) done();
+						if (overContext && pickInFlightKey === key) done();
 						await this.#applySessionModel(model, selector, thinkingLevel, overContext);
-						if (!overContext) done();
+						if (!overContext && pickInFlightKey === key) done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					} finally {
-						pickInFlight = false;
+						if (pickInFlightKey === key) pickInFlightKey = null;
 					}
 				},
 				onPickRole: async entry => {
-					if (!isCurrent() || pickInFlight) return;
-					pickInFlight = true;
+					const key = `role:${entry.role}`;
+					if (!isCurrent() || pickInFlightKey === key) return;
+					pickInFlightKey = key;
 					try {
 						await this.ctx.viewSession.applyRoleModel(entry);
 						this.ctx.statusLine.invalidate();
@@ -852,11 +855,11 @@ export class SelectorController {
 							quickRoleOrder.map(role => ({ label: role })),
 							quickRoleOrder.indexOf(entry.role),
 						);
-						done();
+						if (pickInFlightKey === key) done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					} finally {
-						pickInFlight = false;
+						if (pickInFlightKey === key) pickInFlightKey = null;
 					}
 				},
 				onPickTask: (_model, selector) => {

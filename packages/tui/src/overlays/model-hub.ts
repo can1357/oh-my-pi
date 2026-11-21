@@ -2159,7 +2159,12 @@ export class ModelHubComponent implements Component {
 			if (strip.purpose === "compaction") strip.error = undefined;
 			return;
 		}
-		if (moveStripSelection(strip, data)) return;
+		const prevIndex = strip.index;
+		if (moveStripSelection(strip, data)) {
+			// Navigating within the strip re-arms the committed-row repeat guard.
+			if (strip.index !== prevIndex) this.#committed = null;
+			return;
+		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			this.#activateStripChip();
 			return;
@@ -2357,6 +2362,8 @@ export class ModelHubComponent implements Component {
 		if (footerColumn !== undefined && this.#strip) {
 			const strip = this.#strip;
 			if (event.leftClick && strip.kind !== "name" && this.#frame.selectChipAt(strip, footerColumn)) {
+				// A pointer activation is deliberate: it re-arms the committed-row repeat guard.
+				this.#committed = null;
 				this.#activateStripChip();
 			}
 			return true;
@@ -3034,6 +3041,7 @@ export class ModelHubComponent implements Component {
 					const index = Number(event.item);
 					if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
 					strip.index = index;
+					this.#committed = null;
 					this.#activateStripChip();
 					break;
 				}
@@ -3987,10 +3995,12 @@ export class ModelHubComponent implements Component {
 				const index = Number(value);
 				if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
 				strip.index = index;
+				this.#committed = null;
 				this.#activateStripChip();
 				return;
 			}
 			case "stripApply":
+				this.#committed = null;
 				this.#activateStripChip();
 				return;
 			case "roleName":

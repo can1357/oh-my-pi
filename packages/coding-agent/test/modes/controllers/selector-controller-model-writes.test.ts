@@ -174,6 +174,23 @@ describe("SelectorController model selector writes", () => {
 		expect(showError).not.toHaveBeenCalled();
 	});
 
+	it("applies a pick of a different model made while the first apply is in flight", async () => {
+		const opus = model("claude-opus-4-5");
+		const sonnet = model("claude-sonnet-4-5");
+		const { controller, showError } = start(Settings.isolated(), model("claude-sonnet-4-5"));
+		const { callbacks } = openModelPicker(controller);
+
+		// A deliberate pick of another model lands while the first apply is still awaiting
+		// the model switch; only a repeat of the same pick is dropped.
+		const first = callbacks.onPick(opus, "anthropic/claude-opus-4-5", { overContext: false });
+		const second = callbacks.onPick(sonnet, "anthropic/claude-sonnet-4-5", { overContext: false });
+		await Promise.all([first, second]);
+
+		// The second pick applied despite the first being in flight: the session ends on it.
+		expect(session!.model?.id).toBe("claude-sonnet-4-5");
+		expect(showError).not.toHaveBeenCalled();
+	});
+
 	it("applies a quick-role pick once when Enter repeats before the first apply settles", async () => {
 		const settings = Settings.isolated({ modelRoles: { smol: "anthropic/claude-opus-4-5" }, cycleOrder: ["smol"] });
 		const { controller, showError } = start(settings, model("claude-sonnet-4-5"));

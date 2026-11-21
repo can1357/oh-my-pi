@@ -6,6 +6,7 @@
  * `null`) and fall the session back to the previous model.
  */
 import { beforeAll, describe, expect, test } from "bun:test";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	ModelHubComponent,
@@ -21,10 +22,11 @@ const tuiStub = { requestRender: () => {}, terminal: { rows: 30 } } as unknown a
 
 const ENTER = "\r";
 const RIGHT = "\x1b[C";
+const LEFT = "\x1b[D";
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
 
-function model(id: string) {
+function model(id: string): Model<"ollama-chat"> {
 	return buildModel({
 		id,
 		name: id,
@@ -52,7 +54,7 @@ const registryStub: ModelHubRegistry = {
 };
 
 /** Project-scoped role storage: `onAssign` / `onUnassign` write it the way the controller does. */
-function createHarness(models: ReturnType<typeof model>[]) {
+function createHarness(models: Model<"ollama-chat">[]) {
 	const projectRoles = new Map<string, string>();
 	const assigned: string[] = [];
 	const unassigned: string[] = [];
@@ -150,6 +152,24 @@ describe("model hub repeated Enter on a just-committed row (#12310)", () => {
 		key(UP);
 		key(ENTER); // open the strip for the committed row again
 		key(ENTER); // deliberately press its assigned chip
+
+		await settle();
+		expect(unassigned).toEqual(["default"]);
+		expect(projectRoles.has("default")).toBe(false);
+	});
+
+	test("moving within the strip re-arms the committed row, so Enter unassigns", async () => {
+		const opus = model("chat-a");
+		const { key, unassigned, projectRoles } = createHarness([opus]);
+
+		key(RIGHT);
+		key(ENTER); // open the role strip for the row
+		key(ENTER); // assign the default role
+		await settle();
+		key(ENTER); // open the strip on the committed row again
+		key(RIGHT); // move within the strip: navigation re-arms the guard
+		key(LEFT); // back on the committed chip
+		key(ENTER); // deliberately unassign
 
 		await settle();
 		expect(unassigned).toEqual(["default"]);
