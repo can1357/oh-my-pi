@@ -697,6 +697,28 @@ impl Session {
 		self.run_with(RunOptions::new(command), stdio, cancel).await
 	}
 
+	/// Whether `source` still holds a command for the parser that would
+	/// read it, under the grammar features and aliases in effect now:
+	/// parse-only, nothing runs ([`Shell::source_holds_command`]). Used to
+	/// judge text a run cut short never reached, the same predicate the
+	/// cut-short walk applies to unread input.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Closed`] when the session is closed.
+	pub async fn source_holds_command(&self, source: &[u8]) -> Result<bool, SessionError> {
+		let jobs = self.jobs.as_ref().ok_or(SessionError::Closed)?;
+		let (reply_tx, reply_rx) = flume::bounded(1);
+		jobs
+			.send(Request::HoldsCommand(source.to_vec(), reply_tx))
+			.map_err(|_| SessionError::Closed)?;
+		self.waker.wake_by_ref();
+		reply_rx
+			.recv_async()
+			.await
+			.map_err(|_| SessionError::Closed)
+	}
+
 	/// Run one command to completion and report how it ended.
 	///
 	/// When `cancel` fires the run is stopped (`TERM`, then `KILL` after
@@ -829,6 +851,8 @@ enum Request {
 	Run(Job),
 	/// Count the background jobs running an external.
 	LiveJobs(flume::Sender<usize>),
+	/// Parse-only probe: does this source still hold a command?
+	HoldsCommand(Vec<u8>, flume::Sender<bool>),
 }
 
 /// One command for the driver.
@@ -864,6 +888,13 @@ impl Driver {
 				Ok(Request::Run(job)) => self.run(job).await,
 				Ok(Request::LiveJobs(reply)) => {
 					let _ = reply.send(self.shell.live_external_jobs(&mut self.store));
+				},
+				Ok(Request::HoldsCommand(source, reply)) => {
+					let holds = self.shell.source_holds_command(
+						&mut Cx { host: &mut self.host, store: &mut self.store },
+						&source,
+					);
+					let _ = reply.send(holds);
 				},
 				Err(flume::TryRecvError::Disconnected) => break,
 				Err(flume::TryRecvError::Empty) => self.idle_turn().await,

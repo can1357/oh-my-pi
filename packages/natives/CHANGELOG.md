@@ -4,7 +4,7 @@
 
 ### Added
 
-- `ShellRunResult.endedByExit` distinguishes `exit` or `set -e` leaving commands unrun from a run that reaches the end of its input, including a trailing `exit` ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+- Added `ShellRunResult.endedByExit` to report when `exit` or a failure under `set -e` cuts an embedded shell run short. A trailing `exit` alone does not set the flag ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
 
 ## [19.1.0] - 2026-11-21
 

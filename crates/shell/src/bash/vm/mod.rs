@@ -75,6 +75,7 @@ use crate::bash::{
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
 	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
+	syntax::{AliasLookup, Resume},
 };
 
 /// Ops a vproc runs per scheduler turn.
@@ -2705,6 +2706,29 @@ impl Shell {
 			state.and_then(ProcState::exited)
 		});
 		verdict && !read_failed
+	}
+
+	/// Whether `source` still holds a command for the parser that would read
+	/// it: the grammar features and aliases in effect for the root shell now,
+	/// the same predicate [`Shell::ended_by_exit_cut_short`] applies to a
+	/// script frame's unread input. Parse-only — nothing executes — so a
+	/// chain runner can judge text it never ran by the parser's view (an
+	/// alias can expand a command to a comment). A backend read error
+	/// conservatively answers `true`: a probe failure must not silence the
+	/// cut-short notice.
+	pub fn source_holds_command(&mut self, cx: &mut Cx<'_>, source: &[u8]) -> bool {
+		let Ok(feat) = exec::features(&mut self.k, cx.store, &self.procs[0]) else {
+			return true;
+		};
+		let Ok(aliases) = builtins::alias_table(&mut self.k, cx, &self.procs[0]) else {
+			return true;
+		};
+		exec::script_has_command(
+			source,
+			feat,
+			aliases.as_ref().map(|a| a as &dyn AliasLookup),
+			&Resume::default(),
+		)
 	}
 
 	/// Whether the run's cut-short verdict still waits on a pipeline child

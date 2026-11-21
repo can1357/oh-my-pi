@@ -4,7 +4,7 @@
 
 ### Added
 
-- The bash tool now tells you when `exit` or `set -e` leaves commands unrun and notes that options still in effect can carry over when the session retains the run's state. The RPC `bash` result exposes `endedByExit` and `ephemeralShell`. A trailing `exit` alone does not trigger the notice ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+- The bash tool reports when `exit` or a failure under `set -e` cuts a call short, and mentions possible option carryover only when the session retains the run's shell state. The RPC `bash` result adds optional `endedByExit` and `ephemeralShell` fields ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
 
 ## [19.1.0] - 2026-11-21
 

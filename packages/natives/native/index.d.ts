@@ -4426,7 +4426,10 @@ export interface ShellRunResult {
    * still left to run: whatever followed the abort did not run. A
    * trailing `exit` at the end of the input — which ends the run where
    * the input's end would have — is not reported. The session stays
-   * usable, with its state (including armed options) intact.
+   * usable, with its state intact — options exactly as the script left
+   * them: a function-local `set -e` under `local -` restores its caller's
+   * settings on return, and an `EXIT` trap that fires at the run boundary
+   * can still change them.
    */
   endedByExit: boolean
 }

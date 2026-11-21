@@ -650,7 +650,7 @@ fn starts_command(unit: &Unit, op: Op) -> bool {
 /// Inspect unread input with the execution parser, including its pending
 /// replacement bytes and active-alias guard. Parse errors are still submitted
 /// input; only a stream with no complete command or error is empty.
-fn script_has_command(
+pub(super) fn script_has_command(
 	src: &[u8],
 	feat: Features,
 	aliases: Option<&dyn AliasLookup>,

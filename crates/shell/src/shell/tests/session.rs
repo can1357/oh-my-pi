@@ -1217,6 +1217,144 @@ async fn segmented_exit_reports_ended_by_exit_only_with_later_segments() {
 	);
 }
 
+/// Matrix: the segmented chain must judge the segments an `exit` hides by
+/// the session's parser, not by their raw text — an alias can expand a
+/// segment's command to a comment, and the unsegmented path already treats
+/// such a tail as empty
+/// (`exit_classification_alias_expanded_unread_source_scan`). Segmented and
+/// unsegmented runs of the same input must agree.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_alias_tail_matches_plain_unread_source_scan() {
+	let _guard = shell_test_lock().lock().await;
+	for (name, alias, expected) in
+		[("comment-alias", "'# none'", false), ("command-alias", "'printf called'", true)]
+	{
+		let root = tempfile::tempdir().expect("alias chain directory");
+		let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+		let shell =
+			Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+		let run = async |shell: &Shell, command: &str| {
+			shell
+				.run(
+					ShellRunOptions { command: command.into(), ..Default::default() },
+					None,
+					CancelToken::default(),
+				)
+				.await
+				.expect("run")
+		};
+		run(&shell, "shopt -s expand_aliases").await;
+		run(&shell, &format!("alias git={alias}")).await;
+		let cut = run(&shell, "exit 0; git log -1 --oneline").await;
+		assert_eq!(cut.exit_code, Some(0), "{name}");
+		assert_eq!(
+			cut.ended_by_exit, expected,
+			"{name}: the hidden tail segment must be judged by the session's parser"
+		);
+
+		// The same session state through the unsegmented path must agree.
+		let plain = Shell::new(None);
+		run(&plain, "shopt -s expand_aliases").await;
+		run(&plain, &format!("alias git={alias}")).await;
+		let plain_cut = run(&plain, "exit 0; git log -1 --oneline").await;
+		assert_eq!(plain_cut.ended_by_exit, expected, "{name}: unsegmented parity");
+	}
+}
+
+/// A deadline that lands while the session is only attributing a completed
+/// `exit` keeps the completed status
+/// (`completed_exit_keeps_its_status_when_the_timeout_lands_in_attribution`);
+/// the cancel latch it leaves behind must not reach into the segmented
+/// chain's classification either. The `exit` fired in milliseconds inside
+/// `f`'s lastpipe leg while the `/bin/sleep` sibling settles, so the 50 ms
+/// deadline arrives after the exit was already recorded — the `printf
+/// tail` segment the exit hid must still be reported as unrun.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_exit_settle_window_keeps_ended_by_exit_under_late_deadline() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("deadline chain directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+	run("set -o pipefail; shopt -s lastpipe").await;
+	run("f() { /bin/sleep 0.3 | exit 0; }").await;
+	let cut = shell
+		.run(
+			ShellRunOptions { command: "f; printf tail".into(), ..Default::default() },
+			None,
+			CancelToken::new(Some(50)),
+		)
+		.await
+		.expect("run");
+	assert_eq!(cut.exit_code, Some(0), "the carrier keeps the completed status");
+	assert!(!cut.timed_out, "the exit finished before the deadline");
+	assert!(!cut.cancelled, "nothing the cancel could still cut was in flight");
+	assert!(
+		cut.ended_by_exit,
+		"a deadline that lands after the exit was recorded must not veto the ended-by-exit notice \
+		 for the hidden printf segment"
+	);
+}
+
+/// Bounded matrix for the segmented chain's stop classification
+/// (`ChainStopFacts::classify`): every input shape the stop branch can see,
+/// with the reviewer-probed scenarios as named rows — an exit-established
+/// stop keeps its notice no matter what a late cancel latch says, a cancel
+/// only counts while the chain still owed work, and comment-only alias
+/// tails are not owed commands.
+#[test]
+fn segmented_chain_stop_classification_matrix() {
+	use crate::bash::ExitCause;
+	for (
+		name,
+		exited,
+		cause,
+		cut_short,
+		owed_work,
+		owed_command,
+		expected_notice,
+		expected_cancel_cut,
+	) in [
+		// Explicit `exit` that hid input inside its own segment.
+		("exit-cut-short", true, Some(ExitCause::Exit), true, false, false, true, false),
+		// `exit` whose hidden input is a later real segment.
+		("exit-owed-command", true, Some(ExitCause::Exit), false, true, true, true, false),
+		// `exit` whose later segment expands to a comment: nothing owed.
+		("exit-owed-comment-only", true, Some(ExitCause::Exit), false, true, false, false, false),
+		// A trailing `exit` at the input's end.
+		("exit-trailing", true, Some(ExitCause::Exit), false, false, false, false, false),
+		// Errexit aborts carry the same cause as `exit`.
+		("errexit-cut-short", true, Some(ExitCause::Exit), true, false, false, true, false),
+		// Fatal stops end the run without the exit/errexit notice.
+		("exec-replace", true, Some(ExitCause::ExecReplace), true, true, true, false, false),
+		("posix-fatal", true, Some(ExitCause::PosixFatal), true, true, true, false, false),
+		("fatal-signal", true, Some(ExitCause::FatalSignal), true, true, true, false, false),
+		("no-cause", true, None, true, true, true, false, false),
+		// A cancel that cut a chain with work still owed.
+		("cancel-cut-owed-work", false, None, false, true, true, false, true),
+		// A completed final segment keeps its ordinary status: a signal
+		// arriving after the run ended must not make it a cancellation.
+		("completed-run-stays-itself", false, None, false, false, false, false, false),
+	] {
+		let (notice, cancel_cut) =
+			ChainStopFacts { exited, exit_cause: cause, cut_short, owed_work, owed_command }
+				.classify();
+		assert_eq!(notice, expected_notice, "{name}: ended_by_exit");
+		assert_eq!(cancel_cut, expected_cancel_cut, "{name}: cancel_cut");
+	}
+}
+
 /// An EXIT trap belongs to one run, while signal traps persist in the session.
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_trap_fires_once_per_session_run() {

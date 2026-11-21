@@ -1556,6 +1556,43 @@ fn errexit_suppressed(command: &str) -> String {
 	format!("{{ {command}\n}} && :")
 }
 
+/// What the stop branch knows about the segment run that stopped the chain.
+#[derive(Clone, Copy)]
+struct ChainStopFacts {
+	/// The run recorded an `exit`/errexit unwind.
+	exited:       bool,
+	/// The recorded unwind cause, when any.
+	exit_cause:   Option<crate::bash::ExitCause>,
+	/// The segment's own continuation walk saw input left unrun.
+	cut_short:    bool,
+	/// Later unconditional segments were still owed.
+	owed_work:    bool,
+	/// One owed segment still holds a command under the session's parser.
+	owed_command: bool,
+}
+
+impl ChainStopFacts {
+	/// How a segmented chain classifies its stop after one segment's run:
+	/// `ended_by_exit` reports an `exit`-family abort that hid input — the
+	/// segment's own continuation walk (`cut_short`) or a later
+	/// parse-visible segment still owed a command — while a cancel that
+	/// stopped the chain (`cancel_cut`) only counts while such work was
+	/// still owed, so a completed run keeps its ordinary status instead of
+	/// becoming a cancellation. The point-in-time cancel latch is
+	/// deliberately not an input: a cancel the run never applied cannot
+	/// reclassify a stop the script's own semantics already decided,
+	/// matching the single-command path, which reads only the run's own
+	/// outcome.
+	fn classify(self) -> (bool, bool) {
+		(
+			self.exited
+				&& self.exit_cause == Some(crate::bash::ExitCause::Exit)
+				&& (self.cut_short || self.owed_command),
+			!self.exited && self.owed_work,
+		)
+	}
+}
+
 async fn run_shell_command_segmented_chain(
 	session: &mut ShellSessionCore,
 	scope: &CommandScope<'_>,
@@ -1660,21 +1697,48 @@ async fn run_shell_command_segmented_chain(
 		let keep_running = !command_run.outcome.exited && !scope.cancel.is_cancelled();
 		last_status = Some(exit);
 		if !keep_running {
-			// Stopping because a cancel fired (not an `exit`) cut the chain:
-			// the whole command did not run its course.
-			cancelled |= !command_run.outcome.exited;
-			// A suppressed segment already contains `&& :`: its continuation
+			// Work the chain still owed: later unconditional segments. A
+			// suppressed segment already contains `&& :`: its continuation
 			// walk decides whether any conditional successor would run, even
-			// when a function's final `!` changes its outgoing status. Only
-			// unconditional later segments add input outside that walk; the
+			// when a function's final `!` changes its outgoing status — the
 			// raw exit status is not the counterfactual continuation status.
-			ended_by_exit = command_run.outcome.exited
-				&& command_run.outcome.exit_cause == Some(crate::bash::ExitCause::Exit)
-				&& !scope.cancel.is_cancelled()
-				&& (command_run.outcome.cut_short
-					|| segments
-						.by_ref()
-						.any(|segment| !segment.run_if_previous_succeeded));
+			// A segment's raw text is not proof of owed input either: an
+			// alias can expand its command to a comment, so each one is
+			// judged by the session's parser, the same predicate the
+			// single-command path's walk applies to unread input.
+			let mut owed_work = false;
+			let mut owed_command = false;
+			for pending in segments.by_ref() {
+				if pending.run_if_previous_succeeded {
+					continue;
+				}
+				owed_work = true;
+				if !owed_command
+					&& session
+						.session
+						.source_holds_command(pending.command.as_bytes())
+						.await
+						.unwrap_or(true)
+				{
+					owed_command = true;
+					break;
+				}
+			}
+			// A stop the script's own semantics already decided keeps its
+			// classification: the run-level outcome is authoritative, and a
+			// cancel token that latched after the run's own cancel window
+			// (a deadline during attribution or output drain, a post-run
+			// signal) never reached the engine and cannot have caused it.
+			let (exit_notice, cancel_cut) = ChainStopFacts {
+				exited: command_run.outcome.exited,
+				exit_cause: command_run.outcome.exit_cause,
+				cut_short: command_run.outcome.cut_short,
+				owed_work,
+				owed_command,
+			}
+			.classify();
+			ended_by_exit = exit_notice;
+			cancelled |= cancel_cut;
 			break;
 		}
 	}
