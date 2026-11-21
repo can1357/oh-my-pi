@@ -14,6 +14,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { createTodoHudStateData } from "@oh-my-pi/pi-coding-agent/tools/todo";
 
 function renderTodos(mode: InteractiveMode): string {
 	return Bun.stripANSI(mode.todoContainer.render(120).join("\n"));
@@ -266,6 +267,77 @@ describe("InteractiveMode todo HUD persistence", () => {
 				.some(entry => entry.type === "custom" && entry.customType === "todo_hud_state"),
 		).toBe(false);
 		expect(renderTodos(mode)).toContain("new");
+	});
+
+	function manyTasks(count = 7): TodoPhase[] {
+		return [
+			{
+				name: "Implementation",
+				tasks: Array.from({ length: count }, (_, index) => ({
+					content: `task ${index + 1}`,
+					status: index === 0 ? "in_progress" : "pending",
+				})),
+			},
+		];
+	}
+
+	function seedHudState(phases: TodoPhase[], visibility: "collapsed" | "dismissed" | "revealed"): void {
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
+		const state = createTodoHudStateData(session.sessionManager.getBranch(), phases, visibility);
+		if (!state) throw new Error("expected a canonical todo snapshot");
+		session.sessionManager.appendCustomEntry("todo_hud_state", state);
+	}
+
+	it("restores a persisted HUD reveal on reload", async () => {
+		await replaceMode();
+		seedHudState(manyTasks(), "revealed");
+
+		await mode.reloadTodos();
+
+		const rendered = renderTodos(mode);
+		expect(rendered).toContain("task 1");
+		expect(rendered).toContain("task 7");
+	});
+
+	it("does not restore a reveal the user collapsed before the session ended", async () => {
+		await replaceMode();
+		seedHudState(manyTasks(), "revealed");
+		await mode.reloadTodos();
+		expect(renderTodos(mode)).toContain("task 7");
+
+		mode.setTodoExpanded(false);
+		await mode.reloadTodos();
+
+		const rendered = renderTodos(mode);
+		expect(rendered).toContain("task 1");
+		expect(rendered).not.toContain("task 7");
+	});
+
+	it("keeps an auto-dismissed HUD hidden when the expanded HUD is collapsed", async () => {
+		await replaceMode();
+		vi.useFakeTimers();
+		setTodoClearDelay(0);
+		const open: TodoPhase[] = [{ name: "Implementation", tasks: [{ content: "the task", status: "in_progress" }] }];
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases: open });
+		session.setTodoPhases(open);
+		await mode.reloadTodos();
+		await mode.handleTodoCommand("expand");
+		expect(renderTodos(mode)).toContain("the task");
+
+		const closed: TodoPhase[] = [{ name: "Implementation", tasks: [{ content: "the task", status: "completed" }] }];
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases: closed });
+		session.setTodoPhases(closed);
+		mode.setTodos(closed);
+		vi.advanceTimersByTime(0);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
+		expect(renderTodos(mode)).toBe("");
+
+		await mode.handleTodoCommand("collapse");
+		await mode.reloadTodos();
+
+		expect(renderTodos(mode)).toBe("");
 	});
 
 	it("keeps a newer canonical TODO edit after an older result finishes persisting", async () => {
