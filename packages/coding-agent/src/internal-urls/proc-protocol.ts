@@ -24,6 +24,7 @@ import {
 	serviceUnitLogPath,
 	stopService,
 } from "../launch/services";
+import { AGENT_KILL_LABEL } from "../session/messages";
 import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
 import procReferenceDoc from "../prompts/internal-urls/proc-reference.md" with { type: "text" };
@@ -387,7 +388,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			return { content: result.content, details: { proc: result.details } };
 		}
 		if (agent) {
-			const outcome = await cancelAgentRegistration(session, ownerId, id);
+			const outcome = await cancelAgentRegistration(session, ownerId, id, AGENT_KILL_LABEL);
 			return {
 				content: [{ type: "text", text: outcome.message }],
 				details: { proc: { op: "cancel", jobs: [], cancelled: [{ id, status: outcome.status }] } },

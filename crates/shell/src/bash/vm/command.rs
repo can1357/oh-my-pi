@@ -1879,8 +1879,14 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			} else {
 				false
 			};
-			// Outside posix mode a function name may contain a slash.
-			if via == Via::Plain && (!has_slash || !posix) && !special {
+			// Outside posix mode a function name may contain a slash. A host
+			// command that comes before functions skips them
+			// ([`Host::preempts_functions`](crate::bash::Host::preempts_functions)).
+			if via == Via::Plain
+				&& (!has_slash || !posix)
+				&& !special
+				&& (has_slash || !cx.host.preempts_functions(BStr::new(name)))
+			{
 				let found = match state::record(cx.store, vp, Key::Func(BStr::new(name))) {
 					Ok(Some(Record::Func { .. })) => true,
 					Ok(_) => false,

@@ -137,7 +137,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
-		getMountedXdevToolNames: () => [],
+		getMountedToolCommandNames: () => [],
 		getToolByName: () => undefined,
 		setActiveToolsByName: async () => {},
 		setWorkPoolYieldItems: () => {},

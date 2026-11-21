@@ -58,7 +58,7 @@ func (c *Client) SetCustomTools(ctx context.Context, tools []HostTool) ([]string
 }
 
 // hostToolName renames a tool_execution_* event of a dispatched host call to
-// the host tool that ran: tools mounted as xd:// devices run through `write`.
+// the host tool that ran: tools mounted as tool commands run inside `bash` calls.
 func (c *Client) hostToolName(toolCallID, toolName string, end bool) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
