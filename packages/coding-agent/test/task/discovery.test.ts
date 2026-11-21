@@ -59,8 +59,11 @@ async function writeOmpPluginAgent(home: string): Promise<void> {
 	await fs.writeFile(path.join(pluginRoot, "agents", "loom-verify-spec.md"), OMP_PLUGIN_AGENT_MD);
 }
 
-function agentMd(name: string, model: string): string {
-	return ["---", `name: ${name}`, `description: ${name} probe.`, `model: ${model}`, "---", `body ${name}`].join("\n");
+function agentMd(name: string, model: string, tools?: string): string {
+	const lines = ["---", `name: ${name}`, `description: ${name} probe.`, `model: ${model}`];
+	if (tools) lines.push(`tools: ${tools}`);
+	lines.push("---", `body ${name}`);
+	return lines.join("\n");
 }
 
 // Register an omp-installed marketplace plugin via the OMP plugin registry
@@ -75,13 +78,14 @@ async function writeOmpMarketplacePlugin(
 		agentName: string;
 		model: string;
 		manifest: "omp" | "claude" | "both" | "none";
+		tools?: string;
 	},
 ): Promise<void> {
 	const pluginRoot = path.join(home, "marketplace-cache", options.agentName);
 	await fs.mkdir(path.join(pluginRoot, "agents"), { recursive: true });
 	await fs.writeFile(
 		path.join(pluginRoot, "agents", `${options.agentName}.md`),
-		agentMd(options.agentName, options.model),
+		agentMd(options.agentName, options.model, options.tools),
 	);
 
 	const wantsOmp = options.manifest === "omp" || options.manifest === "both";
@@ -304,5 +308,44 @@ describe("discoverAgents", () => {
 
 		expect(agent).toBeDefined();
 		expect(agent?.model).toEqual(["@advisor", "@smol"]);
+	});
+
+	test("translates Claude-dialect plugin agent tools into OMP built-ins with inferred spawns", async () => {
+		// A `.claude-plugin` package lists Claude Code tool names. They must be
+		// translated (and deduplicated) instead of silently shrinking the
+		// allowlist, and `Agent` must still infer unrestricted spawns.
+		enableProvider("claude-plugins");
+		await writeOmpMarketplacePlugin(tempHome, {
+			agentName: "claude-tools-probe",
+			model: "sonnet",
+			manifest: "claude",
+			tools: "Read, WebFetch, TodoWrite, AskUserQuestion, MultiEdit, Agent",
+		});
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const agent = agents.find(candidate => candidate.name === "claude-tools-probe");
+
+		expect(agent?.tools).toEqual(["read", "todo", "ask", "edit", "task"]);
+		expect(agent?.spawns).toBe("*");
+		expect(agent?.model).toBeUndefined();
+	});
+
+	test("leaves Claude Code tool names untouched on an OMP-native plugin agent", async () => {
+		// Same frontmatter under `.omp-plugin/plugin.json`: OMP-native agents use
+		// OMP names, so only legacy-alias normalization applies.
+		enableProvider("claude-plugins");
+		await writeOmpMarketplacePlugin(tempHome, {
+			agentName: "omp-tools-probe",
+			model: '["@advisor"]',
+			manifest: "omp",
+			tools: "Read, WebFetch, TodoWrite, AskUserQuestion, MultiEdit, Agent",
+		});
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const agent = agents.find(candidate => candidate.name === "omp-tools-probe");
+
+		expect(agent?.tools).toEqual(["read", "WebFetch", "TodoWrite", "AskUserQuestion", "MultiEdit", "Agent"]);
+		expect(agent?.spawns).toBeUndefined();
+		expect(agent?.model).toEqual(["@advisor"]);
 	});
 });
