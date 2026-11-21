@@ -60,6 +60,7 @@ export interface KiroRequest {
 				output_config: { effort: string };
 				max_tokens?: number;
 		  }
+		| { thinking: { type: "disabled" } }
 		| { reasoning: { mode: "standard"; effort: string } };
 }
 
@@ -156,12 +157,21 @@ function shrinkToolResults(results: readonly BudgetedToolResult[], total: number
 
 function requestFields(
 	model: Model,
-	options: { reasoning?: Effort; hideThinkingSummary?: boolean; maxTokens?: number },
+	options: { reasoning?: Effort; disableReasoning?: boolean; hideThinkingSummary?: boolean; maxTokens?: number },
 ): KiroRequest["additionalModelRequestFields"] {
 	const thinking = model.thinking;
 	if (!thinking || thinking.efforts.length === 0) return undefined;
-	const effort = clampThinkingLevelForModel(model, options.reasoning ?? thinking.defaultLevel ?? Effort.Medium);
-	if (effort === undefined) return undefined;
+	// No effort means thinking off. Kiro applies the schema default when these
+	// fields are absent, so a model that advertises an off value is sent it;
+	// discovery marks the others `requiresEffort` and the caller clamps them.
+	const effort = options.disableReasoning ? undefined : clampThinkingLevelForModel(model, options.reasoning);
+	if (effort === undefined) {
+		if (!thinking.suppressWhenOff) return undefined;
+		if (thinking.mode === "anthropic-adaptive") return { thinking: { type: "disabled" } };
+		// Discovery sets `suppressWhenOff` on an effort ladder only when it advertises `none`.
+		if (thinking.mode === "effort") return { reasoning: { mode: "standard", effort: "none" } };
+		return undefined;
+	}
 	if (thinking.mode === "anthropic-adaptive") {
 		// Adaptive thinking has no separate budget: `max_tokens` bounds the whole output.
 		const requested =
@@ -305,7 +315,7 @@ export function transformKiroRequest(
 			});
 		}
 	}
-	const fields = options.disableReasoning ? undefined : requestFields(model, options);
+	const fields = requestFields(model, options);
 	const request: KiroRequest = {
 		agentMode: "vibe",
 		conversationState: {

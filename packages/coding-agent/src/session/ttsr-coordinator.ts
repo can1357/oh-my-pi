@@ -45,6 +45,8 @@ const JUDGED_SETTLE_TIMEOUT_MS = 5_000;
 /** Mid-stream checks may defer conditions that can span lines; the stream's end settles them. */
 const PARTIAL_CHECK: TtsrCheckOptions = { final: false };
 const FINAL_CHECK: TtsrCheckOptions = { final: true };
+/** Message end: the final check of non-interrupting rules on streams whose `*_end` never arrived. */
+const SETTLE_CHECK: TtsrCheckOptions = { final: true, deferredOnly: true };
 
 interface TtsrContinueOptions {
 	source: string;
@@ -91,6 +93,8 @@ export class TtsrCoordinator {
 	#emittedTriggerRules = new Map<string, Set<string>>();
 	/** In-flight judged-rule checks, each already guarded against rejection. */
 	#pendingJudgments = new Set<Promise<void>>();
+	/** Content indices of the current response's tool calls that reached `toolcall_end`. */
+	#endedToolCalls = new Set<number>();
 
 	constructor(host: TtsrCoordinatorHost, manager: TtsrManager | undefined) {
 		this.#host = host;
@@ -130,6 +134,7 @@ export class TtsrCoordinator {
 	 */
 	onAssistantMessageStart(): void {
 		this.#manager?.resetBuffer();
+		this.#endedToolCalls.clear();
 	}
 
 	/** Advances repeat-gap tracking at turn end. */
@@ -145,6 +150,7 @@ export class TtsrCoordinator {
 		// describe the discarded attempt and must not survive it.
 		if (assistantEvent.type === "start") {
 			this.#manager.resetBuffer();
+			this.#endedToolCalls.clear();
 			return false;
 		}
 		let matchContext: TtsrMatchContext | undefined;
@@ -159,9 +165,13 @@ export class TtsrCoordinator {
 			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "toolcall_delta") {
 			streamingToolCall = this.#getStreamingToolCallBlock(event.message, assistantEvent.contentIndex);
+			// Without a rule that can interrupt this call, its `toolcall_end` check is the only one
+			// that matters, so its partial arguments are neither inspected nor buffered.
+			if (!this.#manager.interruptsToolStream(streamingToolCall?.name ?? "")) return false;
 			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "toolcall_end") {
+			this.#endedToolCalls.add(assistantEvent.contentIndex);
 			streamingToolCall = assistantEvent.toolCall;
 			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = "";
@@ -178,7 +188,7 @@ export class TtsrCoordinator {
 		}
 		if (!matchContext || delta === undefined) return false;
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
-		const matches = this.#checkStream(delta, matchContext, streamingToolCall, isFinal);
+		const matches = this.#checkStream(delta, matchContext, streamingToolCall, isFinal ? FINAL_CHECK : PARTIAL_CHECK);
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
 		return false;
 	}
@@ -212,7 +222,7 @@ export class TtsrCoordinator {
 		let matches: Rule[];
 		let matched: Record<string, string>;
 		try {
-			const regexMatches = this.#checkStream("", matchContext, toolCall, true);
+			const regexMatches = this.#checkStream("", matchContext, toolCall, FINAL_CHECK);
 			matched = this.#matchedExcerpts(regexMatches, matchContext);
 			matches = [...regexMatches, ...(await this.#checkAstStream(matchContext, toolCall))].filter(
 				(rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index,
@@ -247,8 +257,39 @@ export class TtsrCoordinator {
 	onAssistantMessageEnd(message: AssistantMessage): void {
 		// Gate on abortPending, not stopReason: unrelated aborts have no TTSR continuation.
 		if (!this.#abortPending) this.resolveResume();
+		this.#settleUnendedStreams(message);
 		this.#queueDeferredInjectionIfNeeded(message);
 		this.#judgeCompletedMessage(message);
+	}
+
+	/**
+	 * Partial checks skip rules that cannot interrupt, leaving them to the `*_end` checks; a provider
+	 * that omits an end event would lose them. Text and thinking buffers get that final check here
+	 * (a repeat after their end event is answered from the scan state), and tool calls that never
+	 * reached `toolcall_end` get it from their final arguments.
+	 */
+	#settleUnendedStreams(message: AssistantMessage): void {
+		if (
+			!this.#manager?.hasRules() ||
+			this.#abortPending ||
+			message.stopReason === "aborted" ||
+			message.stopReason === "error"
+		) {
+			return;
+		}
+		const streams: Array<{ context: TtsrMatchContext; toolCall?: ToolCall }> = [
+			{ context: { source: "text" } },
+			{ context: { source: "thinking" } },
+		];
+		for (const [index, block] of message.content.entries()) {
+			if (block.type === "toolCall" && !this.#endedToolCalls.has(index)) {
+				streams.push({ context: this.#inspector.matchContext(block, index), toolCall: block });
+			}
+		}
+		for (const { context, toolCall } of streams) {
+			const matches = this.#checkStream("", context, toolCall, SETTLE_CHECK);
+			if (matches.length > 0) this.#handleMatches(matches, context, message.timestamp);
+		}
 	}
 
 	/**
@@ -501,17 +542,7 @@ export class TtsrCoordinator {
 	}
 
 	#shouldInterrupt(matches: Rule[], matchContext: TtsrMatchContext): boolean {
-		const globalMode = this.#manager?.getSettings().interruptMode ?? "always";
-		for (const rule of matches) {
-			const mode = rule.interruptMode ?? globalMode;
-			if (mode === "never") continue;
-			if (mode === "prose-only" && (matchContext.source === "text" || matchContext.source === "thinking")) {
-				return true;
-			}
-			if (mode === "tool-only" && matchContext.source === "tool") return true;
-			if (mode === "always") return true;
-		}
-		return false;
+		return matches.some(rule => this.#manager?.interrupts(rule, matchContext.source) === true);
 	}
 
 	#queueDeferredInjectionIfNeeded(message: AssistantMessage): void {
@@ -636,10 +667,9 @@ export class TtsrCoordinator {
 		delta: string,
 		matchContext: TtsrMatchContext,
 		toolCall: ToolCall | undefined,
-		isFinal = false,
+		options: TtsrCheckOptions,
 	): Rule[] {
 		if (!this.#manager) return [];
-		const options = isFinal ? FINAL_CHECK : PARTIAL_CHECK;
 		const entries = this.#inspector.entries(toolCall);
 		if (entries) {
 			const matches: Rule[] = [];
@@ -660,10 +690,10 @@ export class TtsrCoordinator {
 		// that emit toolcall_start -> toolcall_end with no intermediate deltas
 		// (Cursor exec synthesis, OpenAI lossy-proxy fallback) leave that buffer
 		// empty, so the finalized arguments must seed the snapshot themselves.
-		const finalArgs = isFinal ? toolCall?.arguments : undefined;
+		const finalArgs = options.final ? toolCall?.arguments : undefined;
 		if (finalArgs !== undefined && finalArgs !== null) {
 			const snapshot = typeof finalArgs === "string" ? finalArgs : JSON.stringify(finalArgs);
-			return this.#manager.checkSnapshot(snapshot, matchContext);
+			return this.#manager.checkSnapshot(snapshot, matchContext, options);
 		}
 		return this.#manager.checkDelta(delta, matchContext, options);
 	}

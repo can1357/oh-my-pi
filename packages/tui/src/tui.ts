@@ -85,10 +85,13 @@ const ERASE_TO_END_OF_LINE = "\x1b[K";
 const LINE_FIT_MIN_SOURCE_CODE_UNITS = 4096;
 const LINE_FIT_MAX_SOURCE_CODE_UNITS = 65536;
 const LINE_FIT_SOURCE_WIDTH_MULTIPLIER = 64;
-// Hide the hardware cursor before each paint/move write. Ghostty-style bar
-// cursors can otherwise leave visual afterimages while the TUI repaints the
-// row under a visible cursor. Paint writes also disable terminal autowrap:
-// several terminals keep a "pending wrap" flag after an exact-width row, so a
+// Hide the hardware cursor at the start of each paint/move write. Ghostty-style
+// bar cursors can otherwise leave visual afterimages while the TUI repaints the
+// row under a visible cursor. The hide goes inside the synchronized update:
+// kitty snapshots cursor visibility at ?2026h and presents that snapshot until
+// ?2026l, so a hide written before ?2026h makes a visible cursor flash on every
+// animation tick. Paint writes also disable terminal autowrap: several
+// terminals keep a "pending wrap" flag after an exact-width row, so a
 // following cursor move can first wrap to the next row and produce staircase
 // trails. The TUI emits explicit CRLFs and restores autowrap before leaving the
 // paint. Synchronized output can be disabled for terminals with broken DEC 2026
@@ -101,7 +104,7 @@ const SYNC_OUTPUT_END = "\x1b[?2026l";
 const SYNC_OUTPUT_RENEW_BYTES = 16 * 1024;
 const DISABLE_AUTOWRAP = "\x1b[?7l";
 const ENABLE_AUTOWRAP = "\x1b[?7h";
-const PAINT_BEGIN = `${HIDE_CURSOR}${SYNC_OUTPUT_BEGIN}${DISABLE_AUTOWRAP}`;
+const PAINT_BEGIN = `${SYNC_OUTPUT_BEGIN}${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 const PAINT_END = `${ENABLE_AUTOWRAP}${SYNC_OUTPUT_END}`;
 const PAINT_BEGIN_NO_SYNC = `${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
@@ -3875,19 +3878,6 @@ export class TUI extends Container {
 			buffer += SYNC_OUTPUT_BEGIN;
 			syncBytes = 0;
 		};
-		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
-			// A reset is explicitly destructive, so remove every placement—not only
-			// the ones this TUI tracked—then resend images composed for the clean
-			// replay. ED2 below reclaims the rest, but only on terminals that treat
-			// an erase as a graphics clear; the explicit delete covers the others.
-			buffer += encodeKittyDeleteAllImages();
-			// `d=A` spares virtual placements, and erasing the placeholder text it
-			// leaves behind does not remove the prototype either. The ids this
-			// reset forgot are named explicitly here — their tracking is gone, so
-			// nothing downstream could find them again.
-			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
-			this.#screenImagePlacements.clear();
-		}
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of this.#imageBudget.takePurgeIds()) buffer += encodeKittyDeleteImage(id);
 		} else {
@@ -3909,6 +3899,24 @@ export class TUI extends Container {
 		// image the terminal no longer had and every inline image vanished
 		// after a settled width resize.
 		if (destructiveReset) buffer += `${LINE_TERMINATOR}\x1b[H\x1b[2J\x1b[3J`;
+		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			// A reset is explicitly destructive, so remove every placement—not only
+			// the ones this TUI tracked—then resend images composed for the clean
+			// replay. ED2 above reclaims the rest, but only on terminals that treat
+			// an erase as a graphics clear; the explicit delete covers the others.
+			// It MUST follow the erases: `d=A` removes only placements on screen,
+			// and terminals that keep a placement anchored in scrollback move it to
+			// the top-left when ED3 erases its row (herdr-app), so a delete sent
+			// first leaves an id-less placement (an extension's budget-less image)
+			// painted over the fresh screen.
+			buffer += encodeKittyDeleteAllImages();
+			// `d=A` spares virtual placements, and erasing the placeholder text it
+			// leaves behind does not remove the prototype either. The ids this
+			// reset forgot are named explicitly here — their tracking is gone, so
+			// nothing downstream could find them again.
+			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
+			this.#screenImagePlacements.clear();
+		}
 		const diffable =
 			geometryStable &&
 			historyRows.length === 0 &&

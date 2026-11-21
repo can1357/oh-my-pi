@@ -4554,7 +4554,9 @@ export class SessionManager {
 		};
 	}
 	/**
-	 * Continue the most recent session, or create a new one if none exists.
+	 * Continue the most recent session, or create a new one if none exists or
+	 * another live omp process writes the one picked
+	 * ({@link SessionStorage.isSessionOwnedElsewhere}).
 	 *
 	 * When the chosen session's conversation went on in another file (it moved
 	 * off its file; see `findSessionContinuation`), this opens the copy to
@@ -4684,9 +4686,15 @@ export class SessionManager {
 			const continuation = fromBreadcrumb
 				? await findSessionContinuation(chosenSession, storage)
 				: await findRecentSessionContinuation(chosenSession, storage);
-			if (continuation) {
-				options.onSessionContinuation?.(continuation);
-				chosenSession = continuation.session.path;
+			const resumable = continuation?.session.path ?? chosenSession;
+			if (storage.isSessionOwnedElsewhere?.(resumable)) {
+				// Its first write would move it to a sibling, duplicating the
+				// conversation the running process keeps writing: start fresh.
+				logger.debug("Not continuing a session another omp process writes", { sessionFile: resumable });
+				chosenSession = null;
+			} else {
+				if (continuation) options.onSessionContinuation?.(continuation);
+				chosenSession = resumable;
 			}
 		}
 

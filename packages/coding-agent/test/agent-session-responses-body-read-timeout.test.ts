@@ -422,9 +422,14 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		const artifactsDir = harness.sessionManager.getArtifactsDir();
 		if (!artifactsDir) throw new Error("Expected session artifacts directory");
 		const artifactId = "artifact-segment-".repeat(20);
+		// Reserve like `ArtifactManager.allocatePath`: an empty file claims the id.
+		const reservedPath = path.join(artifactsDir, "reserved-shake.log");
 		const allocateArtifactPath = vi
 			.spyOn(harness.sessionManager, "allocateArtifactPath")
-			.mockResolvedValue({ id: artifactId, path: path.join(artifactsDir, "reserved-shake.log") });
+			.mockImplementation(async () => {
+				await Bun.write(reservedPath, "");
+				return { id: artifactId, path: reservedPath };
+			});
 		try {
 			const legacyPlaceholderEstimate = 16;
 			let toolResultText = "";

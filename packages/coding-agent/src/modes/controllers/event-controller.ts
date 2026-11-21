@@ -2736,7 +2736,6 @@ export class EventController {
 				this.ctx.showStatus("Auto-shake completed");
 			}
 		} else if (event.result) {
-			this.ctx.lastAssistantUsage = undefined;
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 			this.ctx.statusLine.invalidate();
 			// rebuildChatFromMessages clears the container's emission ledger,
@@ -2790,30 +2789,33 @@ export class EventController {
 		this.#syntheticFailureCards.clear();
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
-		if (AIError.is(event.errorId, AIError.Flag.ThinkingLoop)) {
-			// The retry path drops the failed assistant from runtime context. Do not
-			// restore its inline Error row; just unpin the fixed-region banner so the
-			// retry UI is the visible state.
-			this.#pinnedErrorComponent = undefined;
-			this.#pinnedErrorMessage = undefined;
-			this.#restorePinnedErrorInline = true;
-			this.ctx.clearPinnedError();
-		}
+		// The failed attempt is not the turn's outcome while a retry is pending:
+		// unpin its banner and keep its inline error hidden, so a recovered retry
+		// leaves no error in the transcript. The retry row names the reason;
+		// `auto_retry_end` marks the attempt recovered or superseded, or restores
+		// its error when the saga fails without accounting for it.
+		this.#pinnedErrorComponent = undefined;
+		this.#pinnedErrorMessage = undefined;
+		this.#restorePinnedErrorInline = true;
+		this.ctx.clearPinnedError();
+		const reason = previewLine(sanitizeText(event.errorMessage), TRUNCATE_LENGTHS.CONTENT);
 		const retryStartMs = Date.now();
 		const retryLabel = `Retrying (${event.attempt}/${event.maxAttempts})`;
+		const attemptLabel = `Retrying · attempt ${event.attempt} of ${event.maxAttempts}`;
 		this.ctx.retryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
 			() => {
 				const remaining = Math.max(0, event.delayMs - (Date.now() - retryStartMs));
-				return `${retryLabel} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
+				const wait = `${retryLabel} in ${formatDuration(remaining)}`;
+				return `${reason ? `${wait} · ${reason}` : `${wait}…`}${this.#maintenanceEscHint()}`;
 			},
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.retryLoader.setWorkingRow(
 			() => ({
-				label: `Retrying · attempt ${event.attempt} of ${event.maxAttempts}`,
+				label: reason ? `${attemptLabel} · ${reason}` : attemptLabel,
 				startedAt: retryStartMs,
 				variant: { kind: "retry", attempt: event.attempt, max: event.maxAttempts, delayMs: event.delayMs },
 				interruptKey: this.ctx.maintenanceInterruptKey(),
@@ -2857,6 +2859,13 @@ export class EventController {
 				this.#restorePinnedErrorInline = true;
 			}
 			appliedRetryUpdate = true;
+		}
+		if (!event.success) {
+			// Attempts the saga did not account for (a cancelled wait, a failed
+			// local continuation) were hidden at `auto_retry_start`; show their errors.
+			for (const component of this.#retrySupersededAssistantQueue) {
+				if (component !== this.#pinnedErrorComponent) component.setErrorPinned(false);
+			}
 		}
 		if (
 			!terminalFailurePinned &&

@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { type CallRecord, ChangeJournal, callDetails } from "./commit/selective/journal";
+import { ChangeJournal } from "./commit/selective/journal";
 import { createCommitPrelude } from "./commit/selective/prelude-definition";
 import { cfgDisasmBackend } from "./disasm/active";
 import { createDsmPrelude, releaseDsmReferences } from "./disasm/prelude-definition";
@@ -162,6 +162,7 @@ import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } fro
 import { onJudgeRejection } from "./judgment";
 import { stripXdUnderscorePrefix, stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
+import { holdSharedMcp } from "./mcp/host/access";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
 	deduplicateMCPToolsByName,
@@ -171,7 +172,6 @@ import {
 	MCPManager,
 	type MCPManagerApi,
 	type MCPToolScope,
-	MCPToolCache,
 	type MCPToolsLoadResult,
 	reconnectMCPServers,
 	resolveMCPTransformContext,
@@ -277,6 +277,7 @@ import {
 	projectMountedMCPXdevGuidance,
 	type SettingsGatedToolDelta,
 	type SystemPromptRebuilder,
+	standbyTools,
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
 import {
@@ -465,6 +466,8 @@ import {
 	cfgMcpEvalNamespaces,
 	cfgMcpNotificationDebounceMs,
 	cfgMcpNotifications,
+	cfgMcpIdleStopMinutes,
+	cfgMcpShared,
 	cfgMcpStartupTimeoutMs,
 } from "./mcp/settings";
 import { cfgPlanEnabled } from "./plan-mode/settings";
@@ -2826,7 +2829,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					path: change.path,
 					before: change.before,
 					after: change.after,
-					beforeMtimeMs: change.beforeMtimeMs,
 				});
 			},
 			getTodoPhases: () => session.getTodoPhases(),
@@ -2876,6 +2878,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			authStorage,
 			modelRegistry,
 			getTelemetry: () => agent?.telemetry,
+			// Late-bound: the session is constructed after this object; completion()
+			// and other oneshots record here so their frames surface in `/debug`.
+			get rawSseDebugBuffer() {
+				return session?.rawSseDebugBuffer;
+			},
 			// Tools and nested subagents use this root's manager, never another root's singleton.
 			asyncJobManager: scopedAsyncJobManager,
 		};
@@ -2981,6 +2988,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
 		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+		// Daemon-hosted MCP servers (see mcp/host/contract.ts). The mode is process
+		// state read whenever a server is attached, so like the shared-LSP mode below
+		// only a session that binds process state holds it, until disposed. Taken
+		// before discovery so the first connects already go to the shared host.
+		const sharedMcp = bindsProcessState ? holdSharedMcp(enableMCP && cfgMcpShared.get(settings)) : undefined;
+		if (sharedMcp) {
+			// Released on dispose, and by a startup that fails before any session exists to dispose.
+			disposeCallbacks.add(sharedMcp.release);
+			startupCleanup.defer(sharedMcp.release);
+		}
+		const mcpIdleStopMs = cfgMcpIdleStopMinutes.get(settings) * 60_000;
 		let mcpManager: MCPManagerApi | undefined = enableMCP ? options.mcpManager : undefined;
 		// A subagent worker thread never connects MCP servers itself: it reuses the main thread's manager.
 		if (enableMCP && !mcpManager && !isMainThread()) mcpManager = MCPManager.instance();
@@ -3025,8 +3043,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		if (enableMCP && !mcpManager && isMainThread()) {
 			if (deferMCPDiscoveryForUI) {
-				const cacheStorage = settings.getStorage();
-				const deferredMCPManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				const deferredMCPManager = new MCPManager(cwd, undefined, mcpIdleStopMs);
 				ownedMcpManager = deferredMCPManager;
 				mcpManager = deferredMCPManager;
 				deferredMCPManager.setAuthStorage(authStorage);
@@ -3046,14 +3063,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							);
 							// The session can be torn down while servers are still connecting.
 							// Don't resurrect tools on a disposed session, and don't leak the
-							// transports/subprocesses the connect just spawned.
+							// server leases the connect just took.
 							if (liveSession.isDisposed) {
 								await deferredMCPManager.disconnectAll();
 								return;
 							}
 							applyMCPEnvironment(mcpResult);
 							logMCPLoadErrors(mcpResult.errors);
-							// Connected MCP tools (and cached routes of servers still connecting) are
+							// Connected MCP tools are
 							// enabled and mounted under xd:// devices right away, so a turn whose
 							// wait runs out still carries them.
 							await liveSession.refreshMCPTools(mcpResult.tools);
@@ -3076,10 +3093,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			} else {
 				const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
 					...mcpDiscoverOptions,
-					cacheStorage: settings.getStorage(),
+					idleStopMs: mcpIdleStopMs,
 					authStorage,
 				});
 				const discoveredMCPManager = mcpResult.manager;
+				// Its servers hold host leases from here on; a startup that fails before a
+				// session owns the manager must give them back.
+				startupCleanup.defer(() => {
+					void discoveredMCPManager.disconnectAll().catch(() => {});
+				});
 				ownedMcpManager = discoveredMCPManager;
 				mcpManager = discoveredMCPManager;
 				toolSession.mcpManager = discoveredMCPManager;
@@ -5246,6 +5268,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined
 				: undefined,
 		});
+		agent.setStandbyTools(standbyTools(toolRegistry, initialToolNames));
 		// The main Agent's issued provider is available before AgentSession accounts
 		// for the finalized message, including errors synthesized after a stream throws.
 		agent.subscribe(event => {
@@ -5255,21 +5278,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				] = mainRequestProvider;
 			} else if (event.type === "turn_end" || event.type === "agent_end") {
 				mainRequestProvider = undefined;
-			}
-		});
-		// Shell-like calls bound the windows in which scripts, formatters, and codegen changed
-		// files on this agent's behalf; selective commits match file ctimes against them, and the
-		// paths their scripts name against deleted files.
-		const shellCalls = new Map<string, Omit<CallRecord, "type" | "agent" | "parent" | "end">>();
-		agent.subscribe(event => {
-			if (event.type === "tool_execution_start") {
-				if (event.toolName !== "bash" && event.toolName !== "eval") return;
-				shellCalls.set(event.toolCallId, { tool: event.toolName, start: Date.now(), ...callDetails(event.args) });
-			} else if (event.type === "tool_execution_end") {
-				const call = shellCalls.get(event.toolCallId);
-				if (!call) return;
-				shellCalls.delete(event.toolCallId);
-				changeJournal()?.recordCall({ ...journalAgent, ...call, end: Date.now() });
 			}
 		});
 		// Catalog rows carry the registry settings' extended-window opt-ins; this
@@ -6211,6 +6219,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cfgLspShared.listen(session, shared => sharedLsp.set(shared));
 			}
 		}
+		// Re-applied live on `mcp.shared` changes; attached servers stay where they
+		// are until they are reconnected.
+		if (sharedMcp && enableMCP) cfgMcpShared.listen(session, shared => sharedMcp.set(shared));
 
 		// Start LSP warmup in the background so startup does not block on language server initialization.
 		// With `lsp.lazy` (the default) the warmup is skipped: recognized servers are still discovered and

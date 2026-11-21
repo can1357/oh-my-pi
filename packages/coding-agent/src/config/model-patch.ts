@@ -250,6 +250,7 @@ export interface ModelPatch {
 	input?: ("text" | "image")[];
 	imageInputDecoder?: Model<Api>["imageInputDecoder"];
 	imageCountBudget?: number;
+	snapcompactShape?: Model<Api>["snapcompactShape"];
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
@@ -298,6 +299,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
 	if (patch.imageCountBudget !== undefined) result.imageCountBudget = patch.imageCountBudget;
+	if (patch.snapcompactShape !== undefined) result.snapcompactShape = patch.snapcompactShape;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
 	if (patch.promptCache !== undefined) {
 		result.promptCache = patch.promptCache;

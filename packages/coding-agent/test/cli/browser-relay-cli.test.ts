@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import { runBrowserRelayCommand } from "@oh-my-pi/pi-coding-agent/cli/browser-relay-cli";
 import { relayExtensionFiles } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
+import { installRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/installs";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { relayExtensionNotice } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
@@ -13,8 +13,8 @@ import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/to
  */
 function runExtensionWorker(script: string, port: number, manifest: object): () => void {
 	let stopped = false;
-	const event = { addListener() {} };
-	const chrome = {
+	const event = { addListener() {}, removeListener() {} };
+	const known = {
 		storage: {
 			local: {
 				get: (defaults: Record<string, unknown>) =>
@@ -41,13 +41,28 @@ function runExtensionWorker(script: string, port: number, manifest: object): () 
 			onClicked: event,
 		},
 		runtime: {
+			id: "abcdefghijklmnopabcdefghijklmnop",
 			getManifest: () => manifest,
 			openOptionsPage: () => Promise.resolve(),
 			onInstalled: event,
 			onStartup: event,
 		},
 	};
-	new Function("chrome", "navigator", script)(chrome, { userAgent: "Mozilla/5.0 Chrome/154.0.0.0" });
+	// Every API the worker touches beyond the relay path (side panel, ports, overlay messaging, notifications…) is
+	// inert here: `on*` members are events, anything else resolves to an empty list.
+	const inert = (members: object): object =>
+		new Proxy(members, {
+			get(target, name, receiver) {
+				if (Reflect.has(target, name)) {
+					const value: unknown = Reflect.get(target, name, receiver);
+					return typeof value === "object" && value !== null && !Array.isArray(value) ? inert(value) : value;
+				}
+				if (typeof name !== "string") return undefined;
+				if (name.startsWith("on")) return event;
+				return inert(Object.assign(() => Promise.resolve([]), {}));
+			},
+		});
+	new Function("chrome", "navigator", script)(inert(known), { userAgent: "Mozilla/5.0 Chrome/154.0.0.0" });
 	return () => {
 		stopped = true;
 	};
@@ -73,8 +88,11 @@ describe("omp browser-relay install", () => {
 	});
 
 	it("stamps the installing omp's version into the extension manifest", async () => {
-		await runBrowserRelayCommand({ action: "install", port: 0, dir: dir.path() });
-		const manifest = await Bun.file(dir.join("manifest.json")).json();
+		// The shared registry stays inside the test's directory, never the user's.
+		const installed = await installRelayExtension(dir.join("extension"), { registryFile: dir.join("installs.json") });
+		const registry = await Bun.file(dir.join("installs.json")).json();
+		expect(registry.installs.map((row: { dir: string }) => row.dir)).toContain(installed);
+		const manifest = await Bun.file(dir.join("extension/manifest.json")).json();
 		expect(manifest.version_name).toBe(VERSION);
 		expect(manifest.manifest_version).toBe(3);
 	});

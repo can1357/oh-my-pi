@@ -334,9 +334,9 @@ describe("totalTokens field", () => {
 
 	describe.skipIf(!e2eApiKey("OPENROUTER_API_KEY"))("OpenRouter", () => {
 		it(
-			"anthropic/claude-sonnet-4 - should return totalTokens equal to sum of components",
+			"anthropic/claude-sonnet-4.6 - should return totalTokens equal to sum of components",
 			async () => {
-				const llm = getBundledModel("openrouter", "anthropic/claude-sonnet-4");
+				const llm = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6");
 
 				console.log(`\nOpenRouter / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: Bun.env.OPENROUTER_API_KEY });
@@ -385,9 +385,9 @@ describe("totalTokens field", () => {
 		);
 
 		it(
-			"google/gemini-2.0-flash-001 - should return totalTokens equal to sum of components",
+			"google/gemini-2.5-flash - should return totalTokens equal to sum of components",
 			async () => {
-				const llm = getBundledModel("openrouter", "google/gemini-2.0-flash-001");
+				const llm = getBundledModel("openrouter", "google/gemini-2.5-flash");
 
 				console.log(`\nOpenRouter / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: Bun.env.OPENROUTER_API_KEY });

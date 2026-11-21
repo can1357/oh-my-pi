@@ -2,6 +2,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } 
 import type { ToolConversationState } from "./tool-state";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { NotifyBatch } from "../async/notify";
 import type { Rule } from "../capability/rule";
@@ -215,11 +216,10 @@ export interface DeferredDiagnosticsEntry {
 export interface FileChangeReport {
 	/** Absolute path. */
 	path: string;
-	/** Reporting tool (`edit`, `write`, `ast_edit`, `task`). */
+	/** Reporting tool (`edit`, `write`, `ast_edit`, `task`, `bash`, `eval`). */
 	tool: string;
 	before: string | null;
 	after: string | null;
-	beforeMtimeMs?: number;
 	/** Agent whose work this is, when not the reporting session's own (isolated subagent merge-back). */
 	agent?: { agent: string; parent?: string };
 }
@@ -368,7 +368,12 @@ export interface ToolSession {
 	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
 	 */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
-		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage">>;
+		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir">>;
+	/**
+	 * Session-owned raw SSE capture, shared with the `/debug` report. Optional:
+	 * helper and standalone contexts without one simply forgo `/debug` capture.
+	 */
+	rawSseDebugBuffer?: RawSseDebugBuffer;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */
@@ -605,7 +610,7 @@ export interface ToolSession {
 	/**
 	 * Journal a file write made by this agent's edit tools (full contents; `null` = file absent),
 	 * so selective commits (`/commit`, the eval `commit` namespace) can attribute its lines.
-	 * `beforeMtimeMs` is the file's mtime before the write. Never throws.
+	 * Never throws.
 	 */
 	recordFileChange?(change: FileChangeReport): void;
 	/** Get the active OpenTelemetry config so subagent dispatch can forward
