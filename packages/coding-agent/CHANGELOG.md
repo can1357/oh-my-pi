@@ -4,7 +4,8 @@
 
 ### Added
 
-- Added opt-in stuck-turn detection (`model.stuckTurnGuard.enabled`) that nudges the model to act when the `judge` role sees it re-investigating settled work ([#19291](https://github.com/can1357/oh-my-pi/pull/19291) by [@Xytronix](https://github.com/Xytronix))
+- Added opt-in stuck-turn detection (`model.stuckTurnGuard.enabled`) that nudges the model to act when the `judge` role sees it re-investigating settled work ([#19904](https://github.com/can1357/oh-my-pi/pull/19904) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
