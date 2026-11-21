@@ -1438,17 +1438,16 @@ export class MCPCommandController {
 				return;
 			}
 
-			if (
-				canSkipMcpServerToggle({
-					targetEnabled: enabled,
-					hasConfig: resolved.hasConfig,
-					hasWritableSource: resolved.writableSource !== undefined,
-					enabledFlag: resolved.enabledFlag,
-					denied: resolved.denied,
-					forced: resolved.forced,
-					builtinDropped: resolved.builtinDropped,
-				})
-			) {
+			const skipPersist = canSkipMcpServerToggle({
+				targetEnabled: enabled,
+				hasConfig: resolved.hasConfig,
+				hasWritableSource: resolved.writableSource !== undefined,
+				enabledFlag: resolved.enabledFlag,
+				denied: resolved.denied,
+				forced: resolved.forced,
+				builtinDropped: resolved.builtinDropped,
+			});
+			if (skipPersist && (enabled || !this.#hasRuntimeServerState(name))) {
 				this.#showMessage(
 					["", theme.fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`), ""].join(
 						"\n",
@@ -1457,14 +1456,16 @@ export class MCPCommandController {
 				return;
 			}
 
-			await setMcpServerEnabled({
-				userPath: resolved.userPath,
-				projectPath: resolved.projectPath,
-				enableProjectConfig,
-				sourcePath: resolved.writableSource?.filePath,
-				name,
-				enabled,
-			});
+			if (!skipPersist) {
+				await setMcpServerEnabled({
+					userPath: resolved.userPath,
+					projectPath: resolved.projectPath,
+					enableProjectConfig,
+					sourcePath: resolved.writableSource?.filePath ?? null,
+					name,
+					enabled,
+				});
+			}
 
 			if (enabled) {
 				await this.#connectEnabledMCPServer(name);
@@ -1502,6 +1503,19 @@ export class MCPCommandController {
 				`Failed to ${enabled ? "enable" : "disable"} server: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+	}
+
+	#hasRuntimeServerState(name: string): boolean {
+		const manager = this.ctx.mcpManager;
+		if (!manager) return false;
+		return (
+			manager.getConnection(name) !== undefined ||
+			manager.getServerConfig(name) !== undefined ||
+			manager.getSource(name) !== undefined ||
+			manager.getConnectedServers().includes(name) ||
+			manager.getAllServerNames().includes(name) ||
+			manager.getTools().some(tool => tool.mcpServerName === name)
+		);
 	}
 
 	async #handleUnauth(name: string | undefined): Promise<void> {

@@ -298,7 +298,6 @@ export async function resolveMcpServerForToggle(
 			cwd,
 			extensionRoots: options.extensionRoots,
 			filter: includeServer,
-			disabledExtensions: [],
 		}),
 		readDisabledServers(userPath),
 		readEnabledServers(userPath),

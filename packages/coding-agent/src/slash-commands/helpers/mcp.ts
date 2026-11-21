@@ -377,7 +377,7 @@ async function handleEnableDisableCommand(
 			userPath: resolved.userPath,
 			projectPath: resolved.projectPath,
 			enableProjectConfig,
-			sourcePath: resolved.writableSource?.filePath,
+			sourcePath: resolved.writableSource?.filePath ?? null,
 			name,
 			enabled,
 		});

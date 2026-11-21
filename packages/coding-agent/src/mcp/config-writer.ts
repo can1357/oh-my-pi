@@ -293,17 +293,53 @@ export async function setServerForceEnabled(filePath: string, name: string, forc
 	});
 }
 
+async function setExistingServerEnabled(filePath: string, name: string, enabled: boolean): Promise<boolean> {
+	if (!name) {
+		throw new Error("Server name cannot be empty");
+	}
+	return withConfigLock(filePath, async () => {
+		const existing = await readMCPConfigFile(filePath);
+		const server = existing.mcpServers?.[name];
+		if (server === undefined) {
+			return false;
+		}
+		if (typeof server !== "object" || server === null || Array.isArray(server)) {
+			throw new Error(`Invalid server config: Server "${name}" entry must be an object`);
+		}
+		const inferredType =
+			server.type ?? (!("command" in server && server.command) && "url" in server && server.url ? "http" : "stdio");
+		const errors = validateServerConfig(name, { ...server, enabled, type: inferredType } as MCPServerConfig);
+		if (errors.length > 0) {
+			throw new Error(`Invalid server config: ${errors.join("; ")}`);
+		}
+		const updated: MCPConfigFile = {
+			...existing,
+			mcpServers: {
+				...existing.mcpServers,
+				[name]: { ...server, enabled },
+			},
+		};
+		await writeMCPConfigFile(filePath, updated);
+		return true;
+	});
+}
+
 /** Paths and target state for toggling one MCP server across known config files. */
 export interface SetMcpServerEnabledOptions {
 	userPath: string;
 	projectPath: string;
 	/**
-	 * Absolute path to the loaded row's source mcp.json. Provide ONLY for
-	 * formats this codebase owns (native `.omp/mcp.json` and `mcp-json`
-	 * `mcp.json`/`.mcp.json`). Tool-owned configs (opencode.json, claude.json,
-	 * settings.json …) MUST be omitted; we never mutate another tool's file.
+	 * Resolved writable config path for `name`:
+	 * - `string`: write `enabled` only in this file (`native` `.omp/mcp.json`
+	 *   or standalone `mcp.json`/`.mcp.json`).
+	 * - `null`: a non-writable source (opencode.json, .cursor/mcp.json, claude,
+	 *   plugin, etc.) owns `name`, or no config file defines it; never probe
+	 *   shadowed `.omp/mcp.json` or user `mcp.json` entries, and record the
+	 *   override in `userPath`'s `disabledServers`/`enabledServers`.
+	 * - `undefined`: ownership was not pre-resolved; probe `projectPath` (when
+	 *   enabled) then `userPath` before falling back to user override lists.
 	 */
-	sourcePath?: string;
+	sourcePath?: string | null;
 	name: string;
 	enabled: boolean;
 	/**
@@ -318,19 +354,17 @@ export interface SetMcpServerEnabledOptions {
  * Flip a server's enabled/disabled state regardless of where it lives.
  *
  * `/mcp enable`, `/mcp disable`, and the extensions dashboard all persist
- * through this function. Callers must omit `sourcePath` for tool-owned or
- * discovered servers, and pass `enableProjectConfig: false` when project
- * config is opted out so that file is not rewritten.
+ * through this function. Callers that resolved ownership pass the owning
+ * writable file as `sourcePath`, or `null` when a tool-owned/discovered source
+ * owns the server so shadowed `.omp/mcp.json` entries are never rewritten.
  *
  * Resolution order:
  *
- * - Server found in `sourcePath` (writable, and not an opted-out project file)
- *   → write `enabled` on that entry.
- * - Else server in project mcp.json (when project config is enabled) → write
- *   `enabled` there.
- * - Else server in user mcp.json → write `enabled` there.
- * - Else (server defined in a tool-owned source like opencode.json, OR a
- *   purely discovered server):
+ * - `sourcePath` is a writable path (and not an opted-out project file) → write
+ *   `enabled` only on that entry.
+ * - `sourcePath` is `null` → skip file probing and use user override lists.
+ * - `sourcePath` is `undefined` → probe project `mcp.json` (when enabled), then
+ *   user `mcp.json`, before falling back to user override lists:
  *   - Disable → add to the user-level `disabledServers` denylist.
  *   - Enable → add to the user-level `enabledServers` allowlist so the
  *     runtime overrides the non-writable source's `enabled: false` flag.
@@ -344,23 +378,24 @@ export interface SetMcpServerEnabledOptions {
 export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): Promise<void> {
 	const { userPath, projectPath, sourcePath, name, enabled } = options;
 	const enableProjectConfig = options.enableProjectConfig ?? true;
-	// An opted-out project file must not be rewritten even if a caller still
-	// passes it as the writable source (findMcpServerForAuth omits it; this is
-	// the backstop).
-	const source = !enableProjectConfig && sourcePath === projectPath ? undefined : sourcePath;
-	const candidatePaths = [
-		...new Set([source, enableProjectConfig ? projectPath : undefined, userPath].filter(path => path !== undefined)),
-	];
+	let candidatePaths: string[];
+	if (sourcePath === null) {
+		candidatePaths = [];
+	} else if (sourcePath !== undefined) {
+		// An opted-out project file must not be rewritten even if a caller passes it.
+		candidatePaths = !enableProjectConfig && sourcePath === projectPath ? [] : [sourcePath];
+	} else {
+		candidatePaths = [
+			...new Set([enableProjectConfig ? projectPath : undefined, userPath].filter(p => p !== undefined)),
+		];
+	}
 	let updatedInConfig = false;
 
 	for (const filePath of candidatePaths) {
-		const config = await readMCPConfigFile(filePath);
-		const server = config.mcpServers?.[name];
-		if (server === undefined) continue;
-
-		await updateMCPServer(filePath, name, { ...server, enabled });
-		updatedInConfig = true;
-		break;
+		if (await setExistingServerEnabled(filePath, name, enabled)) {
+			updatedInConfig = true;
+			break;
+		}
 	}
 
 	if (enabled) {

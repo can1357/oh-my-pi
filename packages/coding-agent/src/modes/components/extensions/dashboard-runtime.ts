@@ -45,7 +45,8 @@ export function createExtensionDashboardRuntime(options: {
 			await setMcpServerEnabled({
 				userPath: getMCPConfigPath("user", cwd),
 				projectPath: getMCPConfigPath("project", cwd),
-				sourcePath,
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
+				sourcePath: sourcePath ?? null,
 				name,
 				enabled,
 			});

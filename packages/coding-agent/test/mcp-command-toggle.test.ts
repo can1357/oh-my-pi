@@ -4,7 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { initializeWithSettings } from "@oh-my-pi/pi-coding-agent/discovery";
+import { cfgDisabledExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { cfgMcpEnableProjectConfig } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import { handleMcpAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/mcp";
@@ -44,6 +47,7 @@ function createController(
 	options?: {
 		getServerConfig?: (name: string) => MCPServerConfig | undefined;
 		getSource?: (name: string) => SourceMeta | undefined;
+		getConnectedServers?: () => string[];
 		settings?: Settings;
 	},
 ) {
@@ -62,6 +66,7 @@ function createController(
 		getBuiltinDrops: () => builtinDrops,
 		...(options?.getServerConfig ? { getServerConfig: options.getServerConfig } : {}),
 		...(options?.getSource ? { getSource: options.getSource } : {}),
+		...(options?.getConnectedServers ? { getConnectedServers: options.getConnectedServers } : {}),
 	});
 	const ctx = createInteractiveModeContext({
 		session: { refreshMCPTools },
@@ -722,5 +727,173 @@ describe("/mcp enable and disable", () => {
 		const afterEnable = await readMCPConfigFile(getMCPConfigPath("project", projectDir));
 		expect(afterEnable.mcpServers?.["MaaS Slack"]?.enabled).toBe(true);
 		expect(afterEnable.mcpServers?.MaaS?.enabled).toBeUndefined();
+	});
+
+	test("toggling a foreign owner that collides with project .omp/mcp.json writes user overrides instead of the shadowed file", async () => {
+		const projectPath = getMCPConfigPath("project", projectDir);
+		await writeProjectConfig(projectDir, {
+			"omp201-collide-off": { type: "stdio", command: "omp-cmd" },
+			"omp201-collide-on": { type: "stdio", command: "omp-cmd", enabled: false },
+		});
+		const beforeProject = await Bun.file(projectPath).text();
+		await Bun.write(
+			path.join(projectDir, ".cursor", "mcp.json"),
+			`${JSON.stringify({ mcpServers: { "omp201-collide-off": { command: "cursor-cmd" } } }, null, 2)}\n`,
+		);
+		await Bun.write(
+			path.join(projectDir, "opencode.json"),
+			`${JSON.stringify(
+				{ mcp: { "omp201-collide-on": { type: "local", command: ["oc-cmd"], enabled: false } } },
+				null,
+				2,
+			)}\n`,
+		);
+
+		const settings = Settings.isolated();
+		cfgDisabledProviders.set(settings, ["native"]);
+		const release = initializeWithSettings(settings);
+		try {
+			const initial = await loadAllMCPConfigs(projectDir, { filterExa: false, enableProjectConfig: true });
+			expect(initial.configs["omp201-collide-off"]).toMatchObject({ command: "cursor-cmd" });
+			expect(initial.configs["omp201-collide-on"]).toBeUndefined();
+
+			const { controller, connectServers } = createController(new Map(), { settings });
+			await controller.handle("/mcp disable omp201-collide-off");
+			await controller.handle("/mcp enable omp201-collide-on");
+
+			expect(await Bun.file(projectPath).text()).toBe(beforeProject);
+			const afterTui = await readMCPConfigFile(userPath());
+			expect(afterTui.disabledServers).toContain("omp201-collide-off");
+			expect(afterTui.enabledServers).toContain("omp201-collide-on");
+			expect(await loadedHas("omp201-collide-off")).toBe(false);
+			expect(await loadedHas("omp201-collide-on")).toBe(true);
+			expect(connectServers).toHaveBeenCalledTimes(1);
+			expect(connectServers.mock.calls[0]![0]["omp201-collide-on"]).toMatchObject({ command: "oc-cmd" });
+
+			await fs.rm(userPath(), { force: true });
+			await runAcp("disable omp201-collide-off", undefined, settings);
+			await runAcp("enable omp201-collide-on", undefined, settings);
+
+			expect(await Bun.file(projectPath).text()).toBe(beforeProject);
+			const afterAcp = await readMCPConfigFile(userPath());
+			expect(afterAcp.disabledServers).toContain("omp201-collide-off");
+			expect(afterAcp.enabledServers).toContain("omp201-collide-on");
+			expect(await loadedHas("omp201-collide-off")).toBe(false);
+			expect(await loadedHas("omp201-collide-on")).toBe(true);
+		} finally {
+			release();
+		}
+	});
+
+	test("enabling a server excluded by disabledExtensions reports not found instead of writing a dead override", async () => {
+		const projectPath = getMCPConfigPath("project", projectDir);
+		await writeProjectConfig(projectDir, {
+			"omp201-ext-native": { type: "stdio", command: "ext-native-cmd", enabled: false },
+		});
+		const beforeProject = await Bun.file(projectPath).text();
+		await Bun.write(
+			path.join(projectDir, "opencode.json"),
+			`${JSON.stringify(
+				{ mcp: { "omp201-ext-foreign": { type: "local", command: ["ext-foreign-cmd"], enabled: false } } },
+				null,
+				2,
+			)}\n`,
+		);
+
+		const settings = Settings.isolated();
+		cfgDisabledExtensions.set(settings, ["mcp:omp201-ext-native", "mcp:omp201-ext-foreign"]);
+		const release = initializeWithSettings(settings);
+		try {
+			const { controller, connectServers, showError } = createController(new Map(), { settings });
+			await controller.handle("/mcp enable omp201-ext-native");
+			await controller.handle("/mcp enable omp201-ext-foreign");
+
+			expect(showError).toHaveBeenCalledTimes(2);
+			expect(connectServers).not.toHaveBeenCalled();
+
+			const acpNative = await runAcp("enable omp201-ext-native", undefined, settings);
+			const acpForeign = await runAcp("enable omp201-ext-foreign", undefined, settings);
+			expect(acpNative.result).toEqual({ consumed: true, failed: true });
+			expect(acpForeign.result).toEqual({ consumed: true, failed: true });
+
+			expect(await Bun.file(projectPath).text()).toBe(beforeProject);
+			const user = await readMCPConfigFile(userPath());
+			expect(user.enabledServers ?? []).toEqual([]);
+			expect(user.disabledServers ?? []).toEqual([]);
+			expect(await loadedHas("omp201-ext-native")).toBe(false);
+			expect(await loadedHas("omp201-ext-foreign")).toBe(false);
+		} finally {
+			release();
+		}
+	});
+
+	test("disabling a still-connected server whose saved config already says disabled disconnects it in place", async () => {
+		const cursorPath = path.join(projectDir, ".cursor", "mcp.json");
+		await Bun.write(
+			cursorPath,
+			`${JSON.stringify(
+				{ mcpServers: { "omp201-live-cursor": { command: "cursor-live-cmd", enabled: false } } },
+				null,
+				2,
+			)}\n`,
+		);
+		const { controller, mcpManager, refreshMCPTools } = createController(
+			new Map(),
+			discoveredLookup("omp201-live-cursor", { type: "stdio", command: "cursor-live-cmd" }, cursorPath),
+		);
+
+		await controller.handle("/mcp disable omp201-live-cursor");
+
+		expect(mcpManager.disconnectServer).toHaveBeenCalledWith("omp201-live-cursor");
+		expect(refreshMCPTools).toHaveBeenCalledWith([]);
+		expect((await readMCPConfigFile(userPath())).disabledServers ?? []).not.toContain("omp201-live-cursor");
+
+		await Bun.write(userPath(), `${JSON.stringify({ disabledServers: ["omp201-live-denied"] }, null, 2)}\n`);
+		const deniedLive = createController(new Map(), {
+			getConnectedServers: () => ["omp201-live-denied"],
+		});
+
+		await deniedLive.controller.handle("/mcp disable omp201-live-denied");
+
+		expect(deniedLive.mcpManager.disconnectServer).toHaveBeenCalledWith("omp201-live-denied");
+		expect(deniedLive.refreshMCPTools).toHaveBeenCalledWith([]);
+	});
+
+	test("toggling a URL-only standalone mcp.json server preserves the entry without requiring type", async () => {
+		const standalone = path.join(projectDir, "mcp.json");
+		await Bun.write(
+			standalone,
+			`${JSON.stringify({ mcpServers: { "omp201-url-only": { url: "https://example.com/mcp" } } }, null, 2)}\n`,
+		);
+		expect(await loadedHas("omp201-url-only")).toBe(true);
+
+		const acpDisabled = await runAcp("disable omp201-url-only");
+		expect(acpDisabled.result).toEqual({ consumed: true });
+		const afterDisable = await readMCPConfigFile(standalone);
+		expect(afterDisable.mcpServers?.["omp201-url-only"]).toEqual({
+			url: "https://example.com/mcp",
+			enabled: false,
+		} as unknown as MCPServerConfig);
+		expect(await loadedHas("omp201-url-only")).toBe(false);
+
+		const acpEnabled = await runAcp("enable omp201-url-only");
+		expect(acpEnabled.result).toEqual({ consumed: true });
+		const afterEnable = await readMCPConfigFile(standalone);
+		expect(afterEnable.mcpServers?.["omp201-url-only"]).toEqual({
+			url: "https://example.com/mcp",
+			enabled: true,
+		} as unknown as MCPServerConfig);
+		expect(await loadedHas("omp201-url-only")).toBe(true);
+
+		const { controller, connectServers, showError } = createController();
+		await controller.handle("/mcp disable omp201-url-only");
+		await controller.handle("/mcp enable omp201-url-only");
+		expect(showError).not.toHaveBeenCalled();
+		expect(connectServers).toHaveBeenCalledTimes(1);
+		expect(connectServers.mock.calls[0]![0]["omp201-url-only"]).toEqual({
+			type: "http",
+			url: "https://example.com/mcp",
+			enabled: true,
+		});
 	});
 });
