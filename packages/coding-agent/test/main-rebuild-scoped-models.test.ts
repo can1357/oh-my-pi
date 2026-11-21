@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AuthStorage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -260,6 +260,21 @@ describe("buildSessionOptions --models scope selection", () => {
 		expect(options.model).toBeUndefined();
 		expect(options.modelPattern).toEqual(["extprov/model-x", "extprov/model-y"]);
 		expect(options.scopedModels).toBeUndefined();
+	});
+
+	it("seeds the startup thinking level from the scope entry the session starts on", async () => {
+		const parsed = parseArgs(["--models", "prov/a:low,prov/b:high"]);
+		const settings = Settings.isolated({ modelRoles: { default: "prov/b" } });
+		const scoped = await resolveModelScope(
+			["prov/a:low", "prov/b:high"],
+			{ getAvailable: () => [model("a"), model("b")] },
+			undefined,
+		);
+
+		const options = await buildSessionOptions(parsed, scoped, SessionManager.inMemory(), registry(), settings);
+
+		expect(options.model?.id).toBe("b");
+		expect(options.thinkingLevel).toBe(Effort.High);
 	});
 
 	it("pins the first scoped model and sets no deferred pattern when the scope resolved", async () => {
