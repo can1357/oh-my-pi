@@ -378,7 +378,9 @@ function toolCallLine(
 				// here, so no completeness is claimed; a tool-side truncation (meta.truncation) is named
 				// independently of this view's cap, so a small tool-truncated result is not mislabelled.
 				const toolTruncated =
-					isRecord(result.details) && isRecord(result.details.meta) && result.details.meta.truncation !== undefined;
+					isRecord(result.details) &&
+					isRecord(result.details.meta) &&
+					result.details.meta.truncation !== undefined;
 				const label = toolTruncated
 					? bounded.truncated
 						? "Tool result (shortened here for advisor view only; the tool itself truncated its output):"
