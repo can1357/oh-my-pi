@@ -385,7 +385,7 @@ describe("todo backend", () => {
 		expect(order).toEqual(["replace", "shutdown"]);
 	});
 
-	it("a backend that never answers holds dispose no longer than the session_shutdown budget", async () => {
+	it("a backend that never answers holds dispose no longer than the session_shutdown budget, and its call does not outlive it", async () => {
 		const backend = tracker();
 		const order: string[] = [];
 		const { session } = await open(
@@ -400,8 +400,15 @@ describe("todo backend", () => {
 		session.commitTodoPhases(list("a"));
 		await inFlight;
 		await session.dispose();
+		// A call omp still raced against the handler budget would keep a host's process alive for
+		// the rest of those 30 s. The sleep only puts a task behind the settled call chain.
+		const left = await Promise.race([
+			session.extensionRunner?.todoBackendSettled().then(() => "no call"),
+			Bun.sleep(0).then(() => "a running call"),
+		]);
 
 		expect(order).toEqual(["shutdown"]);
+		expect(left).toBe("no call");
 	});
 
 	it("an id two extensions registered goes to the first; with that one disabled the next takes it over and gets the list, and with neither it is reported as unregistered", async () => {
