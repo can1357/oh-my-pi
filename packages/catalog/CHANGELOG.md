@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AbliteratedLLM (`abliteratedllm`) with live model discovery from `https://api.abliteratedllm.dev/v1/models` and `/login abliteratedllm` (`ABLITERATEDLLM_API_KEY`) ([#19227](https://github.com/can1357/oh-my-pi/pull/19227) by [@whiteworthy](https://github.com/whiteworthy))
+
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
@@ -15,8 +19,6 @@
 
 ### Added
 
-- Added AbliteratedLLM (`abliteratedllm`) with live model discovery from `https://api.abliteratedllm.dev/v1/models` and `/login abliteratedllm` (`ABLITERATEDLLM_API_KEY`) ([#19227](https://github.com/can1357/oh-my-pi/pull/19227) by [@whiteworthy](https://github.com/whiteworthy))
-- Added `uncached-instructions` compatibility flag, enabled for GPT-6.2 models on every host, which moves the system prompt out of the uncached Responses `instructions` field
 - Added runtime provider rules (`setRuntimeProviderRule` in `compat/cascade`). They apply KDL directives to one provider's models, win ties with bundled rules, and clear rule-derived caches when they change.
 - Added the `prompt-perturbation` catalog axis, which opts a provider or model into per-install prompt paraphrasing.
 - Added the `uncached-instructions` compatibility flag for GPT-6.2 models across all hosts, moving system prompts out of the uncached Responses `instructions` field.
