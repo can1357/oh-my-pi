@@ -24,6 +24,11 @@ const spec: ModelSpec<"anthropic-messages"> = {
 const model = buildModel(spec);
 const SUMMARY = "## Goal\nAudit the handlers.\n\n## Next Steps\nContinue with chunk 11.";
 const SIGNATURE = "sig_opaque_on_demand";
+// Opaque records covered by the signature; the lone surrogate must survive replay sanitization.
+const SIGNED_TOOL_CHANGES: Record<string, unknown>[] = [
+	{ type: "tool_addition", tool: { type: "tool_reference", name: "search" }, opaque: { exact: "\ud800" } },
+	{ type: "tool_removal", tool: { type: "tool_reference", name: "legacy_search" } },
+];
 const ENCRYPTED = "enc_opaque_legacy";
 const vertexUrl =
 	"https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-fable-5:rawPredict";
@@ -136,7 +141,7 @@ async function captureInjected(
 	return { beta, payload };
 }
 
-function mockEvents(stopReason: string, modelId = model.id): Record<string, unknown>[] {
+function mockEvents(stopReason: string, modelId = model.id, toolChanges?: unknown): Record<string, unknown>[] {
 	return [
 		{
 			type: "message_start",
@@ -145,7 +150,12 @@ function mockEvents(stopReason: string, modelId = model.id): Record<string, unkn
 		{
 			type: "content_block_start",
 			index: 0,
-			content_block: { type: "compaction", content: SUMMARY, signature: SIGNATURE },
+			content_block: {
+				type: "compaction",
+				content: SUMMARY,
+				signature: SIGNATURE,
+				...(toolChanges !== undefined ? { tool_changes: toolChanges } : {}),
+			},
 		},
 		{ type: "content_block_stop", index: 0 },
 		{
@@ -290,6 +300,27 @@ describe("Anthropic on-demand compaction requests", () => {
 		expect(supportsAnthropicCompaction(bedrock, `${origin}/openai/v1`)).toBe(false);
 	});
 
+	it("sends on-demand compaction to an opted-in gateway at the model's own endpoint only", async () => {
+		const gateway = "https://llm-gateway.example.test/anthropic";
+		const gatewaySpec = {
+			...spec,
+			provider: "llm-gateway",
+			baseUrl: gateway,
+			compat: { supportsServerCompaction: true },
+		};
+		expect(supportsAnthropicCompaction(buildModel(gatewaySpec))).toBe(false);
+		// `enabled` alone keeps an unknown gateway excluded, as before.
+		expect(supportsAnthropicCompaction(buildModel({ ...gatewaySpec, remoteCompaction: { enabled: true } }))).toBe(
+			false,
+		);
+		const optedIn = buildModel({ ...gatewaySpec, remoteCompaction: { api: "anthropic-messages", enabled: true } });
+		const response = await captureRequest(optedIn, { anthropicCompaction: {} });
+		expect(response.payload.compaction).toEqual({ type: "summarize" });
+		expect(response.beta).toContain("compact-2026-09-04");
+		// The opt-in vouches for the configured endpoint, not a route elsewhere.
+		expect(supportsAnthropicCompaction(optedIn, "https://other-gateway.example.test/anthropic")).toBe(false);
+	});
+
 	it("gates a first-party reroute and an opt-out on compat.bedrockMessagesApi", () => {
 		const runtimeRoute = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic";
 		// Rerouted without the flag: excluded, as before Bedrock support.
@@ -335,6 +366,44 @@ describe("Anthropic on-demand compaction response", () => {
 		expect(result.usage.cacheWrite).toBe(80_082);
 		expect(result.usage.totalTokens).toBe(82_148);
 		expect(requests).toBe(1);
+	});
+
+	it("keeps signed tool_changes and replays them byte-identical", async () => {
+		const fetchMock: typeof fetch = Object.assign(
+			async () => sseResponse(mockEvents("compaction", model.id, SIGNED_TOOL_CHANGES)),
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			anthropicCompaction: {},
+			fetch: fetchMock,
+		}).result();
+		expect(result.providerPayload).toEqual({
+			type: "anthropicCompaction",
+			provider: "anthropic",
+			content: SUMMARY,
+			signature: SIGNATURE,
+			toolChanges: SIGNED_TOOL_CHANGES,
+		});
+
+		const next = await captureRequest(model, {}, [result, { role: "user", content: "Continue", timestamp: 2 }]);
+		const block = (next.payload.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]?.content[0];
+		expect(block).toMatchObject({ type: "compaction", content: SUMMARY, signature: SIGNATURE });
+		expect(block?.tool_changes).toEqual(SIGNED_TOOL_CHANGES);
+	});
+
+	it("publishes no block when signed tool_changes are malformed", async () => {
+		const fetchMock: typeof fetch = Object.assign(
+			async () => sseResponse(mockEvents("compaction", model.id, [SIGNED_TOOL_CHANGES[0], null])),
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			anthropicCompaction: {},
+			fetch: fetchMock,
+		}).result();
+		expect(result.stopDetails).toEqual({ type: "compaction" });
+		expect(result.providerPayload).toBeUndefined();
 	});
 
 	it("does not publish a block if the response stopped for another reason", async () => {

@@ -209,7 +209,7 @@ function lowercaseCandidate(candidate: string): string | undefined {
 
 const STRIP_SYNTHETIC_PREFIX_PATTERN = new RegExp(
 	`^(?:${discoveryVocabulary()
-		.syntheticPrefixes.map(prefix => prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+		.syntheticPrefixes.map(prefix => RegExp.escape(prefix))
 		.join("|")})`,
 	"i",
 );

@@ -8,7 +8,7 @@ Disabled by default. Toggle via `/settings` UI or directly in `config.yml`:
 
 ```yaml
 secrets:
-  enabled: true
+   enabled: true
 ```
 
 ## How it works
@@ -36,10 +36,10 @@ Obfuscate-mode plain values and regex matches shorter than 8 characters are igno
 
 Define custom secret entries in YAML. Two locations are checked:
 
-| Level   | Path                       | Purpose                     |
-| ------- | -------------------------- | --------------------------- |
+| Level   | Path                                                                   | Purpose                                            |
+| ------- | ---------------------------------------------------------------------- | -------------------------------------------------- |
 | Global  | `<active-agent-dir>/secrets.yml` (normally `~/.omp/agent/secrets.yml`) | Secrets across projects using that agent directory |
-| Project | `<cwd>/.omp/secrets.yml`   | Project-specific secrets    |
+| Project | `<cwd>/.omp/secrets.yml`                                               | Project-specific secrets                           |
 
 Project entries override global entries with matching `content`. The global location follows the session's agent directory, including named profiles and explicit SDK agent-directory overrides.
 
@@ -117,6 +117,8 @@ The 12-character hash base is an HMAC of the exact secret under a private per-in
 ```
 
 Regex entries always scan globally (the `g` flag is enforced automatically). The regex literal syntax `/pattern/flags` is supported as an alternative to separate `content` + `flags` fields. Escaped slashes within the pattern (`\\/`) are handled correctly.
+
+Entries run as `LinearRegExp` (`packages/utils/src/regex/linear-regexp.ts`): JavaScript syntax and matches, with a matcher designed to avoid catastrophic backtracking. It supports Unicode modes (`u` and `v`) and scoped modifiers such as `(?i:…)`. Unicode properties of strings such as `\p{RGI_Emoji}` use native matching only for the individual class, not the full expression. Patterns outside the engine’s supported shapes or size limits can still use the native engine.
 
 #### Replace mode with regex
 

@@ -100,6 +100,12 @@ class ReplayTestSession {
 
 	setClientBridge(_bridge: unknown): void {}
 
+	setMcpServerInstructionsSource(_source: unknown): void {}
+
+	registerSessionChangeCallback(_callback: () => void): () => void {
+		return () => {};
+	}
+
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}
@@ -1004,6 +1010,12 @@ describe("ACP event mapper", () => {
 		}
 	});
 
+	it("labels a replayed intent without changing its raw input", () => {
+		const args = { i: "Checking timing: Does Retry-After override the timer?" };
+		const update = buildToolCallStartUpdate({ toolCallId: "timing", toolName: "probe", args });
+		expect(update).toMatchObject({ title: "Checking timing", rawInput: { i: args.i } });
+	});
+
 	it("keeps malformed replay arguments as raw input without command content", () => {
 		const replayArgs = normalizeReplayToolArguments("{not json");
 		const update = buildToolCallStartUpdate({
@@ -1023,6 +1035,22 @@ describe("ACP event mapper", () => {
 			rawInput: "{not json",
 		});
 		expect("content" in update).toBe(false);
+	});
+
+	it("names the tool so clients can label kind-other calls such as task", () => {
+		const update = buildToolCallStartUpdate({
+			toolCallId: "toolu_task",
+			toolName: "task",
+			args: { tasks: [] },
+			intent: "Waiting for agents",
+		});
+
+		expect(update).toMatchObject({
+			sessionUpdate: "tool_call",
+			name: "task",
+			title: "Waiting for agents",
+			kind: "other",
+		});
 	});
 
 	it("keeps object replay arguments unchanged and builds command content", () => {
@@ -1229,30 +1257,30 @@ describe("ACP event mapper", () => {
 		expect(update.locations).toEqual([{ path: "src/current.ts" }, { path: "src/old.ts" }, { path: "src/new.ts" }]);
 	});
 
-	it("maps xd:// device writes to an execute call with no fabricated file location", () => {
+	it("maps a control-URL write to an execute call with no fabricated file location", () => {
 		const update = buildToolCallStartUpdate({
-			toolCallId: "toolu_xd_write",
+			toolCallId: "toolu_proc_write",
 			toolName: "write",
-			args: { path: "xd://github", content: '{"op":"repo_view"}' },
+			args: { path: "proc://build-42/kill", content: "" },
 			cwd: path.resolve("/repo"),
 		});
 
 		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
 		expect(update).toMatchObject({
 			sessionUpdate: "tool_call",
-			title: "xd://github",
+			title: "proc://build-42/kill",
 			kind: "execute",
 		});
 		expect("locations" in update).toBe(false);
 	});
 
-	it("keeps xd:// discovery reads as read kind and plain file writes as edit", () => {
+	it("keeps help:// doc-topic reads as read kind and plain file writes as edit", () => {
 		const discovery = buildToolCallStartUpdate({
-			toolCallId: "toolu_xd_read",
+			toolCallId: "toolu_help_read",
 			toolName: "read",
-			args: { path: "xd://lsp" },
+			args: { path: "help://eval/helpers" },
 		});
-		expect(discovery).toMatchObject({ title: "xd://lsp", kind: "read" });
+		expect(discovery).toMatchObject({ title: "help://eval/helpers", kind: "read" });
 		expect("locations" in discovery).toBe(false);
 
 		const fileWrite = buildToolCallStartUpdate({

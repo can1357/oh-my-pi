@@ -3,6 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 
 type Mode =
 	| "all"
@@ -25,6 +26,8 @@ interface TestCommand {
 	command: string[];
 	/** `bun test --parallel` width this chunk wants when it has the machine to itself. */
 	parallel?: number;
+	/** Expected wall seconds from the timing history, set by weighted chunk planning; orders pool dispatch. */
+	estimatedSeconds?: number;
 }
 
 type CodingAgentTestPartition = Record<CodingAgentBucket, string[]>;
@@ -61,12 +64,18 @@ const validModes: Record<Mode, true> = {
 	"coding-agent-heavy": true,
 };
 
-// `chunkSize` splits a bucket's file list into that-many-file groups, each run as a
-// separate `bun test` child process. A fresh process per chunk resets Bun's
-// heap and reaps any dangling spawned children between groups, keeping peak RSS
-// under the CI runner's OOM ceiling (a single 170–370-file invocation gets
-// SIGKILLed at 137). The singleton/global-state bucket is left whole: its suites
-// co-locate in one process to exercise process-wide state, so they must not split.
+// `chunkSize` caps how many files of a bucket share one `bun test` child process.
+// A fresh process per chunk resets Bun's heap and reaps any dangling spawned
+// children between groups, keeping peak RSS under the CI runner's OOM ceiling (a
+// single 170–370-file invocation gets SIGKILLed at 137). A bucket always gets
+// `ceil(files / chunkSize)` chunks. Which files share a chunk comes from the
+// timing history (see TimingHistory): files are dealt heaviest-first onto the
+// lightest chunk with room, so slow suites spread out instead of clustering in
+// one alphabetical run (ten `cli-*` files once made a 67s chunk beside a 5s
+// median), and chunks are numbered heaviest-first. With no history for any of a
+// bucket's files the plan falls back to consecutive alphabetical runs. The
+// singleton/global-state bucket is left whole: its suites co-locate in one
+// process to exercise process-wide state, so they must not split.
 //
 // The UI/TUI bucket uses a smaller chunk (5) than the others: its suites build up
 // native ghostty-vt cells, and bun 1.3.14's GC aborts (SIGTRAP/SIGABRT, exit
@@ -104,6 +113,13 @@ const nativeAndIntegrationPackages = [
 	"packages/collab-web",
 	"packages/typescript-edit-benchmark",
 ];
+
+const projectToolTestCommand: TestCommand = {
+	label: ".omp/tests (project-local TUI debug tool)",
+	cwd: ".",
+	command: ["bun", "test", ...onlyFailuresArgs, "./.omp/tests/tui.test.ts"],
+	parallel: 1,
+};
 
 // Packages the CI buckets deliberately skip but a local full run should still
 // cover. robomp-web lives under python/robomp and is outside every CI TS bucket.
@@ -193,6 +209,29 @@ const codingAgentRuntimeContentMarkers = ["AgentSession", "SessionManager", "Aut
 
 let codingAgentTestPartitionPromise: Promise<CodingAgentTestPartition> | null = null;
 
+// A test whose own junit `time` exceeds this many seconds is called out in its
+// chunk's progress line and in the end-of-run slow-test section. A warning
+// only: it never fails the run.
+const SLOW_TEST_SECONDS = 5;
+
+// Observed durations from earlier non-dry runs, used to balance coding-agent
+// chunks and to start the longest pool commands first. `files` maps a
+// repo-relative test file to the seconds of its file-level junit suite;
+// `commands` maps the label of a command that lists no test files (a whole
+// package, the Rust task — labels that stay stable across runs) to its wall
+// seconds. A machine-local cache: missing or malformed reads as empty, which is
+// the cold-start plan.
+interface TimingHistory {
+	files: Record<string, number>;
+	commands: Record<string, number>;
+}
+
+const timingHistoryPath = path.join(repoRoot, "node_modules/.cache/omp-test-timings.json");
+const codingAgentCwd = "packages/coding-agent";
+const TEST_FILE_ARG_RE = /\.test\.[cm]?[jt]sx?$/;
+
+let timingHistoryPromise: Promise<TimingHistory> | null = null;
+
 function shellQuote(value: string): string {
 	if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) {
 		return value;
@@ -212,8 +251,9 @@ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArg
 
 // The Rust suite as one pooled command, so root `bun run test` reports TS and
 // Rust under the same progress stream / failure report. Delegates to
-// run-rs-task.ts, which self-skips when no Rust-affecting files changed locally
-// (printing a one-line notice) and resolves the cargo/nextest invocation.
+// run-rs-task.ts, which self-skips when the branch changed no Rust-affecting file
+// since its merge base with main, committed or not (printing a one-line notice),
+// and resolves the cargo/nextest invocation.
 function rustTestCommand(): TestCommand {
 	return {
 		label: "rust (cargo nextest; skipped if no Rust changes)",
@@ -299,6 +339,201 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> 
 	return codingAgentTestPartitionPromise;
 }
 
+// Keep the finite numeric entries of an untrusted JSON object.
+function numberRecord(value: unknown): Record<string, number> {
+	const record: Record<string, number> = {};
+	if (typeof value !== "object" || value === null) return record;
+	for (const key in value) {
+		const entry: unknown = Reflect.get(value, key);
+		if (typeof entry === "number" && Number.isFinite(entry)) record[key] = entry;
+	}
+	return record;
+}
+
+// Read the timing history from disk; a missing or corrupt file is an empty one.
+async function readTimingHistory(): Promise<TimingHistory> {
+	let raw: unknown;
+	try {
+		raw = await Bun.file(timingHistoryPath).json();
+	} catch (err) {
+		if (isEnoent(err) || err instanceof SyntaxError) return { files: {}, commands: {} };
+		throw err;
+	}
+	if (typeof raw !== "object" || raw === null) return { files: {}, commands: {} };
+	return {
+		files: numberRecord("files" in raw ? raw.files : undefined),
+		commands: numberRecord("commands" in raw ? raw.commands : undefined),
+	};
+}
+
+// The history as it stood when this run started, read once for planning and dispatch.
+function getTimingHistory(): Promise<TimingHistory> {
+	timingHistoryPromise ??= readTimingHistory();
+	return timingHistoryPromise;
+}
+
+function roundSeconds(seconds: number): number {
+	return Math.round(seconds * 1000) / 1000;
+}
+
+// Whether the argv names test files; commands that don't run a whole package or task.
+function listsTestFiles(testCommand: TestCommand): boolean {
+	return testCommand.command.some(arg => TEST_FILE_ARG_RE.test(arg));
+}
+
+// Merge this run's observations into the on-disk history: re-read it (another
+// run may have written since this one started), let every observed file and
+// whole-package command overwrite its entry, keep everything not seen this run.
+async function recordTimingHistory(runs: CommandRun[]): Promise<void> {
+	if (runs.length === 0) return;
+	const history = await readTimingHistory();
+	for (const run of runs) {
+		Object.assign(history.files, run.report?.fileSeconds);
+		if (!listsTestFiles(run.command)) history.commands[run.command.label] = roundSeconds(run.seconds);
+	}
+	await Bun.write(timingHistoryPath, `${JSON.stringify(history, null, "\t")}\n`);
+}
+
+// A test slower than SLOW_TEST_SECONDS: where it lives (repo-relative
+// `file:line`) and its `describe > test` name.
+interface SlowTest {
+	seconds: number;
+	location: string;
+	name: string;
+}
+
+// What one bun junit report says about timing: seconds per repo-relative test
+// file (its file-level suite) and the slow tests.
+interface JunitReport {
+	fileSeconds: Record<string, number>;
+	slowTests: SlowTest[];
+}
+
+// One finished command's contribution to the run's timing record: wall seconds
+// (crash retries included) and its junit report, null when the command is not
+// a `bun test` child or its child died before writing one.
+interface CommandRun {
+	command: TestCommand;
+	seconds: number;
+	report: JunitReport | null;
+}
+
+const JUNIT_TAG_RE = /<(\/?)(testsuites|testsuite|testcase)\b([^>]*)>/g;
+const XML_ATTR_RE = /([\w:-]+)="([^"]*)"/g;
+const XML_ENTITY_RE = /&(?:#(\d+)|#x([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));/g;
+const XML_NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+
+function decodeXmlText(value: string): string {
+	return value.replace(XML_ENTITY_RE, (_match: string, dec?: string, hex?: string, named?: string) => {
+		if (dec) return String.fromCodePoint(Number(dec));
+		if (hex) return String.fromCodePoint(Number.parseInt(hex, 16));
+		return named ? XML_NAMED_ENTITIES[named] : "";
+	});
+}
+
+function parseXmlAttributes(source: string): Record<string, string> {
+	const attributes: Record<string, string> = {};
+	for (const [, key, value] of source.matchAll(XML_ATTR_RE)) attributes[key] = decodeXmlText(value);
+	return attributes;
+}
+
+// Parse a bun junit report written by a child running in repo-relative `cwd`.
+// Bun nests one `<testsuite>` per file directly under `<testsuites>`, then one
+// per `describe`, with `<testcase>`s at any depth; `file` attributes are
+// relative to the child's cwd. Only the tags are scanned (attribute values are
+// entity-escaped, so they hold no `<`/`>`). Returns null for a truncated report.
+function parseJunitReport(xml: string, cwd: string): JunitReport | null {
+	if (!xml.includes("</testsuites>")) return null;
+	const report: JunitReport = { fileSeconds: {}, slowTests: [] };
+	let depth = 0;
+	for (const [, closing, tag, rawAttributes] of xml.matchAll(JUNIT_TAG_RE)) {
+		if (tag === "testsuites" || (closing && tag === "testcase")) continue;
+		if (closing) {
+			depth -= 1;
+			continue;
+		}
+		const attributes = parseXmlAttributes(rawAttributes);
+		const seconds = Number(attributes.time);
+		const file = path.posix.join(cwd, attributes.file ?? "");
+		if (tag === "testsuite") {
+			depth += 1;
+			if (depth === 1 && attributes.file && Number.isFinite(seconds)) {
+				report.fileSeconds[file] = roundSeconds(seconds);
+			}
+			if (rawAttributes.trimEnd().endsWith("/")) depth -= 1;
+		} else if (seconds > SLOW_TEST_SECONDS) {
+			const name = attributes.name ?? "";
+			report.slowTests.push({
+				seconds,
+				location: `${file}:${attributes.line ?? "?"}`,
+				// Bun lists a nested test's describes innermost-first in `classname`.
+				name: [...(attributes.classname?.split(" > ").reverse() ?? []), name].filter(Boolean).join(" > "),
+			});
+		}
+	}
+	return report;
+}
+
+// The junit report a finished child left at `junitPath`, or null when it wrote
+// none (crashed, killed, or not a `bun test` child) or left it unparseable.
+async function readJunitReport(junitPath: string, cwd: string): Promise<JunitReport | null> {
+	try {
+		return parseJunitReport(await Bun.file(junitPath).text(), cwd);
+	} catch (err) {
+		if (isEnoent(err)) return null;
+		throw err;
+	}
+}
+
+// One chunk of a bucket plan; `seconds` is its estimate, absent without history.
+interface ChunkPlan {
+	files: string[];
+	seconds?: number;
+}
+
+// Per-file weights for a coding-agent bucket from the timing history; files with
+// no entry weigh the mean of those that have one. Null when none has one.
+function bucketFileWeights(testFiles: string[], history: TimingHistory): Map<string, number> | null {
+	const known = testFiles
+		.map(file => history.files[`${codingAgentCwd}/${file}`])
+		.filter(seconds => seconds !== undefined);
+	if (known.length === 0) return null;
+	const mean = known.reduce((sum, seconds) => sum + seconds, 0) / known.length;
+	return new Map(testFiles.map(file => [file, history.files[`${codingAgentCwd}/${file}`] ?? mean]));
+}
+
+// Cold-start plan: consecutive runs of `chunkSize` alphabetical files.
+function consecutiveChunks(testFiles: string[], chunkSize: number): ChunkPlan[] {
+	const chunks: ChunkPlan[] = [];
+	for (let i = 0; i < testFiles.length; i += chunkSize) {
+		chunks.push({ files: testFiles.slice(i, i + chunkSize) });
+	}
+	return chunks;
+}
+
+// Weighted plan: `ceil(n / chunkSize)` chunks, each capped at `chunkSize` files.
+// Files are dealt in descending weight onto the currently lightest chunk with
+// room (ties → lowest index), then each chunk's files are put back in
+// alphabetical order and the chunks ordered heaviest-first.
+function balancedChunks(testFiles: string[], chunkSize: number, weights: Map<string, number>): ChunkPlan[] {
+	const weightOf = (file: string): number => weights.get(file) ?? 0;
+	const chunks: Required<ChunkPlan>[] = Array.from({ length: Math.ceil(testFiles.length / chunkSize) }, () => ({
+		files: [],
+		seconds: 0,
+	}));
+	for (const file of [...testFiles].sort((a, b) => weightOf(b) - weightOf(a))) {
+		let target = chunks[0];
+		for (const chunk of chunks) {
+			if (chunk.files.length >= chunkSize) continue;
+			if (target.files.length >= chunkSize || chunk.seconds < target.seconds) target = chunk;
+		}
+		target.files.push(file);
+		target.seconds += weightOf(file);
+	}
+	for (const chunk of chunks) chunk.files.sort();
+	return chunks.sort((a, b) => b.seconds - a.seconds);
+}
+
 async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
 	const partition = await getCodingAgentTestPartition();
 	const testFiles = partition[bucket];
@@ -307,19 +542,18 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 	}
 	const plan = codingAgentBucketPlans[bucket];
 	const chunkSize = plan.chunkSize ?? testFiles.length;
-	const chunkCount = Math.ceil(testFiles.length / chunkSize);
-	const commands: TestCommand[] = [];
-	for (let i = 0; i < testFiles.length; i += chunkSize) {
-		const chunk = testFiles.slice(i, i + chunkSize);
-		const chunkLabel = chunkCount > 1 ? ` chunk ${commands.length + 1}/${chunkCount}` : "";
-		commands.push({
-			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.length} files)`,
-			cwd: "packages/coding-agent",
-			command: ["bun", "test", ...onlyFailuresArgs, ...chunk],
+	const weights = bucketFileWeights(testFiles, await getTimingHistory());
+	const chunks = weights ? balancedChunks(testFiles, chunkSize, weights) : consecutiveChunks(testFiles, chunkSize);
+	return chunks.map((chunk, index) => {
+		const chunkLabel = chunks.length > 1 ? ` chunk ${index + 1}/${chunks.length}` : "";
+		return {
+			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.files.length} files)`,
+			cwd: codingAgentCwd,
+			command: ["bun", "test", ...onlyFailuresArgs, ...chunk.files],
 			parallel: plan.parallel,
-		});
-	}
-	return commands;
+			estimatedSeconds: chunk.seconds === undefined ? undefined : roundSeconds(chunk.seconds),
+		};
+	});
 }
 
 async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
@@ -327,7 +561,7 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 		case "workspace":
 			return fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8));
 		case "native":
-			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4));
+			return [...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4)), projectToolTestCommand];
 		case "coding-agent-singleton":
 			return await codingAgentTestCommands("singleton");
 		case "coding-agent-ui":
@@ -353,11 +587,12 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 		// drives: every package the old `--workspaces` fan-out covered (the CI
 		// `all` set plus robomp-web, which CI omits), routed through
 		// this one quiet runner so the whole suite shares one progress stream and
-		// one failure report. Repo script tests remain available via `test:scripts`.
+		// one failure report.
 		case "local-ts":
 			return [
 				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
 				...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
+				projectToolTestCommand,
 				...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
 				...(await commandsForMode("coding-agent-heavy")),
 			];
@@ -369,8 +604,8 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 	}
 }
 
-// The omp-kata runner pods may inject cloud credentials (`AWS_*`) pod-wide via
-// `envFrom`, GitHub Actions injects `GITHUB_TOKEN`,
+// Self-hosted runners may carry cloud credentials (`AWS_*`) in their
+// environment, GitHub Actions injects `GITHUB_TOKEN`,
 // and a host may carry provider API keys. Any of these make env-sensitive code
 // non-deterministic in tests — e.g. leaked AWS creds make `amazon-bedrock` look
 // authenticated and win the provider startup fallback over `anthropic`. Run the
@@ -397,53 +632,94 @@ function isScrubbedEnvVar(key: string): boolean {
 	return /_(API_KEY|OAUTH_TOKEN)$/.test(key) || key.includes("BEARER_TOKEN");
 }
 
-async function runTestCommand(testCommand: TestCommand): Promise<void> {
-	const cwd = path.join(repoRoot, testCommand.cwd);
+// Print a command's `==> label` / `$ argv` header; returns the rendered argv.
+function printCommandHeader(testCommand: TestCommand): string {
 	const renderedCommand = testCommand.command.map(shellQuote).join(" ");
 	console.log(`\n==> ${testCommand.label}`);
 	console.log(`$ ${renderedCommand}`);
+	return renderedCommand;
+}
 
-	if (isDryRun) {
-		return;
+// The argv actually spawned. Every `bun test` child (the commands
+// applyChunkBudget gave a `parallel` width) also writes a junit report to
+// `junitPath`, the runner's only per-test timing source; bun keeps its console
+// reporter alongside it, so the captured output and `--only-failures` are
+// unchanged. The displayed command omits it and stays the one to paste for a
+// rerun. Crash retries overwrite the same file.
+function spawnArgv(testCommand: TestCommand, junitPath: string): string[] {
+	if (testCommand.parallel === undefined) return testCommand.command;
+	return [...testCommand.command, "--reporter=junit", `--reporter-outfile=${junitPath}`];
+}
+
+// The sequential path: each command streams straight to the terminal in
+// planned order and the first failure throws. Every finished command (failed
+// ones too) lands in `runs`, and the slow-test section prints before the
+// failure propagates.
+async function runTestCommandsSequentially(
+	commands: TestCommand[],
+	junitDir: string,
+	runs: CommandRun[],
+): Promise<void> {
+	try {
+		for (const [index, testCommand] of commands.entries()) {
+			await runTestCommand(testCommand, path.join(junitDir, `${index}.xml`), runs);
+		}
+	} finally {
+		process.stdout.write(formatSlowTests(runs));
 	}
+}
 
+async function runTestCommand(testCommand: TestCommand, junitPath: string, runs: CommandRun[]): Promise<void> {
+	const cwd = path.join(repoRoot, testCommand.cwd);
+	const renderedCommand = printCommandHeader(testCommand);
 	const env = buildChildEnv();
-	for (let attempt = 1; ; attempt++) {
-		const proc = Bun.spawn(testCommand.command, {
-			cwd,
-			env,
-			stdout: "inherit",
-			stderr: "inherit",
-		});
-		// Watchdog, mirroring the parallel path: record that *we* killed the child,
-		// otherwise the resulting 137 is indistinguishable from an OOM kill.
-		let timedOut = false;
-		const killTimer = setTimeout(async () => {
-			timedOut = true;
-			try {
-				process.stdout.write(await describeStuckProcessTree(proc.pid));
-			} finally {
-				proc.kill("SIGKILL");
+	const startedAt = performance.now();
+	try {
+		for (let attempt = 1; ; attempt++) {
+			const proc = Bun.spawn(spawnArgv(testCommand, junitPath), {
+				cwd,
+				env,
+				stdout: "inherit",
+				stderr: "inherit",
+			});
+			// Watchdog, mirroring the parallel path: record that *we* killed the child,
+			// otherwise the resulting 137 is indistinguishable from an OOM kill.
+			let timedOut = false;
+			const killTimer = setTimeout(async () => {
+				timedOut = true;
+				try {
+					process.stdout.write(await describeStuckProcessTree(proc.pid));
+				} finally {
+					proc.kill("SIGKILL");
+				}
+			}, chunkTimeoutMs());
+			const exitCode = await proc.exited;
+			clearTimeout(killTimer);
+			if (exitCode === 0) {
+				return;
 			}
-		}, chunkTimeoutMs());
-		const exitCode = await proc.exited;
-		clearTimeout(killTimer);
-		if (exitCode === 0) {
-			return;
+			if (!timedOut && BUN_CRASH_EXITS[exitCode] && attempt < MAX_CHUNK_ATTEMPTS) {
+				console.log(
+					`==> ${testCommand.label}: bun crashed (exit ${exitCode}); retrying (attempt ${attempt + 1}/${MAX_CHUNK_ATTEMPTS})`,
+				);
+				continue;
+			}
+			throw new Error(`${testCommand.label} ${describeChunkFailure(exitCode, timedOut)}: ${renderedCommand}`);
 		}
-		if (!timedOut && BUN_CRASH_EXITS[exitCode] && attempt < MAX_CHUNK_ATTEMPTS) {
-			console.log(
-				`==> ${testCommand.label}: bun crashed (exit ${exitCode}); retrying (attempt ${attempt + 1}/${MAX_CHUNK_ATTEMPTS})`,
-			);
-			continue;
-		}
-		throw new Error(`${testCommand.label} ${describeChunkFailure(exitCode, timedOut)}: ${renderedCommand}`);
+	} finally {
+		runs.push({
+			command: testCommand,
+			seconds: (performance.now() - startedAt) / 1000,
+			report: await readJunitReport(junitPath, testCommand.cwd),
+		});
 	}
 }
 
 // Child env shared by every spawned test process: the parent env with the
 // private test-runtime marker set, all CI credential / cloud-config variables
-// scrubbed (see SCRUBBED_ENV_* above), and GITHUB_ACTIONS cleared.
+// scrubbed (see SCRUBBED_ENV_* above), and GITHUB_ACTIONS cleared. Clearing it
+// would also clear run-rs-task.ts's "always run in GitHub Actions" rule for the
+// Rust child, so under GitHub Actions OMP_FORCE_RUST_TASKS carries it instead.
 //
 // GC knobs (both needed — they gate different JSC mechanisms):
 // - `BUN_JSC_useConcurrentGC=0` stops the collector from marking concurrently
@@ -467,6 +743,7 @@ function buildChildEnv(): Record<string, string | undefined> {
 	const env: Record<string, string | undefined> = {
 		...Bun.env,
 		GITHUB_ACTIONS: "",
+		...(Bun.env.GITHUB_ACTIONS === "true" ? { OMP_FORCE_RUST_TASKS: "1" } : {}),
 		PI_TEST_RUNTIME: "1",
 		BUN_JSC_useConcurrentGC: "0",
 		BUN_JSC_numberOfGCMarkers: "1",
@@ -681,11 +958,13 @@ const style = {
 	red: (s: string) => paint("31", s),
 	bold: (s: string) => paint("1", s),
 	dim: (s: string) => paint("2", s),
+	yellow: (s: string) => paint("33", s),
 };
 
 // Outcome of one finished chunk. `output` is the chunk's combined stdout+stderr,
 // buffered so it can be withheld during a quiet run and replayed only on failure.
 // `retries` counts extra attempts spent on bun-crash exits (see BUN_CRASH_EXITS).
+// `slowTests` comes from the chunk's junit report (see SLOW_TEST_SECONDS).
 interface ChunkOutcome {
 	label: string;
 	command: string;
@@ -693,6 +972,7 @@ interface ChunkOutcome {
 	seconds: number;
 	output: string;
 	retries: number;
+	slowTests: SlowTest[];
 }
 
 // Human duration in bun's bracket style: `[264ms]` under a second, `[3.3s]`
@@ -705,19 +985,25 @@ function formatDuration(seconds: number): string {
 // pass, `✗ <label> [time]` for a failure (bold red so the eye lands on it in a
 // long scroll). A failure also names the first failing test parsed from the
 // captured output — `— file > test (+N more)` — so the exact break is visible
-// in the stream without waiting for the end-of-run report. Emitted in completion
-// order as each chunk finishes.
+// in the stream without waiting for the end-of-run report. A yellow
+// `(N slow >5s)` note counts the chunk's slow tests, listed at the end of the
+// run. Emitted in completion order as each chunk finishes.
 function formatProgressLine(outcome: ChunkOutcome): string {
 	const time = style.dim(`[${formatDuration(outcome.seconds)}]`);
+	const slowNote =
+		outcome.slowTests.length > 0
+			? ` ${style.yellow(`(${outcome.slowTests.length} slow >${SLOW_TEST_SECONDS}s)`)}`
+			: "";
 	const retryNote = outcome.retries > 0 ? ` ${style.dim(`(retried ×${outcome.retries} after bun crash)`)}` : "";
+	const notes = `${slowNote}${retryNote}`;
 	if (outcome.exitCode === 0) {
-		return `${style.green("✓")} ${outcome.label} ${time}${retryNote}`;
+		return `${style.green("✓")} ${outcome.label} ${time}${notes}`;
 	}
 	const failing = extractFailingTests(outcome.output);
 	const first = failing[0]?.name;
 	const more = failing.length > 1 ? style.dim(` (+${failing.length - 1} more)`) : "";
 	const detail = first ? ` ${style.dim("—")} ${style.red(first)}${more}` : "";
-	return `${style.bold(style.red(`✗ ${outcome.label}`))} ${time}${detail}${retryNote}`;
+	return `${style.bold(style.red(`✗ ${outcome.label}`))} ${time}${detail}${notes}`;
 }
 
 // Closing tally in `bun test` style, but counting test *chunks* (child commands),
@@ -733,6 +1019,22 @@ function formatSummaryFooter(passed: number, failed: number, totalSeconds: numbe
 		` ${failLine}`,
 		style.dim(`Ran ${passed + failed} test command(s) in ${formatDuration(totalSeconds)}.`),
 	].join("\n");
+}
+
+// End-of-run warning listing every test slower than SLOW_TEST_SECONDS, slowest
+// first: `[duration] file:line — describe > test`. Printed by both run paths
+// ahead of the failure report / summary footer; "" when nothing was slow. It
+// is advice, not a failure, and never touches the exit code.
+function formatSlowTests(runs: CommandRun[]): string {
+	const slowTests = runs.flatMap(run => run.report?.slowTests ?? []).sort((a, b) => b.seconds - a.seconds);
+	if (slowTests.length === 0) return "";
+	const lines = ["", style.yellow(`⚠ ${slowTests.length} test(s) slower than ${SLOW_TEST_SECONDS}s:`)];
+	for (const test of slowTests) {
+		lines.push(
+			`  ${style.yellow(`[${formatDuration(test.seconds)}]`)} ${test.location} ${style.dim("—")} ${test.name}`,
+		);
+	}
+	return `${lines.join("\n")}\n`;
 }
 
 // A single failing test pulled from a chunk's captured bun output: its
@@ -822,11 +1124,18 @@ function formatChunkFailure(failure: ChunkOutcome, replayOutput: boolean): strin
 // at the end; `--full` streams every chunk's output inline as it completes. All
 // failures are collected and reported together instead of failing fast, so one
 // run surfaces every broken chunk and exits non-zero without a runner stack trace.
-async function runTestCommandsInParallel(commands: TestCommand[], concurrency: number): Promise<void> {
+// Commands are dispatched in the given order; every finished one lands in `runs`.
+async function runTestCommandsInParallel(
+	commands: TestCommand[],
+	concurrency: number,
+	junitDir: string,
+	runs: CommandRun[],
+): Promise<void> {
 	const env = buildChildEnv();
 	const queue = [...commands];
 	const failures: ChunkOutcome[] = [];
 	let completed = 0;
+	let dispatched = 0;
 	const fileWidths = [...new Set(commands.map(c => c.parallel).filter(p => p !== undefined))].sort((a, b) => a - b);
 	console.log(
 		`Running ${commands.length} test command(s), up to ${concurrency} in parallel ` +
@@ -878,8 +1187,9 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 	// can't keep the runner's event loop alive.
 	async function runAttempt(
 		testCommand: TestCommand,
+		junitPath: string,
 	): Promise<{ exitCode: number; output: string; timedOut: boolean }> {
-		const proc = Bun.spawn(testCommand.command, {
+		const proc = Bun.spawn(spawnArgv(testCommand, junitPath), {
 			cwd: path.join(repoRoot, testCommand.cwd),
 			env,
 			stdout: "pipe",
@@ -923,9 +1233,10 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 				return;
 			}
 			const renderedCommand = testCommand.command.map(shellQuote).join(" ");
+			const junitPath = path.join(junitDir, `${dispatched++}.xml`);
 			const startedAt = performance.now();
 			let attempt = 1;
-			let result = await runAttempt(testCommand);
+			let result = await runAttempt(testCommand, junitPath);
 			// Bun-crash retry: a 128+signal exit means the runtime died (GC
 			// segfault/abort), not that tests failed — rerun in a fresh heap.
 			while (!result.timedOut && BUN_CRASH_EXITS[result.exitCode] && attempt < MAX_CHUNK_ATTEMPTS) {
@@ -933,16 +1244,20 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 				process.stdout.write(
 					`${style.dim(`↻ ${testCommand.label} — bun crashed (exit ${result.exitCode}); retrying (attempt ${attempt}/${MAX_CHUNK_ATTEMPTS})`)}\n`,
 				);
-				result = await runAttempt(testCommand);
+				result = await runAttempt(testCommand, junitPath);
 			}
 			completed += 1;
+			const seconds = (performance.now() - startedAt) / 1000;
+			const report = await readJunitReport(junitPath, testCommand.cwd);
+			runs.push({ command: testCommand, seconds, report });
 			const outcome: ChunkOutcome = {
 				label: testCommand.label,
 				command: renderedCommand,
 				exitCode: result.exitCode,
-				seconds: (performance.now() - startedAt) / 1000,
+				seconds,
 				output: result.output,
 				retries: attempt - 1,
+				slowTests: report?.slowTests ?? [],
 			};
 			if (quiet) {
 				let msg = `${formatProgressLine(outcome)}\n`;
@@ -965,6 +1280,8 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 	const runStartedAt = performance.now();
 	await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
+	process.stdout.write(formatSlowTests(runs));
+
 	if (quiet) {
 		const totalSeconds = (performance.now() - runStartedAt) / 1000;
 		process.stdout.write(
@@ -978,11 +1295,29 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 	}
 }
 
+// Pool dispatch order: longest expected first, so the slowest commands start
+// while the pool is full instead of trailing alone at the end. A chunk's
+// estimate is its planned `estimatedSeconds`; a command that lists no test
+// files uses its label's recorded wall time. Commands with no estimate go
+// first (they may be long), and the sort is stable, so a cold history
+// dispatches in planned order.
+function dispatchOrder(commands: TestCommand[], history: TimingHistory): TestCommand[] {
+	const estimate = (testCommand: TestCommand): number =>
+		testCommand.estimatedSeconds ??
+		(listsTestFiles(testCommand) ? undefined : history.commands[testCommand.label]) ??
+		Number.POSITIVE_INFINITY;
+	return commands
+		.map(testCommand => ({ testCommand, seconds: estimate(testCommand) }))
+		.sort((a, b) => (a.seconds === b.seconds ? 0 : a.seconds > b.seconds ? -1 : 1))
+		.map(entry => entry.testCommand);
+}
+
 // `OMP_TEST_SHARD=i/n` splits a mode's chunk commands across n CI jobs; job i
 // runs every chunk whose index ≡ i-1 (mod n). Round-robin rather than
-// contiguous ranges because the chunk list follows sorted file order, so slow
-// neighbouring suites spread evenly instead of piling into one shard. Every
-// chunk lands in exactly one shard; unset/empty runs everything.
+// contiguous ranges because neighbouring chunks are alike in cost (weighted
+// plans list a bucket's chunks heaviest-first; consecutive ones keep similar
+// suites together), so slow chunks spread evenly instead of piling into one
+// shard. Every chunk lands in exactly one shard; unset/empty runs everything.
 function selectShard<T>(commands: T[], spec: string | undefined): T[] {
 	const trimmed = spec?.trim();
 	if (!trimmed) return commands;
@@ -1015,10 +1350,26 @@ const poolWidth = pooled
 	? testConcurrency(requestedCommands.length, Bun.env.OMP_TEST_CONCURRENCY, os.availableParallelism())
 	: 1;
 const testCommands = applyChunkBudget(requestedCommands, poolWidth);
-if (pooled && !isDryRun) {
-	await runTestCommandsInParallel(testCommands, poolWidth);
+if (isDryRun) {
+	for (const testCommand of testCommands) printCommandHeader(testCommand);
 } else {
-	for (const testCommand of testCommands) {
-		await runTestCommand(testCommand);
+	// Per-command junit reports (see spawnArgv) live only for this run; what they
+	// say is folded into the timing history before they are removed.
+	const junitDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-test-junit-"));
+	const runs: CommandRun[] = [];
+	try {
+		if (pooled) {
+			await runTestCommandsInParallel(
+				dispatchOrder(testCommands, await getTimingHistory()),
+				poolWidth,
+				junitDir,
+				runs,
+			);
+		} else {
+			await runTestCommandsSequentially(testCommands, junitDir, runs);
+		}
+	} finally {
+		await recordTimingHistory(runs);
+		await fs.rm(junitDir, { recursive: true, force: true });
 	}
 }

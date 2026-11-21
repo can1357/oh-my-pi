@@ -43,7 +43,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { TspSpan, TspTableColumn, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, elapsed, node, span, text } from "../native/describe";
 import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
-import { actionBar, actionButton } from "../native/overlay";
+import { actionBar, actionButton, segmentedTabs } from "../native/overlay";
 
 /** Local calendar-day activity consumed by the usage heatmap. */
 export interface DailyActivityPoint {
@@ -126,6 +126,33 @@ function statusWithUnavailableAccounts(windows: readonly { status?: UsageLimit["
 	return aggregateStatus(windows) === "exhausted" ? "exhausted" : "warning";
 }
 
+/**
+ * Tone a bar-less amount row (prepaid balance, spend-to-date) takes from its
+ * reported status; `undefined` keeps the row informational, so providers that
+ * omit a status on such rows render unchanged.
+ */
+function pressureTone(status: UsageLimit["status"]): "error" | "warning" | undefined {
+	if (status === "exhausted") return "error";
+	if (status === "warning") return "warning";
+	return undefined;
+}
+
+/**
+ * Text a bar-less amount row shows: the formatted amount, else `exhausted`
+ * when the provider reports the quota spent without a measurable amount,
+ * else the caller's no-data label.
+ */
+function barlessAmountText(
+	amount: string | undefined,
+	status: UsageLimit["status"],
+	labels: { exhausted: string; noData: string },
+): string {
+	return amount ?? (status === "exhausted" ? labels.exhausted : labels.noData);
+}
+
+const CARD_AMOUNT_LABELS = { exhausted: "exhausted", noData: "no data" } as const;
+const NATIVE_AMOUNT_LABELS = { exhausted: "Exhausted", noData: "No data" } as const;
+
 /** Fraction below which a window counts as untouched (renders as 100% free). */
 const IDLE_FRACTION = 0.005;
 /**
@@ -178,7 +205,16 @@ export function buildProviderCards(
 		for (const report of providerReports) {
 			for (const limit of report.limits) {
 				const label = formatLimitTitle(limit);
-				const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
+				// Distinct buckets can share a label and window (Antigravity's Gemini
+				// vs Gemini (Argon) weekly) and must not average into one row, so the
+				// id joins the key. The label and window stay in it too: some
+				// providers build ids positionally or per plan (kimi's `${index}`,
+				// copilot's allowance), where ids differ across accounts for the
+				// same quota, so an id-only key would split those accounts apart.
+				// `sharedGroup` already names the routing copies of one shared bucket.
+				const key =
+					limit.scope.sharedGroup ??
+					`${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}|${limit.id}`;
 				const entry = buckets.get(key) ?? { label, limits: [] };
 				entry.limits.push(limit);
 				buckets.set(key, entry);
@@ -426,22 +462,15 @@ function clockTime(date: Date): string {
 }
 
 /**
- * When a window resets, relative to `nowMs`: `resets 18:00` today, `resets
- * Tue 18:00` within the week, `resets 3 Oct` beyond; the title carries the
- * absolute date and the countdown.
+ * When a window resets, `resetMs` from `nowMs`: the countdown (`resets in
+ * 2h30m`), which reads the same in every time zone; the title carries the
+ * local date and time.
  */
 function resetLabel(nowMs: number, resetMs: number): { text: string; title: string } {
 	const at = new Date(nowMs + resetMs);
-	const now = new Date(nowMs);
-	const sameDay = at.toDateString() === now.toDateString();
-	const text = sameDay
-		? `resets ${clockTime(at)}`
-		: resetMs < 6 * 86_400_000
-			? `resets ${WEEKDAY_NAMES[at.getDay()]} ${clockTime(at)}`
-			: `resets ${at.getDate()} ${MONTH_NAMES[at.getMonth()]}`;
 	return {
-		text,
-		title: `Resets ${shortDate(at)} ${at.getFullYear()}, ${clockTime(at)} (in ${formatDuration(resetMs)})`,
+		text: `resets in ${formatDuration(resetMs)}`,
+		title: `Resets ${shortDate(at)} ${at.getFullYear()}, ${clockTime(at)}`,
 	};
 }
 
@@ -629,7 +658,8 @@ export interface UsageDashboardOptions {
 	/**
 	 * Stream daily activity into the heatmap: push cached DB rows immediately,
 	 * then push again after an incremental session sync. Resolves when the sync
-	 * settles; rejection renders as a dim unavailable note. `signal` aborts when
+	 * settles; rejection before any rows renders as a dim unavailable note, and
+	 * after rows were pushed keeps them, marked as not synced. `signal` aborts when
 	 * the dashboard closes so an in-flight sync can stop early.
 	 */
 	loadActivity: (push: (points: DailyActivityPoint[]) => void, signal: AbortSignal) => Promise<void>;
@@ -647,8 +677,8 @@ export interface UsageDashboardOptions {
 export function formatActivityErrorDetail(error: string, homeDir = os.homedir()): string {
 	let text = replaceTabs(sanitizeText(error)).replace(/\s+/g, " ").trim();
 	if (homeDir) {
-		const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const forward = homeDir.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const escaped = RegExp.escape(homeDir);
+		const forward = RegExp.escape(homeDir.replaceAll("\\", "/"));
 		text = text.replace(new RegExp(`${escaped}|${forward}`, "gi"), "~");
 	}
 	return text.replace(/\.+$/, "");
@@ -683,6 +713,8 @@ export class UsageDashboardComponent implements Component {
 	#scroll = 0;
 	#activity: DailyActivityPoint[] | null = null;
 	#activityError: string | null = null;
+	/** Why the sync after a painted history failed; the painted rows stay, marked stale. */
+	#syncError: string | null = null;
 	#syncing = true;
 	#detailCache: { width: number; lines: string[] } | null = null;
 	/** ANSI overview rows; rebuilt when the revision or width changes. */
@@ -723,11 +755,21 @@ export class UsageDashboardComponent implements Component {
 				this.#changed();
 			}, this.#closeController.signal);
 		} catch (error) {
-			this.#activityError = error instanceof Error ? error.message : String(error);
+			const message = error instanceof Error ? error.message : String(error);
+			// Rows already painted are the stored history: a failed refresh (another
+			// process holding the database, say) leaves them stale, not unavailable.
+			if (this.#activity) this.#syncError = message;
+			else this.#activityError = message;
 		} finally {
 			this.#syncing = false;
 			if (!this.#closed) this.#changed();
 		}
+	}
+
+	/** The stale history's note: the shown rows predate a sync that failed. */
+	#staleNote(): string {
+		const detail = formatActivityErrorDetail(this.#syncError ?? "");
+		return detail ? `not synced (${detail})` : "not synced";
 	}
 
 	invalidate(): void {
@@ -833,7 +875,8 @@ export class UsageDashboardComponent implements Component {
 				}
 			}
 			if (window.fraction === undefined) {
-				const text = theme.fg("dim", window.usedText ?? "no data");
+				const amount = barlessAmountText(window.usedText, window.status, CARD_AMOUNT_LABELS);
+				const text = theme.fg(pressureTone(window.status) ?? "dim", amount);
 				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
 				continue;
 			}
@@ -978,7 +1021,7 @@ export class UsageDashboardComponent implements Component {
 		const reset = "\x1b[39m";
 
 		summary.push(
-			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${formatActivityTotals(layout)} · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : ""}`,
+			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${formatActivityTotals(layout)} · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : this.#syncError ? theme.fg("dim", ` · ${this.#staleNote()}`) : ""}`,
 		);
 		summary.push("");
 
@@ -1054,7 +1097,7 @@ export class UsageDashboardComponent implements Component {
 		const refreshHint = this.#options.refresh ? "r refresh · " : "";
 		const hint =
 			this.#view === "detail"
-				? `${scrollHint}${refreshHint}${cancel} back`
+				? `${scrollHint}${refreshHint}${formatKeyHint("tab")} overview · ${cancel} back`
 				: `${scrollHint}${refreshHint}${formatKeyHint("enter")} details · ${cancel} close`;
 		this.#panel.title = title;
 		this.#header.setLines([checkedText ? theme.fg("dim", checkedText) : ""]);
@@ -1133,8 +1176,7 @@ export class UsageDashboardComponent implements Component {
 			);
 		}
 		const children: NativeChild[] = [
-			node(
-				"tabs",
+			segmentedTabs(
 				{
 					items: [
 						{ id: "overview", label: "Overview" },
@@ -1142,7 +1184,6 @@ export class UsageDashboardComponent implements Component {
 					],
 					active: this.#view,
 				},
-				undefined,
 				"tabs",
 			),
 			node("spacer", { grow: 1 }),
@@ -1202,7 +1243,7 @@ export class UsageDashboardComponent implements Component {
 		const layout = points ? buildHeatmapLayout(points, NATIVE_HEATMAP_WEEKS) : undefined;
 		const figures = points && layout ? activityFigures(points, layout) : undefined;
 		const quiet = layout !== undefined && layout.totalCost <= 0 && layout.totalRequests <= 0;
-		if (framed.length === 0 && quiet && !this.#activityError) {
+		if (framed.length === 0 && quiet && !this.#activityError && !this.#syncError) {
 			const children: NativeChild[] = [
 				node("icon", { name: "gauge" }, undefined, "icon"),
 				text([span("No usage yet")], { role: "omp.usage.empty.title" }),
@@ -1435,7 +1476,18 @@ export class UsageDashboardComponent implements Component {
 				];
 				if (window.fraction === undefined) {
 					cells.push(
-						text([span(window.usedText ?? "No data", "muted")], { role: "omp.usage.amount", truncate: "end" }),
+						text(
+							[
+								span(
+									barlessAmountText(window.usedText, window.status, NATIVE_AMOUNT_LABELS),
+									pressureTone(window.status) ?? "muted",
+								),
+							],
+							{
+								role: "omp.usage.amount",
+								truncate: "end",
+							},
+						),
 					);
 				} else {
 					cells.push(
@@ -1483,6 +1535,8 @@ export class UsageDashboardComponent implements Component {
 		const meta: NativeChild[] = [];
 		if (this.#syncing && this.#activity) {
 			meta.push(node("spinner", { style: "dots", label: [span("Syncing", "dim")] }));
+		} else if (this.#syncError) {
+			meta.push(text([span(this.#staleNote(), "dim")], { role: "omp.usage.section.meta" }));
 		} else if (layout) {
 			const today = new Date();
 			const range = `${layout.start.getDate()} ${MONTH_NAMES[layout.start.getMonth()]} ${layout.start.getFullYear()} – ${today.getDate()} ${MONTH_NAMES[today.getMonth()]} ${today.getFullYear()}`;
@@ -1678,7 +1732,11 @@ export class UsageDashboardComponent implements Component {
 			for (const [index, report] of reports.entries()) {
 				for (const limit of report.limits) {
 					const label = sanitizeDisplayLine(formatLimitTitle(limit));
-					const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
+					// Same hybrid key as the cards: distinct buckets that share a
+					// label and window (Gemini vs Gemini (Argon) weekly) stay separate.
+					const key =
+						limit.scope.sharedGroup ??
+						`${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}|${limit.id}`;
 					let bucket = buckets.get(key);
 					if (!bucket) {
 						bucket = { label, window: detailWindowLabel(label, limit), rows: [] };
@@ -1690,7 +1748,16 @@ export class UsageDashboardComponent implements Component {
 						account: [span(reportAccountLabel(report, limit, index), "muted")],
 						left:
 							fraction === undefined
-								? [span(formatAbsoluteOnlyAmount([limit]) ?? "No data", "muted")]
+								? [
+										span(
+											barlessAmountText(
+												formatAbsoluteOnlyAmount([limit]),
+												limit.status,
+												NATIVE_AMOUNT_LABELS,
+											),
+											pressureTone(limit.status) ?? "muted",
+										),
+									]
 								: leftSpans(fraction, limit.status),
 						reset:
 							resetsAt !== undefined && resetsAt > nowMs
@@ -1798,10 +1865,11 @@ export class UsageDashboardComponent implements Component {
 			void this.#refresh();
 			return;
 		}
-		if (
-			this.#view === "overview" &&
-			(matchesKey(data, "return") || matchesKey(data, "tab") || matchesKey(data, "d"))
-		) {
+		if (matchesKey(data, "tab")) {
+			this.#setView(this.#view === "overview" ? "detail" : "overview");
+			return;
+		}
+		if (this.#view === "overview" && (matchesKey(data, "return") || matchesKey(data, "d"))) {
 			this.#setView("detail");
 			return;
 		}

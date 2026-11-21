@@ -8,10 +8,10 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { hookCapability } from "../../capability/hook";
 import type { Hook } from "../../discovery";
 import { loadCapability } from "../../discovery";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+import { getCodingAgentApi } from "../host-api";
 import type { CustomMessagePayload } from "../../session/messages";
 import * as typebox from "../legacy-typebox";
+import { assertBunCanImport } from "../module-path";
 import { resolvePath, withHostGuard } from "../utils";
 import { execCommand } from "./runner";
 import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types";
@@ -124,7 +124,9 @@ async function createHookAPI(
 		typebox,
 		arktype: type,
 		zod,
-		pi: PiCodingAgent,
+		get pi() {
+			return getCodingAgentApi();
+		},
 	} as HookAPI;
 
 	return {
@@ -148,6 +150,7 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 
 	try {
 		// Import the module using native Bun import
+		await assertBunCanImport(resolvedPath);
 		const module = await withHostGuard(() => import(resolvedPath));
 		const factory = module.default as HookFactory;
 

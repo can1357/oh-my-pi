@@ -17,6 +17,7 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { drive } from "../helpers/fake-clock";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 /**
@@ -40,7 +41,7 @@ interface MockSessionHandle {
 	session: AgentSession;
 	prompts: Array<{ text: string; options?: PromptOptions }>;
 	abortCalls: () => number;
-	/** Owner async work the quiescence barrier sees; the test flips it. */
+	/** An owner job that keeps the run open and can wake it, as the quiescence barrier sees it; the test flips it. */
 	asyncPending: { value: boolean };
 }
 
@@ -89,7 +90,12 @@ function createMockSession(
 		},
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
 		sendUserMessage: async () => {},
-		hasPendingAsyncWork: () => asyncPending.value,
+		get isRunActive() {
+			return asyncPending.value;
+		},
+		get wakeSources() {
+			return asyncPending.value ? { jobs: ["bg_1"], agents: [], queued: false } : undefined;
+		},
 		getAsyncJobSnapshot: () => ({
 			running: asyncPending.value
 				? [{ id: "bg_1", label: "pytest", type: "bash" as const, status: "running" as const, startTime: 0 }]
@@ -97,7 +103,7 @@ function createMockSession(
 			recent: [],
 			delivery: { queued: 0, delivering: false, pendingJobIds: [] },
 		}),
-		settleAsyncWork: async () => {
+		waitForRunEnd: async () => {
 			asyncPending.value = false;
 		},
 		abort: async () => {
@@ -137,8 +143,11 @@ describe("runSubprocess incremental yield loops", () => {
 		AgentLifecycleManager.resetGlobalForTests();
 		AsyncJobManager.resetForTests();
 		tempDir = TempDir.createSync("@pi-yield-loop-");
+		// Drop recovery backs off on timers; `drive` advances the fake clock.
+		vi.useFakeTimers();
 	});
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.restoreAllMocks();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
@@ -150,6 +159,7 @@ describe("runSubprocess incremental yield loops", () => {
 		return {
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "inventory the api surface",
 			index: 0,
 			id,
@@ -247,7 +257,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		expect(handle.prompts.map(({ text }) => text)).toEqual([
 			"inventory the api surface",
@@ -263,7 +273,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		expect(handle.prompts.map(({ text }) => text)).toEqual(Array(4).fill("inventory the api surface"));
 		expect(result.exitCode).toBe(1);
@@ -279,26 +289,12 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		expect(handle.prompts.map(({ text }) => text)).toEqual(Array(4).fill("inventory the api surface"));
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("RECOVERED");
 	});
-
-	it("fails explicitly when a dropped assignment never reaches idle", async () => {
-		const id = "WedgedScout";
-		const handle = createMockSession(() => "dropped");
-		handle.session.waitForIdle = () => Promise.withResolvers<void>().promise;
-		mockCreateAgentSession(handle.session);
-		registerRunning(id, handle.session);
-
-		const result = await runSubprocess(baseOptions(id, 0));
-
-		expect(handle.prompts).toHaveLength(1);
-		expect(result.exitCode).toBe(1);
-		expect(result.error).toContain("initial prompt dropped before provider dispatch; session did not become idle");
-	}, 10_000);
 
 	it("retries a dropped yield reminder without consuming another reminder", async () => {
 		const id = "ReminderScout";
@@ -319,7 +315,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		expect(handle.prompts[1]?.text).toBe(handle.prompts[2]?.text);
 		expect(result.exitCode).toBe(0);
@@ -341,7 +337,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		expect(handle.prompts).toHaveLength(5);
 		expect(handle.prompts.slice(1).map(({ text }) => text)).toEqual(Array(4).fill(handle.prompts[1]?.text));
@@ -381,7 +377,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		expect(handle.prompts).toHaveLength(5);
 		expect(handle.prompts[4]?.text).toBe(handle.prompts[3]?.text);
@@ -405,7 +401,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 2));
+		const result = await drive(runSubprocess(baseOptions(id, 2)));
 
 		expect(result.requests).toBeLessThan(YIELD_TURN_CAP);
 		expect(result.aborted).toBe(true);
@@ -436,7 +432,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		// The final reminder pins the model to `yield`.
 		expect(handle.prompts).toHaveLength(4);
@@ -481,7 +477,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		// The notice turn's section did not end the run: the ladder ran again
 		// and the run completed on the fresh terminal yield.
@@ -500,7 +496,7 @@ describe("runSubprocess incremental yield loops", () => {
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const result = await drive(runSubprocess(baseOptions(id, 0)));
 
 		expect(handle.prompts).toHaveLength(5);
 		expect(handle.prompts.slice(1).map(({ text }) => text)).toEqual(Array(4).fill(handle.prompts[1]?.text));

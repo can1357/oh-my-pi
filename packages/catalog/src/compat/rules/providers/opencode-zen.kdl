@@ -61,6 +61,13 @@ provider "opencode-zen" {
 			thinking-mode "effort"
 		}
 	}
+	// Step 5 Preview uses low/medium/high on this gateway (#14987).
+	class "stepfun" {
+		family "step" {
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+	}
 	class "unknown" {
 		thinking-mode "effort"
 	}

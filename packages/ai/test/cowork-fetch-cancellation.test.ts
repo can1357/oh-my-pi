@@ -16,6 +16,14 @@ class StubClientRequest extends http.ClientRequest {
 	}
 }
 
+/**
+ * These fixtures supply body chunks and termination manually, so the inert
+ * socket must not be treated as a backing body source.
+ */
+class ManualIncomingMessage extends http.IncomingMessage {
+	override _read(_size: number): void {}
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -23,7 +31,7 @@ afterEach(() => {
 describe("coworkFetch response cancellation", () => {
 	it("destroys a compressed response source when its web body is cancelled", async () => {
 		const socket = new net.Socket();
-		const message = new http.IncomingMessage(socket);
+		const message = new ManualIncomingMessage(socket);
 		message.statusCode = 200;
 		message.statusMessage = "OK";
 		message.headers = { "content-encoding": "gzip" };
@@ -61,7 +69,7 @@ describe("coworkFetch response cancellation", () => {
 // while a caller abort keeps its own error.
 describe("coworkFetch premature response close", () => {
 	async function streamingResponse(signal?: AbortSignal) {
-		const message = new http.IncomingMessage(new net.Socket());
+		const message = new ManualIncomingMessage(new net.Socket());
 		message.statusCode = 200;
 		message.statusMessage = "OK";
 		message.headers = { "content-type": "text/event-stream" };
@@ -77,7 +85,12 @@ describe("coworkFetch premature response close", () => {
 		});
 		if (!response.body) throw new Error("Expected a streaming response body.");
 		const reader = response.body.getReader();
-		await reader.read();
+		const first = await reader.read();
+		expect(first.done).toBe(false);
+		expect(new TextDecoder().decode(first.value)).toContain("event: ping");
+		expect(message.complete).toBe(false);
+		expect(message.readableEnded).toBe(false);
+		expect(message.destroyed).toBe(false);
 		return { message, reader };
 	}
 

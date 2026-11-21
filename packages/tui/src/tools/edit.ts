@@ -7,7 +7,7 @@ import type { Component } from "../tui";
 import { sliceWithWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
-import { code, compact, node, span } from "../native/describe";
+import { code, compact, md, node, span } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import {
 	diagnosticsBadge,
@@ -45,7 +45,14 @@ import {
 import type { ToolActivityContext, ToolActivitySummary } from "./renderer";
 import { fileHyperlink, Hasher, type RenderCache, renderStatusLine, truncateToWidth, WidthAwareText } from "../render";
 import { framedToolCard } from "../render/tool-card";
-import { HL_FILE_PREFIX, HL_FILE_SUFFIX, HL_MOVE_KEYWORD, HL_REM_KEYWORD } from "./hashline-format";
+import {
+	HASHLINE_TAG_SUFFIX_RE,
+	HL_FILE_PREFIX,
+	HL_FILE_SUFFIX,
+	HL_MOVE_KEYWORD,
+	HL_REM_KEYWORD,
+} from "./hashline-format";
+import { splitMagicSections } from "./magic-sections";
 
 /** Edit payload syntax selected by the caller. */
 export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "sloppy";
@@ -95,8 +102,10 @@ export interface EditToolPerFileResult {
 
 /** Diff, diagnostics, and snapshots returned by an edit. */
 export interface EditToolDetails {
-	/** Unified diff of the changes made */
+	/** Unified diff of the changes made; empty when the edit failed */
 	diff: string;
+	/** Why the edit failed, as the engine classed it (`unseen_lines`, `stale_tag`, `parse`, …) */
+	errorKind?: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
 	/** Diagnostic result (if available) */
@@ -220,10 +229,69 @@ function previewCacheAt(caches: RenderedStringCache[] | undefined, index: number
 const CALL_TEXT_PREVIEW_LINES = 6;
 const CALL_TEXT_PREVIEW_WIDTH = 80;
 
+/**
+ * The described changes of an `edit.mode: magic` call. Its tool reports mode
+ * `replace`, whose own schema has no `input`, so an `input` string there is a
+ * magic payload.
+ */
+function magicPayload(args: { input?: unknown; _input?: unknown }, editMode: EditMode | undefined): string | undefined {
+	const input = args.input ?? args._input;
+	return editMode === "replace" && typeof input === "string" ? input : undefined;
+}
+
+/** One file of a magic payload: its described changes so far, as Markdown. */
+interface MagicChange {
+	path: string;
+	change: string;
+	/** Holds the payload's last section, the one that may still be streaming in. */
+	open: boolean;
+}
+
+/**
+ * The files of a possibly partial magic payload in order, sections naming the
+ * same path merged as the tool merges them.
+ */
+function magicChanges(input: string): MagicChange[] {
+	const merged = new Map<string, MagicChange>();
+	const { runs } = splitMagicSections(input);
+	for (const [index, run] of runs.entries()) {
+		const change = sanitizeText(run.text).trim();
+		const open = index === runs.length - 1;
+		const file = merged.get(run.path);
+		if (!file) merged.set(run.path, { path: run.path, change, open });
+		else {
+			file.change = [file.change, change].filter(Boolean).join("\n\n");
+			file.open = open;
+		}
+	}
+	return [...merged.values()];
+}
+
+/** Native call view of a magic edit: each file's described changes as Markdown until the result replaces them with diffs. */
+function describeMagicCall(input: string, streaming: boolean): NativeToolView {
+	const files = magicChanges(input);
+	const view = (file: MagicChange) =>
+		md(file.change, { role: "omp.tool.edit.change", stream: streaming && file.open });
+	const tool = editToolHead({ path: files[0]?.path, files: files.length, added: 0, removed: 0 });
+	if (files.length === 1) return { tool, body: files[0]!.change ? [view(files[0]!)] : [] };
+	return {
+		tool,
+		body: files.map(file => fileDiffSection(file, file.change ? [view(file)] : [], { role: "omp.tool.edit.file" })),
+	};
+}
+
 /** Render replacement text until a computed diff preview is available. */
 export function renderStreamingFallback(editMode: EditMode, args: unknown, theme: Theme): string {
 	if (editMode !== "replace" || !args || typeof args !== "object") return "";
 	const record = args as Record<string, unknown>;
+	const described = magicPayload(record, editMode);
+	if (described !== undefined) {
+		return replaceTabs(sanitizeText(described))
+			.trim()
+			.split("\n")
+			.map(line => theme.fg("muted", line))
+			.join("\n");
+	}
 	const newString =
 		typeof record.new_string === "string"
 			? record.new_string
@@ -352,7 +420,8 @@ function renderEditHeader(
 	width: number,
 	uiTheme: Theme,
 	options: {
-		icon?: "pending" | "success" | "error";
+		icon?: "pending" | "running" | "success" | "error";
+		spinnerFrame?: number;
 		iconOverride?: string;
 		op?: Operation;
 		rawPath: string;
@@ -378,6 +447,7 @@ function renderEditHeader(
 		renderStatusLine(
 			{
 				icon: options.icon,
+				spinnerFrame: options.spinnerFrame,
 				iconOverride: options.iconOverride,
 				title,
 				description,
@@ -544,8 +614,6 @@ function formatStreamingDiff(
 	width: number,
 	uiTheme: Theme,
 	expanded: boolean,
-	label = "streaming",
-	spinnerFrame?: number,
 	cache?: RenderedStringCache,
 ): string {
 	if (!diff) return "";
@@ -562,7 +630,7 @@ function formatStreamingDiff(
 	// innerWidth/budget are in the cache salt so a resize re-slices.
 	const innerWidth = Math.max(1, width - 2);
 	const budget = expanded ? previewWindowRows() : Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows());
-	let text = cachedRenderedString(cache, uiTheme, expanded, `${rawPath}:${innerWidth}:${budget}`, diff, () => {
+	return cachedRenderedString(cache, uiTheme, expanded, `${rawPath}:${innerWidth}:${budget}`, diff, () => {
 		// "Cursor" tail window: pin the last rows to the bottom so freshly streamed
 		// changes stay on screen. The whole-file diff is recomputed every chunk and
 		// its Myers alignment is not monotonic in payload length, so a hunk-aware
@@ -578,18 +646,6 @@ function formatStreamingDiff(
 		rendered += renderDiffColored(tail.content, { filePath: rawPath, theme: uiTheme });
 		return rendered;
 	});
-	// The animated glyph rides this trailing line — inside the transcript's
-	// volatile-tail holdback — never the block header: an animating head row
-	// pins the native-scrollback commit boundary at the top of the block, so a
-	// tall expanded preview could never scroll-append mid-stream.
-	const spinner = spinnerFrame !== undefined ? `${formatStatusIcon("running", uiTheme, spinnerFrame)} ` : "";
-	// Expanded approval previews hide the "(preview)" label (#1992) but keep
-	// the animated glyph when one is active so the volatile tail stays live.
-	const hideLabel = expanded && label === "preview";
-	if (spinner || !hideLabel) {
-		text += `\n${hideLabel ? spinner.trimEnd() : `${spinner}${uiTheme.fg("dim", `(${label})`)}`}`;
-	}
-	return text;
 }
 
 function formatMultiFileStreamingDiff(
@@ -597,7 +653,6 @@ function formatMultiFileStreamingDiff(
 	width: number,
 	uiTheme: Theme,
 	expanded: boolean,
-	spinnerFrame?: number,
 	caches?: RenderedStringCache[],
 ): string {
 	const parts: string[] = [];
@@ -610,17 +665,17 @@ function formatMultiFileStreamingDiff(
 			continue;
 		}
 		if (preview.diff) {
-			// Only the last file's preview carries the animated streaming glyph;
-			// earlier files have settled and must stay byte-stable so their rows
-			// can commit to native scrollback mid-stream.
-			const isLast = index === previews.length - 1;
 			const cache = previewCacheAt(caches, index);
-			parts.push(
-				`${header}${formatStreamingDiff(preview.diff, preview.path, width, uiTheme, expanded, "preview", isLast ? spinnerFrame : undefined, cache)}`,
-			);
+			parts.push(`${header}${formatStreamingDiff(preview.diff, preview.path, width, uiTheme, expanded, cache)}`);
 		}
 	}
 	return parts.join("");
+}
+
+/** A call's streamed preview body, and the label its card shows in the bottom border. */
+interface CallPreview {
+	text: string;
+	footer?: "preview" | "streaming";
 }
 
 function getCallPreview(
@@ -630,41 +685,49 @@ function getCallPreview(
 	uiTheme: Theme,
 	renderContext: EditRenderContext | undefined,
 	expanded: boolean,
-	spinnerFrame?: number,
 	caches?: RenderedStringCache[],
-): string {
+): CallPreview {
 	const multi = renderContext?.perFileDiffPreview;
 	if (multi && multi.length > 1 && multi.some(p => p.diff || p.error)) {
-		return formatMultiFileStreamingDiff(multi, width, uiTheme, expanded, spinnerFrame, caches);
+		return {
+			text: formatMultiFileStreamingDiff(multi, width, uiTheme, expanded, caches),
+			footer: multi.some(p => p.diff) ? "preview" : undefined,
+		};
 	}
 	const cache = previewCacheAt(caches, 0);
 	if (args.previewDiff) {
-		return formatStreamingDiff(args.previewDiff, rawPath, width, uiTheme, expanded, "preview", spinnerFrame, cache);
+		return {
+			text: formatStreamingDiff(args.previewDiff, rawPath, width, uiTheme, expanded, cache),
+			footer: "preview",
+		};
 	}
 	if (args.diff && args.op) {
-		return formatStreamingDiff(args.diff, rawPath, width, uiTheme, expanded, "streaming", spinnerFrame, cache);
+		return { text: formatStreamingDiff(args.diff, rawPath, width, uiTheme, expanded, cache), footer: "streaming" };
 	}
 	if (args.diff) {
-		return renderPlainTextPreview(args.diff, uiTheme, rawPath);
+		return { text: renderPlainTextPreview(args.diff, uiTheme, rawPath) };
 	}
 	if (args.newText || args.patch) {
-		return renderPlainTextPreview(args.newText ?? args.patch ?? "", uiTheme, rawPath);
+		return { text: renderPlainTextPreview(args.newText ?? args.patch ?? "", uiTheme, rawPath) };
 	}
 	if (renderContext?.editStreamingFallback) {
-		return renderContext.editStreamingFallback;
+		return { text: renderContext.editStreamingFallback };
 	}
 	const contextPreview = renderContext?.editDiffPreview;
 	if (contextPreview && "error" in contextPreview && contextPreview.error) {
-		return uiTheme.fg("error", replaceTabs(contextPreview.error));
+		return { text: uiTheme.fg("error", replaceTabs(contextPreview.error)) };
 	}
-	return "";
+	return { text: "" };
 }
 
 const MISSING_APPLY_PATCH_END_ERROR = "The last line of the patch must be '*** End Patch'";
 
+/** A model-typed `[path#tag]` header may spell the tag in lowercase. */
+const TYPED_TAG_SUFFIX_RE = new RegExp(HASHLINE_TAG_SUFFIX_RE.source, "i");
+
 function normalizeHashlineInputPreviewPath(rawPath: string): string {
 	const trimmed = rawPath.trim();
-	const hashStart = /#[0-9a-fA-F]{4}$/u.exec(trimmed)?.index;
+	const hashStart = TYPED_TAG_SUFFIX_RE.exec(trimmed)?.index;
 	const withoutHash = hashStart === undefined ? trimmed : trimmed.slice(0, hashStart);
 	if (withoutHash.length < 2) return withoutHash;
 	const first = withoutHash[0];
@@ -946,6 +1009,11 @@ function resolveEditCallFactsUncached(
 	isPartial: boolean,
 	editMode: EditMode | undefined,
 ): EditCallFacts {
+	const magic = magicPayload(editArgs, editMode);
+	if (magic !== undefined) {
+		const files = magicChanges(magic);
+		return { rawPath: files[0]?.path ?? "", fileCount: files.length, hasHashlineLineEdits: false };
+	}
 	const hashlineInputSummary = getHashlineInputRenderSummary(editArgs, editMode);
 	const sloppyInputSummary = getSloppyInputRenderSummary(editArgs, editMode);
 	const applyPatchSummary = getApplyPatchRenderSummary(editArgs, isPartial, editMode);
@@ -1141,34 +1209,40 @@ export const editToolRenderer = {
 		return framedToolCard(
 			uiTheme,
 			({ width }) => {
-				// No status icon on the head row: it's the head of the framed block,
-				// and native-scrollback commits are prefix-only — an animated glyph
-				// would pin the commit boundary at the top, and the pending hourglass
-				// just adds noise. The liveness cue rides the trailing "(preview)" /
-				// "(streaming)" line instead.
+				// Only a live spinner fills the icon slot: a pending hourglass after it
+				// stops would read as a step backwards while the edit executes.
 				const header = renderEditHeader(width, uiTheme, {
+					icon: options.spinnerFrame === undefined ? undefined : "running",
+					spinnerFrame: options.spinnerFrame,
 					op,
 					rawPath,
 					rename,
 					extraSuffix: fileCount > 1 ? uiTheme.fg("dim", ` (+${fileCount - 1} more)`) : undefined,
 				});
-				let body = getCallPreview(
+				const preview = getCallPreview(
 					editArgs,
 					rawPath,
 					width,
 					uiTheme,
 					renderContext,
 					options.expanded,
-					options?.spinnerFrame,
 					callPreviewCaches,
 				);
+				let body = preview.text;
 				if (applyPatchError) {
 					body += `\n${uiTheme.fg("error", truncateToWidth(replaceTabs(applyPatchError), Math.max(1, width - 2)))}`;
 				}
 				const bodyLines = body ? body.split("\n") : [];
 				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+				// Expanded approval previews hide the "preview" label (#1992); "streaming" ends with the args.
+				const footer =
+					(preview.footer === "preview" && options.expanded) ||
+					(preview.footer === "streaming" && options.argsComplete)
+						? undefined
+						: preview.footer;
 				return {
 					header,
+					footerMeta: footer ? uiTheme.fg("dim", footer) : undefined,
 					sections:
 						bodyLines.length > 0
 							? [{ content: bodyLines.flatMap(line => wrapEditRendererLine(line, Math.max(1, width - 2))) }]
@@ -1191,6 +1265,8 @@ export const editToolRenderer = {
 		options: RenderResultOptions & { renderContext?: EditRenderContext },
 	): NativeToolView {
 		const renderContext = options.renderContext;
+		const magic = magicPayload(args, renderContext?.editMode);
+		if (magic !== undefined) return describeMagicCall(magic, options.isPartial);
 		const { rawPath, rename, op, fileCount, applyPatchError } = resolveEditCallFacts(
 			args,
 			options.isPartial,
@@ -1418,7 +1494,8 @@ function editFileParts(
 		filePathFromEditEntry(firstEdit?.rename) ??
 		filePathFromEditEntry(firstEdit?.move) ??
 		(details && "move" in details && typeof details.move === "string" ? details.move : undefined);
-	const editDiffPreview = details ? undefined : options.renderContext?.editDiffPreview;
+	// Details that only class a failure leave the streamed preview to locate it.
+	const editDiffPreview = details && !("errorKind" in details) ? undefined : options.renderContext?.editDiffPreview;
 	const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
 	const diffText = isError ? undefined : details?.diff || previewDiff;
 	const firstChangedLine =
@@ -1530,8 +1607,9 @@ function renderSingleFileResult(
 			// what happened. The shared streaming `editDiffPreview` is a call-phase
 			// artifact (in a batch it reflects only the first file), so consulting it
 			// for an empty-diff delete/move/no-op result mislabels the card. Fall
-			// back to the preview only when no details exist yet.
-			const editDiffPreview = details ? undefined : renderContext?.editDiffPreview;
+			// back to the preview only when no details exist yet, or when they only
+			// class a failure.
+			const editDiffPreview = details && !("errorKind" in details) ? undefined : renderContext?.editDiffPreview;
 			const renderDiffFn = renderContext?.renderDiff ?? renderFallbackDiff;
 
 			if (diffSectionRenderDiffFn !== renderDiffFn) {

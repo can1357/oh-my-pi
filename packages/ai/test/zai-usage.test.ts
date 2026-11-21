@@ -237,4 +237,21 @@ describe("zai usage provider", () => {
 		expect(ranked.primary?.id).toBe("zai:tokens:5h");
 		expect(ranked.secondary?.id).toBe("zai:tokens:1w");
 	});
+
+	it("treats an account without a GLM Coding Plan as nothing to meter, not an invalid response", async () => {
+		const warnings: string[] = [];
+		const logger = { debug() {}, warn: (message: string) => warnings.push(message) };
+		const fetchUsage = (payload: unknown) =>
+			zaiUsageProvider.fetchUsage!(
+				{ provider: "zai", credential: makeCredential(), signal: undefined },
+				{ ...makeCtx(payload), logger },
+			);
+
+		expect(await fetchUsage({ code: 500, msg: "当前用户不存在coding plan", success: false })).toBeNull();
+		expect(warnings).toEqual([]);
+
+		expect(await fetchUsage({ code: 500, msg: "您的coding plan已过期", success: false })).toBeNull();
+		expect(await fetchUsage({ code: 500, msg: "internal error", success: false })).toBeNull();
+		expect(warnings).toEqual(["ZAI usage response invalid", "ZAI usage response invalid"]);
+	});
 });

@@ -72,6 +72,15 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: "AbortAndRestoreQueueResult",
 	},
 	{
+		name: "abort_and_deliver_queue",
+		doc: "Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input.",
+		result: { aborted: "boolean" },
+	},
+	{
+		name: "resume",
+		doc: "Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way.",
+	},
+	{
 		name: "new_session",
 		doc: "Start a new session.",
 		params: { "parentSession?": "string" },
@@ -191,6 +200,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { voice: "string" },
 		unwrap: "voice",
 	},
+	{
+		name: "live_connect",
+		doc: "Start a live voice session whose audio runs on a caller-owned WebRTC peer: send its SDP offer, apply the returned answer.",
+		params: { sdpOffer: "string", "voice?": "string", "instructions?": "string" },
+		result: { voice: "string", sdpAnswer: "string" },
+	},
 	{ name: "live_stop", doc: "Stop the live voice session, if any." },
 	{
 		name: "live_mute",
@@ -199,11 +214,35 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { muted: "boolean" },
 		unwrap: "muted",
 	},
+	{
+		name: "dictation_start",
+		doc: "Start draft-only speech-to-text; resolves once the microphone is recording.",
+		params: { captureId: "string" },
+		timeoutMs: 600_000,
+	},
+	{
+		name: "dictation_stop",
+		doc: "Stop and flush draft-only dictation, returning the accumulated text.",
+		result: { text: "string" },
+		unwrap: "text",
+		timeoutMs: 600_000,
+	},
 
 	{
 		name: "set_model",
 		doc: "Select a model by provider and id.",
-		params: { provider: "string", modelId: "string" },
+		params: {
+			provider: "string",
+			modelId: "string",
+			"thinkingLevel?": doc(
+				"ConfiguredThinkingLevel",
+				"Thinking level to run the model at, clamped to it; omitted re-applies the session's level.",
+			),
+			"role?": doc(
+				"string",
+				"Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted.",
+			),
+		},
 		result: "ModelInfo",
 	},
 	{ name: "cycle_model", doc: "Cycle to the next model.", result: "ModelCycleResult", nullable: true },
@@ -213,7 +252,20 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { models: "ModelInfo[]" },
 		unwrap: "models",
 	},
-	{ name: "set_thinking_level", doc: "Set the thinking level.", params: { level: "ThinkingLevel" } },
+	{
+		name: "get_model_picker",
+		doc: "Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles.",
+		params: {
+			"query?": doc("string", "Search text; blank browses every model, `provider/` limits matches to a provider."),
+			"limit?": doc("number.integer", "Most rows to return; default 100."),
+		},
+		result: "ModelPickerResult",
+	},
+	{
+		name: "set_thinking_level",
+		doc: "Set the thinking level.",
+		params: { level: doc("ConfiguredThinkingLevel", "`auto` lets omp pick the effort per turn.") },
+	},
 	{
 		name: "cycle_thinking_level",
 		doc: "Cycle to the next thinking level.",
@@ -245,10 +297,21 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{ name: "set_auto_retry", doc: "Enable or disable auto-retry.", params: { enabled: "boolean" } },
 	{ name: "abort_retry", doc: "Abort a pending auto-retry." },
-	{ name: "bash", doc: "Run a shell command.", params: { command: "string" }, result: "BashResult" },
+	{
+		name: "bash",
+		doc: "Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.",
+		params: { command: "string", "excludeFromContext?": "boolean" },
+		result: "BashResult",
+	},
 	{ name: "abort_bash", doc: "Abort the running shell command." },
 
 	{ name: "get_session_stats", doc: "Session statistics.", result: "SessionStats" },
+	{
+		name: "get_session_lease",
+		doc: "Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed.",
+		params: { sessionIds: "string[]" },
+		result: { held: "string[]", unknown: "string[]" },
+	},
 	{
 		name: "export_html",
 		doc: "Export the session as HTML; returns the written path.",
@@ -273,6 +336,23 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		doc: "Fork into a new session file: history through `entryId`, or the whole session.",
 		params: { "entryId?": "string" },
 		result: "CancellationResult",
+	},
+	{
+		name: "navigate_tree",
+		doc: "Move the session's leaf to an entry in the same file, optionally summarizing the branch it leaves; refused while busy.",
+		params: {
+			entryId: "string",
+			"summarize?": doc("boolean", "Summarize the abandoned branch at the target."),
+			"customInstructions?": doc("string", "Instructions for the summarizer."),
+		},
+		result: "NavigateTreeResult",
+		timeoutMs: 600_000,
+	},
+	{ name: "abort_branch_summary", doc: "Stop a running `navigate_tree` branch summary; the navigation is cancelled." },
+	{
+		name: "set_label",
+		doc: "Set or clear (omit `label`) an entry's label.",
+		params: { entryId: "string", "label?": "string" },
 	},
 	{
 		name: "get_branch_messages",

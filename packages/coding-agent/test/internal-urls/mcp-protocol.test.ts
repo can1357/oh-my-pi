@@ -8,6 +8,7 @@ import { loadSkillsFromDir } from "@oh-my-pi/pi-coding-agent/extensibility/skill
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { readMcpResource } from "@oh-my-pi/pi-coding-agent/internal-urls/mcp-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -404,27 +405,56 @@ describe("McpProtocolHandler", () => {
 		await expect(router.resolve("mcp://test://empty")).rejects.toThrow("null-server");
 	});
 
-	it("formats binary content with mime type and base64 length", async () => {
-		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
-		resources.set("bin-server", {
-			resources: [{ uri: "test://image", name: "image" }],
-			templates: [],
-		});
-		const blobData = "iVBORw0KGgo=";
-		const manager = createMockManager({
-			servers: ["bin-server"],
-			resources,
-			readResult: {
-				contents: [{ uri: "test://image", mimeType: "image/png", blob: blobData }],
-			},
-		});
-		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+	describe("binary resources", () => {
+		/** A 1×1 PNG. */
+		const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+		const serveBlob = (uri: string, blob: string, mimeType: string) => {
+			const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+			resources.set("bin-server", { resources: [{ uri, name: "blob" }], templates: [] });
+			MCPManager.setInstance(
+				createMockManager({
+					servers: ["bin-server"],
+					resources,
+					readResult: { contents: [{ uri, mimeType, blob }] },
+				}),
+			);
+		};
 
-		const resource = await router.resolve("mcp://test://image");
-		expect(resource.content).toContain("[Binary content:");
-		expect(resource.content).toContain("image/png");
-		expect(resource.content).toContain(`base64 length ${blobData.length}`);
+		it("resolves a lone blob to its bytes and reported type", async () => {
+			serveBlob("test://image", PNG, "image/png");
+			const resource = await InternalUrlRouter.instance().resolve("mcp://test://image");
+			expect(resource.content).toEqual(Buffer.from(PNG, "base64"));
+			expect(resource.contentType).toBe("image/png");
+		});
+
+		it("serves the bytes verbatim to the bash URL filesystem, native or mcp://-wrapped", async () => {
+			serveBlob("test://image", PNG, "image/png");
+			const filesystem = new InternalUrlFilesystem({ context: { cwd: os.tmpdir() }, tier: "read" });
+			for (const url of ["test://image", "mcp://test://image"]) {
+				expect(Buffer.from(await filesystem.readPrefix(url, 1 << 20))).toEqual(Buffer.from(PNG, "base64"));
+			}
+		});
+
+		it("reads an image blob as an image, like an image file", async () => {
+			serveBlob("test://image", PNG, "image/png");
+			const result = await new ReadTool(createToolSession()).execute("read-blob-image", {
+				path: "mcp://test://image",
+			});
+			expect(result.content.some(block => block.type === "image")).toBe(true);
+		});
+
+		it("reads an unparseable blob as a binary file", async () => {
+			serveBlob(
+				"test://bytes",
+				Buffer.from([0, 1, 2, 0xff, 0, 0x7f, 0, 3]).toString("base64"),
+				"application/octet-stream",
+			);
+			const result = await new ReadTool(createToolSession()).execute("read-blob-binary", {
+				path: "mcp://test://bytes",
+			});
+			const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+			expect(text).toContain("Cannot read binary file 'mcp://test://bytes'");
+		});
 	});
 
 	it("joins mixed text and binary content with --- separator", async () => {

@@ -1,11 +1,8 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { isExcludedModel } from "../compat/behavior";
-import { reviewedCollapseTable } from "../compat/collapse";
-import { classifyModel } from "../compat/taxonomy";
 import { providerEntry } from "../compat/providers";
 import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
-import { fetchGeminiCliQuotaModels } from "../discovery/gemini-cli";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
 import { unionAccountCatalogs } from "./account-access";
@@ -33,6 +30,8 @@ export interface GoogleAntigravityAccount {
 	 * When any account lacks one, no model records per-account access.
 	 */
 	accountKey?: string;
+	/** Cloud Code Assist project of the credential, sent with roster discovery like the native client. */
+	projectId?: string;
 }
 
 export interface GoogleAntigravityModelManagerConfig {
@@ -52,15 +51,6 @@ export interface GoogleAntigravityModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-export interface GoogleGeminiCliModelManagerConfig {
-	oauthToken?: string;
-	/** GCP project id required by Workspace/Standard credentials for quota discovery. */
-	projectId?: string;
-	endpoint?: string;
-	fetch?: FetchImpl;
-}
-
-const CLOUD_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 /** Rows whose cached effort ladder predates the native `minimal` drop (#10543). */
 const GEMINI_FLASH_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash", "gemini-3.8-flash"] as const;
 
@@ -113,6 +103,7 @@ export function googleAntigravityModelManagerOptions(
 								result: await fetchAntigravityDiscoveryModels({
 									token: account.accessToken,
 									endpoint: config?.endpoint,
+									projectId: account.projectId,
 									fetcher,
 								}),
 							})),
@@ -140,50 +131,18 @@ export function googleAntigravityModelManagerOptions(
 						return unionAccountCatalogs(
 							catalogs.map(({ accountKey, models }) =>
 								tagAccess && accountKey !== undefined
-									? models.map(model => ({ ...model, accountAccess: { [accountKey]: {} } }))
+									? models.map(model => ({
+											...model,
+											accountAccess: {
+												[accountKey]:
+													model.antigravityWireProfiles === undefined
+														? {}
+														: { antigravityWireProfiles: model.antigravityWireProfiles },
+											},
+										}))
 									: models,
 							),
 						);
-					},
-				}
-			: undefined),
-	};
-}
-
-export function googleGeminiCliModelManagerOptions(
-	config?: GoogleGeminiCliModelManagerConfig,
-): ModelManagerOptions<"google-gemini-cli"> {
-	const token = config?.oauthToken;
-	const endpoint = config?.endpoint ?? CLOUD_CODE_ASSIST_ENDPOINT;
-	return {
-		providerId: "google-gemini-cli",
-		...(token
-			? {
-					fetchDynamicModels: async () => {
-						const fetcher = toDiscoveryFetch(config?.fetch);
-						const collapseTable = reviewedCollapseTable("google-gemini-cli");
-						if (collapseTable === undefined) {
-							throw new Error("missing reviewed collapse table for google-gemini-cli");
-						}
-						const result = await fetchAntigravityDiscoveryModels({
-							token,
-							fetcher,
-							collapseTable,
-						});
-						// Antigravity's fetchAvailableModels is unreachable for
-						// credentials without Antigravity entitlement (Code Assist
-						// Standard returns HTTP 403). Fall back to the account's own
-						// retrieveUserQuota list on Cloud Code Assist.
-						if (result === null || result.rejectedStatus !== undefined) {
-							return fetchGeminiCliQuotaModels({ token, projectId: config?.projectId, endpoint, fetcher });
-						}
-						return result.models
-							.filter(m => classifyModel("google-gemini-cli", m.id, { lenient: true }).class === "gemini")
-							.map(m => ({
-								...m,
-								provider: "google-gemini-cli" as const,
-								baseUrl: endpoint,
-							}));
 					},
 				}
 			: undefined),

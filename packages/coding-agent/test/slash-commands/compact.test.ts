@@ -45,6 +45,16 @@ describe("/compact dispatch (ACP)", () => {
 		}
 	});
 
+	it("treats mode names in /handoff arguments as focus rather than as a different compaction mode", async () => {
+		const h = acpRuntime();
+		await executeAcpBuiltinSlashCommand("/handoff soft failure", h.runtime);
+		await executeAcpBuiltinSlashCommand("/compact handoff soft failure", h.runtime);
+		expect(h.compact.mock.calls).toEqual([
+			["soft failure", { mode: "handoff" }],
+			["soft failure", { mode: "handoff" }],
+		]);
+	});
+
 	it("splits a mode from its focus instructions", async () => {
 		const h = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/compact soft focus on the parser", h.runtime);
@@ -61,7 +71,7 @@ describe("/compact dispatch (ACP)", () => {
 		const h = acpRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/compact snapcompact keep the diffs", h.runtime);
 		expect(h.compact).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("snapcompact");
 	});
 

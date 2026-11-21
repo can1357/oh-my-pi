@@ -368,7 +368,14 @@ export function resolvePluginManifestEntries(
 	const manifest = plugin.manifest;
 
 	const expandDirectory = key === "extensions";
-	const resolveEntry = (entry: string): Array<{ entry: string; resolvedPath: string | null }> => {
+	// Manifest JSON is untrusted: an entry can be an object, number, or null
+	// despite the `string` type. Report it as unresolved instead of letting
+	// `path.join` throw and abort loading every extension.
+	const resolveEntry = (entry: unknown): Array<{ entry: string; resolvedPath: string | null }> => {
+		if (typeof entry !== "string") {
+			logger.warn("plugins: ignoring non-string manifest entry", { plugin: plugin.name, key, entry });
+			return [{ entry: JSON.stringify(entry), resolvedPath: null }];
+		}
 		const files = resolveManifestEntryFiles(path.join(plugin.path, entry), expandDirectory);
 		return files.length > 0 ? files.map(resolvedPath => ({ entry, resolvedPath })) : [{ entry, resolvedPath: null }];
 	};
@@ -463,20 +470,6 @@ export async function getAllPluginCommandPaths(cwd: string): Promise<string[]> {
 
 	for (const plugin of plugins) {
 		paths.push(...resolvePluginCommandPaths(plugin));
-	}
-
-	return paths;
-}
-
-/**
- * Get all extension module paths from all enabled plugins.
- */
-export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
-	const paths: string[] = [];
-
-	for (const plugin of plugins) {
-		paths.push(...resolvePluginExtensionPaths(plugin));
 	}
 
 	return paths;

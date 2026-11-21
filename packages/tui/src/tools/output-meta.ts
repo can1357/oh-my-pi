@@ -1,5 +1,13 @@
 import type { Theme } from "../theme/theme";
-import { formatBytes, wrapBrackets } from "../render/render-utils";
+import { parseSpillUrl, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
+import {
+	flattenLine,
+	formatBytes,
+	shortenEmbeddedPaths,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+	wrapBrackets,
+} from "../render/render-utils";
 import type { OutputArtifactError } from "./streaming-output";
 import { formatGroupedFiles } from "./grouped-file-output";
 
@@ -66,8 +74,8 @@ export interface LimitsMeta {
 	/**
 	 * `unit` may be absent in sessions persisted before it was recorded. `lines` is
 	 * the first-to-last range of cut lines, and `selectorBase` the target a
-	 * `:raw:<line>-<line>` selector reads one of them whole from (an artifact's
-	 * `artifact://<id>` stands in when absent).
+	 * `:raw:<line>-<line>` selector reads one of them whole from (the spill's
+	 * `local://<id>.log` stands in when absent).
 	 */
 	columnTruncated?: {
 		maxColumn: number;
@@ -76,7 +84,21 @@ export interface LimitsMeta {
 		artifactElidedBytes?: number;
 		lines?: { first: number; last: number };
 		selectorBase?: string;
+		/** The first cut line exceeds what one `:raw` read returns; that read stops at this many bytes. */
+		rawByteCap?: number;
 	};
+}
+
+/**
+ * The bash minimizer rewrote this output: `filter` is the native filter label
+ * (`chain` for a minimized `&&`/`;` chain), the byte counts are the raw capture
+ * and the minimized text, and `artifactId` holds the raw capture.
+ */
+export interface MinimizedMeta {
+	filter: string;
+	inputBytes: number;
+	outputBytes: number;
+	artifactId: string;
 }
 
 /**
@@ -87,10 +109,11 @@ export interface OutputMeta {
 	/** Capture failure of this output itself; aggregate reports keep source failures on their entries. */
 	artifactError?: OutputArtifactError;
 	source?: SourceMeta;
-	/** The output is a bounded page of session artifact storage its `source` re-reads with line selectors; spill-to-artifact skips it. */
+	/** The output is a bounded page of a file or session artifact its `source` re-reads with line selectors; spill-to-artifact skips it. */
 	pagedSource?: true;
 	diagnostics?: DiagnosticMeta;
 	limits?: LimitsMeta;
+	minimized?: MinimizedMeta;
 }
 
 // Regex: split on the first `:digits:digits` boundary to separate path from the rest
@@ -150,9 +173,9 @@ export function formatGroupedDiagnosticMessages(messages: string[]): string {
  */
 export function formatFullOutputReference(artifactId: string, artifactElidedBytes?: number): string {
 	if (artifactElidedBytes !== undefined && artifactElidedBytes > 0) {
-		return `Read artifact://${artifactId} for a head/tail sample of the output; ${formatBytes(artifactElidedBytes)} from its middle was not saved`;
+		return `Read ${spillUrl(artifactId)} for a head/tail sample of the output; ${formatBytes(artifactElidedBytes)} from its middle was not saved`;
 	}
-	return `Read artifact://${artifactId} for full output`;
+	return `Read ${spillUrl(artifactId)} for full output`;
 }
 
 /** Strip the last literal notice or a matching final line; optionally preserve surrounding whitespace. */
@@ -179,27 +202,54 @@ export function stripTrailingNotice(
 	return trimResult ? stripped.trimEnd() : stripped;
 }
 
-const RAW_OUTPUT_ARTIFACT_PREFIX = "[raw output: artifact://";
-const RAW_OUTPUT_ARTIFACT_SUFFIX = "]";
+const RAW_OUTPUT_PREFIX = "[raw output: ";
+const RAW_OUTPUT_SUFFIX = "]";
+
+/** The footer naming the spill that holds the raw output a tool result was cut from. */
+export function formatRawOutputNotice(artifactId: string): string {
+	return `${RAW_OUTPUT_PREFIX}${spillUrl(artifactId)}${RAW_OUTPUT_SUFFIX}`;
+}
 
 /** Remove the trailing bash raw-output artifact footer while preserving its artifact id. */
 export function stripRawOutputArtifactNotice(text: string): { text: string; artifactId?: string } {
 	let artifactId: string | undefined;
 	const stripped = stripTrailingNotice(text, line => {
-		if (!line.startsWith(RAW_OUTPUT_ARTIFACT_PREFIX) || !line.endsWith(RAW_OUTPUT_ARTIFACT_SUFFIX)) {
-			return false;
-		}
-		const idStart = RAW_OUTPUT_ARTIFACT_PREFIX.length;
-		const idEnd = line.length - RAW_OUTPUT_ARTIFACT_SUFFIX.length;
-		if (idStart === idEnd) return false;
-		for (let i = idStart; i < idEnd; i++) {
-			const code = line.charCodeAt(i);
-			if (code < 48 || code > 57) return false;
-		}
-		artifactId = line.slice(idStart, idEnd);
+		if (!line.startsWith(RAW_OUTPUT_PREFIX) || !line.endsWith(RAW_OUTPUT_SUFFIX)) return false;
+		const url = line.slice(RAW_OUTPUT_PREFIX.length, line.length - RAW_OUTPUT_SUFFIX.length);
+		const id = parseSpillUrl(url);
+		// The footer names the bare spill, never a selector into it.
+		if (id === undefined || spillUrl(id) !== url) return false;
+		artifactId = String(id);
 		return true;
 	});
 	return artifactId === undefined ? { text } : { text: stripped, artifactId };
+}
+
+/** The column-cap clause {@link formatOutputNotice} puts in a notice, alone or after other parts. */
+const COLUMN_TRUNCATION_CLAUSE = "Some lines truncated to ";
+/**
+ * The rest of the clause as {@link formatOutputNotice} writes it: the cap as JavaScript prints a
+ * finite number (the setting takes any, `768.5` included), its unit, then a `. ` suffix or the bracket.
+ */
+const COLUMN_TRUNCATION_TAIL = String.raw`-?\d+(?:\.\d+)?(?:e[+-]\d+)? (?:chars|bytes)(?:\. .*)?\]$`;
+const COLUMN_TRUNCATION_NOTICE = new RegExp(String.raw`^\[${COLUMN_TRUNCATION_CLAUSE}${COLUMN_TRUNCATION_TAIL}`, "u");
+const COLUMN_TRUNCATION_IN_NOTICE = new RegExp(
+	String.raw`^\[.*\. ${COLUMN_TRUNCATION_CLAUSE}${COLUMN_TRUNCATION_TAIL}`,
+	"u",
+);
+
+/** Whether `line` is the column-cap notice {@link formatOutputNotice} emits (`[Some lines truncated to 768 chars…]`). */
+export function isColumnTruncationNotice(line: string): boolean {
+	return COLUMN_TRUNCATION_NOTICE.test(line.trim());
+}
+
+/**
+ * Whether the bracketed notice `line` carries the column-cap clause: alone, or after the parts
+ * {@link formatOutputNotice} joins before it (`[Showing lines 1-4 of 5. … Some lines truncated to 768 chars…]`).
+ */
+export function hasColumnTruncationClause(line: string): boolean {
+	const trimmed = line.trim();
+	return COLUMN_TRUNCATION_NOTICE.test(trimmed) || COLUMN_TRUNCATION_IN_NOTICE.test(trimmed);
 }
 
 function isGeneratedOutputNoticeLine(line: string): boolean {
@@ -209,7 +259,7 @@ function isGeneratedOutputNoticeLine(line: string): boolean {
 		body.startsWith("Showing ") ||
 		/^\d+ matches limit reached\. Use limit=\d+ for more/u.test(body) ||
 		/^\d+ results limit reached(?:\.|$)/u.test(body) ||
-		body.startsWith("Some lines truncated to ")
+		isColumnTruncationNotice(line)
 	);
 }
 
@@ -225,7 +275,7 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta, source?: 
 		truncation.artifactId == null
 			? undefined
 			: source?.type === "report"
-				? `Read artifact://${truncation.artifactId} for full report (${source.value})`
+				? `Read ${spillUrl(truncation.artifactId)} for full report (${source.value})`
 				: formatFullOutputReference(truncation.artifactId, truncation.artifactElidedBytes);
 
 	if (truncation.direction === "middle") {
@@ -244,7 +294,7 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta, source?: 
 			notice = `Showing ${Math.min(truncation.outputLines, totalLines)} of ${totalLines} lines; middle elided`;
 		}
 		if (truncation.nextOffset != null) {
-			notice += `. Use :${truncation.nextOffset} to continue`;
+			notice += `. Use :${truncation.nextOffset}- to continue`;
 		}
 		if (artifactReference) {
 			notice += `. ${artifactReference}`;
@@ -274,7 +324,7 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta, source?: 
 	}
 
 	if (truncation.nextOffset != null) {
-		notice += `. Use :${truncation.nextOffset} to continue`;
+		notice += `. Use :${truncation.nextOffset}- to continue`;
 	}
 
 	if (artifactReference) {
@@ -295,6 +345,17 @@ export function formatStyledArtifactReference(artifactId: string, theme: Theme):
 /** Describe an incomplete artifact capture. */
 export function formatArtifactErrorNotice(error: OutputArtifactError): string {
 	return `Full output was not saved completely (artifact ${error} failed)`;
+}
+
+/**
+ * `git 120.4KB → 3.2KB`: the minimizer filter that ran and the bytes it took the output from and to.
+ * Native labels are short words; a rehydrated session or extension may carry any text, so the label
+ * is sanitized to one plain line, its home paths shortened to `~`, and width-bounded.
+ */
+export function formatMinimizedMeta(minimized: MinimizedMeta): string {
+	const label = shortenEmbeddedPaths(flattenLine(sanitizeText(minimized.filter)));
+	const filter = truncateToWidth(label, TRUNCATE_LENGTHS.SHORT);
+	return `${filter} ${formatBytes(minimized.inputBytes)} → ${formatBytes(minimized.outputBytes)}`;
 }
 
 /**
@@ -340,14 +401,17 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		// notices always read "chars", so default missing units to it. Otherwise
 		// a resumed legacy session renders "… 768 undefined" and stripOutputNotice
 		// stops matching the persisted "… 768 chars" text.
-		let columnNotice = `Some lines truncated to ${c.maxColumn} ${c.unit ?? "chars"}`;
+		let columnNotice = `${COLUMN_TRUNCATION_CLAUSE}${c.maxColumn} ${c.unit ?? "chars"}`;
 		// An artifact cut to a head/tail sample renumbers its lines, so only a complete one names a line.
 		const selectorBase =
-			c.selectorBase ?? (c.artifactId != null && !c.artifactElidedBytes ? `artifact://${c.artifactId}` : undefined);
+			c.selectorBase ?? (c.artifactId != null && !c.artifactElidedBytes ? spillUrl(c.artifactId) : undefined);
 		if (c.lines && selectorBase !== undefined) {
 			// One line per selector: a span of cut lines can exceed what one read returns.
 			const { first, last } = c.lines;
-			columnNotice += `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} whole`;
+			columnNotice +=
+				c.rawByteCap === undefined
+					? `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} whole`
+					: `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} uncut, byte-capped at ${formatBytes(c.rawByteCap)}`;
 			if (last > first) columnNotice += `; cut lines run to line ${last}, each read the same way`;
 		} else if (c.artifactId != null) {
 			columnNotice += `. ${formatFullOutputReference(c.artifactId, c.artifactElidedBytes)}`;

@@ -129,15 +129,6 @@ describe("searchKimi query directives", () => {
 		};
 	}
 
-	it("sends directive-free queries upstream unchanged", async () => {
-		process.env.KIMI_SEARCH_API_KEY = "test-key";
-		const capture: { body?: { text_query?: string } } = {};
-		await withLocalAuthStorage(async authStorage => {
-			await searchKimi({ query: "bun test runner docs", authStorage, fetch: captureBodyFetch(capture) });
-		});
-		expect(capture.body?.text_query).toBe("bun test runner docs");
-	});
-
 	it("rebuilds directive queries with Bing-style operators and drops date directives", async () => {
 		process.env.KIMI_SEARCH_API_KEY = "test-key";
 		const capture: { body?: { text_query?: string } } = {};

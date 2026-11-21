@@ -19,6 +19,11 @@ import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+import {
+	cfgBashInterceptorPatterns,
+	cfgBashPatterns,
+	DEFAULT_BASH_INTERCEPTOR_RULES,
+} from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 const tick = () => Promise.resolve();
 
@@ -43,13 +48,22 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void): void
 }
 
 describe("settings registry", () => {
-	it("lets an override env beat every layer while a fallback env only replaces the default", () => {
+	it("ranks a runtime override over an override env, that env over persisted layers, and a fallback env only over the default", () => {
 		withEnv({ PI_EDIT_FUZZY: "0", SEARXNG_ENDPOINT: "https://env.example" }, () => {
-			const configured = Settings.isolated({ "edit.fuzzyMatch": true, "searxng.endpoint": "https://cfg.example" });
-			expect(cfgEditFuzzyMatch.get(configured)).toBe(false);
-			expect(cfgEditFuzzyMatch.provenance(configured)).toBe("env");
-			expect(cfgSearxngEndpoint.get(configured)).toBe("https://cfg.example");
-			expect(cfgSearxngEndpoint.provenance(configured)).toBe("runtime");
+			const settings = Settings.isolated();
+			cfgEditFuzzyMatch.set(settings, true);
+			cfgSearxngEndpoint.set(settings, "https://cfg.example");
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(false);
+			expect(cfgEditFuzzyMatch.provenance(settings)).toBe("env");
+			expect(cfgSearxngEndpoint.get(settings)).toBe("https://cfg.example");
+			expect(cfgSearxngEndpoint.provenance(settings)).toBe("global");
+
+			// A CLI flag or session-only write is more specific than the environment.
+			cfgEditFuzzyMatch.override(settings, true);
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(true);
+			expect(cfgEditFuzzyMatch.provenance(settings)).toBe("runtime");
+			cfgEditFuzzyMatch.clearOverride(settings);
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(false);
 
 			const bare = Settings.isolated();
 			expect(cfgSearxngEndpoint.get(bare)).toBe("https://env.example");
@@ -58,10 +72,11 @@ describe("settings registry", () => {
 	});
 
 	it("parses a boolean env var like parseFlag: empty is unset, unlisted text is false", () => {
-		const configuredOff = Settings.isolated({ "eval.py": false });
+		const configuredOff = Settings.isolated();
+		cfgEvalPy.set(configuredOff, false);
 		withEnv({ PI_PY: "" }, () => {
 			expect(cfgEvalPy.get(configuredOff)).toBe(false);
-			expect(cfgEvalPy.provenance(configuredOff)).toBe("runtime");
+			expect(cfgEvalPy.provenance(configuredOff)).toBe("global");
 		});
 		withEnv({ PI_PY: "y" }, () => expect(cfgEvalPy.get(configuredOff)).toBe(true));
 		withEnv({ PI_PY: "disabled" }, () => {
@@ -169,6 +184,45 @@ describe("settings registry", () => {
 		expect(cfgTemperature.get(child)).toBe(0.1);
 		expect(childTemperatures).toEqual([0.7, 0.1]);
 		expect(cfgTopP.get(parent)).not.toBe(0.5);
+	});
+
+	it("keeps host overlays authoritative and delegates only subagent-derived views", () => {
+		const operator = Settings.isolated();
+		const host = operator.overlay({ modelRoles: { review: "mock/target" } });
+		const child = host.overlay({ modelRoles: { advisor: "mock/other" } }, { derived: true });
+		const grandchild = child.overlay({}, { derived: true });
+		expect(operator.grantAuthority().getModelRole("review")).toBeUndefined();
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/target");
+		expect(child.grantAuthority()).toBe(host.grantAuthority());
+		expect(grandchild.grantAuthority()).toBe(host.grantAuthority());
+		expect(child.grantAuthority().getModelRole("advisor")).toBeUndefined();
+	});
+
+	it("rebuilds a host overlay's grant authority after its parent changes", () => {
+		const operator = Settings.isolated({ modelRoles: { review: "mock/target" } });
+		const host = operator.overlay();
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/target");
+		operator.setModelRole("review", "mock/other");
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/other");
+	});
+
+	it.each([false, true])("preserves derived=%s when restoring overlay layers", derived => {
+		const parent = Settings.isolated();
+		const child = parent.overlay({ modelRoles: { review: "mock/target" } }, { derived });
+		const restored = parent.restoreOverlay(child.overlayLayers());
+		expect(restored.getModelRole("review")).toBe("mock/target");
+		expect(restored.grantAuthority().getModelRole("review")).toBe(derived ? undefined : "mock/target");
+	});
+
+	it("preserves a derived view's host authority when cloning for cwd", async () => {
+		const operator = Settings.isolated();
+		const host = operator.overlay({ modelRoles: { review: "mock/target" } });
+		const child = host.overlay({ modelRoles: { advisor: "mock/other" } }, { derived: true });
+		const clone = await child.cloneForCwd(host.getCwd());
+		expect(clone.grantAuthority().getModelRole("review")).toBe("mock/target");
+		expect(clone.grantAuthority().getModelRole("advisor")).toBeUndefined();
+		const hostClone = await host.cloneForCwd(host.getCwd());
+		expect(hostClone.grantAuthority().getModelRole("review")).toBe("mock/target");
 	});
 
 	it("delivers every synchronous parent write to an overlay", async () => {
@@ -377,5 +431,240 @@ describe("settings registry", () => {
 		).toThrow("Invalid task.agentCompactionThresholdOverrides.scout");
 		expect(() => Settings.isolated({ temperature: "hot" })).toThrow("Invalid value for temperature");
 		expect(cfgModelRoles.get(Settings.isolated({ modelRoles: { smol: "a/b" } }))).toEqual({ smol: "a/b" });
+	});
+
+	it("resolves path-scoped object entries in bash.patterns and bashInterceptor.patterns across cwd changes", async () => {
+		const dir = TempDir.createSync("@omp-path-scoped-bash-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const repoA = path.join(dir.path(), "repo-a");
+			const repoASub = path.join(repoA, "packages", "sub");
+			const repoB = path.join(dir.path(), "repo-b");
+			fs.mkdirSync(repoASub, { recursive: true });
+			fs.mkdirSync(repoB, { recursive: true });
+
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({
+					bash: {
+						patterns: [
+							{
+								path: repoA,
+								patterns: [{ match: "make lint*", approval: "allow" }],
+							},
+							{
+								paths: [repoA],
+								match: "rm -rf *",
+								approval: "deny",
+							},
+							{
+								paths: [repoB],
+								patterns: [{ match: "cargo test*", approval: "allow" }],
+							},
+							{ match: "git status*", approval: "allow" },
+						],
+					},
+					bashInterceptor: {
+						patterns: [
+							{
+								pathPrefix: repoA,
+								patterns: [{ pattern: "^\\s*repo-a-tool\\b", tool: "read", message: "Use read in repo-a." }],
+							},
+						],
+					},
+				}),
+			);
+
+			const settings = await Settings.loadIsolated({ cwd: repoASub, agentDir });
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "make lint*", approval: "allow" },
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "git status*", approval: "allow" },
+			]);
+			expect(cfgBashInterceptorPatterns.get(settings)).toEqual([
+				{ pattern: "^\\s*repo-a-tool\\b", tool: "read", message: "Use read in repo-a." },
+				...DEFAULT_BASH_INTERCEPTOR_RULES,
+			]);
+
+			await settings.reloadForCwd(repoB);
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "cargo test*", approval: "allow" },
+				{ match: "git status*", approval: "allow" },
+			]);
+			expect(cfgBashInterceptorPatterns.get(settings)).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
+		} finally {
+			await dir.remove();
+		}
+	});
+
+	it("keeps every bash.patterns rule a path-scoped entry carries inside its scope", async () => {
+		const dir = TempDir.createSync("@omp-path-scoped-bash-deny-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const repoA = path.join(dir.path(), "repo-a");
+			const prod = path.join(repoA, "prod");
+			const other = path.join(dir.path(), "other");
+			fs.mkdirSync(prod, { recursive: true });
+			fs.mkdirSync(other, { recursive: true });
+
+			// `path: ~` is YAML null, so that entry names no usable path.
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				[
+					"bash:",
+					"  patterns:",
+					`    - path: ${JSON.stringify(repoA)}`,
+					'      match: "rm -rf *"',
+					"      approval: deny",
+					"      patterns:",
+					'        - match: "make*"',
+					"          approval: allow",
+					`        - path: ${JSON.stringify(prod)}`,
+					'          match: "terraform apply*"',
+					"          approval: deny",
+					"    - path: ~",
+					'      match: "curl *"',
+					"      approval: prompt",
+					"",
+				].join("\n"),
+			);
+
+			const settings = await Settings.loadIsolated({ cwd: prod, agentDir });
+			expect(cfgBashPatterns.get(settings)).toMatchObject([
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "make*", approval: "allow" },
+				{ match: "terraform apply*", approval: "deny" },
+				{ match: "curl *", approval: "prompt" },
+			]);
+
+			await settings.reloadForCwd(repoA);
+			expect(cfgBashPatterns.get(settings)).toMatchObject([
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "make*", approval: "allow" },
+				{ match: "curl *", approval: "prompt" },
+			]);
+
+			await settings.reloadForCwd(other);
+			expect(cfgBashPatterns.get(settings)).toMatchObject([{ match: "curl *", approval: "prompt" }]);
+		} finally {
+			await dir.remove();
+		}
+	});
+
+	it("prepends project and overlay bash.patterns and bashInterceptor.patterns onto global rules", async () => {
+		const dir = TempDir.createSync("@omp-settings-array-merge-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const projectDir = path.join(dir.path(), "project");
+			const overlayFile = path.join(dir.path(), "overlay.yml");
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({
+					bash: {
+						patterns: [
+							{ match: "git status*", approval: "allow" },
+							{ match: "*", approval: "prompt" },
+						],
+					},
+				}),
+			);
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({
+					bash: {
+						patterns: [
+							{ match: "make build*", approval: "allow" },
+							{ match: "make lint*", approval: "allow" },
+						],
+					},
+					bashInterceptor: {
+						patterns: [{ pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." }],
+					},
+				}),
+			);
+			await Bun.write(
+				overlayFile,
+				YAML.stringify({
+					bash: {
+						patterns: [{ match: "cargo test*", approval: "allow" }],
+					},
+				}),
+			);
+
+			const settings = await Settings.loadReadOnly({
+				cwd: projectDir,
+				agentDir,
+				configFiles: [overlayFile],
+			});
+
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "cargo test*", approval: "allow" },
+				{ match: "make build*", approval: "allow" },
+				{ match: "make lint*", approval: "allow" },
+				{ match: "git status*", approval: "allow" },
+				{ match: "*", approval: "prompt" },
+			]);
+			expect(cfgBashInterceptorPatterns.get(settings)).toEqual([
+				{ pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." },
+				...DEFAULT_BASH_INTERCEPTOR_RULES,
+			]);
+
+			// Runtime overrides still replace the effective list wholesale until cleared.
+			cfgBashPatterns.override(settings, [{ match: "echo *", approval: "allow" }]);
+			expect(cfgBashPatterns.get(settings)).toEqual([{ match: "echo *", approval: "allow" }]);
+			cfgBashPatterns.clearOverride(settings);
+			expect(cfgBashPatterns.get(settings)).toHaveLength(5);
+
+			// Configuring an explicit empty array in a higher layer resets the inherited list.
+			const resetOverlayFile = path.join(dir.path(), "reset-overlay.yml");
+			await Bun.write(resetOverlayFile, YAML.stringify({ bash: { patterns: [] } }));
+			const resetSettings = await Settings.loadReadOnly({
+				cwd: projectDir,
+				agentDir,
+				configFiles: [resetOverlayFile],
+			});
+			expect(cfgBashPatterns.get(resetSettings)).toEqual([]);
+
+			// A global `null` counts as unset, so project rules still prepend to the schema default.
+			const nullAgentDir = path.join(dir.path(), "null-agent");
+			await Bun.write(
+				path.join(nullAgentDir, "config.yml"),
+				YAML.stringify({ bashInterceptor: { patterns: null } }),
+			);
+			const nullGlobalSettings = await Settings.loadReadOnly({ cwd: projectDir, agentDir: nullAgentDir });
+			expect(cfgBashInterceptorPatterns.get(nullGlobalSettings)).toEqual([
+				{ pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." },
+				...DEFAULT_BASH_INTERCEPTOR_RULES,
+			]);
+		} finally {
+			await dir.remove();
+		}
+	});
+
+	it("keeps built-in interceptor rules when a project rule joins a global list of only path-scoped entries", async () => {
+		const dir = TempDir.createSync("@omp-settings-scoped-layer-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const projectDir = path.join(dir.path(), "project");
+			const scopedRule = { pattern: "^\\s*scoped\\s+", tool: "read", message: "Use read." };
+			const projectRule = { pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." };
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({ bashInterceptor: { patterns: [{ path: projectDir, patterns: [scopedRule] }] } }),
+			);
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({ bashInterceptor: { patterns: [projectRule] } }),
+			);
+
+			const settings = await Settings.loadReadOnly({ cwd: projectDir, agentDir });
+			expect(cfgBashInterceptorPatterns.get(settings)).toEqual([
+				projectRule,
+				scopedRule,
+				...DEFAULT_BASH_INTERCEPTOR_RULES,
+			]);
+		} finally {
+			await dir.remove();
+		}
 	});
 });

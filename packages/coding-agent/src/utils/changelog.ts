@@ -361,14 +361,13 @@ export function getNewEntries(entries: ChangelogEntry[], lastVersion: string): C
 }
 
 /**
- * Render changelog entries oldest-first by default and optionally cap the Markdown source size.
+ * Render changelog entries in the given (newest-first) order, matching CHANGELOG.md, and optionally cap the Markdown source size.
  */
 export function renderChangelogEntries(
-	entries: ChangelogEntry[],
-	options: { maxBytes?: number; truncationHint?: string; oldestFirst?: boolean } = {},
+	entries: readonly ChangelogEntry[],
+	options: { maxBytes?: number; truncationHint?: string } = {},
 ): RenderedChangelog {
-	const orderedEntries = options.oldestFirst === false ? entries : [...entries].reverse();
-	const markdown = orderedEntries.map(entry => entry.content).join("\n\n");
+	const markdown = entries.map(entry => entry.content).join("\n\n");
 	if (options.maxBytes === undefined || Buffer.byteLength(markdown) <= options.maxBytes) {
 		return { markdown, truncated: false };
 	}
@@ -399,7 +398,6 @@ function selectStartupChangelogEntries(
 	const rendered = renderChangelogEntries(newEntries, {
 		maxBytes: STARTUP_CHANGELOG_MAX_BYTES,
 		truncationHint: STARTUP_CHANGELOG_FULL_HINT,
-		oldestFirst: false,
 	});
 	const summary = summarizeChangelogEntries(newEntries);
 	const latestEntry = newEntries[0];
@@ -438,16 +436,19 @@ export function selectStartupChangelog(
 /**
  * Resolve and persist the automatic startup changelog decision.
  *
+ * `lastVersion` is the marker as this launch read it ({@link readLastChangelogVersion});
+ * `agentDir` locates the marker this call advances.
  * Hidden mode advances the marker only for an upgrade, so downgrades do not
  * erase knowledge of a newer version the user has already seen.
  */
 export async function resolveStartupChangelogForDisplay(options: {
 	mode: SettingValueOf<typeof cfgStartupChangelogMode>;
 	currentVersion: string;
+	lastVersion: string | undefined;
 	changelogPath?: string;
 	agentDir?: string;
 }): Promise<StartupChangelogSelection | undefined> {
-	const lastVersion = await readLastChangelogVersion(options.agentDir);
+	const { lastVersion } = options;
 	const parsedLastVersion = parseChangelogVersion(lastVersion);
 	if (!parsedLastVersion) {
 		await writeLastChangelogVersion(options.currentVersion, options.agentDir);

@@ -7,13 +7,46 @@ import type { SpinnerFramesOverride } from "./symbols";
 export type ColorValue = string | number;
 
 /**
+ * Index of each slot in a theme's 16-color `terminal.ansi` palette (0–7
+ * normal, 8–15 bright). `Theme.ansiFg()` paints by slot name.
+ */
+export const ANSI_COLOR_INDEX = {
+	black: 0,
+	red: 1,
+	green: 2,
+	yellow: 3,
+	blue: 4,
+	magenta: 5,
+	cyan: 6,
+	white: 7,
+	brightBlack: 8,
+	brightRed: 9,
+	brightGreen: 10,
+	brightYellow: 11,
+	brightBlue: 12,
+	brightMagenta: 13,
+	brightCyan: 14,
+	brightWhite: 15,
+} as const;
+
+export type AnsiColor = keyof typeof ANSI_COLOR_INDEX;
+
+/**
  * Tokens a theme is allowed to omit. They resolve to the terminal default
  * foreground, so `Theme.fg()` stays total for callers that paint a token a theme
  * never declared (e.g. a `modelTags.<role>.color` reference) while
- * `Theme.hasColor()` still reports them as unset.
+ * `Theme.hasColor()` still reports them as unset. `mdExtensionLink` is the
+ * exception: `createTheme` derives it from `mdLink` and `text` when omitted.
  */
 export const OPTIONAL_THEME_COLOR_RECORD = {
 	assistantMessageText: true,
+	mdExtensionLink: true,
+	subagent1: true,
+	subagent2: true,
+	subagent3: true,
+	subagent4: true,
+	subagent5: true,
+	subagent6: true,
 } satisfies Partial<Record<ThemeColor, true>>;
 
 export interface ThemeJson {
@@ -42,7 +75,11 @@ export interface ThemeJson {
 		chrome?: ColorValue;
 		/** Lifted surfaces: popovers, menus, buttons. */
 		widget?: ColorValue;
-		/** ANSI colors 0–15: exactly 16. */
+		/**
+		 * ANSI colors 0–15: exactly 16. omp also paints colorful Markdown
+		 * (headings, emphasis, table headers) from this palette; slots it
+		 * omits fall back to the terminal's own palette.
+		 */
 		ansi?: ColorValue[];
 	};
 	symbols?: {
@@ -72,6 +109,7 @@ export type ThemeColor =
 	| "toolOutput"
 	| "mdHeading"
 	| "mdLink"
+	| "mdExtensionLink"
 	| "mdLinkUrl"
 	| "mdCode"
 	| "mdCodeBlock"
@@ -101,6 +139,7 @@ export type ThemeColor =
 	| "thinkingMax"
 	| "bashMode"
 	| "pythonMode"
+	| "btwMode"
 	| "statusLineSep"
 	| "statusLineModel"
 	| "statusLinePath"
@@ -113,7 +152,13 @@ export type ThemeColor =
 	| "statusLineUntracked"
 	| "statusLineOutput"
 	| "statusLineCost"
-	| "statusLineSubagents";
+	| "statusLineSubagents"
+	| "subagent1"
+	| "subagent2"
+	| "subagent3"
+	| "subagent4"
+	| "subagent5"
+	| "subagent6";
 
 /** Set of all valid ThemeColor string values for runtime validation */
 const THEME_COLOR_RECORD = {
@@ -136,6 +181,7 @@ const THEME_COLOR_RECORD = {
 	toolOutput: true,
 	mdHeading: true,
 	mdLink: true,
+	mdExtensionLink: true,
 	mdLinkUrl: true,
 	mdCode: true,
 	mdCodeBlock: true,
@@ -165,6 +211,7 @@ const THEME_COLOR_RECORD = {
 	thinkingMax: true,
 	bashMode: true,
 	pythonMode: true,
+	btwMode: true,
 	statusLineSep: true,
 	statusLineModel: true,
 	statusLinePath: true,
@@ -178,6 +225,12 @@ const THEME_COLOR_RECORD = {
 	statusLineOutput: true,
 	statusLineCost: true,
 	statusLineSubagents: true,
+	subagent1: true,
+	subagent2: true,
+	subagent3: true,
+	subagent4: true,
+	subagent5: true,
+	subagent6: true,
 } satisfies Record<ThemeColor, true>;
 
 const VALID_THEME_COLORS: ReadonlySet<string> = new Set(Object.keys(THEME_COLOR_RECORD));

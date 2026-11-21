@@ -6,16 +6,16 @@ Set:
 
 ```yaml
 memory:
-  backend: mnemopi
+   backend: mnemopi
 ```
 
 Example:
 
 ```yaml
 memory:
-  backend: mnemopi
+   backend: mnemopi
 mnemopi:
-  scoping: per-project-tagged
+   scoping: per-project-tagged
 ```
 
 With this backend enabled, the coding agent:
@@ -43,32 +43,39 @@ The first-turn recall is part of the transcript's history and is stored in the s
 
 ## Settings
 
-| Setting                       | Default            | Description                                                                                                                                                                                                                                                                            |
-| ----------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory.backend`              | `off`              | Set to `mnemopi` to enable this backend.                                                                                                                                                                                                                                               |
-| `mnemopi.dbPath`              | agent memories dir | Optional SQLite database path.                                                                                                                                                                                                                                                         |
-| `mnemopi.bank`                | unset              | Optional shared bank base name passed to `Mnemopi`; the coding-agent wrapper scopes from this base according to `mnemopi.scoping`. Unset → shared bank `default`; per-project modes derive a project bank from the working-directory basename plus a stable hash of its absolute path. |
-| `mnemopi.scoping`             | `per-project`      | Memory visibility mode: `global` = one shared bank, `per-project` = isolated project memory, `per-project-tagged` = project-local writes plus global recall visibility.                                                                                                                |
-| `mnemopi.autoRecall`          | `true`             | Recall memory on the first turn of a session.                                                                                                                                                                                                                                          |
-| `mnemopi.autoRetain`          | `true`             | Retain completed turns automatically.                                                                                                                                                                                                                                                  |
+| Setting                       | Default            | Description                                                                                                                                                                                                                                                                                                   |
+| ----------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.backend`              | `off`              | Set to `mnemopi` to enable this backend.                                                                                                                                                                                                                                                                      |
+| `mnemopi.dbPath`              | agent memories dir | Optional SQLite database path. A leading `~` is the home directory.                                                                                                                                                                                                                                           |
+| `mnemopi.bank`                | unset              | Optional shared bank base name passed to `Mnemopi`; the coding-agent wrapper scopes from this base according to `mnemopi.scoping`. Unset → shared bank `default`; per-project modes derive a project bank from the working-directory basename plus a stable hash of its absolute path.                        |
+| `mnemopi.scoping`             | `per-project`      | Memory visibility mode: `global` = one shared bank, `per-project` = isolated project memory, `per-project-tagged` = project-local writes plus global recall visibility.                                                                                                                                       |
+| `mnemopi.autoRecall`          | `true`             | Recall memory on the first turn of a session.                                                                                                                                                                                                                                                                 |
+| `mnemopi.recallRelevance`     | `off`              | Asks the `judge` role if each memory the injection budget shows is relevant to the task, dropping any not answered `relevant` (`uncertain` included). `auto` judges only with a native backend, `on` with any model (an on-device judge may answer only some in 10 s). A failed check injects nothing.        |
+| `mnemopi.autoRetain`          | `true`             | Retain completed turns automatically.                                                                                                                                                                                                                                                                         |
 | `mnemopi.polyphonicRecall`    | `false`            | Fuse the standard ranking by reciprocal rank with vector, graph, fact and temporal voices, so memories linked in the episodic graph (by `mnemopi.proactiveLinking` or consolidation) or through consolidated extracted facts surface without a keyword match. `MNEMOPI_POLYPHONIC_RECALL` overrides when set. |
-| `mnemopi.enhancedRecall`      | `false`            | Cache recall results per query for up to 5 minutes. Entries are keyed on every recall option (limit, facts, channel, time, bank), similar queries only reuse entries with identical options, and any write to the bank drops the cache. `MNEMOPI_ENHANCED_RECALL` overrides when set.  |
-| `mnemopi.proactiveLinking`    | `false`            | Ingest new memories into the episodic graph and link them to related entities/memories as they are stored; `MNEMOPI_PROACTIVE_LINKING` overrides when set.                                                                                                                             |
-| `mnemopi.retainEveryNTurns`   | `4`                | Minimum user turns between automatic retain writes.                                                                                                                                                                                                                                    |
-| `mnemopi.recallLimit`         | `8`                | Maximum recalled memories in the prompt block.                                                                                                                                                                                                                                         |
-| `mnemopi.recallContextTurns`  | `3`                | Prior user-bounded turns included in recall queries.                                                                                                                                                                                                                                   |
-| `mnemopi.recallMaxQueryChars` | `4000`             | Maximum composed recall query length.                                                                                                                                                                                                                                                  |
-| `mnemopi.injectionTokenLimit` | `5000`             | Approximate token budget for memory prompt injection.                                                                                                                                                                                                                                  |
-| `mnemopi.debug`               | `false`            | Enable debug logging for backend failures.                                                                                                                                                                                                                                             |
-| `mnemopi.noEmbeddings`        | `false`            | Pass `noEmbeddings` to `Mnemopi` and force FTS-only recall.                                                                                                                                                                                                                            |
-| `mnemopi.embeddingVariant`    | `en`               | Local embedding model variant: `en` = `BAAI/bge-base-en-v1.5` (768d), `multilingual` = `intfloat/multilingual-e5-large` (1024d). `mnemopi.embeddingModel`/`MNEMOPI_EMBEDDING_MODEL` override it; changing it rebuilds stored embeddings on the next writable start.                    |
-| `mnemopi.embeddingModel`      | variant default    | Explicit embedding model id; overrides `mnemopi.embeddingVariant`. Precedence: this setting > `MNEMOPI_EMBEDDING_MODEL` env > variant default; a blank or `null` setting counts as unset.                                                                                                                                         |
-| `mnemopi.embeddingApiUrl`     | env/default        | OpenAI-compatible embedding endpoint passed to `Mnemopi`.                                                                                                                                                                                                                              |
-| `mnemopi.embeddingApiKey`     | env/default        | Embedding API key passed to `Mnemopi`.                                                                                                                                                                                                                                                 |
-| `mnemopi.llmMode`             | `smol`             | `smol` resolves the `memory` model role and its retry chain; `remote` uses the settings below; `none` disables LLM calls. |
-| `mnemopi.llmBaseUrl`          | env/default        | OpenAI-compatible LLM endpoint for `llmMode: remote`.                                                                                                                                                                                                                                  |
-| `mnemopi.llmApiKey`           | env/default        | LLM API key for `llmMode: remote`.                                                                                                                                                                                                                                                     |
-| `mnemopi.llmModel`            | env/default        | LLM model id for `llmMode: remote`.                                                                                                                                                                                                                                                    |
+| `mnemopi.enhancedRecall`      | `false`            | Cache recall results per query for up to 5 minutes. Entries are keyed on every recall option (limit, facts, channel, time, bank), similar queries only reuse entries with identical options, and any write to the bank drops the cache. `MNEMOPI_ENHANCED_RECALL` overrides when set.                         |
+| `mnemopi.proactiveLinking`    | `false`            | Ingest new memories into the episodic graph and link them to related entities/memories as they are stored; `MNEMOPI_PROACTIVE_LINKING` overrides when set.                                                                                                                                                    |
+| `mnemopi.retainEveryNTurns`   | `4`                | Minimum user turns between automatic retain writes.                                                                                                                                                                                                                                                           |
+| `mnemopi.recallLimit`         | `8`                | Maximum recalled memories in the prompt block.                                                                                                                                                                                                                                                                |
+| `mnemopi.recallContextTurns`  | `3`                | Prior user-bounded turns included in recall queries.                                                                                                                                                                                                                                                          |
+| `mnemopi.recallMaxQueryChars` | `4000`             | Maximum composed recall query length.                                                                                                                                                                                                                                                                         |
+| `mnemopi.injectionTokenLimit` | `5000`             | Approximate token budget for memory prompt injection.                                                                                                                                                                                                                                                         |
+| `mnemopi.debug`               | `false`            | Enable debug logging for backend failures.                                                                                                                                                                                                                                                                    |
+| `mnemopi.noEmbeddings`        | `false`            | Pass `noEmbeddings` to `Mnemopi` and force FTS-only recall.                                                                                                                                                                                                                                                   |
+| `mnemopi.embeddingVariant`    | `en`               | Local embedding model variant: `en` = `BAAI/bge-base-en-v1.5` (768d), `multilingual` = `intfloat/multilingual-e5-large` (1024d). `mnemopi.embeddingModel`/`MNEMOPI_EMBEDDING_MODEL` override it; changing it rebuilds stored embeddings on the next writable start.                                           |
+| `mnemopi.embeddingModel`      | variant default    | Explicit embedding model id; overrides `mnemopi.embeddingVariant`. Precedence: this setting > `MNEMOPI_EMBEDDING_MODEL` env > variant default; a blank or `null` setting counts as unset.                                                                                                                     |
+| `mnemopi.embeddingApiUrl`     | env/default        | OpenAI-compatible embedding endpoint passed to `Mnemopi`.                                                                                                                                                                                                                                                     |
+| `mnemopi.embeddingApiKey`     | env/default        | Embedding API key passed to `Mnemopi`.                                                                                                                                                                                                                                                                        |
+| `mnemopi.embeddingQueryPrefix` | unset             | Text prepended to recall queries before embedding, for instruction-tuned embedders (Qwen3-Embedding, E5). Stored memories are embedded unchanged. `MNEMOPI_EMBEDDING_QUERY_PREFIX` applies when unset.                                                                                                         |
+| `mnemopi.embeddingInputType`  | `false`            | Send `input_type` with embedding API requests: `query` for recall queries, `passage` for stored memories. NVIDIA NIM asymmetric embedders (NeMo Retriever, `nv-embedqa-*`) reject requests without it.                                                                                                        |
+| `mnemopi.llmMode`             | `smol`             | `smol` resolves the `memory` model role and its retry chain; `remote` uses the settings below; `none` disables LLM calls.                                                                                                                                                                                     |
+| `mnemopi.llmBaseUrl`          | env/default        | OpenAI-compatible LLM endpoint for `llmMode: remote`.                                                                                                                                                                                                                                                         |
+| `mnemopi.llmApiKey`           | env/default        | LLM API key for `llmMode: remote`.                                                                                                                                                                                                                                                                            |
+| `mnemopi.llmModel`            | env/default        | LLM model id for `llmMode: remote`.                                                                                                                                                                                                                                                                           |
+
+When the embedding model changes, a bank rebuilds its stored embeddings on open. The bank embeds the whole corpus with the new model first and replaces the stored embeddings only after every batch succeeds, so a missing key, an unreachable endpoint, or a rejected request cannot erase the old ones; the next open tries again. Embedding API requests carry at most `MNEMOPI_EMBEDDING_BATCH_SIZE` texts (default `64`); set it to the provider's limit when that limit is lower, for example `10` for DashScope.
+
+A failed embedding API request (rejected key, unknown model, missing `input_type`, timeout) shows a session warning with the provider's response, once per endpoint, model, and status; print mode writes it to stderr. Recall keeps working on keywords alone until requests succeed.
 
 ## Scoping
 
@@ -96,16 +103,16 @@ Retention writes a marker-free transcript projection: when the host supplies an 
 
 Recall multiplies each memory's score by a weight for its stored `veracity` label and, for episodic memories, by a weight for its degradation tier. Each weight is read from its environment variable on every recall:
 
-| Variable                  | Default | Applies to                                                                           |
-| ------------------------- | ------- | ------------------------------------------------------------------------------------ |
-| `MNEMOPI_STATED_WEIGHT`   | `1.0`   | `veracity: stated`, which the coding agent's explicit memory save (the extension `memory.save` API) writes |
+| Variable                  | Default | Applies to                                                                                                             |
+| ------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `MNEMOPI_STATED_WEIGHT`   | `1.0`   | `veracity: stated`, which the coding agent's explicit memory save (the extension `memory.save` API) writes             |
 | `MNEMOPI_UNKNOWN_WEIGHT`  | `0.8`   | `veracity: unknown`, which the coding agent's automatic transcript retention writes, and any write that names no label |
-| `MNEMOPI_INFERRED_WEIGHT` | `0.7`   | `veracity: inferred`                                                                 |
-| `MNEMOPI_IMPORTED_WEIGHT` | `0.6`   | `veracity: imported`                                                                 |
-| `MNEMOPI_TOOL_WEIGHT`     | `0.5`   | `veracity: tool`, which the coding agent's `retain` and `learn` tools write          |
-| `MNEMOPI_TIER1_WEIGHT`    | `1.0`   | episodic memories at degradation tier 1                                              |
-| `MNEMOPI_TIER2_WEIGHT`    | `0.85`  | episodic memories at degradation tier 2                                              |
-| `MNEMOPI_TIER3_WEIGHT`    | `0.7`   | episodic memories at degradation tier 3 or beyond                                    |
+| `MNEMOPI_INFERRED_WEIGHT` | `0.7`   | `veracity: inferred`                                                                                                   |
+| `MNEMOPI_IMPORTED_WEIGHT` | `0.6`   | `veracity: imported`                                                                                                   |
+| `MNEMOPI_TOOL_WEIGHT`     | `0.5`   | `veracity: tool`, which the coding agent's `retain` and `learn` tools write                                            |
+| `MNEMOPI_TIER1_WEIGHT`    | `1.0`   | episodic memories at degradation tier 1                                                                                |
+| `MNEMOPI_TIER2_WEIGHT`    | `0.85`  | episodic memories at degradation tier 2                                                                                |
+| `MNEMOPI_TIER3_WEIGHT`    | `0.7`   | episodic memories at degradation tier 3 or beyond                                                                      |
 
 Sleep consolidation carries a working memory's label onto the episodic memory it produces.
 
@@ -119,9 +126,9 @@ FTS-only:
 
 ```yaml
 memory:
-  backend: mnemopi
+   backend: mnemopi
 mnemopi:
-  noEmbeddings: true
+   noEmbeddings: true
 ```
 
 Equivalent constructor shape:
@@ -134,29 +141,47 @@ Remote embeddings:
 
 ```yaml
 mnemopi:
-  embeddingModel: text-embedding-3-small
-  embeddingApiUrl: https://api.openai.com/v1
-  embeddingApiKey: ${OPENAI_API_KEY}
+   embeddingModel: text-embedding-3-small
+   embeddingApiUrl: https://api.openai.com/v1
+   embeddingApiKey: ${OPENAI_API_KEY}
 ```
 
 Equivalent constructor shape:
 
 ```ts
 new Mnemopi({
-  embeddingModel: "text-embedding-3-small",
-  embeddingApiUrl: "https://api.openai.com/v1",
-  embeddingApiKey,
+	embeddingModel: "text-embedding-3-small",
+	embeddingApiUrl: "https://api.openai.com/v1",
+	embeddingApiKey,
 });
 ```
+
+Asymmetric embedders embed a search query differently from the text it should find. Instruction-tuned models take a query prefix; NVIDIA NIM retrievers take `input_type`:
+
+```yaml
+mnemopi:
+   embeddingModel: Qwen/Qwen3-Embedding-8B
+   embeddingApiUrl: https://your-endpoint/v1
+   embeddingQueryPrefix: "Instruct: Given a question, retrieve stored memories that answer it\nQuery: "
+```
+
+```yaml
+mnemopi:
+   embeddingModel: nvidia/nv-embedqa-e5-v5
+   embeddingApiUrl: https://integrate.api.nvidia.com/v1
+   embeddingInputType: true
+```
+
+`embeddingQueryPrefix` only changes recall queries. Toggling `embeddingInputType` does not re-embed stored memories; a NIM retriever that requires it never stored vectors without it.
 
 Remote LLM:
 
 ```yaml
 mnemopi:
-  llmMode: remote
-  llmBaseUrl: https://api.openai.com/v1
-  llmApiKey: ${OPENAI_API_KEY}
-  llmModel: gpt-4.1-mini
+   llmMode: remote
+   llmBaseUrl: https://api.openai.com/v1
+   llmApiKey: ${OPENAI_API_KEY}
+   llmModel: gpt-4.1-mini
 ```
 
 Equivalent constructor shapes:
@@ -170,14 +195,14 @@ Dynamic function LLM for rotating OAuth tokens:
 
 ```ts
 new Mnemopi({
-  llm: async (prompt, opts) => {
-    const token = await getFreshOauthToken();
-    return await completeWithPiAi(prompt, {
-      token,
-      maxTokens: opts?.maxTokens,
-      temperature: opts?.temperature,
-    });
-  },
+	llm: async (prompt, opts) => {
+		const token = await getFreshOauthToken();
+		return await completeWithPiAi(prompt, {
+			token,
+			maxTokens: opts?.maxTokens,
+			temperature: opts?.temperature,
+		});
+	},
 });
 ```
 
@@ -185,14 +210,14 @@ Managed memory-role LLM:
 
 ```yaml
 mnemopi:
-  llmMode: smol
+   llmMode: smol
 ```
 
 The coding agent resolves the `memory` role and passes a dynamic completion function so every Mnemopi LLM call can fetch current provider credentials at call time and try the role's fallback candidates:
 
 ```ts
 new Mnemopi({
-  llm: async (prompt, opts) => completeMemoryRoleWithCurrentAuth(prompt, opts),
+	llm: async (prompt, opts) => completeMemoryRoleWithCurrentAuth(prompt, opts),
 });
 ```
 

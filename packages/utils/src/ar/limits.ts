@@ -13,6 +13,8 @@ export interface ArchiveLimits {
 	maxEntries: number;
 	/** Max bytes for any archive fully materialized in memory (tar buffers, solid/decompressed streams). */
 	maxInMemorySize: number;
+	/** Max decompressed bytes in one pass over a compressed tar too large for `maxInMemorySize`. */
+	maxStreamSize: number;
 	/** Max bytes for archive metadata (ZIP central directory, ASAR JSON header, RAR/7z header areas). */
 	maxIndexSize: number;
 	/** Max declared bytes for a single extracted member. */
@@ -26,6 +28,7 @@ export interface ArchiveLimits {
 export const DEFAULT_ARCHIVE_LIMITS: ArchiveLimits = {
 	maxEntries: 1_000_000,
 	maxInMemorySize: 256 * 1024 * 1024,
+	maxStreamSize: 4 * 1024 * 1024 * 1024,
 	maxIndexSize: 64 * 1024 * 1024,
 	maxMemberSize: 64 * 1024 * 1024,
 	maxPathBytes: 4096,
@@ -57,14 +60,22 @@ export function assertIndexSize(size: number, limits: ArchiveLimits, what: strin
 }
 
 /**
+ * Reject a member size field that is not a byte count. Indexing checks only this: `maxMemberSize` bounds
+ * extraction, so one oversized member never hides the rest of the archive.
+ */
+export function assertArchiveMemberSizeField(size: number, memberPath: string): void {
+	if (!Number.isSafeInteger(size) || size < 0) {
+		throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' has an invalid size`);
+	}
+}
+
+/**
  * Reject a member whose declared (uncompressed) size exceeds `maxMemberSize`.
  * The declared size is metadata — a crafted entry can claim multi-GB sizes
  * that would be allocated up front before any data decompresses.
  */
 export function assertArchiveMemberSize(size: number, memberPath: string, limits: ArchiveLimits): void {
-	if (!Number.isSafeInteger(size) || size < 0) {
-		throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' has an invalid size`);
-	}
+	assertArchiveMemberSizeField(size, memberPath);
 	if (size > limits.maxMemberSize) {
 		throw new ArchiveError(
 			`Archive member '${formatArchivePathForError(memberPath)}' is too large to extract in memory (${formatBytes(size)} > ${formatBytes(limits.maxMemberSize)} limit)`,

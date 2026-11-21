@@ -1,9 +1,9 @@
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
+import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
-import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
@@ -305,25 +305,33 @@ export const cfgToolsApproval = register({
 });
 
 // Default tool approval mode (interaction tab, but governs the tool wrapper).
-//   "always-ask" — auto-approves read-tier tools only; prompts for write/exec.
-//   "write"      — auto-approves read and write-tier tools; prompts for exec.
-//   "yolo"       — auto-approves every tier.
+//   "always-ask"        — auto-approves read-tier tools only; prompts for write/exec.
+//   "always-ask-cached" — like always-ask, but file reads and writes can be approved
+//                         for a file or folder, this session or across sessions.
+//   "write"             — auto-approves read and write-tier tools; prompts for exec.
+//   "yolo"              — auto-approves every tier.
 export const cfgToolsApprovalMode = register({
 	id: "tools.approvalMode",
 	type: "enum",
-	values: ["always-ask", "write", "yolo"] as const,
+	values: ["always-ask", "always-ask-cached", "write", "yolo"] as const,
 	default: "yolo",
 	ui: {
 		tab: "interaction",
 		group: "Approvals",
 		label: "Tool Approval",
 		description:
-			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
+			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Ask and remember' also asks before file reads, and can remember a file or folder. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
 		options: [
 			{
 				value: "always-ask",
 				label: "Always ask",
 				description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
+			},
+			{
+				value: "always-ask-cached",
+				label: "Ask and remember",
+				description:
+					"Ask before reading or writing a file, with answers that remember the file or its folder for this session or every session; require confirmation for exec tools.",
 			},
 			{
 				value: "write",
@@ -338,6 +346,28 @@ export const cfgToolsApprovalMode = register({
 					"Auto-approve read, write, and exec tools. User policy can still require confirmation or block calls.",
 			},
 		],
+	},
+});
+
+// Folders where every action asks, in every approval mode and whatever was remembered.
+export const cfgToolsRestrictedFolders = register({
+	id: "tools.restrictedFolders",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Restricted Folders",
+		editor: "json",
+		description:
+			'Folders where every read, write, edit, search, or command needs an explicit approval, whatever the approval mode or a remembered grant. The folder and everything under it is restricted; commands are matched by the directory they run in. A JSON list of paths, e.g. ["~/secrets"].',
+		condition: "restrictedFoldersNotProject",
+	},
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw) || raw.some(entry => typeof entry !== "string" || entry.trim().length === 0)) {
+			throw new Error("tools.restrictedFolders must be a list of folder paths");
+		}
 	},
 });
 
@@ -382,6 +412,33 @@ export const cfgTodoRemindersMax = register({
 			{ value: "2", label: "2 reminders" },
 			{ value: "3", label: "3 reminders" },
 			{ value: "5", label: "5 reminders" },
+		],
+	},
+});
+
+export const cfgTodoMidRunNudges = register({
+	id: "todo.midRunNudges",
+	type: "enum",
+	values: ["off", "capped", "backoff"] as const,
+	default: "capped",
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Mid-Run Todo Nudges",
+		description: "How often a long turn is reminded to update its todo list while it keeps changing things",
+		options: [
+			{ value: "off", label: "Off", description: "Never nudge mid-run" },
+			{
+				value: "capped",
+				label: "Capped",
+				description:
+					"Nudge after 12 edits or commands, at most twice until the todo list changes or you send a message",
+			},
+			{
+				value: "backoff",
+				label: "Backoff",
+				description: "Keep nudging with a doubling gap: after 12, 24, 48, 96, then every 192 edits or commands",
+			},
 		],
 	},
 });
@@ -457,7 +514,7 @@ export const cfgGrepEnabled = register({
 export const cfgGrepContextBefore = register({
 	id: "grep.contextBefore",
 	type: "number",
-	default: 1,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -476,7 +533,7 @@ export const cfgGrepContextBefore = register({
 export const cfgGrepContextAfter = register({
 	id: "grep.contextAfter",
 	type: "number",
-	default: 3,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -517,6 +574,19 @@ export const cfgAstEditEnabled = register({
 	},
 });
 
+export const cfgFindVerifyModel = register({
+	id: "find.verifyModel",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tools",
+		group: "Find",
+		label: "Find Verification Model",
+		description:
+			"Model selector (e.g. openrouter/liquid/d1-ultra) tried first for find's passage verification, before the judge role; filename and sketch ranking stay on the judge role. Unset: the judge role verifies too",
+	},
+});
+
 export const cfgFindEnabled = register({
 	id: "find.enabled",
 	type: "enum",
@@ -527,16 +597,34 @@ export const cfgFindEnabled = register({
 		group: "Available Tools",
 		label: "Find (semantic grep)",
 		description:
-			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it only when the judge role resolves to a native TypeSafe jev model",
+			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it when the first usable judge is native",
 		options: [
 			{
 				value: "auto",
 				label: "Auto",
-				description: "Enable when the judge role resolves to a native TypeSafe jev model",
+				description: "Enable when the first usable judge is native",
 			},
 			{ value: "on", label: "On", description: "Always enable, whichever model the judge role resolves to" },
 			{ value: "off", label: "Off", description: "Disable the find tool" },
 		],
+	},
+});
+
+/**
+ * Verified-passage probability at or above which `find` reports a file as a hit, and the floor for the
+ * line ranges it lists. Unset keeps the cascade's built-in threshold (0.2), which suits TypeSafe Jev; other
+ * decision models calibrate differently, so a judge that scores unrelated passages high needs a higher one.
+ */
+export const cfgFindHitThreshold = register({
+	id: "find.hitThreshold",
+	type: "number",
+	default: undefined,
+	// The registry reads a non-number config value as the default, so quoted text must fail here.
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !(raw > 0 && raw <= 1)) {
+			throw new Error(`Invalid find.hitThreshold: expected a number above 0, up to 1, got ${Bun.inspect(raw)}.`);
+		}
 	},
 });
 
@@ -566,6 +654,16 @@ export const cfgLaunchEnabled = register({
 	},
 });
 
+// A service normally ends with the last omp process in its project: the broker shuts
+// down once no client remains and stops every non-persistent service. Print, RPC and
+// ACP hosts override this on: their caller outlives the omp process and uses the
+// servers a run left running.
+export const cfgLaunchPersist = register({
+	id: "launch.persist",
+	type: "boolean",
+	default: false,
+});
+
 export const cfgSpeechgenEnabled = register({
 	id: "speechgen.enabled",
 	type: "boolean",
@@ -574,7 +672,7 @@ export const cfgSpeechgenEnabled = register({
 		tab: "tools",
 		group: "Available Tools",
 		label: "Speech Generation",
-		description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
+		description: "Enable the tts tool for on-device (Phonon) or xAI Grok Voice speech-file synthesis",
 	},
 });
 
@@ -587,7 +685,7 @@ export const cfgGenerateImageEnabled = register({
 		group: "Available Tools",
 		label: "Generate Image",
 		description:
-			"Enable the generate_image tool (text-to-image generation and editing). Exposed as an xd:// device when tools.xdev is on.",
+			"Enable the generate_image tool (text-to-image generation and editing). Mounted as a tool command when tools.commands is on.",
 	},
 });
 
@@ -625,6 +723,19 @@ export const cfgArchiveEnabled = register({
 		label: "Archive",
 		description:
 			"Enable the read-only archive eval prelude: prompt history, recent projects, past sessions and recaps",
+	},
+});
+
+export const cfgCommitEnabled = register({
+	id: "commit.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Selective commit",
+		description:
+			"Enable the commit eval prelude and /commit: commit only the lines this agent and its subagents wrote",
 	},
 });
 
@@ -837,6 +948,19 @@ export const cfgAskEnabled = register({
 	},
 });
 
+export const cfgOutEnabled = register({
+	id: "out.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Out",
+		description:
+			"Let the agent reply mid-task by writing to out://, shown like a response without ending its turn. Unset: on in the interactive TUI, off in print, RPC, and ACP",
+	},
+});
+
 // Tool execution
 export const cfgToolsIntentTracing = register({
 	id: "tools.intentTracing",
@@ -847,7 +971,8 @@ export const cfgToolsIntentTracing = register({
 		tab: "tools",
 		group: "Execution",
 		label: "Intent Tracing",
-		description: "Ask the agent to describe the intent of each tool call before executing it",
+		description:
+			"Ask the agent to describe the intent of each tool call before executing it. Unset: on in the interactive TUI, off in print, RPC, ACP, and SDK sessions",
 	},
 });
 
@@ -937,52 +1062,94 @@ export const cfgAsyncMaxJobs = register({
 	default: 100,
 });
 
-export const cfgToolsXdev = register({
-	id: "tools.xdev",
+// Print mode is single-shot by default: it disposes after the last prompt, cancelling the
+// run's background jobs. Opting in keeps `-p` alive so each job's async-result wakes the same
+// session, as the TUI does, before exiting (issue #10363).
+export const cfgAsyncPrintWake = register({
+	id: "async.printWake",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wake Print Mode on Job Results",
+		description:
+			"In print mode (-p, --mode json), keep running after the last prompt while this run's background jobs are active, and start another turn in the same session with each job's result; exits once no job or result is pending. Off: print mode exits after its prompts and cancels running jobs",
+	},
+});
+
+export const cfgAsyncWidgets = register({
+	id: "async.widgets",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Live Job Widgets",
+		description:
+			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet, and caption long shell commands with one line on what they do. The `widget` model role (default: `smol`) writes one spec and at most one caption per job; updates need no further model calls",
+	},
+});
+
+export const cfgToolsCommands = register({
+	id: "tools.commands",
 	type: "boolean",
 	default: true,
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Tools",
+		label: "Tool Commands",
 		description:
-			"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (only local:// scratch stays writable besides devices). Disable to expose every enabled tool top-level.",
+			"Mount rarely-used (discoverable) tools as bash commands with schema-derived `--help` instead of shipping their schemas on every request. Needs the bash tool: sessions without it keep every enabled tool top-level. Disable to expose every enabled tool top-level.",
 	},
 });
 
-export const cfgToolsXdevDocs = register({
-	id: "tools.xdevDocs",
+export const cfgToolsCommandDocs = register({
+	id: "tools.commandDocs",
 	type: "enum",
 	values: ["inline", "builtins", "catalog"] as const,
 	default: "catalog",
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Prompt Docs",
+		label: "Tool Command Prompt Docs",
 		description:
-			"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on-demand.",
+			"Choose which mounted commands get their `--help` text inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on demand.",
 		options: [
-			{ value: "inline", label: "All Devices", description: "Inline docs and schemas for every mounted device." },
+			{ value: "inline", label: "All Commands", description: "Inline help for every mounted command." },
 			{
 				value: "builtins",
 				label: "Built-ins Only",
-				description: "Inline built-in docs; fetch MCP and extension docs on demand.",
+				description: "Inline built-in help; MCP and extension help on demand.",
 			},
-			{ value: "catalog", label: "Catalog Only", description: "List every device; fetch all docs on demand." },
+			{ value: "catalog", label: "Catalog Only", description: "List every command; run `--help` on demand." },
 		],
 	},
 });
 
-export const cfgToolsXdevInlineDevices = register({
-	id: "tools.xdevInlineDevices",
+export const cfgToolsCommandInline = register({
+	id: "tools.commandInline",
 	type: "array",
 	default: EMPTY_STRING_ARRAY,
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",
-		label: "xd:// Inline Devices",
+		label: "Tool Command Inline Help",
 		description:
-			"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
+			"When Tool Command Prompt Docs is Built-ins Only, also inline dynamic commands whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
+	},
+});
+
+export const cfgToolsCommandNotices = register({
+	id: "tools.commandNotices",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Tool Command Mount Notices",
+		description:
+			"Show a notice when MCP or extension tools are mounted or unmounted as commands; the model still learns of the change with its next prompt.",
 	},
 });
 
@@ -996,7 +1163,7 @@ export const cfgDevAutoqa = register({
 		group: "Developer",
 		label: "Auto QA",
 		description:
-			"Automated tool issue reporting (xd://report_issue). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
+			"Automated tool issue reporting (`report_issue`). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
 	},
 });
 
@@ -1050,13 +1217,13 @@ export const cfgBuiltinToolGates = combine({
 	checkpoint: cfgCheckpointEnabled,
 	contextManagement: cfgCompactionExperimentalContextManagement,
 	debug: cfgDebugEnabled,
+	editMode: cfgEditMode,
 	evalJs: cfgEvalJs,
 	evalPy: cfgEvalPy,
 	find: cfgFindEnabled,
 	github: cfgGithubEnabled,
 	glob: cfgGlobEnabled,
 	grep: cfgGrepEnabled,
-	ida: cfgIdaAvailable,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
 	security: cfgSecurityEnabled,
@@ -1070,5 +1237,5 @@ export const cfgSessionToolGates = combine({
 	builtins: cfgBuiltinToolGates,
 	generateImage: cfgGenerateImageEnabled,
 	speechgen: cfgSpeechgenEnabled,
-	xdev: cfgToolsXdev,
+	toolCommands: cfgToolsCommands,
 });

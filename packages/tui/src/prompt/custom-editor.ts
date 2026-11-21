@@ -15,11 +15,17 @@ import { type Component, TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
 import { formatTooltipKey } from "../key-hint-format";
 import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
+import { getNativeBlob, type NativeBlob, nativeBlob, withBlob } from "../native/blobs";
 import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
-import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
+import {
+	expandModelMentionTags,
+	MODEL_MENTION_RE,
+	modelMentionToken,
+	resolveModelMentionToken,
+} from "./model-mention-syntax";
 import { isVideoPath } from "./video";
 import {
 	attachmentSgr,
@@ -42,21 +48,28 @@ import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spell
 import { TypingWordTracker } from "./typing-word";
 import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
 import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
+import { motionEffectsEnabled } from "../motion-effects";
 import { isNativeRendering } from "../native/state";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
 import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
 import { fgOrPlain, theme } from "../theme/theme";
 
-/** A shell-mode draft's sigil (`!`, `!!`, `$`, `$$`) with its surrounding blanks; the mode chip stands in for it natively. */
-const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?)[ \t]?/;
+/** A mode draft's sigil (`!`, `!!`, `$`, `$$`, `?`) with its surrounding blanks; the mode chip stands in for it natively. */
+const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?|\?)[ \t]?/;
 
 /** The untitled session's TSP placeholder; the rotating ANSI hints (thinking effort, …) move into control tooltips. */
 const NATIVE_COMPOSER_PLACEHOLDER = "What are we cooking?";
+/** The TSP placeholder while an ask waits above the composer. */
+const ASK_PLACEHOLDER = "Answer above, or type here to skip the questions";
 
 /** Live composer state the TSP layout shows; the interactive host wires {@link CustomEditor.composerState}. */
 export interface ComposerNativeState {
-	/** The draft runs as a shell command (`!`, `!!`) or Python (`$`, `$$`); `excluded` keeps it from the model. */
-	readonly shell?: { readonly kind: "bash" | "python"; readonly excluded: boolean };
+	/**
+	 * The draft runs as a shell command (`!`, `!!`), Python (`$`, `$$`) or a `/btw` side question (`?`);
+	 * `excluded` keeps it from the model. Role `omp.editor.<kind>`, except btw's `omp.editor.btw-ask`
+	 * (`omp.editor.btw` is the focused note's).
+	 */
+	readonly shell?: { readonly kind: "bash" | "python" | "btw"; readonly excluded: boolean };
 	/** Thinking effort word (`high`, `off`, `auto`); undefined when the model has no thinking. */
 	readonly thinking?: string;
 	/** The thinking level draws as the model chip's icon instead of its own chip (where the terminal has `effort`). */
@@ -69,6 +82,14 @@ export interface ComposerNativeState {
 	readonly dictation?: "idle" | "starting" | "recording" | "transcribing";
 	/** The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main session. */
 	readonly viewing?: readonly string[];
+	/** Drafts go to the `/btw` note the user clicked, as its follow-ups: role `omp.editor.btw`, a `btw` chip. */
+	readonly btw?: boolean;
+	/**
+	 * An ask waits inline above the composer (Tern). `pending`: the placeholder says typing here skips it, and
+	 * the composer folds to its compact row while the keys are away from it. `skip`: sending the draft skips
+	 * the ask, so a `skips ask` chip leads the input and send reads Skip & send.
+	 */
+	readonly ask?: "pending" | "skip";
 	/** The session's title, quoted in italics as the TSP placeholder; undefined until it has one. */
 	readonly title?: string;
 }
@@ -365,6 +386,18 @@ export function extractImagePastePathsFromText(text: string): string[] | undefin
 	return wholePath ? [wholePath] : undefined;
 }
 
+/** What a bracketed paste into an image-accepting prompt means. */
+export type ImagePaste =
+	/** Empty: the terminal's cue that the clipboard holds an image. */
+	{ kind: "clipboard" } | { kind: "paths"; paths: string[] } | { kind: "text" };
+
+/** Classifies the content of a bracketed paste (markers already stripped). */
+export function classifyImagePaste(content: string): ImagePaste {
+	if (content.length === 0) return { kind: "clipboard" };
+	const paths = extractImagePastePathsFromText(content);
+	return paths ? { kind: "paths", paths } : { kind: "text" };
+}
+
 function bracketedPastePayload(data: string): string | undefined {
 	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
 	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
@@ -456,6 +489,13 @@ export interface TextAttachment {
 export type ComposerChipDescriptor =
 	| { kind: "image" | "video"; n: number; image: ImageContent; link: string | undefined }
 	| { kind: "paste"; n: number; text: TextAttachment };
+
+/** A draft image's blob id, riding on the image itself so its bytes are hashed once. */
+const kImageBlobId = Symbol("omp.imageBlobId");
+
+interface ImageContentWithBlobId extends ImageContent {
+	[kImageBlobId]?: string;
+}
 
 /**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
@@ -620,8 +660,9 @@ export class CustomEditor extends Editor {
 					name => this.skillFilePath(name) !== undefined,
 					register,
 				),
-				selector => this.#mentionLabelFor(selector),
+				selector => this.#mentionChipFor(selector),
 				register,
+				selector => this.resolveModelMention(selector) !== undefined,
 			),
 		);
 		this.#syncComposerTokenPattern();
@@ -635,18 +676,20 @@ export class CustomEditor extends Editor {
 	 */
 	skillFilePath: (name: string) => string | undefined = () => undefined;
 
-	/** Host-owned model probe: maps a mentionable selector to its display chip label. */
-	modelMentionLabel: (selector: string) => string | undefined = () => undefined;
+	/**
+	 * Host-owned model probe: a mentionable `provider/id[:level]` selector's chip label and
+	 * canonical selector, so equivalent spellings (`:hi`/`:high`, bare/`:auto`) share a chip.
+	 */
+	resolveModelMention: (selector: string) => { label: string; selector: string } | undefined = () => undefined;
 
 	/** Host-owned session probe: maps a persisted model pseudonym back to its selector. */
 	modelMentionSelector: (agent: string) => string | undefined = () => undefined;
 
-	#mentionLabelFor(selector: string): string | undefined {
-		const label = this.modelMentionLabel(selector);
-		if (label === undefined) return undefined;
-		const expansion = modelMentionToken(selector);
-		const registered = this.atoms.get(label);
-		return registered !== undefined && registered !== expansion ? undefined : label;
+	#mentionChipFor(selector: string): { label: string; selector: string } | undefined {
+		const chip = this.resolveModelMention(selector);
+		if (chip === undefined) return undefined;
+		const registered = this.atoms.get(chip.label);
+		return registered === undefined || registered === modelMentionToken(chip.selector) ? chip : undefined;
 	}
 
 	/**
@@ -700,9 +743,19 @@ export class CustomEditor extends Editor {
 					const start = match.index + match[1].length;
 					const end = match.index + match[0].length;
 					if (end === line.length && i === lines.length - 1) break;
-					const label = this.#mentionLabelFor(selector);
-					if (label === undefined) continue;
-					this.collapseToAtom(i, start, end, label, modelMentionToken(selector));
+					const mention = resolveModelMentionToken(
+						selector,
+						candidate => this.#mentionChipFor(candidate),
+						candidate => this.resolveModelMention(candidate) !== undefined,
+					);
+					if (!mention) continue;
+					this.collapseToAtom(
+						i,
+						start,
+						end - mention.suffix.length,
+						mention.value.label,
+						modelMentionToken(mention.value.selector),
+					);
 					collapsed = true;
 					anyCollapsed = true;
 					break;
@@ -871,7 +924,8 @@ export class CustomEditor extends Editor {
 		const caret = this.getCursor();
 		this.#typing.update(this.textRevision, this.#decorationLines, caret.line, caret.col, this.focused);
 		const typing = this.#typing.word;
-		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
+		// With decorative motion off the keyword keeps its static highlight; the pending frame chain ends here.
+		const animated = this.focused && this.#shimmerEnabled() && motionEffectsEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
 		let sourceSearchOffset = 0;
@@ -954,8 +1008,9 @@ export class CustomEditor extends Editor {
 	 * TSP decorations: magic keywords shimmer (terminal-clocked) in the accent
 	 * color, chips and markers take their token colors, misspellings are marked,
 	 * and queue-composer markers are dimmed/accented, all as ranges over the raw
-	 * buffer instead of painted text. A shell-mode draft is code: only its sigil
-	 * is decorated, hidden behind the mode chip.
+	 * buffer instead of painted text. An image's token or marker names the image's
+	 * blob, so copying it in the terminal copies the image. A shell-mode draft is
+	 * code: only its sigil is decorated, hidden behind the mode chip.
 	 */
 	override describeDecorations = (lines: readonly string[]): readonly TspEditorDecoration[] => {
 		const text = lines.join("\n");
@@ -966,8 +1021,9 @@ export class CustomEditor extends Editor {
 		this.#syncComposerTokenPattern();
 		const decor: TspEditorDecoration[] = [];
 		let offset = 0;
-		const mark = (length: number, s: string): string => {
-			decor.push({ from: offset, to: offset + length, s });
+		const mark = (length: number, s: string, blob?: NativeBlob): string => {
+			const range = { from: offset, to: offset + length, s };
+			decor.push(blob ? withBlob(range, blob) : range);
 			offset += length;
 			return "";
 		};
@@ -980,7 +1036,10 @@ export class CustomEditor extends Editor {
 				},
 				renderSkill: label => mark(label.length, "customMessageLabel strong"),
 				renderMention: label => mark(label.length, "statusLineModel strong"),
-				renderReference: value => mark(value.length, "accent strong"),
+				renderReference: (value, kind, index) => {
+					const image = kind === "image" ? this.pendingImages[index - 1] : undefined;
+					return mark(value.length, "accent strong", image && this.#imageBlob(image));
+				},
 			},
 			this.atomicTokenPattern,
 		);
@@ -1012,6 +1071,20 @@ export class CustomEditor extends Editor {
 		}
 		return decor.sort((a, b) => a.from - b.from);
 	};
+
+	/**
+	 * The blob of pending image `image`'s bytes: the chips band's while its card shows it, else
+	 * made anew. Its `decor` range owns it, so a deleted token's bytes are released.
+	 */
+	#imageBlob(image: ImageContent): NativeBlob {
+		const tagged = image as ImageContentWithBlobId;
+		const known = tagged[kImageBlobId];
+		const alive = known === undefined ? undefined : getNativeBlob(known);
+		if (alive) return alive;
+		const blob = nativeBlob(Buffer.from(image.data, "base64"), image.mimeType);
+		tagged[kImageBlobId] = blob.id;
+		return blob;
+	}
 
 	/** Optional test override for the magic-keyword shimmer gate. */
 	magicKeywordsEnabledOverride: boolean | undefined;
@@ -1063,13 +1136,33 @@ export class CustomEditor extends Editor {
 	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled
 	 *  and no dictation is still writing into the draft. */
 	protected override get nativeSendable(): boolean {
-		return this.onSubmit !== undefined && !this.disableSubmit && !dictationHoldsDraft(this.composerState().dictation);
+		return (
+			!this.nativeKeyPassthrough &&
+			this.onSubmit !== undefined &&
+			!this.disableSubmit &&
+			!dictationHoldsDraft(this.composerState().dictation)
+		);
 	}
+	/** Rows: while it returns true the composer draws faint, its keys with an ask above it. */
+	faint?: () => boolean;
+
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
+		if (!this.faint?.()) return lines;
+		// Faint every cell: re-applied after each reset the rows carry, so styled runs stay faint too.
+		return lines.map(line => `\x1b[2m${line.replace(/\x1b\[(?:0|22)?m/g, reset => `${reset}\x1b[2m`)}\x1b[22m`);
+	}
+
 	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
 	#titlePlaceholder: { title: string; text: TspText } | undefined;
-	/** Viewing a subagent, the draft goes to it: the placeholder names it; else the session's title, quoted in italics. */
+	/**
+	 * Talking to a `/btw` note, the placeholder asks about it; viewing a subagent, the draft goes to
+	 * it: the placeholder names it; else the session's title, quoted in italics.
+	 */
 	override describePlaceholder = (): TspText => {
-		const { viewing, title } = this.composerState();
+		const { viewing, title, btw, ask } = this.composerState();
+		if (btw) return "Ask about this…";
+		if (ask) return ASK_PLACEHOLDER;
 		const agent = viewing?.at(-1);
 		if (agent !== undefined) return `Message ${agent}`;
 		if (!title) return NATIVE_COMPOSER_PLACEHOLDER;
@@ -1078,8 +1171,11 @@ export class CustomEditor extends Editor {
 		}
 		return this.#titlePlaceholder.text;
 	};
-	/** A shell-mode draft highlights as its language. */
-	override describeLanguage = (): string | undefined => this.composerState().shell?.kind;
+	/** A shell-mode draft highlights as its language; a btw draft is prose. */
+	override describeLanguage = (): string | undefined => {
+		const kind = this.composerState().shell?.kind;
+		return kind === "btw" ? undefined : kind;
+	};
 	/** Host-owned live state for the TSP composer (shell mode, effort chip, send/stop). */
 	composerState: () => ComposerNativeState = () => IDLE_COMPOSER;
 	/** The attachment band, described inside the composer on a TSP terminal (ANSI renders it above). */
@@ -1100,14 +1196,15 @@ export class CustomEditor extends Editor {
 		| undefined;
 
 	/**
-	 * The TSP composer: role `omp.editor[.bash|.python]` (tone `pending` while
+	 * The TSP composer: role `omp.editor[.bash|.python|.btw-ask|.btw]` (tone `pending` while
 	 * a turn runs) over the context hairline, the viewing header while a
 	 * subagent is focused, the attachment chips, a `line` row of the
-	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
+	 * shell-mode (or `btw`) chip and the input, and the `bar`: model chip, effort chip
 	 * (or the effort glyph as the model chip's icon), the generation rate,
 	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
-	 * `submit`, `interrupt` and `focus:<id>` actions.
+	 * `submit`, `interrupt` and `focus:<id>` actions; `thinking.set` (the level
+	 * as `value`) picks a thinking level directly (a phone's effort menu).
 	 */
 	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
 		const effortGlyph = cx.supports("effort");
@@ -1117,6 +1214,8 @@ export class CustomEditor extends Editor {
 		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
 		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
 		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";
+		// The keys away at an ask above: the composer folds until a click or a key brings them back.
+		const folded = state.ask !== undefined && !this.focused;
 		const key = [
 			shell?.kind,
 			shell?.excluded,
@@ -1127,6 +1226,9 @@ export class CustomEditor extends Editor {
 			modelKey,
 			interruptKey,
 			state.viewing?.join("\u0001"),
+			state.btw,
+			state.ask,
+			folded,
 			effortGlyph,
 			state.thinkingInModel,
 		].join("\0");
@@ -1178,8 +1280,13 @@ export class CustomEditor extends Editor {
 			"line",
 		);
 		const layout: NativeEditorLayout = {
-			role: shell ? `omp.editor.${shell.kind}` : "omp.editor",
+			role: shell
+				? `omp.editor.${shell.kind === "btw" ? "btw-ask" : shell.kind}`
+				: state.btw
+					? "omp.editor.btw"
+					: "omp.editor",
 			tone: state.running ? "pending" : undefined,
+			...(folded ? { folded: true } : {}),
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
@@ -1242,6 +1349,23 @@ export class CustomEditor extends Editor {
 				},
 			),
 			"focus",
+		);
+	}
+
+	/**
+	 * The `btw` chip before the input while drafts go to a `/btw` note; a click goes back to the
+	 * chat as the interrupt key does (the note owns it first).
+	 */
+	#describeBtwChip(interruptKey: KeyId): NativeNode {
+		return keyed(
+			row([node("text", { spans: [span("btw", "accent")], wrap: "none" }, undefined, "label")], {
+				role: "omp.composer.mode",
+				gap: "xs",
+				align: "center",
+				title: `Asking the side question · back to the chat  ${formatTooltipKey(interruptKey)}`,
+				actions: { click: "interrupt" },
+			}),
+			"mode",
 		);
 	}
 
@@ -1350,44 +1474,74 @@ export class CustomEditor extends Editor {
 						"dictation",
 					);
 		const dictating = dictationHoldsDraft(state.dictation);
-		const submit = state.running
-			? node(
-					"text",
-					{
-						role: "omp.composer.stop",
-						text: "Stop",
-						tone: "error",
-						title: `Stop  ${formatTooltipKey(interruptKey)}`,
-						actions: { click: "interrupt" },
-					},
-					undefined,
-					"stop",
-				)
-			: node(
-					"kbd",
-					{
-						role: "omp.composer.send",
-						keys: ["enter"],
-						title: dictating ? "Finish dictation before sending" : `Send  ${formatTooltipKey("enter")}`,
-						tone: dictating ? "muted" : undefined,
-						actions: dictating ? undefined : { click: "submit" },
-					},
-					undefined,
-					"send",
-				);
-		if (!shell) return { focus, mode: undefined, model, effort, dictation, submit };
-		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
+		const submit =
+			state.ask === "skip"
+				? node(
+						"text",
+						{
+							role: "omp.composer.skip",
+							text: "Skip & send",
+							tone: "warning",
+							title: `Send this message instead of answering the questions  ${formatTooltipKey("enter")}`,
+							actions: { click: "submit" },
+						},
+						undefined,
+						"skip",
+					)
+				: state.running
+					? node(
+							"text",
+							{
+								role: "omp.composer.stop",
+								text: "Stop",
+								tone: "error",
+								title: `Stop  ${formatTooltipKey(interruptKey)}`,
+								actions: { click: "interrupt" },
+							},
+							undefined,
+							"stop",
+						)
+					: node(
+							"kbd",
+							{
+								role: "omp.composer.send",
+								keys: ["enter"],
+								title: dictating ? "Finish dictation before sending" : `Send  ${formatTooltipKey("enter")}`,
+								tone: dictating ? "muted" : undefined,
+								actions: dictating ? undefined : { click: "submit" },
+							},
+							undefined,
+							"send",
+						);
+		if (!shell) {
+			const mode = state.btw
+				? this.#describeBtwChip(interruptKey)
+				: state.ask === "skip"
+					? keyed(
+							row([node("text", { spans: [span("skips ask", "warning")], wrap: "none" }, undefined, "label")], {
+								role: "omp.composer.mode",
+								tone: "warning",
+								gap: "xs",
+								align: "center",
+								title: "Sending this message skips the questions above",
+							}),
+							"mode",
+						)
+					: undefined;
+			return { focus, mode, model, effort, dictation, submit };
+		}
+		const runs =
+			shell.kind === "bash"
+				? "Runs in your shell"
+				: shell.kind === "python"
+					? "Runs in Python"
+					: "Asks a /btw side question";
 		const mode = keyed(
 			row(
 				compact([
 					shell.excluded &&
 						node("icon", { name: "eye-off", title: "Not sent to the model" }, undefined, "excluded"),
-					node(
-						"text",
-						{ spans: [span(shell.kind, shell.kind === "bash" ? "bashMode" : "pythonMode")], wrap: "none" },
-						undefined,
-						"label",
-					),
+					node("text", { spans: [span(shell.kind, `${shell.kind}Mode`)], wrap: "none" }, undefined, "label"),
 				]),
 				{
 					role: "omp.composer.mode",
@@ -1430,6 +1584,9 @@ export class CustomEditor extends Editor {
 			case "thinking.cycle":
 				this.onCycleThinkingLevel?.();
 				return;
+			case "thinking.set":
+				if (event.value) this.onSetThinkingLevel?.(event.value);
+				return;
 			case "dictation.toggle": {
 				const { dictation } = this.composerState();
 				if (dictation !== undefined && dictation !== "transcribing") this.onToggleDictation?.();
@@ -1452,6 +1609,8 @@ export class CustomEditor extends Editor {
 	onExit?: () => void;
 	onDisplayReset?: () => void;
 	onCycleThinkingLevel?: () => void;
+	/** A thinking level (`off`, `auto`, `minimal`…`max`) was picked by pointer. */
+	onSetThinkingLevel?: (level: string) => void;
 	onCycleModelForward?: () => void;
 	onCycleModelBackward?: () => void;
 	onSelectModel?: () => void;
@@ -1895,15 +2054,15 @@ export class CustomEditor extends Editor {
 		// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
 		// completes — fixes the race where submit runs against an empty `pendingImages`.
 		if (remaining.length > 0) this.#pendingInput.push(draft ? { draft: remaining } : remaining);
-		if (content.length === 0 && this.onPasteImage) {
+		const image = classifyImagePaste(content);
+		if (image.kind === "clipboard" && this.onPasteImage) {
 			this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 			return true;
 		}
-		const attachmentPaths = extractImagePastePathsFromText(content);
-		if (attachmentPaths && this.onPasteImagePath) {
+		if (image.kind === "paths" && this.onPasteImagePath) {
 			this.#trackAsyncPaste(
 				(async () => {
-					for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
+					for (const p of image.paths) await this.onPasteImagePath?.(p);
 				})(),
 			);
 			return true;
@@ -1922,8 +2081,11 @@ export class CustomEditor extends Editor {
 
 	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
 	 *  queue body beneath it. `hadBareQueuePrefix` is the pre-edit state: a prompt that was
-	 *  already just the prefix is left alone so the user can keep editing it. */
+	 *  already just the prefix is left alone so the user can keep editing it. Natively drawn
+	 *  (Tern), the prefix stays as dimmed text rather than a `Queueing` label, so the body
+	 *  goes on the same line and nothing is opened. */
 	#normalizeQueuePrefix(hadBareQueuePrefix: boolean): void {
+		if (isNativeRendering()) return;
 		if (hadBareQueuePrefix || !(this.textEquals("->") || this.textEquals("=>"))) return;
 		const cursor = this.getCursor();
 		if (cursor.line === 0 && cursor.col === 2) {

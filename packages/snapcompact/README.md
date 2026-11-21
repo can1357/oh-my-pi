@@ -34,7 +34,7 @@ A host that downscales images before the model reads them (catalog `image-max-ed
 bun add @oh-my-pi/snapcompact
 ```
 
-Ships TypeScript source directly (no build step); requires Bun ≥ 1.3.14.
+Ships TypeScript source directly (no build step); requires Bun ≥ 1.4.4.
 
 ## Usage
 
@@ -62,7 +62,7 @@ const result = await compact(preparation, { model });
 
 - **Compaction**: `compact`, `CompactionPreparation`, `CompactionResult`, `getPreservedArchive`, `images`, `historyBlocks`, `capFrameDataBytes`
 - **Rendering**: `render`, `renderMany`, `frames`, `geometry`
-- **Shapes**: `SHAPES`, `SHAPE_VARIANTS`, `resolveShape`, `resolveShapeForText`, `idealShapeVariant`, `isShape`, `isShapeVariantName`
+- **Shapes**: `SHAPES`, `SHAPE_VARIANTS`, `resolveShape`, `resolveShapeForText`, `resolveShapeAndScan`, `idealShapeVariant`, `isShape`, `isShapeVariantName`
 - **Text**: `serializeConversation`, `normalize`, `scanRenderability`, `renderabilityProbeText`, `dimStopwords`, `wrap`
 - **Budgets**: `providerImageBudget`, `frameDataBytesBudget`, `MAX_FRAMES_DEFAULT`, `FRAME_TOKEN_ESTIMATE`, `frameBilling`, `frameTokens`, `frameBillingKey`, `plannedFrameTokens`, `HQ_EDGE_FRAMES`
 - **File ops**: `createFileOps`, `computeFileLists`, `upsertFileOperations`

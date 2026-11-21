@@ -182,6 +182,7 @@ function checkNode(ir: IR, v: unknown): boolean {
 			return v instanceof ir.ctor;
 		case "refine":
 			if (!checks(ir.base, v)) return false;
+			if (ir.check !== undefined) return ir.check(v);
 			try {
 				return ir.pred(v) === true;
 			} catch {

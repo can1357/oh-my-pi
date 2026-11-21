@@ -1,6 +1,9 @@
 import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
+import { cachedPngConversion, convertImageToPngShared } from "../png-conversion";
 import { getKittyGraphics } from "../kitty-graphics";
+import { ensureSixelRasterWidth } from "../sixel";
 import {
+	calculateImageFit,
 	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
@@ -35,9 +38,10 @@ export interface ImageOptions {
 	 */
 	imageKey?: string;
 	/**
-	 * Schedules a repaint once this image's off-thread SIXEL encode lands.
-	 * Defaults to the budget's repaint; a host without a budget must pass one,
-	 * or the image's reserved rows stay blank until an unrelated repaint.
+	 * Schedules a repaint once this image's off-thread SIXEL encode or Kitty PNG
+	 * conversion lands. Defaults to the budget's repaint; a host without a budget
+	 * must pass one, or its pending rows (blank for SIXEL, the text fallback's
+	 * label on the last row for Kitty) stay until an unrelated repaint.
 	 */
 	requestRender?: () => void;
 }
@@ -47,6 +51,12 @@ interface SixelEncode {
 	heightPx: number;
 	backgroundRgb: number;
 	sequence?: string | null;
+}
+
+/** A PNG copy of an image for Kitty, sized from the PNG itself. */
+interface KittyPng {
+	data: string;
+	dimensions: ImageDimensions;
 }
 
 /** Renders in progress whose rows are bound for native scrollback. */
@@ -63,6 +73,31 @@ export function renderForScrollback<T>(render: () => T): T {
 		return render();
 	} finally {
 		scrollbackRenderDepth--;
+	}
+}
+
+/** Renders in progress that measure rows outside display order; see {@link measureRender}. */
+let measureRenderDepth = 0;
+/** Budgeted image observations made under {@link measureRender}; only differences are meaningful. */
+let measuredImageObservations = 0;
+
+/**
+ * Run `render` to measure rows outside display order — a newest-first height
+ * walk, say. {@link ImageBudget} derives demotion from the order images are
+ * observed in, so a budgeted {@link Image} inside this scope claims no display
+ * slot: it replays the decision its slot in the surface's last full pass
+ * implies. `images` reports whether any budgeted image was observed; the caller
+ * MUST render every such block it lays out again, outside this scope and in
+ * display order, or its images keep no slot in the pass.
+ */
+export function measureRender<T>(render: () => T): { value: T; images: boolean } {
+	const before = measuredImageObservations;
+	measureRenderDepth++;
+	try {
+		const value = render();
+		return { value, images: measuredImageObservations !== before };
+	} finally {
+		measureRenderDepth--;
 	}
 }
 
@@ -103,16 +138,16 @@ interface SurfaceSplit {
 	/** Images the last full pass on this surface observed. */
 	lastTotal: number;
 	/**
-	 * Image ids shown as text in the frame currently on this surface: the
-	 * display-order prefix [0, onTerminal) of its last full pass, snapshotted by
-	 * id so a partial pass reproduces the on-screen live/text split without a
-	 * full, correctly-ordered walk.
+	 * Display slot of every image the last full pass on this surface observed,
+	 * keyed by id. A pass that cannot derive display order from its own walk — a
+	 * partial `stable` pass, or a {@link measureRender} scope — replays its
+	 * decisions from these slots instead.
 	 */
-	readonly suppressedIds: Set<number>;
+	readonly slots: Map<number, number>;
 }
 
 function newSurfaceSplit(): SurfaceSplit {
-	return { onTerminal: 0, planned: 0, lastTotal: 0, suppressedIds: new Set() };
+	return { onTerminal: 0, planned: 0, lastTotal: 0, slots: new Map() };
 }
 
 /** Return a split to "nothing has been painted on this surface yet", in place. */
@@ -120,7 +155,7 @@ function resetSurfaceSplit(split: SurfaceSplit): void {
 	split.onTerminal = 0;
 	split.planned = 0;
 	split.lastTotal = 0;
-	if (split.suppressedIds.size > 0) split.suppressedIds.clear();
+	if (split.slots.size > 0) split.slots.clear();
 }
 
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
@@ -275,7 +310,15 @@ export class ImageBudget {
 	 */
 	release(key: string): void {
 		const id = this.#keyToId.get(key);
-		if (id !== undefined) this.#released.add(id);
+		if (id !== undefined) this.releaseId(id);
+	}
+
+	/**
+	 * {@link release} by id, for an owner holding the component: an image retired by the
+	 * residency sweep and transmitted again keeps its id but no longer maps from its key.
+	 */
+	releaseId(id: number): void {
+		this.#released.add(id);
 	}
 
 	/**
@@ -335,16 +378,23 @@ export class ImageBudget {
 	 * During a `stable` pass ({@link beginPass}) the call order and visible subset
 	 * are not authoritative, so the decision is the surface's committed
 	 * on-terminal split, keyed by id — order- and partiality-independent.
+	 *
+	 * Inside {@link measureRender} the call claims no slot: it answers what the
+	 * image's slot in the last full pass implies under the planned threshold,
+	 * which is what the display-order render that follows will decide once the
+	 * split has converged.
 	 */
 	observe(imageId: number): boolean {
+		if (measureRenderDepth > 0) measuredImageObservations++;
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
-			const suppressed = this.#cap > 0 && this.#split.suppressedIds.has(imageId);
+			const suppressed = this.#cap > 0 && this.#lastSlotBelow(imageId, this.#split.onTerminal);
 			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
 			return suppressed;
 		}
+		if (measureRenderDepth > 0) return this.#cap > 0 && this.#lastSlotBelow(imageId, this.#split.planned);
 		const index = this.#passIds.length;
 		this.#passIds.push(imageId);
 		const suppressed = this.#cap > 0 && index < this.#split.planned;
@@ -352,6 +402,12 @@ export class ImageBudget {
 		this.#passIndex.set(imageId, index);
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
+	}
+
+	/** Whether `imageId` held a display slot below `threshold` in the last full pass on this surface. */
+	#lastSlotBelow(imageId: number, threshold: number): boolean {
+		const slot = this.#split.slots.get(imageId);
+		return slot !== undefined && slot < threshold;
 	}
 
 	/**
@@ -372,14 +428,12 @@ export class ImageBudget {
 			this.#applyingReset = false;
 		}
 		const retry = this.#reconcile(total);
-		// Snapshot the committed display-order suppression by id: the prefix
-		// [0, onTerminal) is what this surface currently shows as text. Partial
-		// passes replay this per id (see #stablePass) instead of re-deriving it
-		// from a reversed, tail-only walk.
-		const suppressedIds = split.suppressedIds;
-		if (suppressedIds.size > 0) suppressedIds.clear();
-		const suppressedCount = Math.min(total, split.onTerminal);
-		for (let i = 0; i < suppressedCount; i++) suppressedIds.add(this.#passIds[i]);
+		// Snapshot display order by id. Partial passes (see #stablePass) and
+		// measuring renders replay their decisions from it instead of
+		// re-deriving them from a reversed or tail-only walk.
+		const slots = split.slots;
+		if (slots.size > 0) slots.clear();
+		for (let i = 0; i < total; i++) slots.set(this.#passIds[i], i);
 		return retry;
 	}
 
@@ -666,14 +720,22 @@ export class Image implements Component {
 	#cachedSixelBackground: number | undefined;
 	#cachedKittyUnicodePlaceholders = false;
 	#cachedLinked = false;
-	// Tallest graphic placement this image has rendered. The text fallback
-	// pads itself to this height so a budget demotion never shrinks the block
-	// (its rows may already be committed to native scrollback).
+	// Tallest graphic placement this image has rendered or reserved (a pending
+	// Kitty PNG conversion). The text fallback pads itself to this height so a
+	// budget demotion never shrinks the block (its rows may already be committed
+	// to native scrollback).
 	#renderedGraphicRows = 0;
 	/** Described node and the link policy it was built under (an `off` switch drops its `href`). */
 	#native?: { linked: boolean; node: NativeNode };
 	/** Newest SIXEL encode: target size, compositing background, and settled sequence. */
 	#sixel?: SixelEncode;
+	/**
+	 * PNG copy of the source for Kitty, with its own size (decoding applies JPEG
+	 * EXIF orientation, so it can differ from the source header's); `null` once
+	 * conversion failed.
+	 */
+	#kittyPng?: KittyPng | null;
+	#kittyPngPending = false;
 
 	constructor(
 		base64Data: string,
@@ -707,9 +769,35 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	/** Refit to a new column ceiling. */
+	setMaxWidthCells(maxWidthCells: number): void {
+		if (this.#options.maxWidthCells === maxWidthCells) return;
+		this.#options.maxWidthCells = maxWidthCells;
+		this.#native = undefined;
+		this.invalidate();
+	}
+
+	/**
+	 * Refit to a new row ceiling; a SIXEL reserves its rows until the off-thread
+	 * encode lands. A demoted fallback keeps the height already drawn only
+	 * within the new ceiling: the owner chose to shrink the block.
+	 */
+	setMaxHeightCells(maxHeightCells: number): void {
+		if (this.#options.maxHeightCells === maxHeightCells) return;
+		this.#options.maxHeightCells = maxHeightCells;
+		this.#renderedGraphicRows = Math.min(this.#renderedGraphicRows, maxHeightCells);
+		this.#native = undefined;
+		this.invalidate();
+	}
+
 	releaseRenderCaches(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
+	}
+
+	/** Retire this image's graphic as soon as no frame shows it: for an owner closing it for good. */
+	release(): void {
+		if (this.#imageId != null) this.#budget?.releaseId(this.#imageId);
 	}
 
 	/**
@@ -736,7 +824,7 @@ export class Image implements Component {
 		const request: SixelEncode = { widthPx, heightPx, backgroundRgb };
 		this.#sixel = request;
 		const settle = (sequence: string | null): void => {
-			request.sequence = sequence;
+			request.sequence = sequence === null ? null : ensureSixelRasterWidth(sequence);
 			if (this.#sixel !== request || getTerminalBackgroundColor() !== backgroundRgb) return;
 			this.invalidate();
 			if (this.#options.requestRender) this.#options.requestRender();
@@ -744,6 +832,40 @@ export class Image implements Component {
 		};
 		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx, backgroundRgb).then(
 			settle,
+			() => settle(null),
+		);
+		return undefined;
+	}
+
+	/**
+	 * PNG to send over Kitty, whose `f=100` takes PNG only: any other format
+	 * leaves the placement's reserved rows blank. A non-PNG source answers
+	 * `undefined` (rows reserved) until its off-thread conversion lands and
+	 * repaints, and `null` when it cannot be decoded.
+	 */
+	#kittyPngData(): KittyPng | null | undefined {
+		if (this.#kittyPng !== undefined) return this.#kittyPng;
+		if (this.#mimeType === "image/png") {
+			return (this.#kittyPng = { data: this.#base64Data, dimensions: this.#dimensions });
+		}
+		// Before the cache lookup: it hashes the whole payload, and a pending budgeted image misses the render cache every frame.
+		if (this.#kittyPngPending) return undefined;
+		const toKittyPng = (data: string): KittyPng => ({
+			data,
+			dimensions: getImageDimensions(data, "image/png") ?? this.#dimensions,
+		});
+		const source = { type: "image" as const, data: this.#base64Data, mimeType: this.#mimeType };
+		const cached = cachedPngConversion(source);
+		if (cached) return (this.#kittyPng = toKittyPng(cached.data));
+		this.#kittyPngPending = true;
+		const settle = (png: KittyPng | null): void => {
+			this.#kittyPng = png;
+			this.invalidate();
+			if (this.#options.requestRender) this.#options.requestRender();
+			else this.#budget?.requestRender();
+		};
+		convertImageToPngShared(source).then(
+			({ data }) => settle(toKittyPng(data)),
 			() => settle(null),
 		);
 		return undefined;
@@ -824,13 +946,28 @@ export class Image implements Component {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
 			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
-			const result = renderImage(this.#base64Data, this.#dimensions, {
-				maxWidthCells: maxWidth,
-				maxHeightCells: this.#options.maxHeightCells,
-				imageId: this.#imageId,
-				includeTransmit: needsTransmit,
-				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
-			});
+			const kittyPng = imageProtocol === ImageProtocol.Kitty ? this.#kittyPngData() : undefined;
+			const dimensions = kittyPng?.dimensions ?? this.#dimensions;
+			if (imageProtocol === ImageProtocol.Kitty && kittyPng === undefined) {
+				// Reserve the image's rows while its PNG converts, as a pending SIXEL
+				// encode does, so landing it does not reflow everything below.
+				const fit = calculateImageFit(
+					this.#dimensions,
+					{ maxWidthCells: maxWidth, maxHeightCells: this.#options.maxHeightCells },
+					cellDimensions,
+				);
+				this.#renderedGraphicRows = Math.max(this.#renderedGraphicRows, fit.rows);
+			}
+			const result =
+				imageProtocol === ImageProtocol.Kitty && !kittyPng
+					? null
+					: renderImage(kittyPng?.data ?? this.#base64Data, dimensions, {
+							maxWidthCells: maxWidth,
+							maxHeightCells: this.#options.maxHeightCells,
+							imageId: this.#imageId,
+							includeTransmit: needsTransmit,
+							sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
+						});
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {
 				this.#budget.enqueueTransmit(this.#imageId, result.transmit);
@@ -845,15 +982,11 @@ export class Image implements Component {
 				// height. First (rows-1) lines are empty (TUI clears them); the last
 				// saves the final-row cursor, moves up to the image origin, emits the
 				// image sequence, then restores the final-row cursor. When the block
-				// straddles the viewport top, the renderer rewrites this line to the
-				// visible slice (encodeKittyPlacementLine) from the geometry
-				// registered below.
+				// straddles the viewport top, the renderer crops the source raster
+				// for SIXEL or rewrites the Kitty placement's visible source slice
+				// from the geometry registered below.
 				if (this.#imageId != null && this.#budget !== undefined) {
-					this.#budget.registerPlacementGeometry(
-						this.#imageId,
-						this.#dimensions.widthPx,
-						this.#dimensions.heightPx,
-					);
+					this.#budget.registerPlacementGeometry(this.#imageId, dimensions.widthPx, dimensions.heightPx);
 				}
 				lines = [];
 				for (let i = 0; i < result.rows - 1; i++) {

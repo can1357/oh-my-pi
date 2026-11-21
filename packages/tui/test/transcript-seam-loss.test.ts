@@ -79,7 +79,7 @@ describe("transcript rows under chrome that outlives the turn", () => {
 			message.updateContent(reply(lines.join("\n\n")));
 			message.markTranscriptBlockFinalized();
 			composer.ui.requestRender();
-			// Past the idle-chrome settle window, the chrome that outlived the turn is permanent.
+			// The chrome that outlived the turn stays up.
 			await scheduler.advance(terminal, 300);
 
 			const counts = new Map<number, number>();
@@ -123,7 +123,7 @@ describe("transcript rows under chrome that outlives the turn", () => {
 			try {
 				await scheduler.advance(terminal, 300);
 				if (mounting === "runtime remount") {
-					// Replacing session-aware roots resets floor bookkeeping, but
+					// Replacing session-aware roots resets its layout state, but
 					// does not imply another agent run or erase existing history.
 					composer.setRuntimeChildren([transcript, chrome, editor]);
 					await scheduler.advance(terminal, 300);
@@ -149,8 +149,7 @@ describe("transcript rows under chrome that outlives the turn", () => {
 				composer.ui.requestRender();
 				await scheduler.advance(terminal, 300);
 				const editorRow = terminal.getViewport().findIndex(row => row.includes("EDITOR"));
-				expect(editorRow).toBeGreaterThanOrEqual(0);
-				expect(editorRow).toBeLessThan(rows - 1);
+				expect(editorRow).toBe(rows - 1);
 				expect(history()).toEqual([...shell, ...lines]);
 			} finally {
 				composer.stop();
@@ -164,11 +163,10 @@ describe("transcript rows under chrome that outlives the turn", () => {
 		const chrome = new TurnChrome();
 		const editorRoot = new Container();
 		editorRoot.addChild(composer.editor);
-		composer.setRuntimeChildren([transcript, chrome, editorRoot], { transientChrome: [editorRoot] });
+		composer.setRuntimeChildren([transcript, chrome, editorRoot]);
 		await scheduler.settle(terminal);
 		return async (beforeStream?: () => Promise<void>): Promise<string[]> => {
 			await beforeStream?.();
-			composer.setRunActive(true);
 			const message = new AssistantMessageComponent();
 			transcript.addChild(message);
 			chrome.rows = 7;
@@ -180,7 +178,6 @@ describe("transcript rows under chrome that outlives the turn", () => {
 			}
 			message.updateContent(reply(lines.join("\n\n")));
 			message.markTranscriptBlockFinalized();
-			composer.setRunActive(false);
 			composer.ui.requestRender();
 			await scheduler.advance(terminal, 300);
 			const seen = new Set<string>();
@@ -234,4 +231,110 @@ describe("transcript rows under chrome that outlives the turn", () => {
 			composer.stop();
 		}
 	});
+
+	// A todo list created mid-run stays up until the run ends, which can be hours later. Retiring
+	// against a viewport taller than the painted one left the rows right below the scrollback seam
+	// on no screen and in no scrollback: a tool card read as cut off after its top rows.
+	it("leaves no row off both screen and scrollback under a HUD that stays up mid-run", async () => {
+		const terminal = new VirtualTerminal(COLUMNS, 30);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		const hud = new TurnChrome();
+		const editor = new Container();
+		editor.addChild(new Text("EDITOR", 0, 0));
+		composer.setRuntimeChildren([transcript, hud, editor]);
+		composer.start({ playWelcomeIntro: false });
+		try {
+			await scheduler.settle(terminal);
+			hud.rows = 7;
+			const lines: string[] = [];
+			const stream = async (count: number): Promise<void> => {
+				for (let i = 0; i < count; i++) {
+					const line = `QZR${String(lines.length).padStart(3, "0")}`;
+					lines.push(line);
+					transcript.addChild({ render: () => [line] });
+					composer.ui.requestRender();
+					await scheduler.advance(terminal, 20);
+				}
+			};
+			const shown = (): string[] =>
+				terminal
+					.getScrollBuffer()
+					.map(row => Bun.stripANSI(row).trim())
+					.filter(row => row.startsWith("QZR"));
+			await stream(60);
+			// The run is still going and the HUD is still up.
+			expect(shown()).toEqual(lines);
+			expect(terminal.getViewport().filter(row => row.includes("Turn chrome row ")).length).toBe(7);
+
+			// Tasks close and the list clears while output keeps arriving: the rows it covered
+			// stay in scrollback, and newer output fills the rows it gives up.
+			hud.rows = 4;
+			await stream(30);
+			hud.rows = 0;
+			await stream(30);
+			await scheduler.advance(terminal, 300);
+			expect(shown()).toEqual(lines);
+			expect(terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(29);
+		} finally {
+			composer.stop();
+		}
+	});
+
+	// A HUD that appears after the run and stays must not leave a hole in the transcript above it.
+	for (const [rows, hudRows] of [
+		[43, 8],
+		[50, 8],
+	] as const) {
+		it(`keeps every paragraph on screen or in scrollback under a ${hudRows}-row HUD that outlives the turn at ${rows} rows`, async () => {
+			const terminal = new VirtualTerminal(COLUMNS, rows);
+			const scheduler = new VirtualRenderScheduler();
+			const composer = new Composer({
+				terminal,
+				tuiOptions: { renderScheduler: scheduler },
+				preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			});
+			const transcript = new TranscriptContainer();
+			const hud = new TurnChrome();
+			const editor = new Container();
+			editor.addChild(new Text("EDITOR", 0, 0));
+			composer.setRuntimeChildren([transcript, hud, editor]);
+			composer.start({ playWelcomeIntro: false });
+			try {
+				await scheduler.settle(terminal);
+				const tokens: string[] = [];
+				for (let turn = 0; turn < 8; turn++) {
+					const message = new AssistantMessageComponent();
+					const paragraphs = Array.from({ length: 4 }, (_, p) => {
+						const token = `QZH${turn}${p}`;
+						tokens.push(token);
+						return `${token} ${Array.from({ length: 45 }, (_, i) => `w${(i * 7 + p) % 11}ord`).join(" ")}`;
+					});
+					message.updateContent(reply(paragraphs.join("\n\n")));
+					message.markTranscriptBlockFinalized();
+					transcript.addChild(message);
+					composer.ui.requestRender();
+					await scheduler.settle(terminal);
+				}
+				await scheduler.advance(terminal, 300);
+				// The HUD appears after the run and stays.
+				hud.rows = hudRows;
+				composer.ui.requestRender();
+				await scheduler.advance(terminal, 300);
+				const text = terminal
+					.getScrollBuffer()
+					.map(row => Bun.stripANSI(row))
+					.join("\n");
+				expect(tokens.filter(token => !text.includes(token))).toEqual([]);
+				expect(terminal.getViewport().filter(row => row.includes("Turn chrome row ")).length).toBe(hudRows);
+			} finally {
+				composer.stop();
+			}
+		});
+	}
 });

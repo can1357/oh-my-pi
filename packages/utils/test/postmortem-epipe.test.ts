@@ -19,6 +19,7 @@ const CHILD_FLAGS = [
 	socketClosedChildFlag,
 	deferNonEpipeChildFlag,
 ];
+if (CHILD_FLAGS.some(flag => process.argv.includes(flag))) postmortem.installProcessHandlers();
 if (process.argv.includes(unrelatedUncaughtChildFlag)) {
 	// A synchronous throw with no stdio identity must stay fatal.
 	setImmediate(() => {

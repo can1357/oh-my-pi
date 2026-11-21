@@ -130,7 +130,7 @@ describe("expanded tool results reveal clipped rows", () => {
 
 describe("lsp expand hint", () => {
 	const references = (count: number) =>
-		`${count} reference(s)\n${Array.from({ length: count }, (_, i) => `  src/a.ts:${i + 1}:1`).join("\n")}`;
+		`Found ${count} reference(s):\n${Array.from({ length: count }, (_, i) => `  src/a.ts:${i + 1}:1`).join("\n")}`;
 
 	it("lists every reference location once expanded", () => {
 		const text = plain(
@@ -140,7 +140,7 @@ describe("lsp expand hint", () => {
 				theme,
 			),
 		);
-		expect(text).toContain("line 5, col 1");
+		expect(text).toContain("└─ 5:1");
 		expect(text).not.toContain("more");
 	});
 
@@ -150,10 +150,45 @@ describe("lsp expand hint", () => {
 				renderLspResult({ content: [{ type: "text", text }] }, { expanded: false, isPartial: false }, theme),
 			).includes("Expand");
 		expect(hint(references(1))).toBe(false);
-		expect(hint(references(2))).toBe(true);
+		expect(hint(references(2))).toBe(false);
+		expect(hint(references(3))).toBe(true);
 		expect(hint("Reloaded")).toBe(false);
 		expect(hint(long)).toBe(true);
 		expect(hint(`1 error(s)\nsrc/a.ts:3:5 [error] [ts] ${long} (2345)`)).toBe(true);
+	});
+});
+
+describe("debug call rows sanitize raw model args", () => {
+	const cases = [
+		{ args: { program: "bin\tary" }, fragments: ["bin", "ary"] },
+		{ args: { command: "run\ttests" }, fragments: ["run", "tests"] },
+	];
+
+	it("keeps a tab in program or command out of the rendered card row and native head", () => {
+		for (const { args, fragments } of cases) {
+			const row = plain(debugToolRenderer.renderCall(args, { expanded: false, isPartial: true }, theme));
+			expect(row).not.toContain("\t");
+			for (const fragment of fragments) expect(row).toContain(fragment);
+			expect(JSON.stringify(debugToolRenderer.describeCall(args))).not.toContain("\t");
+		}
+	});
+});
+
+describe("debug result header sanitizes the raw action", () => {
+	it("keeps a tab and an OSC title sequence out of the rendered card header", () => {
+		const rendered = debugToolRenderer
+			.renderResult({ content: [{ type: "text", text: "ok" }] }, { expanded: false, isPartial: false }, theme, {
+				action: "launch\t\x1b]0;pwned\x07X",
+			})
+			.render(width)
+			.join("\n");
+		const row = Bun.stripANSI(rendered);
+		expect(row).not.toContain("\t");
+		// Pre-strip: the raw OSC bytes must not survive into the header row.
+		expect(rendered).not.toContain("\x1b]0;pwned");
+		// The tab expands to `TAB_SPACES`; both halves of the action must remain.
+		expect(row).toContain("Debug launch");
+		expect(row).toContain("X");
 	});
 });
 
@@ -167,6 +202,6 @@ describe("expanded lsp detail rows", () => {
 		const first = rows.findIndex(row => row.includes("[ts] wide-content"));
 		const last = rows.findIndex(row => row.includes(MARK));
 		expect(last).toBeGreaterThan(first);
-		for (const row of rows.slice(first, last + 1)) expect(row).toStartWith(`|  ${ascii.tree.vertical}  `);
+		for (const row of rows.slice(first, last + 1)) expect(row).toStartWith(`${ascii.tree.vertical}  `);
 	});
 });

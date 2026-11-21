@@ -127,4 +127,61 @@ describe("parseReviewDiffSnapshot", () => {
 		expect(added.raw).toBe("+world");
 		expect(added.content).toBe("world");
 	});
+
+	it("preserves unquoted spaced paths on mode-only diffs and decodes octal rename paths", () => {
+		const modeOnly = ["diff --git a/src/my script.sh b/src/my script.sh", "old mode 100644", "new mode 100755"].join(
+			"\n",
+		);
+		const octalRename = [
+			'diff --git "a/src/caf\\303\\251 old.ts" "b/src/caf\\303\\251 new.ts"',
+			"similarity index 100%",
+			'rename from "src/caf\\303\\251 old.ts"',
+			'rename to "src/caf\\303\\251 new.ts"',
+		].join("\n");
+
+		const snapshot = parseReviewDiffSnapshot([modeOnly, octalRename].join("\n"));
+		expect(snapshot.files).toHaveLength(2);
+		expect(snapshot.files[0]).toMatchObject({
+			path: "src/my script.sh",
+			oldPath: "src/my script.sh",
+			newPath: "src/my script.sh",
+		});
+		expect(snapshot.files[1]).toMatchObject({
+			path: "src/café new.ts",
+			oldPath: "src/café old.ts",
+			newPath: "src/café new.ts",
+		});
+	});
+
+	it("strips custom source and destination prefixes from supplied diffs", () => {
+		const snapshot = parseReviewDiffSnapshot(
+			[
+				"diff --git old/src/a.ts new/src/a.ts",
+				"index 1234567..89abcdef 100644",
+				"--- old/src/a.ts",
+				"+++ new/src/a.ts",
+				"@@ -1 +1 @@",
+				"-old",
+				"+new",
+			].join("\n"),
+		);
+
+		expect(snapshot.files).toHaveLength(1);
+		expect(snapshot.files[0]).toMatchObject({
+			path: "src/a.ts",
+			oldPath: "src/a.ts",
+			newPath: "src/a.ts",
+			linesAdded: 1,
+			linesRemoved: 1,
+		});
+	});
+
+	it("normalizes CRLF rename-only sections without similarity metadata", () => {
+		const snapshot = parseReviewDiffSnapshot(
+			["diff --git a/old.ts b/new.ts\r", "rename from old.ts\r", "rename to new.ts\r", ""].join("\n"),
+		);
+
+		expect(snapshot.files).toHaveLength(1);
+		expect(snapshot.files[0]).toMatchObject({ path: "new.ts", oldPath: "old.ts", newPath: "new.ts" });
+	});
 });

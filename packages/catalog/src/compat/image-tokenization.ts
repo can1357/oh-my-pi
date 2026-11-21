@@ -36,11 +36,25 @@ export interface OpenAiPatchTokenization {
 	auto: "high" | "original";
 }
 
+/** DeepSeek ViT patches merged `downsample`² into one token, plus a newline per row and two delimiters. */
+export interface DeepSeekPatchTokenization {
+	regime: "deepseek-patch";
+	/** ViT patch edge in pixels. */
+	patchSize: number;
+	/** Patches merged per token along each axis. */
+	downsample: number;
+	/** Token budget per image, layout tokens included. */
+	maxTokens: number;
+	/** Smaller images are upscaled to this pixel area. */
+	minPixels: number;
+}
+
 /** One model line's image billing rule: the vendor formula and its per-model numbers. */
 export type ImageTokenization = (
 	| OpenAiPatchTokenization
 	/** Anthropic 28px patches, resized to fit a padded-edge limit and a visual-token budget. */
 	| { regime: "anthropic-patch"; maxEdge: number; maxTokens: number }
+	| DeepSeekPatchTokenization
 	/** A fixed per-image budget regardless of pixels (Gemini 3 `media_resolution`). */
 	| { regime: "fixed"; tokens: number }
 ) & {
@@ -54,7 +68,10 @@ const UNCLASSIFIED: Pick<ModelIdentity, "class"> = { class: "unknown" };
 function isImageTokenization(value: unknown): value is ImageTokenization {
 	return (
 		isRecord(value) &&
-		(value.regime === "openai-patch" || value.regime === "anthropic-patch" || value.regime === "fixed")
+		(value.regime === "openai-patch" ||
+			value.regime === "anthropic-patch" ||
+			value.regime === "deepseek-patch" ||
+			value.regime === "fixed")
 	);
 }
 
@@ -102,8 +119,11 @@ export function resolveImageMaxEdge(target: ImageTokenizationTarget): number | u
 	return typeof edge === "number" && edge > 0 ? edge : undefined;
 }
 
-/** Scale `size` down (never up) so its longest side is at most `maxEdge`. */
-function fitLongEdge(size: ImageSize, maxEdge: number): ImageSize {
+/**
+ * Scale `size` down (never up) so its longest side is at most `maxEdge`: what a host's `image-max-edge` does to
+ * an image, and how a caller sizes one to pass such a host untouched.
+ */
+export function fitLongEdge(size: ImageSize, maxEdge: number): ImageSize {
 	const longest = Math.max(size.width, size.height);
 	if (longest <= maxEdge) return size;
 	const scale = maxEdge / longest;
@@ -115,21 +135,41 @@ function fitLongEdge(size: ImageSize, maxEdge: number): ImageSize {
 
 const OPENAI_PATCH_PX = 32;
 
-/** <https://developers.openai.com/api/docs/guides/images-vision#patch-based-image-tokenization> */
-function openAiPatches(size: ImageSize, sizing: PatchSizing): number {
-	const { width, height } = fitLongEdge(size, sizing.maxEdge);
-	const patches = Math.ceil(width / OPENAI_PATCH_PX) * Math.ceil(height / OPENAI_PATCH_PX);
-	const budget = sizing.patchBudget;
-	if (budget === undefined || patches <= budget) return patches;
+/** 32px patches `size` covers, counting partial patches whole. */
+function openAiPatchCount({ width, height }: ImageSize): number {
+	return Math.ceil(width / OPENAI_PATCH_PX) * Math.ceil(height / OPENAI_PATCH_PX);
+}
 
+/** The level a `detail` value sizes like: `auto` and an omitted `detail` follow the rule's `auto`. */
+function openAiLevel(rule: OpenAiPatchTokenization, detail: ImageDetail | undefined): "low" | "high" | "original" {
+	return detail === "low" || detail === "high" || detail === "original" ? detail : rule.auto;
+}
+
+/**
+ * `size` after one `detail` level's resize: the long-edge fit, then the shrink to its patch budget. A side the
+ * budget squeezes out comes back 0.
+ * <https://developers.openai.com/api/docs/guides/images-vision#patch-based-image-tokenization>
+ */
+function openAiResize(size: ImageSize, sizing: PatchSizing): ImageSize {
+	const fitted = fitLongEdge(size, sizing.maxEdge);
+	const budget = sizing.patchBudget;
+	if (budget === undefined || openAiPatchCount(fitted) <= budget) return fitted;
+
+	const { width, height } = fitted;
 	const shrink = Math.sqrt((OPENAI_PATCH_PX * OPENAI_PATCH_PX * budget) / (width * height));
 	const scaledW = (width * shrink) / OPENAI_PATCH_PX;
 	const scaledH = (height * shrink) / OPENAI_PATCH_PX;
 	const adjusted = shrink * Math.min(Math.floor(scaledW) / scaledW, Math.floor(scaledH) / scaledH);
-	const resizedW = Math.floor(width * adjusted);
-	const resizedH = Math.floor(height * adjusted);
-	if (resizedW <= 0 || resizedH <= 0) return budget;
-	return Math.min(budget, Math.ceil(resizedW / OPENAI_PATCH_PX) * Math.ceil(resizedH / OPENAI_PATCH_PX));
+	return { width: Math.floor(width * adjusted), height: Math.floor(height * adjusted) };
+}
+
+/** Patches billed for `size` at one `detail` level, never more than its budget. */
+function openAiPatches(size: ImageSize, sizing: PatchSizing): number {
+	const resized = openAiResize(size, sizing);
+	const budget = sizing.patchBudget;
+	if (budget === undefined) return openAiPatchCount(resized);
+	if (resized.width <= 0 || resized.height <= 0) return budget;
+	return Math.min(budget, openAiPatchCount(resized));
 }
 
 const ANTHROPIC_PATCH_PX = 28;
@@ -141,24 +181,27 @@ function roundTiesToEven(value: number): number {
 	return floor % 2 === 0 ? floor : floor + 1;
 }
 
+/** 28px patches along `edge`, counting a partial patch whole. */
+function anthropicPatches(edge: number): number {
+	return Math.ceil(edge / ANTHROPIC_PATCH_PX);
+}
+
 /**
- * Anthropic visual tokens after the API's resize: the largest
- * aspect-preserving size whose 28px-padded edges fit `maxEdge` and whose
- * patch count fits `maxTokens`, found by bisecting the long edge. Port of the
- * reference implementation:
+ * `size` after the API's resize: the largest aspect-preserving size whose
+ * 28px-padded edges fit `maxEdge` and whose patch count fits `maxTokens`,
+ * found by bisecting the long edge. Port of the reference implementation:
  * <https://platform.claude.com/docs/en/build-with-claude/vision-coordinates#resize-your-image-before-uploading>
  */
-function anthropicTokens(size: ImageSize, maxEdge: number, maxTokens: number): number {
+function anthropicResize(size: ImageSize, maxEdge: number, maxTokens: number): ImageSize {
 	const long = Math.max(size.width, size.height);
 	const shortSide = Math.min(size.width, size.height);
 	const aspect = long / shortSide;
-	const patches = (l: number, s: number) => Math.ceil(l / ANTHROPIC_PATCH_PX) * Math.ceil(s / ANTHROPIC_PATCH_PX);
 	const fits = (l: number, s: number) =>
-		Math.ceil(l / ANTHROPIC_PATCH_PX) * ANTHROPIC_PATCH_PX <= maxEdge &&
-		Math.ceil(s / ANTHROPIC_PATCH_PX) * ANTHROPIC_PATCH_PX <= maxEdge &&
-		patches(l, s) <= maxTokens;
+		anthropicPatches(l) * ANTHROPIC_PATCH_PX <= maxEdge &&
+		anthropicPatches(s) * ANTHROPIC_PATCH_PX <= maxEdge &&
+		anthropicPatches(l) * anthropicPatches(s) <= maxTokens;
 	const short = (l: number) => Math.max(roundTiesToEven(l / aspect), 1);
-	if (fits(long, shortSide)) return patches(long, shortSide);
+	if (fits(long, shortSide)) return size;
 	let lo = 1; // always fits
 	let hi = long; // never fits
 	while (lo + 1 < hi) {
@@ -166,7 +209,47 @@ function anthropicTokens(size: ImageSize, maxEdge: number, maxTokens: number): n
 		if (fits(mid, short(mid))) lo = mid;
 		else hi = mid;
 	}
-	return patches(lo, short(lo));
+	return size.width >= size.height ? { width: lo, height: short(lo) } : { width: short(lo), height: lo };
+}
+
+/**
+ * DeepSeek tokens for `size` padded to whole patches: the patches merged
+ * `downsample`² into one token, a newline per row and two delimiters.
+ */
+function deepseekGridTokens({ width, height }: ImageSize, rule: DeepSeekPatchTokenization): number {
+	const rows = Math.ceil(Math.ceil(height / rule.patchSize) / rule.downsample);
+	const cols = Math.ceil(Math.ceil(width / rule.patchSize) / rule.downsample);
+	return rows * (cols + 1) + 2;
+}
+
+/**
+ * `size` after DeepSeek's resize: upscaled to `minPixels`, and when its
+ * padded token grid busts `maxTokens` shrunk to the largest
+ * aspect-preserving grid of whole patches that fits. Port of
+ * `plan_image_grid` in the reference processor (`max_wh_ratio` is unset in
+ * the V4.1 config):
+ * <https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/inference/image_processor.py>
+ */
+function deepseekResize(size: ImageSize, rule: DeepSeekPatchTokenization): ImageSize {
+	const { patchSize, downsample, maxTokens, minPixels } = rule;
+	const cell = patchSize * downsample;
+	let { width, height } = size;
+	if (width * height < minPixels) {
+		const scale = Math.sqrt(minPixels / (width * height));
+		width = Math.trunc(width * scale);
+		height = Math.trunc(height * scale);
+	}
+	if (deepseekGridTokens({ width, height }, rule) <= maxTokens) return { width, height };
+	const aspect = height / width;
+	const maxCols = Math.sqrt((maxTokens - 2) / aspect + 0.25) - 0.5;
+	const maxRows = maxCols * aspect;
+	if (maxCols < 1) return { width: cell, height: Math.floor((maxTokens - 2) / 2) * cell };
+	if (maxRows < 1) return { width: (maxTokens - 3) * cell, height: cell };
+	const beta = Math.min((Math.floor(maxCols) * cell) / width, (Math.floor(maxRows) * cell) / height);
+	return {
+		width: Math.floor((width * beta) / patchSize) * patchSize,
+		height: Math.floor((height * beta) / patchSize) * patchSize,
+	};
 }
 
 /** Billed input tokens for one image of `size` under `rule`; only `openai-patch` reads `detail`. */
@@ -174,11 +257,40 @@ export function imageTokens(rule: ImageTokenization, size: ImageSize, detail?: I
 	switch (rule.regime) {
 		case "fixed":
 			return rule.tokens;
+		case "openai-patch":
+			return Math.ceil(openAiPatches(size, rule[openAiLevel(rule, detail)]) * rule.multiplier);
+		case "anthropic-patch": {
+			const { width, height } = anthropicResize(size, rule.maxEdge, rule.maxTokens);
+			return anthropicPatches(width) * anthropicPatches(height);
+		}
+		case "deepseek-patch":
+			return deepseekGridTokens(deepseekResize(size, rule), rule);
+	}
+}
+
+/**
+ * The size at which `rule`'s model sees an image of `size`, after the vendor's own resize: `size` itself when
+ * the image keeps its pixels, `undefined` for a rule that names no pixel grid (`fixed`). Only `openai-patch`
+ * reads `detail`.
+ *
+ * A model locates things on the resized image, so a caller that maps its coordinates back (browser
+ * screenshots) sizes the image to this first; the result is a fixed point of the resize.
+ */
+export function deliveredImageSize(
+	rule: ImageTokenization,
+	size: ImageSize,
+	detail?: ImageDetail,
+): ImageSize | undefined {
+	switch (rule.regime) {
+		case "fixed":
+			return undefined;
 		case "openai-patch": {
-			const level = detail === "low" || detail === "high" || detail === "original" ? detail : rule.auto;
-			return Math.ceil(openAiPatches(size, rule[level]) * rule.multiplier);
+			const { width, height } = openAiResize(size, rule[openAiLevel(rule, detail)]);
+			return { width: Math.max(1, width), height: Math.max(1, height) };
 		}
 		case "anthropic-patch":
-			return anthropicTokens(size, rule.maxEdge, rule.maxTokens);
+			return anthropicResize(size, rule.maxEdge, rule.maxTokens);
+		case "deepseek-patch":
+			return deepseekResize(size, rule);
 	}
 }

@@ -8,6 +8,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -35,6 +36,32 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+/** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
+export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
+
+/** A model picked for this session only (the model selector, `/model`), not through a configured role. */
+export const TEMPORARY_MODEL_CHANGE_ROLE = "temporary";
+
+/**
+ * The configured model role a `model_change` entry's `role` assigned; undefined for the markers of
+ * switches no role made (retry fallback, prewalk handoff, temporary pick). The Agent Hub labels rows with it.
+ */
+export function modelRoleOf(role: string | undefined): string | undefined {
+	return role === EPHEMERAL_MODEL_CHANGE_ROLE ||
+		role === PREWALK_MODEL_CHANGE_ROLE ||
+		role === TEMPORARY_MODEL_CHANGE_ROLE
+		? undefined
+		: role;
+}
+
+/** Client other than the terminal that started a session: `chrome` is the omp extension's side panel. */
+export type SessionOrigin = "chrome";
+
+/** `value` as a {@link SessionOrigin}; anything else (absent, unknown client) is the terminal's. */
+export function parseSessionOrigin(value: unknown): SessionOrigin | undefined {
+	return value === "chrome" ? value : undefined;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -44,23 +71,31 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	/**
+	 * Set when another client started the session ({@link SessionOrigin}); only that client lists it, so the
+	 * terminal's resume picker, `--continue`, recent sessions and ACP listings skip it. An explicit
+	 * `--resume <id|path>` still opens it.
+	 */
+	origin?: SessionOrigin;
+	/**
 	 * Additional workspace directories beyond `cwd` (multi-root workspace).
 	 * Absolute, normalized, deduplicated. Absent on legacy single-cwd sessions.
 	 * See {@link SessionWorkspace} in `./session-workspace`.
 	 */
 	additionalDirectories?: string[];
 	parentSession?: string;
+	/**
+	 * Set, to the `parentSession` id, when this session is that same conversation
+	 * continued in a new file because it could not keep writing its own (another
+	 * live process held it, or the file changed under it). Resuming the parent
+	 * resumes the most recently active continuation instead. Forks never set it.
+	 */
+	continuationOf?: string;
 	/** Prior absolute JSONL locations recorded by successful session moves. */
 	previousSessionFiles?: string[];
 	/** Local-only provider prompt-cache identity inherited by exact-route full forks; omitted from shares and HTML. */
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
-	/**
-	 * Source session file of a read-only seance fork. Its artifacts stay in the
-	 * source: `history://`, `artifact://`, and `agent://` read them from there.
-	 */
-	seanceSource?: string;
 }
 
 export interface NewSessionOptions {
@@ -68,7 +103,10 @@ export interface NewSessionOptions {
 	/** Provider prompt-cache identity to seed on the new session header. */
 	providerPromptCacheKey?: string;
 	taskPromptCacheKey?: string;
-	/** Skip flushing the current session and delete it instead of saving. */
+	/**
+	 * Skip flushing the current session and delete it instead of saving. The
+	 * successor starts lazy: no empty header is written until it has content.
+	 */
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
@@ -86,11 +124,56 @@ export interface SessionEntryBase {
 	 * (forks, branches, collab replicas) keep the original writer. Absent on older entries.
 	 */
 	runtime?: RuntimeIdentity;
+	/**
+	 * Active leaf at append time, for an entry written off the active branch (late usage,
+	 * a background bash result routed back to the branch it started on). The loader replays
+	 * it instead of treating this entry as the leaf, so resume keeps the branch the live
+	 * session was on. Absence keeps the ordinary last-entry semantics; null records a
+	 * cleared leaf.
+	 */
+	activeLeafId?: string | null;
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+}
+
+/**
+ * One judgment answer as journaled: a noul's probability of yes; `[label, confidence]` for a choice;
+ * `[score, confidence]` for a score; `[top, bottom, left, right, confidence]` for a box. Full
+ * distributions stay in the judgment answer cache.
+ */
+export type JudgmentRecordAnswer =
+	| number
+	| [choice: string, confidence: number]
+	| [score: number, confidence: number]
+	| [top: number, bottom: number, left: number, right: number, confidence: number];
+
+/**
+ * A native judgment as journaled on its {@link ModelUsageEntry}. No prompt text is written: the
+ * judgment answer cache (`judgment-cache.db`) keeps the state once under `states.id` and each
+ * question's rendered instructions under `oracle(state, name)`, so `state` plus a question id
+ * recovers the whole query.
+ */
+export interface JudgmentRecord {
+	/** `sha256` of the canonical state (and image digests): the cache's `states.id`. */
+	state: string;
+	/** Answers the request produced, by question id; empty when it failed. */
+	answers: Record<string, JudgmentRecordAnswer>;
+	/** Questions of the same judgment the cache answered: not billed and not in `answers`. */
+	cached?: number;
+}
+
+/**
+ * An off-transcript text completion as journaled on its {@link ModelUsageEntry}. The entry's
+ * `purpose` names the static prompt, which is never written; text too long to journal is left out.
+ */
+export interface CompletionRecord {
+	/** User-turn text the model was sent; absent when the request read the conversation at the entry's `parentId`. */
+	prompt?: string;
+	/** Reply text as the model produced it, before parsing. */
+	reply?: string;
 }
 
 /** Usage from a model call that does not belong in the conversation transcript. */
@@ -105,9 +188,23 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
-	/** Active leaf at append time for late usage; absence keeps ordinary last-entry semantics. */
-	activeLeafId?: string | null;
+	/**
+	 * A cache-warm refresh that answered for the conversation as it stood: when it was sent (a hit restarts
+	 * the cache lifetime then) and whether it read the cache. Absent on a failed, replaced or outdated refresh.
+	 */
+	cacheRefresh?: { sentAt: number; hit: boolean };
+	/** Wall time of the request in milliseconds. */
+	duration?: number;
+	/** Milliseconds until the first streamed token. */
+	ttft?: number;
+	/** What a native judge was asked and answered. */
+	judgment?: JudgmentRecord;
+	/** What a text side channel (title generation) was sent and replied. */
+	completion?: CompletionRecord;
 }
+
+/** A {@link ModelUsageEntry} as its writer supplies it; the session adds identity, position, and time. */
+export type ModelUsageRecord = Omit<ModelUsageEntry, keyof SessionEntryBase>;
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	type: "thinking_level_change";
@@ -257,12 +354,20 @@ export interface SessionInitEntry extends SessionEntryBase {
 	task: string;
 	/** Tools available to the agent */
 	tools: string[];
+	/** Names in `tools` presented as tool commands instead of top-level tools (absent from older files). */
+	mountedTools?: string[];
 	/** Agent definition name (for example `scout` or `reviewer`). */
 	agent?: string;
 	/** Semantic model role declared by the agent, retained even after concrete model resolution. */
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
+	/** The model came from a per-call `model`; cold revival re-checks it against the current operator grants. */
+	perCallModel?: boolean;
+	/** Exact canonical provider/id[@upstream] identity, without a thinking suffix; required for per-call revival. */
+	perCallModelIdentity?: string;
+	/** Configured thinking selector, or null when unset; required for per-call revival. */
+	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
 	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
@@ -300,7 +405,7 @@ export interface ModeChangeEntry extends SessionEntryBase {
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
  *
- * Unlike CustomEntry, this DOES participate in LLM context.
+ * Unlike CustomEntry, this DOES participate in LLM context unless `excludeFromContext` is set.
  * The content participates in LLM context through convertToLlm().
  * Use details for extension-specific metadata (not sent to LLM).
  *
@@ -316,6 +421,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	display: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
+	excludeFromContext?: boolean;
 }
 
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
@@ -337,9 +444,9 @@ export type SessionEntry =
 	| CredentialPinEntry
 	| ResetBoundaryEntry;
 
-/** Leaf selected when replaying one entry; late usage restores its captured active leaf. */
+/** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
 export function sessionEntryLeafId(entry: SessionEntry): string | null {
-	return entry.type === "model_usage" && entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
+	return entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
 }
 
 /** Newest entry that selects itself on replay; skips late-usage markers. */
@@ -390,21 +497,4 @@ export interface UsageStatistics {
 	cost: number;
 	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
 	subagentCost: number;
-}
-/**
- * True when a raw JSONL line is a complete `message` record carrying an
- * assistant role. Parses the line, so valid JSON whitespace (`"role" :
- * "assistant"`, tabs, newlines-in-string excluded by line framing) classifies
- * correctly — unlike substring checks for exact serializations. Malformed or
- * partial lines (mid-write truncation) return false.
- */
-export function isAssistantMessageLine(line: string): boolean {
-	if (line.length === 0 || line.charCodeAt(0) !== 123) return false;
-	let record: { type?: unknown; message?: { role?: unknown } };
-	try {
-		record = JSON.parse(line) as { type?: unknown; message?: { role?: unknown } };
-	} catch {
-		return false;
-	}
-	return record.type === "message" && record.message?.role === "assistant";
 }

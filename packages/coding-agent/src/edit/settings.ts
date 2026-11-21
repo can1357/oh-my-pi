@@ -4,6 +4,7 @@
  */
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { register } from "../config/registry";
+import { compileModelPatterns } from "../utils/model-patterns";
 
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 
@@ -23,6 +24,13 @@ export const EDIT_MODES = [
 	"sloppy",
 ] as const satisfies readonly EditMode[];
 
+/**
+ * `edit.mode` value: an edit tool variant, `"magic"` for calls that describe the change in
+ * words (see `edit/magic.ts`), or `"none"` to unregister the edit tool and force-enable `bash` (see
+ * `resolveBuiltinToolPlan` in `tools/index.ts`).
+ */
+export type EditModeSetting = EditMode | "magic" | "none";
+
 /** Narrows free text (config values, per-model variants) to an edit mode; `undefined` when unknown. */
 export function normalizeEditMode(mode?: string | null): EditMode | undefined {
 	return EDIT_MODES.find(candidate => candidate === mode);
@@ -36,7 +44,7 @@ export function normalizeEditMode(mode?: string | null): EditMode | undefined {
 export const cfgEditMode = register({
 	id: "edit.mode",
 	type: "enum",
-	values: EDIT_MODES,
+	values: [...EDIT_MODES, "magic", "none"] as const satisfies readonly EditModeSetting[],
 	default: "hashline",
 	// Pins the variant: it also skips the per-model hashline fallback (see `utils/edit-mode.ts`).
 	env: "PI_EDIT_VARIANT",
@@ -44,7 +52,22 @@ export const cfgEditMode = register({
 		tab: "files",
 		group: "Editing",
 		label: "Edit Mode",
-		description: "Select the edit tool variant (replace, patch, hashline, or apply_patch)",
+		description:
+			"Select the edit tool variant (replace, patch, hashline, or apply_patch); magic takes described changes that a fast model writes; none removes the edit tool and keeps bash enabled",
+	},
+});
+
+/** Model that writes the patch for a `magic` call: a selector or role alias (`@slow`); unset uses the `smol` role. */
+export const cfgEditMagicModel = register({
+	id: "edit.magic.model",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "files",
+		group: "Editing",
+		label: "Magic Edit Model",
+		description:
+			"Model selector or role alias (@slow) for the model that applies magic-mode changes, empty = smol role",
 	},
 });
 
@@ -55,15 +78,10 @@ export const cfgEditModelVariants = register({
 	default: EMPTY_STRING_RECORD,
 });
 
-/** {@link cfgEditModelVariants} with lowercased patterns; entries naming an unknown mode are dropped. */
-export const editModelVariants = cfgEditModelVariants.map(variants => {
-	const entries: { patternLower: string; mode: EditMode }[] = [];
-	for (const pattern in variants) {
-		const mode = normalizeEditMode(variants[pattern]);
-		if (mode) entries.push({ patternLower: pattern.toLowerCase(), mode });
-	}
-	return entries;
-});
+/** {@link cfgEditModelVariants} compiled for `matchModelPattern`; entries naming an unknown mode are dropped. */
+export const editModelVariants = cfgEditModelVariants.map(variants =>
+	compileModelPatterns(variants, normalizeEditMode),
+);
 
 export const cfgEditFuzzyMatch = register({
 	id: "edit.fuzzyMatch",

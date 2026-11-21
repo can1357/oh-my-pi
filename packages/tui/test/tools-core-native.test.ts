@@ -53,6 +53,44 @@ describe("core tool native views", () => {
 		expect(view.tone).toBeUndefined();
 	});
 
+	it("diffs an edit as hunks at their real lines, without the model's block-context anchors", () => {
+		// What `editDiffString` returns for a one-line Markdown edit plus a distant one:
+		// enclosing-block lines between blank rows, and edits joined where lines jump.
+		const compactDiff = [
+			" 197|# 2. Verify",
+			"",
+			" 199|- UI: verify the actual surface.",
+			"",
+			" 215|",
+			" 216|# 3. Cleanup",
+			"-217|Permanent fix.",
+			"+217|After smoke proof: permanent fix.",
+			"+218|Then report.",
+			" 218|",
+			" 219|⁂ Delivery",
+			" 228|- Match the output.",
+			"-229|old tail",
+			"+230|new tail",
+			"",
+			" 232|</critical>",
+		].join("\n");
+		const view = editToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "ok" }],
+				details: { diff: compactDiff, path: "/tmp/a.md", firstChangedLine: 217 },
+			},
+			done,
+			{ path: "a.md" },
+		);
+		const props = collect(view.body, "diff")[0]!.p as {
+			hunks: { oldStart: number; newStart: number; lines: string[] }[];
+		};
+		expect(props.hunks.map(h => [h.oldStart, h.newStart, h.lines.length])).toEqual([
+			[215, 215, 7],
+			[228, 229, 3],
+		]);
+	});
+
 	it("describes an image read as an image node backed by a registered blob", () => {
 		// 1×1 transparent PNG.
 		const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -80,11 +118,13 @@ describe("core tool native views", () => {
 			{ pattern: "hit" },
 		);
 		const blocks = collect(view.body, "code").map(
-			n => n.p as { start?: number; text?: string; marks?: { line: number }[] },
+			n => n.p as { start?: number; nums?: number[]; text?: string; marks?: { line: number }[] },
 		);
-		expect(blocks.map(b => b.start)).toEqual([9, 40]);
-		expect(blocks[0]!.text).toBe("ctx\nhit here\nafter");
-		expect(blocks.flatMap(b => (b.marks ?? []).map(m => m.line))).toEqual([10, 40]);
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0]!.start).toBeUndefined();
+		expect(blocks[0]!.nums).toEqual([9, 10, 11, 40]);
+		expect(blocks[0]!.text).toBe("ctx\nhit here\nafter\nfar hit");
+		expect((blocks[0]!.marks ?? []).map(m => m.line)).toEqual([10, 40]);
 	});
 
 	it("wraps long lines of read, write, and code-cell source as their ANSI renderers do (#15823)", () => {

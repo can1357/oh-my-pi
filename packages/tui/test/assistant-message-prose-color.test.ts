@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { getThemeByName, initTheme, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { getThemeByName, initTheme, setMarkdownColorful, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -145,7 +145,13 @@ describe("assistant prose theme token", () => {
 		const theme = await applyTheme("prose-md-precedence", { assistantMessageText: TOKEN_HEX });
 		const md = "# Heading One\n\nplain paragraph with [link](https://example.com)";
 
-		const rendered = new AssistantMessageComponent(assistantMessage(md)).render(RENDER_WIDTH).join("\n");
+		setMarkdownColorful(false);
+		let rendered: string;
+		try {
+			rendered = new AssistantMessageComponent(assistantMessage(md)).render(RENDER_WIDTH).join("\n");
+		} finally {
+			setMarkdownColorful(true);
+		}
 		const headingLine = rendered.split("\n").find(line => line.includes("Heading One")) ?? "";
 		const linkLine = rendered.split("\n").find(line => line.includes("link")) ?? "";
 
@@ -158,6 +164,19 @@ describe("assistant prose theme token", () => {
 		expect(linkLine).not.toContain(theme.fg("assistantMessageText", "link"));
 		// Plain prose runs still carry the token.
 		expect(rendered).toContain(theme.fg("assistantMessageText", "plain paragraph with "));
+	});
+
+	it("keeps colorful Markdown role colors over the assistant prose token", async () => {
+		const theme = await applyTheme("prose-colorful-precedence", { assistantMessageText: TOKEN_HEX });
+		const md = "# Heading One\n\nplain with **strong words** and *soft words*";
+
+		const rendered = new AssistantMessageComponent(assistantMessage(md)).render(RENDER_WIDTH).join("\n");
+
+		for (const words of ["Heading One", "strong words", "soft words"]) {
+			expect(rendered).toContain(theme.ansiFg("magenta", words));
+			expect(rendered).not.toContain(theme.fg("assistantMessageText", words));
+		}
+		expect(rendered).toContain(theme.fg("assistantMessageText", "plain with "));
 	});
 
 	// D1 regression (PR #11260): the stable-snapshot renderer must use the

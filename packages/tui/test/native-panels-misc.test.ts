@@ -1,4 +1,5 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "bun:test";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { KeybindingsManager } from "../src/app-keybindings";
 import { MoveOverlay, type MoveOverlayResult } from "../src/overlays/move-overlay";
 import { AnnotationOverlay } from "../src/overlays/annotation-overlay";
@@ -88,7 +89,7 @@ describe("MoveOverlay native events", () => {
 });
 
 describe("AnnotationOverlay native esc", () => {
-	it("drops a note draft first, then closes the review without a result", () => {
+	it("saves an active note draft and closes the review", () => {
 		const onComplete = vi.fn();
 		const tui = { terminal: { rows: 40, columns: 100 }, requestRender: () => {} } as unknown as TUI;
 		const overlay = new AnnotationOverlay(
@@ -101,10 +102,11 @@ describe("AnnotationOverlay native esc", () => {
 		overlay.handleInput("A");
 		overlay.handleInput("x");
 		overlay.handleNativeEvent(CLOSE_CLICK);
-		expect(onComplete).not.toHaveBeenCalled();
-		expect(overlay.getTextAnnotations()).toEqual([]);
-		overlay.handleNativeEvent(CLOSE_CLICK);
 		expect(onComplete).toHaveBeenCalledWith(undefined);
+		expect(overlay.getTextAnnotations()).toEqual([]);
+		expect(overlay.getDraft()).toMatchObject({ kind: "text", editor: { text: "x" } });
+		overlay.handleNativeEvent(CLOSE_CLICK);
+		expect(onComplete).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -290,7 +292,99 @@ describe("BtwHistoryPanel native events", () => {
 		history.handleInput("hy?");
 		click("send");
 		await sent.promise;
-		expect(onFollowUp).toHaveBeenCalledWith(expect.objectContaining({ id: "a" }), "why?", expect.any(AbortSignal));
+		expect(onFollowUp).toHaveBeenCalledWith(
+			expect.objectContaining({ id: "a" }),
+			"why?",
+			expect.any(AbortSignal),
+			undefined,
+		);
+	});
+
+	it("sends images pasted into a follow-up, dropping one whose marker left the draft", () => {
+		const onFollowUp = vi.fn(async () => true);
+		const history = new BtwHistoryPanel({
+			records: [record("a", "first question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const first: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
+		const second: ImageContent = { type: "image", data: "c2Vjb25k", mimeType: "image/png" };
+		expect(history.acceptsImages).toBe(false);
+		history.handleInput("f");
+		expect(history.acceptsImages).toBe(true);
+		history.pasteText(`what is this ${history.attachImage(first)}`);
+		history.attachImage(second);
+		history.handleInput("\r");
+		expect(onFollowUp).toHaveBeenCalledWith(
+			expect.objectContaining({ id: "a" }),
+			"what is this [Image #1]",
+			expect.any(AbortSignal),
+			[first],
+		);
+		// The sent follow-up already took its images: a new one would vanish when the composer clears.
+		expect(history.acceptsImages).toBe(false);
+		expect(history.attachImage(second)).toBeUndefined();
+	});
+
+	it("hands a follow-up's pasted image path and empty paste to the host, and types other pastes", () => {
+		const onPasteImage = vi.fn(async () => true);
+		const onPasteImagePath = vi.fn(async (_path: string) => {});
+		const history = new BtwHistoryPanel({
+			records: [record("a", "first question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp: async () => true,
+			onPasteImage,
+			onPasteImagePath,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		history.handleInput("f");
+		history.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
+		history.handleInput("\x1b[200~\x1b[201~");
+		history.handleInput("\x1b[200~plain words\x1b[201~");
+		expect(onPasteImagePath).toHaveBeenCalledWith("/tmp/shot.png");
+		expect(onPasteImage).toHaveBeenCalledTimes(1);
+		const input = findNode(history.describe(), node => node.key === "composer")?.c?.[0];
+		expect(input instanceof Input ? input.getValue() : undefined).toBe("plain words");
+	});
+
+	it("holds Enter until a follow-up's pasted image loads, and drops a submit whose image failed", () => {
+		const onFollowUp = vi.fn(async () => true);
+		const history = new BtwHistoryPanel({
+			records: [record("a", "first question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		history.handleInput("f");
+		history.pasteText("what is this ");
+		const failed = history.beginPaste();
+		history.handleInput("\r");
+		failed(undefined);
+		expect(onFollowUp).not.toHaveBeenCalled();
+		const loading = history.beginPaste();
+		history.handleInput("\r");
+		expect(onFollowUp).not.toHaveBeenCalled();
+		loading(history.attachImage(image));
+		expect(onFollowUp).toHaveBeenCalledWith(
+			expect.objectContaining({ id: "a" }),
+			"what is this [Image #1]",
+			expect.any(AbortSignal),
+			[image],
+		);
 	});
 
 	it("stops a running answer from its footer button and sizes the sheet to what it lists", () => {
@@ -326,6 +420,81 @@ describe("BtwHistoryPanel native events", () => {
 		const screen = Bun.stripANSI(history.render(80).join("\n"));
 		expect(screen).toContain("answer to only question");
 		expect(screen).not.toContain("switch pane");
+	});
+
+	it("dates history rows asked before today, in both the native sheet and text mode", () => {
+		setSystemTime(new Date(2026, 10, 5, 16, 0));
+		try {
+			const at = (id: string, createdAt: Date): BtwHistoryRecord => ({
+				...record(id, `question ${id}`),
+				createdAt: createdAt.getTime(),
+				updatedAt: createdAt.getTime(),
+			});
+			const history = new BtwHistoryPanel({
+				records: [
+					at("today", new Date(2026, 10, 5, 9, 5)),
+					at("yesterday", new Date(2026, 10, 4, 13, 18)),
+					at("last-year", new Date(2025, 10, 4, 8, 0)),
+				],
+				onClose: () => {},
+				onCopy: () => {},
+				onCancel: () => {},
+				requestRender: () => {},
+				getHeight: () => 30,
+			});
+			const stamps = listOf(history.describe()).c?.map(item => {
+				const detail = isNode(item) && item.k === "item" ? item.p?.detail : undefined;
+				return Array.isArray(detail) ? detail[0]?.t : detail;
+			});
+			expect(stamps).toEqual(["09:05", "Nov 4", "Nov 4, 2025"]);
+			const screen = Bun.stripANSI(history.render(120).join("\n"));
+			expect(screen).toContain("Nov 4, 2025");
+			// Yesterday's row shows its date: its bare time would read as today's, out of order.
+			expect(screen).not.toContain("13:18");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	it("dates a follow-up asked on a later day than its topic", () => {
+		const turn = (question: string, createdAt: Date) => ({
+			question,
+			answer: `answer to ${question}`,
+			status: "complete" as const,
+			createdAt: createdAt.getTime(),
+			updatedAt: createdAt.getTime(),
+		});
+		const history = new BtwHistoryPanel({
+			records: [
+				{
+					...record("a", "topic"),
+					...turn("topic", new Date(2026, 10, 4, 21, 0)),
+					followUps: [
+						turn("same day", new Date(2026, 10, 4, 22, 30)),
+						turn("next day", new Date(2026, 10, 5, 9, 15)),
+						// Same day as the previous follow-up, but the topic's header names only its own day.
+						turn("next day again", new Date(2026, 10, 5, 11, 0)),
+					],
+				},
+			],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const metas: string[] = [];
+		const collect = (root: NativeNode) => {
+			const spans = root.k === "text" ? root.p?.spans : undefined;
+			if (Array.isArray(spans) && spans[0]?.t === "Follow-up · ") metas.push(spans.map(part => part.t).join(""));
+			for (const child of root.c ?? []) if (isNode(child)) collect(child);
+		};
+		collect(history.describe());
+		expect(metas).toHaveLength(3);
+		expect(metas[0]).toBe("Follow-up · 22:30");
+		// ICU's date/time joiner varies by platform (" at " on macOS, ", " on Linux); pin the date and time, not the glue.
+		expect(metas[1]).toMatch(/^Follow-up · Nov 5, 2026\D+09:15$/);
+		expect(metas[2]).toMatch(/^Follow-up · Nov 5, 2026\D+11:00$/);
 	});
 });
 

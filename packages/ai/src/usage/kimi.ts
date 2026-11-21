@@ -316,6 +316,11 @@ export const kimiUsageProvider: UsageProvider = {
 
 		const parsed = parseUsagePayload(payload, nowMs);
 		if (!parsed || parsed.rows.length === 0) {
+			// `{}` is Kimi's answer for an account without a Kimi Code plan: nothing to meter.
+			if (isRecord(payload) && Object.keys(payload).length === 0) {
+				ctx.logger?.debug("Kimi account has no Kimi Code plan to meter", { provider: params.provider });
+				return null;
+			}
 			ctx.logger?.warn("Kimi usage response invalid", { provider: params.provider });
 			return null;
 		}

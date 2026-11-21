@@ -108,8 +108,10 @@ export interface TableColumn {
 	/**
 	 * Index of the measure column this one restates, read from the values: a
 	 * proportional copy (`pass` 33/38 beside `pass%` 87%, `Samples` beside `% of
-	 * Total`, `Leverage vs $200` beside the cost) or a running total of it
-	 * (`Offset` summing `Verts`). Such a column is never a measure of its own.
+	 * Total`, `Leverage vs $200` beside the cost), a running total of it
+	 * (`Offset` summing `Verts`), or its ratio to another column of its unit
+	 * (`ratio` 0.997 for `Python (ms)` ÷ `C++ (ms)`, `Speedup` 4.1×: the
+	 * numerator's index). Such a column is never a measure of its own.
 	 */
 	readonly restates?: number;
 }
@@ -148,7 +150,17 @@ export interface TableAnalysis {
 	readonly composition?: Composition;
 }
 
-const NUMBER = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?|\.\d+`;
+/**
+ * A whole number as written: bare, or grouped in thousands by commas (`1,988`)
+ * or by spaces as many locales write it (`1 988`, also U+00A0 and U+202F).
+ * Space groups take exactly three digits, so `12 5` and `128 2560` stay apart.
+ */
+const INTEGER = String.raw`\d{1,3}(?:,\d{3})+|\d{1,3}(?:[ \u00A0\u202F]\d{3})+(?!\d)|\d+`;
+const NUMBER = String.raw`(?:${INTEGER})(?:\.\d+)?(?:[eE][+-]?\d+)?|\.\d+`;
+/** A cell holding one whole number and nothing else (`38`, `1,980`). */
+const WHOLE = new RegExp(String.raw`^(?:${INTEGER})$`);
+/** The first number of a figure, its whole part and its decimals apart. */
+const WRITTEN = new RegExp(String.raw`(${INTEGER})(?:\.(\d+))?`);
 const CELL = new RegExp(
 	String.raw`^(?<approx>~|≈|<=|>=|<|>|≤|≥)?\s*(?<sign>[+\-−±])?\s*(?<cur>[$€£¥])?\s*(?<num>${NUMBER})(?<plus>\+(?=\s*[A-Za-zµμ%]))?\s*(?<unit>%|[A-Za-zµμ×]+(?:\/[A-Za-z]+)?|\/s)?(?<rest>.*)$`,
 );
@@ -399,6 +411,16 @@ export function plainCell(markdown: string): { text: string; emphasis: boolean }
 
 /** Parse the first number of a (Markdown) cell, or classify why it is not one. */
 export function parseCell(markdown: string): Cell {
+	const cell = readCell(markdown);
+	if (cell.kind !== "number") return cell;
+	// `1e400` overflows to Infinity, which no axis reaches: an axis looping up to it never ends.
+	const values = [cell.value, cell.to, cell.upper, cell.denominator, cell.error, ...(cell.values ?? [])];
+	if (values.every(value => value === undefined || Number.isFinite(value))) return cell;
+	return { kind: "text", text: cell.text, emphasis: cell.emphasis };
+}
+
+/** {@link parseCell} before it drops values no axis reaches. */
+function readCell(markdown: string): Cell {
 	const plain = plainCell(markdown);
 	const text = plain.text.replace(MARKS, "").replace(/\s+/g, " ").trim();
 	const emphasis = plain.emphasis;
@@ -461,12 +483,14 @@ export function parseCell(markdown: string): Cell {
 	const figureEnd = unit ? text.length - groups.rest!.length : text.indexOf(groups.num!) + groups.num!.length;
 	const figure = text.slice(0, figureEnd).trim();
 	if (groups.cur) unit = groups.cur;
-	// `24–72 h`: the unit after the range's end applies to its start too.
+	// `24–72 h`, `402.7 → 13.3 µs`: the unit after a range's end or a transition's target applies to its start too.
 	const range = RANGE_TAIL.exec(rest);
-	const rangeUnit = range?.[2] ? knownUnit(range[2]) : undefined;
-	if (!unit && rangeUnit) {
-		[dim, factor] = rangeUnit;
-		unit = range![2]!;
+	const arrow = range ? null : ARROW_TAIL.exec(rest);
+	const tailUnit = range?.[2] ?? arrow?.[3];
+	const carried = !unit && tailUnit ? knownUnit(tailUnit) : undefined;
+	if (carried) {
+		[dim, factor] = carried;
+		unit = tailUnit!;
 	}
 	// A magnitude suffix on money (`$6.0k`, `$1.2M`, `$4.4k–6.1k`) scales it; the amount stays currency.
 	if (groups.cur && dim === "count") {
@@ -507,7 +531,6 @@ export function parseCell(markdown: string): Cell {
 		const upper = toNumber(range[1]!) * tailFactor(range[2], factor);
 		return { ...cell, fit: "range", upper, figure: `${figure}${range[0].trim()}` };
 	}
-	const arrow = ARROW_TAIL.exec(rest);
 	if (arrow) {
 		const sign = arrow[1] === "-" || arrow[1] === "−" ? -1 : 1;
 		const to = sign * toNumber(arrow[2]!) * tailFactor(arrow[3], factor);
@@ -517,8 +540,9 @@ export function parseCell(markdown: string): Cell {
 	return { ...cell, fit: "prose" };
 }
 
+/** The value of a number {@link NUMBER} matched, its comma or space group separators removed. */
 function toNumber(written: string): number {
-	return Number(written.replaceAll(",", ""));
+	return Number(written.replace(/[,\s]/g, ""));
 }
 
 /** A number of a list or sum: its value as written, its unit (known or a noun) and how it was marked. */
@@ -632,7 +656,7 @@ function listCell(text: string, base: CellBase): NumberCell | undefined {
 	// A spaced pair of bare numbers that is no score (`25.0 / 27.8`, `12.6 / 9.4`: the second is no whole, or
 	// the first exceeds it) lists two values of the column's quantity; `27 / 30` stays a score.
 	const [first, second] = items;
-	const whole = /^\d[\d,]*$/.test(text.slice(text.indexOf("/") + 1, end).trim());
+	const whole = WHOLE.test(text.slice(text.indexOf("/") + 1, end).trim());
 	const score = whole && first!.value >= 0 && first!.value <= second!.value;
 	const pair = items.length === 2 && !marked.some(Boolean) && separators[0] !== "/" && !score;
 	if (!pair && (!marked.at(-1) || !(marked.every(Boolean) || carried))) return undefined;
@@ -837,6 +861,22 @@ export function analyzeTable(header: readonly string[], rows: readonly (readonly
 	};
 }
 
+/**
+ * `table` read with `measures` (some of its own) as its only measures and
+ * `label` naming its rows: the table as a planner sees it once something
+ * that knows what the numbers mean (a judge) says which are results. A
+ * composition stands while every part is still a measure.
+ */
+export function withMeasures(
+	table: TableAnalysis,
+	measures: readonly TableColumn[],
+	label: TableColumn | undefined = table.label,
+): TableAnalysis {
+	const parts = table.composition?.parts ?? [];
+	const whole = parts.length > 0 && parts.every(index => measures.some(column => column.index === index));
+	return { ...table, label, measures, composition: whole ? table.composition : undefined };
+}
+
 /** A header with its numbers blanked: `scale 1 (200 tiles)` and `scale 8 (1600 tiles)` are one sweep. */
 const SWEEP_STEP = /\d+(?:\.\d+)?/g;
 
@@ -876,9 +916,9 @@ const WHOLE_HEADER = /\b(?:total|all|sum|overall)\b/i;
  */
 export function writtenSlack(cell: NumberCell): number {
 	if (cell.denominator !== undefined && cell.dim === "percent") return 0;
-	const match = /(\d[\d,]*)(?:\.(\d+))?/.exec(cell.figure);
+	const match = WRITTEN.exec(cell.figure);
 	if (!match) return 0;
-	const written = Number(`${match[1]!.replaceAll(",", "")}${match[2] ? `.${match[2]}` : ""}`);
+	const written = toNumber(`${match[1]!}${match[2] ? `.${match[2]}` : ""}`);
 	const factor = written ? Math.abs(cell.value) / written : 1;
 	const decimals = match[2]?.length ?? 0;
 	if (cell.dim === "count" && decimals === 0 && factor === 1 && !cell.approx) return 0;
@@ -895,10 +935,11 @@ function plainValue(column: TableColumn, row: number): NumberCell | undefined {
 
 /**
  * Columns restating another column's values: `y = k·x` within the written
- * precision over three or more rows where `x` varies, or a running total
- * (`Offset` stepping by `Verts`). Of a proportional pair the first column
- * stays, unless the second is a share summing to 100% beside counts or the
- * table bolded more of its cells (`**87%**` beside `33/38`).
+ * precision over three or more rows where `x` varies, a running total
+ * (`Offset` stepping by `Verts`), or the ratio of two others ({@link quotient}).
+ * Of a proportional pair the first column stays, unless the second is a share
+ * summing to 100% beside counts or the table bolded more of its cells
+ * (`**87%**` beside `33/38`).
  */
 function restatedColumns(measures: readonly TableColumn[], rows: readonly number[]): Map<number, number> {
 	const restated = new Map<number, number>();
@@ -920,7 +961,53 @@ function restatedColumns(measures: readonly TableColumn[], rows: readonly number
 		const source = measures.find(other => other !== column && runningTotal(column, other, rows));
 		if (source) restated.set(column.index, source.index);
 	}
+	const kept = measures.filter(column => !restated.has(column.index));
+	for (const ratio of kept) {
+		if (restated.has(ratio.index)) continue;
+		const terms = kept.filter(column => column !== ratio && !restated.has(column.index));
+		const over = terms
+			.flatMap(a => terms.map(b => [a, b] as const))
+			.find(([a, b]) => a !== b && quotient(ratio, a, b, rows));
+		if (over) restated.set(ratio.index, over[0].index);
+	}
 	return restated;
+}
+
+/** Most relative rounding a row's quotient may carry to count toward proving it (`2×` beside its terms proves little). */
+const LOOSE_QUOTIENT = 0.05;
+
+/**
+ * `ratio = a ÷ b` in every row holding all three, `a` and `b` in one unit
+ * (`Python (ms)` ÷ `old C++ (ms)` = `0.997`; `Go` ÷ `omp-xfs` = `4.1×`),
+ * within the precision each figure is written to, over three or more rows
+ * pinned to {@link LOOSE_QUOTIENT}. Percent columns are left alone: a part's
+ * share of a whole (`Share` = `Tokens` ÷ `Total`) is a measure the table states.
+ *
+ * Bare numbers all read as counts, and of three columns related so each is
+ * the others' quotient or product (`C++ = Python ÷ ratio` holds too), the
+ * ratio is the one that varies less from row to row than both its terms:
+ * workloads of different sizes move both timings, not their ratio. Where none
+ * does, none is taken for the ratio.
+ */
+function quotient(ratio: TableColumn, a: TableColumn, b: TableColumn, rows: readonly number[]): boolean {
+	if ((ratio.dim !== "count" && ratio.dim !== "ratio") || a.dim !== b.dim || a.unit !== b.unit) return false;
+	let tight = 0;
+	const matched: (readonly [number, number, number])[] = [];
+	for (const row of rows) {
+		const [r, x, y] = [plainValue(ratio, row), plainValue(a, row), plainValue(b, row)];
+		if (!r || !x || !y) continue;
+		if (x.value <= 0 || y.value <= 0 || r.value <= 0) return false;
+		const exact = x.value / y.value;
+		const slack = writtenSlack(r) + exact * (writtenSlack(x) / x.value + writtenSlack(y) / y.value) + 1e-9 * exact;
+		if (Math.abs(r.value - exact) > slack) return false;
+		if (slack <= LOOSE_QUOTIENT * exact) tight++;
+		matched.push([r.value, x.value, y.value]);
+	}
+	if (tight < 3) return false;
+	if (ratio.dim !== a.dim) return true;
+	const spread = (at: 0 | 1 | 2) =>
+		Math.max(...matched.map(values => values[at])) / Math.min(...matched.map(values => values[at]));
+	return spread(0) < spread(1) && spread(0) < spread(2);
 }
 
 /** How many of `rows` the table bolded in `column`. */
@@ -999,12 +1086,25 @@ function findComposition(measures: readonly TableColumn[], rows: readonly number
 		}
 	}
 	if (sums.size > 0) {
-		// Parts are non-negative and non-zero somewhere, so no column sums into itself: the expansion ends.
-		const leaves = (index: number): number[] => sums.get(index)?.flatMap(part => leaves(part.index)) ?? [index];
+		// Rounding tolerance can admit both A ≈ B + C and B ≈ A + C; neither is a usable composition.
+		const active = new Set<number>();
+		const leaves = (index: number): number[] | undefined => {
+			if (active.has(index)) return undefined;
+			const parts = sums.get(index);
+			if (!parts) return [index];
+			active.add(index);
+			const branches = parts.map(part => leaves(part.index));
+			active.delete(index);
+			return branches.every((branch): branch is number[] => branch !== undefined) ? branches.flat() : undefined;
+		};
+		const expanded = new Map([...sums.keys()].map(index => [index, leaves(index)]));
+		if ([...expanded.values()].some(parts => parts === undefined)) return undefined;
+		// Acyclic now, so some whole is nobody's part.
 		const nested = new Set([...sums.values()].flatMap(parts => parts.map(part => part.index)));
-		const roots = [...sums.keys()].filter(index => !nested.has(index));
-		const root = roots.sort((a, b) => leaves(b).length - leaves(a).length)[0] ?? [...sums.keys()][0]!;
-		return { whole: root, parts: leaves(root).sort((a, b) => a - b), exact: true };
+		const root = [...sums.keys()]
+			.filter(index => !nested.has(index))
+			.sort((a, b) => expanded.get(b)!.length - expanded.get(a)!.length)[0]!;
+		return { whole: root, parts: expanded.get(root)!.sort((a, b) => a - b), exact: true };
 	}
 	const whole = pool.find(column => WHOLE_HEADER.test(column.header));
 	if (!whole) return undefined;
@@ -1097,7 +1197,7 @@ const MIN_LISTS = 2;
 /** A spaced slash between list items. */
 const LIST_SLASH = /\s+\/\s+/;
 /** A list item that is one number, as written (`12`, `~1,400`, `3.5 ms`, `40%`). */
-const LISTED_NUMBER = /^[~≈]?[$€£¥]?\d[\d,]*(?:\.\d+)?\s*(?:%|[A-Za-zµμ]+)?$/;
+const LISTED_NUMBER = new RegExp(String.raw`^[~≈]?[$€£¥]?(?:${INTEGER})(?:\.\d+)?\s*(?:%|[A-Za-zµμ]+)?$`);
 
 /**
  * Rows folding several rows into one (`response anthropic / chat / responses /

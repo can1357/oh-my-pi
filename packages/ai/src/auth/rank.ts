@@ -25,6 +25,10 @@ export type UsageCandidate<T extends AuthCredential> = {
 	 * spent, so if it still serves it draws on paid overage such as Codex credits.
 	 */
 	allowanceSpent?: boolean;
+	/** Present after policy-aware ranking: the account's configured `priority` (0 when unset). */
+	accountPriority?: number;
+	/** Present after policy-aware ranking: unblocked and measured at or above its `reclaimAbovePct`. */
+	reclaimReady?: boolean;
 };
 
 /** OAuth credential eligible for usage ranking. */
@@ -107,14 +111,16 @@ function compareUsageRankedCandidatePriority(
 	const leftHot = left.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	const rightHot = right.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	if (leftHot !== rightHot) return leftHot ? 1 : -1;
-	// Usage-backed candidates outrank unmeasured ones: required-drain
-	// scores are only comparable between measured windows, and the
-	// clockless headroom fallback (0..1) must not let an account whose
+	// Configured priority is the user's order; a failed usage fetch says nothing
+	// about it, so it ranks ahead of measurement.
+	if (left.accountPriority !== right.accountPriority) return right.accountPriority - left.accountPriority;
+	// Within a priority, usage-backed candidates outrank unmeasured ones:
+	// required-drain scores are only comparable between measured windows, and
+	// the clockless headroom fallback (0..1) must not let an account whose
 	// usage fetch failed shadow a measured sibling.
 	const leftMeasured = left.usageMeasured;
 	const rightMeasured = right.usageMeasured;
 	if (leftMeasured !== rightMeasured) return leftMeasured ? -1 : 1;
-	if (left.accountPriority !== right.accountPriority) return right.accountPriority - left.accountPriority;
 	// Required drain, descending: the account whose remaining quota must
 	// burn fastest to avoid expiring unused at its reset comes first, so
 	// staggered resets land at ~100% utilization instead of stranding
@@ -152,5 +158,7 @@ export function orderUsageRankedCandidates<T extends AuthCredential>(
 		inReserve: candidate.inReserve,
 		reserveMeasured: candidate.reserveMeasured,
 		allowanceSpent: candidate.allowanceSpent,
+		accountPriority: candidate.accountPriority,
+		reclaimReady: candidate.reclaimReady,
 	}));
 }

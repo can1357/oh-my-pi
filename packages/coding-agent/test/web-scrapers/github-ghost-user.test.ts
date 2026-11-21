@@ -46,17 +46,20 @@ describe("GitHub scraper with deleted (null) authors", () => {
 
 	test("renders issue-list entries authored by deleted accounts as @ghost", async () => {
 		stubGitHubApi({
-			"/repos/o/r/issues?state=open&per_page=30": [
-				{
-					number: 2,
-					title: "Orphaned list entry",
-					state: "open",
-					user: null,
-					created_at: "2026-01-01T00:00:00Z",
-					comments: 0,
-					labels: [],
-				},
-			],
+			"/search/issues?q=repo%3Ao%2Fr+is%3Aissue+is%3Aopen&per_page=30&page=1": {
+				total_count: 1,
+				items: [
+					{
+						number: 2,
+						title: "Orphaned list entry",
+						state: "open",
+						user: null,
+						created_at: "2026-01-01T00:00:00Z",
+						comments: 0,
+						labels: [],
+					},
+				],
+			},
 		});
 
 		const result = await handleGitHub("https://github.com/o/r/issues", 5);

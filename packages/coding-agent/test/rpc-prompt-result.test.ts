@@ -5,9 +5,11 @@ import {
 	RpcPromptResults,
 	reportPromptResult,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
+import { RpcSessionSettleWatcher } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-settle";
 import type { ExtensionActions } from "../src/extensibility/extensions/types";
 import { initializeExtensions } from "../src/modes/runtime-init";
 import type { AgentSession, AgentSessionEvent } from "../src/session/agent-session";
+import type { CostCapRefusal } from "../src/session/cost-gate";
 
 /** Prompt results for a fake session whose streaming state the test drives. */
 function createHarness() {
@@ -16,7 +18,7 @@ function createHarness() {
 		isStreaming: false,
 		hasAdmittedSubmission: false,
 		queuedMessageCount: 0,
-		hasPendingAsyncWork: () => false,
+		isRunActive: false,
 	};
 	const results = new RpcPromptResults(session, frame => frames.push(frame));
 	return { frames, session, results };
@@ -48,20 +50,24 @@ function assistant(fields: Record<string, unknown>): AgentMessage {
 	} as unknown as AgentMessage;
 }
 
-function agentEnd(messages: AgentMessage[], isTerminal?: boolean): AgentSessionEvent {
-	return { type: "agent_end", messages, ...(isTerminal === undefined ? {} : { isTerminal }) };
+function agentEnd(messages: AgentMessage[]): AgentSessionEvent {
+	return { type: "agent_end", messages };
+}
+
+function agentPause(messages: AgentMessage[], yielded: boolean): AgentSessionEvent {
+	return { type: "agent_pause", messages, yielded, awaiting: false };
 }
 
 const agentStart: AgentSessionEvent = { type: "agent_start" };
 
 describe("RpcPromptResults", () => {
-	test("reports a joined prompt only at the terminal agent_end, not a non-terminal settle", async () => {
+	test("reports a joined prompt only at the run's yield, not an unyielded pause", async () => {
 		const { frames, session, results } = createHarness();
 		session.isStreaming = true;
 		const ticket = results.begin("req_1");
 		results.settle(ticket);
 
-		results.observe(agentEnd([assistant({ stopReason: "toolUse" })], false));
+		results.observe(agentPause([assistant({ stopReason: "toolUse" })], false));
 		await flushFrames();
 		expect(frames).toEqual([]);
 
@@ -74,7 +80,7 @@ describe("RpcPromptResults", () => {
 		]);
 	});
 
-	test("reports the prompt's own run when a stale terminal agent_end arrives after acceptance", async () => {
+	test("reports the prompt's own run when a stale agent_end arrives after acceptance", async () => {
 		const { frames, results } = createHarness();
 		const ticket = results.begin("req_2");
 		// The previous prompt's run fails and settles after req_2 was accepted.
@@ -89,11 +95,11 @@ describe("RpcPromptResults", () => {
 		]);
 	});
 
-	test("waits for the continuation when the prompt resolves idle after a non-terminal settle", async () => {
+	test("waits for the continuation when the prompt resolves idle after an unyielded pause", async () => {
 		const { frames, results } = createHarness();
 		const ticket = results.begin("req_3");
 		results.observe(agentStart);
-		results.observe(agentEnd([assistant({ stopReason: "stop" })], false));
+		results.observe(agentPause([assistant({ stopReason: "stop" })], false));
 		results.settle(ticket);
 		await flushFrames();
 		expect(frames).toEqual([]);
@@ -106,18 +112,13 @@ describe("RpcPromptResults", () => {
 		]);
 	});
 
-	test("reports at the agent's yield while background work can still wake the session", async () => {
+	test("reports at a yielded pause while background work can still resume the run", async () => {
 		const { frames, session, results } = createHarness();
 		const ticket = results.begin("req_bg");
 		results.observe(agentStart);
 		// The turn is complete but an async job will deliver and resume the session.
-		session.hasPendingAsyncWork = () => true;
-		results.observe({
-			type: "agent_end",
-			messages: [assistant({ stopReason: "stop" })],
-			isTerminal: false,
-			yielded: true,
-		});
+		session.isRunActive = true;
+		results.observe(agentPause([assistant({ stopReason: "stop" })], true));
 		results.settle(ticket);
 		await flushFrames();
 
@@ -219,7 +220,7 @@ describe("RpcPromptResults", () => {
 		const running = results.begin("req_running");
 		results.observe(agentStart);
 		results.abortOpen();
-		// The detached run never publishes its terminal; the running prompt resolves afterwards.
+		// The detached run never publishes its agent_end; the running prompt resolves afterwards.
 		session.isStreaming = false;
 		results.settle(running);
 		results.observe(agentEnd([assistant({ stopReason: "stop" })]));
@@ -234,7 +235,7 @@ describe("RpcPromptResults", () => {
 	test("writes prompt_result after output queued synchronously with the settle", async () => {
 		const frames: object[] = [];
 		const results = new RpcPromptResults(
-			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+			{ isRunActive: false, isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0 },
 			frame => frames.push(frame),
 		);
 		results.completeLocal(results.begin("req_6"));
@@ -244,6 +245,80 @@ describe("RpcPromptResults", () => {
 		expect(frames).toEqual([
 			{ type: "response", id: "req_6" },
 			{ type: "prompt_result", id: "req_6", agentInvoked: false, status: "completed", sessionSettled: true },
+		]);
+	});
+
+	test("reports a run the cost gate stopped as an error with code cost_cap, and only that run", async () => {
+		const frames: object[] = [];
+		const session = {
+			isStreaming: false,
+			hasAdmittedSubmission: false,
+			queuedMessageCount: 0,
+			isRunActive: false,
+		};
+		const gate: { refusal?: CostCapRefusal } = {};
+		const results = new RpcPromptResults(session, frame => frames.push(frame), undefined, {
+			costCapRefusal: () => gate.refusal,
+		});
+		const message = "Cost cap reached: this session spent $1.50 of its $1.00 cap";
+
+		const capped = results.begin("req_cap");
+		results.observe(agentStart);
+		gate.refusal = { spent: 1.5, cap: 1, message };
+		results.observe(agentEnd([assistant({ stopReason: "aborted", errorMessage: message })]));
+		results.settle(capped);
+		// The next run sends its request (the cap was raised) and ends normally.
+		const next = results.begin("req_next");
+		results.observe(agentStart);
+		results.observe(agentEnd([assistant({ stopReason: "stop" })]));
+		results.settle(next);
+		await flushFrames();
+
+		expect(frames).toEqual([
+			{
+				type: "prompt_result",
+				id: "req_cap",
+				agentInvoked: true,
+				status: "error",
+				error: { message, retryable: false, code: "cost_cap" },
+				sessionSettled: true,
+			},
+			{ type: "prompt_result", id: "req_next", agentInvoked: true, status: "completed", sessionSettled: true },
+		]);
+	});
+
+	test("reports a prompt the cost gate refused before dispatch as cost_cap, then settles the session", async () => {
+		const { frames, session } = createHarness();
+		const watcher = new RpcSessionSettleWatcher(session, frame => frames.push(frame));
+		// An earlier run's stretch is still open: its settle check saw this prompt admitted.
+		watcher.markActive();
+		const gate: { refusal?: CostCapRefusal } = {};
+		const results = new RpcPromptResults(session, frame => frames.push(frame), undefined, {
+			costCapRefusal: () => gate.refusal,
+			settledWithoutRun: () => void watcher.check(),
+		});
+		const message = "Cost cap reached: this session spent $1.50 of its $1.00 cap";
+
+		const refused = results.begin("req_refused");
+		gate.refusal = { spent: 1.5, cap: 1, message };
+		results.settle(refused);
+		// An abort that wins before dispatch, with no newer refusal, stays aborted.
+		const aborted = results.begin("req_aborted");
+		results.settle(aborted);
+		await flushFrames();
+		await flushFrames();
+
+		expect(frames).toEqual([
+			{
+				type: "prompt_result",
+				id: "req_refused",
+				agentInvoked: true,
+				status: "error",
+				error: { message, retryable: false, code: "cost_cap" },
+				sessionSettled: true,
+			},
+			{ type: "prompt_result", id: "req_aborted", agentInvoked: true, status: "aborted", sessionSettled: true },
+			{ type: "session_settled" },
 		]);
 	});
 });

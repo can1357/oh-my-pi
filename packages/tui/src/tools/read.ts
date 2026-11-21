@@ -62,7 +62,9 @@ export interface ReadToolDetails {
 	 * screenshots, URL reads and other images not backed by a file. Display-only.
 	 */
 	mediaPath?: string;
-	suffixResolution?: { from: string; to: string };
+	suffixResolution?: { from: string; to: string; raw?: boolean };
+	/** Raw source output keeps descriptive diagnostics in details, not in the body. */
+	raw?: boolean;
 	url?: string;
 	finalUrl?: string;
 	contentType?: string;
@@ -104,11 +106,13 @@ export interface ReadToolDetails {
 // Parsing also recognizes incomplete counts to explain their errors; path splitting
 // only peels complete selectors (not a trailing `+` or `L`).
 const RANGE_SELECTOR_CHUNK = `${LINE_RANGE_CHUNK_SOURCE}(?<=[\\d.-])`;
-const RANGE_LIST_SRC = `${RANGE_SELECTOR_CHUNK}(?:,${RANGE_SELECTOR_CHUNK})*`;
 // A tail selector: `-N` reads the last N lines. Keep in sync with TAIL_SELECTOR_RE.
 const TAIL_CHUNK_SRC = String.raw`-\d+`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC}|raw|conflicts|img)$`, "i");
-const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC})$`, "i");
+// A comma list may mix ranges and tails (`1-12,-15`); a lone tail is a one-chunk list.
+const LIST_CHUNK_SRC = `(?:${RANGE_SELECTOR_CHUNK}|${TAIL_CHUNK_SRC})`;
+const RANGE_LIST_SRC = `${LIST_CHUNK_SRC}(?:,${LIST_CHUNK_SRC})*`;
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts|img)$`, "i");
+const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC})$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
 // plus common malformed shapes (e.g. `:-N-M`) so the read tool peels the entire
@@ -117,8 +121,69 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
-/** Split a filesystem path from its trailing read selector. */
-export function splitPathAndSel(rawPath: string): { path: string; sel?: string } {
+
+const BARE_LINE_RE = /^\d+$/;
+// A comma list whose chunks carry their own `raw` (`:1-32:raw,48-50:raw`, `:raw:5,raw:9-12`).
+const RAW_CHUNK_SRC = `(?:raw:)?${LIST_CHUNK_SRC}(?::raw)?`;
+const PER_CHUNK_RAW_LIST_RE = new RegExp(`:(${RAW_CHUNK_SRC}(?:,${RAW_CHUNK_SRC})+)$`, "i");
+
+/** Rewrite a list with per-chunk `raw` to its one-raw form: `a:1-3:raw,9:raw` → `a:1-3,9:raw`. */
+function hoistChunkRaw(rawPath: string): string {
+	const match = PER_CHUNK_RAW_LIST_RE.exec(rawPath);
+	if (!match || !/raw/i.test(match[1])) return rawPath;
+	const chunks = match[1].split(",").map(chunk => chunk.replace(/^raw:|:raw$/gi, ""));
+	return `${rawPath.slice(0, match.index)}:${chunks.join(",")}:raw`;
+}
+
+/**
+ * Fold the list chunks split off by a colon inside one comma list into the `list`
+ * that follows them. Two shapes put a colon there: the selector colon repeated
+ * after a comma (`a:1-30,:-30` reads as `a:1-30,-30`) and a colon written as the
+ * range dash (`a:20:40,85:100` reads as `a:20-40,85-100`). The dash shape folds
+ * only into a list that has a comma, so `clip.mp4:1:30` (a timestamp) and
+ * `a.ts:12:5` (line:column) keep their colons. Only colons at or after
+ * `minColon` count. Each chunk is tested once.
+ */
+function foldListColons(basePath: string, list: string, minColon: number): { basePath: string; list: string } {
+	// Comma chunks, last first: the list's first chunk is always `chunks.at(-1)`.
+	const chunks = list.split(",").reverse();
+	let base = basePath;
+	let dashed = false;
+	while (true) {
+		const colon = base.lastIndexOf(":");
+		if (colon < minColon) break;
+		const head = base.slice(colon + 1);
+		if (head.endsWith(",")) {
+			const repeated = head.slice(0, -1);
+			if (!FILE_LINE_RANGE_ONLY_RE.test(repeated)) break;
+			chunks.push(...repeated.split(",").reverse());
+		} else {
+			const headChunks = head.split(",");
+			const start = headChunks.pop()!;
+			const end = chunks.at(-1)!;
+			if (!BARE_LINE_RE.test(start) || !BARE_LINE_RE.test(end)) break;
+			if (headChunks.length > 0 && !FILE_LINE_RANGE_ONLY_RE.test(headChunks.join(","))) break;
+			chunks[chunks.length - 1] = `${start}-${end}`;
+			chunks.push(...headChunks.reverse());
+			dashed = true;
+		}
+		base = base.slice(0, colon);
+	}
+	if (dashed && chunks.length === 1) return { basePath, list };
+	return { basePath: base, list: chunks.reverse().join(",") };
+}
+
+/**
+ * Split a filesystem path from its trailing read selector. `foldListColons: false`
+ * keeps a colon inside a list as part of the path (`a:1-30,:-30` peels only
+ * `:-30`, `a:20:40,85:100` only `:100`), for callers checking whether that
+ * shorter split names a real file.
+ */
+export function splitPathAndSel(
+	rawPath: string,
+	options?: { foldListColons?: boolean },
+): { path: string; sel?: string } {
+	rawPath = hoistChunkRaw(rawPath);
 	const colon = rawPath.lastIndexOf(":");
 	if (colon <= 0) return { path: rawPath };
 
@@ -126,25 +191,33 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
 	if (!FILE_LINE_RANGE_RE.test(candidate)) return { path: rawPath };
 
 	let basePath = rawPath.slice(0, colon);
-	let sel = candidate;
-
 	// Allow a compound trailing selector: `path:1-50:raw`, `path:raw:1-50`, or
-	// `path:raw:-60`. The two chunks must be one line-range (or tail) plus one
-	// `raw`, in either order.
-	const innerColon = basePath.lastIndexOf(":");
-	if (innerColon > 0) {
+	// `path:raw:-60`. The two chunks must be one line list (ranges and tails)
+	// plus one `raw`, in either order.
+	let list: string | undefined;
+	let rawSuffix = "";
+	if (FILE_LINE_RANGE_ONLY_RE.test(candidate)) {
+		list = candidate;
+	} else if (FILE_RAW_ONLY_RE.test(candidate)) {
+		const innerColon = basePath.lastIndexOf(":");
 		const innerCandidate = basePath.slice(innerColon + 1);
-		const innerIsRaw = FILE_RAW_ONLY_RE.test(innerCandidate);
-		const outerIsRaw = FILE_RAW_ONLY_RE.test(candidate);
-		const innerIsRange = FILE_LINE_RANGE_ONLY_RE.test(innerCandidate);
-		const outerIsRange = FILE_LINE_RANGE_ONLY_RE.test(candidate);
-		if ((innerIsRaw && outerIsRange) || (innerIsRange && outerIsRaw)) {
-			sel = `${innerCandidate}:${candidate}`;
+		if (innerColon > 0 && FILE_LINE_RANGE_ONLY_RE.test(innerCandidate)) {
+			list = innerCandidate;
+			rawSuffix = `:${candidate}`;
 			basePath = basePath.slice(0, innerColon);
 		}
 	}
+	if (list === undefined) return { path: basePath, sel: candidate };
 
-	return { path: basePath, sel };
+	if (options?.foldListColons !== false) ({ basePath, list } = foldListColons(basePath, list, 1));
+	if (!rawSuffix) {
+		const innerColon = basePath.lastIndexOf(":");
+		const innerCandidate = basePath.slice(innerColon + 1);
+		if (innerColon > 0 && FILE_RAW_ONLY_RE.test(innerCandidate)) {
+			return { path: basePath.slice(0, innerColon), sel: `${innerCandidate}:${list}` };
+		}
+	}
+	return { path: basePath, sel: `${list}${rawSuffix}` };
 }
 
 /**
@@ -155,7 +228,7 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
  * grammar. That rule is right for filesystem paths (a file named `a:1-50` is
  * legal) but wrong for internal URLs, where any trailing `:<chunk>` after the
  * scheme is unambiguously a read-tool selector — even if malformed (e.g.
- * `artifact://3:raw:-100-5`).
+ * `local://3.log:raw:-100-5`).
  *
  * This function iteratively peels selector-shaped chunks (well-formed plus
  * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
@@ -182,12 +255,23 @@ export function splitInternalUrlSel(
 	if (spec.portAuthority && !url.rest.includes("/")) return { path: rawPath };
 
 	const schemeEnd = rawPath.length - url.rest.length;
+	rawPath = hoistChunkRaw(rawPath);
 	let path = rawPath;
 	const chunks: string[] = [];
 	while (true) {
 		const colon = path.lastIndexOf(":");
 		// Stop before crossing into the scheme separator `://`.
 		if (colon < schemeEnd) break;
+		// `local://7.log:1-30,:-30`, `local://7.log:20:40,85:100`: chunks split off
+		// by a colon inside one list join the list peeled after them.
+		if (chunks.length > 0 && FILE_LINE_RANGE_ONLY_RE.test(chunks[0])) {
+			const folded = foldListColons(path, chunks[0], schemeEnd);
+			if (folded.basePath !== path) {
+				chunks[0] = folded.list;
+				path = folded.basePath;
+				continue;
+			}
+		}
 		const tail = path.slice(colon + 1);
 		if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
 		chunks.unshift(tail);
@@ -195,6 +279,20 @@ export function splitInternalUrlSel(
 	}
 	if (chunks.length === 0) return { path: rawPath };
 	return { path, sel: chunks.join(":") };
+}
+
+/** A read query after a filesystem path: `?key=` (`?q=…`, `?limit=…&where=…`), not a `\\?\` long-path prefix. */
+const READ_QUERY_RE = /(?<!^\\\\)\?\w+=/;
+
+/**
+ * Split a filesystem read target from its query (`data.json?q=.items` →
+ * `data.json`, `?q=.items`), the display twin of the read tool's JSON, SQLite
+ * and image-question parsers. URLs own their query string and stay whole, as
+ * does a `?` inside a file name.
+ */
+export function splitReadQuery(readPath: string): { path: string; query?: string } {
+	const at = splitUrlScheme(readPath) ? -1 : readPath.search(READ_QUERY_RE);
+	return at > 0 ? { path: readPath.slice(0, at), query: readPath.slice(at) } : { path: readPath };
 }
 
 /** Recognize HTTP URLs and www-prefixed external read targets. */
@@ -421,11 +519,11 @@ function readRangeStart(rawPath: string, args: ReadRenderArgs | undefined): numb
 }
 
 /**
- * Read content as numbered, wrapped `code` (no path header: the head names
- * the file), matching the ANSI preview's hanging wrap. Numbers come from
+ * Read content as one numbered, wrapped `code` block (no path header: the head
+ * names the file), matching the ANSI preview's hanging wrap. Numbers come from
  * `lineNumbers` (`displayContent`'s per-line numbers, `null` for an elided
- * block; runs split with `…` between) when they cover every line, else count
- * up from `start`.
+ * block, which Tern shows as a `…` gap row where the numbers jump) when they
+ * cover every line, else count up from `start`.
  */
 export function readContentCode(
 	content: string,
@@ -434,10 +532,11 @@ export function readContentCode(
 	path: string | undefined,
 ): NativeNode[] {
 	const lines = content.split("\n");
-	return numberedCode(
+	const block = numberedCode(
 		lines.map((text, i) => ({ n: numbers && numbers.length === lines.length ? numbers[i]! : start + i, text })),
 		{ path, wrap: true },
 	);
+	return block ? [block] : [];
 }
 
 /** An image content block as the read tool emits it (base64 data + mime type). */

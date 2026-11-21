@@ -18,6 +18,8 @@ const PRODUCT = "omp";
 const SERVICE_URL = (process.env.BUILD_URL ?? "https://build.stencil.so").replace(/\/+$/, "");
 const HOMEPAGE = "https://omp.sh";
 const DESC = "Coding agent with the IDE wired in";
+/** GitHub release assets: the same bytes `release_github` publishes before the build service. */
+const RELEASE_DOWNLOAD_URL = "https://github.com/can1357/oh-my-pi/releases/download";
 
 /** Build-service target of each formula stanza. */
 const FORMULA_TARGETS = {
@@ -79,7 +81,7 @@ async function resolveFile(version: string, target: string): Promise<FormulaFile
 
 // `${...}` is JS interpolation; the literal `#{bin}` below is a Ruby
 // interpolation Homebrew resolves when it evaluates the formula.
-export function renderFormula(version: string, files: Record<FormulaTarget, FormulaFile>): string {
+function renderFormula(version: string, files: Record<FormulaTarget, FormulaFile>): string {
 	// Each `url` carries `using: :nounzip` because the build files are bare
 	// Mach-O/ELF executables, not archives. Without it Homebrew's default
 	// CurlDownloadStrategy routes through UnpackStrategy::Uncompressed#extract_nestedly,
@@ -90,6 +92,12 @@ export function renderFormula(version: string, files: Record<FormulaTarget, Form
 	// the writable staging dir so `generate_completions_from_executable` does
 	// not touch the real `/Users/<user>/.omp` (denied by Homebrew's sandbox
 	// profile, which would otherwise fail the popen).
+	//
+	// Each `mirror` points at the same file on the GitHub release. Homebrew
+	// tries it when the build-service download fails, e.g. when a proxy blocks
+	// the service's redirect to R2 storage; `sha256` still checks the bytes.
+	const mirror = (file: FormulaFile) =>
+		`${RELEASE_DOWNLOAD_URL}/v${version}/${file.url.slice(file.url.lastIndexOf("/") + 1)}`;
 	return `class Omp < Formula
   desc "${DESC}"
   homepage "${HOMEPAGE}"
@@ -100,11 +108,13 @@ export function renderFormula(version: string, files: Record<FormulaTarget, Form
     on_arm do
       url "${files.macosArm.url}",
           using: :nounzip
+      mirror "${mirror(files.macosArm)}"
       sha256 "${files.macosArm.sha256}"
     end
     on_intel do
       url "${files.macosIntel.url}",
           using: :nounzip
+      mirror "${mirror(files.macosIntel)}"
       sha256 "${files.macosIntel.sha256}"
     end
   end
@@ -113,11 +123,13 @@ export function renderFormula(version: string, files: Record<FormulaTarget, Form
     on_arm do
       url "${files.linuxArm.url}",
           using: :nounzip
+      mirror "${mirror(files.linuxArm)}"
       sha256 "${files.linuxArm.sha256}"
     end
     on_intel do
       url "${files.linuxIntel.url}",
           using: :nounzip
+      mirror "${mirror(files.linuxIntel)}"
       sha256 "${files.linuxIntel.sha256}"
     end
   end

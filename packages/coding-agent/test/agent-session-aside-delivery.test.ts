@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { AsyncJobManager, type AsyncJobManagerApi } from "@oh-my-pi/pi-coding-agent/async";
 import type { AssistantMessage, Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -12,7 +12,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, PromptDroppedError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -159,7 +159,7 @@ describe("AgentSession aside delivery", () => {
 			const nextCall = Promise.withResolvers<void>();
 			const waitStarted = Promise.withResolvers<void>();
 			const job = Promise.withResolvers<string>();
-			const manager = new AsyncJobManager({});
+			const manager: AsyncJobManagerApi = new AsyncJobManager({});
 			const settings = Settings.isolated({
 				"compaction.enabled": false,
 				"todo.enabled": false,
@@ -243,7 +243,7 @@ describe("AgentSession aside delivery", () => {
 			} finally {
 				job.resolve("JOB_RESULT_AFTER_ASIDE");
 				await run;
-				await session.settleAsyncWork();
+				await session.waitForRunEnd();
 			}
 			expect(
 				session.agent.state.messages.filter(
@@ -456,6 +456,67 @@ describe("AgentSession aside delivery", () => {
 		expect(startedTurn).toBe(true);
 		expect(contexts).toHaveLength(1);
 		expect(JSON.stringify(contexts[0]!.messages)).toContain("IDLE_ASIDE_BODY");
+	});
+
+	it("two asides sent back to back to an idle session both reach the model, in order", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const modelRegistry = new ModelRegistry(authStorage);
+		const contexts: Context[] = [];
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "Acknowledged." }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: zeroUsage,
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+		});
+
+		const first = session.sendCustomMessage(
+			{ customType: "ext-aside", content: "FIRST_ASIDE", display: true, attribution: "agent" },
+			{ deliverAs: "aside", triggerTurn: true },
+		);
+		const second = session.sendCustomMessage(
+			{ customType: "ext-aside", content: "SECOND_ASIDE", display: true, attribution: "agent" },
+			{ deliverAs: "aside", triggerTurn: true },
+		);
+		await Promise.all([first, second]);
+		await session.waitForIdle();
+
+		const sent = JSON.stringify(contexts.at(-1)!.messages);
+		expect(sent).toContain("FIRST_ASIDE");
+		expect(sent).toContain("SECOND_ASIDE");
+		expect(sent.indexOf("FIRST_ASIDE")).toBeLessThan(sent.indexOf("SECOND_ASIDE"));
+		const persisted = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message")
+			.map(entry => entry.content);
+		expect(persisted).toEqual(["FIRST_ASIDE", "SECOND_ASIDE"]);
 	});
 
 	it("a stranded aside queued during an aborted turn does not leak into a fresh session (newSession)", async () => {
@@ -1133,9 +1194,13 @@ describe("AgentSession aside delivery", () => {
 			return images;
 		});
 		let asideSettled = false;
-		const asidePromise = session.sendUserMessage("GENERATION_RACE_ASIDE", { deliverAs: "aside" }).then(() => {
-			asideSettled = true;
-		});
+		const asidePromise = session.sendUserMessage("GENERATION_RACE_ASIDE", { deliverAs: "aside" }).then(
+			() => undefined,
+			(error: unknown) => {
+				asideSettled = true;
+				return error;
+			},
+		);
 		let newSessionPromise: Promise<boolean> | undefined;
 		try {
 			await normalizeStarted.promise;
@@ -1153,6 +1218,7 @@ describe("AgentSession aside delivery", () => {
 			releaseNormalize.resolve();
 			await setImmediate();
 			expect(asideSettled).toBe(true);
+			expect(await asidePromise).toBeInstanceOf(PromptDroppedError);
 			expect(session.isSessionTransitioning).toBe(true);
 			expect(ready).toBe(false);
 			expect(JSON.stringify(session.agent.state.messages)).not.toContain("GENERATION_RACE_ASIDE");
@@ -1701,5 +1767,216 @@ describe("AgentSession aside delivery", () => {
 		);
 		expect(notice).toBeDefined();
 		expect(notice && typeof notice.content === "string" ? notice.content : "").toContain("m1");
+		// One-at-a-time steering must deliver the notice and the steer it announces
+		// in the same model call; split, the model answers the notice alone first.
+		expect(mock.calls.length).toBe(2);
+		const steerCall = JSON.stringify(mock.calls[1]!.context.messages);
+		expect(steerCall).toContain("Now available:");
+		expect(steerCall).toContain("delegate to");
+	});
+
+	/** A session whose first model call blocks until `release`, with `^openai/gpt-test` taggable. */
+	function createMentionSession() {
+		const modelRegistry = new ModelRegistry(authStorage);
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			provider: "openai",
+			id: "gpt-test",
+			responses: [
+				async () => {
+					started.resolve();
+					await release.promise;
+					return { content: ["done"] };
+				},
+				{ content: ["queued handled"] },
+			],
+		});
+		spyOn(modelRegistry, "getAvailable").mockReturnValue([mock.model]);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		const created = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+		});
+		session = created;
+		return { session: created, mock, started, release };
+	}
+
+	function llmText(message: Context["messages"][number]): string {
+		if (typeof message.content === "string") return message.content;
+		return message.content.map(part => (part.type === "text" ? part.text : "")).join("");
+	}
+
+	/** The model call delivering `text` carries it with `m1` expanded, right after the only notice announcing `m1`. */
+	function expectAnnouncedMention(calls: readonly { context: Context }[], text: string): void {
+		expect(calls.length).toBe(2);
+		const texts = calls[1]!.context.messages.map(llmText);
+		const messageIndex = texts.findIndex(candidate => candidate.startsWith(`${text} <model agent="m1"`));
+		const noticeIndexes = texts.flatMap((candidate, index) => (candidate.includes("Now available:") ? [index] : []));
+		expect(messageIndex).toBeGreaterThan(-1);
+		expect(noticeIndexes).toEqual([messageIndex - 1]);
+		expect(texts[messageIndex - 1]).toContain("`m1`");
+		expect(texts.join("\n")).not.toContain("^openai/gpt-test");
+	}
+
+	// The TUI's `->` queue shorthand while busy, messages held during compaction, RPC
+	// steer/follow_up, ACP steering, and extensions' queued sendUserMessage reach the
+	// session through these, not prompt().
+	const queueMentionVia = {
+		steer: (session: AgentSession, text: string) => session.steer(text),
+		followUp: (session: AgentSession, text: string) => session.followUp(text),
+		joinActiveTurn: (session: AgentSession, text: string) => session.joinActiveTurn(text),
+		"sendUserMessage({ deliverAs: 'steer' })": (session: AgentSession, text: string) =>
+			session.sendUserMessage(text, { deliverAs: "steer" }),
+		"sendUserMessage({ deliverAs: 'followUp' })": (session: AgentSession, text: string) =>
+			session.sendUserMessage(text, { deliverAs: "followUp" }),
+		"sendUserMessage({ deliverAs: 'aside' })": (session: AgentSession, text: string) =>
+			session.sendUserMessage(text, { deliverAs: "aside" }),
+	};
+	it.each(Object.keys(queueMentionVia) as (keyof typeof queueMentionVia)[])(
+		"a mention queued mid-run through session.%s mints its alias and rides the session-agent notice",
+		async method => {
+			const { session, mock, started, release } = createMentionSession();
+			const run = session.prompt("go");
+			try {
+				await started.promise;
+				await queueMentionVia[method](session, "delegate to ^openai/gpt-test");
+				expect(session.getSessionAgents().map(agentDef => agentDef.name)).toContain("m1");
+			} finally {
+				release.resolve();
+			}
+			await run;
+			await session.waitForIdle();
+			expectAnnouncedMention(mock.calls, "delegate to");
+		},
+	);
+
+	// Plain-first separates the two into batches: the earlier batch must not announce
+	// the mention still queued behind it with its own notice. Cross-queue rows deliver
+	// the plain steer ahead of a mention whose notice waits in another queue.
+	const mention = "delegate to ^openai/gpt-test";
+	const plain = "plain other";
+	it.each([
+		[
+			["steer", mention],
+			["steer", plain],
+		],
+		[
+			["followUp", mention],
+			["followUp", plain],
+		],
+		[
+			["steer", plain],
+			["steer", mention],
+		],
+		[
+			["followUp", plain],
+			["followUp", mention],
+		],
+		[
+			["followUp", mention],
+			["steer", plain],
+		],
+		[
+			["sendUserMessage({ deliverAs: 'aside' })", mention],
+			["steer", plain],
+		],
+	] as const)("messages queued as %j then %j announce the mention once", async (first, second) => {
+		const { session, mock, started, release } = createMentionSession();
+		const run = session.prompt("go");
+		try {
+			await started.promise;
+			for (const [method, text] of [first, second]) await queueMentionVia[method](session, text);
+		} finally {
+			release.resolve();
+		}
+		await run;
+		await session.waitForIdle();
+		const texts = mock.calls.at(-1)!.context.messages.map(llmText);
+		const notices = texts.flatMap((text, index) => (text.includes("Now available:") ? [index] : []));
+		expect(notices).toEqual([texts.findIndex(text => text.startsWith('delegate to <model agent="m1"')) - 1]);
+		expect(texts).toContain(plain);
+	});
+
+	it("a reused alias is announced on delivery when the message carrying its notice was withdrawn", async () => {
+		const { session, mock, started, release } = createMentionSession();
+		const run = session.prompt("go");
+		try {
+			await started.promise;
+			await session.followUp("delegate to ^openai/gpt-test");
+			// Reuses `m1`, whose notice rides on the message ahead.
+			await session.followUp("again ^openai/gpt-test");
+			expect(session.removeQueuedMessage("delegate to ^openai/gpt-test", "followUp")).toBe(true);
+		} finally {
+			release.resolve();
+		}
+		await run;
+		await session.waitForIdle();
+		const texts = mock.calls.at(-1)!.context.messages.map(llmText);
+		expect(texts.some(text => text.startsWith("delegate to"))).toBe(false);
+		expect(texts.some(text => text.startsWith('again <model agent="m1"'))).toBe(true);
+		const notices = texts.filter(text => text.includes("Now available:"));
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("`m1`");
+	});
+
+	it("an agent-attributed steer keeps its `^` text literal and mints no alias", async () => {
+		const { session, mock, started, release } = createMentionSession();
+		const run = session.prompt("go");
+		try {
+			await started.promise;
+			await session.steer("relay ^openai/gpt-test", undefined, { attribution: "agent" });
+		} finally {
+			release.resolve();
+		}
+		await run;
+		await session.waitForIdle();
+		expect(session.getSessionAgents().map(agentDef => agentDef.name)).not.toContain("m1");
+		const texts = mock.calls.at(-1)!.context.messages.map(llmText);
+		expect(texts).toContain("relay ^openai/gpt-test");
+		expect(texts.some(text => text.includes("Now available:"))).toBe(false);
+	});
+
+	it("a mention in a later item of a queued list mints its alias and rides the session-agent notice", async () => {
+		const { session, mock, started, release } = createMentionSession();
+		// `=>` with a numbered list on an idle session: the first item starts the turn,
+		// the rest queue behind it as follow-ups.
+		const run = session.prompt("go", { streamingBehavior: "followUp", followUps: ["delegate to ^openai/gpt-test"] });
+		try {
+			await started.promise;
+			expect(session.getSessionAgents().map(agentDef => agentDef.name)).toContain("m1");
+		} finally {
+			release.resolve();
+		}
+		await run;
+		await session.waitForIdle();
+		expectAnnouncedMention(mock.calls, "delegate to");
+	});
+
+	it("a mention withdrawn from the queue is announced again when its alias is reused", async () => {
+		const { session, mock, started, release } = createMentionSession();
+		const run = session.prompt("go");
+		try {
+			await started.promise;
+			await session.followUp("delegate to ^openai/gpt-test");
+			// Alt+Up takes the message back to the editor; its notice leaves the queue with it.
+			expect(session.clearQueue().followUp.map(message => message.text)).toHaveLength(1);
+			await session.followUp("again ^openai/gpt-test");
+		} finally {
+			release.resolve();
+		}
+		await run;
+		await session.waitForIdle();
+		expectAnnouncedMention(mock.calls, "again");
 	});
 });

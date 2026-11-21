@@ -87,11 +87,12 @@ function matchListFromProps(node: KdlNodeView, skip: readonly string[]): Compile
 const UTC_OFFSET_PATTERN = /^(?:Z|[+-](?:(?:0\d|1[0-3]):[0-5]\d|14:00))$/;
 
 function parseRetryResetTimezone(node: KdlNodeView): CompiledRetryResetTimezone {
-	ensureLeaf(node, ["provider", "offset"]);
+	ensureLeaf(node, ["provider", "base-url", "offset"]);
 	const provider = requiredProp(node, "provider");
+	const baseUrl = propString(node, "base-url");
 	const offset = requiredProp(node, "offset");
 	if (!provider || !UTC_OFFSET_PATTERN.test(offset) || node.args.length > 0) malformed(node);
-	return { provider, offset };
+	return { provider, offset, ...(baseUrl === undefined ? {} : { baseUrl }) };
 }
 
 function hasMatchers(match: CompiledMatchList): boolean {
@@ -326,6 +327,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		excludeModels: [],
 		retiredProviders: [],
 		referenceIsolatedProviders: [],
+		appendOnlyContextProviders: [],
 		planRequirements: [],
 		retryResetTimezones: [],
 		pricingPeers: [],
@@ -413,6 +415,13 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				const values = positionalStrings(node);
 				if (values.length === 0 || values.some(value => !value)) malformed(node);
 				behavior.referenceIsolatedProviders.push(...values);
+				break;
+			}
+			case "append-only-context-providers": {
+				ensureLeaf(node, []);
+				const values = positionalStrings(node);
+				if (values.length === 0 || values.some(value => !value)) malformed(node);
+				behavior.appendOnlyContextProviders.push(...values);
 				break;
 			}
 			case "role-defaults": {

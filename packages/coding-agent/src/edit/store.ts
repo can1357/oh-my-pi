@@ -2,29 +2,29 @@
  * Session-scoped native edit state: full-file snapshots that mint hashline
  * tags (recorded by `read`/`search`/`write`), `CUT`/`PUT` clipboard
  * registers, and the byte-identical no-op loop guard. One store per
- * {@link ToolSession}; every {@link EditSession} the edit tool opens shares it.
+ * conversation ({@link ToolSession.state}); every {@link EditSession} the edit
+ * tool opens shares it.
  */
 import { EditStore } from "@oh-my-pi/pi-natives";
-
-/** Owner of the lazily created per-session store. */
-export interface EditStoreOwner {
-	editStore?: EditStore;
-}
+import type { ToolSession } from "../tools";
+import { getToolConversationState } from "../tools/tool-state";
 
 /** The session's store, created on first use. */
-export function getEditStore(session: EditStoreOwner): EditStore {
-	session.editStore ??= new EditStore();
-	return session.editStore;
+export function getEditStore(session: ToolSession): EditStore {
+	const state = getToolConversationState(session);
+	state.editStore ??= new EditStore();
+	return state.editStore;
 }
 
 const SEEN_ROW_PREFIX = /^[ *]?(\d+)(?:-(\d+))?:/;
 
 /**
  * Seen-line entry that no edit can anchor (lines are 1-based). An empty seen set
- * means unrestricted provenance (a `write` tag), so a display whose every row was
- * column-cut records this instead: provenance present, no source line fully shown.
+ * means unrestricted provenance (a `write` tag), so a display that fully shows no
+ * row (every row column-cut, or only a tagged header kept) records this instead:
+ * provenance present, no source line fully shown.
  */
-const NO_FULL_LINE = 0;
+export const NO_FULL_LINE = 0;
 
 /** Record numbered output without treating column-cut rows as complete source lines. */
 export function recordFullySeenRows(

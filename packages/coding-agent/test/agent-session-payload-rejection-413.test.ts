@@ -1150,6 +1150,53 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 	});
 
+	for (const goalMode of [false, true]) {
+		it(`walks the configured chain for overflow wording on a context that fits (goal mode: ${goalMode})`, async () => {
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!fallbackModel) {
+				throw new Error("Expected bundled openai fallback model to exist");
+			}
+
+			const requestedModels: string[] = [];
+			const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+			const fallbackMock = createMockModel({ id: fallbackModel.id, provider: fallbackModel.provider });
+			await createSession(200_000, undefined, {
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					if (model.provider === "anthropic") {
+						// oMLX memory-guard rejection: overflow wording, but the prompt is tiny.
+						primaryMock.push({
+							throw: "oMLX prefill memory guard rejected this prompt: Prefill context too large for available memory (pre-chunk guard at 0 tokens, kv_len=10620). Free system memory, or reduce context length.",
+						});
+						return primaryMock.stream(model, context, options);
+					}
+					fallbackMock.push({ content: ["recovered on configured fallback"] });
+					return fallbackMock.stream(model, context, options);
+				},
+				extraSettings: {
+					"retry.baseDelayMs": 5,
+					"retry.modelFallback": true,
+					"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+				},
+			});
+			if (goalMode) activateOngoingGoal("goal-memory-guard");
+			const startCount = countCompactionEvents("auto_compaction_start");
+
+			await session.prompt("work on it");
+			await session.waitForIdle();
+
+			expect(startCount()).toBe(0);
+			expect(requestedModels).toEqual([
+				"anthropic/claude-sonnet-4-5",
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+			]);
+			expect(session.model?.provider).toBe(fallbackModel.provider);
+			const last = session.getLastAssistantMessage();
+			expect(last?.stopReason).not.toBe("error");
+			expect(last?.content).toContainEqual(expect.objectContaining({ text: "recovered on configured fallback" }));
+		});
+	}
+
 	it("consults a configured fallback chain for dual-flag bare-413 rejections", async () => {
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallbackModel) {

@@ -11,7 +11,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
-import { modelKind, type ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { type Model, modelKind, type ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { resolveProviderModelReference } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 describe("Codex model discovery", () => {
@@ -288,13 +288,24 @@ describe("Codex model discovery", () => {
 		}
 	});
 
-	it("applies GPT-6 / GPT-6.1 Sol and Luna pricing to discovered plain and worker routes", async () => {
+	it("applies GPT-6 / GPT-6.1 / GPT-6.2 pricing to discovered plain and worker routes", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
 				Response.json({
 					// GPT-6 plain rows are bundled, so their `-wm` listing also yields
-					// the plain route; GPT-6.1 Sol is not yet bundled and ships both.
-					models: ["gpt-6-sol-wm", "gpt-6-luna-wm", "gpt-6.1-sol", "gpt-6.1-sol-wm"].map(slug => ({
+					// the plain route; GPT-6.1 Terra and GPT-6.2 are not yet bundled and ship both.
+					models: [
+						"gpt-6-sol-wm",
+						"gpt-6-luna-wm",
+						"gpt-6.1-sol",
+						"gpt-6.1-sol-wm",
+						"gpt-6.1-terra",
+						"gpt-6.1-terra-wm",
+						"gpt-6.2-astra",
+						"gpt-6.2-astra-wm",
+						"gpt-6.2-sol",
+						"gpt-6.2-sol-wm",
+					].map(slug => ({
 						slug,
 						display_name: slug,
 						default_reasoning_level: "medium",
@@ -318,26 +329,49 @@ describe("Codex model discovery", () => {
 			"gpt-6-sol-wm",
 			"gpt-6.1-sol",
 			"gpt-6.1-sol-wm",
+			"gpt-6.1-terra",
+			"gpt-6.1-terra-wm",
+			"gpt-6.2-astra",
+			"gpt-6.2-astra-wm",
+			"gpt-6.2-sol",
+			"gpt-6.2-sol-wm",
 		]);
+		// GPT-6.1 Sol ships Ultrafast at Codex's 8x included-usage rate and GPT-6.2
+		// at 6x with Fast at 2x; GPT-6.1 Terra, GPT-6 Sol, and Luna have only Fast and Flex.
+		const expected: Record<string, { cost: Model["cost"]; serviceTierCost: Model["serviceTierCost"] }> = {
+			"gpt-6.2-astra": {
+				cost: { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2, ultrafast: 6 },
+			},
+			"gpt-6.2-sol": {
+				cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2, ultrafast: 6 },
+			},
+			"gpt-6.1-sol": {
+				cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2.5, ultrafast: 8 },
+			},
+			"gpt-6.1-terra": {
+				cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2.5 },
+			},
+			"gpt-6-sol": {
+				cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2.5 },
+			},
+			"gpt-6-luna": {
+				cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
+				serviceTierCost: { flex: 0.5, priority: 2.5 },
+			},
+		};
 		for (const model of result!.models) {
 			// Discovery has no rates; the generated KDL policy supplies them
 			// when the discovered spec becomes a usable model.
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 			const builtModel = buildModel(model);
-			expect(builtModel.cost).toEqual(
-				model.id.startsWith("gpt-6.1-sol")
-					? { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 }
-					: model.id.startsWith("gpt-6-sol")
-						? { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 }
-						: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
-			);
-			// GPT-6.1 Sol ships Ultrafast at Codex's 8x included-usage rate;
-			// GPT-6 Sol and Luna have only Fast and Flex.
-			expect(builtModel.serviceTierCost).toEqual(
-				model.id.startsWith("gpt-6.1-sol")
-					? { flex: 0.5, priority: 2.5, ultrafast: 8 }
-					: { flex: 0.5, priority: 2.5 },
-			);
+			const want = expected[model.id.replace(/-wm$/, "")];
+			expect(builtModel.cost).toEqual(want.cost);
+			expect(builtModel.serviceTierCost).toEqual(want.serviceTierCost);
 		}
 	});
 
@@ -754,6 +788,42 @@ describe("Codex model discovery", () => {
 			);
 
 			expect(result.models.map(model => model.id)).toEqual(["gpt-6-astra"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("lists Codex Terra from a healthy account when other accounts return 402", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-payment-"));
+		const fetchFn: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const accountId = new Headers(init?.headers).get("chatgpt-account-id");
+				if (accountId !== "entitled") return new Response("payment required", { status: 402 });
+				return Response.json({
+					models: [{ slug: "gpt-6.1-terra", visibility: "list", minimal_client_version: "0.153.0" }],
+				});
+			},
+			{ preconnect() {} },
+		);
+		try {
+			const result = await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [
+							{ accessToken: "token-limited-1", accountId: "limited-1" },
+							{ accessToken: "token-entitled", accountId: "entitled" },
+							{ accessToken: "token-limited-2", accountId: "limited-2" },
+						],
+						fetch: fetchFn,
+					}),
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+
+			expect(result.models.find(model => model.id === "gpt-6.1-terra")?.accountAccess).toEqual({
+				entitled: {},
+			});
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

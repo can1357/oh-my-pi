@@ -189,16 +189,64 @@ function replaceCommonAsciiSymbolsOutsideHtmlComments(line: string, state: HtmlC
 	return result;
 }
 
+/** Pre-formatted text that {@link formatLines} keeps as one opaque line; it never counts as blank. */
+interface AtomicLine {
+	readonly text: string;
+	/** Unformatted lines, used verbatim when the block falls inside a code fence. */
+	readonly source: string;
+}
+
+/**
+ * Width of `line`'s leading whitespace: spaces and tabs, or any Unicode whitespace when the first other
+ * character is non-ASCII. Counts without allocating a trimmed copy on the ASCII path.
+ */
+function lineIndent(line: string): number {
+	let s = 0;
+	let first = line.charCodeAt(0);
+	while (first === 32 /* space */ || first === 9 /* tab */) first = line.charCodeAt(++s);
+	// Possible unicode leading whitespace — defer to trimStart for exactness.
+	return first >= 128 ? line.length - line.trimStart().length : s;
+}
+
+/** Whether `line`, indented by `indent`, opens or closes a code fence for {@link format}. */
+function isFenceLine(line: string, indent: number): boolean {
+	return line.startsWith("```", indent) || line.startsWith("~~~", indent);
+}
+
+/**
+ * `text` with a closing fence appended when it ends inside a code fence by {@link format}'s rule, so an
+ * unclosed fence in one inserted text never leaves the text after it unformatted.
+ */
+export function closeCodeFence(text: string): string {
+	let open: string | undefined;
+	for (const line of text.split("\n")) {
+		const indent = lineIndent(line);
+		if (isFenceLine(line, indent)) open = open ? undefined : line.slice(indent, indent + 3);
+	}
+	if (!open) return text;
+	return text.endsWith("\n") ? `${text}${open}` : `${text}\n${open}`;
+}
+
 export function format(content: string, options: PromptFormatOptions = {}): string {
+	return formatLines(content.split("\n"), options).join("\n");
+}
+
+/**
+ * {@link format} over lines. An atomic line passes through unchanged and keeps its identity, except
+ * inside a code fence, where its source lines replace it, as they would stay verbatim in place.
+ */
+function formatLines<A extends AtomicLine = never>(
+	lines: (string | A)[],
+	options: PromptFormatOptions,
+): (string | A)[] {
 	const {
 		renderPhase = "post-render",
 		replaceAsciiSymbols = false,
 		normalizeRfc2119: shouldNormalizeRfc2119 = false,
 	} = options;
 	const isPreRender = renderPhase === "pre-render";
-	const lines = content.split("\n");
 	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-	const result: string[] = new Array(lines.length);
+	const result: (string | A)[] = new Array(lines.length);
 	let n = 0; // logical length of `result` (pops are n--)
 	let inCodeBlock = false;
 
@@ -207,24 +255,23 @@ export function format(content: string, options: PromptFormatOptions = {}): stri
 
 	for (let i = 0; i < lines.length; i++) {
 		const raw = lines[i];
+		if (typeof raw !== "string") {
+			if (inCodeBlock) {
+				lines.splice(i, 1, ...raw.source.split("\n"));
+				i--;
+			} else result[n++] = raw;
+			continue;
+		}
 		// charCode fast paths: only pay for trimEnd when the last char might be
 		// whitespace (<= 0x20 ASCII ws/controls, >= 0x80 unicode ws). Untouched
 		// lines are pushed as the original string — no allocation.
 		const last = raw.charCodeAt(raw.length - 1);
 		let line = last <= 32 || last >= 128 ? raw.trimEnd() : raw;
-		// Locate the first non-whitespace char without allocating a trimStart
-		// copy; `s` is the indent width, `first` the char code there (NaN when
-		// the line is blank).
-		let s = 0;
-		let first = line.charCodeAt(0);
-		while (first === 32 /* space */ || first === 9 /* tab */) first = line.charCodeAt(++s);
-		if (first >= 128) {
-			// Possible unicode leading whitespace — defer to trimStart for exactness.
-			s = line.length - line.trimStart().length;
-			first = line.charCodeAt(s);
-		}
+		// `s` is the indent width, `first` the char code there (NaN when the line is blank).
+		let s = lineIndent(line);
+		let first = line.charCodeAt(s);
 
-		if ((first === 96 /* ` */ || first === 126) /* ~ */ && (line.startsWith("```", s) || line.startsWith("~~~", s))) {
+		if ((first === 96 /* ` */ || first === 126) /* ~ */ && isFenceLine(line, s)) {
 			inCodeBlock = !inCodeBlock;
 			result[n++] = line;
 			continue;
@@ -239,13 +286,8 @@ export function format(content: string, options: PromptFormatOptions = {}): stri
 			const replaced = replaceCommonAsciiSymbolsOutsideHtmlComments(line, htmlCommentState);
 			if (replaced !== line) {
 				line = replaced;
-				s = 0;
-				first = line.charCodeAt(0);
-				while (first === 32 || first === 9) first = line.charCodeAt(++s);
-				if (first >= 128) {
-					s = line.length - line.trimStart().length;
-					first = line.charCodeAt(s);
-				}
+				s = lineIndent(line);
+				first = line.charCodeAt(s);
 			}
 		}
 
@@ -281,30 +323,30 @@ export function format(content: string, options: PromptFormatOptions = {}): stri
 			// Blank line (`line` carries no trailing whitespace, so it is "").
 			const next = lines[i + 1];
 			// Strip any run of 2+ consecutive blank lines entirely; preserve a single blank.
-			if (next === undefined || next.length === 0 || !NON_BLANK.test(next)) {
-				while (n > 0 && result[n - 1].length === 0) n--;
+			if (next === undefined || (typeof next === "string" && !NON_BLANK.test(next))) {
+				while (n > 0 && result[n - 1] === "") n--;
 				let j = i + 1;
-				while (j < lines.length && (lines[j].length === 0 || !NON_BLANK.test(lines[j]))) j++;
+				for (let line = lines[j]; typeof line === "string" && !NON_BLANK.test(line); line = lines[++j]);
 				i = j - 1;
 				continue;
 			}
-			if (n === 0 || result[n - 1].length === 0) {
+			if (n === 0 || result[n - 1] === "") {
 				continue;
 			}
 		}
 
 		// CLOSING_HBS (`/^\{\{\//`) ⇔ startsWith("{{/") at the indent offset.
 		if (isClosingLine || (isPreRender && first === 123 /* { */ && line.startsWith("{{/", s))) {
-			while (n > 0 && result[n - 1].length === 0) n--;
+			while (n > 0 && result[n - 1] === "") n--;
 		}
 
 		result[n++] = line;
 	}
 
-	while (n > 0 && result[n - 1].length === 0) n--;
+	while (n > 0 && result[n - 1] === "") n--;
 	result.length = n;
 
-	return result.join("\n");
+	return result;
 }
 
 export interface TemplateContext extends Record<string, unknown> {
@@ -545,4 +587,80 @@ export function render(template: string, context: TemplateContext = {}): string 
 	const compiled = compile(template);
 	const rendered = compiled(context ?? {});
 	return format(rendered, { renderPhase: "post-render" });
+}
+
+/** UTF-16 range of a tracked item's text in rendered output. */
+export interface ItemRange {
+	readonly start: number;
+	readonly end: number;
+}
+
+export interface TrackedRender {
+	readonly text: string;
+	/** Ranges of `items[i]`, one per tracked iteration that rendered it. */
+	readonly ranges: readonly (readonly ItemRange[])[];
+}
+
+interface ItemLine extends AtomicLine {
+	readonly item: number;
+}
+
+const compiledMarkedCache = new LRUCache<string, Handlebars.MarkedTemplateDelegate<TemplateContext>>({ max: 256 });
+
+/**
+ * {@link render} that also reports where each of `items` was rendered; the text always equals
+ * `render(template, context)`. A template `{{#each}}` iteration over an item (not inside a helper block
+ * or partial) that covers whole lines and closes every code fence it opens is formatted on its own,
+ * without the blank lines at its edges, and composed into the formatted template as one block, so its
+ * range is known by construction. Other iterations are formatted in place and not reported.
+ */
+export function renderTracked(template: string, context: TemplateContext, items: readonly object[]): TrackedRender {
+	let compiled = compiledMarkedCache.get(template);
+	if (!compiled) {
+		compiled = handlebars.compileMarked<TemplateContext>(template, { noEscape: true, strict: false });
+		compiledMarkedCache.set(template, compiled);
+	}
+	const itemIndex = new Map<unknown, number>(items.map((item, index) => [item, index]));
+	const { text: raw, marks } = compiled(context ?? {}, new Set(items));
+	const lines: (string | ItemLine)[] = [];
+	let cursor = 0;
+	// Iterations finish inner-first; take the outermost first and skip what it contains.
+	for (const mark of marks.toSorted((a, b) => a.start - b.start || b.end - a.end)) {
+		let { start, end } = mark;
+		if (start < cursor || (start > 0 && raw[start - 1] !== "\n")) continue;
+		if (raw[end - 1] === "\n") end--;
+		if (end < raw.length && raw[end] !== "\n") continue;
+		// Blank edge lines stay template lines: alone, the block would drop them.
+		while (start < end) {
+			const newline = raw.indexOf("\n", start);
+			const lineEnd = newline < 0 || newline > end ? end : newline;
+			if (NON_BLANK.test(raw.slice(start, lineEnd))) break;
+			start = lineEnd + 1;
+		}
+		if (start >= end) continue;
+		for (;;) {
+			const lineStart = raw.lastIndexOf("\n", end - 1) + 1;
+			if (NON_BLANK.test(raw.slice(lineStart, end))) break;
+			end = lineStart - 1;
+		}
+		const source = raw.slice(start, end);
+		// A fence left open would leave the text after it unformatted in place; alone it could not.
+		if (closeCodeFence(source) !== source) continue;
+		if (start > cursor) for (const line of raw.slice(cursor, start - 1).split("\n")) lines.push(line);
+		lines.push({ text: format(source, { renderPhase: "post-render" }), source, item: itemIndex.get(mark.item)! });
+		cursor = end + 1;
+	}
+	if (cursor <= raw.length) for (const line of raw.slice(cursor).split("\n")) lines.push(line);
+	const ranges: ItemRange[][] = items.map(() => []);
+	let text = "";
+	for (const [index, line] of formatLines(lines, { renderPhase: "post-render" }).entries()) {
+		if (index > 0) text += "\n";
+		if (typeof line === "string") {
+			text += line;
+			continue;
+		}
+		ranges[line.item]!.push({ start: text.length, end: text.length + line.text.length });
+		text += line.text;
+	}
+	return { text, ranges };
 }

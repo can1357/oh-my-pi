@@ -1,0 +1,61 @@
+// https://docs.inceptionlabs.ai/get-started/models (2026-10-20).
+provider "inception" {
+	default-model "mercury-3"
+	env "INCEPTION_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Inception"
+
+	seed api="openai-completions" base-url="https://api.inceptionlabs.ai/v1" bundle="fallback" {
+		model "mercury-3" name="Mercury 3" {
+			reasoning #true
+			input "text"
+			cost input=0.1 output=0.35 cache-read=0.01 cache-write=0
+			limits context=1000000 max-tokens=131072
+		}
+		model "mercury-2.5" name="Mercury 2.5" {
+			reasoning #true
+			input "text"
+			cost input=0.2 output=0.75 cache-read=0.02 cache-write=0
+			limits context=260000 max-tokens=65536
+		}
+		model "mercury-2" name="Mercury 2" {
+			reasoning #true
+			input "text"
+			cost input=0.25 output=0.75 cache-read=0.025 cache-write=0
+			limits context=128000 max-tokens=50000
+		}
+	}
+
+	supports-developer-role #false
+	supports-store #false
+	max-tokens-field "max_completion_tokens"
+	clamp-output-to-model-max #true
+
+	// No Mercury taxonomy exists; these reviewed chat ids expose reasoning
+	// controls omitted by /models. Other endpoints must not inherit them.
+	models "mercury-2" "mercury-2.5" "mercury-3" {
+		thinking-upgrade-neutral #true
+		thinking-mode "effort"
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-effort-map { minimal "instant" }
+		thinking-default-level "medium"
+		supports-reasoning-effort #true
+		reasoning-disable-mode "lowest-effort"
+	}
+	models "mercury-3" priority=1 {
+		thinking-default-level "low"
+		// Mercury streams nothing while it reasons. High effort defaults to a
+		// 131,072-token budget; at the measured ~400 reasoning tokens/s that
+		// can take ~330s before the first chunk, past the 300s default.
+		stream-first-event-timeout-ms 600000
+		// /models reports $0. `cost-fallback` seeds the published launch price
+		// ($0.10/$0.35, 50% off the $0.20/$0.70 list price, no announced end) only
+		// while it does, so a real upstream tariff takes over once published.
+		cost-fallback {
+			input 0.1
+			output 0.35
+			cache-read 0.01
+			cache-write 0
+		}
+	}
+}

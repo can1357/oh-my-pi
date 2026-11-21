@@ -1,8 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,12 +16,15 @@ import {
 	getImageGenToolsWithRegistry,
 	imageGenTool,
 } from "@oh-my-pi/pi-coding-agent/tools/image-gen";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { hasFsCode, removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const generatedImagePaths: string[] = [];
 const PNG_DATA = Buffer.from("catalog-image").toString("base64");
 const WEBP_DATA = Buffer.from("hosted-image").toString("base64");
+/** A real 3x2 PNG, for the paths that decode the image. */
+const REAL_PNG_DATA = encodeRawPng(new Uint8Array(3 * 2 * 3), 3, 2, 3).toBase64();
 
 afterAll(async () => {
 	await Promise.all(generatedImagePaths.map(imagePath => removeWithRetries(imagePath)));
@@ -101,7 +107,46 @@ function collectPaths(result: CustomToolResult<{ imagePaths: string[] }>): void 
 	generatedImagePaths.push(...(result.details?.imagePaths ?? []));
 }
 
+/** Asserts the result carries a leading text block and one image block per generated image. */
+function expectGeneratedImageBlocks(
+	result: CustomToolResult<{ imagePaths: string[] }>,
+	expected: Array<{ data: string; mimeType: string }>,
+): void {
+	const [text, ...images] = result.content;
+	expect(text?.type).toBe("text");
+	expect(images).toEqual(expected.map(image => ({ type: "image", data: image.data, mimeType: image.mimeType })));
+	expect(result.details?.imagePaths).toHaveLength(expected.length);
+}
+
 describe("imageGenTool catalog routing", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("offline skips a foreign image backend and uses a same-provider fallback", async () => {
+		const foreign = catalogModel("deepinfra", "foreign-image", "openai-images");
+		const local = catalogModel("xai", "same-image", "openai-images");
+		const active = catalogModel("xai", "active-chat", "openai-responses", "chat");
+		const urls: string[] = [];
+		const settings = Settings.isolated({
+			"models.offline": true,
+			modelRoles: { image: "deepinfra/foreign-image" },
+			"retry.fallbackChains": { image: ["xai/same-image"] },
+		});
+		const ctx = createContext({
+			models: [foreign, local, active],
+			settings,
+			activeModel: active,
+			fetch: async input => {
+				urls.push(input.toString());
+				return imageResponse();
+			},
+		});
+
+		const result = await imageGenTool.execute("offline", { subject: "a harbor" }, undefined, ctx);
+		collectPaths(result);
+		expect(urls).toEqual(["https://xai.example/v1/images/generations"]);
+		expect(result.details?.model).toBe("same-image");
+	});
+
 	it("registers without resolving credentials", async () => {
 		const registry = createRegistry([]);
 		expect(await getImageGenTools(registry)).toEqual([imageGenTool]);
@@ -226,12 +271,23 @@ describe("imageGenTool catalog routing", () => {
 		collectPaths(result);
 		expect(result.details?.model).toBe("second-image");
 
-		const failingFetch: FetchImpl = async () =>
-			new Response(JSON.stringify({ error: { message: "failed" } }), { status: 503 });
+		const gatewayPage = `<!DOCTYPE html>\n<html>\n<body>\n${"<p>Bad gateway</p>\n".repeat(500)}</body>\n</html>`;
+		const failingFetch: FetchImpl = async input =>
+			input.toString().startsWith("https://deepinfra.example")
+				? new Response(JSON.stringify({ error: { message: "Duplicate parameter: 'image'." } }), { status: 400 })
+				: new Response(gatewayPage, { status: 502 });
 		const failingContext = createContext({ models: [first, second], settings, fetch: failingFetch });
-		await expect(
-			imageGenTool.execute("aggregate", { subject: "fails" }, undefined, failingContext),
-		).rejects.toBeInstanceOf(AggregateError);
+		const failure = await imageGenTool
+			.execute("aggregate", { subject: "fails" }, undefined, failingContext)
+			.catch((error: unknown) => error);
+		if (!(failure instanceof AggregateError)) throw new Error("Expected an exhausted image chain");
+		expect(failure.errors).toHaveLength(2);
+		expect(failure.message).toContain(
+			"deepinfra/first-image image request failed (400): Duplicate parameter: 'image'",
+		);
+		expect(failure.message).toContain("openrouter/second-image image request failed (502)");
+		expect(failure.message).not.toContain("\n");
+		expect(failure.message.length).toBeLessThan(gatewayPage.length / 4);
 	});
 
 	it("propagates transport I/O failures without trying the next model", async () => {
@@ -312,7 +368,7 @@ describe("imageGenTool catalog routing", () => {
 			aspect_ratio: "16:9",
 			input_references: [{ type: "image_url", image_url: { url: `data:image/png;base64,${PNG_DATA}` } }],
 		});
-		expect(result.details?.images[0]?.mimeType).toBe("image/webp");
+		expectGeneratedImageBlocks(result, [{ data: PNG_DATA, mimeType: "image/webp" }]);
 	});
 
 	it("uses the selected Gemini catalog id and base URL", async () => {
@@ -337,7 +393,72 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("gemini-selected-image");
 	});
 
+	it("generates through a Factory Droid image model chosen for the image role", async () => {
+		const factory = factoryDroidRegistry()
+			.filter(({ spec }) => spec.id === "kimi-k3" || spec.id === "gpt-image-2.5-sunburst")
+			.map(entry => buildModel(buildFactoryDroidModel(entry)));
+		const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			requests.push({ url: input.toString(), body: JSON.parse(String(init?.body)) });
+			return imageResponse();
+		};
+		const ctx = createContext({
+			models: factory,
+			settings: Settings.isolated({ modelRoles: { image: "factory-droid/gpt-image-2.5-sunburst" } }),
+			fetch: fetchMock,
+			activeModel: factory.find(model => model.id === "kimi-k3"),
+		});
+
+		const result = await imageGenTool.execute("factory", { subject: "a lighthouse" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(requests.map(request => request.url)).toEqual(["https://api.factory.ai/api/llm/o/v1/images/generations"]);
+		expect(requests[0].body.model).toBe("gpt-image-2.5-sunburst");
+		expect(result.details?.provider).toBe("factory-droid");
+		expect(result.details?.imageCount).toBe(1);
+	});
+
+	describe("Factory Droid image models at the end of the image defaults", () => {
+		const factory = factoryDroidRegistry()
+			.filter(({ spec }) => spec.id === "kimi-k3" || buildModel(spec).kind === "image")
+			.map(entry => buildModel(buildFactoryDroidModel(entry)));
+		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const FACTORY_GENERATE = "https://api.factory.ai/api/llm/o/v1/images/generations";
+		const XAI_GENERATE = "https://xai.example/v1/images/generations";
+
+		/** Run the tool once with every image request succeeding; returns the requested URLs and the result. */
+		async function run(models: Model<Api>[]) {
+			const urls: string[] = [];
+			const ctx = createContext({
+				models,
+				settings: Settings.isolated(),
+				fetch: async input => {
+					urls.push(input.toString());
+					return imageResponse();
+				},
+				activeModel: factory.find(model => model.id === "kimi-k3"),
+			});
+			const result = await imageGenTool.execute("default", { subject: "a lighthouse" }, undefined, ctx);
+			collectPaths(result);
+			return { urls, result };
+		}
+
+		it("generates with only a Factory login, starting from the CLI's preferred model", async () => {
+			const { urls, result } = await run(factory);
+			expect(urls).toEqual([FACTORY_GENERATE]);
+			expect(result?.details?.model).toBe("gpt-image-2.6-sunburst");
+		});
+
+		it("keeps another default image provider ahead of Factory", async () => {
+			const { urls, result } = await run([...factory, xai]);
+			expect(urls).toEqual([XAI_GENERATE]);
+			expect(result?.details?.provider).toBe("xai");
+		});
+	});
+
 	it("falls back to the selected Antigravity id when discovery advertises no image model", async () => {
+		// Antigravity is paused in its auth rules; its image transport stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		const model = catalogModel("google-antigravity", "gemini-selected-image", "google-gemini-cli");
 		const requestBodies: Array<Record<string, unknown>> = [];
 		const fetchMock: FetchImpl = async (input, init) => {
@@ -501,10 +622,27 @@ describe("imageGenTool catalog routing", () => {
 		collectPaths(result);
 
 		expect(result.details?.model).toBe("gpt-image-2-codex");
-		expect(result.details?.images[0]).toMatchObject({ size: "1774x887", quality: "low" });
+		expect(result.content[1]).toMatchObject({ type: "image", data: WEBP_DATA });
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-2)");
 		expect(text).toContain("(1774x887, quality low)");
+	});
+
+	it("fails when the provider returns no image", async () => {
+		const image = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");
+		const fetchMock: FetchImpl = async () => {
+			const event = { type: "response.completed", response: { output: [] } };
+			return new Response(`data: ${JSON.stringify(event)}\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } });
+		const ctx = createContext({ models: [image, carrier], settings, fetch: fetchMock });
+		await expect(imageGenTool.execute("empty", { subject: "apple" }, undefined, ctx)).rejects.toThrow(
+			/returned no image/,
+		);
 	});
 
 	it("spells the requested shape into the Codex prompt because the backend ignores the size field", async () => {
@@ -515,7 +653,7 @@ describe("imageGenTool catalog routing", () => {
 			requests.push(JSON.parse(String(init?.body)));
 			const event = {
 				type: "response.completed",
-				response: { output: [{ type: "image_generation_call", result: WEBP_DATA }] },
+				response: { output: [{ type: "image_generation_call", result: REAL_PNG_DATA }] },
 			};
 			return new Response(`data: ${JSON.stringify(event)}\n\n`, {
 				status: 200,
@@ -525,9 +663,25 @@ describe("imageGenTool catalog routing", () => {
 		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } });
 		const ctx = createContext({ models: [image, carrier], settings, fetch: fetchMock });
 
+		const results = [];
 		for (const params of [{ aspect_ratio: "3:2" as const }, { image_size: "1024x1536" as const }]) {
-			collectPaths(await imageGenTool.execute("codex-shape", { subject: "apple", ...params }, undefined, ctx));
+			const result = await imageGenTool.execute("codex-shape", { subject: "apple", ...params }, undefined, ctx);
+			collectPaths(result);
+			results.push(result);
 		}
+		// The provider's own size comes back resampled to the requested image_size.
+		const sized = results[1]!;
+		const sizedBlock = sized.content[1];
+		expect(sizedBlock?.type).toBe("image");
+		const sizedData = sizedBlock?.type === "image" ? sizedBlock.data : "";
+		expect(await new Bun.Image(Buffer.from(sizedData, "base64")).metadata()).toMatchObject({
+			width: 1024,
+			height: 1536,
+		});
+		expect(await new Bun.Image(fs.readFileSync(sized.details!.imagePaths[0]!)).metadata()).toMatchObject({
+			width: 1024,
+			height: 1536,
+		});
 
 		const sent = requests.map(body => {
 			const input = body.input as Array<{ content: Array<{ text?: string }> }>;

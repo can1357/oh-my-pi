@@ -43,6 +43,8 @@ describe("QwenCloud Token Plan provider", () => {
 						{ id: "qwen3.6-plus", owned_by: "qwencloud" },
 						{ id: "qwen3.8-max", owned_by: "qwencloud" },
 						{ id: "qwen3.8-flash", owned_by: "qwencloud" },
+						{ id: "qwen4-max-preview", owned_by: "qwencloud" },
+						{ id: "qwen4.0-max-preview", owned_by: "qwencloud" },
 						{ id: "deepseek-v3.2", owned_by: "qwencloud" },
 						{ id: "glm-5.1", owned_by: "qwencloud" },
 						{ id: "glm-5", owned_by: "qwencloud" },
@@ -82,11 +84,15 @@ describe("QwenCloud Token Plan provider", () => {
 			"qwen3.7-plus",
 			"qwen3.8-flash",
 			"qwen3.8-max",
+			"qwen4-max-preview",
+			"qwen4.0-max-preview",
 		]);
 		const expectedLimits = [
 			["qwen3.6-plus", 1_000_000, 65_536],
 			["qwen3.8-max", 1_000_000, 131_072],
 			["qwen3.8-flash", 1_000_000, 131_072],
+			["qwen4-max-preview", 1_000_000, 393_216],
+			["qwen4.0-max-preview", 1_000_000, 393_216],
 			["deepseek-v4-flash", 1_000_000, 384_000],
 			["deepseek-v4-flash-0731", 1_000_000, 384_000],
 			["deepseek-v4-pro-0813", 1_000_000, 384_000],
@@ -160,6 +166,29 @@ describe("QwenCloud Token Plan provider", () => {
 				},
 			},
 		});
+		for (const id of ["qwen4-max-preview", "qwen4.0-max-preview"]) {
+			const discovered = models?.find(model => model.id === id);
+			if (!discovered) throw new Error(`${id} missing from discovery`);
+			expect(buildModel(discovered)).toMatchObject({
+				contextWindow: 1_000_000,
+				maxTokens: 393_216,
+				reasoning: true,
+				input: ["text", "image"],
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+					defaultLevel: Effort.XHigh,
+				},
+				compat: {
+					supportsReasoningEffort: true,
+					replayReasoningContent: true,
+					whenThinking: {
+						thinkingFormat: "openai",
+						extraBody: { enable_thinking: true },
+					},
+				},
+			});
+		}
 		expect(options.dynamicModelsAuthoritative).toBe(true);
 	});
 

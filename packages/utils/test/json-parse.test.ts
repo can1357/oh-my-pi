@@ -188,3 +188,38 @@ describe("parseStreamingJson partial parsing", () => {
 		).toEqual({});
 	});
 });
+
+describe("__proto__ keys in relaxed/streaming parsing", () => {
+	it("keeps __proto__ as an own property in relaxed final parsing instead of replacing the prototype", () => {
+		// Trailing comma forces the relaxed path; strict JSON.parse keeps
+		// __proto__ as an own key, so the relaxed result must match it.
+		const result = parseJsonWithRepair<Record<string, unknown>>('{"__proto__": {"polluted": "yes"}, "a": 1,}');
+
+		expect(Object.hasOwn(result, "__proto__")).toBe(true);
+		expect(Object.keys(result)).toEqual(["__proto__", "a"]);
+		expect(result["__proto__"]).toEqual({ polluted: "yes" });
+		expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+	});
+
+	it("keeps __proto__ as an own property in streaming partial parsing so its fields cannot be smuggled in", () => {
+		const result = parseStreamingJson<Record<string, unknown>>('{"__proto__": {"path": "/tmp/smuggled"}, "a": 1,');
+
+		expect(Object.hasOwn(result, "__proto__")).toBe(true);
+		expect(result["__proto__"]).toEqual({ path: "/tmp/smuggled" });
+		expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+		// The smuggled field must not surface as an inherited property:
+		// own-key validation and direct property reads must agree.
+		expect(Object.hasOwn(result, "path")).toBe(false);
+		expect(result["path"]).toBeUndefined();
+	});
+
+	it("keeps a nested __proto__ as an own property", () => {
+		const result = parseJsonWithRepair<{ outer: Record<string, unknown> }>(
+			'{"outer": {"__proto__": {"polluted": "yes"}, "b": 2,}}',
+		);
+
+		expect(Object.hasOwn(result.outer, "__proto__")).toBe(true);
+		expect(result.outer["__proto__"]).toEqual({ polluted: "yes" });
+		expect(Object.getPrototypeOf(result.outer)).toBe(Object.prototype);
+	});
+});

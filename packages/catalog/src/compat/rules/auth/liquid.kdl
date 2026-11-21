@@ -1,0 +1,11 @@
+// Liquid AI serves the d1 decision models under `/decisions/v1`.
+auth "liquid" {
+	name "Liquid AI"
+	env "LIQUID_API_KEY"
+	login "api-key" {
+		auth-url "https://console.liquid.ai/"
+		instructions "Create an API key under Dashboard > API Keys in the Liquid AI console."
+		prompt "Paste your Liquid AI API key" placeholder="liquid_..."
+		validate "models-endpoint" label="Liquid AI" url="https://api.liquid.ai/decisions/v1/models"
+	}
+}

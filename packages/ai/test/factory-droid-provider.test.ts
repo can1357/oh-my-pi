@@ -256,6 +256,30 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(request.body.parallel_tool_calls).toBeUndefined();
 	});
 
+	it.each([
+		["/o/v1/chat/completions", kimiK3, completionsChunks("OK", "kimi-k3")],
+		["/o/v1/responses", gptTerra, responsesChunks("OK")],
+		["/a/v1/messages", sonnet5, anthropicChunks("OK")],
+	] as const)(
+		"sends %s without SDK telemetry, an API key or Claude Code app headers",
+		async (_path, model, chunks) => {
+			const captured: CapturedRequest[] = [];
+			const result = await streamFactoryDroid(
+				model(),
+				{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+				// A first-event budget is what makes the shared OpenAI transports add their timeout header.
+				{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, [...chunks]), streamFirstEventTimeoutMs: 60_000 },
+			).result();
+
+			expect(result.stopReason).toBe("stop");
+			const sent = Object.keys(captured[0].headers).map(name => name.toLowerCase());
+			expect(sent.filter(name => name.startsWith("x-stainless-"))).toEqual([]);
+			expect(sent).not.toContain("x-api-key");
+			expect(sent).not.toContain("x-app");
+			expect(sent).not.toContain("anthropic-dangerous-direct-browser-access");
+		},
+	);
+
 	it("forwards payload replacement, response metadata and raw SSE observation through the wrapper", async () => {
 		const captured: CapturedRequest[] = [];
 		const observed = { status: 0, chunks: [] as string[] };

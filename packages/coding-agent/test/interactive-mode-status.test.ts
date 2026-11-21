@@ -6,6 +6,7 @@ import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -20,6 +21,7 @@ function renderContainer(container: Container, width = 120): string {
 function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: UiHelpers } {
 	const ctx = {
 		chatContainer: new Container(),
+		pendingShellContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
@@ -54,6 +56,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 			sessionManager: {
 				buildSessionContext: () => buildSessionContext([]),
 				getEntries: () => [],
+				getConversationTip: () => undefined,
 			},
 		},
 		get viewSession() {
@@ -100,6 +103,30 @@ describe("InteractiveMode.showStatus", () => {
 		expect(renderLastLine(ctx.chatContainer)).not.toContain("STATUS_ONE");
 	});
 
+	test("a repeated identical status swaps in a fresh notice so native terminals re-toast it", () => {
+		const ctx = {
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			present: (content: Component | readonly Component[]) => {
+				const items = Array.isArray(content) ? content : [content];
+				for (const item of items) ctx.chatContainer.addChild(item);
+				ctx.ui.requestRender();
+			},
+			lastStatus: undefined,
+		} as unknown as InteractiveModeContext;
+		const helpers = new UiHelpers(ctx);
+
+		helpers.showStatus("Objective: ship it");
+		const first = ctx.chatContainer.children[0];
+		helpers.showStatus("Objective: ship it");
+		// One line in the transcript, but a new component: the reconciler only
+		// sends a toast for a node it has not seen, never for identical props.
+		expect(ctx.chatContainer.children).toHaveLength(1);
+		expect(ctx.chatContainer.children[0]).not.toBe(first);
+		expect(ctx.lastStatus).toBe(ctx.chatContainer.children[0] as typeof ctx.lastStatus);
+		expect(renderLastLine(ctx.chatContainer)).toContain("Objective: ship it");
+	});
+
 	test("appends a new status line if something else was added in between", () => {
 		const ctx = {
 			chatContainer: new Container(),
@@ -127,6 +154,39 @@ describe("InteractiveMode.showStatus", () => {
 		expect(ctx.chatContainer.children[0]?.render(120).join("\n")).toContain("STATUS_ONE");
 	});
 
+	test("a keyed status updates its line across notices but appends once other content follows", () => {
+		const ctx = {
+			chatContainer: new TranscriptContainer(),
+			ui: { requestRender: vi.fn() },
+			present: (content: Component | readonly Component[]) => {
+				const items = Array.isArray(content) ? content : [content];
+				for (const item of items) ctx.chatContainer.addChild(item);
+				ctx.ui.requestRender();
+			},
+			lastStatus: undefined,
+		} as unknown as InteractiveModeContext;
+		const helpers = new UiHelpers(ctx);
+
+		helpers.showStatus("Connecting…", { key: "k" });
+		helpers.showStatus("NOTICE_A", { collapse: false });
+		helpers.showStatus("NOTICE_B", { collapse: false });
+		helpers.showStatus("Connected", { key: "k" });
+		// Notices in between survive, and the keyed line is rewritten rather than duplicated.
+		const startup = renderContainer(ctx.chatContainer);
+		expect(ctx.chatContainer.children).toHaveLength(3);
+		expect(startup).toContain("NOTICE_A");
+		expect(startup).toContain("NOTICE_B");
+		expect(startup).toContain("Connected");
+		expect(startup).not.toContain("Connecting…");
+
+		// Once the conversation moves on, the old line may be in scrollback: append a fresh one.
+		ctx.chatContainer.addChild({ render: () => ["OTHER"], invalidate: () => {} });
+		helpers.showStatus("Reconnecting…", { key: "k" });
+		expect(ctx.chatContainer.children).toHaveLength(5);
+		expect(renderLastLine(ctx.chatContainer)).toContain("Reconnecting…");
+		expect(ctx.chatContainer.children[0]?.render(120).join("\n")).toContain("Connected");
+	});
+
 	test("preserves startup notifications while rendering the initial transcript", async () => {
 		await Settings.init({ inMemory: true });
 		try {
@@ -147,7 +207,7 @@ describe("InteractiveMode.showStatus", () => {
 			transcriptMessageComponents: new WeakMap(),
 			pendingTools: new Map(),
 			ui: { requestRender: vi.fn() },
-			viewSession: { isStreaming: false },
+			viewSession: { isStreaming: false, sessionManager: { getConversationTip: () => undefined } },
 			optimisticUserMessageSignature: "hello\u00001",
 		} as unknown as InteractiveModeContext;
 		const helpers = new UiHelpers(ctx);

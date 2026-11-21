@@ -4,7 +4,7 @@ import { ALL_SEGMENT_IDS, renderSegment } from "@oh-my-pi/pi-tui/status-line/seg
 import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/types";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { GallerySessionOptions } from "./preview-session";
-import { createGallerySession, GALLERY_CONTEXT_WINDOW } from "./preview-session";
+import { createGallerySession, GALLERY_CONTEXT_WINDOW, GALLERY_PROMPT_CACHE } from "./preview-session";
 import type { GalleryPreviewEntry } from "./types";
 
 const FIXED_NOW = new Date(2026, 7, 29, 14, 7, 9);
@@ -84,6 +84,7 @@ export function createGallerySegmentContext(sessionOptions?: GallerySessionOptio
 			fiveHour: { percent: 32, resetMinutes: 71 },
 			sevenDay: { percent: 68, resetHours: 52 },
 		},
+		promptCache: sessionOptions?.promptCache,
 	};
 }
 
@@ -98,6 +99,12 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 		case "status":
 			return [
 				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
+				{
+					label: "coloured extension status",
+					context: {
+						hookStatuses: ["\x1b[33mbuilding\x1b[39m", "\x1b[1;38;2;255;95;135mfailed\x1b[0m", "queued"],
+					},
+				},
 			];
 		case "model":
 			return [
@@ -265,6 +272,14 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 					label: "icon mode",
 					context: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "icon" } },
 				},
+			];
+		case "cache":
+			return [
+				{ label: "cached", session: { promptCache: GALLERY_PROMPT_CACHE.warm } },
+				{ label: "likely cached (inferred)", session: { promptCache: GALLERY_PROMPT_CACHE.likelyWarm } },
+				{ label: "not cached — expired", session: { promptCache: GALLERY_PROMPT_CACHE.coldExpired } },
+				{ label: "not cached — model changed", session: { promptCache: GALLERY_PROMPT_CACHE.coldModel } },
+				{ label: "hidden (nothing to report)" },
 			];
 		default:
 			return [{ label: "canonical" }];

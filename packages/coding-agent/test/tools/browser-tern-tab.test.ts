@@ -5,8 +5,9 @@ import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import type { ScreenshotResult } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { TernElementHandle, TernTab, userSourceFunction } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/tern-tab";
 import { parseTernSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/selectors";
-import { TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
+import { TernError, TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
 interface FakePage {
@@ -140,6 +141,40 @@ describe("TernTab", () => {
 		expect(tab.url()).toBe("https://example.test/");
 	});
 
+	it.each(["about:blank", "https://example.test/"])(
+		"does not take an about:blank load reported after the first goto for that navigation (state at %s)",
+		async stateUrl => {
+			// Tern reported the blank page's load before the goto and again after it, then never
+			// loaded the address (its `state` names either page, settled): the open must not return
+			// as if the page had arrived.
+			let seq = 0;
+			let goto = false;
+			let afterGoto = 0;
+			const fake = await startFakeDaemon((op): FakeAnswer => {
+				if (op.op === "open") return { ok: { block: 7, url: "about:blank" } };
+				if (op.op === "goto") goto = true;
+				if (op.op === "state") return { ok: { url: stateUrl, loading: false, width: 800, height: 600 } };
+				if (op.op !== "events") return { ok: {} };
+				const batch = seq === 0 || (goto && afterGoto++ === 0) ? BLANK_LOAD : [];
+				const events = batch.map(event => ({ seq: ++seq, ...event }));
+				return { ok: { events, next: seq, dropped: 0 } };
+			});
+			daemon = fake;
+			client = new TernSocketClient({ socketPath: fake.socketPath });
+			const failure = await TernTab.open(client, {
+				name: "main",
+				pane: 3,
+				viewport: { width: 800, height: 600 },
+				timeoutMs: 1_500,
+				url: "https://example.test/",
+			}).catch((error: unknown) => error);
+			expect(String(failure)).toContain('tab.goto("https://example.test/") timed out');
+			expect(String(failure)).toContain("about:blank load since the goto");
+			// The PiP of the failed open is closed again.
+			expect(opsOf(fake)).toContain("close");
+		},
+	);
+
 	it("opens at about:blank without a goto, which a Tern web view would never load", async () => {
 		const fake = await startPage({ eventBatches: [], kit: {} });
 		await openTab(fake, { url: "about:blank" });
@@ -218,6 +253,21 @@ describe("TernTab", () => {
 		]);
 	});
 
+	it("presses the requested button for a selector click", async () => {
+		const fake = await startPage({
+			eventBatches: [],
+			kit: { target: () => ({ ok: true, x: 40, y: 20, width: 30, height: 12, count: 1 }) },
+		});
+		const tab = await openTab(fake);
+		await tab.click("#menu", { button: "right" });
+		const input = fake.requests.find(request => request.op.op === "input")!.op;
+		expect(input.events).toEqual([
+			{ type: "mouse", action: "move", x: 40, y: 20, button: "right", clicks: 0, mods: [] },
+			{ type: "mouse", action: "down", x: 40, y: 20, button: "right", clicks: 1, mods: [] },
+			{ type: "mouse", action: "up", x: 40, y: 20, button: "right", clicks: 1, mods: [] },
+		]);
+	});
+
 	it("fills text controls with trusted text input after the kit selects their content", async () => {
 		const fake = await startPage({
 			eventBatches: [],
@@ -230,6 +280,70 @@ describe("TernTab", () => {
 		await tab.fill("#email", "a@b.test");
 		const input = fake.requests.find(request => request.op.op === "input")!.op;
 		expect(input.events).toEqual([{ type: "text", text: "a@b.test" }]);
+	});
+
+	it("presses Enter on a native ref handle without sending that ref to the page kit", async () => {
+		const node = {
+			ref: "e1-5",
+			tag: "input",
+			role: "textbox",
+			states: ["editable"],
+			rect: [20, 10, 40, 20],
+		};
+		daemon = await startFakeDaemon(
+			(op): FakeAnswer => {
+				if (op.op === "dom") {
+					return {
+						ok:
+							op.read === "query"
+								? { nodes: [node], total: 1 }
+								: { state: "ok", point: [40, 20], rect: node.rect, node },
+					};
+				}
+				if (op.op === "eval") return { error: { kind: "js", message: "native refs cannot reach the page kit" } };
+				return { ok: {} };
+			},
+			{ welcome: { ops: ["dom"] } },
+		);
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		await client.connect();
+		const tab = new TernTab({ client, block: 7, name: "main", viewport: { width: 800, height: 600 } });
+		await new TernElementHandle(tab, { engine: "ref", ref: node.ref }, null).press("Enter");
+		const events = daemon.requests.filter(request => request.op.op === "input").flatMap(request => request.op.events);
+		expect(events).toContainEqual(expect.objectContaining({ type: "key", action: "down", key: "Enter" }));
+		expect(events).toContainEqual(expect.objectContaining({ type: "key", action: "up", key: "Enter" }));
+	});
+
+	it("sends one key press to an uncovered element and none to an element a dialog covers", async () => {
+		let covered = false;
+		const fake = await startPage({
+			eventBatches: [],
+			kit: {
+				target: () =>
+					covered
+						? { ok: false, reason: "covered", count: 1, detail: "<dialog#modal>" }
+						: { ok: true, x: 5, y: 5, width: 100, height: 20, count: 1 },
+				focus: () => null,
+			},
+		});
+		const tab = await openTab(fake);
+		// A short cell budget, so the refused press stops polling the covered target quickly.
+		tab.setRunContext({
+			timeoutMs: 2_000,
+			deadline: Date.now() + 2_000,
+			signal: new AbortController().signal,
+			session: { cwd: os.tmpdir() },
+			output: new RunOutput(),
+			screenshots: [],
+		});
+		await tab.press("Enter", { selector: "#name" });
+		const inputs = () => fake.requests.filter(request => request.op.op === "input").length;
+		expect(inputs()).toBe(1);
+		covered = true;
+		const refused = await tab.press("Enter", { selector: "#name" }).catch((error: unknown) => String(error));
+		expect(refused).toContain('tab.press("Enter", { selector: "#name" }) timed out');
+		expect(refused).toContain("covered by <dialog#modal>");
+		expect(inputs()).toBe(1);
 	});
 
 	it("reports a held dialog and answers it through the dialog op", async () => {
@@ -413,6 +527,88 @@ describe("TernTab", () => {
 		expect(await tab.storage("local", { key: "b" })).toBe("2");
 	});
 
+	it("reports a block the window no longer lists as gone, with how to reopen, and sends nothing more", async () => {
+		let gone = false;
+		daemon = await startFakeDaemon((op): FakeAnswer => {
+			switch (op.op) {
+				case "open":
+					return { ok: { block: 7, url: "about:blank" } };
+				case "events":
+					return { ok: { events: BLANK_LOAD.map((event, index) => ({ seq: index + 1, ...event })), next: 2 } };
+				case "blocks":
+					return { ok: { blocks: gone ? [] : [{ block: 7, url: "about:blank", title: "", owner: 3 }] } };
+				case "state":
+					if (gone) return { error: { kind: "not_found", message: "no browser block 7 in this window" } };
+					return { ok: { url: "about:blank", width: 800, height: 600 } };
+				default:
+					return { ok: {} };
+			}
+		});
+		const fake = daemon;
+		const tab = await openTab(fake);
+		gone = true;
+		const failure = await tab.readyInfo().catch((error: unknown) => error);
+		expect(String(failure)).toContain(
+			'Tab "main" is gone: its Tern browser block 7 is no longer in this Tern window',
+		);
+		expect(String(failure)).toContain('browser.targets({ app: "tern" })');
+		expect(tab.gone).toContain("browser block 7 is no longer in this Tern window");
+		const before = fake.requests.length;
+		await expect(tab.readyInfo()).rejects.toBe(failure);
+		expect(fake.requests.length).toBe(before);
+	});
+
+	it("keeps a not_found for a block the window still lists as that op's own failure", async () => {
+		daemon = await startFakeDaemon((op): FakeAnswer => {
+			if (op.op === "open") return { ok: { block: 7, url: "about:blank" } };
+			if (op.op === "events") {
+				return { ok: { events: BLANK_LOAD.map((event, index) => ({ seq: index + 1, ...event })), next: 2 } };
+			}
+			if (op.op === "blocks") return { ok: { blocks: [{ block: 7, url: "about:blank", title: "", owner: 3 }] } };
+			if (op.op === "state") return { error: { kind: "not_found", message: "stale ref e3" } };
+			return { ok: {} };
+		});
+		const tab = await openTab(daemon);
+		await expect(tab.readyInfo()).rejects.toThrow("stale ref e3");
+		expect(tab.gone).toBeUndefined();
+	});
+
+	it("says how to get a fixed viewport when the block was docked", async () => {
+		daemon = await startFakeDaemon((op): FakeAnswer => {
+			switch (op.op) {
+				case "open":
+					return { ok: { block: 7, url: "about:blank" } };
+				case "events":
+					return { ok: { events: BLANK_LOAD.map((event, index) => ({ seq: index + 1, ...event })), next: 2 } };
+				case "viewport":
+					return { error: { kind: "failed", message: "the block is docked: its page takes the block's size" } };
+				case "blocks":
+					return { ok: { blocks: [{ block: 7, url: "https://example.test/", title: "", owner: null }] } };
+				case "state":
+					return { ok: { url: "https://example.test/", width: 843, height: 632 } };
+				default:
+					return { ok: {} };
+			}
+		});
+		const tab = await openTab(daemon);
+		const failure = await tab.setViewport({ width: 1000, height: 900 }).catch((error: unknown) => error);
+		expect(String(failure)).toContain("is docked, so its page takes the block's size (843x632 now)");
+		expect(String(failure)).toContain('app: "own"');
+	});
+
+	it("names the backend and the helpers to use for page event listeners", () => {
+		const tab = new TernTab({
+			client: new TernSocketClient({ socketPath: "/nonexistent" }),
+			block: 7,
+			name: "main",
+			viewport: { width: 800, height: 600 },
+		});
+		expect(() => tab.page.on("request", () => {})).toThrow(
+			/page\.on\("request"\) is not supported on the Tern browser backend: .*tab\.requests\(\)/,
+		);
+		expect(() => tab.page.once("console", () => {})).toThrow(/tab\.console\(\)/);
+	});
+
 	it("names the Tern backend and the reason for helpers it cannot provide", async () => {
 		const fake = await startPage({ eventBatches: [], kit: {} });
 		const tab = await openTab(fake);
@@ -434,8 +630,73 @@ describe("TernTab", () => {
 	});
 });
 
+describe("TernTab on an unresponsive page", () => {
+	async function runTab(fake: FakeDaemon, timeoutMs: number): Promise<TernTab> {
+		client = new TernSocketClient({ socketPath: fake.socketPath });
+		// The welcome says what the host does: a tab reads it from the connected client.
+		await client.connect();
+		const tab = new TernTab({ client, block: 7, name: "main", viewport: { width: 800, height: 600 } });
+		tab.setRunContext({
+			timeoutMs,
+			deadline: Date.now() + timeoutMs,
+			signal: new AbortController().signal,
+			session: { cwd: os.tmpdir() },
+			output: new RunOutput(),
+			screenshots: [],
+		});
+		return tab;
+	}
+
+	it.each([
+		{ ops: ["browser", "dom", "responsive"], failFast: true },
+		{ ops: ["browser", "dom"], failFast: undefined },
+	])(
+		"asks a host that watches responsiveness ($ops) to fail a read at once, and names the way out",
+		async ({ ops, failFast }) => {
+			daemon = await startFakeDaemon(
+				(op): FakeAnswer =>
+					op.op === "dom"
+						? {
+								error: {
+									kind: "unresponsive",
+									message:
+										"dom: the page is unresponsive: a script keeps its web process busy (no answer for 3.0 s)",
+								},
+							}
+						: { ok: {} },
+				{ welcome: { ops } },
+			);
+			const tab = await runTab(daemon, 5_000);
+			const error = await tab.observe().catch((failure: unknown) => failure);
+			// Only a host that lists `responsive` strips the member before the engine reads the request.
+			expect(daemon.requests.find(request => request.op.op === "dom")?.op.failUnresponsive).toBe(failFast);
+			if (!(error instanceof TernError)) throw error;
+			expect(error.kind).toBe("unresponsive");
+			if (failFast)
+				expect(error.message).toContain('In tab "main", tab.reload() or tab.goto() ends that web process');
+		},
+	);
+
+	it("names an unresponsive page as the cause of a timed-out call when the host's state says so", async () => {
+		daemon = await startFakeDaemon(
+			(op): FakeAnswer => {
+				if (op.op === "eval") return null;
+				if (op.op === "state") return { ok: { url: "https://example.test/", responsive: false } };
+				return { ok: {} };
+			},
+			{ welcome: { ops: ["browser", "dom", "responsive"] } },
+		);
+		const tab = await runTab(daemon, 1_500);
+		const error = await tab.evaluate(() => 1).catch((failure: unknown) => failure);
+		if (!(error instanceof TernError)) throw error;
+		expect(error.kind).toBe("unresponsive");
+		expect(error.message).toContain("timed out");
+		expect(error.message).toContain("the page is unresponsive");
+	});
+});
+
 describe("TernTab screenshots", () => {
-	it("states the coordinate scale the capture was taken at, not one set while it ran", async () => {
+	it("sizes the screenshot by the scale the capture was taken at, not one set while it ran", async () => {
 		const captureAsked = Promise.withResolvers<number>();
 		daemon = await startFakeDaemon((op, id) => {
 			if (op.op !== "capture") return { ok: {} };
@@ -453,6 +714,7 @@ describe("TernTab screenshots", () => {
 		const screenshots: ScreenshotResult[] = [];
 		tab.setRunContext({
 			timeoutMs: 5_000,
+			deadline: Date.now() + 5_000,
 			signal: new AbortController().signal,
 			session: { cwd: os.tmpdir() },
 			output,
@@ -468,7 +730,48 @@ describe("TernTab screenshots", () => {
 			.flatMap(block => (block.type === "text" ? [block.text] : []))
 			.join("\n");
 		expect(daemon.requests.find(request => request.op.op === "capture")?.op.scale).toBe(1);
-		expect(text).toContain("by 1.17 to get viewport CSS pixels for tab.clickAt");
+		// At scale 1 the 1200x700 capture is the viewport in CSS pixels; read at the later 2 it would shrink to 600x350.
+		expect(text).toBe("Screenshot 1200x700.");
+		for (const saved of screenshots) await fs.rm(saved.dest);
+	});
+
+	it("reads clickAt positions on a scaled screenshot, and page.mouse positions as CSS pixels", async () => {
+		// A 4000x400 viewport reaches the model at half size, 2000x200.
+		const png = encodeRawPng(new Uint8Array(4000 * 400 * 3), 4000, 400, 3).toBase64();
+		daemon = await startFakeDaemon(op => (op.op === "capture" ? { ok: { data: png } } : { ok: {} }));
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		const tab = new TernTab({
+			client,
+			block: 7,
+			name: "main",
+			viewport: { width: 4000, height: 400, deviceScaleFactor: 1 },
+		});
+		const screenshots: ScreenshotResult[] = [];
+		tab.setRunContext({
+			timeoutMs: 5_000,
+			deadline: Date.now() + 5_000,
+			signal: new AbortController().signal,
+			session: { cwd: os.tmpdir() },
+			output: new RunOutput(),
+			screenshots,
+		});
+		await tab.screenshot();
+		await tab.clickAt(1000, 100);
+		await tab.page.mouse.click(1000, 100);
+
+		// Where each click's pointer first moved: the image's centre is the viewport's, raw page input is not mapped.
+		const moves = daemon.requests.flatMap(request => {
+			const first: unknown = Array.isArray(request.op.events) ? request.op.events[0] : undefined;
+			return isRecord(first) ? [[first.x, first.y]] : [];
+		});
+		expect(moves).toEqual([
+			[2000, 200],
+			[1000, 100],
+		]);
+
+		// The picture is of another viewport once it is resized.
+		await tab.setViewport({ width: 1000, height: 600 });
+		await expect(tab.clickAt(1000, 100)).rejects.toThrow(/new screenshot/);
 		for (const saved of screenshots) await fs.rm(saved.dest);
 	});
 });

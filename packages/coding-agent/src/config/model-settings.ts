@@ -2,8 +2,10 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
-import { register, type SettingValueOf } from "./registry";
+import { register, effect, operatorValue, type SettingValueOf } from "./registry";
 import type { AuthAccountPolicies } from "@oh-my-pi/pi-ai/auth-storage";
+import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
+import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { cfgDefaultThinkingLevel } from "../session/settings";
 
 /** Display metadata for one model tag. */
@@ -60,6 +62,35 @@ export const cfgAuthAccountPolicies = register({
 	default: EMPTY_AUTH_ACCOUNT_POLICIES,
 });
 
+/** Providers the auth rules pause (`disabled "<reason>"`), offered as opt-back-in choices. */
+const PAUSED_PROVIDER_CHOICES = authProviders()
+	.filter(provider => provider.disabled !== undefined)
+	.map(provider => ({ value: provider.id, label: provider.name, description: provider.disabled }));
+
+/**
+ * Paused providers the user turns back on, accepting the risk their pause reason names. Read
+ * through {@link cfgOperatorUnpausedProviders}: a project layer never turns a paused provider on.
+ */
+export const cfgAuthUnpausedProviders = register({
+	id: "auth.unpausedProviders",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Unpaused Providers",
+		description:
+			"Turn providers we paused back on: login, token refresh and stored credentials work again. Each pause names the account risk you accept. Project settings cannot set this",
+		options: PAUSED_PROVIDER_CHOICES,
+		// The editor writes the global layer; hide it while a project layer supplies a (disregarded) list.
+		condition: "unpausedProvidersNotProject",
+	},
+});
+
+/** `auth.unpausedProviders` from operator layers only; the value the process applies. */
+export const cfgOperatorUnpausedProviders = operatorValue(cfgAuthUnpausedProviders);
+effect(cfgOperatorUnpausedProviders, setUnpausedProviders);
+
 export const cfgEnabledModels = register({
 	id: "enabledModels",
 	type: "array",
@@ -107,6 +138,19 @@ export const cfgModelRoleStorage = register({
 });
 
 export const cfgModelRoles = register({ id: "modelRoles", type: "record", default: EMPTY_STRING_RECORD });
+
+/** Total provider budget for one native judge candidate, including setup and retries. */
+export const cfgJudgmentAttemptTimeoutMs = register({
+	id: "judgment.attemptTimeoutMs",
+	type: "number",
+	default: 3_000,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0) {
+			throw new Error("judgment.attemptTimeoutMs must be a positive safe integer");
+		}
+	},
+});
 
 /** Named model presets; no settings-panel UI — managed by `/modelpreset` and the model hub. */
 export const cfgModelPresets = register({

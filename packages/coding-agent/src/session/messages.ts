@@ -4,7 +4,7 @@
  * Extends the base AgentMessage type with coding-agent specific message types,
  * and provides a transformer to convert them to LLM-compatible messages.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, toProviderReplayMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	isUserInterruptAbort,
 	isCustomMessageContent,
@@ -33,6 +33,9 @@ export {
 	isSilentAbort,
 	USER_INTERRUPT_LABEL,
 	isUserInterruptAbort,
+	AGENT_KILL_LABEL,
+	type InterruptReason,
+	isInterruptReason,
 	shouldRenderAbortReason,
 	GENERIC_ABORT_SENTINEL,
 	resolveAbortLabel,
@@ -46,6 +49,7 @@ export {
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
+import { calculateContextTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
@@ -56,8 +60,7 @@ import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
-import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
-import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
 export {
 	type BranchSummaryMessage,
@@ -89,6 +92,10 @@ const EPHEMERAL_REPLY_MAX_BYTES = 4096;
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
 /** Max chars kept from each anchored user request in the replan title context. */
 const REPLAN_TITLE_ANCHOR_CHARS = 400;
+/** Chars of recent conversation the title-drift judge reads; see {@link buildTitleDriftTurns}. */
+const TITLE_DRIFT_CONTEXT_CHARS = 3000;
+/** Max chars kept from one turn, so one long reply cannot fill the drift window alone. */
+const TITLE_DRIFT_TURN_CHARS = 1000;
 
 /**
  * Removes replay-bound provider state before reparenting an assistant message
@@ -188,6 +195,58 @@ export function operatorTitleText(message: AgentMessage): string | undefined {
 	if (message.role === "custom") return titleTextFromSkillPrompt(message);
 	if (message.role !== "user" || message.attribution !== "user") return undefined;
 	return textFromContent(message.content) || undefined;
+}
+
+/** One turn of the recent conversation the title-drift judge compares with the session title. */
+export type TitleDriftTurn = { role: "user" | "assistant"; text: string };
+
+/**
+ * The latest conversation, oldest first, that the title-drift judge compares
+ * with the session title: operator prompts and assistant reply text (never
+ * thinking), newest turns kept until {@link TITLE_DRIFT_CONTEXT_CHARS}. The
+ * latest operator prompt leads when the window holds none, since the notes of a
+ * long tool loop rarely say what was asked; it displaces the oldest turns it
+ * would push past the window.
+ */
+export function buildTitleDriftTurns(messages: readonly AgentMessage[]): TitleDriftTurn[] {
+	const turns: TitleDriftTurn[] = [];
+	let chars = 0;
+	let i = messages.length - 1;
+	for (; i >= 0; i--) {
+		const turn = titleDriftTurn(messages[i]);
+		if (!turn) continue;
+		if (turns.length > 0 && chars + turn.text.length > TITLE_DRIFT_CONTEXT_CHARS) break;
+		turns.push(turn);
+		chars += turn.text.length;
+	}
+	turns.reverse();
+	if (turns.some(turn => turn.role === "user")) return turns;
+	for (; i >= 0; i--) {
+		const anchor = titleDriftTurn(messages[i]);
+		if (anchor?.role !== "user") continue;
+		let start = 0;
+		while (start < turns.length - 1 && chars + anchor.text.length > TITLE_DRIFT_CONTEXT_CHARS) {
+			chars -= turns[start++]!.text.length;
+		}
+		return [anchor, ...turns.slice(start)];
+	}
+	return turns;
+}
+
+function titleDriftTurn(message: AgentMessage | undefined): TitleDriftTurn | undefined {
+	if (!message) return undefined;
+	let role: TitleDriftTurn["role"];
+	let raw: string | undefined;
+	if (message.role === "assistant") {
+		if (message.stopReason === "aborted" || message.stopReason === "error") return undefined;
+		role = "assistant";
+		raw = textFromContent(message.content);
+	} else {
+		role = "user";
+		raw = operatorTitleText(message);
+	}
+	const text = raw ? cleanTinyMessage(raw).slice(0, TITLE_DRIFT_TURN_CHARS) : "";
+	return text ? { role, text } : undefined;
 }
 
 /**
@@ -368,6 +427,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				role: message.role,
 				customType: message.customType,
 				content: normalizeProviderReplayValue(message.content),
+				excludeFromContext: message.role === "custom" ? message.excludeFromContext : undefined,
 			};
 		case "branchSummary":
 			return { role: message.role, summary: message.summary };
@@ -396,6 +456,9 @@ export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
 
 /** Custom message type for the transient checkpoint-active reminder. */
 export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
+
+/** Custom message type carrying a completed rewind's report into model context. */
+export const REWIND_REPORT_MESSAGE_TYPE = "rewind-report";
 
 /** Metadata persisted with a hidden interrupted-thinking continuity message. */
 export interface InterruptedThinkingDetails {
@@ -479,25 +542,6 @@ function followedByInterruptedThinking(messages: AgentMessage[], index: number):
 function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage {
 	const demoted = demoteInterruptedThinking(message);
 	return demoted ? { ...message, content: demoted.strippedContent } : message;
-}
-
-/**
- * Replay `xd://<device>` tool-call names under their bare device name. Sessions
- * saved before the agent loop canonicalized fallback-resolved names persist the
- * alias, which providers reject as a function name (#13352). Call ids are kept,
- * so call/result pairing is unchanged.
- */
-function canonicalizeXdToolCallNames(message: AssistantMessage): AssistantMessage {
-	let content: AssistantMessage["content"] | undefined;
-	for (let i = 0; i < message.content.length; i++) {
-		const block = message.content[i]!;
-		if (block.type !== "toolCall") continue;
-		const name = stripXdUrlPrefix(block.name);
-		if (name === block.name) continue;
-		content ??= message.content.slice();
-		content[i] = { ...block, name };
-	}
-	return content ? { ...message, content } : message;
 }
 
 /** A provider-rejection turn carrying nothing but the error flag: stopReason
@@ -611,6 +655,42 @@ export function assistantTurnProducedOutput(message: Pick<AssistantMessage, "sto
  */
 export function assistantTurnDelivered(message: Pick<AssistantMessage, "content">): boolean {
 	return message.content.some(isDeliverableContent);
+}
+
+/**
+ * Occupied context tokens carried by a usage record, using the same accounting
+ * as session compaction ({@link calculateContextTokens}): a provider-reported
+ * `contextTokens` wins; otherwise the billable `totalTokens` (or the bucket
+ * sum when no total is reported) minus provider-side orchestration tokens.
+ * Live `message.usage` payloads and persisted transcript records are loosely
+ * typed, so numeric fields are validated here. Returns 0 when the record
+ * carries no usage signal.
+ */
+export function usageContextTokens(raw: unknown): number {
+	if (!isRecord(raw)) return 0;
+	const field = (record: Record<string, unknown>, key: string): number => {
+		const value = record[key];
+		return typeof value === "number" && Number.isFinite(value) ? value : 0;
+	};
+	const contextTokens = raw.contextTokens;
+	const orchestration = isRecord(raw.orchestration) ? raw.orchestration : undefined;
+	return calculateContextTokens({
+		input: field(raw, "input"),
+		output: field(raw, "output"),
+		cacheRead: field(raw, "cacheRead"),
+		cacheWrite: field(raw, "cacheWrite"),
+		totalTokens: field(raw, "totalTokens"),
+		...(typeof contextTokens === "number" && Number.isFinite(contextTokens) ? { contextTokens } : {}),
+		...(orchestration
+			? {
+					orchestration: {
+						input: field(orchestration, "input"),
+						cacheRead: field(orchestration, "cacheRead"),
+						output: field(orchestration, "output"),
+					},
+				}
+			: {}),
+	});
 }
 
 /** Extract the optional `__queueChipText` field from a CustomMessage's
@@ -1124,17 +1204,20 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			return out;
 		}
 		case "custom": {
-			if (!isCustomMessageContent(m.content)) return [];
+			if (m.excludeFromContext || !isCustomMessageContent(m.content)) return [];
 			if (isSteeringUserMessage(m)) {
 				const converted = convertMessageToLlm(wrapSteeringUserMessage(m));
 				return converted ? [converted] : [];
 			}
-			if (isUserInvokedSkillPrompt(m)) {
+			// A user-invoked skill is the user's own turn. An agent message is a user turn
+			// authored by that agent: never tool output, never developer or system authority.
+			const ircIncoming = m.customType === "irc:incoming";
+			if (ircIncoming || isUserInvokedSkillPrompt(m)) {
 				return [
 					{
 						role: "user",
 						content: customMessageContentToLlmContent(m.content),
-						attribution: "user",
+						attribution: ircIncoming ? "agent" : "user",
 						timestamp: m.timestamp,
 					},
 				];
@@ -1162,30 +1245,73 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
 				return [];
 			}
-			const converted = convertMessageToLlm(canonicalizeXdToolCallNames(source));
+			const converted = convertMessageToLlm(source);
 			return converted ? [converted] : [];
 		}
 		case "branchSummary":
 		case "compactionSummary":
 		case "user":
-		case "developer": {
+		case "developer":
+		case "toolResult": {
 			// Core roles share one transformer with agent-core —
 			// duplicating them here is how snapcompact frames once
 			// silently fell off the provider request.
 			const converted = convertMessageToLlm(m);
 			return converted ? [converted] : [];
 		}
-		case "toolResult": {
-			// Same pre-canonicalization history as `canonicalizeXdToolCallNames`;
-			// Gemini replays the result under this name.
-			const toolName = stripXdUrlPrefix(m.toolName);
-			const converted = convertMessageToLlm(toolName === m.toolName ? m : { ...m, toolName });
-			return converted ? [converted] : [];
-		}
 		default:
 			m satisfies never;
 			return [];
 	}
+}
+
+/**
+ * Converts `messages[index]` with its neighbor-sensitive state.
+ * {@link convertToLlm} and {@link convertMessagesForContextView} both go
+ * through here so the viewer cannot drift from the per-message conversion that
+ * gets sent; a filter or reorder added outside this helper must be mirrored in
+ * both.
+ */
+function convertMessageAt(
+	messages: AgentMessage[],
+	index: number,
+	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
+): Message[] {
+	const m = messages[index];
+	return convert(m, m.role === "assistant" && followedByInterruptedThinking(messages, index));
+}
+
+/** A converted viewer message and its position in the source and converted histories. */
+export interface ContextViewMessage {
+	message: Message;
+	sourceIndex: number;
+	convertedIndex: number;
+}
+
+/**
+ * Convert history for inspection without reading or populating the per-message
+ * and array conversion caches. Steering messages show the envelope
+ * {@link wrapSteeringForModel} sends (sharing its wrapper cache); it maps
+ * one-to-one, so source indices hold. Mirrors the {@link convertToLlm} loop
+ * through {@link convertMessageAt}, then applies the send path's replay policy
+ * (`toProviderReplayMessage`): provider refusals are dropped and provider-error
+ * tool placeholders lose the provider's error text.
+ *
+ * Kept separate from `convertToLlm` because the viewer needs source indices:
+ * reporting them from `convertToLlm` would add a per-message callback and
+ * disable its cache shortcuts, a cost every request would pay even when
+ * `/context` is never opened.
+ */
+export function convertMessagesForContextView(messages: AgentMessage[]): ContextViewMessage[] {
+	const modelMessages = wrapSteeringForModel(messages);
+	const result: ContextViewMessage[] = [];
+	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
+		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
+			const replay = toProviderReplayMessage(message);
+			if (replay) result.push({ message: replay, sourceIndex, convertedIndex: result.length });
+		}
+	}
+	return result;
 }
 
 /** Cached per-message conversion. Reuses the stored fragment while identity and
@@ -1217,6 +1343,10 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * unchanged re-convert of the same array hands back the same outer `Message[]`.
  * Owner mutations (prune/shake/strip-images) invalidate the affected message
  * through the shared registry before the next pass.
+ *
+ * {@link convertMessagesForContextView} mirrors this loop through
+ * {@link convertMessageAt}; it stays separate so the index mapping `/context`
+ * needs adds no cost here.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const len = messages.length;
@@ -1260,9 +1390,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let prefixOutputLen = 0;
 	for (let i = start; i < len; i++) {
 		if (i === len - 1) prefixOutputLen = out.length;
-		const m = messages[i];
-		const interruptedNext = m.role === "assistant" && followedByInterruptedThinking(messages, i);
-		const fragment = convertOneCached(m, interruptedNext);
+		const fragment = convertMessageAt(messages, i, convertOneCached);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;

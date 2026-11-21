@@ -6,6 +6,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { getKeybindings, type KeybindingsManager as TuiKeybindingsManager, setKeybindings } from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
@@ -58,10 +60,14 @@ describe("BTW session boundaries", () => {
 	let originalRecord: string;
 	let turns: SideTurn[];
 	let extensionRunner: ExtensionRunner;
+	let previousKeybindings: TuiKeybindingsManager;
 
 	beforeAll(() => initTheme());
 	beforeEach(async () => {
 		resetSettingsForTest();
+		// The app installs its keymap before any picker opens; picker delete runs through `app.session.delete`.
+		previousKeybindings = getKeybindings();
+		setKeybindings(KeybindingsManager.inMemory());
 		directory = TempDir.createSync("@omp-btw-session-lifecycle-");
 		await Settings.init({ inMemory: true, cwd: directory.path() });
 		auth = await AuthStorage.create(path.join(directory.path(), "auth.db"));
@@ -126,6 +132,7 @@ describe("BTW session boundaries", () => {
 		auth.close();
 		directory.removeSync();
 		resetSettingsForTest();
+		setKeybindings(previousKeybindings);
 	});
 
 	async function targetSession(): Promise<string> {
@@ -141,7 +148,11 @@ describe("BTW session boundaries", () => {
 		const list = await SessionManager.list(directory.path(), directory.path());
 		const selected = list.find(item => item.path === file);
 		if (!selected) throw new Error("Expected saved picker target");
-		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([selected]);
+		const listed = [selected];
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue({
+			sessions: listed,
+			complete: Promise.resolve(listed),
+		});
 		await new SelectorController(mode).showSessionSelector();
 		const component = vi.spyOn(mode.ui, "showOverlay").mock.calls.at(-1)?.[0];
 		if (!(component instanceof SessionSelectorComponent)) throw new Error("Expected session selector");

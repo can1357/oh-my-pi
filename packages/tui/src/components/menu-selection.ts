@@ -1,4 +1,5 @@
 import { fuzzyFilter } from "../fuzzy";
+import type { ViewportAlignment } from "./scroll-viewport";
 
 /** Describes how a menu identifies, searches, disables, and confirms its items. */
 export interface MenuSelectionAdapter<T> {
@@ -31,11 +32,31 @@ export interface MenuWindow {
 	totalRows: number;
 }
 
+/** Options for configuring menu window calculation. */
+export interface MenuWindowOptions {
+	/**
+	 * Window alignment policy:
+	 * - "center": selection is centered in the viewport (default).
+	 * - "nearest": edge-triggered scrolling; preserves current scroll window until
+	 *   selection moves past viewport boundaries.
+	 */
+	alignment?: Extract<ViewportAlignment, "center" | "nearest">;
+	/** Prior window start index used to preserve viewport position in "nearest" mode. */
+	currentStartIndex?: number;
+}
+
 /**
- * Pick a selection-centered, contiguous window whose visual rows fit `rowBudget`.
+ * Pick a contiguous window over variable-height items whose visual rows fit `rowBudget`.
+ * In "center" mode (default), the window is centered around `selectedIndex`.
+ * In "nearest" mode, `currentStartIndex` is retained until the selection moves past the window edge.
  * A selected item taller than the budget is retained and clipped by the renderer.
  */
-export function getMenuWindow(rowCounts: readonly number[], selectedIndex: number, rowBudget: number): MenuWindow {
+export function getMenuWindow(
+	rowCounts: readonly number[],
+	selectedIndex: number,
+	rowBudget: number,
+	options?: MenuWindowOptions,
+): MenuWindow {
 	let totalRows = 0;
 	for (const count of rowCounts) totalRows += Math.max(0, count);
 	if (rowCounts.length === 0) return { startIndex: 0, endIndex: 0, rowOffset: 0, totalRows };
@@ -43,18 +64,37 @@ export function getMenuWindow(rowCounts: readonly number[], selectedIndex: numbe
 	const budget = Math.max(1, Math.trunc(rowBudget));
 	const selected = Math.max(0, Math.min(Math.trunc(selectedIndex), rowCounts.length - 1));
 	const selectedRows = Math.max(0, rowCounts[selected] ?? 0);
-	const targetRowsBeforeSelection = Math.floor(Math.max(0, budget - Math.min(selectedRows, budget)) / 2);
-	let startIndex = selected;
-	let rowsBeforeSelection = 0;
-	while (startIndex > 0) {
-		const cost = Math.max(0, rowCounts[startIndex - 1] ?? 0);
-		if (rowsBeforeSelection + cost > targetRowsBeforeSelection) break;
-		startIndex--;
-		rowsBeforeSelection += cost;
+
+	let startIndex: number;
+	let used: number;
+
+	if (options?.alignment === "nearest") {
+		const rawCurrentStart = options.currentStartIndex ?? 0;
+		startIndex = Math.max(0, Math.min(Math.trunc(rawCurrentStart), selected));
+
+		let rowsNeeded = 0;
+		for (let i = startIndex; i <= selected; i++) {
+			rowsNeeded += Math.max(0, rowCounts[i] ?? 0);
+		}
+		while (rowsNeeded > budget && startIndex < selected) {
+			rowsNeeded -= Math.max(0, rowCounts[startIndex] ?? 0);
+			startIndex++;
+		}
+		used = rowsNeeded;
+	} else {
+		const targetRowsBeforeSelection = Math.floor(Math.max(0, budget - Math.min(selectedRows, budget)) / 2);
+		startIndex = selected;
+		let rowsBeforeSelection = 0;
+		while (startIndex > 0) {
+			const cost = Math.max(0, rowCounts[startIndex - 1] ?? 0);
+			if (rowsBeforeSelection + cost > targetRowsBeforeSelection) break;
+			startIndex--;
+			rowsBeforeSelection += cost;
+		}
+		used = rowsBeforeSelection + selectedRows;
 	}
 
 	let endIndex = selected + 1;
-	let used = rowsBeforeSelection + selectedRows;
 	while (endIndex < rowCounts.length) {
 		const cost = Math.max(0, rowCounts[endIndex] ?? 0);
 		if (used + cost > budget) break;

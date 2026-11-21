@@ -241,7 +241,7 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 			snapcompact.maxFramesForDataBudget(shape, snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET),
 		);
 		expect(officialFrames).toBeGreaterThan(proxiedFrames);
-		// The trigger, not the 12 MB frame share, decides the official count.
+		// The trigger, not the 60 MB frame share, decides the official count.
 		expect(officialFrames).toBeLessThan(
 			snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(official)),
 		);

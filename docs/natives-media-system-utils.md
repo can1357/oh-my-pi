@@ -4,49 +4,49 @@ This document covers the media/system/conversion exports in `@oh-my-pi/pi-native
 
 ## Implementation files
 
-- `crates/pi-natives/src/audio.rs`
-- `crates/pi-natives/src/live.rs`
-- `crates/pi-voice/src/audio.rs` and `crates/pi-voice/src/live.rs` (media engines behind the N-API adapters)
-- `crates/pi-natives/src/snapcompact.rs`
-- `crates/pi-natives/src/sixel.rs`
-- `crates/pi-natives/src/svg.rs`
-- `crates/pi-natives/src/pdf.rs`
-- `crates/pi-natives/src/html.rs`
-- `crates/pi-natives/src/clipboard.rs`
-- `crates/pi-natives/src/tokens.rs`
-- `crates/pi-natives/src/utok/` (embedded tokenizer implementation and vocabularies)
-- `crates/pi-natives/src/devicecheck.rs`
-- `crates/pi-natives/src/appearance.rs`
-- `crates/pi-natives/src/power.rs`
-- `crates/pi-natives/src/prof.rs`
-- `crates/pi-natives/src/task.rs`
+- `crates/natives/src/audio.rs`
+- `crates/natives/src/live.rs`
+- `crates/voice/src/audio.rs` and `crates/voice/src/live.rs` (media engines behind the N-API adapters)
+- `crates/natives/src/snapcompact.rs`
+- `crates/natives/src/sixel.rs`
+- `crates/natives/src/svg.rs`
+- `crates/natives/src/pdf.rs`
+- `crates/natives/src/html.rs`
+- `crates/natives/src/clipboard.rs`
+- `crates/natives/src/tokens.rs`
+- `crates/natives/src/utok/` (embedded tokenizer implementation and vocabularies)
+- `crates/natives/src/devicecheck.rs`
+- `crates/natives/src/appearance.rs`
+- `crates/natives/src/power.rs`
+- `crates/natives/src/prof.rs`
+- `crates/natives/src/task.rs`
 - `packages/natives/native/index.d.ts`
 
 There is no native `PhotonImage` class or `image.rs` in the addon. General-purpose image processing stays in `Bun.Image`; the native image surface supplies SIXEL encoding/decoding, bounded SVG rasterization, and snapcompact frame rendering. Filesystem isolation is a separate subsystem.
 
 ## JS API ↔ Rust export/module mapping
 
-| JS export                                | Rust N-API export              | Rust module      |
-| ---------------------------------------- | ------------------------------ | ---------------- |
-| `new AudioCapture(sampleRate, cb)`       | `AudioCapture`                 | `audio.rs`       |
-| `new AudioPlayback(sampleRate)`          | `AudioPlayback`                | `audio.rs`       |
-| `new LiveWebRtcPeer(...)`                | `LiveWebRtcPeer`               | `live.rs`        |
-| `encodeSixel(bytes, width, height, backgroundRgb)` | `encode_sixel`              | `sixel.rs`       |
-| `encodeSixelAsync(bytes, width, height, backgroundRgb)` | `encode_sixel_async`    | `sixel.rs`       |
-| `decodeSixelToPng(bytes)`                | `decode_sixel_to_png`          | `sixel.rs`       |
-| `rasterizeSvg(bytes, maxWidth, maxHeight)` | `rasterize_svg`               | `svg.rs`         |
-| `pdfToMarkdown(bytes)`                   | `pdf_to_markdown`              | `pdf.rs`         |
-| `renderSnapcompactPng(text, options)`    | `render_snapcompact_png`       | `snapcompact.rs` |
-| `snapcompactSupportedChars(font, chars)` | `snapcompact_supported_chars`  | `snapcompact.rs` |
-| `htmlToMarkdown(html, options?)`         | `html_to_markdown`             | `html.rs`        |
-| `copyToClipboard(text)`                  | `copy_to_clipboard`            | `clipboard.rs`   |
-| `readImageFromClipboard()`               | `read_image_from_clipboard`    | `clipboard.rs`   |
-| `countTokens(input, encoding?)`          | `count_tokens`                 | `tokens.rs`      |
-| `detectMacOSAppearance()`                | `detect_macos_appearance`      | `appearance.rs`  |
-| `MacAppearanceObserver.start(cb)`        | `MacAppearanceObserver::start` | `appearance.rs`  |
-| `PowerAssertion.start(options?)`         | `PowerAssertion::start`        | `power.rs`       |
-| `getWorkProfile(lastSeconds)`            | `get_work_profile`             | `prof.rs`        |
-| `deviceCheckGenerateToken()`             | `device_check_generate_token`  | `devicecheck.rs` |
+| JS export                                               | Rust N-API export              | Rust module      |
+| ------------------------------------------------------- | ------------------------------ | ---------------- |
+| `new AudioCapture(sampleRate, cb)`                      | `AudioCapture`                 | `audio.rs`       |
+| `new AudioPlayback(sampleRate)`                         | `AudioPlayback`                | `audio.rs`       |
+| `new LiveWebRtcPeer(...)`                               | `LiveWebRtcPeer`               | `live.rs`        |
+| `encodeSixel(bytes, width, height, backgroundRgb)`      | `encode_sixel`                 | `sixel.rs`       |
+| `encodeSixelAsync(bytes, width, height, backgroundRgb)` | `encode_sixel_async`           | `sixel.rs`       |
+| `decodeSixelToPng(bytes)`                               | `decode_sixel_to_png`          | `sixel.rs`       |
+| `rasterizeSvg(bytes, maxWidth, maxHeight)`              | `rasterize_svg`                | `svg.rs`         |
+| `pdfToMarkdown(bytes)`                                  | `pdf_to_markdown`              | `pdf.rs`         |
+| `renderSnapcompactPng(text, options)`                   | `render_snapcompact_png`       | `snapcompact.rs` |
+| `snapcompactSupportedChars(font, chars)`                | `snapcompact_supported_chars`  | `snapcompact.rs` |
+| `htmlToMarkdown(html, options?)`                        | `html_to_markdown`             | `html.rs`        |
+| `copyToClipboard(text)`                                 | `copy_to_clipboard`            | `clipboard.rs`   |
+| `readImageFromClipboard()`                              | `read_image_from_clipboard`    | `clipboard.rs`   |
+| `countTokens(input, encoding?)`                         | `count_tokens`                 | `tokens.rs`      |
+| `detectMacOSAppearance()`                               | `detect_macos_appearance`      | `appearance.rs`  |
+| `MacAppearanceObserver.start(cb)`                       | `MacAppearanceObserver::start` | `appearance.rs`  |
+| `PowerAssertion.start(options?)`                        | `PowerAssertion::start`        | `power.rs`       |
+| `getWorkProfile(lastSeconds)`                           | `get_work_profile`             | `prof.rs`        |
+| `deviceCheckGenerateToken()`                            | `device_check_generate_token`  | `devicecheck.rs` |
 
 ## Data format boundaries and conversions
 
@@ -55,7 +55,7 @@ There is no native `PhotonImage` class or `image.rs` in the addon. General-purpo
 - `AudioCapture(sampleRate, callback)` opens the default microphone and delivers low-latency mono `Float32Array` PCM chunks at the requested logical rate. `stop()` immediately releases capture.
 - `AudioPlayback(sampleRate)` opens the default speaker. `write(samples)` queues mono `Float32Array` PCM in order; `setGain(gain)` changes render-time gain even for queued samples; `end()` drains and closes, while `stop()` discards queued audio immediately.
 - `LiveWebRtcPeer(onEvent, onLevel, onFailure)` owns a WebRTC peer for Codex live media. `createOffer()` returns SDP, `acceptAnswer(sdp)` applies the remote answer, and `waitForOpen(timeoutMs?)` waits for the `oai-events` data channel (default 20 seconds). `pushAudio(samples)` accepts 16 kHz mono PCM with a bounded queue; muted input and input that would overflow the queue are dropped. `setMuted()` controls transmission and discards partial muted frames; `close()` asynchronously tears down media, data channel, peer, and playback.
-- The N-API modules adapt callbacks/buffers; device discovery, conversion, playback, WebRTC, and Opus media live in `pi-voice`. The TypeScript host owns authenticated signaling and sideband protocol handling.
+- The N-API modules adapt callbacks/buffers; device discovery, conversion, playback, WebRTC, and Opus media live in `omp-voice`. The TypeScript host owns authenticated signaling and sideband protocol handling.
 
 ### SIXEL image encoding (`sixel`)
 
@@ -130,10 +130,10 @@ There is no current `packages/natives` TS wrapper that emits OSC52, handles Term
 - **Collection boundary**: profiling samples are produced by `profile_region(tag)` guards, including those in `task::blocking`, `task::blocking_mapped`, and `task::future`.
 - **Storage format**: fixed-size circular buffer (`MAX_SAMPLES = 10_000`) storing stack path, duration, and timestamp.
 - **Output boundary**: `getWorkProfile(lastSeconds)` returns:
-  - `folded`: folded-stack text (flamegraph input)
-  - `summary`: markdown table summary
-  - `svg`: optional flamegraph SVG
-  - `totalMs`, `sampleCount`
+   - `folded`: folded-stack text (flamegraph input)
+   - `summary`: markdown table summary
+   - `svg`: optional flamegraph SVG
+   - `totalMs`, `sampleCount`
 
 ## Lifecycle and state transitions
 

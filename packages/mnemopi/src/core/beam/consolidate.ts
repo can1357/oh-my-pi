@@ -64,6 +64,28 @@ const DEFAULT_MAX_EPISODE_CHARS = 100_000;
 const SLEEP_SUMMARY_SEPARATOR = " | ";
 const SLEEP_TRUNCATION_MARKER = "\n[... sleep_consolidation episode truncated by maxEpisodeChars ...]";
 const PATTERN_FACT_EXTRACTION_MAX_INPUT_CHARS = REGEX_EXTRACTION_MAX_INPUT_CHARS;
+/** Dotted number that may name a version: `v1.2`, `1.2.3`, `1.2.3-beta.1`, or a bare `1.2`. */
+const VERSION_CANDIDATE = /\b(v?\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.]+)?)\b/g;
+/**
+ * Keyword immediately before a bare `x.y` marking it as a version rather than a decimal or price.
+ * Opening prose/Markdown delimiters may sit between them: `version (2.4)`, ``version `2.4` ``, `version **2.4**`.
+ */
+const VERSION_CUE_BEFORE =
+	/\b(?:versions?|ver|releases?|released|upgraded?|downgraded?|bumped?)(?:\s+(?:is|was|to|from|of|at|on))?[\s:=#([`"'*_]*$/i;
+
+/**
+ * Whether a {@link VERSION_CANDIDATE} match at `index` is a version mention.
+ *
+ * A bare `x.y` is indistinguishable from a decimal (`12.50`, `3.9949820000000003`), so it only
+ * counts behind a version keyword. `v`-prefixed and full `x.y.z` forms count on their own unless
+ * they are a slice of a longer dotted run such as an IP address.
+ */
+function isVersionMention(text: string, value: string, index: number): boolean {
+	const end = index + value.length;
+	if (text[index - 1] === "." || /^\.\d/.test(text.slice(end, end + 2))) return false;
+	if (value.startsWith("v") || /^\d+\.\d+\.\d+/.test(value)) return true;
+	return VERSION_CUE_BEFORE.test(text.slice(Math.max(0, index - 40), index));
+}
 
 type SleepSummary = {
 	summary: string;
@@ -696,8 +718,13 @@ export function extractAndStoreFacts(
 		const prefixWords = window
 			.replace(/`[^`]*`/g, " ")
 			.split(/\s+/)
-			.map(w => w.replace(/[.,:;!?()[\]"'`*_]/g, ""))
-			.filter(w => w.length > 2 && !/^(the|and|for|was|of|to|an?|in|on|at|by|is|are|has|had|not|but|or)$/i.test(w))
+			.map(w => w.replace(/[^\p{L}\p{N}-]/gu, ""))
+			.filter(
+				w =>
+					w.length > 2 &&
+					/\p{L}/u.test(w) &&
+					!/^(the|and|for|was|of|to|an?|in|on|at|by|is|are|has|had|not|but|or)$/i.test(w),
+			)
 			.slice(-3)
 			.join("_")
 			.toLowerCase();
@@ -728,9 +755,9 @@ export function extractAndStoreFacts(
 		}
 	}
 
-	for (const match of text.matchAll(/\b(v?\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.]+)?)\b/g)) {
+	for (const match of text.matchAll(VERSION_CANDIDATE)) {
 		const value = match[1] ?? "";
-		if (/^\d{4}-\d{2}$/.test(value)) continue;
+		if (!isVersionMention(text, value, match.index ?? 0)) continue;
 		insertFactRows(
 			beam,
 			messageIdx,

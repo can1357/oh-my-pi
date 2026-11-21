@@ -109,6 +109,7 @@ describe("auth-gateway speech", () => {
 				body: {
 					text: "Hello from xAI",
 					voice_id: "ara",
+					language: "auto",
 					output_format: { codec: "wav", sample_rate: 24_000 },
 				},
 			},

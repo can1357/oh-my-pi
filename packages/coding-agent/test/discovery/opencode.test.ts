@@ -88,6 +88,70 @@ describe("OpenCode MCP discovery", () => {
 		);
 	});
 
+	test("discovers OpenCode v2 servers rather than the mcp.servers container", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "opencode.jsonc"),
+			JSON.stringify({
+				mcp: {
+					timeout: 10_000,
+					servers: {
+						demo: { type: "local", command: ["node", "demo.js"] },
+					},
+				},
+			}),
+		);
+
+		const servers = await loadOpenCodeMcpConfig(tempDir);
+
+		expect(servers).toEqual([
+			expect.objectContaining({ name: "demo", command: "node", args: ["demo.js"], transport: "stdio" }),
+		]);
+	});
+
+	test("merges v2 overrides with legacy flat servers across config scopes", async () => {
+		const projectDir = path.join(tempDir, "project");
+		const userConfigDir = path.join(tempDir, ".config", "opencode");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(userConfigDir, { recursive: true });
+
+		await fs.writeFile(
+			path.join(userConfigDir, "opencode.json"),
+			JSON.stringify({
+				mcp: {
+					demo: { type: "local", command: ["node", "demo.js"], environment: { TOKEN: "user" } },
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(projectDir, "opencode.jsonc"),
+			JSON.stringify({
+				mcp: { timeout: 10_000, servers: { demo: { environment: { REGION: "project" } } } },
+			}),
+		);
+
+		const servers = await loadOpenCodeMcpConfig(projectDir);
+
+		expect(servers).toEqual([
+			expect.objectContaining({
+				name: "demo",
+				command: "node",
+				args: ["demo.js"],
+				env: { TOKEN: "user", REGION: "project" },
+			}),
+		]);
+	});
+
+	test("keeps a legacy flat server named servers", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "opencode.json"),
+			JSON.stringify({ mcp: { servers: { type: "local", command: ["node", "legacy.js"] } } }),
+		);
+
+		const servers = await loadOpenCodeMcpConfig(tempDir);
+
+		expect(servers).toEqual([expect.objectContaining({ name: "servers", command: "node", args: ["legacy.js"] })]);
+	});
+
 	test("loads project .opencode config after project-root config", async () => {
 		const projectDir = path.join(tempDir, "project");
 		const projectConfigDir = path.join(projectDir, ".opencode");

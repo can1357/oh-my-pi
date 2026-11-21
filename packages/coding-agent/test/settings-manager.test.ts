@@ -18,6 +18,8 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
@@ -45,7 +47,7 @@ import {
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
-	cfgToolsXdev,
+	cfgToolsCommands,
 	cfgTodoReminders,
 	cfgTodoRemindersMax,
 	cfgDevAutoqa,
@@ -69,6 +71,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgMnemopiDbPath, cfgMnemopiScoping } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgSpeechVoice, cfgTtsLocalVoice } from "@oh-my-pi/pi-coding-agent/tts/settings";
 import { cfgHindsightBankId, cfgHindsightScoping } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgExaEnabled } from "@oh-my-pi/pi-coding-agent/web/settings";
@@ -1820,11 +1823,10 @@ describe("Settings", () => {
 		const MODEL_PRIO = roleDefaultModels();
 		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
-			"google-gemini-cli/gemini-2.5-flash",
 			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
-			"openai-codex/gpt-5.6-luna",
+			"openai-codex/gpt-6-luna",
 			"xai/grok-4.5",
 			"web/exa",
 			"web/tavily",
@@ -1874,7 +1876,7 @@ describe("Settings", () => {
 				{ image: imageOrderedCandidates[0] },
 				{ image: imageOrderedCandidates.slice(1) },
 			],
-			["local speech provider", "providers.tts", "local", { speech: "local/kokoro" }, { speech: [] }],
+			["local speech provider", "providers.tts", "local", { speech: "local/phonon-31m" }, { speech: [] }],
 			["xAI speech provider", "providers.tts", "xai", { speech: "xai/grok-tts" }, { speech: [] }],
 			[
 				"DeepInfra speech provider",
@@ -1906,7 +1908,7 @@ describe("Settings", () => {
 			],
 			["tiny model", "providers.tinyModel", "lfm2.5-230m", { tiny: "local/lfm2.5-230m" }, {}],
 			["memory model", "providers.memoryModel", "lfm2-1.2b", { memory: "local/lfm2-1.2b" }, {}],
-			["local speech model", "tts.localModel", "kokoro", {}, {}],
+			["local speech model", "tts.localModel", "phonon-31m", {}, {}],
 			["fast dictation model", "stt.modelName", "fast", { dictation: "local/whisper-base" }, {}],
 			["balanced dictation model", "stt.modelName", "balanced", { dictation: "local/whisper-small" }, {}],
 			["turbo dictation model", "stt.modelName", "turbo", { dictation: "local/whisper-large-v3-turbo" }, {}],
@@ -1950,6 +1952,46 @@ describe("Settings", () => {
 			},
 		);
 
+		it("repairs the old generated web fallback pair without changing unrelated chains", async () => {
+			await writeSettings({
+				modelRoles: { web: "web/parallel" },
+				retry: {
+					fallbackChains: {
+						web: [
+							"web/searxng",
+							"openai-codex/gpt-6-luna",
+							"openai-codex/gpt-5.6",
+							"openai-codex/gpt-5.5",
+							"xai/grok-4.5",
+						],
+						slow: ["openai-codex/gpt-5.5"],
+					},
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings)).toEqual({
+				web: ["web/searxng", "openai-codex/gpt-6-luna", "openai-codex/gpt-5.6-sol", "xai/grok-4.5"],
+				slow: ["openai-codex/gpt-5.5"],
+			});
+			const codex = getBundledModels("openai-codex").filter(model => model.webSearch);
+			expect(resolveRoleChain("web", settings, codex).map(candidate => candidate.model.id)).toEqual([
+				"gpt-6-luna",
+				"gpt-5.6-sol",
+			]);
+		});
+
+		it("preserves independently configured Codex web selectors", async () => {
+			await writeSettings({
+				retry: { fallbackChains: { web: ["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"] } },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings).web).toEqual(["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"]);
+		});
+
 		it("keeps a legacy Gemini wire tier ahead of non-Gemini fallbacks", async () => {
 			await writeSettings({
 				providers: {
@@ -1960,8 +2002,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 2)]).toEqual([
-				"google-gemini-cli/gemini-3.8-flash-high",
+			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 1)]).toEqual([
 				"google-antigravity/gemini-3.8-flash-high",
 				"google/gemini-3.8-flash-high",
 			]);
@@ -2271,6 +2312,20 @@ describe("Settings", () => {
 			expect(cfgMnemopiScoping.get(settings)).toBe("global");
 		});
 
+		it("migrates legacy Kokoro voices and speech role to Phonon", async () => {
+			await writeSettings({
+				tts: { localVoice: "bm_george" },
+				speech: { voice: "af_bella" },
+				modelRoles: { speech: "local/kokoro" },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgTtsLocalVoice.get(settings)).toBe("edwin");
+			expect(cfgSpeechVoice.get(settings)).toBe("harper");
+			expect(settings.getModelRole("speech")).toBe("local/phonon-31m");
+		});
+
 		it("does not clobber an explicit mnemopi block when the legacy mnemosyne block is also present", async () => {
 			await writeSettings({
 				mnemosyne: { dbPath: "/tmp/old.db" },
@@ -2517,7 +2572,7 @@ describe("Settings", () => {
 			expect(cfgTodoReminders.get(reloaded)).toBe(true);
 		});
 
-		it("drops dead BM25-discovery keys and leaves tools.xdev at its default", async () => {
+		it("drops dead BM25-discovery keys and leaves tools.commands at its default", async () => {
 			await writeSettings({
 				tools: { discoveryMode: "off", essentialOverride: ["read"] },
 				mcp: { discoveryMode: "auto", discoveryDefaultServers: ["gh"] },
@@ -2525,10 +2580,10 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			// No migration mapping: legacy discovery intent is discarded, xdev
-			// keeps its own default. An explicit xdev value is untouched.
-			expect(cfgToolsXdev.get(settings)).toBe(true);
-			expect(cfgToolsXdev.isConfigured(settings)).toBe(false);
+			// No migration mapping: legacy discovery intent is discarded, toolCommands
+			// keeps its own default. An explicit toolCommands value is untouched.
+			expect(cfgToolsCommands.get(settings)).toBe(true);
+			expect(cfgToolsCommands.isConfigured(settings)).toBe(false);
 		});
 
 		it("migrates from settings.json containing comments", async () => {

@@ -35,7 +35,7 @@ function fakeSession(): AgentSession {
 		agent: { state: { tools: [] } },
 		skills: [],
 		model,
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		state: { messages, model },
 		settings: undefined,
 		sessionManager: {

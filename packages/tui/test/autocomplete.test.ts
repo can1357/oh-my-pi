@@ -197,6 +197,32 @@ describe("CombinedAutocompleteProvider", () => {
 
 			expect(result?.items.map(item => item.value)).toEqual(["last-report"]);
 		});
+		it("ranks a command prefix above whole inner-segment skill matches (#18891)", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "jobs", description: "List background jobs" },
+					{ name: "join", description: "Join a session" },
+					{ name: "skill:diagnosing-vanished-job-pods", description: "Find vanished pods" },
+					{ name: "skill:hermes-scheduled-job-triage", description: "Triage scheduled runs" },
+				],
+				"/tmp",
+			);
+			// Issue repro: `/jo` and `/jobs` already ranked the leading-prefix
+			// command first; only `/job` — where `job` is a whole hyphen
+			// segment of the skill bare names — jumped the skills above.
+			// The whole-segment hit now ties the command prefix at 900, so
+			// the tie keeps the popup command-only (jobs first) instead of
+			// jumping the skills above.
+			const cases: Array<[string, Array<string>]> = [
+				["/jo", ["jobs", "join"]],
+				["/job", ["jobs"]],
+				["/jobs", ["jobs"]],
+			];
+			for (const [input, expected] of cases) {
+				const result = await provider.getSuggestions([input], 0, input.length);
+				expect(result?.items.map(item => item.value)).toEqual(expected);
+			}
+		});
 
 		it("collapses skills into a single skill: namespace row at prompt start", async () => {
 			const provider = new CombinedAutocompleteProvider(
@@ -842,6 +868,11 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 
 		it("skips the interim listing when the walk finishes quickly", async () => {
+			// An already-settled walk always beats the interim delay; a real walk can lose it on a loaded host.
+			spyOn(natives, "fuzzyFind").mockResolvedValue({
+				matches: [{ path: "other/widget.md", isDirectory: false, score: 1 }],
+				totalMatches: 1,
+			});
 			const partials: AutocompleteItem[][] = [];
 			const provider = new CombinedAutocompleteProvider([], baseDir);
 			const line = "@widget";
@@ -849,7 +880,7 @@ describe("CombinedAutocompleteProvider", () => {
 				partials.push(suggestions.items),
 			);
 
-			expect(result?.items.map(item => item.value)).toContain("@widget-app/");
+			expect(result?.items.map(item => item.value)).toEqual(["@other/widget.md"]);
 			expect(partials).toEqual([]);
 		});
 

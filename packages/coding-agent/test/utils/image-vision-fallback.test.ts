@@ -10,6 +10,8 @@ import {
 	type DescribeAttachedImagesDeps,
 	describeAttachedImagesForTextModel,
 } from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
+import { CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // 1x1 transparent PNG.
@@ -30,6 +32,11 @@ const visionModel: Model<"openai-responses"> = buildModel({
 });
 
 const textModel: Model<"openai-responses"> = { ...visionModel, id: "gpt-4.1-mini", input: ["text"] };
+const cheaperVisionModel: Model<"openai-responses"> = {
+	...visionModel,
+	id: "gpt-4o-mini",
+	cost: { input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0.15 },
+};
 
 function makeCompleteStub(text: string): { calls: unknown[][]; fn: typeof completeSimple } {
 	const calls: unknown[][] = [];
@@ -108,6 +115,83 @@ describe("describeAttachedImagesForTextModel", () => {
 		const fileName = match![1].slice("local://".length);
 		const saved = await fs.readFile(path.join(testDir, "local", fileName));
 		expect(saved.toString("base64")).toBe(TINY_PNG_BASE64);
+	});
+
+	it("counts each description against the session's cost cap and describes nothing at it", async () => {
+		const stub = makeCompleteStub("A man holding a red balloon.");
+		const billed = (async (...args: Parameters<typeof completeSimple>) => {
+			const message = await stub.fn(...args);
+			message.usage.cost.total = 1.2;
+			return message;
+		}) as typeof completeSimple;
+		const costGate = new CostGate(Settings.isolated({ "session.maxCost": 1 }), 0, () => {});
+		const deps = { ...makeDeps(testDir, [textModel, visionModel], billed), costGate };
+		const image = { type: "image" as const, data: TINY_PNG_BASE64, mimeType: "image/png" };
+
+		await describeAttachedImagesForTextModel([image], deps);
+		expect(costGate.spent).toBe(1.2);
+		const capped = await describeAttachedImagesForTextModel([image], deps);
+
+		expect(stub.calls).toHaveLength(1);
+		expect(capped[0]!.text).not.toContain("red balloon");
+	});
+
+	it("journals each description once as usage-only `image-describe`", async () => {
+		const stub = makeCompleteStub("A man holding a red balloon.");
+		const usageLedger = SessionManager.inMemory();
+		const deps = { ...makeDeps(testDir, [textModel, visionModel], stub.fn), usageLedger };
+
+		await describeAttachedImagesForTextModel([{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }], deps);
+
+		const journaled = usageLedger.getEntries().filter(entry => entry.type === "model_usage");
+		expect(journaled).toHaveLength(1);
+		expect(journaled[0]).toMatchObject({
+			purpose: "image-describe",
+			model: visionModel.id,
+			usage: { input: 1, output: 1, totalTokens: 2 },
+		});
+		// The description is already in the transcript, and the request text is a fixed instruction.
+		expect(journaled[0]).not.toHaveProperty("completion");
+	});
+
+	it("chooses the cheaper available vision model instead of catalog order", async () => {
+		const unpriced = {
+			...visionModel,
+			id: "unpriced-vision",
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+		const stub = makeCompleteStub("description");
+		await describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			makeDeps(testDir, [textModel, unpriced, visionModel, cheaperVisionModel], stub.fn),
+		);
+
+		expect(stub.calls[0]?.[0]).toMatchObject({ id: "gpt-4o-mini" });
+	});
+
+	it("prefers a declared free vision model over a paid one listed after it", async () => {
+		const free = {
+			...visionModel,
+			id: "free-vision",
+			pricingStatus: "free" as const,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+		const stub = makeCompleteStub("description");
+		await describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			makeDeps(testDir, [textModel, free, cheaperVisionModel], stub.fn),
+		);
+
+		expect(stub.calls[0]?.[0]).toMatchObject({ id: "free-vision" });
+	});
+
+	it("keeps a configured vision role ahead of the cheaper fallback", async () => {
+		const stub = makeCompleteStub("description");
+		const deps = makeDeps(testDir, [textModel, visionModel, cheaperVisionModel], stub.fn);
+		deps.settings = Settings.isolated({ modelRoles: { vision: "openai/gpt-4o" } });
+		await describeAttachedImagesForTextModel([{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }], deps);
+
+		expect(stub.calls[0]?.[0]).toMatchObject({ id: "gpt-4o" });
 	});
 
 	it("saves the image but emits a no-vision note when no vision model is available", async () => {

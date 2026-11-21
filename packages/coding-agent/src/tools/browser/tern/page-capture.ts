@@ -219,6 +219,8 @@ export const TERN_CAPTURE_INSTALLER = String.raw`function (config) {
 			const url = request.url;
 			send({ kind: "request", id, method: request.method.toUpperCase(), url, resourceType: "fetch", headers: headerRecord(request.headers), bodySize: bodySize(init && init.body) });
 			state.inflight++;
+			// Whether the capture answers this request itself (offline, an aborting or fulfilling route): no load reaches the network.
+			let local = true;
 			try {
 				if (state.config.emulation.offline) throw new TypeError("Load failed");
 				const rule = route(url, "fetch");
@@ -230,14 +232,15 @@ export const TERN_CAPTURE_INSTALLER = String.raw`function (config) {
 					if (rule.fulfill.contentType) headers.set("content-type", rule.fulfill.contentType);
 					response = new Response(rule.fulfill.body == null ? null : rule.fulfill.body, { status: rule.fulfill.status, headers });
 				} else {
+					local = false;
 					response = await originalFetch.call(this, request);
 				}
 				const headers = headerRecord(response.headers);
 				track(id, readBounded(id, response.clone(), headers["content-type"]));
-				send({ kind: "response", id, url: response.url || url, status: response.status, statusText: response.statusText, headers, durationMs: Date.now() - started, routed: !!rule });
+				send({ kind: "response", id, url: response.url || url, status: response.status, statusText: response.statusText, headers, durationMs: Date.now() - started, routed: !!rule, local });
 				return response;
 			} catch (error) {
-				send({ kind: "requestfailed", id, url, error: String((error && error.message) || error), durationMs: Date.now() - started });
+				send({ kind: "requestfailed", id, url, error: String((error && error.message) || error), durationMs: Date.now() - started, local });
 				throw error;
 			} finally {
 				state.inflight--;
@@ -281,7 +284,7 @@ export const TERN_CAPTURE_INSTALLER = String.raw`function (config) {
 						xhr.dispatchEvent(new Event("readystatechange"));
 						xhr.dispatchEvent(new ProgressEvent("error"));
 						xhr.dispatchEvent(new ProgressEvent("loadend"));
-						send({ kind: "requestfailed", id, url: info.url, error: "Load failed", durationMs: Date.now() - started });
+						send({ kind: "requestfailed", id, url: info.url, error: "Load failed", durationMs: Date.now() - started, local: true });
 						finish();
 						return;
 					}
@@ -301,7 +304,7 @@ export const TERN_CAPTURE_INSTALLER = String.raw`function (config) {
 					xhr.dispatchEvent(new Event("readystatechange"));
 					xhr.dispatchEvent(new ProgressEvent("load"));
 					xhr.dispatchEvent(new ProgressEvent("loadend"));
-					send({ kind: "response", id, url: info.url, status: fulfill.status, statusText: "", headers, durationMs: Date.now() - started, routed: true });
+					send({ kind: "response", id, url: info.url, status: fulfill.status, statusText: "", headers, durationMs: Date.now() - started, routed: true, local: true });
 					remember(id, new TextEncoder().encode(bodyText), headers["content-type"]);
 					finish();
 				}, rule.delay || 0);

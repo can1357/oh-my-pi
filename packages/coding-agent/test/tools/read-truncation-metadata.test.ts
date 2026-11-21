@@ -70,7 +70,7 @@ describe("read truncation metadata", () => {
 		await Bun.write(path.join(root, "bytes.txt"), lines.join("\n"));
 
 		const result = persistedResult(await tool.execute("local-bytes", { path: "bytes.txt:raw:1-100" }));
-		const expectedBody = lines.slice(0, 49).join("\n");
+		const expectedBody = `${lines.slice(0, 49).join("\n")}\n`;
 		expect(textOutput(result)).toBe(expectedBody);
 		expect(result.details?.displayContent?.text).toBe(expectedBody);
 		expect(result.details?.truncation).toMatchObject({
@@ -79,7 +79,7 @@ describe("read truncation metadata", () => {
 			totalLines: 100,
 			totalBytes: Buffer.byteLength(lines.join("\n")),
 			outputLines: 49,
-			outputBytes: Buffer.byteLength(expectedBody),
+			outputBytes: Buffer.byteLength(lines.slice(0, 49).join("\n")),
 			firstLineExceedsLimit: false,
 			lastLinePartial: false,
 		} satisfies ReadTruncationStats);
@@ -89,7 +89,7 @@ describe("read truncation metadata", () => {
 		});
 		const meta = result.details?.meta?.truncation;
 		if (!meta) throw new Error("Expected continuation metadata");
-		expect(formatTruncationMetaNotice(meta)).toContain("Use :50 to continue");
+		expect(formatTruncationMetaNotice(meta)).toContain("Use :50- to continue");
 	});
 
 	it("does not turn an oversized local first line into an editable partial hashline", async () => {
@@ -103,16 +103,17 @@ describe("read truncation metadata", () => {
 			firstLineExceedsLimit: true,
 			lastLinePartial: false,
 			totalBytes: DEFAULT_MAX_BYTES + 1,
-			outputBytes: DEFAULT_MAX_BYTES,
 		});
+		// The budget reserves row-prefix bytes, so the preview stops at or below the shared cap.
+		expect(result.details?.truncation?.outputBytes).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
 		expect(result.details?.meta?.truncation).toMatchObject({ partialLine: true, shownRange: { start: 1, end: 1 } });
 		expect(result.details?.meta?.truncation?.nextOffset).toBeUndefined();
 	});
 
 	it("retains the partial UTF-8 preview and oversized-line warning for streamed artifact reads", async () => {
 		const line = "é".repeat(36_000);
-		await Bun.write(path.join(root, "artifacts", "0.read.log"), `before\n${line}\nafter`);
-		const result = persistedResult(await tool.execute("artifact-line", { path: "artifact://0:raw:2-2" }));
+		await Bun.write(path.join(root, "artifacts", "local", "0.log"), `before\n${line}\nafter`);
+		const result = persistedResult(await tool.execute("artifact-line", { path: "local://0.log:raw:2-2" }));
 		const preview = line.slice(0, DEFAULT_MAX_BYTES / 2);
 
 		expect(textOutput(result)).toBe(preview);
@@ -131,7 +132,7 @@ describe("read truncation metadata", () => {
 		});
 		expect(result.details?.meta?.truncation?.nextOffset).toBeUndefined();
 		const rendered = readToolRenderer
-			.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { path: "artifact://0:raw:2-2" })
+			.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { path: "local://0.log:raw:2-2" })
 			.render(100)
 			.map(line => Bun.stripANSI(line))
 			.join("\n");

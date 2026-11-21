@@ -40,6 +40,7 @@ import type { ApiKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AntigravityCliOptions } from "./providers/antigravity-cli";
 import type { FallbackParam, MessageCreateParamsStreaming, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
@@ -50,6 +51,7 @@ import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -83,11 +85,13 @@ export interface ApiOptionsMap {
 	"google-generative-ai": GoogleOptions;
 	"google-gemini-cli": GoogleGeminiCliOptions;
 	"google-vertex": GoogleVertexOptions;
+	"kiro-api": KiroOptions;
 	"ollama-chat": OllamaChatOptions;
 	"cursor-agent": CursorOptions;
 	"factory-droid-agent": FactoryDroidOptions;
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
+	"antigravity-acp": AntigravityCliOptions;
 	"apple-foundation-models": AppleFoundationModelsOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
@@ -240,8 +244,10 @@ export function resolveModelServiceTier(
  * `service_tier_for_request`); an empty or missing list counts as "not
  * reported" — accounts whose `/models` lists no tiers keep `/fast` — so the
  * provider-level answer stands. `flex` and `default` are never gated.
- * First-party OpenAI takes `ultrafast` as-is. A bare provider string cannot
- * carry the list, so it answers for the provider alone.
+ * First-party OpenAI takes `ultrafast` as-is. An OpenAI-family relay on the
+ * Responses/Completions APIs gets `ultrafast` only when its discovered
+ * `service_tiers` lists it. A bare provider string cannot carry the list, so
+ * it answers for the provider alone.
  */
 export function shouldSendServiceTier(
 	serviceTier: ServiceTier | null | undefined,
@@ -260,7 +266,11 @@ export function shouldSendServiceTier(
 		if (advertised !== undefined && advertised.length > 0) return advertised.includes(serviceTier);
 	}
 	if (serviceTier === "ultrafast") {
-		return provider === "openai" || (typeof target === "string" && provider === "openai-codex");
+		if (typeof target === "string") return provider === "openai" || provider === "openai-codex";
+		if (provider === "openai") return true;
+		return (
+			target !== undefined && isOpenAIServiceTierModel(target) && target.serviceTiers?.includes(serviceTier) === true
+		);
 	}
 	if (provider === "openai" || provider === "openai-codex") return true;
 	if (provider === "openrouter") {
@@ -461,8 +471,12 @@ export interface AnthropicCompactionRequest {
 export interface OpenAIPromptCacheOptions {
 	/** `explicit` disables OpenAI's automatic latest-message breakpoint. */
 	mode: "implicit" | "explicit";
-	/** The only currently supported minimum breakpoint lifetime. */
-	ttl?: "30m";
+	/**
+	 * Minimum cache lifetime. `30m` is OpenAI's default; `12h` (Responses API only)
+	 * bills writes at 2.5× input instead of 1.25×. Defaults to `12h` when
+	 * `cacheRetention` resolves to `long`, otherwise `30m`.
+	 */
+	ttl?: "30m" | "12h";
 	/** By default, mark one existing block from stable history; `none` suppresses that marker. */
 	breakpoint?: "latest-stable-message" | "none";
 }
@@ -513,6 +527,11 @@ export interface StreamOptions {
 	 * its conversation prefix. Binding-capable models default to `"drop_block"`.
 	 */
 	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
+	/**
+	 * Leave other models' reasoning, which would replay as text, out of the
+	 * request. Anthropic Messages only; other providers ignore it.
+	 */
+	omitDemotedReasoning?: boolean;
 	/**
 	 * Anthropic on-demand compaction (`compact-2026-09-04` beta). Sends a
 	 * top-level `compaction: { type: "summarize", instructions? }` request; the
@@ -583,9 +602,10 @@ export interface StreamOptions {
 	 */
 	promptCache?: OpenAIPromptCacheOptions;
 	/**
-	 * Disable OpenAI Responses server-side turn chaining for this request.
-	 * Diagnostic callers that compare independent requests can set this to
-	 * `false` so `previous_response_id` cannot explain a result.
+	 * Server-side turn chaining: OpenAI Responses `previous_response_id` and
+	 * Anthropic message threads. `false` sends every request in full (diagnostic
+	 * callers comparing independent requests); `true` chains even where the
+	 * provider would not by default. Unset follows the provider default.
 	 */
 	statefulResponses?: boolean;
 	/**
@@ -599,6 +619,13 @@ export interface StreamOptions {
 	 */
 	storeResponses?: boolean;
 	/**
+	 * Request the Daybreak Blue cyber access program on Codex when the account
+	 * is eligible (see `openai-codex/access-programs.ts`). `false` omits
+	 * `access_programs`. Unset falls back to the host's
+	 * `configureCodexAccessPrograms` default, else on. Ignored elsewhere.
+	 */
+	codexAccessPrograms?: boolean;
+	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
 	 * Google transports use their native thinking-off controls.
@@ -609,6 +636,8 @@ export interface StreamOptions {
 	 * Providers can use this to persist transport/session state between turns.
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
+	/** @internal Registry-scoped models.db for persistent unknown-model thinking probes. */
+	thinkingCapabilityDbPath?: string;
 	/**
 	 * Session a side request branches from, so it can read the parent's cached
 	 * prefix. Providers that keep per-conversation request controls (OpenAI
@@ -641,11 +670,15 @@ export interface StreamOptions {
 	 * are not covered.
 	 */
 	maxInFlightRequests?: Record<string, number>;
+	/** Called after the provider slot is acquired, before each model dispatch; throwing refuses that attempt. */
+	beforeDispatch?: () => void;
 	/** @internal Keep the in-flight permit until a provider's bounded terminal drain finishes. */
 	waitForTerminalDrain?: boolean;
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
+	 * A pre-send standard Responses WS fallback rebuilds the HTTP candidate and
+	 * invokes this hook again. WS connection-local delta shaping follows it.
 	 */
 	onPayload?: (
 		payload: unknown,
@@ -654,6 +687,9 @@ export interface StreamOptions {
 	) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback for provider response metadata after headers are received.
+	 * Standard Responses WS reports each physical handshake once with
+	 * metadata.transport="websocket" and metadata.phase="handshake", not each
+	 * generation. Its headers are not per-generation cache/request metadata.
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
 	/**
@@ -673,7 +709,7 @@ export interface StreamOptions {
 	 * in the iterator while waiting for the first semantic stream event. Set to
 	 * `0` to disable both layers for this request. After the first semantic
 	 * event arrives, `streamIdleTimeoutMs` governs inter-event stalls. Falls
-	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 100s default.
+	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 900s default.
 	 * OpenAI-family transports additionally honor
 	 * `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS` as the most-specific override and
 	 * floor the first-event budget at the resolved idle (per-call
@@ -692,7 +728,7 @@ export interface StreamOptions {
 	 * mid-stream stalls (broker dies, half-open socket, model produces no real
 	 * progress for too long). Set to `0` to disable. Falls back to
 	 * `PI_STREAM_IDLE_TIMEOUT_MS` (alias: `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`)
-	 * and then to a 120s default.
+	 * and then to a 900s default.
 	 */
 	streamIdleTimeoutMs?: number;
 	/**
@@ -719,6 +755,8 @@ export interface StreamOptions {
 	 * implementation when set. Defaults to `globalThis.fetch`. Providers that
 	 * do not use `fetch` (Bedrock's AWS SDK transport, Cursor's HTTP/2
 	 * channel) silently ignore the override.
+	 * Standard Responses defaults to HTTP/SSE when set unless a request or model
+	 * explicitly selects WebSockets. WebSocket connections do not use this hook.
 	 */
 	fetch?: FetchImpl;
 	/** Current session working directory for providers that need workspace-scoped discovery. */
@@ -739,6 +777,19 @@ export interface StreamOptions {
 	 * observes limit headers, and decides capacity waits.
 	 */
 	anthropicSlowMode?: AnthropicSlowModeHooks;
+	/**
+	 * Prompt-cache pre-warm (Anthropic Messages only). The provider builds the
+	 * request exactly as it would otherwise (same `onPayload` hooks, auth, and
+	 * headers, so the cache key is identical), then sends it non-streaming
+	 * with `max_tokens: 0`: the endpoint reads the prompt, refreshes the cache
+	 * at its breakpoints, and returns usage with no output billed. The stream
+	 * emits `start` then `done` with empty content, `stopReason: "length"`,
+	 * and that usage. Ends in an `error` event, sending nothing, when the
+	 * request has budget thinking, a forced `tool_choice`, or structured
+	 * output, which the endpoint rejects. Other providers ignore the flag and generate normally,
+	 * so callers gate it on `isPromptCachePrewarmSupported`.
+	 */
+	prewarm?: boolean;
 }
 
 /**
@@ -807,7 +858,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
-	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
+	/** The caller's client runs every tool: Cursor offers them all as MCP tools and hands each call off to it. */
 	cursorExternalToolExecutor?: boolean;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
@@ -832,7 +883,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	kimiApiFormat?: "openai" | "anthropic";
 	/** API format for Synthetic provider: "openai" or "anthropic" (default: "openai") */
 	syntheticApiFormat?: "openai" | "anthropic";
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
 	preferWebsockets?: boolean;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when
@@ -859,6 +910,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * provider. Non-Anthropic providers ignore the field.
 	 */
 	fallbacks?: FallbackParam[];
+	/** Factory Droid only: omit refusal fallbacks and reject responses served by another model. */
+	disableServerSideFallback?: boolean;
 }
 
 // Generic StreamFunction with typed options
@@ -868,10 +921,16 @@ export type StreamFunction<TApi extends Api> = (
 	options: OptionsForApi<TApi>,
 ) => AssistantMessageEventStream;
 
+/**
+ * Responses API assistant message phase. `partial_answer` (Codex 0.162+) marks
+ * answer text that more output or tool calls may follow; `final_answer` ends the turn.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer" | "partial_answer";
+
 export interface TextSignatureV1 {
 	v: 1;
 	id: string;
-	phase?: "commentary" | "final_answer";
+	phase?: AssistantMessagePhase;
 }
 
 export interface TextContent {
@@ -1045,6 +1104,8 @@ export interface ToolCall {
 	 * JSON function tools.
 	 */
 	customWireName?: string;
+	/** Responses API namespace for namespaced function and custom tools. */
+	namespace?: string;
 	/** Provider-native metadata required to execute and faithfully replay this call. */
 	providerMetadata?: ToolCallProviderMetadata;
 }
@@ -1056,6 +1117,13 @@ export interface OpenAIResponsesHistoryPayload {
 	provider?: string;
 	dt?: boolean;
 	items: Array<Record<string, unknown>>;
+	/**
+	 * Set on a turn whose request was retried after the server refused replayed
+	 * encrypted reasoning (key rotation, another credential). That retry carried
+	 * no encrypted reasoning from earlier turns, and later requests omit it too,
+	 * so the refused blobs are never sent again.
+	 */
+	encryptedReasoningFloor?: boolean;
 }
 
 /** Anthropic `output_config.effort` level. */
@@ -1117,6 +1185,8 @@ export interface AnthropicCompactionPayload {
 	content: string;
 	/** Signature of an on-demand block; replayed verbatim. */
 	signature?: string;
+	/** Net tool changes across the summarized range; covered by the signature, replayed verbatim. */
+	toolChanges?: Record<string, unknown>[];
 	/** Legacy threshold block state (`compact-2026-01-12`); replay-only. */
 	encryptedContent?: string;
 	/**
@@ -1165,11 +1235,49 @@ export interface CursorHistoryPayload {
 	records: string[];
 }
 
+/**
+ * The `candidates[0].content` a Gemini model streamed for one turn, every part
+ * (thought text, signatures, call ids) merged in arrival order. Written and read
+ * by the Factory Droid Gemini transport, which replays it unchanged to the same
+ * model while the turn's content still matches `digest`.
+ */
+export interface GeminiNativeContentPayload {
+	type: "geminiNativeContent";
+	/** Digest of the turn's text, thinking and tool calls when recorded; a rewritten turn rebuilds instead. */
+	digest: string;
+	content: { role?: string; parts: Record<string, unknown>[]; [key: string]: unknown };
+}
+
+/** Row counts of an agy conversation store at a turn end; truncating to them rewinds the conversation there. */
+export interface AntigravityCliCheckpoint {
+	steps: number;
+	generations: number;
+	executions: number;
+}
+
+/**
+ * Where an Antigravity CLI (`agy`) step ran. Written and read by the
+ * `antigravity-acp` transport: when the transcript diverges from agy's own
+ * history, it rewinds agy's conversation to the newest turn end whose digest
+ * still matches instead of replaying the whole transcript as text.
+ */
+export interface AntigravityCliPayload {
+	type: "antigravityCli";
+	/** agy conversation (ACP session) the step ran in. */
+	conversationId: string;
+	/** Structural digest of the transcript through this message. */
+	digest: string;
+	/** Present on the step that ended agy's turn. */
+	checkpoint?: AntigravityCliCheckpoint;
+}
+
 export type ProviderPayload =
 	| OpenAIResponsesHistoryPayload
 	| AnthropicMessagePayload
 	| AnthropicCompactionPayload
-	| CursorHistoryPayload;
+	| CursorHistoryPayload
+	| GeminiNativeContentPayload
+	| AntigravityCliPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {
@@ -1182,6 +1290,8 @@ export interface ProviderInputTransformation {
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
+	/** Original sender and body of a parent-agent IRC steer, for transcript presentation only. */
+	parentIrc?: { from: string; body: string };
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
@@ -1342,6 +1452,8 @@ export interface AssistantMessage {
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
+	/** On a refusal: how many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
@@ -1512,11 +1624,22 @@ export interface CursorMcpResourceContent {
 	downloadPath?: string;
 }
 
+/** What the provider knows about an exec frame beyond its arguments. */
+export interface CursorExecFrameContext {
+	/**
+	 * The frame materializes a native StrReplace or Write: Cursor reads the
+	 * whole file and writes it back under the edit's call id. The streamed
+	 * `edit` block owns that id, so the frame surfaces no call of its own, and
+	 * the write reports as `edit` with the diff it made.
+	 */
+	editMaterialization?: boolean;
+}
+
 export interface CursorExecHandlers {
-	read?: (args: ReadArgs) => Promise<CursorExecHandlerResult<ReadResult>>;
+	read?: (args: ReadArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<ReadResult>>;
 	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
 	grep?: (args: GrepArgs) => Promise<CursorExecHandlerResult<GrepResult>>;
-	write?: (args: WriteArgs) => Promise<CursorExecHandlerResult<WriteResult>>;
+	write?: (args: WriteArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<WriteResult>>;
 	delete?: (args: DeleteArgs) => Promise<CursorExecHandlerResult<DeleteResult>>;
 	shell?: (args: ShellArgs) => Promise<CursorExecHandlerResult<ShellResult>>;
 	shellStream?: (
@@ -1539,6 +1662,16 @@ export interface CursorExecHandlers {
 	 * handler is registered the provider refuses, since it cannot decide.
 	 */
 	mcpApprovalPreflight?: (call: CursorMcpCall) => Promise<boolean>;
+	/**
+	 * How a locally executed MCP call is ordered against the run's other exec
+	 * frames: `"exclusive"` waits for every unfinished earlier frame and holds
+	 * later frames until it finishes, mirroring the agent loop's scheduling of
+	 * the same tool. Resolve it from the tool the call will actually run — the
+	 * frame's name may be an alias the host rewrites onto another tool.
+	 * Without it every MCP call is `"shared"`. Approval probes execute
+	 * nothing, so they are never classified.
+	 */
+	mcpConcurrency?: (call: CursorMcpCall) => "shared" | "exclusive";
 	/**
 	 * Modern Cursor CLI Pi tool frames (`ExecServerMessage` 45-51). They are a
 	 * distinct frame family from the legacy `readArgs`/`shellArgs`/... set, not
@@ -1572,6 +1705,12 @@ export interface CursorExecHandlers {
 	}) => Promise<CursorMcpResourceContent | null>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
+	/**
+	 * Settle a native StrReplace or Write the server completed without a
+	 * materializing write (a failed match, a refusal). Its read surfaced no
+	 * call, so nothing else ends the live card.
+	 */
+	editSettled?: (result: ToolResultMessage) => void;
 	onToolResult?: CursorToolResultHandler;
 }
 
@@ -1652,7 +1791,10 @@ export interface Context {
 	systemPrompt?: string[];
 	messages: Message[];
 	tools?: Tool[];
-	/** Definitions of tools the transcript's latest Anthropic request declared but that are no longer in `tools`; only the Anthropic provider reads it. */
+	/**
+	 * Definitions of declared tools that are not in `tools`: those the transcript's latest Anthropic request declared,
+	 * or, before any request declared tools, those that may become active later. Only the Anthropic provider reads it.
+	 */
 	inactiveTools?: Tool[];
 }
 
@@ -1691,4 +1833,6 @@ export interface AnthropicFallbackCreditHandle {
 	expiresAt: number;
 	/** The refused response's content, in `AssistantMessage` block form. */
 	refusedContent?: AssistantMessage["content"];
+	/** How many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 }

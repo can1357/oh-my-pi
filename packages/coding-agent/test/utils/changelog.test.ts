@@ -294,7 +294,7 @@ describe("renderChangelogEntries", () => {
 			release(1, 0, 0, `### Added\n\n- First ${largeBody}\nEND-FIRST`),
 		]);
 
-		expect(rendered.markdown.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("1.0.0");
+		expect(rendered.markdown.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("3.0.0");
 		expect(rendered.truncated).toBe(false);
 		expect(rendered.markdown).toContain("END-FIRST");
 		expect(rendered.markdown).toContain("END-SECOND");
@@ -323,6 +323,7 @@ describe("last changelog marker", () => {
 			const upgradeDisplay = await resolveStartupChangelogForDisplay({
 				mode: "hidden",
 				currentVersion: CURRENT_VERSION,
+				lastVersion: "1.0.0",
 				agentDir,
 			});
 
@@ -333,6 +334,7 @@ describe("last changelog marker", () => {
 			const downgradeDisplay = await resolveStartupChangelogForDisplay({
 				mode: "hidden",
 				currentVersion: CURRENT_VERSION,
+				lastVersion: "3.0.0",
 				agentDir,
 			});
 
@@ -343,7 +345,6 @@ describe("last changelog marker", () => {
 
 	test("summary mode keeps the last unseen release of a changelog that ends in a newline", async () => {
 		await withTempAgentDir(async agentDir => {
-			await writeLastChangelogVersion("1.0.0", agentDir);
 			const changelogPath = path.join(agentDir, "CHANGELOG.md");
 			const history = [release(2, 0, 0, "### Added\n\n- Newest."), release(1, 5, 0, "### Fixed\n\n- Last section.")];
 			await Bun.write(changelogPath, `# Changelog\n\n${history.map(entry => entry.content).join("\n\n")}\n`);
@@ -351,6 +352,7 @@ describe("last changelog marker", () => {
 			const selection = await resolveStartupChangelogForDisplay({
 				mode: "summary",
 				currentVersion: CURRENT_VERSION,
+				lastVersion: "1.0.0",
 				changelogPath,
 				agentDir,
 			});

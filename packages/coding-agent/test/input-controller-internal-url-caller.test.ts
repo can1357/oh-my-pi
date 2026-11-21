@@ -16,7 +16,6 @@ function registerSession(id: string, kind: "main" | "sub", backend: "local" | "o
 			getSessionId: () => id,
 			getSessionFile: () => undefined,
 			getArtifactsDir: () => null,
-			getSeanceSourceArtifactsDir: () => null,
 		},
 		settings: Settings.isolated({ "memory.backend": backend }),
 	} as unknown as AgentSession;

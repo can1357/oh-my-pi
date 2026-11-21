@@ -75,7 +75,7 @@ function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; he
 		session: {
 			retryAttempt: 0,
 			getToolByName: () => undefined,
-			sessionManager: { getCwd: () => process.cwd() },
+			sessionManager: { getCwd: () => process.cwd(), getConversationTip: () => undefined },
 		},
 		get viewSession() {
 			return (this as typeof ctx).session;
@@ -208,7 +208,8 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 		]);
 
 		const rendered = builder.container.render(120);
-		expect(Bun.stripANSI(rendered.join("\n"))).toContain("echo ok");
+		// Shell visualization (on by default) draws the command as pseudo code.
+		expect(Bun.stripANSI(rendered.join("\n"))).toContain('print("ok")');
 		expect(builder.rowForEntry("tool-entry")).toBe(0);
 	});
 
