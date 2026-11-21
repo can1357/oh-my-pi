@@ -2906,7 +2906,13 @@ export class TurnRecovery {
 							restored = true;
 							break;
 						}
-						if (result.retryAfterMs === undefined || attempt >= maxRetries) break;
+						if (result.retryAfterMs === undefined || attempt >= maxRetries) {
+							logger.info("auto-reset: no reset restored the account", {
+								reason: result.retryAfterMs === undefined ? "not-throttled" : "retries-exhausted",
+								attempts: attempt + 1,
+							});
+							break;
+						}
 						// Only retry the safe eligibility read, never the reset mutation or
 						// model request. Respect provider pacing within the configured wait cap.
 						const readDelayMs = Math.max(
@@ -2914,8 +2920,18 @@ export class TurnRecovery {
 							result.retryAfterMs,
 							calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, attempt + 1),
 						);
-						if (retrySettings.maxDelayMs > 0 && Date.now() - startedAtMs + readDelayMs > retrySettings.maxDelayMs)
+						if (
+							retrySettings.maxDelayMs > 0 &&
+							Date.now() - startedAtMs + readDelayMs > retrySettings.maxDelayMs
+						) {
+							logger.info("auto-reset: no reset restored the account", {
+								reason: "re-read-exceeds-max-delay",
+								attempts: attempt + 1,
+								readDelayMs,
+								maxDelayMs: retrySettings.maxDelayMs,
+							});
 							break;
+						}
 						await sleepLong(readDelayMs, resetAbortController.signal);
 					}
 				} catch (error) {
