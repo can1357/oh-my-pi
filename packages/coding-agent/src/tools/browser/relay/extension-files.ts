@@ -6,7 +6,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBrowserRelayDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { replaceFileAtomically } from "../../../utils/atomic-file";
-import { embeddedRelayExtension } from "./embedded-extension";
+import { embeddedRelayExtensionZstPath } from "./embedded-extension";
 import {
 	type RelayExtensionStamp,
 	readRelayExtensionStamp,
@@ -27,23 +27,34 @@ const GENERATED_EXTENSION = path.join(import.meta.dir, "extension.generated.json
 let loading: Promise<RelayExtensionBundle> | undefined;
 
 /**
- * The extension this omp installs: embedded in binaries and bundles, read from `extension.generated.json` in a source
- * checkout. A missing file fails only the caller, so startup survives a checkout that has not generated it.
+ * The extension this omp installs: loaded lazily from the embedded zstd asset in
+ * binaries and bundles, or read from `extension.generated.json` in a source
+ * checkout. Coalesces concurrent loads without pinning the ~2 MiB bundle after
+ * callers finish.
  *
  * @throws Error naming `bun run gen:relay-extension` when a source checkout has not generated the extension.
  */
 export function loadRelayExtension(): Promise<RelayExtensionBundle> {
-	if (embeddedRelayExtension) return Promise.resolve(embeddedRelayExtension);
-	loading ??= Bun.file(GENERATED_EXTENSION)
-		.json()
-		.catch((error: unknown) => {
-			loading = undefined;
-			if (!isEnoent(error)) throw error;
-			throw new Error(
-				`This omp checkout has not built the omp extension (${GENERATED_EXTENSION} is missing). Run \`bun run gen:relay-extension\` at the repository root.`,
-			);
-		});
-	return loading;
+	if (loading) return loading;
+	const pending: Promise<RelayExtensionBundle> = embeddedRelayExtensionZstPath
+		? Bun.file(embeddedRelayExtensionZstPath)
+				.bytes()
+				.then(bytes => Bun.zstdDecompress(bytes))
+				.then(raw => JSON.parse(Buffer.from(raw).toString("utf8")) as RelayExtensionBundle)
+		: Bun.file(GENERATED_EXTENSION)
+				.json()
+				.catch((error: unknown) => {
+					if (!isEnoent(error)) throw error;
+					throw new Error(
+						`This omp checkout has not built the omp extension (${GENERATED_EXTENSION} is missing). Run \`bun run gen:relay-extension\` at the repository root.`,
+					);
+				});
+	loading = pending;
+	const settle = (): void => {
+		if (loading === pending) loading = undefined;
+	};
+	pending.then(settle, settle);
+	return pending;
 }
 
 type ExtensionFiles = Record<string, string | Buffer> & {
