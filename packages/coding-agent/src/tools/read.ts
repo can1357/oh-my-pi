@@ -2282,11 +2282,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// A located URL reads its backing file through the filesystem pipeline (images, `:img`,
 		// `?q=`, archives, sqlite, streaming, paging) while the URL stays the read's identity.
 		const protocolFallback = { handled: false };
+		let bufferedSkillBytes: Buffer | undefined;
+		const captureBufferedSkill = extractUriScheme(located.url) === "skill" && located.sel === undefined;
 		const result = await this.#readFilesystemPath(located.path, {
 			located,
 			question,
 			questionPath: readPath,
 			signal,
+			onBufferedFile: captureBufferedSkill
+				? bytes => {
+						bufferedSkillBytes = bytes;
+						onBufferedFile?.(bytes);
+					}
+				: onBufferedFile,
 			toolContext,
 			plainWindow,
 			protocolFallback,
@@ -2300,12 +2308,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (extractUriScheme(located.url) === "skill" && !isRawSelector(parseSel(located.sel))) {
 			const provenance = `[Skill file: ${located.path}]`;
 			const firstText = result.content.find((block): block is TextContent => block.type === "text");
+			const rawContent = bufferedSkillBytes?.toString("utf-8") ?? firstText?.text;
 			// The TUI falls back to this block when no structured display content exists.
 			if (firstText) firstText.text = `${provenance}\n${firstText.text}`;
 			else result.content.unshift({ type: "text", text: provenance });
-			if (located.sel === undefined && !protocolFallback.handled) {
+			if (located.sel === undefined && !protocolFallback.handled && rawContent !== undefined) {
 				const note = await skillUrlClaudeCodeToolNote(
 					parseInternalUrl(located.url),
+					located.path,
+					rawContent,
 					sessionResolveContext(this.session, { signal }),
 				);
 				if (note) result.content.push({ type: "text", text: note });
@@ -3577,7 +3588,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			throw new ToolError("The ':img' selector requires a file-backed path.");
 		}
-		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
+		const resource = await InternalUrlRouter.instance().resolve(
+			url,
+			sessionResolveContext(this.session, { signal, verbatim: parsedSel.kind !== "none" }),
+		);
 		if (typeof resource.content !== "string") {
 			// Bytes take the file pipeline under the URL's identity: images and documents by their
 			// content and type, anything else as a binary file (`:raw` reads it verbatim).

@@ -291,7 +291,11 @@ async function locateSkillTarget(
  * with ENOENT. A skill's own instruction file is delivered through the same Claude-dialect rewriting
  * as `loadSkillPromptBody`, so every path that reads a skill body agrees.
  */
-async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Promise<InternalResource> {
+async function readSkillTarget(
+	url: InternalUrl,
+	target: LocatedSkillTarget,
+	verbatim = false,
+): Promise<InternalResource> {
 	const { path: targetPath, stats, skill, instructions } = target;
 	if (!stats) throw new Error(`File not found: ${targetPath}`);
 
@@ -304,7 +308,8 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 
 	const raw = await Bun.file(targetPath).text();
 	// Only the skill's own instruction body is Claude-dialect prose; frontmatter and referenced assets are not.
-	const content = instructions ? await withClaudeCodeToolNote(skill, raw, parseSkillBody(raw, targetPath)) : raw;
+	const content =
+		instructions && !verbatim ? await withClaudeCodeToolNote(skill, raw, parseSkillBody(raw, targetPath)) : raw;
 	return {
 		url: url.href,
 		content,
@@ -318,16 +323,32 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 /**
  * The Claude Code tool note for `url` when it names a Claude-dialect skill's own instruction file
  * ({@link claudeCodeToolNote}); undefined for any other target. `read` locates skill files and reads
- * them through the filesystem pipeline, bypassing {@link readSkillTarget}, so it appends this itself.
+ * them through the filesystem pipeline, bypassing {@link readSkillTarget}, so it passes the exact
+ * content snapshot it read without reopening the file on disk.
  */
 export async function skillUrlClaudeCodeToolNote(
 	url: InternalUrl,
+	locatedPath: string,
+	rawContent: string,
 	context?: ResolveContext,
 ): Promise<string | undefined> {
-	const target = await locateSkillTarget(url, context, false);
-	if (!target.instructions || !target.stats?.isFile()) return undefined;
-	const raw = await Bun.file(target.path).text();
-	return claudeCodeToolNote(target.skill, parseSkillBody(raw, target.path));
+	const skills = context?.skills ?? getActiveSkills();
+	const host = contextRediscoveryHost(skills, context);
+	const resolvedLocated = path.resolve(locatedPath);
+	const candidates = host.skills !== skills ? [...host.skills, ...skills] : skills;
+	let skill = candidates.find(candidate => path.resolve(candidate.filePath) === resolvedLocated);
+	if (!skill) {
+		const named = findKnownUrlSkill(url, host.skills) ?? findKnownUrlSkill(url, skills);
+		if (!named) return undefined;
+		const resolvedSkillFile = path.resolve(named.skill.filePath);
+		const isInstructionUrl =
+			!named.urlPath ||
+			named.urlPath === "/" ||
+			path.resolve(named.skill.baseDir, decodeURIComponent(named.urlPath.slice(1))) === resolvedSkillFile;
+		if (!isInstructionUrl) return undefined;
+		skill = named.skill;
+	}
+	return claudeCodeToolNote(skill, parseSkillBody(rawContent, locatedPath));
 }
 
 /**
@@ -385,14 +406,15 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			return { ...resource, unbounded: false };
 		}
 
+		const verbatim = context?.verbatim === true;
 		try {
-			return await readSkillTarget(url, target);
+			return await readSkillTarget(url, target, verbatim);
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 			// The target was removed after it was located: an upgrade published the plugin's new
 			// version and deleted the old directory between the check and the read. Locate it again,
 			// which now finds the old skill gone and rediscovers it.
-			return readSkillTarget(url, await locateSkillTarget(url, context, false));
+			return readSkillTarget(url, await locateSkillTarget(url, context, false), verbatim);
 		}
 	}
 

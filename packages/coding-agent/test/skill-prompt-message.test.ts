@@ -247,6 +247,48 @@ describe("buildSkillPromptMessage", () => {
 				const result = await new ReadTool(session).execute("read-claude-fallback", { path: "skill://reviewer" });
 				const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 				expect(text.split(NOTE).length - 1).toBe(1);
+
+				// Raw fallback must stay verbatim and omit the Claude tool note.
+				vi.spyOn(router, "target").mockImplementationOnce(async (input, context) => {
+					const located = await originalTarget(input, context);
+					if (!located || located.kind !== "file") return located;
+					return { ...located, path: path.join(dir, "vanished", "SKILL.md") };
+				});
+				const rawResult = await new ReadTool(session).execute("read-claude-raw-fallback", {
+					path: "skill://reviewer:raw",
+				});
+				const rawText = rawResult.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				expect(rawText).not.toContain(NOTE);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("computes the Claude tool note from the buffered snapshot without reopening the file", async () => {
+			const { dir, skill } = await createSkill("Track tasks with TodoWrite.");
+			const claudeSkill = { ...skill, _source: sourceFor("claude", dir) };
+			try {
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [claudeSkill],
+				};
+				const realReadFile = fs.readFile;
+				vi.spyOn(fs, "readFile").mockImplementation((async (filePath: Parameters<typeof fs.readFile>[0]) => {
+					const bytes = await realReadFile(filePath);
+					if (String(filePath) === skill.filePath) {
+						// Remove the file right after ReadTool reads v1; the note must
+						// still come from the buffered v1 snapshot without reopening disk.
+						await fs.rm(skill.filePath, { force: true });
+					}
+					return bytes;
+				}) as typeof fs.readFile);
+				const result = await new ReadTool(session).execute("read-claude-snapshot", { path: "skill://reviewer" });
+				const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				expect(text).toContain(`${NOTE} TodoWrite → todo.`);
 			} finally {
 				await removeWithRetries(dir);
 			}

@@ -40,12 +40,18 @@ export function contextLocalProtocolOptions(session: ToolSession): LocalProtocol
 /** The single ResolveContext builder for a tool session; replaces per-tool literal assembly. */
 export function sessionResolveContext(
 	session: ToolSession,
-	options: { signal?: AbortSignal; skipDirectoryListing?: boolean; containSkillPaths?: boolean } = {},
+	options: {
+		signal?: AbortSignal;
+		skipDirectoryListing?: boolean;
+		containSkillPaths?: boolean;
+		verbatim?: boolean;
+	} = {},
 ): ResolveContext {
 	return {
 		cwd: session.cwd,
 		settings: session.settings,
 		signal: options.signal,
+		verbatim: options.verbatim,
 		sessionFile: session.getSessionFile() ?? undefined,
 		experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(session.settings) === true,
 		getSessionBranch: () => getExperimentalContextSession(session).getBranch(),
