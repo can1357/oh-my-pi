@@ -219,9 +219,10 @@ export class ProcessWatch {
 		const shown = jobs.map(job => describe(job, now));
 		const questions: Record<string, (typeof QUESTIONS)["check"]> = {};
 		for (const [i, entry] of shown.entries()) {
+			// Named by id only: the command sits in `state.processes`, which the judge
+			// redacts, while question text goes out as written.
 			questions[`p${i}`] = renderQuestion(QUESTIONS.check, {
 				id: entry.job.id,
-				command: entry.command,
 				age: formatDuration(entry.ageMs),
 				quiet: entry.quietMs === undefined ? undefined : formatDuration(entry.quietMs),
 			});
@@ -254,6 +255,10 @@ export class ProcessWatch {
 		for (const [i, entry] of shown.entries()) {
 			const answer = answers[`p${i}`];
 			if (answer?.type !== "choice") continue;
+			if (!fits(answer)) {
+				logger.debug("process-watch: malformed answer", { jobId: entry.job.id });
+				continue;
+			}
 			const flagProbability = flagShare(answer);
 			const isFlagged = flagProbability >= threshold;
 			verdicts.push({
@@ -305,6 +310,22 @@ function lastLines(text: string | undefined): string | undefined {
 		.slice(-LAST_OUTPUT_LINES)
 		.map(line => truncate(line, LAST_OUTPUT_LINE_CHARS))
 		.join("\n");
+}
+
+/**
+ * Whether a choice answer is one this watch can read: its choice and every
+ * probability name a verdict, and each probability is in 0..1. The judge
+ * trusts answers past their type, so a malformed one is skipped, not summed.
+ */
+function fits(answer: ChoiceAnswer): boolean {
+	if (!Object.hasOwn(QUESTIONS.check.criteria, answer.choice)) return false;
+	const { probabilities } = answer;
+	if (typeof probabilities !== "object" || probabilities === null) return false;
+	for (const [verdict, p] of Object.entries(probabilities)) {
+		if (!Object.hasOwn(QUESTIONS.check.criteria, verdict)) return false;
+		if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1) return false;
+	}
+	return true;
 }
 
 /** P(stalled) + P(failing) + P(ready). */

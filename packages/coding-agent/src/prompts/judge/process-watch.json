@@ -1,6 +1,6 @@
 {
 	"check": {
-		"instructions": "The state is a coding agent's session: `recent` is its latest conversation, oldest first, `processes` lists the commands running now in the background, and `host`, when present, is a snapshot of the machine they run on (`psi`: percent of time tasks stalled on cpu, memory and io over 10 s and 60 s; memory, swap and the working directory's disk in GiB). Look at the one with id {{id}} (`{{command}}`), running {{age}}{{#if quiet}}, nothing new written for {{quiet}}{{/if}}. Given what the session expects of it, what is it doing?",
+		"instructions": "The state is a coding agent's session: `recent` is its latest conversation, oldest first, `processes` lists the commands running now in the background, and `host`, when present, is a snapshot of the machine they run on (`psi`: percent of time tasks stalled on cpu, memory and io over 10 s and 60 s; memory, swap and the working directory's disk in GiB). Look at the process with id {{id}}, running {{age}}{{#if quiet}}, nothing new written for {{quiet}}{{/if}}. Given what the session expects of it, what is it doing?",
 		"criteria": {
 			"progressing": "It writes output or produces results as a command like it should, and its last output shows the work moving.",
 			"waiting_as_expected": "It writes little or nothing, and that is what it does: it waits on something slow (a CI run, a sleep, a download, a long build or test run) or serves (a server, a watcher) as the session meant it to.",

@@ -15,6 +15,8 @@ class FakeJudge implements Judge {
 	readonly label = "fake/judge";
 	readonly requests: JudgmentRequest[] = [];
 	answer: (jobId: string) => Probabilities = () => ({ progressing: 1 });
+	/** Replaces the well-formed answer for a job when it returns one, as a judge past its type check might. */
+	raw: (jobId: string) => unknown = () => undefined;
 	fail = false;
 	/** Never answers and ignores its abort signal, like a provider that hangs. */
 	hang = false;
@@ -27,6 +29,11 @@ class FakeJudge implements Judge {
 		if (this.hang) return Promise.withResolvers<JudgmentResult<Q>>().promise;
 		const answers: Record<string, unknown> = {};
 		for (const [i, running] of this.running().entries()) {
+			const raw = this.raw(running.id);
+			if (raw !== undefined) {
+				answers[`p${i}`] = raw;
+				continue;
+			}
 			const probabilities = this.answer(running.id);
 			const choice = Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0]![0];
 			answers[`p${i}`] = { type: "choice", choice, probabilities, confidence: 1 };
@@ -215,6 +222,48 @@ describe("ProcessWatch", () => {
 
 		await advance(30);
 		expect(drain(queue)).toHaveLength(1);
+	});
+
+	it("names a job by id only in the question text, leaving its command to the redacted state", async () => {
+		jobs = [job("bg1", "curl -H 'Authorization: Bearer secret-token' https://example.com")];
+		start();
+
+		await advance(30);
+		const request = judge.requests[0]!;
+		const question = request.questions.p0!;
+		expect(question.instructions).toContain("bg1");
+		expect(question.instructions).not.toContain("secret-token");
+		expect(JSON.stringify(request.state)).toContain("secret-token");
+	});
+
+	it("skips a choice answer with no probabilities and still judges the other jobs", async () => {
+		jobs = [job("bg1", "npm install"), job("bg2", "bun test")];
+		judge.raw = id => (id === "bg1" ? { type: "choice", choice: "stalled", confidence: 1 } : undefined);
+		judge.answer = () => ({ stalled: 0.9, progressing: 0.1 });
+		start();
+
+		await advance(30);
+		const messages = drain(queue);
+		expect(messages).toHaveLength(1);
+		const text = messages[0]!.role === "custom" ? String(messages[0]!.content) : "";
+		expect(text).toContain("bg2");
+		expect(text).not.toContain("bg1");
+	});
+
+	it("skips a choice answer whose probabilities fall outside 0..1 or name no verdict", async () => {
+		jobs = [job("bg1", "cargo build"), job("bg2", "make"), job("bg3", "bun test")];
+		judge.raw = id =>
+			id === "bg1"
+				? { type: "choice", choice: "failing", probabilities: { failing: 2, progressing: -1 }, confidence: 1 }
+				: id === "bg2"
+					? { type: "choice", choice: "stalled", probabilities: { stalled: 0.7, bogus: 0.3 }, confidence: 1 }
+					: undefined;
+		judge.answer = () => ({ progressing: 0.9, stalled: 0.1 });
+		start();
+
+		await advance(30);
+		expect(judge.requests).toHaveLength(1);
+		expect(drain(queue)).toHaveLength(0);
 	});
 
 	it("stops watching a job once it finishes and drops its pending notice", async () => {
