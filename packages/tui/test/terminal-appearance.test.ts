@@ -123,6 +123,40 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("accepts Zellij's forwarded OSC 11 reply after its local DA1 response", () => {
+		Bun.env.ZELLIJ = "1";
+		const { terminal, received, queryCount } = setupTerminal();
+		try {
+			// Zellij answers DA1 itself but forwards OSC 11 to the outer terminal.
+			process.stdin.emit("data", "\x1b[?62;52c");
+			process.stdin.emit("data", "\x1b[?62;52c");
+			terminal.refreshAppearance();
+			expect(queryCount()).toBe(1);
+			process.stdin.emit("data", "\x1b]11;rgb:eeee/eeee/eeee\x07");
+			expect(terminal.appearance).toBe("light");
+			expect(received).toEqual([]);
+			expect(queryCount()).toBe(2);
+		} finally {
+			terminal.stop();
+		}
+	});
+
+	it("expires an unanswered forwarded OSC 11 query before sending a queued refresh", () => {
+		vi.useFakeTimers();
+		Bun.env.ZELLIJ = "1";
+		const { terminal, queryCount } = setupTerminal();
+		try {
+			process.stdin.emit("data", "\x1b[?62;52c");
+			process.stdin.emit("data", "\x1b[?62;52c");
+			terminal.refreshAppearance();
+			expect(queryCount()).toBe(1);
+			vi.advanceTimersByTime(5000);
+			expect(queryCount()).toBe(2);
+		} finally {
+			terminal.stop();
+		}
+	});
+
 	it("queues overlapping OSC 11 queries until both in-flight DA1 sentinels are consumed", () => {
 		vi.useFakeTimers();
 		const { terminal, queryCount, sentinelCount } = setupTerminal();
@@ -1018,8 +1052,10 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		terminal.write("frame");
 		expect(writes).toEqual(["\x1b[?2004hframe"]);
 		terminal.stop();
+		// A stopped terminal retires its output until the next start().
+		const stopped = writes.length;
 		terminal.write("after stop");
-		expect(writes.at(-1)).toBe("after stop");
+		expect(writes.slice(stopped)).toEqual([]);
 	});
 
 	for (const { name, session } of [
@@ -1054,6 +1090,30 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 
 		expect(received).toEqual(["\x1b[200~aaa\rbbb\rccc\x1b[201~"]);
 		terminal.stop();
+	});
+
+	describe("keystrokes the tty buffered in cooked mode before input attached (#17820)", () => {
+		// ICRNL turned the typed Enter into LF, which the editor reads as Shift+Enter.
+		it("submit with the Enter that ended them when probe replies share the read", () => {
+			const { terminal, received } = setup({ deferInput: true });
+			terminal.enableInput();
+			process.stdin.emit("data", "hi\nyo\n\x1b[?2004;1$y");
+			expect(received).toEqual(["h", "i", "\n", "y", "o", "\r"]);
+
+			// Later reads are raw-mode input: a lone LF is Ctrl+J again.
+			received.length = 0;
+			process.stdin.emit("data", "x\n\x1b[B");
+			expect(received).toEqual(["x", "\n", "\x1b[B"]);
+			terminal.stop();
+		});
+
+		it("submit a multiline prompt as one paste plus Enter", () => {
+			const { terminal, received } = setup({ deferInput: true });
+			terminal.enableInput();
+			process.stdin.emit("data", "line1\nline2\n\n- bullet a\n- bullet b\n");
+			expect(received).toEqual(["\x1b[200~line1\nline2\n\n- bullet a\n- bullet b\x1b[201~\r"]);
+			terminal.stop();
+		});
 	});
 
 	it("reports DECRPM statuses 1, 2, and 3 as supported private modes", () => {

@@ -1,4 +1,4 @@
-import type { ElementHandle, JSHandle, Page } from "puppeteer-core";
+import type { ElementHandle, Frame, JSHandle, Page } from "puppeteer-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	type AriaHrefMap,
@@ -63,7 +63,7 @@ const evaluateAriaHrefs = new Function(
  * on each call and remain valid until the next snapshot.
  */
 export async function captureAriaSnapshot(
-	page: Page,
+	page: Page | Frame,
 	root: ElementHandle | null,
 	options: AriaSnapshotOptions = {},
 ): Promise<string> {
@@ -82,7 +82,7 @@ export async function captureAriaSnapshot(
  * null when the ref no longer matches any element. It uses the same isolated
  * world as capture, where that snapshot wrote its `_ariaRef` expandos.
  */
-export async function resolveAriaRefHandle(page: Page, ref: string): Promise<ElementHandle | null> {
+export async function resolveAriaRefHandle(page: Page | Frame, ref: string): Promise<ElementHandle | null> {
 	const handle = (await page.evaluateHandle(evaluateResolveRef as never, ref as never)) as JSHandle;
 	const element = handle.asElement();
 	if (!element) {
@@ -114,15 +114,21 @@ export function assertSelectorString(selector: unknown): asserts selector is str
 	if (typeof selector === "string") return;
 	let kind: string;
 	if (selector !== null && typeof selector === "object") {
+		const proto = Object.getPrototypeOf(selector);
 		kind =
-			"then" in selector && typeof selector.then === "function" ? "a Promise (missing await?)" : "an ElementHandle";
+			"then" in selector && typeof selector.then === "function"
+				? "a Promise (missing await?)"
+				: (proto === Object.prototype || proto === null) &&
+					  !Object.values(selector).some(value => typeof value === "function")
+					? "an options object (the selector comes first; to wait for time or a condition, use wait(ms | predicate) inside tab.run)"
+					: "an element handle";
 	} else {
 		kind = `a ${typeof selector}`;
 	}
 	throw new ToolError(
 		`Browser selector must be a string; got ${kind}. ` +
 			"tab.click/type/fill/waitFor take string selectors only — " +
-			'call the handle method directly (e.g. (await tab.id(n)).click()) or pass a string like "aria-ref=eN".',
+			'call the element\'s own method instead (tab.id(n).click()) or pass a string like "aria-ref=eN".',
 	);
 }
 

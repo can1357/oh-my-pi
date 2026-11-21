@@ -33,6 +33,7 @@
 import { vi } from "bun:test";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { MCPDroppedServer } from "@oh-my-pi/pi-coding-agent/mcp/transforms";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
@@ -115,8 +116,6 @@ export function createSessionStub(
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 		modelRegistry: {},
 		getToolByName: () => undefined,
-		hasSessionApproval: () => false,
-		getApprovalGrants: () => ({ present: () => new Set<string>() }),
 		hasBuiltInTool: () => true,
 		getLastAssistantMessage: () => undefined,
 		agent: {
@@ -125,6 +124,7 @@ export function createSessionStub(
 			metadataForProvider: () => undefined,
 		},
 		getEvalPreludes: () => [],
+		getActiveToolNames: () => [],
 		getEnabledToolNames: () => [],
 		getContextUsage: () => undefined,
 		getGoalModeState: () => undefined,
@@ -133,9 +133,10 @@ export function createSessionStub(
 		setActiveToolsByName: vi.fn(async () => {}),
 		runIdleCompaction: vi.fn(async () => {}),
 		waitForIdle: async () => {},
-		hasPendingAsyncWork: () => false,
+		isRunActive: false,
+		wakeSources: undefined,
+		waitForRunEnd: async () => {},
 		getAsyncJobSnapshot: () => null,
-		settleAsyncWork: async () => {},
 		subscribe: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
 	if (overrides) layer(stub, overrides);
@@ -169,6 +170,7 @@ export function createMcpManagerStub(overrides?: McpManagerOverrides): MCPManage
 		getConnectedServers: vi.fn(() => []),
 		getAllServerNames: vi.fn(() => []),
 		getSource: vi.fn(() => undefined),
+		getBuiltinDrops: vi.fn(() => new Map<string, MCPDroppedServer>()),
 		getServerConfig: vi.fn(() => undefined),
 		getServerResources: vi.fn(() => undefined),
 		getServerPrompts: vi.fn(() => undefined),
@@ -222,7 +224,6 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 	};
 	const ctx = {
 		ui,
-		composer: { setRunActive: vi.fn() },
 		chatContainer,
 		statusContainer: new Container(),
 		editorContainer: new Container(),
@@ -268,6 +269,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		pythonComponent: undefined,
 		isBashMode: false,
 		isPythonMode: false,
+		isBtwMode: false,
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		lastAssistantUsage: undefined,

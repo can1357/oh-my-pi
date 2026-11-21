@@ -35,12 +35,8 @@ describe.skipIf(SKIP)("handleSecEdgar", () => {
 		expect(result?.content).toMatch(/apple inc/i);
 	});
 
-	it("fetches via Archives path", async () => {
-		// Any filing URL with CIK in Archives path
-		const result = await handleSecEdgar(
-			"https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm",
-			20,
-		);
+	it("fetches via the company's Archives directory", async () => {
+		const result = await handleSecEdgar("https://www.sec.gov/Archives/edgar/data/320193/", 20);
 		expect(result).not.toBeNull();
 		expect(result?.method).toBe("sec-edgar");
 		expect(result?.content).toMatch(/apple inc/i);

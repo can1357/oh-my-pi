@@ -15,6 +15,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { Terminal as VirtualTerminal } from "@oh-my-pi/pi-utils/vterm";
 import { lookup } from "../../src/config/registry";
 import { Settings } from "../../src/config/settings";
 import {
@@ -43,18 +44,19 @@ const CURRENT_VERSION = "2.0.0";
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
 const packageDir = path.join(repoRoot, "packages", "coding-agent");
-const hasPtyHarness = process.platform === "linux" && (await Bun.file("/usr/bin/script").exists());
+const PTY_COLUMNS = 120;
+const PTY_ROWS = 40;
 const PTY_STARTUP_OUTPUT_CEILING = 512 * 1024;
 /**
- * Upper bound for a cold `bun src/cli.ts` to persist the first-run marker. Only
- * a hang reaches it: the test proceeds as soon as the marker lands, so a slow or
- * loaded runner costs time, not a failure.
+ * Upper bound for a cold `bun src/cli.ts` to persist the first-run marker and
+ * echo the input probe. Only a hang reaches it: each wait ends as soon as its
+ * event lands, so a slow or loaded runner costs time, not a failure.
  */
-const PTY_MARKER_DEADLINE_MS = 60_000;
-/** How long the CLI keeps running after the marker, so a startup changelog render would reach the PTY. */
-const PTY_POST_MARKER_OBSERVE_MS = 5_000;
-/** Marker deadline plus observation window, with slack for spawn and `script` teardown. */
-const PTY_TEST_TIMEOUT_MS = PTY_MARKER_DEADLINE_MS + PTY_POST_MARKER_OBSERVE_MS + 30_000;
+const PTY_STARTUP_DEADLINE_MS = 60_000;
+/** Startup deadline with slack for spawn and PTY teardown. */
+const PTY_TEST_TIMEOUT_MS = PTY_STARTUP_DEADLINE_MS + 30_000;
+/** Keystrokes typed once the marker lands; their on-screen echo orders every earlier frame before it. */
+const PTY_INPUT_PROBE = "zxqprobe";
 
 function release(major: number, minor: number, patch: number, body: string): ChangelogEntry {
 	const heading = `## [${major}.${minor}.${patch}] - 2026-07-11`;
@@ -294,7 +296,7 @@ describe("renderChangelogEntries", () => {
 			release(1, 0, 0, `### Added\n\n- First ${largeBody}\nEND-FIRST`),
 		]);
 
-		expect(rendered.markdown.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("1.0.0");
+		expect(rendered.markdown.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("3.0.0");
 		expect(rendered.truncated).toBe(false);
 		expect(rendered.markdown).toContain("END-FIRST");
 		expect(rendered.markdown).toContain("END-SECOND");
@@ -393,16 +395,25 @@ async function waitForChangelogMarker(
 	return await readLastChangelogVersion(agentDir);
 }
 
-describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () => {
+function visibleText(screen: VirtualTerminal): string {
+	const buffer = screen.buffer.active;
+	return Array.from({ length: buffer.length }, (_, row) => buffer.getLine(row)?.translateToString(true) ?? "").join(
+		"\n",
+	);
+}
+
+describe.skipIf(process.platform === "win32")("interactive startup changelog PTY smoke", () => {
 	test(
 		"does not dump packaged changelog history on first install with uncollapsed notes",
 		async () => {
 			await withTempAgentDir(async agentDir => {
 				const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-pty-"));
+				const screen = new VirtualTerminal({ cols: PTY_COLUMNS, rows: PTY_ROWS, scrollback: 200 });
 				try {
-					await fs.mkdir(path.join(root, "xdg-config"), { recursive: true });
-					await fs.mkdir(path.join(root, "xdg-state"), { recursive: true });
-					await fs.mkdir(path.join(root, "xdg-data"), { recursive: true });
+					const cwd = path.join(root, "project");
+					for (const dir of [cwd, "xdg-config", "xdg-state", "xdg-data"]) {
+						await fs.mkdir(path.resolve(root, dir), { recursive: true });
+					}
 					// Setup already completed, so the interactive transcript (where the startup
 					// changelog renders) comes up instead of the animated setup wizard.
 					await Bun.write(
@@ -410,10 +421,37 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 						`setupVersion: ${CURRENT_SETUP_VERSION}\ncollapseChangelog: false\n`,
 					);
 
-					const proc = Bun.spawn(["script", "-q", "-c", `bun ${JSON.stringify(cliEntry)}`, "/dev/null"], {
-						cwd: repoRoot,
-						stdout: "pipe",
-						stderr: "pipe",
+					const decoder = new TextDecoder();
+					let output = "";
+					let outputBytes = 0;
+					let probeEchoed = false;
+					const probeSeen = Promise.withResolvers<void>();
+					let screenWritten = Promise.resolve();
+					const closed = Promise.withResolvers<void>();
+					await using terminal = new Bun.Terminal({
+						cols: PTY_COLUMNS,
+						rows: PTY_ROWS,
+						data(_terminal, data) {
+							outputBytes += data.byteLength;
+							output += decoder.decode(data, { stream: true });
+							const written = Promise.withResolvers<void>();
+							screenWritten = written.promise;
+							screen.write(data, () => {
+								if (!probeEchoed && visibleText(screen).includes(PTY_INPUT_PROBE)) {
+									probeEchoed = true;
+									probeSeen.resolve();
+								}
+								written.resolve();
+							});
+						},
+						exit() {
+							closed.resolve();
+						},
+					});
+					const deadline = AbortSignal.timeout(PTY_STARTUP_DEADLINE_MS);
+					const proc = Bun.spawn([process.execPath, cliEntry], {
+						cwd,
+						terminal,
 						env: {
 							...process.env,
 							// ci-test-ts children inherit PI_TEST_RUNTIME=1, which makes the CLI
@@ -431,42 +469,42 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 							TERM: "xterm-256color",
 						},
 					});
-					let exited = false;
-					void proc.exited.then(() => {
-						exited = true;
-					});
-					const outputs = Promise.all([new Response(proc.stdout).arrayBuffer(), new Response(proc.stderr).text()]);
 
 					let marker: string | undefined;
 					let exitedBeforeStop: boolean;
 					try {
 						// Cold-start time tracks runner load, so wait for the marker the first-run
 						// path persists rather than racing it against a fixed window.
-						marker = await waitForChangelogMarker(
-							agentDir,
-							proc.exited,
-							AbortSignal.timeout(PTY_MARKER_DEADLINE_MS),
-						);
-						if (marker !== undefined) {
-							// Genuine delay: asserting the startup changelog is absent has no event to
-							// await, so give the first frames time to reach the PTY.
-							await Promise.race([proc.exited, Bun.sleep(PTY_POST_MARKER_OBSERVE_MS)]);
+						marker = await waitForChangelogMarker(agentDir, proc.exited, deadline);
+						if (marker !== undefined && !deadline.aborted) {
+							// A startup changelog would render from the marker write's continuation,
+							// before the TUI reads later input. Type a probe and wait for its echo:
+							// once it is on screen, any changelog frame already reached the PTY.
+							const deadlineHit = Promise.withResolvers<void>();
+							deadline.addEventListener("abort", () => deadlineHit.resolve(), { once: true });
+							terminal.write(PTY_INPUT_PROBE);
+							await Promise.race([probeSeen.promise, proc.exited, deadlineHit.promise]);
 						}
-						exitedBeforeStop = exited;
+						exitedBeforeStop = proc.exitCode !== null;
 					} finally {
-						proc.kill();
+						if (proc.exitCode === null) proc.kill();
+						await proc.exited;
+						terminal.close();
+						await closed.promise;
+						await screenWritten;
 					}
-					const [stdout, stderr] = await outputs;
-					await proc.exited;
-					const output = Buffer.from(stdout).toString("utf8");
 
 					expect(exitedBeforeStop).toBe(false);
-					expect(Buffer.byteLength(output)).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
+					expect(output).not.toContain("Cannot find module");
+					expect(marker).toBe(VERSION);
+					expect(probeEchoed).toBe(true);
+					expect(outputBytes).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
+					// Every startup changelog block, expanded or summary, opens with this header.
+					expect(output).not.toContain("What's New");
 					expect(output).not.toContain("## [");
 					expect(output).not.toContain(STARTUP_CHANGELOG_FULL_HINT);
-					expect(stderr).not.toContain("Cannot find module");
-					expect(marker).toBe(VERSION);
 				} finally {
+					screen.dispose();
 					await removeWithRetries(root);
 				}
 			});

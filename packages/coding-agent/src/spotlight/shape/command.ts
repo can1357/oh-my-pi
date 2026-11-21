@@ -5,10 +5,11 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spillUrlIds } from "@oh-my-pi/pi-utils";
 
 /** Source extensions: code windows outline, and reads of these are "source reads". */
 export const SOURCE_PATH =
-	/\.(?:pyi?|js|jsx|ts|tsx|mts|cts|mjs|cjs|rs|go|java|kt|c|cc|cpp|h|hpp|cs|rb|php|scala|swift|lua|vue|svelte)$/;
+	/\.(?:pyi?|js|jsx|ts|tsx|mts|cts|mjs|cjs|rs|go|java|kt|c|cc|cpp|h|hpp|cu|cuh|m|mm|cs|rb|php|scala|swift|lua|luau|vue|svelte|qml|css|sh|bash|zsh|fish|cmake)$/;
 
 /** Docs printed whole fold to their needed sections. */
 export const DOC_FILE = /(?:^|\/)[\w.-]+\.(?:md|mdx|rst|txt)$/i;
@@ -109,9 +110,9 @@ export function runsAgent(command: string): boolean {
 	return segments(command).some(s => AGENT_SEGMENT.test(s));
 }
 
-/** The command or read path reads text a shaped result saved (`artifact://N`): the agent paging hidden lines back in. */
+/** The command or read path reads text a shaped result saved (`local://N.log`): the agent paging hidden lines back in. */
 export function isPageBack(command: string): boolean {
-	return command.includes("artifact://");
+	return spillUrlIds(command).length > 0;
 }
 
 /** One file-printing segment of a command. */

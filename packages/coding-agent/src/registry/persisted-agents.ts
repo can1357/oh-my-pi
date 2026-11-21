@@ -4,8 +4,8 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
-import { assistantTurnProducedOutput } from "../session/messages";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "../session/session-entries";
+import { assistantTurnProducedOutput, usageContextTokens } from "../session/messages";
+import { modelRoleOf } from "../session/session-entries";
 import { readSessionHeaderId, visitEntriesFromFileStream } from "../session/session-loader";
 import { defaultSessionStorage, type SessionStorage, type SessionStorageStat } from "../session/session-storage";
 import { loadBundledAgents } from "../task/agents";
@@ -17,6 +17,7 @@ import {
 	type AgentRef,
 	type AgentRegistryApi,
 	MAIN_AGENT_ID,
+	recordRefSessionStorage,
 } from "./agent-registry";
 import { getAgentTombstonePath } from "./agent-tombstone";
 
@@ -144,7 +145,7 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 		tokens: usageTokens(usage),
 		tools: content.filter(part => recordOf(part)?.type === "toolCall").length,
 		cost: finiteNumber(cost?.total),
-		contextTokens: finiteNumber(usage.totalTokens) || undefined,
+		contextTokens: usageContextTokens(usage) || undefined,
 		resolvedModel: provider && model ? `${provider}/${model}` : undefined,
 		served: assistantTurnProducedOutput({
 			stopReason: message.stopReason,
@@ -278,13 +279,7 @@ async function readPersistedAgentHistory(
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
-			if (
-				modelChange.role &&
-				modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
-				modelChange.role !== PREWALK_MODEL_CHANGE_ROLE
-			) {
-				modelRole ??= modelChange.role;
-			}
+			modelRole ??= modelRoleOf(modelChange.role);
 			// The transition that installed the serving model: it carries the
 			// fallback flag the raw message lacks. Every writer records the selector
 			// through `formatModelStringWithRouting`, which appends an `@upstream`
@@ -395,13 +390,8 @@ async function readPersistedAgentMetadata(
 				}
 				if (record.type === "model_change") {
 					if (typeof record.model === "string") history.resolvedModel = record.model;
-					if (
-						typeof record.role === "string" &&
-						record.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
-						record.role !== PREWALK_MODEL_CHANGE_ROLE
-					) {
-						history.modelRole = record.role;
-					}
+					const role = modelRoleOf(typeof record.role === "string" ? record.role : undefined);
+					if (role) history.modelRole = role;
 					if (typeof record.resolvedModelIsFallback === "boolean") {
 						history.resolvedModelIsFallback = record.resolvedModelIsFallback;
 					}
@@ -833,7 +823,7 @@ async function registerPersistedSubagentsFromDir(
 				if (!shouldContinue()) return;
 				// The id is reused across `/new`; refresh it to the current session's file.
 				if (existing) registry.unregister(advisorId);
-				registry.register({
+				const advisor = registry.register({
 					id: advisorId,
 					displayName,
 					kind: "advisor",
@@ -846,6 +836,7 @@ async function registerPersistedSubagentsFromDir(
 					history: { ...metadata.history, readOnly: true },
 					status: "parked",
 				});
+				recordRefSessionStorage(advisor, storage);
 				owned?.set(advisorId, sessionFile);
 				transcripts.push({
 					id: advisorId,
@@ -949,6 +940,8 @@ async function registerPersistedSubagentsFromDir(
 				const vacated = stillUnclaimed || (expected !== null && registry.unregister(id, expected));
 				if (vacated && registry.registerIfAvailable(input, null)) {
 					const ref = registry.get(id);
+					// A kill of the parked agent writes its sidecar beside the transcript this storage holds.
+					if (ref) recordRefSessionStorage(ref, storage);
 					owned?.set(id, sessionFile);
 					transcripts.push({
 						id,

@@ -12,13 +12,20 @@
  * Usage: `installInMemoryRelay()` in `beforeAll`/`beforeEach`,
  * `uninstallInMemoryRelay()` in the matching `afterAll`/`afterEach`.
  */
+import { type Mock, spyOn } from "bun:test";
+import * as os from "node:os";
 import { rewriteEnvelopePeer, unpackEnvelope } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { refreshDirsFromEnv, TempDir } from "@oh-my-pi/pi-utils";
 
 /** Active relay the fake transport routes through; set between install/uninstall. */
 let activeRelay: InMemoryRelay | null = null;
 
-/** Pristine constructor captured before any test swaps it. */
+/** Pristine constructor and home directory captured before any test swaps them. */
 const RealWebSocket = globalThis.WebSocket;
+const RealHomedir = os.homedir();
+
+let relayHomeDir: TempDir | null = null;
+let relayHomedirSpy: Mock<typeof os.homedir> | null = null;
 
 export class FakeWebSocket {
 	static readonly CONNECTING = 0;
@@ -155,21 +162,56 @@ export class InMemoryRelay {
 }
 
 /**
- * Create a fresh relay and route `new WebSocket(...)` through it.
+ * Redirect an unmocked `os.homedir()` / `getConfigRootDir()` into a temporary
+ * directory. Suites that stand up a real `Bun.serve` relay instead of
+ * {@link installInMemoryRelay} call this directly and pair it with
+ * {@link uninstallTestCollabHome}.
+ */
+export function installTestCollabHome(): void {
+	if (os.homedir() === RealHomedir) {
+		relayHomeDir ??= TempDir.createSync("@omp-relay-home-");
+		relayHomedirSpy ??= spyOn(os, "homedir").mockReturnValue(relayHomeDir.path());
+		refreshDirsFromEnv();
+	}
+}
+
+/**
+ * Restore `os.homedir()` and remove any temporary home directory created by
+ * {@link installTestCollabHome} or {@link installInMemoryRelay}.
+ */
+export function uninstallTestCollabHome(): void {
+	const homeDir = relayHomeDir;
+	const homedirSpy = relayHomedirSpy;
+	relayHomeDir = null;
+	relayHomedirSpy = null;
+	if (homedirSpy) {
+		homedirSpy.mockRestore();
+		refreshDirsFromEnv();
+	}
+	homeDir?.removeSync();
+}
+
+/**
+ * Create a fresh relay, isolate `os.homedir()` / `getConfigRootDir()` into a
+ * temporary directory unless the caller already redirected `os.homedir()`, and
+ * route `new WebSocket(...)` through the relay.
  * Pair with {@link uninstallInMemoryRelay} in the matching after-hook.
  */
 export function installInMemoryRelay(): InMemoryRelay {
+	installTestCollabHome();
 	activeRelay = new InMemoryRelay();
 	globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 	return activeRelay;
 }
 
 /**
- * Restore the real WebSocket constructor and drop the active relay. Sockets
- * already constructed keep their own relay reference, so in-flight teardown
- * (e.g. `host.stop()`) still works after uninstall.
+ * Restore the real WebSocket constructor, drop the active relay, and remove
+ * any temporary home directory installed by {@link installInMemoryRelay}.
+ * Stop active `CollabHost` / `CollabGuestLink` instances before calling so IPC
+ * sockets and replica files close before the temporary home is deleted.
  */
 export function uninstallInMemoryRelay(): void {
 	globalThis.WebSocket = RealWebSocket;
 	activeRelay = null;
+	uninstallTestCollabHome();
 }

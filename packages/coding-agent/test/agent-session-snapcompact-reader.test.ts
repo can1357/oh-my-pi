@@ -40,7 +40,7 @@ function bundled(provider: GeneratedProvider, modelId: string): Model {
 const gpt = bundled("openai", "gpt-5.4");
 const claude = bundled("anthropic", "claude-opus-5-5");
 // Takes no image input.
-const deepseek = bundled("deepseek", "deepseek-v4-flash");
+const deepseek = bundled("fireworks", "deepseek-v4-flash");
 
 function assistant(model: Model, content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -117,7 +117,7 @@ describe("snapcompact archive read by another model", () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
-		authStorage.keys.setRuntime("deepseek", "test-key");
+		authStorage.keys.setRuntime("fireworks", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 

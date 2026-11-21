@@ -378,6 +378,18 @@ export class Reconciler {
 		return state ? this.#findEditor(state, 0) : null;
 	}
 
+	/**
+	 * The last description of `component` on this surface (a settled one only
+	 * while still referenced elsewhere), or undefined when it isn't mounted.
+	 */
+	described(component: Component): NativeNode | undefined {
+		const state = this.#states.get(component);
+		if (!state) return undefined;
+		const node = state.node ?? (state.weak?.deref() as NativeNode | readonly string[] | undefined);
+		// A settled `rows` fallback is held by its lines; its node is kept beside them.
+		return Array.isArray(node) ? (state.rowsNode ?? undefined) : (node as NativeNode | undefined);
+	}
+
 	/** Stop referencing ids the terminal dropped (`gone`). */
 	forget(ids: readonly string[]): void {
 		for (const id of ids) this.#gone.add(id);

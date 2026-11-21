@@ -21,7 +21,7 @@ export interface ChecksumEntry {
 	sha256: string;
 }
 
-export function formatChecksums(entries: readonly ChecksumEntry[]): string {
+function formatChecksums(entries: readonly ChecksumEntry[]): string {
 	return entries
 		.slice()
 		.sort((a, b) => a.name.localeCompare(b.name))

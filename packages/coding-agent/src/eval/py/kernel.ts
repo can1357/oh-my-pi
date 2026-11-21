@@ -3,13 +3,15 @@
  *
  * Speaks NDJSON with `runner.py` over stdin/stdout. One subprocess per kernel
  * instance; sessions reuse a single subprocess across executions. Cancellation
- * is `kill("SIGINT")` which raises a real `KeyboardInterrupt` inside user
- * code. Shutdown writes `{"type":"exit"}` and escalates to SIGTERM/SIGKILL on
+ * writes `{"type":"interrupt","id":…}` naming the execution, then sends
+ * `kill("SIGINT")`, which interrupts that cell with a `KeyboardInterrupt`.
+ * Shutdown writes `{"type":"exit"}` and escalates to SIGTERM/SIGKILL on
  * timeout.
  */
 import * as path from "node:path";
 import { $env, $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
+import { registerOnBoard } from "../../daemon/client";
 import {
 	BaseKernel,
 	getRemainingTimeMs,
@@ -154,6 +156,18 @@ export async function checkPythonKernelAvailability(
 	return result;
 }
 
+/** Minimum interpreter version: the runner is UTF-8 source and the prelude uses `asyncio.to_thread`. */
+const MIN_PYTHON_MINOR = 9;
+const TOO_OLD_EXIT_BASE = 200;
+/** Exits 0 on Python 3.9+, otherwise `200 + 10*major + minor` so the host can name the rejected version. */
+const PYTHON_VERSION_PROBE = `import sys;v=sys.version_info;sys.exit(0 if v>=(3,${MIN_PYTHON_MINOR}) else ${TOO_OLD_EXIT_BASE}+min(v[0],3)*10+min(v[1],9))`;
+
+function describePythonProbeExit(exitCode: number): string | undefined {
+	const encoded = exitCode - TOO_OLD_EXIT_BASE;
+	if (encoded < 20 || encoded > 39) return undefined;
+	return `Python ${Math.floor(encoded / 10)}.${encoded % 10} is too old; 3.${MIN_PYTHON_MINOR}+ required`;
+}
+
 async function probePythonKernelAvailability(
 	cwd: string,
 	interpreter?: string,
@@ -171,9 +185,10 @@ async function probePythonKernelAvailability(
 		}
 		const result = await probeCandidates(
 			runtimes.map(runtime => ({
-				command: [runtime.pythonPath, "-c", "import sys;sys.exit(0)"],
+				command: [runtime.pythonPath, "-c", PYTHON_VERSION_PROBE],
 				env: runtime.env,
 				label: runtime.pythonPath,
+				describeExit: describePythonProbeExit,
 			})),
 			{ cwd, signal: probeOpts?.signal, timeoutMs: probeOpts?.timeoutMs },
 		);
@@ -200,6 +215,12 @@ async function probePythonKernelAvailability(
 	}
 }
 
+/** {@link PythonKernel.start} options. */
+export interface PythonKernelStartOptions extends KernelStartOptions {
+	/** Agent session the kernel process is listed under on the daemon board. */
+	sessionId?: string;
+}
+
 export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 	#installedPreludes = new Map<string, PythonPreludeSource>();
 
@@ -212,6 +233,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 			languageName: "Python",
 			traceIpc: TRACE_IPC,
 			exitPayload: JSON.stringify({ type: "exit" }),
+			interruptPayload: msgId => JSON.stringify({ type: "interrupt", id: msgId }),
 			interruptEscalationMs: INTERRUPT_ESCALATION_MS,
 			shutdownGraceMs: SHUTDOWN_GRACE_MS,
 			buildPayload: (code, msgId, opts) =>
@@ -309,7 +331,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		}
 	}
 
-	static async start(options: KernelStartOptions): Promise<PythonKernel> {
+	static async start(options: PythonKernelStartOptions): Promise<PythonKernel> {
 		const availability = await logger.time(
 			"PythonKernel.start:availabilityCheck",
 			checkPythonKernelAvailability,
@@ -336,6 +358,9 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		}
 		spawnEnv.PYTHONUNBUFFERED = "1";
 		spawnEnv.PYTHONIOENCODING = "utf-8";
+		// UTF-8 mode: text-mode subprocess pipes otherwise decode with the ANSI code page on
+		// Windows, and a decode error in CPython's pipe reader thread yields `stdout=None`.
+		spawnEnv.PYTHONUTF8 = "1";
 
 		const scriptPath = await stageRunnerScript("omp-python-runner", "py", RUNNER_SCRIPT);
 		const kernel = new PythonKernel(Snowflake.next(), runtime.pythonPath);
@@ -354,6 +379,15 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		});
 
 		kernel.setProcess(proc);
+		const board = registerOnBoard({
+			kind: "external",
+			scope: { kind: "session", id: options.sessionId || `process-${process.pid}` },
+			key: `python-eval:${proc.pid}`,
+			label: `python eval (${path.basename(runtime.pythonPath)})`,
+			pid: proc.pid,
+		});
+		// Exit covers every teardown path: shutdown, kill, and crashes.
+		void proc.exited.finally(() => board.dispose());
 
 		const startup = { signal: options.signal, deadlineMs: options.deadlineMs };
 		const startupBudget = Math.min(getRemainingTimeMs(startup.deadlineMs) ?? STARTUP_TIMEOUT_MS, STARTUP_TIMEOUT_MS);

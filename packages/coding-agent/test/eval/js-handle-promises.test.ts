@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
 
-// `xd://eval/agents` and `xd://eval/judge` tell JS sessions that `workpool()`, `judgeBatch()`,
+// `help://eval/agents` and `help://eval/judge` tell JS sessions that `workpool()`, `judgeBatch()`,
 // `judgeBatch.attach()` and every handle, pool and batch method except `drainIter` return
 // Promises, and that `.id`/`.handle` live on the result of `await agent(…)`. A method that stops
 // returning a Promise (or a new synchronous one) makes that rule wrong, so every method the
@@ -92,10 +92,6 @@ describe("JS eval handle, pool and batch calls", () => {
 		expect(Object.keys(observed.methods)).toContain("AgentHandle.status");
 		expect(Object.entries(observed.methods).filter(([, returnsPromise]) => returnsPromise !== true)).toEqual([]);
 		expect(observed.drainIter).toBe(false);
-	});
-
-	it("returns a Promise from workpool(), judgeBatch() and judgeBatch.attach()", () => {
-		expect(observed.factories).toEqual({ workpool: true, judgeBatch: true, "judgeBatch.attach": true });
 	});
 
 	it("exposes .id/.handle only on the result of await agent(…)", () => {

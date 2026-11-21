@@ -2,9 +2,48 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Added
 
-- Added the `ShellTrace` model (`shell-trace.ts`: a shell run's compiled units, per-node state and reflowed layout, byte-offset based) and the TSP `shell` kind with `TspShellProps`
+- Added `toolIntentLabel` for displaying the brief prefix of a structured tool-call intent.
+- Added clickable shell-command steps with output selection and visual highlighting of the currently displayed step.
+- Added a terminal `features` event for notifying clients when terminal settings change.
+- Added collaboration guest support for resuming sessions and delivering queued messages, plus `followUp` prompts.
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added tray state and interaction properties, including focus, peek, quiet, main status, item references, card status and actions, and event state.
+- Added layout transition properties to nodes for coordinating layout animations.
+- Added support for folding a dock composer into its compact row.
+
+## [18.22.0] - 2026-11-16
+
+### Added
+
+- Added optional picker icons for tooltips and accessible names, plus an option to control the placement of the search interface.
+- Added buttons, menu, and document component kinds, including menu-row action state changes and document text editing, commenting, and uncommenting events.
+
+## [18.18.6] - 2026-11-09
+
+### Added
+
+- `actions.hold` (`TspMenuEntry[]`): what a long press on a touch screen offers, beside `actions.menu`; and `toast`'s `action` / `label` props for a button on the toast
+
+## [18.18.0] - 2026-11-07
+
+### Changed
+
+- `ShellTrace` fields that carry values from the run (argv, assignments, redirect targets, unlocated unit sources, diagnostics) are `ShellTraceBytes`: a string when the bytes are UTF-8, otherwise the raw byte values. `isShellTrace` accepts both forms
+
+## [18.17.0] - 2026-11-06
+
+### Added
+
+- Added shell trace visualization: `ShellTrace` model and TSP `shell` kind for shell runs, node state, and layout.
+- Code views gain score-based line shading, labeled collapsible folds with notes, tones, and hover cards, and an overview strip.
 
 ## [18.16.0] - 2026-11-02
 
@@ -17,8 +56,6 @@
 ### Added
 
 - Added `nums` to `code` props (`TspCodeProps`): each line's number, so one block can show non-contiguous lines with `…` gap rows where the numbers jump.
-- Added an optional `heat` value in [0, 1] to `code` line marks (`TspCodeMark`), so a line can be shaded by a score. A mark's `tone` is now optional.
-- Added `code` folds (`TspCodeFold`: runs of lines drawn as one row that opens in place, with an optional label, note, tone and hover card), per-line score gradients (`TspCodeMark.wash`: scores washing the row from left to right) and an overview strip (`TspCodeProps.overview`).
 - Added the TSP `button` kind (`TspButtonProps`: label, icon, keycaps, `default`/`primary`/`quiet`/`danger` variants, `sm`/`md` sizes, pressed, disabled with a reason, busy) and `tabs` `variant: "segmented"`.
 
 ## [18.14.0] - 2026-10-29

@@ -7,7 +7,7 @@ import { EVAL_STATE_CONTEXT_TYPE } from "@oh-my-pi/pi-coding-agent/eval/state";
 import { createSessionManager } from "@oh-my-pi/pi-coding-agent/main";
 import { openRpcSession, type RpcOpenSessionSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { SESSION_EXIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
-import type { SessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { findSessionContinuation, type SessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
@@ -619,6 +619,33 @@ describe("--resume of a session that continued in a sibling file", () => {
 		}
 	}, 30_000);
 
+	it("reads only the header of a later sibling that continues nothing", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const created = new Date(Date.now() + 60_000).toISOString();
+		const sibling = tempDir.join(`${created.replace(/[:.]/g, "-")}_unrelated.jsonl`);
+		const header = { type: "session", version: 3, id: "unrelated", timestamp: created, cwd: tempDir.path() };
+		const filler = {
+			type: "custom",
+			customType: "filler",
+			data: "x".repeat(16_384),
+			id: "f1",
+			parentId: null,
+			timestamp: created,
+		};
+		await Bun.write(sibling, `${[header, filler].map(entry => JSON.stringify(entry)).join("\n")}\n`);
+		const scanned: string[] = [];
+		class CountingStorage extends FileSessionStorage {
+			override async scanLines(file: string, visit: (line: string) => boolean): Promise<void> {
+				scanned.push(file);
+				return super.scanLines(file, visit);
+			}
+		}
+
+		expect(await findSessionContinuation(original, new CountingStorage())).toBeUndefined();
+		expect(scanned).not.toContain(sibling);
+	});
+
 	it("does not follow a deliberate fork", async () => {
 		using tempDir = TempDir.createSync("@omp-resume-continuation-");
 		const original = await createSession(tempDir);
@@ -723,6 +750,30 @@ describe("--resume of a session that continued in a sibling file", () => {
 			]);
 		} finally {
 			await manager.close();
+		}
+	}, 30_000);
+});
+
+describe("--continue while the picked session is open in another live process", () => {
+	it("starts a new session, as a plain launch does, when --continue picks a session another live process writes", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const holder = await Holder.resume(tempDir, original);
+		try {
+			await holder.append("holder turn");
+			const args = continueArgs(tempDir.path());
+			const manager = await createSessionManager(args, tempDir.path(), stubSettings);
+			try {
+				// Resuming would duplicate the running conversation into a sibling on the first write.
+				expect(manager?.getSessionFile()).not.toBe(original);
+				expect(manager?.getEntries()).toEqual([]);
+				// Startup then runs as a plain launch, not as a resume.
+				expect(args.continue).toBe(false);
+			} finally {
+				await manager?.close();
+			}
+		} finally {
+			await holder.exit();
 		}
 	}, 30_000);
 });

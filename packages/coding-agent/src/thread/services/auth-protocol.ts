@@ -70,6 +70,11 @@ import type {
 	UsageReport,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import type {
+	ImageGenerationOptions,
+	ImageGenerationRequest,
+	ImageGenerationResult,
+} from "@oh-my-pi/pi-ai/images/types";
 import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
 import type {
 	ModelRegistryMirrorBatch,
@@ -85,6 +90,8 @@ import type {
 	AnthropicSlowModeLane,
 } from "../../session/anthropic-slow-mode";
 import type { UsageLimitState } from "../../session/usage-limit";
+import type { SearchParams } from "../../web/search/providers/base";
+import type { SearchResponse } from "../../web/search/types";
 import type { RpcMethod } from "../rpc";
 
 /** Exported-class kind of `AuthStorage`. */
@@ -102,10 +109,15 @@ export type BaseUrlTable = Record<string, string>;
 /** Provider → `[include when not explicit, include when explicit]`: a worker's `sessions.inherit` filter, evaluated before the call. */
 export type InheritTable = Record<string, readonly [boolean, boolean]>;
 
-/** One provider's answers to `keys.source` with the default `env` mode (absent = no auth) and `keys.keyless`. */
+/**
+ * One provider's answers to `keys.source` with the default `env` mode (absent = no auth),
+ * `keys.keyless` and `credentials.hasOAuth`.
+ */
 export interface ProviderAuthAvailability {
 	readonly source?: AuthSource;
 	readonly keyless: boolean;
+	/** Without a stored OAuth credential no session has an OAuth account (`oauth.identity`, `usage.ingestHeaders`). */
+	readonly oauth: boolean;
 }
 
 /** Provider → {@link ProviderAuthAvailability}, for every provider main reports at once. */
@@ -151,6 +163,7 @@ export type AuthStorageProtocol = {
 	"credentials.list": RpcMethod<[provider?: string], StoredAuthCredential[]>;
 	"credentials.has": RpcMethod<[provider: string], boolean>;
 	"credentials.hasOAuth": RpcMethod<[provider: string], boolean>;
+	"credentials.hasSubscription": RpcMethod<[provider: string], boolean>;
 	"credentials.getOAuth": RpcMethod<[provider: string], OAuthCredential | undefined>;
 	"credentials.set": RpcMethod<[provider: string, credential: AuthCredentialEntry], void>;
 	"credentials.upsert": RpcMethod<[provider: string, credential: AuthCredential], AuthCredentialSnapshotEntry[]>;
@@ -174,6 +187,8 @@ export type AuthStorageProtocol = {
 	 * provider with stored credentials, and `providers`, in one call (a worker caches it).
 	 */
 	"keys.availability": RpcMethod<[providers: readonly string[]], AuthAvailabilityTable>;
+	/** {@link ProviderAuthAvailability} of one provider the cached table lacks. */
+	"keys.availabilityOf": RpcMethod<[provider: string], ProviderAuthAvailability>;
 	"keys.describe": RpcMethod<[provider: string, sessionId?: string], string | undefined>;
 	"keys.setRuntime": RpcMethod<[provider: string, apiKey: string], void>;
 	"keys.removeRuntime": RpcMethod<[provider: string], void>;
@@ -240,6 +255,7 @@ export type AuthStorageProtocol = {
 	>;
 	"usage.setProvider": RpcMethod<[provider: Provider, usageProvider: UsageProvider, apiKey?: string], void>;
 	"usage.removeProvider": RpcMethod<[provider: Provider], void>;
+	"usage.replaceConfiguredProviders": RpcMethod<[providers: [Provider, UsageProvider][]], void>;
 
 	"health.model": RpcMethod<[provider: Provider, options: ModelUsageHealthOptions], ModelUsageHealth>;
 	"health.check": RpcMethod<[options?: WireCheckCredentialsOptions], CredentialHealthResult[]>;
@@ -286,9 +302,41 @@ export type MainStreamSimple = (
  * {@link streamOnMain}; `usage` stays on main (main's `AuthStorage` already
  * serves it); OAuth `getApiKey`/`modifyModels` are `rpcSync`.
  */
-export interface WireProviderConfig extends Omit<ProviderConfigInput, "streamSimple" | "usage"> {
+export interface WireProviderConfig extends Omit<
+	ProviderConfigInput,
+	"streamSimple" | "stream" | "generateImage" | "webSearch" | "discoverModels" | "usage"
+> {
 	streamOnMain?: MainStreamSimple;
+	/** The provider `stream` hook, run on main like {@link streamOnMain}. */
+	streamHookOnMain?: MainStreamSimple;
+	/** The provider `generateImage` hook, run on main with the worker's `fetch` bridged. */
+	generateImageOnMain?: MainGenerateImage;
+	/** The provider `webSearch` hook, run on main against main's `AuthStorage` and registry. */
+	webSearchOnMain?: MainWebSearch;
 }
+
+/** Image options as a main-side `generateImage` hook receives them; `fetch` crosses as {@link WorkerFetch}. */
+export interface WireImageOptions extends Omit<ImageGenerationOptions, "fetch"> {
+	fetchOnWorker?: WorkerFetch;
+}
+
+/** A provider `generateImage` hook run on main for a worker. */
+export type MainGenerateImage = (
+	model: Model<Api>,
+	request: ImageGenerationRequest,
+	options: WireImageOptions,
+) => Promise<ImageGenerationResult>;
+
+/**
+ * Search parameters as a main-side `webSearch` hook receives them: main
+ * supplies its own `AuthStorage` and registry; `fetch` crosses as {@link WorkerFetch}.
+ */
+export interface WireSearchParams extends Omit<SearchParams, "authStorage" | "modelRegistry" | "fetch"> {
+	fetchOnWorker?: WorkerFetch;
+}
+
+/** A provider `webSearch` hook run on main for a worker. */
+export type MainWebSearch = (params: WireSearchParams) => Promise<SearchResponse>;
 
 /**
  * A worker's stream options as a main-side `streamSimple` receives them.

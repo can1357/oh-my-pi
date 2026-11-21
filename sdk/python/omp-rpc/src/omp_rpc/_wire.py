@@ -93,8 +93,8 @@ _MESSAGE_UPDATES_VALUES: Final[frozenset[str]] = frozenset({"full", "delta"})
 _decode_message_updates = cast("Decoder[MessageUpdates]", literal(_MESSAGE_UPDATES_VALUES))
 
 
-TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned", "blocked"]
-_TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned", "blocked"})
+TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned"]
+_TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned"})
 _decode_todo_status = cast("Decoder[TodoStatus]", literal(_TODO_STATUS_VALUES))
 
 
@@ -156,6 +156,11 @@ _CACHE_WARMING_PHASE_VALUES: Final[frozenset[str]] = frozenset({"streaming", "id
 _decode_cache_warming_phase = cast("Decoder[CacheWarmingPhase]", literal(_CACHE_WARMING_PHASE_VALUES))
 
 
+CacheWarmingMethod: TypeAlias = Literal["prewarm", "replay"]
+_CACHE_WARMING_METHOD_VALUES: Final[frozenset[str]] = frozenset({"prewarm", "replay"})
+_decode_cache_warming_method = cast("Decoder[CacheWarmingMethod]", literal(_CACHE_WARMING_METHOD_VALUES))
+
+
 CacheWarmingOutcome: TypeAlias = Literal["hit", "miss", "error", "aborted"]
 _CACHE_WARMING_OUTCOME_VALUES: Final[frozenset[str]] = frozenset({"hit", "miss", "error", "aborted"})
 _decode_cache_warming_outcome = cast("Decoder[CacheWarmingOutcome]", literal(_CACHE_WARMING_OUTCOME_VALUES))
@@ -191,8 +196,8 @@ _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset({"aboveEditor", "bel
 _decode_widget_placement = cast("Decoder[WidgetPlacement]", literal(_WIDGET_PLACEMENT_VALUES))
 
 
-ExtensionUiMethod: TypeAlias = Literal["select", "confirm", "input", "editor", "ask", "cancel", "notify", "setStatus", "setWidget", "setTitle", "set_editor_text", "open_url"]
-_EXTENSION_UI_METHOD_VALUES: Final[frozenset[str]] = frozenset({"select", "confirm", "input", "editor", "ask", "cancel", "notify", "setStatus", "setWidget", "setTitle", "set_editor_text", "open_url"})
+ExtensionUiMethod: TypeAlias = Literal["select", "confirm", "input", "editor", "ask", "form", "cancel", "notify", "setStatus", "setWidget", "setTitle", "set_editor_text", "open_url"]
+_EXTENSION_UI_METHOD_VALUES: Final[frozenset[str]] = frozenset({"select", "confirm", "input", "editor", "ask", "form", "cancel", "notify", "setStatus", "setWidget", "setTitle", "set_editor_text", "open_url"})
 _decode_extension_ui_method = cast("Decoder[ExtensionUiMethod]", literal(_EXTENSION_UI_METHOD_VALUES))
 
 
@@ -277,10 +282,15 @@ class Usage(TypedDict):
     credits: NotRequired[JsonObject]
 
 
+ParentIrc = TypedDict("ParentIrc", {"from": "str", "body": "str"})
+"""Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope."""
+
+
 class UserMessage(TypedDict):
     role: Literal["user"]
     content: MessageContent
     timestamp: float
+    parentIrc: NotRequired[ParentIrc]
     synthetic: NotRequired[bool]
     steering: NotRequired[bool]
     liveSteered: NotRequired[bool]
@@ -366,6 +376,7 @@ class CustomMessage(TypedDict):
     timestamp: float
     details: NotRequired[JsonValue]
     attribution: NotRequired[Attribution]
+    excludeFromContext: NotRequired[bool]
 
 
 class HookMessage(TypedDict):
@@ -552,8 +563,6 @@ class ModelInfo:
 class TodoItem:
     content: str
     status: TodoStatus
-    blocker: str | None = None
-    """What a `blocked` task is waiting on."""
     details: str | None = None
     notes: tuple[str, ...] | None = None
 
@@ -642,6 +651,10 @@ class SessionState:
     session_id: str
     model: ModelInfo | None = None
     thinking_level: ThinkingLevel | None = None
+    configured_thinking_level: ConfiguredThinkingLevel | None = None
+    """The user's thinking selector: `auto` while auto mode picks the effort, else `thinkingLevel`."""
+    thinking_levels: tuple[ConfiguredThinkingLevel, ...] | None = None
+    """Selectors the active model accepts, as omp's thinking selector lists them: `off`, `auto`, then its efforts."""
     is_streaming: bool = False
     is_compacting: bool = False
     steering_mode: QueueMode = "one-at-a-time"
@@ -664,7 +677,7 @@ class SessionState:
     message_count: int = 0
     queued_message_count: int = 0
     has_pending_async_work: bool = False
-    """Background jobs or deliveries can still inject a follow-up and wake the session."""
+    """Background jobs, their deliveries, child agents or queued peer messages can still wake the session."""
     is_settled: bool = False
     """Idle with nothing queued or pending; same predicate as `session_settled`."""
     queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, "queuedMessages"))
@@ -708,6 +721,16 @@ class BashResult:
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
+    fork: ShellForkOutcome | None = None
+    """Set when the command overlapped another one on the session's persistent shell and ran in a fork of it."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ShellForkOutcome:
+    carried: bool
+    """What the command set carried back into the session's shell; `false`: it stayed in the fork."""
+    jobs: bool
+    """It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -731,6 +754,45 @@ class CompactionResult:
     details: JsonValue | None = None
     preserve_data: JsonObject | None = None
     provider_replay_through_entry_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ModelPickerRole:
+    """A role a model holds, as picker rows chip it."""
+    role: str
+    label: str
+    """The role's display tag."""
+    auto: bool | None = None
+    """Auto-selected: the role has no configured model."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ModelPickerRow:
+    """One row of omp's session model picker."""
+    provider: str
+    id: str
+    name: str
+    role: str | None = None
+    """The quick role this row applies (`@` search); pass it to `set_model`."""
+    roles: tuple[ModelPickerRole, ...] | None = None
+    """Visible roles the model holds, built-in order first."""
+    thinking: tuple[ConfiguredThinkingLevel, ...] | None = None
+    """Steps of the model's thinking slider, low to high: `auto`, `off`, then its efforts. Absent when it has no effort to pick."""
+    thinking_level: ConfiguredThinkingLevel | None = None
+    """Model rows: the session's level as this model would run it (the untouched slider). Quick-role rows: the role's explicit level, which `set_model` should carry."""
+    over_context: bool | None = None
+    """The session's context exceeds the model's window."""
+    current: bool | None = None
+    """The session runs this row: its model, or under `@` its active quick role."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ModelPickerResult:
+    rows: tuple[ModelPickerRow, ...]
+    recent: int
+    """Leading rows that are recently used or role-held (the picker's Recent block); 0 when there is no such split."""
+    total: int
+    """Matching rows before `limit`."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1098,7 +1160,7 @@ class AutoCompactionEndEvent:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class ManualCompactionStartEvent:
-    """A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."""
+    """A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."""
     type: Literal["manual_compaction_start"] = "manual_compaction_start"
     mode: str | None = None
     """The `/compact <mode>` subcommand, when one was given."""
@@ -1142,6 +1204,7 @@ class CacheWarmingStartEvent:
     """A prompt-cache refresh was handed to the provider."""
     type: Literal["cache_warming_start"] = "cache_warming_start"
     phase: CacheWarmingPhase
+    method: CacheWarmingMethod
     provider: str
     model: str
 
@@ -1151,6 +1214,7 @@ class CacheWarmingEndEvent:
     """Outcome of the refresh announced by the matching `cache_warming_start`."""
     type: Literal["cache_warming_end"] = "cache_warming_end"
     phase: CacheWarmingPhase
+    method: CacheWarmingMethod
     provider: str
     model: str
     outcome: CacheWarmingOutcome
@@ -1267,6 +1331,8 @@ class ReadyEvent:
     supported_protocol_versions: tuple[int, ...] | None = None
     max_frame_bytes: int | None = None
     max_reassembled_frame_bytes: int | None = None
+    supports_bash_exclude_from_context: bool | None = None
+    """`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1499,6 +1565,14 @@ class SelectUiRequest:
     title: str
     options: tuple[str, ...]
     option_details: tuple[SelectOptionDetail, ...] | None = None
+    initial_index: int | None = None
+    """Index into `options` to focus first."""
+    selection_marker: Literal["radio", "checkbox"] | None = None
+    """Marker style for the first `markableCount` options."""
+    checked_indices: tuple[int, ...] | None = None
+    """For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option."""
+    markable_count: int | None = None
+    """Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."""
     timeout: int | None = None
 
 
@@ -1535,11 +1609,21 @@ class EditorUiRequest:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AskUiRequest:
-    """Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it."""
+    """Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."""
     type: Literal["extension_ui_request"] = "extension_ui_request"
     id: str
     method: Literal["ask"] = "ask"
     questions: tuple[AskQuestion, ...]
+    timeout: int | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class FormUiRequest:
+    """The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required."""
+    type: Literal["extension_ui_request"] = "extension_ui_request"
+    id: str
+    method: Literal["form"] = "form"
+    html: str
     timeout: int | None = None
 
 
@@ -1616,6 +1700,14 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
     title: str | None = None
     options: tuple[str, ...] | None = None
     option_details: tuple[SelectOptionDetail, ...] | None = None
+    initial_index: int | None = None
+    """Index into `options` to focus first."""
+    selection_marker: Literal["radio", "checkbox"] | None = None
+    """Marker style for the first `markableCount` options."""
+    checked_indices: tuple[int, ...] | None = None
+    """For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option."""
+    markable_count: int | None = None
+    """Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."""
     timeout: int | None = None
     message: str | None = None
     placeholder: str | None = None
@@ -1623,6 +1715,7 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
     prefill: str | None = None
     prompt_style: bool | None = None
     questions: tuple[AskQuestion, ...] | None = None
+    html: str | None = None
     target_id: str | None = None
     notify_type: NotifyType | None = None
     status_key: str | None = None
@@ -1639,7 +1732,7 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AskAnswer:
-    """Answer to one `ask` question: exact option labels, plus optional free text."""
+    """Answer to one `ui.askDialog` question: exact option labels, plus optional free text."""
     id: str
     selected_options: tuple[str, ...]
     custom_input: str | None = None
@@ -1667,6 +1760,11 @@ class HostUriSchemeDefinition:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class NegotiateProtocolResult:
     protocol_version: int
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class AbortAndDeliverQueueResult:
+    aborted: bool
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1750,6 +1848,10 @@ parse_usage_cost = cast("Decoder[UsageCost]", open_record(None, None))
 
 parse_usage = cast("Decoder[Usage]", open_record(None, None))
 """Decodes a `Usage` open record: checks the discriminator and keeps every key."""
+
+
+parse_parent_irc = cast("Decoder[ParentIrc]", open_record(None, None))
+"""Decodes a `ParentIrc` open record: checks the discriminator and keeps every key."""
 
 
 parse_user_message = cast("Decoder[UserMessage]", open_record("role", frozenset({"user"})))
@@ -1926,7 +2028,6 @@ def parse_todo_item(value: object, path: str = "TodoItem") -> TodoItem:
     return TodoItem(
         content=required(payload, "content", decode_str, path),
         status=required(payload, "status", _decode_todo_status, path),
-        blocker=optional(payload, "blocker", decode_str, path),
         details=optional(payload, "details", decode_str, path),
         notes=optional(payload, "notes", array(decode_str), path),
     )
@@ -2024,6 +2125,8 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
         session_id=required(payload, "sessionId", decode_str, path),
         model=optional(payload, "model", parse_model_info, path),
         thinking_level=optional(payload, "thinkingLevel", _decode_thinking_level, path),
+        configured_thinking_level=optional(payload, "configuredThinkingLevel", _decode_configured_thinking_level, path),
+        thinking_levels=optional(payload, "thinkingLevels", array(_decode_configured_thinking_level), path),
         is_streaming=defaulted(payload, "isStreaming", decode_bool, path, False),
         is_compacting=defaulted(payload, "isCompacting", decode_bool, path, False),
         steering_mode=defaulted(payload, "steeringMode", _decode_queue_mode, path, "one-at-a-time"),
@@ -2077,6 +2180,15 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
         trace=optional(payload, "trace", decode_json_object, path),
+        fork=optional(payload, "fork", parse_shell_fork_outcome, path),
+    )
+
+
+def parse_shell_fork_outcome(value: object, path: str = "ShellForkOutcome") -> ShellForkOutcome:
+    payload = expect_object(value, path)
+    return ShellForkOutcome(
+        carried=required(payload, "carried", decode_bool, path),
+        jobs=required(payload, "jobs", decode_bool, path),
     )
 
 
@@ -2106,6 +2218,39 @@ def parse_compaction_result(value: object, path: str = "CompactionResult") -> Co
         details=optional(payload, "details", decode_json, path),
         preserve_data=optional(payload, "preserveData", decode_json_object, path),
         provider_replay_through_entry_id=optional(payload, "providerReplayThroughEntryId", decode_str, path),
+    )
+
+
+def parse_model_picker_role(value: object, path: str = "ModelPickerRole") -> ModelPickerRole:
+    payload = expect_object(value, path)
+    return ModelPickerRole(
+        role=required(payload, "role", decode_str, path),
+        label=required(payload, "label", decode_str, path),
+        auto=optional(payload, "auto", decode_bool, path),
+    )
+
+
+def parse_model_picker_row(value: object, path: str = "ModelPickerRow") -> ModelPickerRow:
+    payload = expect_object(value, path)
+    return ModelPickerRow(
+        provider=required(payload, "provider", decode_str, path),
+        id=required(payload, "id", decode_str, path),
+        name=required(payload, "name", decode_str, path),
+        role=optional(payload, "role", decode_str, path),
+        roles=optional(payload, "roles", array(parse_model_picker_role), path),
+        thinking=optional(payload, "thinking", array(_decode_configured_thinking_level), path),
+        thinking_level=optional(payload, "thinkingLevel", _decode_configured_thinking_level, path),
+        over_context=optional(payload, "overContext", decode_bool, path),
+        current=optional(payload, "current", decode_bool, path),
+    )
+
+
+def parse_model_picker_result(value: object, path: str = "ModelPickerResult") -> ModelPickerResult:
+    payload = expect_object(value, path)
+    return ModelPickerResult(
+        rows=required(payload, "rows", array(parse_model_picker_row), path),
+        recent=required(payload, "recent", decode_int, path),
+        total=required(payload, "total", decode_int, path),
     )
 
 
@@ -2568,6 +2713,7 @@ def parse_cache_warming_start_event(value: object, path: str = "CacheWarmingStar
     required(payload, "type", cast('Decoder[Literal["cache_warming_start"]]', literal(frozenset({"cache_warming_start"}))), path)
     return CacheWarmingStartEvent(
         phase=required(payload, "phase", _decode_cache_warming_phase, path),
+        method=required(payload, "method", _decode_cache_warming_method, path),
         provider=required(payload, "provider", decode_str, path),
         model=required(payload, "model", decode_str, path),
     )
@@ -2578,6 +2724,7 @@ def parse_cache_warming_end_event(value: object, path: str = "CacheWarmingEndEve
     required(payload, "type", cast('Decoder[Literal["cache_warming_end"]]', literal(frozenset({"cache_warming_end"}))), path)
     return CacheWarmingEndEvent(
         phase=required(payload, "phase", _decode_cache_warming_phase, path),
+        method=required(payload, "method", _decode_cache_warming_method, path),
         provider=required(payload, "provider", decode_str, path),
         model=required(payload, "model", decode_str, path),
         outcome=required(payload, "outcome", _decode_cache_warming_outcome, path),
@@ -2714,6 +2861,7 @@ def parse_ready_event(value: object, path: str = "ReadyEvent") -> ReadyEvent:
         supported_protocol_versions=optional(payload, "supportedProtocolVersions", array(decode_int), path),
         max_frame_bytes=optional(payload, "maxFrameBytes", decode_int, path),
         max_reassembled_frame_bytes=optional(payload, "maxReassembledFrameBytes", decode_int, path),
+        supports_bash_exclude_from_context=optional(payload, "supportsBashExcludeFromContext", decode_bool, path),
     )
 
 
@@ -2974,6 +3122,10 @@ def parse_select_ui_request(value: object, path: str = "SelectUiRequest") -> Sel
         title=required(payload, "title", decode_str, path),
         options=required(payload, "options", array(decode_str), path),
         option_details=optional(payload, "optionDetails", array(parse_select_option_detail), path),
+        initial_index=optional(payload, "initialIndex", decode_int, path),
+        selection_marker=optional(payload, "selectionMarker", cast('Decoder[Literal["radio", "checkbox"]]', literal(frozenset({"radio", "checkbox"}))), path),
+        checked_indices=optional(payload, "checkedIndices", array(decode_int), path),
+        markable_count=optional(payload, "markableCount", decode_int, path),
         timeout=optional(payload, "timeout", decode_int, path),
     )
 
@@ -3022,6 +3174,17 @@ def parse_ask_ui_request(value: object, path: str = "AskUiRequest") -> AskUiRequ
     return AskUiRequest(
         id=required(payload, "id", decode_str, path),
         questions=required(payload, "questions", array(parse_ask_question), path),
+        timeout=optional(payload, "timeout", decode_int, path),
+    )
+
+
+def parse_form_ui_request(value: object, path: str = "FormUiRequest") -> FormUiRequest:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["extension_ui_request"]]', literal(frozenset({"extension_ui_request"}))), path)
+    required(payload, "method", cast('Decoder[Literal["form"]]', literal(frozenset({"form"}))), path)
+    return FormUiRequest(
+        id=required(payload, "id", decode_str, path),
+        html=required(payload, "html", decode_str, path),
         timeout=optional(payload, "timeout", decode_int, path),
     )
 
@@ -3111,6 +3274,10 @@ def parse_extension_ui_request(value: object, path: str = "ExtensionUiRequest") 
         title=optional(payload, "title", decode_str, path),
         options=optional(payload, "options", array(decode_str), path),
         option_details=optional(payload, "optionDetails", array(parse_select_option_detail), path),
+        initial_index=optional(payload, "initialIndex", decode_int, path),
+        selection_marker=optional(payload, "selectionMarker", cast('Decoder[Literal["radio", "checkbox"]]', literal(frozenset({"radio", "checkbox"}))), path),
+        checked_indices=optional(payload, "checkedIndices", array(decode_int), path),
+        markable_count=optional(payload, "markableCount", decode_int, path),
         timeout=optional(payload, "timeout", decode_int, path),
         message=optional(payload, "message", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
@@ -3118,6 +3285,7 @@ def parse_extension_ui_request(value: object, path: str = "ExtensionUiRequest") 
         prefill=optional(payload, "prefill", decode_str, path),
         prompt_style=optional(payload, "promptStyle", decode_bool, path),
         questions=optional(payload, "questions", array(parse_ask_question), path),
+        html=optional(payload, "html", decode_str, path),
         target_id=optional(payload, "targetId", decode_str, path),
         notify_type=optional(payload, "notifyType", _decode_notify_type, path),
         status_key=optional(payload, "statusKey", decode_str, path),
@@ -3168,6 +3336,13 @@ def parse_negotiate_protocol_result(value: object, path: str = "NegotiateProtoco
     payload = expect_object(value, path)
     return NegotiateProtocolResult(
         protocol_version=required(payload, "protocolVersion", decode_int, path),
+    )
+
+
+def parse_abort_and_deliver_queue_result(value: object, path: str = "AbortAndDeliverQueueResult") -> AbortAndDeliverQueueResult:
+    payload = expect_object(value, path)
+    return AbortAndDeliverQueueResult(
+        aborted=required(payload, "aborted", decode_bool, path),
     )
 
 
@@ -3363,6 +3538,16 @@ class WireClient:
         params: dict[str, object] = {}
         return parse_abort_and_restore_queue_result(self._command("abort_and_restore_queue", params), "abort_and_restore_queue")
 
+    def abort_and_deliver_queue(self) -> AbortAndDeliverQueueResult:
+        """Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input."""
+        params: dict[str, object] = {}
+        return parse_abort_and_deliver_queue_result(self._command("abort_and_deliver_queue", params), "abort_and_deliver_queue")
+
+    def resume(self) -> None:
+        """Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way."""
+        params: dict[str, object] = {}
+        self._command("resume", params)
+
     def new_session(self, parent_session: str | None = None) -> CancellationResult:
         """Start a new session."""
         params: dict[str, object] = {}
@@ -3513,11 +3698,15 @@ class WireClient:
         params: dict[str, object] = {}
         return required(expect_object(self._command("dictation_stop", params, timeout=600), "dictation_stop"), "text", decode_str, "dictation_stop")
 
-    def set_model(self, provider: str, model_id: str) -> ModelInfo:
+    def set_model(self, provider: str, model_id: str, *, thinking_level: ConfiguredThinkingLevel | None = None, role: str | None = None) -> ModelInfo:
         """Select a model by provider and id."""
         params: dict[str, object] = {}
         params["provider"] = provider
         params["modelId"] = model_id
+        if thinking_level is not None:
+            params["thinkingLevel"] = thinking_level
+        if role is not None:
+            params["role"] = role
         return parse_model_info(self._command("set_model", params), "set_model")
 
     def cycle_model(self) -> ModelCycleResult | None:
@@ -3531,7 +3720,16 @@ class WireClient:
         params: dict[str, object] = {}
         return required(expect_object(self._command("get_available_models", params), "get_available_models"), "models", array(parse_model_info), "get_available_models")
 
-    def set_thinking_level(self, level: ThinkingLevel) -> None:
+    def get_model_picker(self, *, query: str | None = None, limit: int | None = None) -> ModelPickerResult:
+        """Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles."""
+        params: dict[str, object] = {}
+        if query is not None:
+            params["query"] = query
+        if limit is not None:
+            params["limit"] = limit
+        return parse_model_picker_result(self._command("get_model_picker", params), "get_model_picker")
+
+    def set_thinking_level(self, level: ConfiguredThinkingLevel) -> None:
         """Set the thinking level."""
         params: dict[str, object] = {}
         params["level"] = level
@@ -3596,10 +3794,12 @@ class WireClient:
         params: dict[str, object] = {}
         self._command("abort_retry", params)
 
-    def bash(self, command: str) -> BashResult:
-        """Run a shell command."""
+    def bash(self, command: str, *, exclude_from_context: bool | None = None) -> BashResult:
+        """Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true."""
         params: dict[str, object] = {}
         params["command"] = command
+        if exclude_from_context is not None:
+            params["excludeFromContext"] = exclude_from_context
         return parse_bash_result(self._command("bash", params), "bash")
 
     def abort_bash(self) -> None:
@@ -3905,7 +4105,7 @@ class WireClient:
         return self._listen("auto_compaction_end", listener)
 
     def on_manual_compaction_start(self, listener: Callable[[ManualCompactionStartEvent], None]) -> Callable[[], None]:
-        """Subscribe to `manual_compaction_start`: A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."""
+        """Subscribe to `manual_compaction_start`: A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."""
         return self._listen("manual_compaction_start", listener)
 
     def on_manual_compaction_end(self, listener: Callable[[ManualCompactionEndEvent], None]) -> Callable[[], None]:
@@ -3986,6 +4186,7 @@ class WireClient:
 
 
 __all__ = [
+    "AbortAndDeliverQueueResult",
     "AbortAndRestoreQueueResult",
     "AdvisorCostChangedEvent",
     "AdvisorYieldedEvent",
@@ -4034,6 +4235,7 @@ __all__ = [
     "BtwRecordEvent",
     "BtwStatus",
     "CacheWarmingEndEvent",
+    "CacheWarmingMethod",
     "CacheWarmingMode",
     "CacheWarmingOutcome",
     "CacheWarmingPhase",
@@ -4062,6 +4264,7 @@ __all__ = [
     "FastModeResult",
     "FileMentionItem",
     "FileMentionMessage",
+    "FormUiRequest",
     "GetSessionLeaseResult",
     "Goal",
     "GoalModeState",
@@ -4100,6 +4303,9 @@ __all__ = [
     "ModelCost",
     "ModelCycleResult",
     "ModelInfo",
+    "ModelPickerResult",
+    "ModelPickerRole",
+    "ModelPickerRow",
     "NavigateTreeResult",
     "NegotiateProtocolResult",
     "NoticeEvent",
@@ -4107,6 +4313,7 @@ __all__ = [
     "NotifyUiRequest",
     "OpenSessionResult",
     "OpenUrlUiRequest",
+    "ParentIrc",
     "PromoteQueuedMessageResult",
     "PromptAck",
     "PromptError",
@@ -4139,6 +4346,7 @@ __all__ = [
     "SetStatusUiRequest",
     "SetTitleUiRequest",
     "SetWidgetUiRequest",
+    "ShellForkOutcome",
     "SlashCommandInput",
     "SlashCommandSource",
     "SlashSubcommand",
@@ -4187,6 +4395,7 @@ __all__ = [
     "UserContent",
     "UserMessage",
     "WidgetPlacement",
+    "parse_abort_and_deliver_queue_result",
     "parse_abort_and_restore_queue_result",
     "parse_advisor_cost_changed_event",
     "parse_advisor_yielded_event",
@@ -4252,6 +4461,7 @@ __all__ = [
     "parse_fast_mode_result",
     "parse_file_mention_item",
     "parse_file_mention_message",
+    "parse_form_ui_request",
     "parse_get_session_lease_result",
     "parse_goal",
     "parse_goal_mode_state",
@@ -4283,6 +4493,9 @@ __all__ = [
     "parse_model_cost",
     "parse_model_cycle_result",
     "parse_model_info",
+    "parse_model_picker_result",
+    "parse_model_picker_role",
+    "parse_model_picker_row",
     "parse_navigate_tree_result",
     "parse_negotiate_protocol_result",
     "parse_notice_event",
@@ -4290,6 +4503,7 @@ __all__ = [
     "parse_notify_ui_request",
     "parse_open_session_result",
     "parse_open_url_ui_request",
+    "parse_parent_irc",
     "parse_promote_queued_message_result",
     "parse_prompt_ack",
     "parse_prompt_error",
@@ -4318,6 +4532,7 @@ __all__ = [
     "parse_set_status_ui_request",
     "parse_set_title_ui_request",
     "parse_set_widget_ui_request",
+    "parse_shell_fork_outcome",
     "parse_slash_command_input",
     "parse_slash_subcommand",
     "parse_subagent_event",

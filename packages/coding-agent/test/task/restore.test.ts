@@ -51,14 +51,20 @@ const finished: Message[] = [
 ];
 
 /** Writes subagent `id`'s transcript under the main session `mainFile`, with its spawn contract. */
-async function writeSubagent(mainFile: string, cwd: string, id: string, messages: Message[]): Promise<string> {
+async function writeSubagent(
+	mainFile: string,
+	cwd: string,
+	id: string,
+	messages: Message[],
+	agent?: string,
+): Promise<string> {
 	const file = path.join(mainFile.slice(0, -6), `${id}.jsonl`);
 	const manager = await SessionManager.open(file, undefined, undefined, {
 		initialCwd: cwd,
 		parentSession: mainFile,
 		suppressBreadcrumb: true,
 	});
-	manager.appendSessionInit({ systemPrompt: ["sub prompt"], task: `${id} task`, tools: ["read", "yield"] });
+	manager.appendSessionInit({ systemPrompt: ["sub prompt"], task: `${id} task`, tools: ["read", "yield"], agent });
 	for (const message of messages) manager.appendMessage(message);
 	await manager.close();
 	return file;
@@ -86,7 +92,7 @@ describe("restoreSession (omp --restore)", () => {
 		const mainFile = main.getSessionFile();
 		if (!mainFile) throw new Error("Expected a persisted session file");
 		await main.close();
-		await writeSubagent(mainFile, cwd, "Cut", cutOff);
+		await writeSubagent(mainFile, cwd, "Cut", cutOff, "scout");
 		await writeSubagent(mainFile, cwd, "Done", finished);
 		const killed = await writeSubagent(mainFile, cwd, "Killed", cutOff);
 		await fs.writeFile(getAgentTombstonePath(killed), "");
@@ -123,7 +129,13 @@ describe("restoreSession (omp --restore)", () => {
 
 		expect(outcome).toEqual({ turn: true, subagents: ["Cut"] });
 		expect(followUp).toHaveBeenCalledTimes(1);
-		expect(followUp.mock.calls[0]![0]).toMatchObject({ id: "Cut", restore: true, message: "Cut task" });
+		expect(followUp.mock.calls[0]![0]).toMatchObject({
+			id: "Cut",
+			agent: { name: "Cut" },
+			restore: true,
+			message: "Cut task",
+			softRequestBudget: 100,
+		});
 		await manager.getJob("Cut")!.promise;
 		await manager.drainDeliveries({ filter: { ownerId: MAIN_AGENT_ID } });
 		expect(delivered).toEqual(["Cut"]);

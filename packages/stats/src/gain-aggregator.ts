@@ -1,16 +1,17 @@
 /**
  * Aggregates token-savings data for the Gain dashboard.
  *
- * Source:
- *   1. Snapcompact: colocated with stats.db as snapcompact-savings.jsonl
- *
- * Missing files are treated as zero records — never an error.
+ * Sources:
+ *   1. Imaged tool results: colocated with stats.db as snapcompact-savings.jsonl
+ *      (a missing file is zero records, never an error)
+ *   2. Snapcompact compactions: the `snapcompact_compactions` table the session sync fills
  */
 
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getStatsDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { format } from "@oh-my-pi/pi-utils/dates";
 import { getTimeRangeConfig } from "./aggregator";
 import { initDb } from "./db";
 import type { GainDashboardStats, GainSourceTotals, GainTimeSeriesPoint } from "./shared-types";
@@ -228,6 +229,27 @@ async function readSnapcompactRecords(cutoff: number | null, project: string | n
 	return { records, projects };
 }
 
+interface CompactionRow {
+	folder: string;
+	timestamp: number;
+	tokens_before: number;
+	tokens_after: number;
+}
+
+async function readSnapcompactCompactions(
+	cutoff: number | null,
+	project: string | null,
+): Promise<{ rows: CompactionRow[]; projects: Set<string> }> {
+	const database = await initDb();
+	const rows = database
+		.query<CompactionRow, [number]>(
+			"SELECT folder, timestamp, tokens_before, tokens_after FROM snapcompact_compactions WHERE timestamp >= ?",
+		)
+		.all(cutoff ?? 0);
+	const projects = new Set(rows.map(row => row.folder));
+	return { rows: project === null ? rows : rows.filter(row => matchesProject(row.folder, project)), projects };
+}
+
 // ---------------------------------------------------------------------------
 // Aggregation helpers
 // ---------------------------------------------------------------------------
@@ -243,11 +265,6 @@ function emptyTotals(): GainSourceTotals {
 	};
 }
 
-/** ISO date string from epoch ms, bucketed to the day. */
-function toDateBucket(epochMs: number): string {
-	return new Date(epochMs).toISOString().slice(0, 10); // "YYYY-MM-DD"
-}
-
 // ---------------------------------------------------------------------------
 // Main aggregation function
 // ---------------------------------------------------------------------------
@@ -259,34 +276,51 @@ export async function getGainDashboardStats(
 	const { cutoff: effectiveCutoff } = getTimeRangeConfig(range);
 	const effectiveProject: string | null = project?.trim() || null;
 
-	const { records: snapcompactRecords, projects: snapcompactProjects } = await readSnapcompactRecords(
-		effectiveCutoff,
-		effectiveProject,
-	);
+	const toolResultSets = await readSnapcompactRecords(effectiveCutoff, effectiveProject);
+	const compactionSets = await readSnapcompactCompactions(effectiveCutoff, effectiveProject);
 
-	const snapcompactTotals = emptyTotals();
-	const timeMap = new Map<string, { snapcompact: number }>();
+	const toolResults = emptyTotals();
+	const compaction = emptyTotals();
+	const timeMap = new Map<string, { snapcompact: number; compaction: number }>();
+	const bucketFor = (epochMs: number) => {
+		// Local calendar day, matching the dashboard's local day buckets.
+		const date = format(epochMs, "yyyy-MM-dd");
+		let bucket = timeMap.get(date);
+		if (!bucket) {
+			bucket = { snapcompact: 0, compaction: 0 };
+			timeMap.set(date, bucket);
+		}
+		return bucket;
+	};
 
-	for (const rec of snapcompactRecords) {
-		snapcompactTotals.savedTokens += rec.savedTokens;
-		const approxBytes = rec.savedTokens * BYTES_PER_TOKEN_ESTIMATE;
-		snapcompactTotals.savedBytes += approxBytes;
-		snapcompactTotals.hits += 1;
-
-		const date = toDateBucket(rec.ts);
-		const bucket = timeMap.get(date) ?? { snapcompact: 0 };
-		bucket.snapcompact += rec.savedTokens;
-		timeMap.set(date, bucket);
+	// The journal records no original size, so imaged tool results leave reductionPercent null.
+	for (const rec of toolResultSets.records) {
+		toolResults.savedTokens += rec.savedTokens;
+		toolResults.savedBytes += rec.savedTokens * BYTES_PER_TOKEN_ESTIMATE;
+		toolResults.hits += 1;
+		bucketFor(rec.ts).snapcompact += rec.savedTokens;
 	}
-	// No originalBytes for snapcompact — reductionPercent stays null.
 
+	// A compaction whose estimate did not shrink kept nothing out of context.
+	for (const row of compactionSets.rows) {
+		const saved = Math.max(0, row.tokens_before - row.tokens_after);
+		compaction.savedTokens += saved;
+		compaction.savedBytes += saved * BYTES_PER_TOKEN_ESTIMATE;
+		compaction.originalBytes += row.tokens_before * BYTES_PER_TOKEN_ESTIMATE;
+		compaction.hits += 1;
+		bucketFor(row.timestamp).compaction += saved;
+	}
+	compaction.outputBytes = compaction.originalBytes - compaction.savedBytes;
+	compaction.reductionPercent = compaction.originalBytes > 0 ? compaction.savedBytes / compaction.originalBytes : null;
+
+	// The overall reduction is known only while every hit has a known original size.
 	const overall: GainSourceTotals = {
-		savedTokens: snapcompactTotals.savedTokens,
-		savedBytes: snapcompactTotals.savedBytes,
-		hits: snapcompactTotals.hits,
-		outputBytes: 0,
-		originalBytes: 0,
-		reductionPercent: null,
+		savedTokens: toolResults.savedTokens + compaction.savedTokens,
+		savedBytes: toolResults.savedBytes + compaction.savedBytes,
+		hits: toolResults.hits + compaction.hits,
+		outputBytes: toolResults.hits === 0 ? compaction.outputBytes : 0,
+		originalBytes: toolResults.hits === 0 ? compaction.originalBytes : 0,
+		reductionPercent: toolResults.hits === 0 ? compaction.reductionPercent : null,
 	};
 
 	const timeSeries: GainTimeSeriesPoint[] = Array.from(timeMap.entries())
@@ -294,16 +328,15 @@ export async function getGainDashboardStats(
 		.map(([date, bucket]) => ({
 			date,
 			snapcompact: bucket.snapcompact,
-			total: bucket.snapcompact,
+			compaction: bucket.compaction,
+			total: bucket.snapcompact + bucket.compaction,
 		}));
 
-	const projects = dedupeProjects(snapcompactProjects);
+	const projects = dedupeProjects(new Set([...toolResultSets.projects, ...compactionSets.projects]));
 
 	return {
 		overall,
-		bySource: {
-			snapcompact: snapcompactTotals,
-		},
+		bySource: { snapcompact: toolResults, compaction },
 		timeSeries,
 		project: effectiveProject,
 		projects,

@@ -96,6 +96,15 @@ describe("sumSubagentTreeCost", () => {
 					sessionFile: path.join(artifacts, "__advisor.jsonl"),
 					cost: 5,
 				}),
+				// Multi-session hosts (ACP, SDK) register each root as `kind: "main"` under
+				// its own id; the root's own transcript and its advisor stay out of the tree.
+				ref("acp:root", { kind: "main", sessionFile: root, cost: 10 }),
+				ref("acp:root/advisor", {
+					kind: "advisor",
+					parentId: "acp:root",
+					sessionFile: path.join(artifacts, "__advisor.jsonl"),
+					cost: 5,
+				}),
 				// A previous session's agent still in the process-global registry.
 				ref("Old", { sessionFile: path.resolve("sessions", "old", "Old.jsonl"), cost: 7 }),
 				// File-less and not observed by this session.

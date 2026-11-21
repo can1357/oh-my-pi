@@ -16,6 +16,12 @@ class "meta" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
 		thinking-mode "effort"
 	}
+	// Muse Ember documents `minimal` through `max`, defaulting to `max`
+	// (dev.meta.ai/docs/muse-ember, 2026-11-10); no contributor tier.
+	models "muse-ember-1.0" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+		thinking-mode "effort"
+	}
 	models "muse-spark-1.1" "muse-spark-1.2" "muse-spark-1.2-contributor" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		thinking-mode "effort"

@@ -2,7 +2,8 @@
  * Worker-side {@link AsyncJobManagerApi} over the root's main-thread manager.
  *
  * Every query and command runs on main: synchronous methods through
- * `callSync`, async ones through `call`. Job rows come back as
+ * `callSync` (`releaseForegroundJob`, which returns nothing, as an ordered
+ * notification), async ones through `call`. Job rows come back as
  * {@link RemoteAsyncJob}s built from {@link AsyncJobWire} projections, with
  * local equivalents of the live fields:
  *
@@ -32,6 +33,7 @@ import type {
 	AsyncJobRun,
 	AsyncJobRunResult,
 	AsyncJobType,
+	EvictedJob,
 } from "../../async/job-manager";
 import type { JobTextSource, JobWidgetInputs, JobWidgetRegistry } from "../../job-widgets/types";
 import type { RemoteObject } from "../rpc";
@@ -234,6 +236,10 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return localUnsubscribe(this.#remote.callSync("onJobSettled", listener));
 	}
 
+	onJobsChanged(listener: () => void): () => void {
+		return localUnsubscribe(this.#remote.callSync("onJobsChanged", listener));
+	}
+
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		const local: LocalInputs | undefined =
 			options?.process || options?.widgetInputs
@@ -307,8 +313,9 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.callSync("backgroundJob", jobId);
 	}
 
+	/** A notification: nothing to wait for, and every later call reaches main after it. */
 	releaseForegroundJob(jobId: string): void {
-		this.#remote.callSync("releaseForegroundJob", jobId);
+		this.#remote.notify("releaseForegroundJob", jobId);
 	}
 
 	getDeliveryState(filter?: AsyncJobFilter): AsyncJobDeliveryState {
@@ -347,6 +354,14 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.callSync("evictCompletedJobs", filter);
 	}
 
+	getEvictedJob(id: string, filter?: AsyncJobFilter): EvictedJob | undefined {
+		return this.#remote.callSync("getEvictedJob", id, filter);
+	}
+
+	getEvictedJobs(filter?: AsyncJobFilter): EvictedJob[] {
+		return this.#remote.callSync("getEvictedJobs", filter);
+	}
+
 	waitForAll(): Promise<void> {
 		return this.#remote.call("waitForAll");
 	}
@@ -373,6 +388,14 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 
 	isDeliverySuppressed(jobId: string): boolean {
 		return this.#remote.callSync("isDeliverySuppressed", jobId);
+	}
+
+	isDeliveryPending(jobId: string): boolean {
+		return this.#remote.callSync("isDeliveryPending", jobId);
+	}
+
+	isDeliverySuperseded(jobId: string): boolean {
+		return this.#remote.callSync("isDeliverySuperseded", jobId);
 	}
 
 	/** One main `whenSettled` call per job id while it is pending; resolves (never rejects) on settle or link loss. */

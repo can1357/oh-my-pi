@@ -52,7 +52,6 @@ export function mergeAnthropicBetaHeader(callerHeaders: Record<string, string>, 
 	return { "anthropic-beta": beta };
 }
 const oauthAuthBeta = "oauth-2025-04-20";
-const midConversationSystemBeta = "mid-conversation-system-2026-04-07";
 export const midConversationSystemClearAtBeta = "mid-conversation-system-clear-at-2026-08-21";
 export const midConversationToolChangesBeta = "mid-conversation-tool-changes-2026-07-01";
 export const midConversationOutputConfigBeta = "mid-conversation-output-config-2026-07-01";
@@ -76,7 +75,6 @@ const claudeCodeAgentBetaDefaults = [
 	thinkingTokenCountBeta,
 	contextManagementBeta,
 	promptCachingScopeBeta,
-	midConversationSystemBeta,
 ] as const;
 export const extendedCacheTtlBeta = "extended-cache-ttl-2025-04-11";
 export const fineGrainedToolStreamingBeta = "fine-grained-tool-streaming-2025-05-14";
@@ -320,7 +318,7 @@ export const claudeCodeHeaders = {
 	"X-Stainless-Package-Version": claudeCodeSdkVersion,
 	"X-Stainless-Retry-Count": "0",
 	"X-Stainless-Runtime": "node",
-	"X-Stainless-Runtime-Version": "v26.3.0",
+	"X-Stainless-Runtime-Version": "v26.12.1",
 	"X-Stainless-Timeout": "600",
 };
 

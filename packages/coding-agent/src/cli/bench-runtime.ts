@@ -23,6 +23,7 @@ import type { ApiKeyResolverModel } from "../config/api-key-resolver";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
+import type { AuthStorage } from "../session/auth-storage";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { concreteThinkingLevel, resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
 
@@ -53,6 +54,7 @@ export interface BenchModelRegistry {
 /** Live registry plus the settings and teardown hook backing it. */
 export interface BenchRuntime {
 	modelRegistry: BenchModelRegistry;
+	oauth?: AuthStorage["oauth"];
 	settings?: Settings;
 	close?: () => void;
 }
@@ -75,6 +77,7 @@ export async function createDefaultBenchRuntime(): Promise<BenchRuntime> {
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {
 			modelRegistry,
+			oauth: authStorage.oauth,
 			settings,
 			close: () => authStorage.close(),
 		};

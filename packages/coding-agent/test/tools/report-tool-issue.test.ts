@@ -1,20 +1,22 @@
 import { Database } from "bun:sqlite";
 import * as os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as reportIssue from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import {
 	__awaitAutoQaRecordPipelineForTests,
 	__resetAutoQaConsentForTests,
 	__resetAutoQaFlushStateForTests,
-	dispatchReportIssueDevice,
+	isReportIssueToolCall,
 	flushGrievances,
 	isAutoQaEnabled,
-	reportIssueDeviceUsage,
 } from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { specialToolCommands } from "@oh-my-pi/pi-coding-agent/tools/resolve";
+import { REPORT_ISSUE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
 import { mockFetch } from "../helpers/fetch-mock";
 
 function openTempDb(): Database {
@@ -28,7 +30,8 @@ function openTempDb(): Database {
 			report TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			pushed INTEGER NOT NULL DEFAULT 0,
-			push_error TEXT
+			push_error TEXT,
+			source TEXT
 		);
 	`);
 	return db;
@@ -467,7 +470,19 @@ describe("flushGrievances", () => {
 	});
 });
 
-describe("dispatchReportIssueDevice", () => {
+/** Find the report_issue tool among the session's special tool commands. */
+function reportIssueTool(session: ToolSession): Tool {
+	const tool = specialToolCommands(session).find(command => command.name === REPORT_ISSUE_COMMAND_NAME);
+	if (!tool) throw new Error(`Missing ${REPORT_ISSUE_COMMAND_NAME} tool command`);
+	return tool;
+}
+
+/** Run the report_issue tool command and return its result. */
+async function runReportIssue(session: ToolSession, text: string) {
+	return reportIssueTool(session).execute("report-issue-call", { report: text });
+}
+
+describe("report_issue tool command", () => {
 	beforeEach(() => {
 		// Fixture words (`read`, `glob`, …) must not depend on the host's login name.
 		stubIdentity("/home/omp-test-user", "omp-test-user");
@@ -498,14 +513,10 @@ describe("dispatchReportIssueDevice", () => {
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			const session = { settings: consentedSettings() } as ToolSession;
-			const { result, xdev } = await dispatchReportIssueDevice(
-				session,
-				"read: selector parse dropped trailing line",
-			);
+			const result = await runReportIssue(session, "read: selector parse dropped trailing line");
 			const first = result.content[0];
 			expect(first?.type).toBe("text");
 			if (first?.type === "text") expect(first.text).toBe("Noted, thanks!");
-			expect(xdev.tool).toBe("report_issue");
 			await settlePipeline();
 			expect(selectIds(db)).toHaveLength(1);
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
@@ -522,7 +533,7 @@ describe("dispatchReportIssueDevice", () => {
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(session, "grep\nreported matches include a deleted file");
+			await runReportIssue(session, "grep\nreported matches include a deleted file");
 			await settlePipeline();
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
 			expect(row).toEqual({ tool: "grep", report: "reported matches include a deleted file" });
@@ -534,11 +545,15 @@ describe("dispatchReportIssueDevice", () => {
 
 	it.each([
 		[
-			"xd://tui: start fails because kitty-vt-wasm is missing",
-			"xd://tui",
+			"help://read/sources: start fails because kitty-vt-wasm is missing",
+			"help://read/sources",
 			"start fails because kitty-vt-wasm is missing",
 		],
-		["write xd://tui: start fails before executing bun", "write xd://tui", "start fails before executing bun"],
+		[
+			"write help://read/sources: start fails before executing bun",
+			"write help://read/sources",
+			"start fails before executing bun",
+		],
 		[
 			'write conflict://*: per-id content "2:\ttext" was read as a hashline prefix',
 			"write conflict://*",
@@ -550,7 +565,7 @@ describe("dispatchReportIssueDevice", () => {
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(session, text);
+			await runReportIssue(session, text);
 			await settlePipeline();
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
 			expect(row).toEqual({ tool, report });
@@ -566,7 +581,7 @@ describe("dispatchReportIssueDevice", () => {
 	])("rejects %p, which has no `: ` separator, instead of splitting inside it", async text => {
 		Bun.env.PI_AUTO_QA = "1";
 		const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
-		await expect(dispatchReportIssueDevice(session, text)).rejects.toThrow("Invalid report format");
+		await expect(runReportIssue(session, text)).rejects.toThrow("Invalid report format");
 	});
 
 	it("clamps a prose first line so the stored tool stays within the collector limit", async () => {
@@ -577,7 +592,7 @@ describe("dispatchReportIssueDevice", () => {
 			const prose =
 				"eval içindeki tool.glob exact ve var olmayan yolu çağırınca beklenmedik şekilde RuntimeError fırlatıyor, sessizce boş dönmüyor";
 			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(session, `${prose}\nglob threw instead of returning empty`);
+			await runReportIssue(session, `${prose}\nglob threw instead of returning empty`);
 			await settlePipeline();
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
 			expect(Buffer.byteLength(row.tool, "utf8")).toBeLessThanOrEqual(128);
@@ -598,7 +613,7 @@ describe("dispatchReportIssueDevice", () => {
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(session, `bash: ${report}`);
+			await runReportIssue(session, `bash: ${report}`);
 			await settlePipeline();
 			const row = db.prepare("SELECT report FROM grievances").get() as { report: string };
 			return row.report;
@@ -634,10 +649,7 @@ describe("dispatchReportIssueDevice", () => {
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(
-				session,
-				"read: c:\\users\\will\\secret.txt and C:/USERS/WILL/x and -users-will-proj",
-			);
+			await runReportIssue(session, "read: c:\\users\\will\\secret.txt and C:/USERS/WILL/x and -users-will-proj");
 			await settlePipeline();
 			const row = db.prepare("SELECT report FROM grievances").get() as { report: string };
 			expect(row.report).toBe("~\\secret.txt and ~/x and -users-<user>-proj");
@@ -656,7 +668,7 @@ describe("dispatchReportIssueDevice", () => {
 		try {
 			// Consent unset and no UI handler registered → resolves to false.
 			const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
-			const { result } = await dispatchReportIssueDevice(session, "read: selector parse dropped trailing line");
+			const result = await runReportIssue(session, "read: selector parse dropped trailing line");
 			const first = result.content[0];
 			if (first?.type === "text") expect(first.text).toBe("Noted, thanks!");
 			await settlePipeline();
@@ -669,10 +681,39 @@ describe("dispatchReportIssueDevice", () => {
 		}
 	});
 
+	it("tags MCP tools with their server", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = {
+				settings: consentedSettings(),
+				getToolByName: (name: string) =>
+					name === "mcp__linear__search" ? ({ name, mcpServerName: "linear" } as unknown as AgentTool) : undefined,
+			} as ToolSession;
+			await runReportIssue(session, "mcp__linear__search: returned stale issues");
+			await settlePipeline();
+			expect(db.prepare("SELECT source FROM grievances").get()).toEqual({ source: "mcp:linear" });
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
 	it("rejects malformed body text with a usage hint", async () => {
 		const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
-		await expect(dispatchReportIssueDevice(session, "just a vague sentence")).rejects.toThrow(
-			reportIssueDeviceUsage(),
+		await expect(runReportIssue(session, "just a vague sentence")).rejects.toThrow("Invalid report format");
+	});
+});
+
+describe("isReportIssueToolCall", () => {
+	it("detects direct and shell report_issue calls only", () => {
+		expect(isReportIssueToolCall({ name: "report_issue" })).toBe(true);
+		expect(isReportIssueToolCall({ name: "bash", arguments: { command: "report_issue something went wrong" } })).toBe(
+			true,
 		);
+		expect(isReportIssueToolCall({ name: "resolve" })).toBe(false);
+		expect(isReportIssueToolCall({ name: "bash", arguments: { command: "echo report_issue" } })).toBe(false);
+		expect(isReportIssueToolCall({ name: "bash" })).toBe(false);
 	});
 });

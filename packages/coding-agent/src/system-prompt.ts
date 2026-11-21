@@ -38,32 +38,43 @@ import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" w
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
-import { normalizeConcurrencyLimit } from "./task/parallel";
+import type { SystemPromptSource, SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
-import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { quotePosixArgument } from "./utils/shell-quote";
+import { expandTilde } from "./tools/path-utils";
+import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import { combine } from "./config/registry";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
 import { cfgEvalAutoBackgroundEnabled } from "./eval/settings";
 import { cfgTtsrBuiltinRules, cfgTtsrDisabledRules, cfgTtsrEnabled } from "./export/ttsr-settings";
-import { cfgTuiAutoGraph, cfgTuiReactions, cfgTuiRenderMermaid, cfgTuiRenderSvg } from "./modes/settings";
+import {
+	cfgTuiAutoGraph,
+	cfgTuiReactions,
+	cfgTuiRenderEmbeds,
+	cfgTuiRenderMermaid,
+	cfgTuiRenderSvg,
+} from "./modes/settings";
 import { cfgSecretsEnabled } from "./secrets/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import {
+	cfgEncourageEdits,
 	cfgIncludeModelInPrompt,
 	cfgIncludeWorkspaceTree,
 	cfgInlineToolDescriptors,
 	cfgPersonality,
+	cfgSystemPromptTemplates,
 } from "./session/settings";
-import { cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import { cfgOvnfsPath, cfgTaskBatch, cfgTaskCrossInstance, cfgTaskEager } from "./task/settings";
+import { cfgBrowserCdpUrl, cfgBrowserRelayUrl } from "./tools/browser/settings";
 import {
 	cfgAsyncEnabled,
 	cfgOutEnabled,
 	cfgToolsIntentTracing,
-	cfgToolsXdevDocs,
-	cfgToolsXdevInlineDevices,
+	cfgToolsCommandDocs,
+	cfgToolsCommandInline,
 	cfgVaultEnabled,
 } from "./tools/settings";
 
@@ -75,26 +86,35 @@ import {
  */
 export const cfgSystemPromptInputs = combine({
 	personality: cfgPersonality,
+	systemPromptTemplates: cfgSystemPromptTemplates,
 	includeModelInPrompt: cfgIncludeModelInPrompt,
 	includeWorkspaceTree: cfgIncludeWorkspaceTree,
 	inlineToolDescriptors: cfgInlineToolDescriptors,
 	toolsFormat: cfgToolsFormat,
 	intentTracing: cfgToolsIntentTracing,
-	xdevDocs: cfgToolsXdevDocs,
-	xdevInlineDevices: cfgToolsXdevInlineDevices,
+	toolCommandDocs: cfgToolsCommandDocs,
+	toolCommandInline: cfgToolsCommandInline,
 	vaultEnabled: cfgVaultEnabled,
 	outEnabled: cfgOutEnabled,
+	crossInstanceAgents: cfgTaskCrossInstance,
 	renderMermaid: cfgTuiRenderMermaid,
 	renderSvg: cfgTuiRenderSvg,
+	renderEmbeds: cfgTuiRenderEmbeds,
 	autoGraph: cfgTuiAutoGraph,
 	reactions: cfgTuiReactions,
+	encourageEdits: cfgEncourageEdits,
 	// Rendered into the bash/eval/task tool descriptions (inline catalog) or read by
 	// the prompt builder (eager/batch delegation).
 	asyncEnabled: cfgAsyncEnabled,
 	bashAutoBackground: cfgBashAutoBackgroundEnabled,
 	evalAutoBackground: cfgEvalAutoBackgroundEnabled,
+	// Browser endpoint changes can enable pre-call platform safety guidance.
+	browserCdpUrl: cfgBrowserCdpUrl,
+	browserRelayUrl: cfgBrowserRelayUrl,
 	taskEager: cfgTaskEager,
 	taskBatch: cfgTaskBatch,
+	// Separate-checkout guidance names the ovnfs command.
+	ovnfsPath: cfgOvnfsPath,
 	// Rule bucketing (TTSR registrations, rulebook, always-apply) runs at rebuild time.
 	ttsrEnabled: cfgTtsrEnabled,
 	ttsrBuiltinRules: cfgTtsrBuiltinRules,
@@ -510,6 +530,12 @@ export interface BuildSystemPromptOptions {
 	resolvedCustomPrompt?: string;
 	/** Raw Handlebars template rendered with the default prompt's live context. */
 	systemPromptTemplate?: string;
+	/**
+	 * Compiled `systemPromptTemplates` setting, matched against `model`. The selected file replaces
+	 * only the bundled default and is read only then: explicit and discovered (`SYSTEM.md`/
+	 * `SYSTEM_TEMPLATE.md`) prompts win. A missing, empty, or invalid file warns and keeps the bundled prompt.
+	 */
+	modelSystemPromptTemplates?: readonly ModelPatternEntry<string>[];
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -555,19 +581,19 @@ export interface BuildSystemPromptOptions {
 	eagerTasksAlways?: boolean;
 	/** Whether `task.batch` is enabled; selects the centralized delegation guidance's call shape. */
 	taskBatch?: boolean;
-	/** Effective task concurrency limit displayed in centralized delegation guidance. Zero means unlimited. */
-	taskMaxConcurrency?: number;
 	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
 	taskIrcEnabled?: boolean;
 	/** Whether the read-only `scout` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
 	scoutAvailable?: boolean;
-	/** Active model's delegation appetite (catalog `delegation-bias` axis); selects the Delegation section's wording. Default: `eager`. */
+	/** Active model's delegation appetite (catalog `delegation-bias` axis); selects the Delegation section's wording. Default: `balanced`. */
 	delegationBias?: DelegationBias;
 
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
 	secretsEnabled?: boolean;
+	/** Spotlight's result-shaping notice (`SHAPE_RULE`), rendered under Tool I/O; omitted when Spotlight is off. */
+	resultShaping?: string;
 	/** Pre-loaded workspace tree (skips discovery if provided). May be a Promise to allow early kick-off. */
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/** Active `memory.backend` id; undefined when memory is off. */
@@ -578,6 +604,8 @@ export interface BuildSystemPromptOptions {
 	settingsApproval?: boolean;
 	/** Whether `out://` writes reach the user as transcript replies; gates advertising `out://`. */
 	outReplies?: boolean;
+	/** Advertise cross-instance agent addressing. */
+	crossInstanceAgents?: boolean;
 	/**
 	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
 	 * appended as its own block after the rendered template, so custom templates
@@ -596,20 +624,24 @@ export interface BuildSystemPromptOptions {
 	renderMermaid?: boolean;
 	/** Whether the reader's UI draws ```svg fences as themed images, so the prompt invites figures. Default: false */
 	renderSvg?: boolean;
+	/** Whether the reader's UI draws `<img>` pictures and `<iframe>` page screenshots, so the prompt offers them. Default: false */
+	renderEmbeds?: boolean;
 	/** Whether the reader's UI charts numeric Markdown tables, so the prompt routes data to tables and forbids duplicate charts. Default: false */
 	autoGraph?: boolean;
 	/** Whether the TUI lifts an opening emoji into a reaction badge on the user's message. Default: false */
 	reactions?: boolean;
+	/** Whether a critical rule makes file edits go through `edit` (sed/perl/python edits forbidden); false omits edit guidance. Default: true */
+	encourageEdits?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
-	/** Tools mounted under `xd://`; renders the protocol section when non-empty. `dynamic` marks external devices whose summary is third-party metadata. */
-	xdevTools?: Array<{ name: string; summary: string; dynamic?: boolean }>;
-	/** Full docs + JSON schema for every `xd://`-mounted tool, inlined into the protocol section so no discovery `read` is needed. */
-	xdevDocs?: string;
-	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
+	/** Tools mounted as commands; renders the Tool Commands section when non-empty. `dynamic` marks external commands whose summary is third-party metadata. */
+	mountedCommands?: Array<{ name: string; summary: string; dynamic?: boolean }>;
+	/** Inlined `--help` sections and the one-line catalog for mounted commands. */
+	toolCommandDocs?: string;
+	/** Whether Auto-QA grievance reporting is enabled; renders the `report_issue` note. */
 	autoQaEnabled?: boolean;
-	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
-	writeTransportOnly?: boolean;
+	/** ovnfs command when its binary is found (`ovnfsCommand`); renders the separate-checkout guidance. */
+	ovnfs?: string;
 	/**
 	 * Whether this prompt is for a subagent session. Replaces the Verify workflow with a hand-off:
 	 * the main agent verifies once after all subagents land, so parallel children don't storm the CPU.
@@ -621,21 +653,57 @@ export interface BuildSystemPromptOptions {
 export interface BuildSystemPromptResult {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
+	/** Context files and skills located in `systemPrompt`; absent for prompts not built from templates. */
+	sources?: SystemPromptSources;
 	/**
-	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
-	 * Empty/undefined when no catalog was emitted (no mounted devices, or a custom
-	 * prompt template that omits the section). Lets the session fold these devices
+	 * Names of mounted commands whose catalog section this prompt renders.
+	 * Empty/undefined when no catalog was emitted (no mounted commands, or a custom
+	 * prompt template that omits the section). Lets the session fold these commands
 	 * into its announced-mount baseline so a same-turn mount notice does not re-list
 	 * a catalog the prompt already carries (issue #7139).
 	 */
-	xdevCatalogNames?: readonly string[];
+	toolCommandCatalogNames?: readonly string[];
 }
 
 /** Static wrapper; compiled (not rendered) so user-authored Markdown passes through byte-for-byte. */
 const renderUserAppend = prompt.compile(userAppendPromptTemplate.trimEnd());
 
+type SourceIdentity = Pick<SystemPromptSource, "id" | "kind" | "label" | "path">;
+
+/** Drops the leading whitespace `String.trim` removes, shifting ranges with it. */
+function trimTracked(rendered: prompt.TrackedRender): prompt.TrackedRender {
+	const text = rendered.text.trim();
+	const lead = rendered.text.length - rendered.text.trimStart().length;
+	if (lead === 0) return { text, ranges: rendered.ranges };
+	return {
+		text,
+		ranges: rendered.ranges.map(ranges =>
+			ranges
+				.filter(range => range.start >= lead)
+				.map(range => ({ start: range.start - lead, end: range.end - lead })),
+		),
+	};
+}
+
+/** One source per tracked occurrence in `rendered`, which was built as block `block`. */
+function trackedSources(
+	rendered: prompt.TrackedRender,
+	block: number,
+	identities: readonly SourceIdentity[],
+): SystemPromptSource[] {
+	return rendered.ranges.flatMap((ranges, index) =>
+		ranges.map(({ start, end }, occurrence) => ({
+			...identities[index]!,
+			id: occurrence === 0 ? identities[index]!.id : `${identities[index]!.id}-${occurrence + 1}`,
+			block,
+			start,
+			end,
+		})),
+	);
+}
+
 /**
- * Join generated append blocks (memory, auto-learn, `xd://` routes, MCP server
+ * Join generated append blocks (memory, auto-learn, tool-command routes, MCP server
  * instructions) with the user's append prompt. Keep the user text in its own
  * section so it is not misclassified as MCP server-controlled instructions.
  */
@@ -679,16 +747,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks = false,
 		eagerTasksAlways = false,
 		taskBatch = true,
-		taskMaxConcurrency = 0,
 		taskIrcEnabled = false,
 		secretsEnabled = false,
+		resultShaping = "",
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
-		delegationBias = "eager",
+		delegationBias = "balanced",
 		memoryBackend,
 		securityEnabled = false,
 		settingsApproval = false,
 		outReplies = false,
+		crossInstanceAgents = false,
 		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
@@ -696,12 +765,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		includeWorkspaceTree = false,
 		renderMermaid = true,
 		renderSvg = false,
+		renderEmbeds = false,
 		autoGraph = false,
 		reactions = false,
-		xdevTools = [],
-		xdevDocs = "",
+		encourageEdits = true,
+		mountedCommands = [],
+		toolCommandDocs = "",
 		autoQaEnabled = false,
-		writeTransportOnly = false,
+		ovnfs,
 		subagent = false,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
@@ -729,6 +800,30 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			resolvedSystemPromptTemplate = undefined;
 		} else {
 			throw new Error("System prompt template must not be empty");
+		}
+	}
+	// A `systemPromptTemplates` file is discovered input like SYSTEM_TEMPLATE.md: it applies only when
+	// nothing above did, and a missing, empty, or invalid file falls back to the bundled prompt.
+	const modelTemplatePath =
+		resolvedSystemPromptTemplate === undefined && resolvedCustomPromptInput === undefined && !hasExplicitCustomPrompt
+			? matchModelPattern(options.modelSystemPromptTemplates ?? [], model)
+			: undefined;
+	if (modelTemplatePath !== undefined) {
+		const templateFile = expandTilde(modelTemplatePath);
+		try {
+			const content = await Bun.file(templateFile).text();
+			if (content.trim()) resolvedSystemPromptTemplate = content;
+			else
+				logger.warn("Ignoring empty systemPromptTemplates template; using the bundled prompt", {
+					model,
+					path: templateFile,
+				});
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			logger.warn("systemPromptTemplates template not found; using the bundled prompt", {
+				model,
+				path: templateFile,
+			});
 		}
 	}
 
@@ -922,18 +1017,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const toolListMode = !inlineToolDescriptors && nativeTools;
 	// Build tool descriptions for system prompt rendering.
 	const toolPromptNames = new Map<string, string>(toolNames.map(name => [name, tools?.get(name)?.wireName ?? name]));
-	// xd://-mounted tools count as present for prompt gates ({{#has tools "lsp"}})
-	// and resolve to their `xd://<name>` URL, the only way to reach them. The
-	// Tool Inventory list stays limited to real defs.
-	for (const mounted of xdevTools) {
-		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, `${XD_URL_PREFIX}${mounted.name}`);
+	// Mounted tool commands count as present for prompt gates ({{#has tools "lsp"}})
+	// and are referred to by their bare name, which is also the command to run.
+	// The Tool Inventory list stays limited to tools with a top-level definition.
+	for (const mounted of mountedCommands) {
+		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, mounted.name);
 	}
 	const toolRefs = Object.fromEntries(toolPromptNames.entries());
-	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
-	// A direct custom tool can share a name with a retained built-in device.
+	const mountedCommandNames = new Set(mountedCommands.map(mounted => mounted.name));
+	// A direct custom tool can share a name with a mounted tool command.
 	// Presence in both toolNames and tools proves it still has a top-level definition.
 	const inventoryToolNames =
-		xdevToolNames.size === 0 ? toolNames : toolNames.filter(name => tools?.has(name) || !xdevToolNames.has(name));
+		mountedCommandNames.size === 0
+			? toolNames
+			: toolNames.filter(name => tools?.has(name) || !mountedCommandNames.has(name));
 	const toolInfo = inventoryToolNames.map(name => ({
 		name: toolPromptNames.get(name) ?? name,
 		internalName: name,
@@ -956,13 +1053,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// Filter skills for the rendered system prompt:
 	// - require an active tool that declares `skill://` read capability (any tool
 	//   name, not just `read`, so custom resolvers count once projected; mounted
-	//   xd:// tools count too when their metadata is projected);
+	//   tool commands count too when their metadata is projected);
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasSkillReader =
 		tools === undefined
 			? toolNames.includes("read")
 			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
-				xdevTools.some(entry => toolReadsSkillUris(tools.get(entry.name)));
+				mountedCommands.some(entry => toolReadsSkillUris(tools.get(entry.name)));
 	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
 	const schemeHost: SchemeHost = {
 		skillUriAccess: hasSkillUriAccess,
@@ -971,6 +1068,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled,
 		settingsApproval,
 		outReplies,
+		crossInstanceAgents,
 		subagent,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
@@ -990,75 +1088,96 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
+	// A fence a file leaves open is closed at its end, so it never leaves the rest of the prompt unformatted.
+	const promptContextFiles = contextFiles.map(file => ({ ...file, content: prompt.closeCodeFence(file.content) }));
+	// Each `{{#each}}` iteration over a context file or skill records where that source landed.
+	const sourceItems = [...promptContextFiles, ...filteredSkills];
+	const sourceIdentities: SourceIdentity[] = [
+		...promptContextFiles.map((file, index) => ({
+			id: `instruction-${index}`,
+			kind: "instruction-files" as const,
+			label: file.path,
+		})),
+		...filteredSkills.map((skill, index) => ({
+			id: `skill-${index}`,
+			kind: "skills" as const,
+			label: skill.name,
+			path: skill.filePath,
+		})),
+	];
+	const selectedTemplate = resolvedCustomPrompt
+		? customSystemPromptTemplate
+		: (resolvedSystemPromptTemplate ?? systemPromptTemplate);
 	const environment = getEnvironmentInfo();
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
 		appendPrompt: resolvedAppendPrompt ?? "",
-		tools: [...new Set([...toolNames, ...xdevTools.map(mounted => mounted.name)])],
+		tools: [...new Set([...toolNames, ...mountedCommands.map(mounted => mounted.name)])],
 		toolInfo,
 		toolInventory,
 		inlineToolDescriptors,
 		toolListMode,
 		toolRefs,
 		environment,
-		contextFiles,
+		contextFiles: promptContextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
 		hasSkillUriAccess,
 		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
+		internalUrlReference: InternalUrlRouter.instance().reference(),
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		cwd: promptCwd,
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
-		delegationBias,
+		// An explicit eager-tasks mode lifts balanced/restrained wording to eager; gated has its own eager-tasks text.
+		delegationTier: eagerTasks && delegationBias !== "gated" ? "eager" : delegationBias,
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
 		intentGuidance: $env.PI_INTENT_PROMPT || intentGuidance || "",
 		eagerTasks,
 		eagerTasksAlways,
-		// Restrained bias yields to an explicit eager-tasks mode.
-		inlineFirstDelegation: delegationBias === "restrained" && !eagerTasks,
 		taskBatch,
-		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
+		resultShaping,
 		browserEnabled: evalPreludes.some(prelude => prelude.name === "browser"),
 		computerEnabled: evalPreludes.some(prelude => prelude.name === "computer"),
 		includeWorkspaceTree,
 		renderMermaid,
 		renderSvg,
+		renderEmbeds,
 		autoGraph,
 		reactions,
-		xdevTools,
-		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
-		xdevDocs,
+		encourageEdits,
+		mountedCommands,
+		hasDynamicToolCommands: mountedCommands.some(mounted => mounted.dynamic === true),
+		toolCommandDocs,
 		autoQaEnabled,
-		writeTransportOnly,
+		// The guidance pastes it into shell commands: always single-quoted, so no path character splits or expands it.
+		ovnfs: ovnfs && quotePosixArgument(ovnfs),
 		subagent,
 	};
-	const selectedTemplate = resolvedCustomPrompt
-		? customSystemPromptTemplate
-		: (resolvedSystemPromptTemplate ?? systemPromptTemplate);
-	let rendered: string;
+	let rendered: prompt.TrackedRender;
 	try {
-		rendered = prompt.render(selectedTemplate, data);
+		rendered = prompt.renderTracked(selectedTemplate, data, sourceItems);
 	} catch (error) {
 		if (resolvedSystemPromptTemplate === undefined) throw error;
-		if (!hasDiscoveredTemplate) {
+		if (options.systemPromptTemplate !== undefined) {
 			throw new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
 		}
-		logger.warn("Ignoring invalid discovered system prompt template; using the bundled prompt", {
+		logger.warn("Ignoring invalid system prompt template file; using the bundled prompt", {
 			error: String(error),
 		});
 		resolvedSystemPromptTemplate = undefined;
-		rendered = prompt.render(systemPromptTemplate, data);
+		rendered = prompt.renderTracked(systemPromptTemplate, data, sourceItems);
 	}
-	const systemPrompt = [rendered];
+	const systemPrompt = [rendered.text];
+	const sources = trackedSources(rendered, 0, sourceIdentities);
 	for (const prelude of evalPreludes) {
 		const guidance = prelude.guidance?.trim();
 		if (guidance) systemPrompt.push(guidance);
@@ -1068,19 +1187,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// `<project-context>` block after every static block, so sessions in
 	// different directories share the static prefix and the Anthropic head
 	// cache breakpoint lands right before this block.
-	const projectPrompt = prompt
-		.render(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt })
-		.trim();
-	if (projectPrompt) {
-		systemPrompt.push(projectPrompt);
+	const projectPrompt = trimTracked(
+		prompt.renderTracked(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt }, sourceItems),
+	);
+	if (projectPrompt.text) {
+		sources.push(...trackedSources(projectPrompt, systemPrompt.length, sourceIdentities));
+		systemPrompt.push(projectPrompt.text);
 	}
 
-	// Claim delivery only when the rendered block 0 actually carries the xd://
-	// section, so a template that references {{xdevDocs}} keeps mount-notice
+	// Claim delivery only when the rendered block 0 actually carries the tool-command
+	// catalog, so a template that references {{toolCommandDocs}} keeps mount-notice
 	// dedupe while one that omits it stays honest.
-	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 && rendered.includes("xd://")
-			? xdevTools.map(mounted => mounted.name)
+	const toolCommandCatalogNames =
+		!resolvedCustomPrompt && toolCommandDocs.length > 0 && rendered.text.includes(toolCommandDocs)
+			? mountedCommands.map(mounted => mounted.name)
 			: undefined;
-	return { systemPrompt, xdevCatalogNames };
+	return { systemPrompt, toolCommandCatalogNames, sources: { blocks: systemPrompt.slice(), sources } };
 }

@@ -11,10 +11,12 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
+import type { SessionStorage } from "../session/session-storage";
 import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import { noteAgentArrival } from "@oh-my-pi/pi-tui/overlays/agent-identity";
 export { MAIN_AGENT_ID };
 export type { AgentStatus, AgentMetricsSummary };
 
@@ -94,6 +96,24 @@ export function isMintedAgentRef(value: unknown): value is AgentRef {
 }
 
 /**
+ * The storage holding each ref's transcript, when known: the storage of the
+ * session that last attached to it, or the one a persisted roster scan read it
+ * from. Kept beside the ref rather than on it, because refs cross the worker
+ * RPC boundary and a storage holds a database client.
+ */
+const refStorages = new WeakMap<AgentRef, SessionStorage>();
+
+/** Record the storage holding `ref`'s transcript; `undefined` keeps what was known. */
+export function recordRefSessionStorage(ref: AgentRef, storage: SessionStorage | undefined): void {
+	if (storage) refStorages.set(ref, storage);
+}
+
+/** The storage holding `ref`'s transcript, when its session or its roster scan said. */
+export function refSessionStorage(ref: AgentRef): SessionStorage | undefined {
+	return refStorages.get(ref);
+}
+
+/**
  * Whether messaging `ref` resumes it: a live `idle` agent, or a `parked` or
  * killed one whose transcript is on disk. Task summaries use it to tell the
  * parent to resume a stopped agent instead of redoing its work.
@@ -150,8 +170,8 @@ export interface AgentRegistryApi {
 	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean;
 	/** Accepted-but-running refs whose run already finished. */
 	staleAcceptedRuns(): AgentRef[];
-	/** Record a short activity gist for the work-aware roster. */
-	setActivity(id: string, activity: string): void;
+	/** Record a roster heartbeat for `id` when it still matches `expected`. */
+	setActivity(id: string, activity: string, expected?: AgentRefExpectation): void;
 	/** Attach a live session to `id` when it still matches `expected`. */
 	attachSession(
 		id: string,
@@ -169,7 +189,7 @@ export interface AgentRegistryApi {
 	list(): AgentRef[];
 	/** Every alive non-advisor agent except `id`. */
 	listVisibleTo(id: string): AgentRef[];
-	/** Whether a ref's claimed running state is corroborated by its attached live session. */
+	/** Whether a ref's claimed running state is corroborated by its attached live session's open run. */
 	isRunning(ref: AgentRef): boolean;
 	/** Mirror a session's run-state notifications into ref `id`; returns the unsubscribe function. */
 	syncSessionStatus(id: string, session: AgentSessionHandle): () => void;
@@ -232,7 +252,11 @@ export class AgentRegistry implements AgentRegistryApi {
 			lifecycle: input.lifecycle,
 		};
 		Object.defineProperty(ref, kMintedRef, { value: true });
+		// Test doubles and remote proxies may carry no session manager.
+		recordRefSessionStorage(ref, input.session?.sessionManager?.getStorage?.());
 		this.#refs.set(ref.id, ref);
+		// Name colours follow arrival order; a re-registered or restored ref keeps its original `createdAt`.
+		if (ref.kind === "sub") noteAgentArrival(ref.id, ref.createdAt);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
@@ -259,7 +283,7 @@ export class AgentRegistry implements AgentRegistryApi {
 	reopen(id: string, expected: AgentRef): AgentRef | undefined {
 		const current = this.#refs.get(id);
 		if (current !== expected || current.status !== "aborted" || current.session) return undefined;
-		return this.register({
+		const reopened = this.register({
 			id,
 			displayName: current.displayName,
 			kind: current.kind,
@@ -270,6 +294,8 @@ export class AgentRegistry implements AgentRegistryApi {
 			createdAt: current.createdAt,
 			history: current.history,
 		});
+		recordRefSessionStorage(reopened, refSessionStorage(current));
+		return reopened;
 	}
 
 	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
@@ -333,12 +359,13 @@ export class AgentRegistry implements AgentRegistryApi {
 
 	/**
 	 * Record that this agent's run produced and handed over its final result,
-	 * and terminalize the ref when no turn is in flight. Acceptance is the
-	 * executor's run boundary: the result is settled, so a ref still `running`
-	 * with nothing streaming is a missed terminal transition the parent's
-	 * `wait` would otherwise keep blocking on. A ref with a genuinely
-	 * streaming session (a wake turn started at the boundary) stays `running`
-	 * and is surfaced by {@link staleAcceptedRuns} instead.
+	 * and terminalize the ref when its session's run is closed. Acceptance is
+	 * the executor's run boundary: the result is settled, so a ref still
+	 * `running` with no open run is a missed terminal transition the parent's
+	 * `wait` would otherwise keep blocking on. A ref whose session still has a
+	 * run open (a wake turn started at the boundary, or the run is paused on
+	 * background work) stays `running`; the run's own end reports `idle`, and
+	 * {@link staleAcceptedRuns} surfaces it if that never comes.
 	 *
 	 * Milestones are run-scoped: `responseAt` is the CURRENT call's response
 	 * time (never a previous run's, which {@link setStatus} cleared when the
@@ -356,7 +383,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			responseAt: responseAt ?? now,
 			acceptedAt: now,
 		};
-		if (ref.status === "running" && ref.session?.isStreaming !== true) {
+		if (ref.status === "running" && !this.isRunning(ref)) {
 			this.setStatus(id, "idle", ref);
 		} else {
 			this.#emit({ type: "metadata_changed", ref });
@@ -366,7 +393,7 @@ export class AgentRegistry implements AgentRegistryApi {
 
 	/**
 	 * Accepted-but-running refs: the run's final result was handed over but the
-	 * ref never left `running`, and no turn is in flight. This is the lifecycle
+	 * ref never left `running`, and its session has no run open. This is the lifecycle
 	 * leak the `proc://` running-agents roster reports so the parent can cancel it
 	 * instead of waiting on a run that already finished.
 	 */
@@ -390,10 +417,9 @@ export class AgentRegistry implements AgentRegistryApi {
 	 * intent text can neither break the roster nor smuggle terminal escapes —
 	 * every caller is safe without sanitizing at its own call site.
 	 */
-	setActivity(id: string, activity: string): void {
+	setActivity(id: string, activity: string, expected?: AgentRefExpectation): void {
 		const ref = this.#refs.get(id);
-		if (!ref) return;
-		if (ref.status !== "running") return;
+		if (!ref || ref.status !== "running" || !this.#matchesExpected(ref, expected)) return;
 		const gist = oneLineLabel(activity);
 		ref.lastActivity = Date.now();
 		if (ref.activity === gist) return;
@@ -412,6 +438,7 @@ export class AgentRegistry implements AgentRegistryApi {
 		// createAgentSession after an explicit kill.
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = session;
+		recordRefSessionStorage(ref, session.sessionManager?.getStorage?.());
 		if (sessionFile !== undefined) {
 			// A replacement transcript starts a new cumulative-cost identity.
 			if (ref.sessionFile !== sessionFile && ref.history?.directCost !== undefined) {
@@ -457,10 +484,13 @@ export class AgentRegistry implements AgentRegistryApi {
 		);
 	}
 
-	/** Whether a ref's claimed running state is corroborated by its attached live session. */
+	/**
+	 * Whether a ref's claimed running state is corroborated by its attached live session:
+	 * its run is open, streaming or paused until a job, child or peer message resumes it.
+	 */
 	isRunning(ref: AgentRef): boolean {
 		if (ref.status !== "running") return false;
-		return ref.session?.isStreaming === true;
+		return ref.session?.runStartedAt !== undefined;
 	}
 
 	/** Mirror a session's authoritative run-state notifications into its owned registry ref. */

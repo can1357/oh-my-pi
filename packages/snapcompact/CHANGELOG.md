@@ -2,9 +2,27 @@
 
 ## [Unreleased]
 
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- `resolveShape()` uses a model's configured `snapcompactShape` in place of its model-line default; an explicit variant still wins and billing still follows the model ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
+
+## [18.20.0] - 2026-11-12
+
+### Added
+
+- `resolveShapeAndScan()` returns the auto-picked shape together with its `scanRenderability()` verdict, reusing the scan auto resolution already runs; exported `ShapeScan` and `RenderabilityScan` types ([#15689](https://github.com/can1357/oh-my-pi/issues/15689), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
+
+### Changed
+
+- `compact()` splits its synchronous work into two `compaction.snapcompact` loop phases (building the archive source, then planning the layout) with an event-loop turn between them, shortening the longest main-thread block on long histories ([#15689](https://github.com/can1357/oh-my-pi/issues/15689), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
+
+## [18.17.0] - 2026-11-06
+
 ### Fixed
 
-- Fixed `compact()` dropping the imaged history of an archive saved before omp 16.1.0 without a word: the new summary now counts those characters as dropped history ([#17883](https://github.com/can1357/oh-my-pi/pull/17883) by [@will-bogusz](https://github.com/will-bogusz))
+- `compact()` now keeps image content from pre-16.1.0 archived histories in the dropped-history summary.
 
 ## [18.16.0] - 2026-11-02
 

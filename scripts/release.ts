@@ -34,7 +34,7 @@ const cargoTomlGlob = new Glob("crates/*/Cargo.toml");
  * no downstream manifest (package.json, Cargo.toml, tag) ever sees a `v`
  * prefix — Cargo rejects `version = "v17.2.8"`.
  */
-export function validateExplicitVersion(version: string): string | null {
+function validateExplicitVersion(version: string): string | null {
 	const match = /^v?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(version);
 	return match ? match[1] : null;
 }
@@ -220,7 +220,7 @@ export function parseVersion(v: string): [number, number, number] {
 	return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
 }
 
-export function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
+function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
 	const [major, minor, patch] = parseVersion(current);
 	if (bump === "patch" && /-canary\.\d+$/.test(current)) {
 		return `${major}.${minor}.${patch}`;
@@ -235,7 +235,7 @@ export function bumpVersion(current: string, bump: "major" | "minor" | "patch"):
 	}
 }
 
-export function bumpCanaryVersion(current: string): string {
+function bumpCanaryVersion(current: string): string {
 	const [major, minor, patch] = parseVersion(current);
 	const canaryMatch = current.match(/-canary\.(\d+)$/);
 	if (canaryMatch) {
@@ -384,7 +384,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log();
 
-	// pi-natives addons carry no per-release Rust edit: every install stamps
+	// omp-natives addons carry no per-release Rust edit: every install stamps
 	// `packages/natives/package.json#version` into the addon post-link
 	// (scripts/stamp-native-version.ts via scripts/bazel-natives.ts), so the
 	// version bump above is the only native-facing change.

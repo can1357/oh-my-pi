@@ -39,6 +39,7 @@ import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
+import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
@@ -98,6 +99,7 @@ import type {
 	ResourcesDiscoverResult,
 	SessionBeforeBranchResult,
 	SessionBeforeCompactResult,
+	SessionBeforeShutdownResult,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionCompactingResult,
@@ -192,6 +194,31 @@ const SESSION_IDENTITY_EVENTS: Record<string, true> = {
 	session_branch: true,
 };
 
+/**
+ * Cancellable pre-events. Each may veto its operation, so — like `tool_call` —
+ * each is a gate whose handlers may consult the operator: time spent in host
+ * dialogs does not count against the handler budget.
+ */
+const SESSION_BEFORE_EVENTS: Record<string, true> = {
+	session_before_switch: true,
+	session_before_branch: true,
+	session_before_compact: true,
+	session_before_tree: true,
+	session_before_shutdown: true,
+};
+
+/**
+ * Events whose `signal` releases the dispatch: on abort the emitter stops
+ * waiting, pending handler dialogs close, and late results are dropped. Other
+ * events' signals (`session_before_compact`, `session_before_tree`) are
+ * cooperative: handlers should honor them, but their operation still awaits
+ * the handlers so nothing runs alongside a handler that ignores the abort.
+ */
+const RELEASING_SIGNAL_EVENTS: Record<string, true> = {
+	session_stop: true,
+	session_before_shutdown: true,
+};
+
 interface HandlerTimeoutBudget {
 	pause(): void;
 	resume(): void;
@@ -213,6 +240,7 @@ function createHandlerUIContext(
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionUIContext {
 	const askDialog = ui.askDialog;
+	const formDialog = ui.formDialog;
 	const approve = ui.approve;
 	const runDialog = async <T>(dialog: () => Promise<T>): Promise<T> => {
 		timeoutBudget?.pause();
@@ -232,6 +260,10 @@ function createHandlerUIContext(
 		askDialog: askDialog
 			? (questions, dialogOptions) =>
 					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
+			: undefined,
+		formDialog: formDialog
+			? (html, dialogOptions) =>
+					runDialog(() => formDialog.call(ui, html, attachHandlerSignal(dialogOptions, handlerSignal)))
 			: undefined,
 		approve: approve
 			? (prompt, dialogOptions) =>
@@ -262,7 +294,10 @@ function createHandlerUIContext(
 		},
 		editor: (title, prefill, dialogOptions, editorOptions) =>
 			runDialog(() => ui.editor(title, prefill, attachHandlerSignal(dialogOptions, handlerSignal), editorOptions)),
-	} satisfies Pick<ExtensionUIContext, "select" | "confirm" | "input" | "askDialog" | "approve" | "custom" | "editor">;
+	} satisfies Pick<
+		ExtensionUIContext,
+		"select" | "confirm" | "input" | "askDialog" | "formDialog" | "approve" | "custom" | "editor"
+	>;
 	const delegatedMethods = new Map<PropertyKey, unknown>();
 
 	return new Proxy(ui, {
@@ -390,6 +425,25 @@ async function raceHandlerWithTimeout<T>(
 	}
 }
 
+/**
+ * Wait for an extension's earlier deliveries until `deadline` (a
+ * `performance.now()` instant). Resolves `false` when the deadline passes or
+ * `signal` aborts first; an already-settled `ready` wins even at a past deadline.
+ */
+async function awaitDeliveryTurn(ready: Promise<void>, deadline: number, signal?: AbortSignal): Promise<boolean> {
+	if (signal?.aborted) return false;
+	const { promise: expired, resolve } = Promise.withResolvers<boolean>();
+	const timer = setTimeout(resolve, Math.max(0, deadline - performance.now()), false);
+	const onAbort = () => resolve(false);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([ready.then(() => true), expired]);
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 const MAX_PENDING_CREDENTIAL_DISABLED = 32;
 
 /**
@@ -420,14 +474,22 @@ type RunnerEmitEvent = Exclude<
 
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
-	{ type: "session_before_switch" | "session_before_branch" | "session_before_compact" | "session_before_tree" }
+	{
+		type:
+			| "session_before_switch"
+			| "session_before_branch"
+			| "session_before_compact"
+			| "session_before_tree"
+			| "session_before_shutdown";
+	}
 >;
 
 type SessionBeforeEventResult =
 	| SessionBeforeSwitchResult
 	| SessionBeforeBranchResult
 	| SessionBeforeCompactResult
-	| SessionBeforeTreeResult;
+	| SessionBeforeTreeResult
+	| SessionBeforeShutdownResult;
 
 type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_switch" }
 	? SessionBeforeSwitchResult | undefined
@@ -437,11 +499,13 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 			? SessionBeforeCompactResult | undefined
 			: TEvent extends { type: "session_before_tree" }
 				? SessionBeforeTreeResult | undefined
-				: TEvent extends { type: "session.compacting" }
-					? SessionCompactingResult | undefined
-					: TEvent extends { type: "session_stop" }
-						? SessionStopEventResult | undefined
-						: undefined;
+				: TEvent extends { type: "session_before_shutdown" }
+					? SessionBeforeShutdownResult | undefined
+					: TEvent extends { type: "session.compacting" }
+						? SessionCompactingResult | undefined
+						: TEvent extends { type: "session_stop" }
+							? SessionStopEventResult | undefined
+							: undefined;
 
 // Session-lifecycle handler types live once in session-handler-types (imported
 // above for local use); re-exported here to keep this module's public API stable.
@@ -514,6 +578,15 @@ interface ToolRegistrationScope {
 	closed: boolean;
 }
 
+/** One extension's place in its delivery queue for one {@link ExtensionRunner.emit} call. */
+interface DeliveryTurn {
+	/** Settles once the extension has handled every earlier event; undefined when its queue was idle. */
+	ready: Promise<void> | undefined;
+	/** `performance.now()` instant after which the event stops waiting for earlier deliveries. */
+	deadline: number;
+	release: () => void;
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -566,12 +639,22 @@ export class ExtensionRunner {
 	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
+	/** Latest pending delivery per extension; see {@link #reserveDeliveryTurns}. Absent while idle. */
+	#deliveryTails = new Map<Extension, Promise<void>>();
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
 	#suspendedExtensions = new Set<Extension>();
 	/** Per-extension listener factories from {@link onToolRegistered}, applied to late-added extensions too. */
 	#toolRegistrationSubscribers = new Set<(extension: Extension) => ToolRegistrationListener>();
+	/**
+	 * What each persisted history message looked like on the previous
+	 * {@link emitContext} pass, keyed by the history message itself: the hash of
+	 * a hook's rewrite, or `null` when no hook touched it. A hook that rewrites a
+	 * message the same way every call (e.g. a stable tag prefix) leaves its bytes
+	 * unchanged across requests, so that message is not per-call.
+	 */
+	#contextProjections = new WeakMap<AgentMessage, number | bigint | null>();
 	/** Latest `session_start` broadcast, replayed to extensions added afterwards. */
 	#sessionStartEvent: RunnerEmitEvent | undefined;
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
@@ -635,9 +718,9 @@ export class ExtensionRunner {
 	 * The agent loop emits `tool_call` at arg-prep time (before scheduling and
 	 * `tool_execution_start`) via the session's `beforeToolCall` wiring; the
 	 * marker tells `ExtensionToolWrapper.execute` not to emit a second event for
-	 * the same dispatch. Keyed by call id + tool name because a nested xd://
-	 * device dispatch reuses the model's toolCallId under a different tool name
-	 * and must still emit its own event. Bounded: markers for calls whose
+	 * the same dispatch. Keyed by call id + tool name because a tool command run
+	 * inside a `bash` call reuses the model's toolCallId while dispatching under
+	 * its own name and must still emit its own event. Bounded: markers for calls whose
 	 * execute path never runs (policy deny, validation failure) would otherwise
 	 * accumulate for the session's lifetime.
 	 */
@@ -820,6 +903,15 @@ export class ExtensionRunner {
 	 */
 	get sessionId(): string {
 		return this.sessionManager.getSessionId();
+	}
+
+	/**
+	 * Writer for the records the approval gate keeps in this session's file. The gate scopes its
+	 * grants to this runner's session, so its records belong to that same file; the tool context
+	 * only carries a read-only view.
+	 */
+	get approvalRecords(): ApprovalRecordSink {
+		return this.sessionManager;
 	}
 
 	/**
@@ -1051,14 +1143,6 @@ export class ExtensionRunner {
 
 	grantSessionApproval(key: string): void {
 		this.#sessionApprovals.add(`${this.sessionId}\0${key}`);
-	}
-
-	/** Every key {@link hasSessionApproval} holds for the current session, in grant order. */
-	sessionApprovalKeys(): string[] {
-		const prefix = `${this.sessionId}\0`;
-		const keys: string[] = [];
-		for (const entry of this.#sessionApprovals) if (entry.startsWith(prefix)) keys.push(entry.slice(prefix.length));
-		return keys;
 	}
 
 	getUIContext(): ExtensionUIContext {
@@ -1723,8 +1807,9 @@ export class ExtensionRunner {
 		const getModel = model ? () => model : this.#getModel;
 		const runEphemeralTurn = this.#runEphemeralTurnFn;
 		const createAnnotations = this.#createAnnotations;
-		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
-			this.runtime.sendUserMessage(text, options);
+		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void => {
+			void this.runtime.sendUserMessage(text, options);
+		};
 		const getSessionModes = () => this.#sessionModes;
 		return {
 			ui: this.#uiContext,
@@ -1773,6 +1858,8 @@ export class ExtensionRunner {
 						const onTextDelta = options.onTextDelta;
 						const request = {
 							...options,
+							// Unnamed extension turns still journal their spend.
+							purpose: options.purpose ?? "extension",
 							onTextDelta: onTextDelta
 								? (delta: string) => this.#ephemeralTurnBlocker.exit(() => onTextDelta(delta))
 								: undefined,
@@ -1850,12 +1937,7 @@ export class ExtensionRunner {
 	}
 
 	#isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
-		return (
-			event.type === "session_before_switch" ||
-			event.type === "session_before_branch" ||
-			event.type === "session_before_compact" ||
-			event.type === "session_before_tree"
-		);
+		return SESSION_BEFORE_EVENTS[event.type] === true;
 	}
 	#isSessionShutdownEvent(event: RunnerEmitEvent): event is Extract<RunnerEmitEvent, { type: "session_shutdown" }> {
 		return event.type === "session_shutdown";
@@ -1869,15 +1951,16 @@ export class ExtensionRunner {
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
-		// `session_stop` carries its own signal on the event; `tool_call` receives
-		// the outer dispatch signal (loop request or wrapper execute) so an abort
-		// while a handler awaits a human dialog cancels the dialog and settles the
-		// gate without executing the underlying tool. Compose whichever apply.
-		const sessionStopSignal =
-			event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
+		// Releasing events (RELEASING_SIGNAL_EVENTS) carry their own signal;
+		// `tool_call` receives the outer dispatch signal (loop request or wrapper
+		// execute). Either way an abort while a handler awaits a human dialog
+		// cancels the dialog and settles the dispatch even when the handler
+		// ignores the signal.
+		const ownSignal =
+			RELEASING_SIGNAL_EVENTS[event.type] && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
 				: undefined;
-		const signals = [outerSignal, sessionStopSignal].filter((s): s is AbortSignal => s !== undefined);
+		const signals = [outerSignal, ownSignal].filter((s): s is AbortSignal => s !== undefined);
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 		if (signal?.aborted) return undefined;
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
@@ -1893,7 +1976,7 @@ export class ExtensionRunner {
 							const handlerContext = createHandlerContext(
 								ctx,
 								handlerSignal,
-								event.type === "tool_call" ? budget : undefined,
+								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
 							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(event, handlerContext),
@@ -1983,50 +2066,63 @@ export class ExtensionRunner {
 			return result as RunnerEmitResult<TEvent>;
 		}
 
-		for (const ext of extensions) {
-			const handlers = ext.handlers.get(event.type);
-			if (!handlers || handlers.length === 0) continue;
-			ctx ??= this.createContext();
-
-			for (const handler of handlers) {
-				const handlerResult = await this.#runHandlerWithTimeout(
-					handler,
-					event,
-					ctx,
-					ext,
-					handlerTimeoutForEvent(event.type),
-				);
-
-				if (this.#isSessionBeforeEvent(event) && handlerResult) {
-					result = handlerResult as SessionBeforeEventResult;
-					if (result.cancel) {
-						return result as RunnerEmitResult<TEvent>;
-					}
+		const timeoutMs = handlerTimeoutForEvent(event.type);
+		const signal =
+			RELEASING_SIGNAL_EVENTS[event.type] && "signal" in event && event.signal instanceof AbortSignal
+				? event.signal
+				: undefined;
+		const turns = this.#reserveDeliveryTurns(extensions, event.type, timeoutMs);
+		try {
+			for (const ext of extensions) {
+				const handlers = ext.handlers.get(event.type);
+				if (!handlers || handlers.length === 0) continue;
+				const turn = turns?.get(ext);
+				if (turn?.ready && !(await awaitDeliveryTurn(turn.ready, turn.deadline, signal)) && !signal?.aborted) {
+					logger.warn("Extension still handling an earlier event; delivering out of order", {
+						extensionPath: ext.path,
+						event: event.type,
+						timeoutMs,
+					});
 				}
+				ctx ??= this.createContext();
 
-				if (event.type === "session.compacting" && handlerResult) {
-					result = handlerResult as SessionCompactingResult;
-				}
+				for (const handler of handlers) {
+					const handlerResult = await this.#runHandlerWithTimeout(handler, event, ctx, ext, timeoutMs);
 
-				if (event.type === "session_stop" && handlerResult) {
-					const stopResult = handlerResult as SessionStopEventResult;
-					if (stopResult.decision === "block") {
-						return stopResult as RunnerEmitResult<TEvent>;
+					if (this.#isSessionBeforeEvent(event) && handlerResult) {
+						result = handlerResult as SessionBeforeEventResult;
+						if (result.cancel) {
+							return result as RunnerEmitResult<TEvent>;
+						}
 					}
-					const continuationContext = stopResult.additionalContext || stopResult.reason;
-					if (stopResult.continue === true && continuationContext) {
-						if (result) {
-							const prior = result as SessionStopEventResult;
-							result = {
-								continue: true,
-								additionalContext: `${prior.additionalContext || prior.reason}\n\n${continuationContext}`,
-							};
-						} else {
-							result = stopResult;
+
+					if (event.type === "session.compacting" && handlerResult) {
+						result = handlerResult as SessionCompactingResult;
+					}
+
+					if (event.type === "session_stop" && handlerResult) {
+						const stopResult = handlerResult as SessionStopEventResult;
+						if (stopResult.decision === "block") {
+							return stopResult as RunnerEmitResult<TEvent>;
+						}
+						const continuationContext = stopResult.additionalContext || stopResult.reason;
+						if (stopResult.continue === true && continuationContext) {
+							if (result) {
+								const prior = result as SessionStopEventResult;
+								result = {
+									continue: true,
+									additionalContext: `${prior.additionalContext || prior.reason}\n\n${continuationContext}`,
+								};
+							} else {
+								result = stopResult;
+							}
 						}
 					}
 				}
+				turn?.release();
 			}
+		} finally {
+			if (turns) for (const turn of turns.values()) turn.release();
 		}
 
 		// Handlers for these events export session-scoped environment (a session
@@ -2042,6 +2138,47 @@ export class ExtensionRunner {
 		}
 
 		return result as RunnerEmitResult<TEvent>;
+	}
+
+	/**
+	 * Queue an event behind each subscribed extension's earlier events before
+	 * the first await, so every extension handles events in emission order even
+	 * while an earlier-loaded extension is still handling one: otherwise a slow
+	 * `tool_execution_start` handler lets the call's `tool_execution_end` reach
+	 * later extensions first (#17680). Load order within one event is kept.
+	 *
+	 * An event waits for the extension's earlier deliveries at most `timeoutMs`
+	 * after it was emitted, then runs out of order. Each handler run is capped
+	 * by the same budget, so an extension that stalls on a stream of events
+	 * (`tool_execution_update`) cannot build an unbounded serial backlog.
+	 *
+	 * Emits made inside a running handler (open handler scope) skip the queue:
+	 * that handler may be awaiting them (`ctx.newSession()` from `agent_end`),
+	 * and queueing them behind it, or behind a later extension still waiting
+	 * for it, would deadlock until the handler timeout.
+	 */
+	#reserveDeliveryTurns(
+		extensions: readonly Extension[],
+		type: string,
+		timeoutMs: number,
+	): Map<Extension, DeliveryTurn> | undefined {
+		const scope = this.#toolRegistrationScope.getStore();
+		if (scope && !scope.closed) return undefined;
+		const deadline = performance.now() + timeoutMs;
+		let turns: Map<Extension, DeliveryTurn> | undefined;
+		for (const ext of extensions) {
+			if (!ext.handlers.get(type)?.length) continue;
+			const ready = this.#deliveryTails.get(ext);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#deliveryTails.set(ext, promise);
+			const release = () => {
+				resolve();
+				if (this.#deliveryTails.get(ext) === promise) this.#deliveryTails.delete(ext);
+			};
+			turns ??= new Map();
+			turns.set(ext, { ready, deadline, release });
+		}
+		return turns;
 	}
 
 	/**
@@ -2420,13 +2557,38 @@ export class ExtensionRunner {
 			const unchanged = historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
 			clearContextHistoryIndex(message);
 			if (historyMessage) clearContextHistoryIndex(historyMessage);
-			if (!unchanged) markPerCallContextMessage(message);
+			if (unchanged) {
+				this.#contextProjections.set(historyMessage, null);
+				continue;
+			}
+			if (!historyMessage || !this.#isRepeatedProjection(historyMessage, message)) {
+				markPerCallContextMessage(message);
+			}
 		}
 		for (const message of messages) clearContextHistoryIndex(message);
 		// An aborted handler is skipped and its input kept unchanged. Never hand that
 		// untransformed (possibly unredacted) context back to a caller as if every hook ran.
 		signal?.throwIfAborted();
 		return currentMessages;
+	}
+
+	/**
+	 * Whether a hook-rewritten history message carries the same bytes it carried
+	 * on the previous pass. A first sighting counts as repeated: the message is
+	 * new to the tail, and treating it as volatile would keep the rolling
+	 * Anthropic breakpoint off every message a tool loop appends. A projection
+	 * that later differs is marked per-call from then on, call by call.
+	 */
+	#isRepeatedProjection(historyMessage: AgentMessage, message: AgentMessage): boolean {
+		let projection: number | bigint;
+		try {
+			projection = Bun.hash(JSON.stringify(message));
+		} catch {
+			return false;
+		}
+		const previous = this.#contextProjections.get(historyMessage);
+		this.#contextProjections.set(historyMessage, projection);
+		return previous === undefined || previous === projection;
 	}
 
 	/** Runs request payload hooks with the model used for that provider request. */

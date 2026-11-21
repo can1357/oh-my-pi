@@ -55,7 +55,7 @@ import {
 } from "./registry";
 // Registers every setting before any instance is read (definitions live next to their domains).
 import "./all-settings";
-import { cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
+import { cfgDisabledProviders, cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -136,9 +136,20 @@ type ProjectSettingsReadResult = {
 	settings: RawSettings;
 	fileSettings: RawSettings;
 	shellPathSource: string | undefined;
-	/** Files that supplied merged project-level settings items. */
+	/** Discovered project files to invalidate and watch, including filtered or temporarily missing sources. */
 	sourcePaths: string[];
 	/** Project warnings surfaced for this read; commit with the layer as `#projectSettingsWarningsSeen`. */
+	warningsSeen: Set<string>;
+};
+
+/** A project-layer read before `disabledProviders` filtering; `#resolveProjectRead` merges it. */
+type ProjectSettingsDiscovery = {
+	cwd: string;
+	quarantineInvalid: boolean;
+	/** Project-level settings items in discovery order, disabled providers' items included. */
+	items: SettingsCapabilityItem[];
+	nativeModelRoles: unknown;
+	fileSettings: RawSettings;
 	warningsSeen: Set<string>;
 };
 
@@ -429,6 +440,45 @@ function pathMatchesPrefix(cwd: string, prefix: string): boolean {
 	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+/**
+ * Phonon voice replacing each retired Kokoro voice family, keyed by Kokoro's
+ * accent/gender prefix (`af_heart` → American female → `harper`).
+ */
+const PHONON_VOICE_FOR_KOKORO_PREFIX: Record<string, string> = {
+	af_: "harper",
+	am_: "easton",
+	bf_: "maeve",
+	bm_: "edwin",
+};
+
+/**
+ * Local TTS moved from Kokoro-82M to Phonon 31M: rewrite configured Kokoro
+ * voice ids (`tts.localVoice`, `speech.voice`) to the Phonon voice of the same
+ * accent and gender, and a `local/kokoro` speech role to `local/phonon-31m`.
+ * Handles nested and quoted-dotted sources.
+ */
+function migrateKokoroSpeechSettings(raw: RawSettings): void {
+	const phononVoice = (value: unknown): string | undefined =>
+		typeof value === "string" ? PHONON_VOICE_FOR_KOKORO_PREFIX[value.slice(0, 3)] : undefined;
+	const phononRole = (value: unknown): unknown =>
+		value === "local/kokoro"
+			? "local/phonon-31m"
+			: Array.isArray(value)
+				? value.map(entry => (entry === "local/kokoro" ? "local/phonon-31m" : entry))
+				: value;
+	const leaves: Array<[root: string, leaf: string, migrate: (value: unknown) => unknown]> = [
+		["tts", "localVoice", value => phononVoice(value) ?? value],
+		["speech", "voice", value => phononVoice(value) ?? value],
+		["modelRoles", "speech", phononRole],
+	];
+	for (const [root, leaf, migrate] of leaves) {
+		const rootObj = raw[root];
+		if (isRecord(rootObj) && leaf in rootObj) rootObj[leaf] = migrate(rootObj[leaf]);
+		const dotted = `${root}.${leaf}`;
+		if (dotted in raw) raw[dotted] = migrate(raw[dotted]);
+	}
+}
+
 function stringArrayFromUnknown(value: unknown): string[] {
 	if (typeof value === "string") return [value];
 	if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
@@ -535,41 +585,102 @@ function runChangeListeners(listeners: ReadonlySet<SettingChangeListener>, setti
 	}
 }
 
+/** Path prefixes a path-scoped array entry names under `path`, `paths`, `pathPrefix`, `pathPrefixes`. */
+function pathScopePrefixes(entry: Record<string, unknown>): string[] {
+	return [
+		...stringArrayFromUnknown(entry.path),
+		...stringArrayFromUnknown(entry.paths),
+		...stringArrayFromUnknown(entry.pathPrefix),
+		...stringArrayFromUnknown(entry.pathPrefixes),
+	];
+}
+
+/**
+ * Default entries an object-item path-scoped `list` keeps: a non-empty list of only scoped entries
+ * adds to the setting's default (the built-in interceptor rules) rather than replacing it, so this
+ * returns that default; any unscoped entry makes the list replace it, so this returns `[]`.
+ * Read by {@link resolvePathScopedArray} and by layered merges, which must keep that meaning once a
+ * higher layer prepends unscoped entries onto a scoped-only lower list.
+ */
+function scopedListDefault(setting: AnySetting, list: readonly unknown[]): readonly unknown[] {
+	const { definition } = setting;
+	if (definition.type !== "array" || definition.pathScoped?.itemType !== "object" || list.length === 0) return [];
+	return list.some(entry => isRecord(entry) && pathScopePrefixes(entry).length === 0) ? [] : definition.default;
+}
+
+/**
+ * Appends the object `entries` that apply at `cwd` to `resolved`.
+ * An entry naming no path prefix (none of the scope keys, or only unusable values such as YAML's
+ * `path: ~` = null) is unscoped and passes through unchanged. A scoped entry whose prefix covers `cwd`
+ * contributes its remaining fields as an inline rule, then its nested `values`/`items`/`valuesKey`
+ * entries resolved the same way, so no rule it carries is dropped inside its scope.
+ */
+function resolvePathScopedObjects(
+	entries: readonly unknown[],
+	valuesKey: string,
+	cwd: string,
+	resolved: unknown[],
+): void {
+	for (const entry of entries) {
+		if (!isRecord(entry)) continue;
+		const prefixes = pathScopePrefixes(entry);
+		if (prefixes.length === 0) {
+			resolved.push(entry);
+			continue;
+		}
+		if (!prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
+
+		const {
+			path: _path,
+			paths: _paths,
+			pathPrefix: _prefix,
+			pathPrefixes: _prefixes,
+			values,
+			items,
+			[valuesKey]: nested,
+			...inlineRule
+		} = entry;
+		if (Object.keys(inlineRule).length > 0) resolved.push(inlineRule);
+		for (const list of [values, items, nested]) {
+			if (Array.isArray(list)) resolvePathScopedObjects(list, valuesKey, cwd, resolved);
+		}
+	}
+}
+
 /** Value `setting` has in the `merged` layers, path-scoped entries resolved for `cwd`; `null` counts as unset. */
 function configuredValue(merged: RawSettings, setting: AnySetting, cwd: string): unknown {
 	const value = getByPath(merged, setting.segments);
 	if (value === undefined || value === null) return undefined;
-	return resolvePathScopedStringArray(setting, value, cwd) ?? value;
+	return resolvePathScopedArray(setting, value, cwd) ?? value;
 }
 
-function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: string): string[] | undefined {
+function resolvePathScopedArray(setting: AnySetting, value: unknown, cwd: string): unknown[] | undefined {
 	const scope = setting.definition.pathScoped;
 	if (!scope || !Array.isArray(value)) return undefined;
 
-	const resolved: string[] = [];
+	const resolved: unknown[] = [];
+	if (scope.itemType === "object") {
+		resolvePathScopedObjects(value, scope.valuesKey, cwd, resolved);
+		resolved.push(...scopedListDefault(setting, value));
+		return resolved;
+	}
+
 	for (const entry of value) {
 		if (typeof entry === "string") {
 			resolved.push(entry);
 			continue;
 		}
-		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+		if (!isRecord(entry)) continue;
 
-		const scoped: Record<string, unknown> = entry;
-		const prefixes = [
-			...stringArrayFromUnknown(scoped.path),
-			...stringArrayFromUnknown(scoped.paths),
-			...stringArrayFromUnknown(scoped.pathPrefix),
-			...stringArrayFromUnknown(scoped.pathPrefixes),
-		];
+		const prefixes = pathScopePrefixes(entry);
 		if (prefixes.length === 0 || !prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
 
 		resolved.push(
-			...stringArrayFromUnknown(scoped.values),
-			...stringArrayFromUnknown(scoped.items),
-			...stringArrayFromUnknown(scoped[scope.valuesKey]),
+			...stringArrayFromUnknown(entry.values),
+			...stringArrayFromUnknown(entry.items),
+			...stringArrayFromUnknown(entry[scope.valuesKey]),
 		);
 	}
-
 	return resolved;
 }
 
@@ -646,7 +757,7 @@ export class Settings {
 	#configOverlay: RawSettings = {};
 	/** Project settings file that most recently supplied shellPath. */
 	#projectShellPathSource: string | undefined;
-	/** Discovered files that supplied the current project layer (watch targets). */
+	/** Project files to invalidate and watch, including filtered or temporarily missing sources. */
 	#projectSourcePaths: string[] = [];
 	/** Capability warnings already surfaced for the current project scope; reloads stay quiet. */
 	#projectSettingsWarningsSeen = new Set<string>();
@@ -731,7 +842,12 @@ export class Settings {
 	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
 	#layerListeners = new Set<() => void>();
 
-	private constructor(options: SettingsOptions = {}) {
+	/**
+	 * `projection`: a derived read-only view of another instance ({@link grantAuthority}), not a
+	 * session's settings; it stays out of the registry so legacy {@link findScopedSettings}
+	 * lookups never resolve to it.
+	 */
+	private constructor(options: SettingsOptions = {}, { projection = false }: { projection?: boolean } = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
@@ -739,7 +855,7 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
-		liveSettingsInstances.add(new WeakRef(this));
+		if (!projection) liveSettingsInstances.add(new WeakRef(this));
 		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
 	}
 
@@ -839,7 +955,7 @@ export class Settings {
 		if (this.#derived && this.#parent) return this.#parent.grantAuthority();
 		const revision = this.revision;
 		if (this.#grantView?.revision === revision) return this.#grantView.view;
-		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir });
+		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir }, { projection: true });
 		view.#storage = this.#storage;
 		view.#global = this.#operatorLayers();
 		inheritWarnings(view, this);
@@ -1524,7 +1640,13 @@ export class Settings {
 			});
 			cloned.#storage = this.#storage;
 			cloned.#configPath = this.#configPath;
-			cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
+			cloned.#project = this.#persist
+				? cloned.#adoptProjectRead(await cloned.#readProjectSettings(true), {
+						global: this.#global,
+						configOverlay: this.#configOverlay,
+						overrides: this.#overrides,
+					})
+				: structuredClone(this.#project);
 			if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
 			cloned.#configFiles = [...this.#configFiles];
 			cloned.#overlayShellPathSource = this.#overlayShellPathSource;
@@ -1632,16 +1754,6 @@ export class Settings {
 					},
 				});
 			}
-			if (projectResult.status === "fulfilled") {
-				const project = projectResult.value;
-				this.#applyPendingProjectWrites(project.settings);
-				refreshed.push({
-					layer: "project",
-					settings: project.settings,
-					source: project.sourcePaths.join(", ") || getProjectAgentDir(this.#cwd),
-					commit: () => this.#commitProjectRead(project),
-				});
-			}
 			if (overlayResult.status === "fulfilled") {
 				const { settings, shellPathSource } = overlayResult.value;
 				refreshed.push({
@@ -1654,9 +1766,8 @@ export class Settings {
 				});
 			}
 
-			// Keep-last-good adopts each refreshed layer only when it validates over the layers
-			// accepted so far: an invalid file keeps its own layer's last good values while the
-			// other layers still refresh. Strict validates the whole refresh and throws.
+			// Accept global and overlay edits before resolving the project read: a rejected layer
+			// cannot disable a provider in the project layer. Strict mode validates the final set.
 			let layers = this.#ownLayers();
 			const adopted: LayerRefresh[] = [];
 			for (const refresh of refreshed) {
@@ -1665,6 +1776,21 @@ export class Settings {
 				if (keepLastGood && !this.#acceptsLayers(trial, refresh.source)) continue;
 				layers = trial;
 				adopted.push(refresh);
+			}
+			if (projectResult.status === "fulfilled") {
+				const project = this.#resolveProjectRead(projectResult.value, layers);
+				this.#applyPendingProjectWrites(project.settings);
+				const source = project.sourcePaths.join(", ") || getProjectAgentDir(this.#cwd);
+				const trial: OwnLayers = { ...layers, project: project.settings };
+				if (!keepLastGood || this.#acceptsLayers(trial, source)) {
+					layers = trial;
+					adopted.push({
+						layer: "project",
+						settings: project.settings,
+						source,
+						commit: () => this.#commitProjectRead(project),
+					});
+				}
 			}
 			const settled = this.#settlePins(layers);
 			if (!keepLastGood) this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
@@ -1756,14 +1882,15 @@ export class Settings {
 		try {
 			if (normalized === this.#cwd) return;
 			await this.flush();
-			const project = this.#persist ? await this.#readProjectSettings(true, { cwd: normalized }) : undefined;
-			const candidate: OwnLayers = {
+			const read = this.#persist ? await this.#readProjectSettings(true, { cwd: normalized }) : undefined;
+			const layers = {
 				global: this.#global,
-				project: project?.settings ?? this.#project,
 				configOverlay: this.#configOverlay,
 				overrides:
 					this.#savedRuntimeModelRoleOverrides.size === 0 ? this.#overrides : this.#buildOriginalOverrides(),
 			};
+			const project = read ? this.#resolveProjectRead(read, layers) : undefined;
+			const candidate: OwnLayers = { ...layers, project: project?.settings ?? this.#project };
 			const settledPins = this.#settlePins(candidate);
 			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized);
 
@@ -2189,13 +2316,14 @@ export class Settings {
 		// abandoning the other rejection.
 		const [globalResult, projectResult] = await Promise.allSettled([
 			this.#persist ? this.#loadGlobalSettings() : Promise.resolve(),
-			this.#loadProjectSettings(),
+			this.#readProjectSettings(true),
 		]);
 		if (globalResult.status === "rejected") throw globalResult.reason;
 		if (projectResult.status === "rejected") throw projectResult.reason;
 
-		this.#project = projectResult.value;
 		this.#configOverlay = await this.#loadConfigOverlays();
+		// Global and overlay `disabledProviders` decide which providers feed the project layer.
+		this.#project = this.#adoptProjectRead(projectResult.value);
 
 		// Build merged view (global → project → overrides; project wins over global)
 		this.#rebuildMerged();
@@ -2217,7 +2345,7 @@ export class Settings {
 	async #loadReadOnly(): Promise<Settings> {
 		const [globalResult, projectResult] = await Promise.allSettled([
 			this.#loadExistingMainYaml(),
-			this.#loadProjectSettings(),
+			this.#readProjectSettings(true),
 		]);
 		if (globalResult.status === "rejected") throw globalResult.reason;
 		if (projectResult.status === "rejected") throw projectResult.reason;
@@ -2225,8 +2353,8 @@ export class Settings {
 			this.#global = globalResult.value;
 		}
 
-		this.#project = projectResult.value;
 		this.#configOverlay = await this.#loadConfigOverlays();
+		this.#project = this.#adoptProjectRead(projectResult.value);
 		this.#rebuildMerged();
 		this.#validateAll();
 		return this;
@@ -2664,7 +2792,7 @@ export class Settings {
 	async #readProjectSettings(
 		quarantineInvalid: boolean,
 		options: { rejectNewWarnings?: boolean; cwd?: string } = {},
-	): Promise<ProjectSettingsReadResult> {
+	): Promise<ProjectSettingsDiscovery> {
 		const cwd = options.cwd ?? this.#cwd;
 		// Resolve once: capability discovery, fs-cache invalidation, and the
 		// warning prefix below must all derive from the same absolute scope so
@@ -2676,13 +2804,14 @@ export class Settings {
 		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
 		invalidateCapabilityFsCache(path.join(discoveryCwd, ".claude", "settings.json"));
 		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
-		let shellPathSource: string | undefined;
-		let merged: RawSettings = {};
-		const sourcePaths: string[] = [];
+		let projectItems: SettingsCapabilityItem[] = [];
 		let rejectedWarnings: string[] | undefined;
 		let warningsSeen = this.#projectSettingsWarningsSeen;
 		try {
-			const result = await loadCapability(settingsCapability.id, { cwd: discoveryCwd });
+			const result = await loadCapability(settingsCapability.id, {
+				cwd: discoveryCwd,
+				includeDisabledProviders: true,
+			});
 			// `loadCapability` aggregates warnings across every level, but this
 			// method only merges project items — user-level parse failures belong
 			// to the global layer and would misattribute here. Warnings embed
@@ -2701,16 +2830,10 @@ export class Settings {
 			} else {
 				for (const warning of newWarnings) logger.warn(`Settings: ${warning}`);
 				warningsSeen = new Set(projectWarnings);
-				for (const item of result.items as SettingsCapabilityItem[]) {
-					if (item.level === "project") {
-						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
-						sourcePaths.push(item.path);
-						if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
-					}
-				}
+				projectItems = (result.items as SettingsCapabilityItem[]).filter(item => item.level === "project");
 			}
 		} catch {
-			shellPathSource = undefined;
+			projectItems = [];
 			// Capability discovery is best-effort; the native project config below
 			// remains authoritative for its model-role layer and must not be hidden.
 		}
@@ -2723,21 +2846,92 @@ export class Settings {
 			? await this.#loadYaml(projectConfigPath)
 			: (this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false)) ??
 				(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {}));
-		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
-		if (nativeModelRoles !== undefined) {
-			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
-		}
 		return {
-			settings: this.#migrateRawSettings(merged, quarantineInvalid),
+			cwd,
+			quarantineInvalid,
+			items: projectItems,
+			nativeModelRoles: getByPath(nativeProject, ["modelRoles"]),
 			fileSettings: structuredClone(nativeProject),
-			shellPathSource,
-			sourcePaths,
 			warningsSeen,
 		};
 	}
 
-	async #loadProjectSettings(): Promise<RawSettings> {
-		const result = await this.#readProjectSettings(true);
+	/**
+	 * Merges a project read, leaving out items from providers `disabledProviders` disables. That
+	 * setting may come from any layer, the project's own native config included, so it resolves
+	 * over `layers` with the merged project; the read itself runs without waiting for them.
+	 */
+	#resolveProjectRead(read: ProjectSettingsDiscovery, layers: Omit<OwnLayers, "project">): ProjectSettingsReadResult {
+		let project = this.#mergeProjectItems(read.items, read.nativeModelRoles);
+		const disabled = this.#disabledProviderIds({ ...layers, project: project.settings }, read.cwd);
+		if (read.items.some(item => disabled.has(item._source.provider))) {
+			const filtered = this.#mergeProjectItems(
+				read.items.filter(item => !disabled.has(item._source.provider)),
+				read.nativeModelRoles,
+			);
+			const projectSwitch = getByPath(project.settings, cfgDisabledProviders.segments);
+			if (projectSwitch !== undefined) {
+				const remaining = this.#disabledProviderIds({ ...layers, project: filtered.settings }, read.cwd);
+				// A project provider may disable itself; preserve only its switch when removing
+				// its other settings would undo that decision. Do not pin a global/overlay switch.
+				let changed = disabled.size !== remaining.size;
+				if (!changed) {
+					for (const id of disabled) {
+						if (!remaining.has(id)) {
+							changed = true;
+							break;
+						}
+					}
+				}
+				if (changed) setByPath(filtered.settings, cfgDisabledProviders.segments, projectSwitch);
+			}
+			project = filtered;
+		}
+		return {
+			settings: this.#migrateRawSettings(project.settings, read.quarantineInvalid),
+			fileSettings: read.fileSettings,
+			shellPathSource: project.shellPathSource,
+			sourcePaths: [
+				...new Set([
+					...(read.cwd === this.#cwd ? this.#projectSourcePaths : []),
+					...read.items.map(item => item.path),
+				]),
+			],
+			warningsSeen: read.warningsSeen,
+		};
+	}
+
+	/** Project-level settings `items` merged in discovery order, then the native project config's model roles. */
+	#mergeProjectItems(
+		items: readonly SettingsCapabilityItem[],
+		nativeModelRoles: unknown,
+	): { settings: RawSettings; sourcePaths: string[]; shellPathSource: string | undefined } {
+		let settings: RawSettings = {};
+		const sourcePaths: string[] = [];
+		let shellPathSource: string | undefined;
+		for (const item of items) {
+			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path), {
+				arrays: "combine",
+			});
+			sourcePaths.push(item.path);
+			if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
+		}
+		if (nativeModelRoles !== undefined) settings = this.#deepMerge(settings, { modelRoles: nativeModelRoles });
+		return { settings, sourcePaths, shellPathSource };
+	}
+
+	/** Provider ids `disabledProviders` resolves to for `cwd` when `layers` are merged (over the overlay parent). */
+	#disabledProviderIds(layers: OwnLayers, cwd: string): ReadonlySet<string> {
+		const value = configuredValue(this.#mergeOverParent(this.#mergeOwnLayers(layers)), cfgDisabledProviders, cwd);
+		return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : []);
+	}
+
+	/** Resolves `read` over `layers` (default: this instance's own) and commits it; returns the project layer. */
+	#adoptProjectRead(
+		read: ProjectSettingsDiscovery,
+		layers: Omit<OwnLayers, "project"> = this.#ownLayers(),
+	): RawSettings {
+		const result = this.#resolveProjectRead(read, layers);
 		this.#commitProjectRead(result);
 		return result.settings;
 	}
@@ -2755,7 +2949,7 @@ export class Settings {
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
-			settings = this.#deepMerge(settings, overlay);
+			settings = this.#deepMerge(settings, overlay, { arrays: "combine" });
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
 		return { settings, shellPathSource };
@@ -3201,15 +3395,21 @@ export class Settings {
 			if (migrated !== undefined) providersObj.tinyModel = migrated;
 		}
 
-		// Saved-reset autoRedeem booleans -> tri-state enums. Existing explicit
-		// false keeps "do not run"; missing config falls through to "unset",
-		// which asks before the first eligible provider-specific spend.
-		const codexResetsObj = raw.codexResets as Record<string, unknown> | undefined;
-		if (codexResetsObj && typeof codexResetsObj.autoRedeem === "boolean") {
-			codexResetsObj.autoRedeem = codexResetsObj.autoRedeem ? "yes" : "no";
-		}
-		if (typeof raw["codexResets.autoRedeem"] === "boolean") {
-			raw["codexResets.autoRedeem"] = raw["codexResets.autoRedeem"] ? "yes" : "no";
+		// Legacy single saved-reset `autoRedeem` (boolean or tri-state) -> the 5h and
+		// weekly window keys not set yet. The Fable window is new and stays `unset`.
+		for (const group of ["codexResets", "claudeResets"] as const) {
+			const nested = isRecord(raw[group]) ? raw[group] : undefined;
+			const dotted = `${group}.autoRedeem`;
+			const legacy = nested?.autoRedeem ?? raw[dotted];
+			if (nested) delete nested.autoRedeem;
+			delete raw[dotted];
+			if (legacy === undefined) continue;
+			const mode = typeof legacy === "boolean" ? (legacy ? "yes" : "no") : legacy;
+			for (const key of ["autoRedeem5h", "autoRedeemWeekly"]) {
+				if (nested?.[key] !== undefined || raw[`${group}.${key}`] !== undefined) continue;
+				if (nested) nested[key] = mode;
+				else raw[`${group}.${key}`] = mode;
+			}
 		}
 
 		// Map legacy `memories.enabled` boolean to the explicit `memory.backend`
@@ -3461,13 +3661,13 @@ export class Settings {
 			delete raw["task.completionProbeMs"];
 		}
 
-		// Early per-agent toggles were persisted as booleans even though the
-		// runtime record contract is "on"/"off"/model pattern. Normalize each
-		// layer before merging so project-level false still overrides global true.
+		// Per-agent records accept booleans from early persisted toggles and
+		// hand-written YAML, though the runtime contract is "on"/"off"/model pattern.
+		// Normalize each layer before merging so project-level false still overrides global true.
 		{
 			const taskObj = isRecord(raw.task) ? raw.task : undefined;
 			if (taskObj) {
-				for (const key of ["agentPrewalk", "agentAdvisor"]) {
+				for (const key of ["agentPrewalk", "agentAdvisor", "agentPrewalkAuto"]) {
 					const overrides = isRecord(taskObj[key]) ? taskObj[key] : undefined;
 					if (!overrides) continue;
 					for (const agentName in overrides) {
@@ -3498,9 +3698,11 @@ export class Settings {
 			value => typeof value === "number" && Number.isFinite(value),
 		);
 
+		migrateKokoroSpeechSettings(raw);
+
 		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
 		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
-		// replacement (`tools.xdev` stays at its own default). Dead keys are
+		// replacement (`tools.commands` stays at its own default). Dead keys are
 		// deleted so they stop lingering in config.yml.
 		const toolsObj = raw.tools as Record<string, unknown> | undefined;
 		if (toolsObj) {
@@ -3571,11 +3773,7 @@ export class Settings {
 				const selector = bundledSelector(provider, model => model.webSearchModel);
 				return selector ? [selector] : [];
 			};
-			const geminiSelectors = (model: string): string[] => [
-				`google-gemini-cli/${model}`,
-				`google-antigravity/${model}`,
-				`google/${model}`,
-			];
+			const geminiSelectors = (model: string): string[] => [`google-antigravity/${model}`, `google/${model}`];
 			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
@@ -4192,8 +4390,10 @@ export class Settings {
 
 	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
 	#mergeOwnLayers(layers: OwnLayers): RawSettings {
-		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
-		merged = this.#deepMerge(merged, layers.configOverlay);
+		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project), {
+			arrays: "layer",
+		});
+		merged = this.#deepMerge(merged, layers.configOverlay, { arrays: "layer" });
 		return this.#deepMerge(merged, layers.overrides);
 	}
 
@@ -4213,24 +4413,64 @@ export class Settings {
 	/**
 	 * `overrides` deep-merged over `base`. Keys follow the higher layer's order, then base-only keys:
 	 * record order is meaningful to some consumers (`retry.fallbackChains` is searched in order).
+	 * `arrays` decides how an array setting declaring `merge` combines with the lower value:
+	 *  - `"replace"` (default): the higher array replaces it, like every other value.
+	 *  - `"combine"`: the setting's `merge` strategy applies over the lower array as found.
+	 *  - `"layer"`: as `"combine"`, and a lower layer leaving the setting unset (or `null`) contributes its default.
+	 * `prefix` is the dotted path of `base`/`overrides` within the settings tree.
 	 */
-	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
+	#deepMerge(
+		base: RawSettings,
+		overrides: RawSettings,
+		options: { readonly arrays?: "replace" | "combine" | "layer"; readonly prefix?: string } = {},
+	): RawSettings {
+		const { arrays = "replace", prefix = "" } = options;
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
 			const baseVal = Object.hasOwn(base, key) ? base[key] : undefined;
 
 			if (override === undefined) continue;
+			const settingPath = prefix ? `${prefix}.${key}` : key;
 
+			const isOverrideRecord = typeof override === "object" && override !== null && !Array.isArray(override);
+			const isBaseRecord = typeof baseVal === "object" && baseVal !== null && !Array.isArray(baseVal);
 			if (
-				typeof override === "object" &&
-				override !== null &&
-				!Array.isArray(override) &&
-				typeof baseVal === "object" &&
-				baseVal !== null &&
-				!Array.isArray(baseVal)
+				isOverrideRecord &&
+				(isBaseRecord ||
+					(arrays === "layer" && baseVal === undefined && Object.hasOwn(settingsGroupOnlyPrefixes(), settingPath)))
 			) {
-				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
+				setOwn(
+					result,
+					key,
+					this.#deepMerge((isBaseRecord ? baseVal : {}) as RawSettings, override as RawSettings, {
+						arrays,
+						prefix: settingPath,
+					}),
+				);
+			} else if (arrays !== "replace" && Array.isArray(override)) {
+				const setting = lookupSetting(settingPath);
+				const strategy = setting?.definition.type === "array" ? setting.definition.merge : undefined;
+				const fallbackBase =
+					arrays === "layer" &&
+					(baseVal === undefined || baseVal === null) &&
+					override.length > 0 &&
+					setting?.definition.type === "array"
+						? setting.default
+						: undefined;
+				// A scoped-only lower list stands for its entries plus the default; keep that once higher entries join it.
+				const effectiveBase = Array.isArray(baseVal)
+					? setting
+						? [...baseVal, ...scopedListDefault(setting, baseVal)]
+						: baseVal
+					: fallbackBase;
+				if (override.length > 0 && strategy === "prepend" && Array.isArray(effectiveBase)) {
+					setOwn(result, key, [...override, ...effectiveBase]);
+				} else if (override.length > 0 && strategy === "append" && Array.isArray(effectiveBase)) {
+					setOwn(result, key, [...effectiveBase, ...override]);
+				} else {
+					setOwn(result, key, override);
+				}
 			} else {
 				setOwn(result, key, override);
 			}
@@ -4245,9 +4485,10 @@ export class Settings {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Weak registry of every constructed instance so `resetSettingsForTest` can
- * disarm stray background saves on isolated instances too. WeakRefs never
- * retain instances; the set is cleared on every test reset.
+ * Weak registry of every constructed instance except in-memory projections, so
+ * `resetSettingsForTest` can disarm stray background saves on isolated
+ * instances too and {@link findScopedSettings} can resolve a session by scope.
+ * WeakRefs never retain instances; the set is cleared on every test reset.
  */
 const liveSettingsInstances = new Set<WeakRef<Settings>>();
 

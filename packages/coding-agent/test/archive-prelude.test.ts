@@ -6,16 +6,22 @@ import type {
 	ArchiveProject,
 	ArchivePrompt,
 	ArchiveRecap,
+	ArchiveSearchHit,
 	ArchiveSession,
 	ArchiveSessionDetail,
 } from "@oh-my-pi/pi-coding-agent/archive/archive";
 import { createArchivePrelude } from "@oh-my-pi/pi-coding-agent/archive/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import { recordSessionRecap, closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import {
+	closeSessionIndex,
+	recordSessionRecap,
+	recordSessionTitle,
+} from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage, setDefaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import { syncTranscripts } from "@oh-my-pi/pi-coding-agent/daemon/modules/transcripts";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
@@ -26,24 +32,47 @@ let root: string;
 let app: string;
 let lib: string;
 
-/** JSONL transcript of session `id`, created at `at` in `cwd`. */
+/**
+ * JSONL transcript of session `id`, created at `at` in `cwd`.
+ * `reply` answers the prompt with that text, `answered` with a stock reply.
+ */
 function sessionContent(
 	id: string,
 	at: string,
 	cwd: string,
-	options: { prompt?: string; answered?: boolean } = {},
+	options: { prompt?: string; answered?: boolean; reply?: string; toolOutput?: string } = {},
 ): string {
+	const later = new Date(new Date(at).getTime() + 1000).toISOString();
 	const entries: unknown[] = [{ type: "session", version: 3, id, timestamp: at, cwd }];
 	if (options.prompt) {
 		entries.push({
 			type: "message",
 			id: "u1",
 			parentId: null,
+			timestamp: at,
 			message: { role: "user", content: options.prompt, timestamp: 1 },
 		});
 	}
-	if (options.answered) {
-		entries.push({ type: "message", id: "a1", parentId: "u1", message: makeAssistantMessage() });
+	if (options.answered || options.reply) {
+		const message = makeAssistantMessage();
+		if (options.reply) message.content = [{ type: "text", text: options.reply }];
+		entries.push({ type: "message", id: "a1", parentId: "u1", timestamp: later, message });
+	}
+	if (options.toolOutput) {
+		entries.push({
+			type: "message",
+			id: "t1",
+			parentId: "a1",
+			timestamp: later,
+			message: {
+				role: "toolResult",
+				toolCallId: "c1",
+				toolName: "bash",
+				content: [{ type: "text", text: options.toolOutput }],
+				isError: false,
+				timestamp: 1,
+			},
+		});
 	}
 	return `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`;
 }
@@ -53,7 +82,7 @@ function writeSession(
 	cwd: string,
 	label: string,
 	at: string,
-	options: { prompt?: string; answered?: boolean } = {},
+	options: { prompt?: string; answered?: boolean; reply?: string; toolOutput?: string } = {},
 ): string {
 	const time = new Date(at);
 	const id = `${label}-${crypto.randomUUID()}`;
@@ -123,9 +152,10 @@ describe("archive prelude", () => {
 
 	it("scopes sessions to the current project unless asked for every project", async () => {
 		const local = await call<ArchiveSession[]>({ action: "sessions" });
+		// A missing recap stays a null-valued key so Python callers can index `row["recap"]`.
 		expect(local.map(session => [session.id, session.recap])).toEqual([
 			[newApp, "second recap"],
-			[oldApp, undefined],
+			[oldApp, null],
 		]);
 		const global = await call<ArchiveSession[]>({ action: "sessions", project: "*", limit: 2 });
 		expect(global.map(session => session.id)).toEqual([newApp, libSession]);
@@ -149,8 +179,45 @@ describe("archive prelude", () => {
 			"archive cleanup",
 			"deploy the archive",
 		]);
-		// Infix tokens miss the FTS prefix index and exercise the substring path.
-		expect(texts(await call({ action: "prompts", query: "chiv", project: lib }))).toEqual(["archive cleanup"]);
+		// Terms match word prefixes only.
+		expect(texts(await call({ action: "prompts", query: "arch", project: lib }))).toEqual(["archive cleanup"]);
+		expect(texts(await call({ action: "prompts", query: "chiv", project: lib }))).toEqual([]);
+	});
+
+	it("searches session titles, recaps, and transcripts, newest session first", async () => {
+		const bench = writeSession(app, "app-bench", "2024-02-15T00:00:00.000Z", {
+			prompt: "run the edit benchmark",
+			reply: "The typescript-edit-benchmark finished: 41 of 50 passed.",
+			toolOutput: "secret tool payload",
+		});
+		recordSessionTitle(oldApp, "Archive retention policy");
+		recordSessionTitle(libSession, "archive internals");
+		// The test runner never reaches the user's daemon, so this indexes on a worker thread here.
+		expect((await syncTranscripts()).outcome).toBe("synced");
+		const search = (params: Record<string, unknown>) => call<ArchiveSearchHit[]>({ action: "search", ...params });
+		const found = (hits: ArchiveSearchHit[]) =>
+			hits.map(hit => [hit.id, hit.matches.map(match => [match.source, match.text])]);
+
+		// The lib session's title matches too, but lives outside the current project.
+		expect(found(await search({ query: "archive" }))).toEqual([[oldApp, [["title", "Archive retention policy"]]]]);
+		expect(found(await search({ query: "archive", project: "*" }))).toEqual([
+			[libSession, [["title", "archive internals"]]],
+			[oldApp, [["title", "Archive retention policy"]]],
+		]);
+		expect(found(await search({ query: "edit benchmark" }))).toEqual([
+			[
+				bench,
+				[
+					["assistant", "The typescript-edit-benchmark finished: 41 of 50 passed."],
+					["user", "run the edit benchmark"],
+				],
+			],
+		]);
+		expect(found(await search({ query: "second recap" }))).toEqual([[newApp, [["recap", "second recap"]]]]);
+		// Tool output is not indexed.
+		expect(await search({ query: "secret payload" })).toEqual([]);
+		// Every word must occur in one text, not spread across a session's sources.
+		expect(await search({ query: "login second" })).toEqual([]);
 	});
 
 	it("lists recaps newest first within scope", async () => {

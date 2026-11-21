@@ -191,9 +191,13 @@ export function resolveEquivalentPath(inputPath: string, options?: EquivalentPat
 	}
 }
 
-export function normalizePathForComparison(inputPath: string): string {
-	const resolvedPath = resolveEquivalentPath(inputPath);
+function comparablePath(inputPath: string, options?: EquivalentPathOptions): string {
+	const resolvedPath = resolveEquivalentPath(inputPath, options);
 	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
+}
+
+export function normalizePathForComparison(inputPath: string): string {
+	return comparablePath(inputPath);
 }
 
 /**
@@ -211,9 +215,10 @@ export function relativePathWithinNormalizedRoot(normalizedRoot: string, normali
 	return relative;
 }
 
-export function pathIsWithin(root: string, candidate: string): boolean {
+/** `options` apply to `candidate` only. */
+export function pathIsWithin(root: string, candidate: string, options?: EquivalentPathOptions): boolean {
 	const normalizedRoot = normalizePathForComparison(root);
-	const normalizedCandidate = normalizePathForComparison(candidate);
+	const normalizedCandidate = comparablePath(candidate, options);
 	return relativePathWithinNormalizedRoot(normalizedRoot, normalizedCandidate) !== null;
 }
 
@@ -264,25 +269,23 @@ export function __resetProjectDirCacheForTests(): void {
 	projectDir = undefined;
 }
 
-/** Whether a path is absent or not a directory. Other stat failures return false. */
-export async function directoryIsMissing(dir: string): Promise<boolean> {
+/** Whether a path is absent or not a directory; `strict` propagates non-missing stat failures. */
+export async function directoryIsMissing(dir: string, options?: { strict?: boolean }): Promise<boolean> {
 	try {
 		return !(await fs.promises.stat(dir)).isDirectory();
 	} catch (error) {
-		return isEnoent(error) || isEnotdir(error);
+		if (isEnoent(error) || isEnotdir(error)) return true;
+		if (options?.strict) throw error;
+		return false;
 	}
 }
 
-/**
- * Whether `dir` resolves to an existing directory. Any stat failure — a deleted
- * path (ENOENT), permission error, or a non-directory — returns `false`, so
- * callers can decide whether a directory is safe to `chdir` into or adopt as a
- * working directory before {@link setProjectDir} throws on it.
- */
-export async function directoryExists(dir: string): Promise<boolean> {
+/** Whether a path is an existing directory; `strict` propagates non-missing stat failures. */
+export async function directoryExists(dir: string, options?: { strict?: boolean }): Promise<boolean> {
 	try {
 		return (await fs.promises.stat(dir)).isDirectory();
-	} catch {
+	} catch (error) {
+		if (options?.strict && !isEnoent(error) && !isEnotdir(error)) throw error;
 		return false;
 	}
 }
@@ -328,12 +331,6 @@ export function getSafeProjectCwd(): string {
 /** Get the config directory name relative to home (e.g. ".omp" or PI_CONFIG_DIR override). */
 export function getConfigDirName(): string {
 	return process.env.PI_CONFIG_DIR || CONFIG_DIR_NAME;
-}
-
-/** Get the config agent directory name relative to home (e.g. ".omp/agent" or PI_CONFIG_DIR + "/agent"). */
-export function getConfigAgentDirName(): string {
-	const profile = getActiveProfile();
-	return profile ? path.join(getConfigDirName(), "profiles", profile, "agent") : `${getConfigDirName()}/agent`;
 }
 
 // =============================================================================
@@ -666,6 +663,15 @@ export function getUpdateStateDir(): string {
 }
 
 /**
+ * Return a per-user directory (`<tmpdir>/<prefix>-<uid>`) under the OS temp dir
+ * so `bun test` state never collides across accounts sharing `/tmp`.
+ */
+export function getTestTempDir(prefix: string): string {
+	const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+	return path.join(os.tmpdir(), `${prefix}-${uid}`);
+}
+
+/**
  * Get the logs directory (~/.omp/logs). `bun test` processes get
  * `<tmpdir>/omp-test-logs-<uid>` instead, so suites never write into the
  * developer's real logs; the uid suffix (as for the test session-owners dir)
@@ -673,8 +679,7 @@ export function getUpdateStateDir(): string {
  */
 export function getLogsDir(): string {
 	if (isBunTestRuntime()) {
-		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
-		return path.join(os.tmpdir(), `omp-test-logs-${uid}`);
+		return getTestTempDir("omp-test-logs");
 	}
 	return dirs.rootSubdir("logs", "state");
 }
@@ -797,9 +802,19 @@ export function getPythonEnvDir(): string {
 	return dirs.rootSubdir("python-env", "data");
 }
 
+/** Get managed Ghidra installs, JDK, PyGhidra venv and Gradle cache (~/.omp/ghidra). */
+export function getGhidraDir(): string {
+	return dirs.rootSubdir("ghidra", "data");
+}
+
 /** Get the shared Python gateway state directory (~/.omp/agent/python-gateway; XDG default: $XDG_STATE_HOME/omp/python-gateway). */
 export function getPythonGatewayDir(): string {
 	return dirs.agentSubdir(undefined, "python-gateway", "state");
+}
+
+/** Get the managed Antigravity CLI directory (~/.omp/antigravity-cli): the `agy` binary and its isolated state. */
+export function getAntigravityCliDir(): string {
+	return dirs.rootSubdir("antigravity-cli", "data");
 }
 
 /** Get the puppeteer sandbox directory (~/.omp/puppeteer). */
@@ -807,9 +822,23 @@ export function getPuppeteerDir(): string {
 	return dirs.rootSubdir("puppeteer", "cache");
 }
 
+/**
+ * Get where the WebKit browser engine's host executable is installed: `ABHost` (`ABHost.exe` on Windows)
+ * in the ABKit engine directory `~/.o2/lib/abkit`. The location is shared with Tern, so it is outside omp's
+ * own directories.
+ */
+export function getWebKitHostPath(platform: NodeJS.Platform = process.platform): string {
+	return path.join(os.homedir(), ".o2", "lib", "abkit", platform === "win32" ? "ABHost.exe" : "ABHost");
+}
+
 /** Get the browser relay extension install directory (~/.omp/browser-relay). */
 export function getBrowserRelayDir(): string {
 	return dirs.rootSubdir("browser-relay", "data");
+}
+
+/** Get the install registry shared by every omp profile and browser. */
+export function getBrowserRelayInstallRegistryFile(): string {
+	return dirs.baseRootSubdir(path.join("browser-relay", "installs.json"));
 }
 
 /** Get the profile root for Chromium browsers the browser tool spawns via `app.path` (~/.omp/browser-profiles). */
@@ -888,6 +917,15 @@ export function getAuthBrokerSnapshotCachePath(): string {
 	const override = process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE;
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "auth-broker-snapshot.enc"), "cache");
+}
+
+/**
+ * Get the cached OpenAI Codex client version record
+ * (~/.omp/agent/codex-client-version.json; XDG default: $XDG_CACHE_HOME/omp/codex-client-version.json).
+ * It is a refetchable cache, not config, so it belongs under the cache dir.
+ */
+export function getCodexClientVersionPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "codex-client-version.json", "cache");
 }
 
 /** Get the commit-author avatar cache directory (~/.omp/cache/avatars). */
@@ -971,6 +1009,11 @@ export function getLastChangelogVersionPath(agentDir?: string): string {
 /** Get the path to history.db (SQLite database for session history). */
 export function getHistoryDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "history.db", "data");
+}
+
+/** Get the path to transcripts.db (full-text index of session transcripts). */
+export function getTranscriptIndexDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "transcripts.db", "data");
 }
 
 /** Get the path to models.db (model cache database). */
@@ -1117,38 +1160,15 @@ export function getSecretPlaceholderKeyPath(): string {
 	return keyPath;
 }
 
-/** Directory holding the per-model tiny-worker sockets and logs (~/.omp/run/tiny; XDG default: $XDG_STATE_HOME/omp/run/tiny). */
-export function getTinyWorkerRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("run", "tiny"), "state");
+/** Runtime directory of the single per-user omp daemon (~/.omp/run/daemon; XDG default: $XDG_STATE_HOME/omp/run/daemon). Shared across profiles; holds its socket, token, sqlite store and unit logs. */
+export function getDaemonDir(): string {
+	return dirs.baseRootSubdir(path.join("run", "daemon"), "state");
 }
 
-/** Directory holding the per-model mnemopi embedding server endpoints and logs (~/.omp/run/mnemopi; XDG default: $XDG_STATE_HOME/omp/run/mnemopi). */
-export function getMnemopiEmbedRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("run", "mnemopi"), "state");
-}
-
-/** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */
-export function getDaemonRuntimeRoot(): string {
-	return dirs.rootSubdir(path.join("run", "daemons"), "state");
-}
-
-/** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
+/** Get the per-project runtime directory (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
 export function getDaemonRuntimeDir(projectDir: string): string {
 	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-	return path.join(getDaemonRuntimeRoot(), key);
-}
-
-/** Root directory containing every machine-global daemon service scope (~/.omp/run/daemons/global; XDG default: $XDG_STATE_HOME/omp/run/daemons/global). Shared across profiles. */
-export function getGlobalDaemonRuntimeRoot(): string {
-	return dirs.baseRootSubdir(path.join("run", "daemons", "global"), "state");
-}
-
-/** Get a profile-independent runtime directory for a machine-global daemon service. */
-export function getGlobalDaemonRuntimeDir(service: string): string {
-	if (!/^[a-z0-9][a-z0-9._-]*$/i.test(service)) {
-		throw new Error(`Invalid global daemon service name: ${JSON.stringify(service)}`);
-	}
-	return path.join(getGlobalDaemonRuntimeRoot(), service);
+	return path.join(dirs.rootSubdir(path.join("run", "daemons"), "state"), key);
 }
 
 /**

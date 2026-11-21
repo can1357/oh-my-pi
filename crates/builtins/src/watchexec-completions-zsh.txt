@@ -1,0 +1,104 @@
+#compdef watchexec
+
+autoload -U is-at-least
+
+_watchexec() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'(--manual --only-emit-events)--completions=[Generate a shell completions script]:SHELL:(bash elvish fish nu powershell zsh)' \
+'--shell=[Use a different shell]:SHELL:_default' \
+'*-E+[Add env vars to the command]:KEY=VALUE:_default' \
+'*--env=[Add env vars to the command]:KEY=VALUE:_default' \
+'--wrap-process=[Configure how the process is wrapped]:MODE:(group session none)' \
+'--stop-signal=[Signal to send to stop the command]:SIGNAL:_default' \
+'--stop-timeout=[Time to wait for the command to exit gracefully]:TIMEOUT:_default' \
+'--delay-run=[Sleep before running the command]:DURATION:_default' \
+'--workdir=[Set the working directory]:DIRECTORY:_files -/' \
+'*--socket=[Provide a socket to the command]:PORT:_default' \
+'-o+[What to do when receiving events while the command is running]:MODE:(queue do-nothing restart signal)' \
+'--on-busy-update=[What to do when receiving events while the command is running]:MODE:(queue do-nothing restart signal)' \
+'(-r --restart)-s+[Send a signal to the process when it'\''s still running]:SIGNAL:_default' \
+'(-r --restart)--signal=[Send a signal to the process when it'\''s still running]:SIGNAL:_default' \
+'*--map-signal=[Translate signals from the OS to signals to send to the command]:SIGNAL:SIGNAL:_default' \
+'-d+[Time to wait for new events before taking action]:TIMEOUT:_default' \
+'--debounce=[Time to wait for new events before taking action]:TIMEOUT:_default' \
+'--poll=[Poll for filesystem changes]' \
+'--emit-events-to=[Configure event emission]:MODE:(environment stdio file json-stdio json-file none)' \
+'*-w+[Watch a specific file or directory]:PATH:_files' \
+'*--watch=[Watch a specific file or directory]:PATH:_files' \
+'*-W+[Watch a specific directory, non-recursively]:PATH:_files' \
+'*--watch-non-recursive=[Watch a specific directory, non-recursively]:PATH:_files' \
+'-F+[Watch files and directories from a file]:PATH:_files' \
+'--watch-file=[Watch files and directories from a file]:PATH:_files' \
+'*-e+[Filename extensions to filter to]:EXTENSIONS:_default' \
+'*--exts=[Filename extensions to filter to]:EXTENSIONS:_default' \
+'*-f+[Filename patterns to filter to]:PATTERN:_default' \
+'*--filter=[Filename patterns to filter to]:PATTERN:_default' \
+'*--filter-file=[Files to load filters from]:PATH:_files' \
+'--project-origin=[Set the project origin]:DIRECTORY:_files -/' \
+'*-j+[Filter programs]:EXPRESSION:_default' \
+'*--filter-prog=[Filter programs]:EXPRESSION:_default' \
+'*-i+[Filename patterns to filter out]:PATTERN:_default' \
+'*--ignore=[Filename patterns to filter out]:PATTERN:_default' \
+'*--ignore-file=[Files to load ignores from]:PATH:_files' \
+'*--fs-events=[Filesystem events to filter to]:EVENTS:(access create remove rename modify metadata)' \
+'--log-file=[Write diagnostic logs to a file]' \
+'-c+[Clear screen before running command]' \
+'--clear=[Clear screen before running command]' \
+'--color=[When to use terminal colours]:MODE:(auto always never)' \
+'(--completions --only-emit-events)--manual[Show the manual page]' \
+'(--completions --manual)--only-emit-events[Only emit events to stdout, run no commands]' \
+'-1[Testing only\: exit Watchexec after the first run and return the command'\''s exit code]' \
+'-n[Shorthand for '\''--shell=none'\'']' \
+'--no-environment[Deprecated shorthand for '\''--emit-events=none'\'']' \
+'--no-process-group[Don'\''t use a process group]' \
+'(-o --on-busy-update)-r[Restart the process if it'\''s still running]' \
+'(-o --on-busy-update)--restart[Restart the process if it'\''s still running]' \
+'--stdin-quit[Exit when stdin closes]' \
+'-p[Wait until first change before running command]' \
+'--postpone[Wait until first change before running command]' \
+'--no-vcs-ignore[Don'\''t load gitignores]' \
+'--no-project-ignore[Don'\''t load project-local ignores]' \
+'--no-global-ignore[Don'\''t load global ignores]' \
+'--no-default-ignore[Don'\''t use internal default ignores]' \
+'--no-discover-ignore[Don'\''t discover ignore files at all]' \
+'--ignore-nothing[Don'\''t ignore anything at all]' \
+'(--fs-events)--no-meta[Don'\''t emit fs events for metadata changes]' \
+'*-v[Set diagnostic log level]' \
+'*--verbose[Set diagnostic log level]' \
+'--print-events[Print events that trigger actions]' \
+'-N[Alert when commands start and end]' \
+'--notify[Alert when commands start and end]' \
+'--timings[Print how long the command took to run]' \
+'-q[Don'\''t print starting and stopping messages]' \
+'--quiet[Don'\''t print starting and stopping messages]' \
+'--bell[Ring the terminal bell on command completion]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::program -- Command (program and arguments) to run on changes:_cmdstring' \
+&& ret=0
+}
+
+(( $+functions[_watchexec_commands] )) ||
+_watchexec_commands() {
+    local commands; commands=()
+    _describe -t commands 'watchexec commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_watchexec" ]; then
+    _watchexec "$@"
+else
+    compdef _watchexec watchexec
+fi

@@ -255,10 +255,13 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 			logger.debug("omp render teardown failed", { error: String(err) });
 		}
 		// Removing the directory reclaims a file copy; a copy the storage holds
-		// as a row is removed from the storage.
+		// as a row is removed from the storage. Only the row: the copy carries the
+		// original's session id, so `deleteSessionWithArtifacts` would purge the
+		// original's history.db rows (prompts, recap, title) by that id. Its tool
+		// artifacts are local files under `tempDir`, removed below.
 		if (!(storage instanceof FileSessionStorage)) {
 			try {
-				await storage.deleteSessionWithArtifacts(workingCopy);
+				await storage.unlink(workingCopy);
 			} catch (err) {
 				logger.debug("omp render working copy cleanup failed", { error: String(err) });
 			}

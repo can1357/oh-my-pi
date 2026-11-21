@@ -27,6 +27,7 @@ import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
+import { normalizeClaudeCodeToolName, normalizeToolNames } from "../tools/builtin-names";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
@@ -44,13 +45,14 @@ export interface DiscoveryResult {
 interface AgentDirectory {
 	dir: string;
 	source: AgentSource;
-	ignoreModel?: boolean;
+	/** Frontmatter is the Claude Code dialect: drop `model:` and translate `tools:`. */
+	claudeDialect?: boolean;
 }
 
 /**
  * Load agents from a directory.
  */
-async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): Promise<AgentDefinition[]> {
+async function loadAgentsFromDir({ dir, source, claudeDialect }: AgentDirectory): Promise<AgentDefinition[]> {
 	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
@@ -61,7 +63,15 @@ async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): 
 				.readFile(filePath, "utf-8")
 				.then(content => {
 					const agent = parseAgent(filePath, content, source, "warn");
-					if (ignoreModel) agent.model = undefined;
+					if (claudeDialect) {
+						// Claude-format frontmatter: `model:` is a Claude alias, not an
+						// OMP selector, and `tools:` uses Claude names (#7966).
+						agent.model = undefined;
+						if (agent.tools) agent.tools = normalizeToolNames(agent.tools.map(normalizeClaudeCodeToolName));
+						// `parseAgent` inferred spawns from the untranslated names, so `Agent`
+						// (→ task) missed it; re-apply the same rule to the result.
+						if (agent.spawns === undefined && agent.tools?.includes("task")) agent.spawns = "*";
+					}
 					return agent;
 				})
 				.catch(error => {
@@ -135,13 +145,14 @@ export async function discoverAgents(
 		if (a.scope === b.scope) return 0;
 		return a.scope === "project" ? -1 : 1;
 	});
-	const pluginModelDrops = await Promise.all(
-		// The `model:` dialect follows the plugin's declared manifest, not the
-		// registry that supplied it: foreign Claude roots (origin "claude") always
-		// use Claude aliases, and an omp-installed or --plugin-dir root can still
-		// ship a `.claude-plugin` package. Claude-dialect frontmatter is dropped so
-		// its aliases are not misread as OMP selectors (#7966); OMP-native and
-		// Agent-Plugins-standard plugin agents keep their selectors (#12028).
+	const pluginClaudeDialect = await Promise.all(
+		// The `model:` and `tools:` dialect follows the plugin's declared manifest,
+		// not the registry that supplied it: foreign Claude roots (origin "claude")
+		// always use Claude aliases, and an omp-installed or --plugin-dir root can
+		// still ship a `.claude-plugin` package. Claude-dialect frontmatter is
+		// translated so its aliases and tool names are not misread as OMP ones
+		// (#7966); OMP-native and Agent-Plugins-standard plugin agents keep theirs
+		// (#12028).
 		sortedPluginRoots.map(
 			async plugin => plugin.origin === "claude" || (await pluginUsesClaudeModelDialect(plugin.path)),
 		),
@@ -150,7 +161,7 @@ export async function discoverAgents(
 		orderedDirs.push({
 			dir: path.join(plugin.path, "agents"),
 			source: plugin.scope === "project" ? "project" : "user",
-			ignoreModel: pluginModelDrops[index],
+			claudeDialect: pluginClaudeDialect[index],
 		});
 	});
 

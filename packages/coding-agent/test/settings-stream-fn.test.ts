@@ -151,28 +151,24 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[0]?.options?.hideThinkingSummary).toBe(true);
 	});
 
-	it("applies Codex text verbosity only when settings or caller options configure it", () => {
-		const unconfiguredSettings = Settings.isolated({});
-		const { fn: unconfiguredBase, calls: unconfiguredCalls } = captureBase();
-		const unconfiguredWrapped = createSettingsAwareStreamFn(unconfiguredSettings, unconfiguredBase);
+	it("sends low text verbosity to Codex and Responses unless the setting or caller overrides it", () => {
+		const { fn: defaultBase, calls: defaultCalls } = captureBase();
+		const defaultWrapped = createSettingsAwareStreamFn(Settings.isolated({}), defaultBase);
 
-		unconfiguredWrapped(stubCodexModel, stubContext, undefined);
-		unconfiguredWrapped(stubCodexModel, stubContext, { textVerbosity: "medium" });
+		defaultWrapped(stubCodexModel, stubContext, undefined);
+		defaultWrapped(stubResponsesModel, stubContext, undefined);
 
-		expect(unconfiguredCalls[0]?.options?.textVerbosity).toBeUndefined();
-		expect(unconfiguredCalls[1]?.options?.textVerbosity).toBe("medium");
+		expect(defaultCalls[0]?.options?.textVerbosity).toBe("low");
+		expect(defaultCalls[1]?.options?.textVerbosity).toBe("low");
 
-		const settings = Settings.isolated({ textVerbosity: "low" });
 		const { fn: base, calls } = captureBase();
-		const wrapped = createSettingsAwareStreamFn(settings, base);
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated({ textVerbosity: "medium" }), base);
 
 		wrapped(stubCodexModel, stubContext, undefined);
-		wrapped(stubResponsesModel, stubContext, undefined);
-		wrapped(stubResponsesModel, stubContext, { textVerbosity: "medium" });
+		wrapped(stubCodexModel, stubContext, { textVerbosity: "high" });
 
-		expect(calls[0]?.options?.textVerbosity).toBe("low");
-		expect(calls[1]?.options?.textVerbosity).toBe("low");
-		expect(calls[2]?.options?.textVerbosity).toBe("medium");
+		expect(calls[0]?.options?.textVerbosity).toBe("medium");
+		expect(calls[1]?.options?.textVerbosity).toBe("high");
 	});
 
 	it("forwards configured stream watchdog budgets while preserving caller overrides", () => {

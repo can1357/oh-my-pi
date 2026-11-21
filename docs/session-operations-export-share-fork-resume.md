@@ -6,7 +6,6 @@ This document describes operator-visible behavior for session export, sharing, c
 
 - [`src/slash-commands/builtin-collaboration.ts`](../packages/coding-agent/src/slash-commands/builtin-collaboration.ts) — export/dump/share command specs
 - [`src/slash-commands/builtin-lifecycle.ts`](../packages/coding-agent/src/slash-commands/builtin-lifecycle.ts) — lifecycle command specs
-- [`src/slash-commands/seance.ts`](../packages/coding-agent/src/slash-commands/seance.ts) — `/seance` command and session-picker adapter
 - [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts) — TUI execution
 - [`src/modes/controllers/selector-controller.ts`](../packages/coding-agent/src/modes/controllers/selector-controller.ts) — resume/import picker and cwd transition
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
@@ -32,11 +31,10 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/fork`                                   | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)                                                                                           | Copies artifact directory to new session namespace when present                     |
 | `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command    | No (parent session retained)                  | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Orca tab, or CMUX workspace)                            | Child receives a separate forked session                                            |
 | `--fork <id\|path>`                       | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir                                                                                             | Copies source artifacts recursively by default                                      |
-| `/seance [id\|path] [--model sel]`        | Interactive slash command    | No (active session and model unchanged)       | Forks the source transcript into a read-only consultant subagent under the current session                                                                                   | None; the consultant reads the source's artifacts in place                          |
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
 | `--resume`                                | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                                                                                |
-| `--resume <id\|path>`                     | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory                                                                                   | None                                                                                |
-| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session, otherwise starts fresh                                                                                            | None                                                                                |
+| `--resume <id\|path>`                     | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory (protocol modes open it in place, except a session from a removed worktree)       | None                                                                                |
+| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; restores a materialized session (`--restore`), otherwise starts fresh                                                                             | None                                                                                |
 | `--continue`                              | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists                                                                                             | None                                                                                |
 
 ## Export and dump
@@ -273,6 +271,10 @@ command aborts it and waits for it to stop before resetting.
   session retains the marker in memory. The collapsed live transcript and
   rebuilt model context begin after the latest boundary, while persisted JSONL
   and full-transcript export retain the pre-reset history.
+- After the reset and system-prompt refresh succeed, awaits the `session_clear`
+  notification to hooks/extensions so they can invalidate context-dependent
+  caches. Empty successful clears also notify; busy/rejected resets do not.
+  This does not emit `session_switch` or allow handlers to cancel the clear.
 
 The TUI clears its rendered transcript after a successful clear. This differs
 from `/fresh`, which rotates provider stream state without clearing the
@@ -385,7 +387,7 @@ The original bare `/fork` uses `AgentSession.fork()`:
 - It throws `SessionBusyError` while `AgentSession.isBusyForSnapshot` is true (a response is streaming, or user bash/eval, compaction, handoff, or retry work is running). The check runs before `session_before_branch`, again after it, and once more after pending bash output and session writes flush. That last check comes before anything of the old session is discarded (pending next-turn messages, async jobs, the auto-learn capture), so a refused fork leaves the session as it was. A prompt admitted during the remaining drain awaits is dropped by the prompt-generation bump at the cut, as for `branch()`. `/btw` branches use the same predicate.
 - When `entryId` sits inside an assistant tool-call batch (the assistant message, or a tool result answering it), the cut extends through the batch's recorded tool results, following the tree from `entryId` and stepping over lone non-message entries between results. A fork therefore never ends on tool calls whose results exist in the source session; calls that never got a result stay as they are.
 - The transition is the one `AgentSession.branch()` uses, cut at the resolved entry rather than before it: `session_before_branch` with reason `"fork"` (cancellable; `entryId` is the last kept entry, not a dropped one as for `branch()`), `SessionManager.createBranchedSession(leafId, { copyArtifacts: true })`, rebuilt agent messages, then `session_branch` with reason `"fork"`.
-- The new file keeps the root-to-entry path including the resolved entry, carries labels for kept entries, keeps the title, and sets `parentSession` to the previous session file. The whole artifact directory is copied in the background (including artifacts only cited by dropped entries), and the new session's artifact manager waits for the copy before allocating ids or resolving `artifact://`, so kept `artifact://N` references still resolve and new artifacts get fresh ids. Unlike the whole-session fork, the provider prompt-cache key is not inherited (same as `branch()`).
+- The new file keeps the root-to-entry path including the resolved entry, carries labels for kept entries, keeps the title, and sets `parentSession` to the previous session file. The whole artifact directory is copied in the background (including artifacts only cited by dropped entries), and the new session's artifact manager waits for the copy before allocating ids or resolving spills, so kept `local://N.log` references still resolve and new spills get fresh ids. Unlike the whole-session fork, the provider prompt-cache key is not inherited (same as `branch()`).
 - Works in non-persistent mode (in-memory replacement), unlike the whole-session fork.
 - `AgentSession.fork(undefined, { requireIdle: true })` applies the same idle rule to the whole-session fork (before `session_before_switch` and again after the flushes). RPC `fork` passes it for both variants, so both reject with `code: "session_busy"`. Interactive `/fork` does not, so it can still carry a running bash command into the new session.
 
@@ -407,20 +409,6 @@ Startup `--fork` is resolved before normal session creation:
 5. Full-context forks automatically seed `providerPromptCacheKey` from the source header's inherited key, falling back to the source session id. Startup drops that automatic inheritance for explicit `--model`, `--thinking`, `--system-prompt`, `--system-prompt-template`, `--append-system-prompt`, `--tools`, or `--no-tools` overrides, or an applicable scoped-model override.
 
 Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explicitly and independently from both the OMP session id and `--provider-session-id`. `--provider-session-id` continues to control provider session/routing headers and sticky credential selection; `--prompt-cache-key` controls the OpenAI Responses `prompt_cache_key` payload where supported.
-
-## Seance
-
-`/seance [id|path] [--model selector]` opens a source picker when no source is supplied; an id or path (`~` expands) selects directly. Typed ids search the current project, then every project. The source is read without opening a writer and is never modified.
-
-Each consult forks only the source transcript, into `<current session artifacts>/<ConsultId>.jsonl`, with `seanceSource` in its header. Artifacts are not copied: the consultant's `history://`, `artifact://`, and `agent://` read the source's artifacts directory in place, and its own new artifact ids are allocated past the source's so inherited `artifact://<n>` references keep naming the source artifact. Consulting the current session repeatedly adds one transcript per consult, not a copy of the tree.
-
-The model comes from the source's active branch when restorable; `--model selector` overrides it. When the source has no saved model, the model picker opens directly.
-
-The consult excludes additional workspace roots, the workspace tree, context files, skills, rules, inherited agents, extensions, MCP, IRC, and LSP; the source's `session_init` contracts become inert `source_session_init` entries. Tools are limited to `read`, `grep`, and `glob` (as enabled); `task.structured` adds `yield`. Cold revival requires the `seanceSource` header and restores the persisted prompt with the same read-only tools.
-
-Inherited source charges are zeroed; new consultation turns use existing task/Agent Hub usage tracking.
-
-Ownership: [`src/slash-commands/seance.ts`](../packages/coding-agent/src/slash-commands/seance.ts) (command and pickers), [`src/task/seance.ts`](../packages/coding-agent/src/task/seance.ts) (source/model resolution, revival contract), [`src/task/seance-policy.ts`](../packages/coding-agent/src/task/seance-policy.ts) (isolation options), and `SessionManager.forkFrom(..., { seance: true })` (fork).
 
 ## Resume and continue
 
@@ -463,6 +451,8 @@ Id/filename-prefix match behavior (local or global):
 - If the matched session's recorded directory no longer exists, CLI asks `Session's directory no longer exists (...). Move (re-root) it into the current directory? [Y/n]`.
    - On yes (default), `SessionManager.open()` is anchored at the missing source cwd with `initialCwd`, then `manager.moveTo(cwd, sessionDir)` re-roots the existing session without duplicating it.
    - On no, startup is cancelled. In non-TTY mode, startup fails with an error directing the user to run interactively.
+   - Under `--mode rpc`, `--mode rpc-ui` and `--mode acp` no question is asked, because the protocol owns standard input and standard output: the session opens where it is stored, with the launch directory as its working directory, as a path-valued resume does.
+   - A session recorded in a since-removed worktree of the launch checkout's repository is moved into the launch directory without a question, in every mode.
 - If the recorded directory still exists, the matched session is opened directly. Startup later changes the process/project scope to the resumed session's cwd and reloads cwd-scoped settings and plugin caches. It is not implicitly forked.
 
 Path-valued resume opens directly rather than using the missing-directory move
@@ -478,10 +468,16 @@ replaced under a session that went on in a sibling (see above).
 
 `--restore [value]` selects and opens its session exactly as `--resume [value]`
 does, then, once the interactive TUI is up, goes on with what the session's last
-process left unfinished when it died (`task/restore.ts`, `restoreSession`). Tern's
+process left unfinished when it ended (`task/restore.ts`, `restoreSession`). Tern's
 session daemon relaunches omp panes with it after a crash: omp reports
 `omp_restore=1` (OSC 1337 user variable) beside its session file to say it
-understands the flag.
+understands the flag. `/restart` relaunches with it too.
+
+A subagent whose turn the process teardown cut off counts as left mid-turn, even
+though the teardown was clean: its owner's shutdown aborts the run with
+`INTERRUPTED_TURN_ERROR` and records its `session_exit` as a process exit
+(`postmortem.Reason.EXIT`), both for a first run the task executor drives and for
+a revived agent's turn the lifecycle teardown disposes.
 
 1. **Subagents first.** Every persisted subagent transcript under the session
    (`<session>/<AgentId>.jsonl`, nested ones included) that its process left
@@ -503,7 +499,8 @@ Nothing is continued when the last turn finished, failed, or the user interrupte
 it, or when a normal exit was recorded after it (the user quit with it
 interrupted). `--restore` is interactive only, takes no prompt, and cannot be
 combined with `--continue`, `--fork`, imports, `--goal` or `--no-session`.
-`/restart` drops it like the other one-shot selectors.
+`/restart` drops a launch `--restore` like the other one-shot selectors and adds
+its own for the current session.
 
 ## CLI `--continue`
 
@@ -528,9 +525,11 @@ This is startup-only behavior; there is no interactive `/continue` slash command
 Interactive `/restart` performs normal teardown, flushes postmortem cleanup and
 stdout, then relaunches the CLI. `restartArgv()` preserves launch configuration
 flags but strips original prompts/`@file` positionals and one-shot session
-selectors (`--session`, `--resume`, `--continue`, `--fork`, and foreign imports).
-It adds `--resume <current-id>` only when the session actually exists on disk;
-an in-memory or never-materialized session restarts fresh.
+selectors (`--session`, `--resume`, `--restore`, `--continue`, `--fork`, and
+foreign imports). It adds `--restore <session-file>` only when the session
+actually exists on disk, so the subagents the teardown cut off mid-turn go on in
+the new process (see [CLI `--restore`](#cli---restore)); an in-memory or
+never-materialized session restarts fresh.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.

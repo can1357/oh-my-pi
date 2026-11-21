@@ -21,7 +21,6 @@ import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types"
 import { getLatestCompactionEntry } from "./session-context";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import { cfgSkillful } from "./settings";
 
 /** Non-message accounting recorded with a provider prompt. */
 interface NonMessageSnapshot {
@@ -287,13 +286,10 @@ export class SessionStatsTracker {
 		const rawContextWindow = options?.contextWindow ?? this.#host.model()?.contextWindow ?? 0;
 		const contextWindow = Number.isFinite(rawContextWindow) && rawContextWindow > 0 ? rawContextWindow : 0;
 		const settings = this.#host.session.settings;
-		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(
-			this.#host.session,
-			this.#tokenizer,
-			settings?.revision,
-			settings ? cfgSkillful.get(settings) : undefined,
-		);
-		const categoryNonMessageTokens = skillsTokens + toolsTokens + systemContextTokens + systemPromptTokens;
+		const { skillsTokens, instructionFilesTokens, toolsTokens, systemContextTokens, systemPromptTokens } =
+			computeNonMessageBreakdown(this.#host.session, this.#tokenizer, settings?.revision);
+		const categoryNonMessageTokens =
+			skillsTokens + instructionFilesTokens + toolsTokens + systemContextTokens + systemPromptTokens;
 		const current = {
 			nonMessageTokens: computeNonMessageTokens(this.#host.session, this.#tokenizer, settings?.revision),
 			toolSchemaTokens: toolsTokens,
@@ -380,6 +376,7 @@ export class SessionStatsTracker {
 			systemPromptTokens,
 			systemToolsTokens: toolsTokens,
 			systemContextTokens,
+			instructionFilesTokens,
 			skillsTokens,
 			messagesTokens: Math.max(0, usedTokens - categoryNonMessageTokens),
 		};

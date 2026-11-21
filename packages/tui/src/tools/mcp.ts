@@ -402,6 +402,23 @@ export interface MCPImageContent {
 	mimeType: string;
 }
 
+/** Base64-encoded audio returned by an MCP tool or prompt. */
+export interface MCPAudioContent {
+	type: "audio";
+	data: string; // base64
+	mimeType: string;
+}
+
+/** Link to a server resource, read separately (`resources/read`). */
+export interface MCPResourceLinkContent {
+	type: "resource_link";
+	uri: string;
+	name?: string;
+	title?: string;
+	description?: string;
+	mimeType?: string;
+}
+
 /** Embedded text or binary resource returned by an MCP tool. */
 export interface MCPResourceContent {
 	type: "resource";
@@ -414,7 +431,12 @@ export interface MCPResourceContent {
 }
 
 /** Supported MCP result content blocks retained in display metadata. */
-export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;
+export type MCPContent =
+	| MCPTextContent
+	| MCPImageContent
+	| MCPAudioContent
+	| MCPResourceContent
+	| MCPResourceLinkContent;
 
 /** Server-reported progress of an in-flight MCP request. */
 export interface MCPProgress {

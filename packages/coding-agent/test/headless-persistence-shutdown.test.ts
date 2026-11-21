@@ -128,6 +128,7 @@ async function createHarness(): Promise<ShutdownHarness> {
 		sessionManager: manager,
 		subscribe: () => {},
 		addDisposer: () => {},
+		setScopedModelsRefresher: () => {},
 		getAllToolNames: () => [],
 		validateRetryFallbackChains: () => {},
 		getLastAssistantMessage: () => undefined,

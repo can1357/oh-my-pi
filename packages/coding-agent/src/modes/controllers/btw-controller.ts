@@ -1,5 +1,6 @@
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
+import { type Component, type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
+import type { TspMenuEntry } from "@oh-my-pi/pi-wire";
 import { logger, toError, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	type BtwHistoryRecord,
@@ -15,8 +16,10 @@ import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { focusActiveEditorArea } from "./selector-controller";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
-import type { BtwInjectState } from "@oh-my-pi/pi-tui/overlays/btw-inject";
+import { BTW_INJECT_LABEL, type BtwInjectState } from "@oh-my-pi/pi-tui/overlays/btw-inject";
+import { type BtwNoteAction, BtwNoteComponent, type BtwNoteHost } from "@oh-my-pi/pi-tui/overlays/btw-note";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import type { AgentViewSession, AgentViewSessionManager } from "../../session/agent-session-handle";
@@ -95,6 +98,15 @@ export class BtwController {
 	#storeScope: string | undefined;
 	#historyPanel: BtwHistoryPanel | undefined;
 	#historyOverlay: OverlayHandle | undefined;
+	/** Tern's transcript notes of the store's topics on the shown branch, by topic id. */
+	readonly #notes = new Map<string, BtwNoteComponent>();
+	/** The topic whose note the composer talks to (Tern): drafts become its follow-ups. */
+	#focus: string | undefined;
+	readonly #noteHost: BtwNoteHost = {
+		menu: (record, folded) => this.#noteMenu(record, folded),
+		injectState: (record, turnIndex) => this.#noteInjectState(record, turnIndex),
+		run: (record, action) => this.#runNoteAction(record, action),
+	};
 	readonly #writes = new Set<Promise<boolean>>();
 	readonly #failedWrites = new Map<BtwRequest, Error>();
 	/**
@@ -125,19 +137,35 @@ export class BtwController {
 		return this.ctx.focusedAgentId ? this.#sessionManager.getSessionId() : undefined;
 	}
 
-	/** Whether the inline panel owns Escape. */
+	/** Whether /btw owns Escape: the inline panel, or a note the composer talks to. */
 	hasActiveRequest(): boolean {
-		return this.#visible;
+		return this.#visible || this.#focus !== undefined;
+	}
+
+	/** Whether the composer talks to a note: its drafts go to {@link submitFollowUp}. */
+	isFocused(): boolean {
+		return this.#focus !== undefined;
+	}
+
+	/** Sends a composer draft to the focused note's topic; false when no follow-up started. */
+	submitFollowUp(question: string, images?: ImageContent[]): Promise<boolean> {
+		const id = this.#focus;
+		return id === undefined ? Promise.resolve(false) : this.startFollowUp(id, question, undefined, images);
 	}
 
 	canBranch(): boolean {
 		return this.#branchUnavailableReason() === undefined;
 	}
 
+	/** The answer lives in the inline panel, or in Tern's open history sheet. */
+	#answerShown(): boolean {
+		return this.#visible || (this.ctx.ui.nativeRendering && this.#historyOverlay !== undefined);
+	}
+
 	/** Whether plain `b` is currently reserved for a completed or pending branch action. */
 	handlesBranchKey(): boolean {
 		if (this.#branchInFlight) return true;
-		if (!this.#visible || this.#activeRequest?.component.isBranchable() !== true) return false;
+		if (!this.#answerShown() || this.#activeRequest?.component.isBranchable() !== true) return false;
 		// Branch promotion rewrites the main session; focused-subagent answers stay side-only.
 		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId) return false;
 		return (
@@ -153,11 +181,13 @@ export class BtwController {
 		if (this.#branchInFlight) return "a branch is already in progress";
 		if ([...this.#injects.values()].includes("sending")) return "a /btw prompt is still sending";
 		if (this.#transitionCount > 0) return "a session operation is in progress";
-		if (!this.#visible || this.#activeRequest?.component.isBranchable() !== true) return "the answer is not ready";
-		if (this.#activeRequest.session !== this.ctx.session || this.ctx.focusedAgentId)
+		const request = this.#activeRequest;
+		const shown = this.#answerShown() || (request !== undefined && this.#notes.has(request.record.id));
+		if (!shown || request?.component.isBranchable() !== true) return "the answer is not ready";
+		if (request.session !== this.ctx.session || this.ctx.focusedAgentId)
 			return "only main-session answers can be branched";
 		// Inline branch promotion carries one pair; do not drop earlier side turns.
-		if (this.#activeRequest.history?.length) return "multi-turn side conversations remain in BTW history";
+		if (request.history?.length) return "multi-turn side conversations remain in BTW history";
 		if (!this.#lastQuestion || !this.#lastReplyText || !this.#lastAssistantMessage)
 			return "the answer is unavailable";
 		if (!this.#lastLeafId) return "the session has no branch point";
@@ -236,6 +266,10 @@ export class BtwController {
 	handleEscape(): boolean {
 		if (this.#branchInFlight) {
 			this.ctx.showStatus("/btw branch is in progress", { dim: true });
+			return true;
+		}
+		if (this.#focus !== undefined) {
+			this.#setFocus(undefined);
 			return true;
 		}
 		if (!this.#visible) return false;
@@ -334,6 +368,7 @@ export class BtwController {
 			const request = this.#activeRequest;
 			if (request && getBtwTurnKey(request.record) === key) request.component.setInjected(sent);
 			this.#refreshHistory();
+			this.#notes.get(record.id)?.refresh();
 			if (sent) return;
 			if (reason) {
 				this.ctx.showError(sanitizeErrorLine(`Cannot inject /btw prompt: ${reason}`));
@@ -418,6 +453,7 @@ export class BtwController {
 		this.#updateRequest(request, { status: "cancelled", updatedAt: Date.now() });
 		request.abortController.abort();
 		request.component.markAborted();
+		this.#notes.get(request.record.id)?.update(request.record);
 		this.#persist(request);
 		this.#refreshHistory();
 		return true;
@@ -435,6 +471,8 @@ export class BtwController {
 			await this.flush();
 			this.#closeHistory();
 			this.#hideInline();
+			this.#setFocus(undefined);
+			this.#notes.clear();
 			this.#activeRequest?.component.close();
 			this.#activeRequest = undefined;
 			this.#clearCompletedState();
@@ -498,15 +536,20 @@ export class BtwController {
 		}
 	}
 
+	/** Whether the store opened (or opening) is the one of the session view on screen. */
+	#storeMatchesView(): boolean {
+		return (
+			this.#storeSessionId === this.#sessionManager.getSessionId() &&
+			this.#storeArtifactsDir === (this.#sessionManager.getArtifactsDir() ?? undefined) &&
+			this.#storeScope === this.#historyScope
+		);
+	}
+
 	async #loadHistory(): Promise<BtwHistoryStore> {
 		const sessionId = this.#sessionManager.getSessionId();
 		const artifactsDir = this.#sessionManager.getArtifactsDir() ?? undefined;
 		const scope = this.#historyScope;
-		if (
-			this.#storeSessionId !== sessionId ||
-			this.#storeArtifactsDir !== artifactsDir ||
-			this.#storeScope !== scope
-		) {
+		if (!this.#storeMatchesView()) {
 			await this.dispose();
 			if (
 				this.#sessionManager.getSessionId() !== sessionId ||
@@ -647,10 +690,9 @@ export class BtwController {
 				injectEnabled,
 			};
 			this.#activeRequest = request;
-			// Tern shows the answer in the BTW history sheet (its body scrolls, its
-			// markdown is native); the text renderer keeps the inline panel.
-			const sheet = this.ctx.ui.nativeRendering;
-			this.#visible = !sheet && (!previous || !this.#historyOverlay);
+			// Tern draws the topic as a note in its transcript; the text renderer keeps the inline panel.
+			const native = this.ctx.ui.nativeRendering;
+			this.#visible = !native && (!previous || !this.#historyOverlay);
 			this.ctx.btwContainer.clear();
 			if (this.#visible) this.ctx.btwContainer.addChild(request.component);
 			this.ctx.ui.requestRender();
@@ -679,7 +721,7 @@ export class BtwController {
 				return false;
 			}
 			this.#refreshHistory();
-			if (sheet && !previous) this.#showHistory(store).showRecord(record.id);
+			if (native) this.#showNote(request.record, { append: !previous });
 			void this.#runRequest(request);
 			return true;
 		} catch (error) {
@@ -706,6 +748,11 @@ export class BtwController {
 			},
 			onCancel: record => {
 				if (this.#activeRequest?.record.id === record.id) this.handleCancel();
+			},
+			canBranch: record => record.id === this.#activeRequest?.record.id && this.canBranch(),
+			onBranch: record => {
+				if (record.id !== this.#activeRequest?.record.id) return;
+				void this.handleBranch();
 			},
 			canFollowUp: record =>
 				!this.#starting &&
@@ -765,12 +812,15 @@ export class BtwController {
 		this.#historyPanel = undefined;
 		if (!overlay) return;
 		overlay.hide();
+		focusActiveEditorArea(this.ctx);
 		// Closing while a BTW still answers keeps it running: text mode returns
-		// to its inline panel; Tern has none, so it says how to get back.
+		// to its inline panel; Tern answers in its note, or says how to get back.
 		const request = this.#activeRequest;
 		if (request && this.#isActiveRequest(request) && getBtwLatestTurn(request.record).status === "running") {
 			if (this.ctx.ui.nativeRendering) {
-				this.ctx.showStatus("/btw is still answering in the background · /btw to reopen it", { dim: true });
+				if (!this.#notes.has(request.record.id)) {
+					this.ctx.showStatus("/btw is still answering in the background · /btw to reopen it", { dim: true });
+				}
 			} else {
 				request.component.setAnswer(getBtwLatestTurn(request.record).answer);
 				this.#visible = true;
@@ -828,6 +878,7 @@ export class BtwController {
 					if (this.#isActiveRequest(request)) {
 						if (this.#visible) request.component.appendText(delta);
 						this.#refreshHistory();
+						this.#notes.get(request.record.id)?.update(request.record);
 					}
 				},
 				signal: request.abortController.signal,
@@ -841,9 +892,11 @@ export class BtwController {
 			if (this.#isActiveRequest(request)) {
 				request.component.setAnswer(replyText);
 				request.component.markComplete();
-				// Tern: the sheet was put away while answering; say where the answer is.
+				// Tern: an answer folded away or left only in history says it is ready.
 				if (this.ctx.ui.nativeRendering && !this.#historyOverlay) {
-					this.ctx.showStatus("/btw answer ready · /btw to read it");
+					const note = this.#notes.get(request.record.id);
+					if (!note) this.ctx.showStatus("/btw answer ready · /btw to read it");
+					else if (note.folded) this.ctx.showStatus("/btw answer ready");
 				}
 				const copyText = request.component.getCopyText();
 				if (copyText !== undefined) {
@@ -871,12 +924,165 @@ export class BtwController {
 			}
 		}
 		this.#persist(request);
-		if (this.#isActiveRequest(request)) this.#refreshHistory();
+		if (this.#isActiveRequest(request)) {
+			this.#refreshHistory();
+			this.#notes.get(request.record.id)?.update(request.record);
+		}
 	}
 
 	#hideInline(): void {
 		this.#visible = false;
 		this.ctx.btwContainer.clear();
+		this.ctx.ui.requestRender();
+	}
+
+	/** Makes the composer talk to topic `id`'s note (undefined: back to the chat); the note rings while it does. */
+	#setFocus(id: string | undefined): void {
+		if (this.#focus === id) return;
+		if (this.#focus !== undefined) this.#notes.get(this.#focus)?.setActive(false);
+		this.#focus = id;
+		if (id !== undefined) this.#notes.get(id)?.setActive(true);
+		// The composer's role, chip and placeholder follow.
+		this.ctx.ui.requestRender();
+	}
+
+	/** Tern: the topic's note, updated in place, or (`append`) a new one at the transcript's end. */
+	#showNote(record: BtwHistoryRecord, options: { append: boolean }): void {
+		const note = this.#notes.get(record.id);
+		if (note) {
+			note.update(record);
+			note.setFolded(false);
+			return;
+		}
+		if (!options.append) return;
+		this.ctx.chatContainer.addChild(this.#createNote(record, { folded: false }));
+		this.ctx.ui.requestRender();
+	}
+
+	#createNote(record: BtwHistoryRecord, options: { folded: boolean }): BtwNoteComponent {
+		const note = new BtwNoteComponent({ record, folded: options.folded, tui: this.ctx.ui, host: this.#noteHost });
+		this.#notes.set(record.id, note);
+		return note;
+	}
+
+	/** A note's right-click entries: what can be done with its topic now; a press re-checks. */
+	#noteMenu(record: BtwHistoryRecord, folded: boolean): TspMenuEntry[] {
+		const entries: TspMenuEntry[] = [];
+		if (getBtwCopyText(record) !== undefined) entries.push({ id: "btw-copy", label: "Copy answer", icon: "copy" });
+		if (this.#canSend(record)) entries.push({ id: "btw-inject", label: BTW_INJECT_LABEL });
+		const status = getBtwLatestTurn(record).status;
+		if (this.#activeRequest?.record.id === record.id) {
+			if (status === "running") entries.push({ id: "btw-stop", label: "Stop answer", icon: "stop" });
+			else if (status === "complete" && !record.followUps?.length) {
+				entries.push({ id: "btw-branch", label: "Branch into chat", icon: "branch" });
+			}
+		}
+		entries.push(
+			{ id: "btw-history", label: "Open in BTW history", icon: "history" },
+			"-",
+			folded ? { id: "btw-expand", label: "Expand" } : { id: "btw-fold", label: "Fold to one line" },
+		);
+		return entries;
+	}
+
+	/** A note's `<inject>` block: pending while a turn asked with the instruction streams, else as history shows it. */
+	#noteInjectState(record: BtwHistoryRecord, turnIndex: number): BtwInjectState | undefined {
+		if (getBtwTurns(record)[turnIndex]?.status !== "running") return this.#injectState(record, turnIndex);
+		const request = this.#activeRequest;
+		return request?.record.id === record.id && request.injectEnabled ? "pending" : undefined;
+	}
+
+	#runNoteAction(record: BtwHistoryRecord, action: BtwNoteAction): void {
+		const note = this.#notes.get(record.id);
+		switch (action) {
+			case "btw-focus":
+				this.#setFocus(this.#focus === record.id ? undefined : record.id);
+				return;
+			case "btw-expand":
+				note?.setFolded(false);
+				this.#setFocus(record.id);
+				return;
+			case "btw-fold":
+				note?.setFolded(true);
+				if (this.#focus === record.id) this.#setFocus(undefined);
+				return;
+			case "btw-copy": {
+				const answer = getBtwCopyText(record);
+				if (answer !== undefined) void this.#copyAnswer(answer);
+				return;
+			}
+			case "btw-inject":
+				if (this.#canSend(record)) this.#inject(record);
+				return;
+			case "btw-branch":
+				void this.handleBranch();
+				return;
+			case "btw-stop":
+				if (this.#activeRequest?.record.id === record.id) this.handleCancel();
+				return;
+			case "btw-history":
+				if (this.#store) this.#showHistory(this.#store).showRecord(record.id);
+				return;
+		}
+	}
+
+	/**
+	 * Tern: puts the topics asked on the transcript's branch back into it after a rebuild, each
+	 * before the first message newer than it, folded unless already shown in this process. Opens
+	 * the view's history first when it is not open, unless that would cancel a question still
+	 * answering in another view. Resolves once placed (or skipped); never rejects.
+	 */
+	async placeNotes(): Promise<void> {
+		if (!this.ctx.ui.nativeRendering) return;
+		if (this.#store && this.#storeMatchesView()) {
+			this.#placeNotes(this.#store);
+			return;
+		}
+		const active = this.#activeRequest;
+		const answering = active !== undefined && getBtwLatestTurn(active.record).status === "running";
+		if (answering || this.#starting || this.#transitionCount > 0) return;
+		const sessionId = this.#sessionManager.getSessionId();
+		try {
+			const store = await this.#loadHistory();
+			if (store === this.#store && sessionId === this.#sessionManager.getSessionId()) this.#placeNotes(store);
+		} catch (error) {
+			logger.warn("BTW notes not restored", { error: toError(error).message });
+		}
+	}
+
+	#placeNotes(store: BtwHistoryStore): void {
+		const container = this.ctx.chatContainer;
+		const shown = new Map<Component, number>();
+		container.children.forEach((child, index) => shown.set(child, index));
+		const onBranch = new Set<string>();
+		// Message blocks in transcript order with when their message was created.
+		const anchors: { at: number; index: number }[] = [];
+		for (const entry of this.#sessionManager.getBranch()) {
+			onBranch.add(entry.id);
+			if (entry.type !== "message") continue;
+			const component = this.ctx.transcriptMessageComponents.get(entry.message);
+			const index = component && shown.get(component);
+			if (index !== undefined) anchors.push({ at: entry.message.timestamp, index });
+		}
+		const notes = new Map<string, BtwNoteComponent>();
+		const inserts: { index: number; at: number; note: BtwNoteComponent }[] = [];
+		for (const record of this.#historyRecords(store)) {
+			if (record.leafId !== null && !onBranch.has(record.leafId)) continue;
+			const existing = this.#notes.get(record.id);
+			const note = existing ?? this.#createNote(record, { folded: true });
+			if (existing) note.update(record);
+			notes.set(record.id, note);
+			// Still in the transcript (a rebuild that kept it): it stays where it is.
+			if (shown.has(note)) continue;
+			const index = anchors.find(anchor => anchor.at > record.createdAt)?.index ?? container.children.length;
+			inserts.push({ index, at: record.createdAt, note });
+		}
+		// From the end, so earlier indices hold; the older of two notes at one index goes first.
+		inserts.sort((a, b) => b.index - a.index || b.at - a.at);
+		for (const { index, note } of inserts) container.insertChildAt(note, index);
+		this.#notes.clear();
+		for (const [id, note] of notes) this.#notes.set(id, note);
+		if (this.#focus !== undefined && !notes.has(this.#focus)) this.#setFocus(undefined);
 		this.ctx.ui.requestRender();
 	}
 

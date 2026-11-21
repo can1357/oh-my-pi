@@ -73,10 +73,8 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * resumed session's subagent transcripts are rows, and a directory walk of
  * the artifacts tree finds nothing. When the same id appears in multiple dirs,
  * the first hit wins (registry dirs are scanned first; a `preferredDir` from
- * the caller root is scanned before them). Within one directory both modes
- * keep the orders they had when this walked the filesystem directly:
- * `onlyPreferred` records direct files before it descends, so a direct
- * transcript beats a nested same-id copy, while a full walk takes the
+ * the caller root is scanned before them). Within one directory the walk keeps
+ * the order it had when it walked the filesystem directly: it takes the
  * directory's entries in their own order and descends as it meets them, so
  * whichever of `Worker.jsonl` and `Z/Worker.jsonl` the directory lists first
  * wins. That order is what `listEntriesSync` exists to carry across the
@@ -85,18 +83,18 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  */
 export function sessionFilesFromDisk(
 	preferredDir: string | undefined,
-	options: { onlyPreferred?: boolean; preserveDuplicates: true; storage?: SessionStorage },
+	options: { preserveDuplicates: true; storage?: SessionStorage },
 ): Promise<Map<string, string[]>>;
 export function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean; preserveDuplicates?: false; storage?: SessionStorage },
+	options?: { preserveDuplicates?: false; storage?: SessionStorage },
 ): Promise<Map<string, string>>;
 export async function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean; preserveDuplicates?: boolean; storage?: SessionStorage },
+	options?: { preserveDuplicates?: boolean; storage?: SessionStorage },
 ): Promise<Map<string, string> | Map<string, string[]>> {
 	const storage = options?.storage ?? defaultSessionStorage();
-	const dirs = options?.onlyPreferred ? [] : artifactsDirsFromRegistry();
+	const dirs = artifactsDirsFromRegistry();
 	if (preferredDir) dirs.unshift(preferredDir);
 
 	const found = options?.preserveDuplicates ? new Map<string, string[]>() : new Map<string, string>();
@@ -119,16 +117,6 @@ export async function sessionFilesFromDisk(
 		if (depth > MAX_SCAN_DEPTH || seenDirs.has(dir)) return;
 		seenDirs.add(dir);
 		const entries = storage.listEntriesSync(dir);
-		if (options?.onlyPreferred) {
-			// Prefer a direct transcript over a nested same-id copy.
-			for (const entry of entries) {
-				if (entry.isFile) recordFile(path.join(dir, entry.name));
-			}
-			for (const entry of entries) {
-				if (entry.isDirectory) scan(path.join(dir, entry.name), depth + 1);
-			}
-			return;
-		}
 		for (const entry of entries) {
 			if (entry.isDirectory) scan(path.join(dir, entry.name), depth + 1);
 			// Regular files only: a symlink, a FIFO or a device node named

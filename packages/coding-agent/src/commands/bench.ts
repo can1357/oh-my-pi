@@ -38,6 +38,9 @@ export default class Bench extends Command {
 			description: "Service tier applied per model family (default: configured `tier.*` settings; `none` omits it)",
 			options: SERVICE_TIER_OPENAI_VALUES,
 		}),
+		account: Flags.integer({
+			description: "Select the Nth OAuth account (1-based, as listed by omp token PROVIDER --list)",
+		}),
 		json: Flags.boolean({ description: "Output JSON" }),
 		par: Flags.integer({
 			description: "Execute runs with N parallel queries/requests (default: 4); --detailed's parallel phase width",
@@ -77,6 +80,7 @@ export default class Bench extends Command {
 				prefillBytes: flags["prefill-bytes"],
 				detailed: flags.detailed,
 				serviceTier: flags["service-tier"],
+				account: flags.account,
 				json: flags.json,
 				par: flags.par,
 				cache: flags.cache,

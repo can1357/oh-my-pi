@@ -4,7 +4,6 @@
  *
  * The reads below walked the local filesystem instead of the storage that
  * holds the session, so the resumed session could not see its own subagents,
- * `/seance` could not find a session the table held by its id or its path,
  * and the resume picker could not rename it.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -21,7 +20,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { resolveSeanceSource } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
@@ -137,25 +135,6 @@ describe("a session resumed from SQL session storage", () => {
 		const target = await resolveResumeTarget(id.slice(0, 8), cwd, sessionDir);
 
 		expect([target?.session.id, target?.session.path]).toEqual([id, sessionFile]);
-	});
-
-	it("is found by /seance by its id prefix and by its path", async () => {
-		using tempDir = TempDir.createSync("@omp-sql-seance-");
-		const cwd = tempDir.join("project");
-		const database = `sqlite://${tempDir.join("sessions.db")}`;
-		const storage = await SqlSessionStorage.create({ client: new SQL(database) });
-		setDefaultSessionStorage(storage);
-
-		const id = "01a1880d-bbbb-7000-9000-000000000002";
-		const sessionDir = computeDefaultSessionDir(cwd, storage);
-		const sessionFile = path.join(sessionDir, `2026-10-29T00-00-00-000Z_${id}.jsonl`);
-		await storage.writeText(sessionFile, transcript(id, cwd, "only in the table", "stored reply"));
-		await storage.drain();
-
-		const byId = await resolveSeanceSource(id.slice(0, 8), { cwd, sessionDirHint: sessionDir });
-		const byPath = await resolveSeanceSource(sessionFile, { cwd });
-
-		expect([byId.id, byId.file, byPath.id, byPath.file]).toEqual([id, sessionFile, id, sessionFile]);
 	});
 
 	it("is renamed from the resume picker and keeps the title in the table", async () => {

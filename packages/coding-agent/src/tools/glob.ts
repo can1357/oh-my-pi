@@ -1,9 +1,10 @@
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import * as natives from "@oh-my-pi/pi-natives";
-import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { formatGroupedPaths, hasFsCode, isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
@@ -37,12 +38,48 @@ const findSchema = type({
 	"path?": "string",
 	"hidden?": "boolean",
 	"gitignore?": "boolean",
-	"limit?": "number",
+	"limit?": "1 <= number.integer <= 200",
 });
 
 export type GlobToolInput = typeof findSchema.infer;
 
+/** Every `glob` argument, plus the `pattern` models pass for the glob itself; any other key is refused, not dropped unread. */
+const GLOB_ARGUMENTS: ReadonlySet<string> = new Set(["path", "hidden", "gitignore", "limit", "pattern"]);
+
+/**
+ * The `path` a call searches. Models often pass the glob as `pattern` beside a
+ * directory `path` (`{path: "src", pattern: "**\/*.ts"}`) or instead of it; each
+ * `;` entry of `pattern` is scoped under each `path` entry unless it is absolute
+ * or a URL. Approval and execution both read this, so a `pattern` reaching
+ * outside `path` is approved for where it actually searches.
+ */
+function globSearchPath(args: unknown): string | undefined {
+	if (!isRecord(args)) return undefined;
+	const base = typeof args.path === "string" ? args.path : undefined;
+	if (typeof args.pattern !== "string") return base;
+	const patterns = args.pattern
+		.split(";")
+		.map(entry => entry.trim())
+		.filter(entry => entry.length > 0);
+	const bases =
+		base
+			?.split(";")
+			.map(entry => entry.trim())
+			.filter(entry => entry.length > 0) ?? [];
+	if (bases.length === 0) return patterns.join(";");
+	const scoped = new Set<string>();
+	for (const dir of bases) {
+		for (const pattern of patterns) {
+			const standalone =
+				path.isAbsolute(pattern) || pattern.startsWith("~") || /^[a-z][a-z0-9+.-]*:\/\//i.test(pattern);
+			scoped.add(standalone ? pattern : `${dir.replace(/[\\/]+$/, "")}/${pattern}`);
+		}
+	}
+	return [...scoped].join(";");
+}
+
 const DEFAULT_LIMIT = 200;
+/** The schema's `limit` bound. */
 const MAX_LIMIT = 200;
 const DEFAULT_GLOB_TIMEOUT_MS = 5000;
 
@@ -99,7 +136,7 @@ export interface GlobToolOptions {
 	operations?: GlobOperations;
 	/** Remap slash-only paths to the session cwd before root-search validation. */
 	rootPathAlias?: boolean;
-	/** Native glob binding. Override only in tests. */
+	/** Glob backend (`natives.glob`). Override only in tests. */
 	nativeGlob?: typeof natives.glob;
 	/** Filesystem stat used before native scans. Override only in tests. */
 	stat?: typeof fs.promises.stat;
@@ -121,7 +158,7 @@ interface NativePreparedTarget {
 
 export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly name = "glob";
-	readonly approval = searchPathTier;
+	readonly approval = (args: unknown) => searchPathTier({ path: globSearchPath(args) });
 	/**
 	 * `always-ask-cached` keys: the folders and files this glob searches, so a
 	 * folder grant recorded by a `read` (or by a grep) covers a search inside it
@@ -130,9 +167,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	 * costs a single stat; see {@link searchApprovalCacheTargets}.
 	 */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
-		const a = args as { path?: string | string[] } | null | undefined;
 		return searchApprovalCacheTargets(
-			toPathList(a?.path),
+			toPathList(globSearchPath(args)),
 			this.session.cwd,
 			entry => parseFindPattern(entry).basePath,
 			entry => {
@@ -163,6 +199,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly parameters = findSchema;
 
 	readonly strict = true;
+	/**
+	 * Unknown keys reach {@link execute} so a misplaced `pattern` is refused: the
+	 * closed schema would drop it and list the whole tree instead. Arguments the
+	 * agent loop could not repair arrive raw and are validated there too.
+	 */
+	readonly lenientArgValidation = true;
 
 	readonly #customOps?: GlobOperations;
 	readonly #rootPathAlias: boolean;
@@ -193,7 +235,17 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<GlobToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GlobToolDetails>> {
-		const { path: pathInput, limit, hidden, gitignore } = params;
+		const undeclared = Object.keys(params).filter(key => !GLOB_ARGUMENTS.has(key));
+		if (undeclared.length > 0) {
+			const keys = undeclared.map(key => `\`${key}\``).join(", ");
+			throw new ToolError(`glob has no ${keys} argument; put the glob in \`path\``);
+		}
+		const { pattern, ...declared }: Record<string, unknown> = params;
+		if (pattern !== undefined && typeof pattern !== "string") throw new ToolError("`pattern` must be a string glob");
+		const validated = findSchema(declared);
+		if (validated instanceof type.errors) throw new ToolError(validated.summary);
+		const { limit, hidden, gitignore } = validated;
+		const pathInput = globSearchPath(params);
 
 		throwIfAborted(signal);
 		// Preparation still rejects immediately on caller abort. Once every
@@ -211,9 +263,18 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const formatScopePath = (targetPath: string): string => formatPathRelativeToCwd(targetPath, this.session.cwd);
 			const scopedPaths = toPathList(pathInput);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
+			const internalRouter = InternalUrlRouter.instance();
+			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
+			const urlFilesystem = new InternalUrlFilesystem({
+				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
+				tier: resolveToolTier(this, params),
+			});
 			const rawPatternInputs = this.#customOps
 				? effectivePaths
-				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, { splitter: parseFindPattern });
+				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+						splitter: parseFindPattern,
+						mixedLocalPaths: urlFilesystem,
+					});
 			const rawPatterns = rawPatternInputs.map(input => normalizePathLikeInput(input).replace(/\\/g, "/"));
 			const aliasResolvedPatterns = this.#rootPathAlias
 				? rawPatterns.map(pattern => (/^\/+$/.test(pattern) ? "." : pattern))
@@ -221,12 +282,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			if (aliasResolvedPatterns.some(pattern => /^\/+$/.test(pattern))) {
 				throw new ToolError("Searching from root directory '/' is not allowed");
 			}
-			const internalRouter = InternalUrlRouter.instance();
-			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
-			const urlFilesystem = new InternalUrlFilesystem({
-				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
-				tier: resolveToolTier(this, params),
-			});
 			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
 			if (normalizedPatterns.some(pattern => pattern.length === 0)) {
 				throw new ToolError("`path` must contain non-empty globs or paths");
@@ -246,7 +301,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					urlFilesystem,
 				);
 				if (partition.valid.length === 0) {
-					throw new ToolError(`Path not found: ${partition.missing.join(", ")}`);
+					throw new ToolError(
+						`None of the ${partition.missing.length} paths exist:\n${partition.missing.map(missing => `- ${missing}`).join("\n")}`,
+					);
 				}
 				effectivePatterns = partition.valid;
 				missingPaths = partition.missing;
@@ -280,17 +337,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				}
 			}
 
-			const requestedLimit = limit ?? DEFAULT_LIMIT;
-			if (!Number.isFinite(requestedLimit) || requestedLimit <= 0) {
-				throw new ToolError("Limit must be a positive number");
-			}
-			const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(requestedLimit)));
-			// A request above the hard cap is silently reduced today; say so up
-			// front so `limit=1000` no longer reads as "200 is all there is" (#13263).
-			const clampNotice =
-				requestedLimit > MAX_LIMIT
-					? `Requested limit ${requestedLimit} clamped to the max of ${MAX_LIMIT}`
-					: undefined;
+			const effectiveLimit = limit ?? DEFAULT_LIMIT;
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
 			const timeoutMs = this.#timeoutMs;
@@ -339,7 +386,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const baseOutput = formatGroupedPaths(limited);
 				const trailingNotes: string[] = [];
 				if (notice) trailingNotes.push(notice);
-				if (clampNotice) trailingNotes.push(clampNotice);
 				if (missingPathsNote) trailingNotes.push(missingPathsNote);
 				const rawOutput = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
 				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
@@ -358,7 +404,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 				// Cap the doubled suggestion at MAX_LIMIT; once the reached count
 				// is already the cap there is no larger usable limit, so suppress
-				// the advice rather than recommend a value that clamps back (#13263).
+				// the advice rather than recommend a value the schema rejects (#13263).
 				const reachedLimit = limitMeta.resultLimit;
 				const cappedSuggestion =
 					reachedLimit === undefined ? undefined : Math.min(reachedLimit.reached * 2, MAX_LIMIT);
@@ -478,7 +524,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					throwIfAborted(signal);
 					let stat: UrlFileStat;
 					if (internalRouter.canHandle(target.searchPath)) {
-						// A URL failure carries its handler's diagnosis (`Artifact 9 not found. Available: 4`).
+						// A URL failure carries its handler's diagnosis (a missing `local://` file, a `skill://` URL without a name).
 						stat = await urlFilesystem.stat(target.searchPath).catch((err: unknown) => {
 							throw new ToolError(
 								`Cannot glob ${target.searchPath}: ${err instanceof Error ? err.message : String(err)}`,
@@ -588,6 +634,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							// `dir/sub/nested.ts`.
 							recursive: false,
 							followLinks: target.searchPath.startsWith("skill://"),
+							// `node_modules/**/x` scopes the walk to node_modules, whose nested
+							// node_modules the native walk would otherwise prune.
+							includeNodeModules: target.searchPath.split(/[\\/]/).includes("node_modules") || undefined,
 							signal: combinedSignal,
 							timeoutMs,
 							filesystem: urlFilesystem.shellFilesystem(),

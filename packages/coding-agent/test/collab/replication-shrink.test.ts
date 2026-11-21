@@ -28,7 +28,7 @@
  * {@link MAX_REPLICATED_PAYLOAD_BYTES}, and preserves the entry's
  * `id`/`parentId` so the guest's branch chain stays connected.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -54,6 +54,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { installTestCollabHome, uninstallTestCollabHome } from "./helpers/in-memory-relay";
 
 interface RelayData {
 	role: "host" | "guest";
@@ -317,8 +318,12 @@ const BIG_PAYLOAD_BYTES = 5 * 1024 * 1024;
 const RELAY_MAX_PAYLOAD = 8 * 1024 * 1024;
 
 const cleanups: (() => void | Promise<void>)[] = [];
+beforeEach(() => {
+	installTestCollabHome();
+});
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	uninstallTestCollabHome();
 });
 
 describe("collab replication shrinking (#3739)", () => {

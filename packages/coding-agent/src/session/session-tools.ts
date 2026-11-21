@@ -10,24 +10,36 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
+import { clearPluginRootsAndCaches } from "../discovery/helpers";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
-import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
+import {
+	getActiveSkills,
+	type LoadSkillsResult,
+	loadSkills,
+	type Skill,
+	type SkillWarning,
+	setActiveSkills,
+} from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
-import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { isEvalNamespaceTool } from "../mcp/eval-namespaces";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
-import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { invalidateToolSchemaMetadata, type SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
+import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
+import evalPreludeGuidePrompt from "../prompts/tools/eval-prelude-first-call.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
+import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
-import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
+import toolCommandMountNoticePrompt from "../prompts/system/tool-command-mount-notice.md" with { type: "text" };
+import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import {
 	approvalRestrictions,
@@ -43,13 +55,13 @@ import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
-	isMountableUnderXdev,
-	listXdevTools,
-	planXdevPromptDocs,
-	type XdevState,
-	xdevDocsFor,
-	xdevEntries,
-} from "../tools/xdev";
+	isMountableAsToolCommand,
+	listToolCommands,
+	planToolCommandPromptDocs,
+	type ToolCommandState,
+	toolCommandDocsFor,
+	toolCommandEntries,
+} from "../tools/tool-commands";
 import type { EditModeSetting } from "../edit/settings";
 import { resolveEditMode } from "../utils/edit-mode";
 import {
@@ -60,7 +72,9 @@ import {
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
-import { toolReadsSkillUris } from "../system-prompt";
+import { type BuildSystemPromptResult, toolReadsSkillUris } from "../system-prompt";
+import { matchModelPattern } from "../utils/model-patterns";
+import { resolveToolWireName } from "../utils/tool-wire-name";
 
 import type { CustomMessage } from "./messages";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
@@ -68,15 +82,31 @@ import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
-import { cfgExternalThinking, cfgIncludeModelInPrompt, cfgInlineToolDescriptors, cfgSkillful } from "./settings";
+import {
+	cfgExternalThinking,
+	cfgIncludeModelInPrompt,
+	cfgInlineToolDescriptors,
+	cfgSkillful,
+	systemPromptTemplatePatterns,
+} from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import {
 	cfgToolsApproval,
 	cfgToolsApprovalMode,
-	cfgToolsXdevDocs,
-	cfgToolsXdevInlineDevices,
-	cfgToolsXdevNotices,
+	cfgToolsCommandDocs,
+	cfgToolsCommandInline,
+	cfgToolsCommandNotices,
 } from "../tools/settings";
+
+/**
+ * Registered tools a mode may activate mid-session that `active` leaves out, for {@link Agent.setStandbyTools}:
+ * goal mode activates `goal`, and declaring it only then re-writes Anthropic's cached prompt (issue #19826).
+ * Applied when the session's agent is created and on every active-tool change.
+ */
+export function standbyTools(registry: ReadonlyMap<string, AgentTool>, active: readonly string[]): AgentTool[] {
+	const goal = active.includes("goal") ? undefined : registry.get("goal");
+	return goal ? [goal] : [];
+}
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
@@ -145,9 +175,20 @@ export interface SettingsGatedToolDelta {
 	readonly added: readonly { readonly name: string; readonly builtIn: boolean; readonly activate: boolean }[];
 	/** Names whose registry entries were removed. */
 	readonly removed: readonly string[];
-	/** `xd://` state after following `tools.xdev`; undefined while mounting is off. */
-	readonly xdev: XdevState | undefined;
+	/** Tool command state after following `tools.commands`; undefined while mounting is off. */
+	readonly toolCommands: ToolCommandState | undefined;
 }
+
+/**
+ * Renders the base prompt for an active tool set. `toolCommands` is the tool command state
+ * to render: the live state, or a frozen prefix's committed roster when a
+ * rebuild re-renders it. Supplied by `sdk.ts`; called on every prompt rebuild.
+ */
+export type SystemPromptRebuilder = (
+	toolNames: string[],
+	tools: Map<string, AgentTool>,
+	toolCommands: ToolCommandState | undefined,
+) => Promise<BuildSystemPromptResult>;
 
 interface SessionToolsOptions {
 	autoApprove?: boolean;
@@ -159,10 +200,6 @@ interface SessionToolsOptions {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
-	ensureWriteRegistered?: () => Promise<boolean>;
-	isDeviceOnlyWrite?: () => boolean;
-	setDeviceOnlyWrite?: (enabled: boolean) => void;
-	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/**
@@ -170,14 +207,19 @@ interface SessionToolsOptions {
 	 * registry; `isBuiltIn` reports this session's built-in provenance.
 	 */
 	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
-	rebuildSystemPrompt?: (
-		toolNames: string[],
-		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	rebuildSystemPrompt?: SystemPromptRebuilder;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
-	xdev?: XdevState;
+	/**
+	 * Whether enabled MCP tools present as eval namespaces (`mcp.evalNamespaces`)
+	 * while `eval` is top-level; read at every apply.
+	 */
+	bindsMcpToEval?: () => boolean;
+	/** Eval-bound names of the construction slate ({@link SessionTools.getEvalBoundToolNames}). */
+	evalBoundToolNames?: Iterable<string>;
+	toolCommands?: ToolCommandState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
+	systemPromptSources?: SystemPromptSources;
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
 	skillsSettings?: SkillsSettings;
@@ -204,18 +246,19 @@ export interface MountedMCPToolRoute {
 	readonly name: string;
 }
 
-export interface MCPXdevGuidanceMapping extends MountedMCPToolRoute {
+export interface MCPToolCommandGuidanceMapping extends MountedMCPToolRoute {
 	readonly label: string;
+	/** Command name the route runs as. */
 	readonly path: string;
 }
 
-export interface MCPXdevGuidanceProjection {
-	readonly mappings: readonly MCPXdevGuidanceMapping[];
+export interface MCPToolCommandGuidanceProjection {
+	readonly mappings: readonly MCPToolCommandGuidanceMapping[];
 	readonly hasOmittedMappings: boolean;
 }
 
-const MAX_MCP_XDEV_GUIDANCE_MAPPING_DATA_LENGTH = 4000;
-const MAX_MCP_XDEV_GUIDANCE_MAPPINGS = 64;
+const MAX_MCP_TOOL_COMMAND_GUIDANCE_MAPPING_DATA_LENGTH = 4000;
+const MAX_MCP_TOOL_COMMAND_GUIDANCE_MAPPINGS = 64;
 
 /** Yield exact mounted MCP ownership and route metadata. */
 export function* collectMountedMCPToolRoutes(
@@ -231,7 +274,7 @@ export function* collectMountedMCPToolRoutes(
 	}
 }
 
-function formatMCPXdevGuidanceLabel(label: string): string {
+function formatMCPToolCommandGuidanceLabel(label: string): string {
 	return (JSON.stringify(label) ?? '""')
 		.replaceAll("`", "\\u0060")
 		.replaceAll("\u2028", "\\u2028")
@@ -242,35 +285,40 @@ function formatMCPXdevGuidanceLabel(label: string): string {
  * Project exact live MCP routes into the bounded, Markdown-safe mapping data
  * rendered by the static MCP guidance prompt.
  */
-export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRoute>): MCPXdevGuidanceProjection {
-	const mappings: MCPXdevGuidanceMapping[] = [];
-	let remainingMappingDataLength = MAX_MCP_XDEV_GUIDANCE_MAPPING_DATA_LENGTH;
+export function projectMountedMCPToolCommandGuidance(
+	routes: Iterable<MountedMCPToolRoute>,
+): MCPToolCommandGuidanceProjection {
+	const mappings: MCPToolCommandGuidanceMapping[] = [];
+	let remainingMappingDataLength = MAX_MCP_TOOL_COMMAND_GUIDANCE_MAPPING_DATA_LENGTH;
 	let hasOmittedMappings = false;
 	for (const route of routes) {
-		const rawMappingDataLength = route.mcpToolName.length + XD_URL_PREFIX.length + route.name.length;
-		if (mappings.length >= MAX_MCP_XDEV_GUIDANCE_MAPPINGS || rawMappingDataLength > remainingMappingDataLength) {
+		const label = formatMCPToolCommandGuidanceLabel(route.mcpToolName);
+		const mappingDataLength = label.length + route.name.length;
+		if (mappings.length >= MAX_MCP_TOOL_COMMAND_GUIDANCE_MAPPINGS || mappingDataLength > remainingMappingDataLength) {
 			hasOmittedMappings = true;
 			continue;
 		}
-		const label = formatMCPXdevGuidanceLabel(route.mcpToolName);
-		const path = `${XD_URL_PREFIX}${route.name}`;
-		const mappingDataLength = label.length + path.length;
-		if (mappingDataLength > remainingMappingDataLength) {
-			hasOmittedMappings = true;
-			continue;
-		}
-		mappings.push({ ...route, label, path });
+		mappings.push({ ...route, label, path: route.name });
 		remainingMappingDataLength -= mappingDataLength;
 	}
 	return { mappings, hasOmittedMappings };
 }
 
 const TOOL_ROSTER_NOTICE_MESSAGE_TYPE = "tool-roster-notice";
-const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
+const TOOL_COMMAND_MOUNT_NOTICE_MESSAGE_TYPE = "tool-command-mount-notice";
 const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
+const EVAL_PRELUDE_GUIDE_MESSAGE_TYPE = "eval-prelude-guide";
+const SKILL_NOTICE_MESSAGE_TYPE = "skill-notice";
 
 /** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
 const SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE = "system-prompt-digest";
+
+/**
+ * Least time between two rediscoveries started by `skill://` names no loaded skill owns, so a typo
+ * read in a loop (a shell resolving one URL per spawned command) costs one pass per interval
+ * rather than one per read, while a skill installed after a miss is found once it has passed.
+ */
+const UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS = 2_000;
 
 /** Equal digests mean equal prompt blocks. */
 function systemPromptDigest(blocks: readonly string[]): string {
@@ -279,25 +327,31 @@ function systemPromptDigest(blocks: readonly string[]): string {
 	return hash.toString(16);
 }
 
+/** Whether two prompts carry the same blocks in the same order. */
+function samePromptBlocks(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((block, index) => block === right[index]);
+}
+
 /** The digest a branch entry records, `undefined` for a malformed record, or `null` when it is not a record. */
 export function promptDigestOfEntry(entry: SessionEntry): string | undefined | null {
 	if (entry.type !== "custom" || entry.customType !== SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE) return null;
 	return typeof entry.data === "string" ? entry.data : undefined;
 }
 
-/**
- * Structured payload persisted on each {@link XDEV_MOUNT_NOTICE_MESSAGE_TYPE}
- * custom message. Lets a resumed session reconstruct which dynamic devices the
- * model has already been told about, so reconnecting hosts do not re-announce
- * (and re-splice a redundant developer message that busts the provider
- * prompt-cache prefix).
- */
+/** Tool names added/removed by one hidden {@link TOOL_ROSTER_NOTICE_MESSAGE_TYPE} message. */
 interface ToolRosterNoticeDetails {
 	added: string[];
 	removed: string[];
 }
 
-interface XdevMountNoticeDetails {
+/**
+ * Structured payload persisted on each {@link TOOL_COMMAND_MOUNT_NOTICE_MESSAGE_TYPE}
+ * custom message. Lets a resumed session reconstruct which tool commands the
+ * model has already been told about, so reconnecting hosts do not re-announce
+ * (and re-splice a redundant developer message that busts the provider
+ * prompt-cache prefix).
+ */
+interface ToolCommandMountNoticeDetails {
 	added: string[];
 	removed: string[];
 }
@@ -305,6 +359,17 @@ interface XdevMountNoticeDetails {
 /** Prelude names added/removed by one hidden {@link EVAL_PRELUDE_NOTICE_MESSAGE_TYPE} message. */
 interface EvalPreludeNoticeDetails {
 	added: string[];
+	removed: string[];
+}
+
+/** Preludes whose first-call guide one hidden {@link EVAL_PRELUDE_GUIDE_MESSAGE_TYPE} message carries. */
+interface EvalPreludeGuideDetails {
+	names: string[];
+}
+
+/** Skills one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message announced or withdrew. */
+interface SkillNoticeDetails {
+	announced: Array<{ name: string; description: string }>;
 	removed: string[];
 }
 
@@ -327,6 +392,24 @@ interface PromptSurface {
 	evalPreludes: readonly EvalPreludeDefinition[];
 	/** User-tagged model agents listed in the task description. */
 	sessionAgents: readonly AgentDefinition[];
+	/** Tool names the eval description lists as callable from cells. */
+	evalToolNames: readonly string[];
+	/** Per-call model roles the task/eval descriptions advertise (mid-session role edits). */
+	perCallModelAdvertisement: PerCallModelAdvertisement;
+}
+
+/**
+ * Tool roster a committed base prompt rendered, captured for prefix-bound
+ * models. While a roster change is held out of that prompt, a forced rebuild
+ * re-renders this roster first (see `SessionTools.#prepareHeldRosterPrompt`).
+ */
+interface PromptRoster {
+	/** Active tool names the render listed. */
+	readonly toolNames: string[];
+	/** Registry entries the render could read. */
+	readonly tools: Map<string, AgentTool>;
+	/** Tool command state over {@link tools} with the mounts the render listed. */
+	readonly toolCommands: ToolCommandState | undefined;
 }
 
 interface PendingNoticePreview<T> {
@@ -340,8 +423,8 @@ interface PendingNoticePreview<T> {
 	contentKey: string;
 }
 
-interface XdevMountNoticeProjection {
-	notice: CustomMessage<XdevMountNoticeDetails> | undefined;
+interface ToolCommandMountNoticeProjection {
+	notice: CustomMessage<ToolCommandMountNoticeDetails> | undefined;
 	announcedMounts: Set<string>;
 }
 
@@ -359,10 +442,10 @@ export class SessionTools {
 	#rpcHostToolNames = new Set<string>();
 	#mcpManagerToolNames = new Set<string>();
 	#extensionMcpTools = new Map<string, AgentTool>();
-	#xdev: XdevState | undefined;
+	#toolCommands: ToolCommandState | undefined;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#pendingToolRosterDeltaAfterBase: { added: Set<string>; removed: Set<string> } | undefined;
-	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
+	#pendingToolCommandMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	/**
 	 * Whether the current {@link #baseSystemPrompt} is a newer roster snapshot than
 	 * the provider has received. Changes after that rebuild are tracked separately:
@@ -390,16 +473,17 @@ export class SessionTools {
 	/** {@link currentPromptDigest} for the base prompt array it hashed. */
 	#currentPromptDigest: { base: readonly string[]; digest: string } | undefined;
 	/**
-	 * Dynamic (`xd://`) devices the model has already been told are mounted.
+	 * Tool commands the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
 	 * {@link #ensureAnnouncedMountsSeeded}) and updated as notices are emitted, so
-	 * a host reconnect that re-mounts the same device does not re-announce it.
+	 * a host reconnect that re-mounts the same command does not re-announce it.
 	 */
 	#announcedMounts = new Set<string>();
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
+	#systemPromptSources: SystemPromptSources | undefined;
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
 	 * ("replace the system prompt for this turn"). While set, base-prompt
@@ -412,16 +496,31 @@ export class SessionTools {
 	/** The latest per-turn override and the base its hook was given; kept after the turn ends. */
 	#lastTurnSystemPromptOverride: { prompt: string[]; base: string[] } | undefined;
 	#lastAppliedToolSignature: string | undefined;
+	/** Roster {@link #baseSystemPrompt} rendered; captured only for prefix-bound models. */
+	#basePromptRoster: PromptRoster | undefined;
+	/** A frozen roster change is held out of {@link #baseSystemPrompt}, riding notices instead. */
+	#promptRosterHeld = false;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
+	/** Enabled MCP tools presented only as eval namespace methods: neither top-level nor a tool command. */
+	#evalBoundNames = new Set<string>();
+	/** Enabled mountable tools presented top-level only because `bash`, the command transport, is not enabled. */
+	#transportDemotedNames = new Set<string>();
+	#bindsMcpToEval: SessionToolsOptions["bindsMcpToEval"];
 	/**
-	 * `xd://` device names the current base system prompt renders in its catalog
-	 * (the last rebuild's {@link BuildSystemPromptResult.xdevCatalogNames}). Consulted
-	 * when a pending mount notice is delivered: a device the outgoing prompt already
+	 * Tool command names the current base system prompt renders in its catalog
+	 * (the last rebuild's {@link BuildSystemPromptResult.toolCommandCatalogNames}). Consulted
+	 * when a pending mount notice is delivered: a command the outgoing prompt already
 	 * lists is recorded as announced without a redundant notice line. Empty when the
 	 * prompt carries no catalog (no mounts, or a custom prompt that omits the section).
 	 */
-	#basePromptXdevNames: ReadonlySet<string> = new Set();
+	#basePromptToolCommandNames: ReadonlySet<string> = new Set();
+	/**
+	 * Mounted MCP commands whose route line, with its catalog summary, the
+	 * committed base prompt renders. A command mounted since needs a notice even
+	 * when the live route projection lists it: a frozen prompt never shipped it.
+	 */
+	#basePromptRoutedToolCommandNames: ReadonlySet<string> = new Set();
 	#toolRegistryMutationScope = new AsyncLocalStorage<boolean>();
 	/**
 	 * Render-scoped candidate prompt surface. Rebuild frames run inside
@@ -435,6 +534,8 @@ export class SessionTools {
 	#promptModelKey: string | undefined;
 	/** Inline-descriptor decision of the model the base prompt was rendered for. */
 	#promptInlineDescriptors: boolean | undefined;
+	/** `systemPromptTemplates` path selected for the model the base prompt was rendered for. */
+	#promptTemplate: string | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	/**
@@ -455,23 +556,17 @@ export class SessionTools {
 		localProtocolOptions: this.#host.localProtocolOptions(),
 	});
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
-	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
-	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
-	#setDeviceOnlyWrite: SessionToolsOptions["setDeviceOnlyWrite"];
-	#setPendingFullWriteDescription: SessionToolsOptions["setPendingFullWriteDescription"];
-	/**
-	 * The session originated with an xd:// transport grant. Unlike the live
-	 * device-only flag, this survives temporary full-write upgrades.
-	 */
-	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
+	#promptSkills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
 	/** The skill rediscovery in flight, shared by concurrent misses (see {@link shareSkillRediscovery}). */
 	#skillsRediscovery: Promise<readonly Skill[]> | undefined;
+	/** Earliest time (ms since epoch) a name no loaded skill owns may start another rediscovery. */
+	#nextUnknownSkillRediscovery = 0;
 	/**
 	 * Prompt surface committed by the last system-prompt rebuild. The
 	 * provider-visible system prompt is deliberately byte-stable across
@@ -503,22 +598,19 @@ export class SessionTools {
 			}
 		}
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
-		this.#ensureWriteRegistered = options.ensureWriteRegistered;
-		this.#isDeviceOnlyWrite = options.isDeviceOnlyWrite;
-		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
-		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
-		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
 		this.#reconcileSettingsGatedTools = options.reconcileSettingsGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
-		this.#xdev = options.xdev;
-		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
-			throw new Error("xd:// state must reference the canonical session tool map");
+		this.#bindsMcpToEval = options.bindsMcpToEval;
+		this.#toolCommands = options.toolCommands;
+		if (this.#toolCommands && this.#toolCommands.tools !== this.#toolRegistry) {
+			throw new Error("tool command state must reference the canonical session tool map");
 		}
-		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
+		if (this.#toolCommands) this.#toolCommands.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
+		this.#systemPromptSources = options.systemPromptSources;
 		const restoredReply = this.#latestReply();
 		const restoredPromptDigest = restoredReply && this.recordedPromptDigest();
 		this.#restoredTranscript =
@@ -526,20 +618,27 @@ export class SessionTools {
 				? { reply: restoredReply, promptDigest: restoredPromptDigest }
 				: undefined;
 		this.#skills = options.skills ?? [];
+		this.#promptSkills = this.#skills;
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
-		this.#promptSurface = this.#derivePromptSurface();
-		// Seed from the construction slate (top-level tools plus xd:// mounts).
+		// Seed from the construction slate (top-level tools plus tool command mounts).
 		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
 		// so an early reconcile (think after the startup model resolution)
 		// landing while the live set is transiently narrow
 		// commits that narrow set as the sticky slate — the session keeps almost
 		// no tools and the prompt rebuild without `read` empties the skill list.
 		for (const tool of host.agent.state.tools) this.#enabledToolNames.add(tool.name);
-		for (const name of this.#xdev?.mountedNames ?? []) this.#enabledToolNames.add(name);
+		for (const name of this.#toolCommands?.mountedNames ?? []) this.#enabledToolNames.add(name);
+		for (const name of options.evalBoundToolNames ?? []) {
+			this.#evalBoundNames.add(name);
+			this.#enabledToolNames.add(name);
+		}
+		this.#promptSurface = this.#derivePromptSurface();
+		this.#basePromptRoutedToolCommandNames = this.#routedSummaryToolCommandNames();
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+		this.#promptTemplate = this.#currentPromptTemplate();
 	}
 
 	/** Mutable registry shared with controller hosts that inspect available tools. */
@@ -552,9 +651,19 @@ export class SessionTools {
 		return this.#baseSystemPrompt;
 	}
 
-	/** Replaces the controller-owned base prompt without applying it to the agent. */
-	setBaseSystemPrompt(prompt: string[]): void {
+	/**
+	 * Replaces the controller-owned base prompt and its sources without applying them to the agent.
+	 * Pass the sources built with `prompt`; a prompt built before an appended memory promotion keeps
+	 * the current sources, since promotion only appends a block.
+	 */
+	restoreBaseSystemPrompt(prompt: string[], sources: SystemPromptSources | undefined): void {
 		this.#baseSystemPrompt = prompt;
+		this.#systemPromptSources = sources;
+	}
+
+	/** Sources committed with the base prompt; appended blocks (memory promotion) keep them valid. */
+	get systemPromptSources(): SystemPromptSources | undefined {
+		return this.#systemPromptSources;
 	}
 
 	/**
@@ -591,9 +700,14 @@ export class SessionTools {
 		this.#turnSystemPromptOverride = undefined;
 	}
 
-	/** Skills currently rendered into the system prompt. */
+	/** The live skill registry: what `skill://` and `/skill:` resolve. */
 	get skills(): Skill[] {
 		return this.#skills;
+	}
+
+	/** Skills the system prompt renders; behind {@link skills} after {@link reloadSkills}. */
+	get promptSkills(): Skill[] {
+		return this.#promptSkills;
 	}
 
 	/** Whether {@link refreshSkills} rediscovers the list; false when it was fixed at creation (a subagent's). */
@@ -604,6 +718,7 @@ export class SessionTools {
 	/** Stores a re-pointed fixed skill list (see `rediscoverSkills`) and refreshes prompt metadata. */
 	async replaceSkills(skills: readonly Skill[]): Promise<void> {
 		this.#skills = [...skills];
+		this.#promptSkills = this.#skills;
 		if (this.#host.agentKind() === "main") {
 			setActiveSkills(this.#skills);
 		}
@@ -617,6 +732,61 @@ export class SessionTools {
 			this.#skillsRediscovery = undefined;
 		});
 		return this.#skillsRediscovery;
+	}
+
+	/**
+	 * Skills rediscovered for a `skill://` name the list lacks (one created or installed since the
+	 * list was taken, or a typo): joins a pass in flight, else starts one unless another such miss
+	 * started one within {@link UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS}. Undefined when skipped.
+	 */
+	rediscoverSkillsForUnknownName(): Promise<readonly Skill[]> | undefined {
+		if (!this.#skillsRediscovery) {
+			const now = Date.now();
+			if (now < this.#nextUnknownSkillRediscovery) return undefined;
+			this.#nextUnknownSkillRediscovery = now + UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS;
+		}
+		return this.shareSkillRediscovery(() => this.#adoptNewSkills());
+	}
+
+	/**
+	 * Discovers this session's skills again and adopts them when they differ from the list (a skill
+	 * added, or one removed, which a stale-skill miss joining this pass must see gone); otherwise the
+	 * list, the prompt and the process snapshot stay as they were. The process snapshot follows only
+	 * while it is this session's list, so another session's stays published.
+	 */
+	#adoptNewSkills(): Promise<readonly Skill[]> {
+		return this.runToolRegistryMutation(async () => {
+			clearPluginRootsAndCaches();
+			resetCapabilities();
+			const { discovered, skillsSettings } = await this.#discoverSkills();
+			const held = new Set(this.#skills.map(skill => `${skill.name}\0${skill.filePath}`));
+			if (
+				discovered.skills.length === this.#skills.length &&
+				discovered.skills.every(skill => held.has(`${skill.name}\0${skill.filePath}`))
+			) {
+				return this.#skills;
+			}
+			const published = getActiveSkills() === this.#skills;
+			this.#skills = discovered.skills;
+			this.#skillWarnings = discovered.warnings;
+			this.#skillsSettings = skillsSettings;
+			if (published) setActiveSkills(this.#skills);
+			await this.refreshBaseSystemPrompt();
+			this.#host.notifyCommandMetadataChanged();
+			return this.#skills;
+		});
+	}
+
+	/** A fresh discovery of this session's skills, with the skills settings it ran under. */
+	async #discoverSkills(): Promise<{ discovered: LoadSkillsResult; skillsSettings: SkillsSettings }> {
+		const skillsSettings = cfgSkills.get(this.#host.settings);
+		const discovered = await loadSkills({
+			...skillsSettings,
+			cwd: this.#host.sessionManager.getCwd(),
+			disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
+			extensionRoots: this.#host.effectiveExtensionRoots(),
+		});
+		return { discovered, skillsSettings };
 	}
 
 	/** Diagnostics produced while loading the current skills. */
@@ -657,13 +827,36 @@ export class SessionTools {
 	get advertisedSessionAgents(): readonly AgentDefinition[] {
 		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).sessionAgents;
 	}
+	/**
+	 * Per-call model roles the task/eval descriptions advertise (see
+	 * {@link #promptSurface}); the candidate inside a rebuild frame.
+	 */
+	get advertisedPerCallModel(): PerCallModelAdvertisement {
+		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).perCallModelAdvertisement;
+	}
+
+	/**
+	 * Tool names the eval description advertises (see {@link #promptSurface});
+	 * the candidate inside a rebuild frame. Tools enabled since the last rebuild
+	 * stay callable from cells and ride the mount notice until a rebuild absorbs them.
+	 */
+	get advertisedEvalToolNames(): readonly string[] {
+		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).evalToolNames;
+	}
 
 	/** Derives the candidate surface from live state without publishing it. */
 	#derivePromptSurface(): PromptSurface {
 		return {
-			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0,
+			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && this.#promptSkills.length > 0,
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
+			// Eval-bound tools stay callable by name; their namespaces advertise them.
+			evalToolNames: this.getEvalBridgeToolNames().filter(name => !this.#evalBoundNames.has(name)),
+			perCallModelAdvertisement: getPerCallModelAdvertisement(
+				this.#host.settings,
+				this.#host.model(),
+				this.#host.modelRegistry,
+			),
 		};
 	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
@@ -689,19 +882,30 @@ export class SessionTools {
 	getActiveToolNames(): string[] {
 		return this.#host.agent.state.tools.map(t => t.name);
 	}
-	/** Enabled top-level and `xd://` tool names. */
+	/** Enabled top-level and tool command names. */
 	getEnabledToolNames(): string[] {
-		// Union live xd:// mounts so devices mounted out-of-band (plugins writing
-		// to xdev state directly) survive the next apply.
-		const mountedNames = this.#xdev?.mountedNames;
+		// Union live mounts so commands mounted out-of-band (plugins writing
+		// to toolCommands state directly) survive the next apply.
+		const mountedNames = this.#toolCommands?.mountedNames;
 		const base = this.#enabledToolNames.size > 0 ? [...this.#enabledToolNames] : this.getActiveToolNames();
 		if (!mountedNames || mountedNames.size === 0) return base;
 		return [...new Set([...base, ...mountedNames])];
 	}
 
-	/** Names currently presented as `xd://` devices. */
-	getMountedXdevToolNames(): string[] {
-		return [...(this.#xdev?.mountedNames ?? [])];
+	/** Tool command state while the active `bash` tool runs the commands; undefined while tools present top-level. */
+	get activeToolCommands(): ToolCommandState | undefined {
+		if (!this.#toolCommands || !this.#builtInToolNames.has("bash")) return undefined;
+		return this.getActiveToolNames().includes("bash") ? this.#toolCommands : undefined;
+	}
+
+	/** Names currently presented as tool commands. */
+	getMountedToolCommandNames(): string[] {
+		return [...(this.#toolCommands?.mountedNames ?? [])];
+	}
+
+	/** Enabled MCP tools presented as eval namespace methods (`mcp.evalNamespaces`); the SDK builds their preludes. */
+	getEvalBoundToolNames(): string[] {
+		return [...this.#evalBoundNames];
 	}
 
 	/** Whether the edit tool is registered. */
@@ -710,7 +914,7 @@ export class SessionTools {
 	}
 
 	/**
-	 * Looks up a registered tool by its canonical name or `xd://` alias.
+	 * Looks up a registered tool by its canonical name.
 	 *
 	 * An unmatched `mcp__` name is retried under its canonical registry keys: the
 	 * identity prompt primes the Claude Code spelling `mcp__<server>__<tool>`
@@ -722,27 +926,25 @@ export class SessionTools {
 	 * shortcut could render or return the wrong tool.
 	 */
 	getToolByName(name: string): AgentTool | undefined {
-		const bareName = stripXdUrlPrefix(name);
-		const direct = this.#toolRegistry.get(name) ?? this.#toolRegistry.get(bareName);
+		const direct = this.#toolRegistry.get(name);
 		if (direct) return direct;
-		return resolveMCPToolAlias(bareName, candidate => this.#toolRegistry.get(candidate));
+		return resolveMCPToolAlias(name, candidate => this.#toolRegistry.get(candidate));
 	}
 
 	/**
 	 * Looks up an enabled tool through the same ACP permission gate as direct calls.
 	 *
-	 * Accepts the spellings direct dispatch accepts: an `xd://` prefix and the
+	 * Accepts the spellings direct dispatch accepts: the canonical name and the
 	 * Claude Code `mcp__<server>__<tool>` alias. The alias resolves in one
 	 * {@link resolveMCPToolAlias} pass over every enabled tool (top-level plus
-	 * mounted devices), so an alias two enabled tools answer resolves to nothing.
+	 * tool commands), so an alias two enabled tools answer resolves to nothing.
 	 */
 	getToolForEvalBridge(name: string): AgentTool | undefined {
-		const bareName = stripXdUrlPrefix(name);
 		const enabled = new Set(this.getEnabledToolNames());
-		const named = this.#resolveToolWireName(bareName);
+		const named = resolveToolWireName(this.#toolRegistry, name);
 		// A registered name never falls through to an alias guess, even when disabled.
 		if (named) return enabled.has(named.name) ? this.#wrapToolForAcpPermission(named) : undefined;
-		const alias = resolveMCPToolAlias(bareName, candidate =>
+		const alias = resolveMCPToolAlias(name, candidate =>
 			enabled.has(candidate) ? this.#toolRegistry.get(candidate) : undefined,
 		);
 		return alias && this.#wrapToolForAcpPermission(alias);
@@ -755,24 +957,11 @@ export class SessionTools {
 			const tool = this.#toolRegistry.get(name);
 			if (!tool || !isEvalBridgeToolCallable(tool)) continue;
 			names.add(name);
-			if (tool.customWireName && this.#resolveToolWireName(tool.customWireName) === tool) {
+			if (tool.customWireName && resolveToolWireName(this.#toolRegistry, tool.customWireName) === tool) {
 				names.add(tool.customWireName);
 			}
 		}
 		return [...names];
-	}
-
-	/** Exact registry names shadow wire aliases, including when the exact tool is disabled. */
-	#resolveToolWireName(name: string): AgentTool | undefined {
-		const exact = this.#toolRegistry.get(name);
-		if (exact) return exact;
-		let resolved: AgentTool | undefined;
-		for (const tool of this.#toolRegistry.values()) {
-			if (tool.customWireName !== name) continue;
-			if (resolved) return undefined;
-			resolved = tool;
-		}
-		return resolved;
 	}
 
 	/**
@@ -786,7 +975,7 @@ export class SessionTools {
 	 * tool with that name wins and the alias no longer counts as built-in.
 	 */
 	hasBuiltInTool(name: string): boolean {
-		const tool = this.#resolveToolWireName(name);
+		const tool = resolveToolWireName(this.#toolRegistry, name);
 		return tool !== undefined && this.#builtInToolNames.has(tool.name);
 	}
 
@@ -878,7 +1067,7 @@ export class SessionTools {
 				origin: "top-level",
 			};
 			const info: ToolInfo = { name, description: tool.description, parameters: tool.parameters, sourceInfo };
-			// MCP-backed tools (MCPTool, DeferredMCPTool and their adapters) carry the
+			// MCP-backed tools (MCPTool and its adapters) carry the
 			// server, original name and read-only annotation; expose them so
 			// extensions can act on the hint the runtime already keeps.
 			const mcp = tool as { mcpServerName?: unknown; mcpToolName?: unknown; mcpReadOnlyHint?: unknown };
@@ -976,6 +1165,13 @@ export class SessionTools {
 		return shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(this.#host.settings), activeModel.id);
 	}
 
+	/** `systemPromptTemplates` path the active model selects; a change replaces the whole instruction block. */
+	#currentPromptTemplate(): string | undefined {
+		const activeModel = this.#host.model();
+		if (!activeModel) return undefined;
+		return matchModelPattern(systemPromptTemplatePatterns.get(this.#host.settings), formatModelString(activeModel));
+	}
+
 	#currentPromptModelKey(): string | undefined {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
@@ -992,28 +1188,32 @@ export class SessionTools {
 	 * Delegation wording the prompt was rendered with: re-rendering them changed the prompt's bytes,
 	 * and the provider then wrote the whole cached conversation again on every hop. It still rebuilds
 	 * when the hop changes what the request must carry for the new model: the edit-mode policy
-	 * (#11983), or the inline-descriptor decision, which also turns provider-side description pruning
-	 * on or off (#14200). The kept key makes a later switch back to the rendered model a no-op, and a
-	 * deliberate switch (`/model`, `setModel`) compares against the model the prompt describes.
+	 * (#11983), the inline-descriptor decision, which also turns provider-side description pruning
+	 * on or off (#14200), or the `systemPromptTemplates` entry the model selects. The kept key makes a
+	 * later switch back to the rendered model a no-op, and a deliberate switch (`/model`, `setModel`)
+	 * compares against the model the prompt describes.
 	 */
 	async syncAfterModelChange(previousEditMode: EditModeSetting, options?: { retryFallback?: boolean }): Promise<void> {
 		const currentEditMode = this.resolveActiveEditMode();
+		const templateChanged = this.#currentPromptTemplate() !== this.#promptTemplate;
 		if (options?.retryFallback) {
 			const inlineDescriptorsChanged = this.#currentInlineDescriptors() !== this.#promptInlineDescriptors;
-			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged) await this.refreshBaseSystemPrompt();
+			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged || templateChanged) {
+				await this.refreshBaseSystemPrompt();
+			}
 			return;
 		}
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
-		if (editModeChanged || modelChanged) {
+		if (editModeChanged || modelChanged || templateChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
 	}
 
 	/** Enabled MCP tools in their current presentation partition. */
 	getSelectedMCPToolNames(): string[] {
-		// Every connected MCP tool is enabled; presentation (top-level vs xd://) is
+		// Every connected MCP tool is enabled; presentation (top-level vs tool command) is
 		// decided by loadMode. Return the enabled MCP tools in the current set.
 		return this.getEnabledToolNames().filter(name => isMCPToolName(name) && this.#toolRegistry.has(name));
 	}
@@ -1272,7 +1472,7 @@ export class SessionTools {
 		);
 	}
 
-	/** Applies an enabled tool set and reconciles its `xd://` partition. */
+	/** Applies an enabled tool set and reconciles its tool command partition. */
 	applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		return this.runToolRegistryMutation(
 			() => this.#applyActiveToolsByName(toolNames, forcePromptRefresh, signal),
@@ -1282,25 +1482,9 @@ export class SessionTools {
 
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
-		toolNames = normalizeToolNames(toolNames);
-		let builtInWriteAvailable = this.#builtInToolNames.has("write");
-		const fullWriteSelected =
-			toolNames.includes("write") &&
-			(this.#presentationPinnedToolNames?.has("write") === true ||
-				this.#runtimeSelectedToolNames?.has("write") === true);
-		if (fullWriteSelected) {
-			const writeRegistration = this.#ensureWriteRegistered?.();
-			if (writeRegistration) {
-				builtInWriteAvailable = (await untilAborted(signal, writeRegistration)) === true;
-				if (builtInWriteAvailable) this.#builtInToolNames.add("write");
-			}
-		}
-		const upgradeDeviceOnlyWrite =
-			fullWriteSelected &&
-			builtInWriteAvailable &&
-			this.#isDeviceOnlyWrite?.() === true &&
-			this.#setDeviceOnlyWrite !== undefined &&
-			this.#setPendingFullWriteDescription !== undefined;
+		// Special tools are never selected: their presentation follows the command
+		// transport and whether each has something to act on.
+		toolNames = normalizeToolNames(toolNames).filter(name => !SPECIAL_TOOL_NAMES.has(name));
 		// Goal mode may have been enabled after session creation, leaving the
 		// registry without `goal`. Register it before resolving the selection so
 		// `#enterGoalMode`'s `[...tools, "goal"]` request is honored instead of
@@ -1313,87 +1497,67 @@ export class SessionTools {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [{ name, tool }] : [];
 		});
-		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
-		const xdevWriteAvailable =
-			builtInWriteAvailable &&
-			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
+		// Tool commands run inside the built-in `bash` tool: mounting engages only
+		// while it is enabled, and every mountable tool presents top-level otherwise.
+		const commandTransportActive =
+			this.#toolCommands !== undefined &&
+			this.#builtInToolNames.has("bash") &&
+			selectedTools.some(({ name }) => name === "bash");
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
-		const mountCandidates = selectedTools.filter(
-			({ name, tool }) =>
-				this.#xdev !== undefined &&
-				xdevReadAvailable &&
-				xdevWriteAvailable &&
-				!isPresentationPinned(name) &&
-				isMountableUnderXdev(tool),
+		// The setting, not a pin, decides MCP presentation: eval namespaces replace
+		// both surfaces whenever `eval` (essential, so never mounted) is selected.
+		const evalBound = new Set(
+			this.#bindsMcpToEval?.() === true && selectedTools.some(({ name }) => name === "eval")
+				? selectedTools.filter(({ tool }) => isEvalNamespaceTool(tool)).map(({ name }) => name)
+				: [],
 		);
-		const mountNames = new Set(mountCandidates.map(({ name }) => name));
+		const mountEligible = selectedTools.filter(
+			({ name, tool }) =>
+				this.#toolCommands !== undefined &&
+				!evalBound.has(name) &&
+				!isPresentationPinned(name) &&
+				isMountableAsToolCommand(tool),
+		);
+		const mountNames = new Set(commandTransportActive ? mountEligible.map(({ name }) => name) : []);
+		const transportDemotedNames = new Set(commandTransportActive ? [] : mountEligible.map(({ name }) => name));
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const { name, tool } of selectedTools) {
-			if (mountNames.has(name)) continue;
+			if (mountNames.has(name) || evalBound.has(name)) continue;
 			tools.push(this.#wrapToolForAcpPermission(tool));
 			validToolNames.push(name);
 		}
-
-		const pinnedWrite = isPresentationPinned("write");
-		const activeDeferrableTool = tools.some(tool => tool.deferrable === true);
-		const transportNeeded = mountNames.size > 0 || activeDeferrableTool || this.#host.planModeEnabled();
-		if (transportNeeded && !builtInWriteAvailable) {
-			const writeRegistration = this.#ensureWriteRegistered?.();
-			builtInWriteAvailable = writeRegistration ? (await untilAborted(signal, writeRegistration)) === true : false;
-			if (builtInWriteAvailable) this.#builtInToolNames.add("write");
-		}
-		if (transportNeeded && builtInWriteAvailable) {
-			const write = this.#toolRegistry.get("write");
-			if (write && !validToolNames.includes("write")) {
-				tools.push(this.#wrapToolForAcpPermission(write));
-				validToolNames.push("write");
+		if (!commandTransportActive) {
+			const planModeEnabled = this.#host.planModeEnabled();
+			for (const name of SPECIAL_TOOL_NAMES) {
+				const special = this.#toolRegistry.get(name);
+				if (!special || !specialToolApplies(name, { tools, planModeEnabled })) continue;
+				tools.push(this.#wrapToolForAcpPermission(special));
+				validToolNames.push(name);
 			}
-		} else if (
-			!pinnedWrite &&
-			(this.#presentationPinnedToolNames !== undefined || this.#runtimeSelectedToolNames !== undefined)
-		) {
-			const writeNameIndex = validToolNames.indexOf("write");
-			if (writeNameIndex >= 0 && this.#builtInToolNames.has("write")) validToolNames.splice(writeNameIndex, 1);
-			const writeToolIndex = tools.findIndex(tool => tool.name === "write" && this.#builtInToolNames.has("write"));
-			if (writeToolIndex >= 0) tools.splice(writeToolIndex, 1);
 		}
 
-		const restrictDeviceOnlyWrite =
-			validToolNames.includes("write") &&
-			!fullWriteSelected &&
-			(this.#presentationPinnedToolNames !== undefined || this.#runtimeSelectedToolNames !== undefined) &&
-			builtInWriteAvailable &&
-			this.#isDeviceOnlyWrite?.() !== true &&
-			this.#setDeviceOnlyWrite !== undefined;
-		const restoreDormantDeviceOnlyWrite =
-			!validToolNames.includes("write") &&
-			this.#deviceOnlyWriteTransportAvailable &&
-			this.#isDeviceOnlyWrite?.() !== true &&
-			this.#setDeviceOnlyWrite !== undefined;
-		const deactivateDeviceOnlyWrite =
-			!validToolNames.includes("write") &&
-			!this.#deviceOnlyWriteTransportAvailable &&
-			this.#isDeviceOnlyWrite?.() === true &&
-			this.#setDeviceOnlyWrite !== undefined;
-		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
+		const previousMounted = new Set(this.#toolCommands?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const previousEnabledToolNames = this.#enabledToolNames;
-		this.#enabledToolNames = new Set([...validToolNames, ...mountNames]);
+		const previousEvalBoundNames = this.#evalBoundNames;
+		const previousTransportDemotedNames = this.#transportDemotedNames;
+		this.#enabledToolNames = new Set([...validToolNames, ...mountNames, ...evalBound]);
+		this.#evalBoundNames = evalBound;
+		this.#transportDemotedNames = transportDemotedNames;
 		this.#setMountedNames(mountNames);
 		this.#setActiveToolNames?.(validToolNames);
 
 		let rebuiltSystemPrompt: string[] | undefined;
+		let rebuiltSources: SystemPromptSources | undefined;
 		let rebuiltSignature: string | undefined;
 		let frozenSignature: string | undefined;
 		// Trigger of an implicit (non-forced) rebuild, rechecked at commit.
 		let implicitRebuildSignature: string | undefined;
-		let rebuiltXdevCatalogNames: readonly string[] | undefined;
+		let rebuiltToolCommandCatalogNames: readonly string[] | undefined;
 		let candidateSurface: PromptSurface | undefined;
 		try {
-			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(true);
-			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(true);
 			if (this.#rebuildSystemPrompt) {
 				// Local alias: closures below cannot observe the field narrowing.
 				const rebuildSystemPrompt = this.#rebuildSystemPrompt;
@@ -1411,14 +1575,16 @@ export class SessionTools {
 					this.#promptSurfaceScope.run(surface, () =>
 						this.#computeAppliedToolSignature(validToolNames, tools, mountedSignatureTools),
 					);
-				// Eval-prelude and model-mention changes alone never trigger a
-				// rebuild: they ride their hidden notices. The trigger keeps the
-				// committed sets; a rebuild caused by anything else absorbs the live
-				// ones.
+				// Eval-prelude, eval tool-name, model-mention and per-call-model advertisement
+				// changes alone never trigger a rebuild: they ride their hidden notices. The trigger keeps
+				// the committed sets; a rebuild caused by anything else absorbs the
+				// live ones.
 				const triggerSignature = computeSignature({
 					...candidate,
 					evalPreludes: this.#promptSurface.evalPreludes,
 					sessionAgents: this.#promptSurface.sessionAgents,
+					evalToolNames: this.#promptSurface.evalToolNames,
+					perCallModelAdvertisement: this.#promptSurface.perCallModelAdvertisement,
 				});
 				const freezeImplicitPromptRefresh =
 					!forcePromptRefresh &&
@@ -1431,100 +1597,113 @@ export class SessionTools {
 					const built = await untilAborted(
 						signal,
 						this.#promptSurfaceScope.run(candidate, () =>
-							rebuildSystemPrompt(validToolNames, this.#toolRegistry),
+							rebuildSystemPrompt(validToolNames, this.#toolRegistry, this.#toolCommands),
 						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
+					rebuiltSources = built.sources;
 					if (!forcePromptRefresh) implicitRebuildSignature = triggerSignature;
 					rebuiltSignature = signature;
-					rebuiltXdevCatalogNames = built.xdevCatalogNames;
+					rebuiltToolCommandCatalogNames = built.toolCommandCatalogNames;
 					candidateSurface = candidate;
 				}
 			}
 			signal?.throwIfAborted();
 		} catch (error) {
-			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
-			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
 			this.#setActiveToolNames?.(previousActiveToolNames);
 			this.#enabledToolNames = previousEnabledToolNames;
+			this.#evalBoundNames = previousEvalBoundNames;
+			this.#transportDemotedNames = previousTransportDemotedNames;
 			throw error;
 		}
 
 		if (this.#host.isDisposed()) {
-			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
-			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
 			this.#setActiveToolNames?.(previousActiveToolNames);
 			this.#enabledToolNames = previousEnabledToolNames;
+			this.#evalBoundNames = previousEvalBoundNames;
+			this.#transportDemotedNames = previousTransportDemotedNames;
 			return;
 		}
 
-		try {
-			this.#notifyXdevMountDelta(previousMounted);
-			const currentTools = this.#host.agent.state.tools;
-			if (currentTools.length !== tools.length || currentTools.some((tool, index) => tool !== tools[index])) {
-				this.#host.agent.setTools(tools);
+		this.#notifyToolCommandMountDelta(previousMounted);
+		const currentTools = this.#host.agent.state.tools;
+		if (currentTools.length !== tools.length || currentTools.some((tool, index) => tool !== tools[index])) {
+			this.#host.agent.setTools(tools);
+		}
+		this.#host.agent.setStandbyTools(standbyTools(this.#toolRegistry, validToolNames));
+		// The first primary model call can capture the prompt while the rebuild
+		// awaits; that prompt is bound from then on, so an implicit rebuild ends
+		// exactly as if it had frozen up front. Before that call, a resumed
+		// transcript binds the prompt it was sent with: only a rebuild that
+		// reproduces it commits.
+		let restoresTranscriptPrompt = false;
+		if (rebuiltSystemPrompt && implicitRebuildSignature !== undefined) {
+			const binding = this.#implicitRebuildBinding();
+			restoresTranscriptPrompt =
+				typeof binding === "object" && systemPromptDigest(rebuiltSystemPrompt) === binding.promptDigest;
+			if (binding !== "free" && !restoresTranscriptPrompt) {
+				rebuiltSystemPrompt = undefined;
+				frozenSignature = implicitRebuildSignature;
 			}
-			// The first primary model call can capture the prompt while the rebuild
-			// awaits; that prompt is bound from then on, so an implicit rebuild ends
-			// exactly as if it had frozen up front. Before that call, a resumed
-			// transcript binds the prompt it was sent with: only a rebuild that
-			// reproduces it commits.
-			let restoresTranscriptPrompt = false;
-			if (rebuiltSystemPrompt && implicitRebuildSignature !== undefined) {
-				const binding = this.#implicitRebuildBinding();
-				restoresTranscriptPrompt =
-					typeof binding === "object" && systemPromptDigest(rebuiltSystemPrompt) === binding.promptDigest;
-				if (binding !== "free" && !restoresTranscriptPrompt) {
-					rebuiltSystemPrompt = undefined;
-					frozenSignature = implicitRebuildSignature;
-				}
+		}
+		if (rebuiltSystemPrompt && rebuiltSignature) {
+			// The restored transcript was sent with this prompt under the inherited cache key.
+			if (this.#lastAppliedToolSignature !== undefined && !restoresTranscriptPrompt) {
+				this.#host.clearInheritedProviderPromptCacheKey();
 			}
-			if (rebuiltSystemPrompt && rebuiltSignature) {
-				// The restored transcript was sent with this prompt under the inherited cache key.
-				if (this.#lastAppliedToolSignature !== undefined && !restoresTranscriptPrompt) {
-					this.#host.clearInheritedProviderPromptCacheKey();
-				}
-				this.#baseSystemPrompt = rebuiltSystemPrompt;
-				this.#host.clearMemoryPromotionSnapshot();
-				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
-				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
-				this.#lastAppliedToolSignature = rebuiltSignature;
-				this.#promptModelKey = this.#currentPromptModelKey();
-				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
-				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
-				// The rebuilt prompt is a fresh roster snapshot. Keep the complete
-				// pending delta for a turn override that hides it, while separately
-				// tracking any later frozen changes that must follow a delivered base.
-				this.#basePromptReflectsRosterDelta = true;
-				this.#pendingToolRosterDeltaAfterBase = undefined;
-				// Publish the exact surface the prompt rendered with — never
-				// re-derive from live settings, which could diverge mid-flight.
-				this.#promptSurface = candidateSurface ?? this.#promptSurface;
-			} else if (frozenSignature) {
-				this.#notifyToolRosterDelta(previousActiveToolNames, validToolNames);
-				this.#lastAppliedToolSignature = frozenSignature;
-			}
-			if (restoreDormantDeviceOnlyWrite) {
-				this.#setDeviceOnlyWrite?.(true);
-			} else if (upgradeDeviceOnlyWrite || deactivateDeviceOnlyWrite) {
-				this.#setDeviceOnlyWrite?.(false);
-			}
-		} finally {
-			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
+			this.#baseSystemPrompt = rebuiltSystemPrompt;
+			this.#systemPromptSources = rebuiltSources;
+			this.#host.clearMemoryPromotionSnapshot();
+			this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+			invalidateToolSchemaMetadata(this.#host.agent.state.tools);
+			this.#lastAppliedToolSignature = rebuiltSignature;
+			this.#recordPromptRoster(validToolNames);
+			this.#promptModelKey = this.#currentPromptModelKey();
+			this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+			this.#promptTemplate = this.#currentPromptTemplate();
+			this.#setBasePromptToolCommandNames(rebuiltToolCommandCatalogNames);
+			// The rebuilt prompt is a fresh roster snapshot. Keep the complete
+			// pending delta for a turn override that hides it, while separately
+			// tracking any later frozen changes that must follow a delivered base.
+			this.#basePromptReflectsRosterDelta = true;
+			this.#pendingToolRosterDeltaAfterBase = undefined;
+			// Publish the exact surface the prompt rendered with — never
+			// re-derive from live settings, which could diverge mid-flight.
+			this.#promptSurface = candidateSurface ?? this.#promptSurface;
+		} else if (frozenSignature) {
+			this.#notifyToolRosterDelta(previousActiveToolNames, validToolNames);
+			this.#lastAppliedToolSignature = frozenSignature;
+			this.#promptRosterHeld = true;
 		}
 	}
 
 	#setMountedNames(names: Iterable<string>): void {
-		const mountedNames = this.#xdev?.mountedNames;
+		const mountedNames = this.#toolCommands?.mountedNames;
 		if (!mountedNames) return;
 		mountedNames.clear();
 		for (const name of names) mountedNames.add(name);
 	}
 
-	#setBasePromptXdevNames(names: readonly string[] | undefined): void {
-		this.#basePromptXdevNames = new Set(names);
+	#setBasePromptToolCommandNames(names: readonly string[] | undefined): void {
+		this.#basePromptToolCommandNames = new Set(names);
+		this.#basePromptRoutedToolCommandNames = this.#routedSummaryToolCommandNames();
+	}
+
+	/** Mounted MCP commands the live route projection lists with their catalog summary. */
+	#routedSummaryToolCommandNames(): ReadonlySet<string> {
+		if (!this.#toolCommands) return new Set();
+		const docsPlan = planToolCommandPromptDocs(
+			this.#toolCommands,
+			cfgToolsCommandDocs.get(this.#host.settings),
+			cfgToolsCommandInline.get(this.#host.settings),
+		);
+		return new Set(
+			projectMountedMCPToolCommandGuidance(collectMountedMCPToolRoutes(listToolCommands(this.#toolCommands)))
+				.mappings.filter(mapping => docsPlan.catalog.has(mapping.name))
+				.map(mapping => mapping.name),
+		);
 	}
 
 	#latestReply(): AgentMessage | undefined {
@@ -1636,6 +1815,30 @@ export class SessionTools {
 		return latest === this.#restoredTranscript?.reply ? this.#restoredTranscript : "frozen";
 	}
 
+	/**
+	 * Records the roster a just-committed base prompt rendered and ends any hold.
+	 * Only prefix-bound models hold roster changes, so others skip the copy.
+	 */
+	#recordPromptRoster(toolNames: readonly string[]): void {
+		this.#promptRosterHeld = false;
+		if (this.#host.model()?.thinking?.prefixBinding !== true) {
+			this.#basePromptRoster = undefined;
+			return;
+		}
+		const tools = new Map(this.#toolRegistry);
+		const toolCommands = this.#toolCommands;
+		this.#basePromptRoster = {
+			toolNames: [...toolNames],
+			tools,
+			toolCommands: toolCommands && {
+				tools,
+				mountedNames: new Set(toolCommands.mountedNames),
+				builtInNames: toolCommands.builtInNames,
+				isActive: toolCommands.isActive,
+			},
+		};
+	}
+
 	#notifyToolRosterDelta(previousActiveToolNames: readonly string[], appliedNames: readonly string[]): void {
 		const previous = new Set(previousActiveToolNames);
 		const current = new Set(appliedNames);
@@ -1672,18 +1875,18 @@ export class SessionTools {
 	}
 
 	/**
-	 * Record a mid-session `xd://` mount delta for the model. Non-MCP mount
+	 * Record a mid-session tool command mount delta for the model. Non-MCP mount
 	 * churn remains notice-only, leaving the system prompt and provider cache
 	 * prefix byte-stable; mounted MCP route changes additionally rebuild the
 	 * global route guidance through the applied-tool signature. The delta is NOT
 	 * steered immediately — a steered notice landing at a run's stop boundary
 	 * (or while the session is idle) forces an unsolicited extra assistant turn
-	 * — so it is coalesced into {@link #pendingXdevMountDelta} and rides along
-	 * with the next prompt (docs + schema stay one `read xd://<tool>` away).
+	 * — so it is coalesced into {@link #pendingToolCommandMountDelta} and rides along
+	 * with the next prompt (usage stays one `<tool> --help` away).
 	 * Full docs join the system prompt opportunistically on a rebuild.
 	 */
-	#notifyXdevMountDelta(previousMounted: ReadonlySet<string>): void {
-		const current = this.#xdev?.mountedNames;
+	#notifyToolCommandMountDelta(previousMounted: ReadonlySet<string>): void {
+		const current = this.#toolCommands?.mountedNames;
 		if (!current) return;
 		const addedNames = [...current].filter(name => !previousMounted.has(name));
 		const removedNames = [...previousMounted].filter(name => !current.has(name));
@@ -1691,29 +1894,29 @@ export class SessionTools {
 		// Coalesce against the unannounced delta: an unmount cancels a pending
 		// mount the model never learned about, and a remount cancels a pending
 		// unmount.
-		this.#pendingXdevMountDelta = this.#coalesceToolRosterDelta(
-			this.#pendingXdevMountDelta,
+		this.#pendingToolCommandMountDelta = this.#coalesceToolRosterDelta(
+			this.#pendingToolCommandMountDelta,
 			addedNames,
 			removedNames,
 		);
-		if (cfgStartupQuiet.get(this.#host.settings) || !cfgToolsXdevNotices.get(this.#host.settings)) return;
+		if (cfgStartupQuiet.get(this.#host.settings) || !cfgToolsCommandNotices.get(this.#host.settings)) return;
 		const parts: string[] = [];
-		if (addedNames.length > 0) parts.push(`mounted ${addedNames.join(", ")}`);
-		if (removedNames.length > 0) parts.push(`unmounted ${removedNames.join(", ")}`);
-		this.#host.emitNotice("info", `xd://: ${parts.join("; ")}`, "xdev");
+		if (addedNames.length > 0) parts.push(`added ${addedNames.join(", ")}`);
+		if (removedNames.length > 0) parts.push(`removed ${removedNames.join(", ")}`);
+		this.#host.emitNotice("info", `Tool commands: ${parts.join("; ")}`, "toolCommands");
 	}
 
 	/**
 	 * Forget the announced-mount baseline for a replaced transcript. Called when
 	 * session history is swapped wholesale (`/new`, `switchSession`, `branch`): the
 	 * previous transcript's persisted notices no longer apply, so the next notice
-	 * re-seeds from the new history and a device reconnecting into it announces
+	 * re-seeds from the new history and a tool reconnecting into it announces
 	 * again.
 	 *
 	 * The pending delta is deliberately preserved: it holds mounts that are still
 	 * live but not yet delivered to the model, and `branch()` does not rebuild the
 	 * base system prompt, so dropping it would leave the branched transcript
-	 * unaware of a still-mounted device that no later refresh would re-queue.
+	 * unaware of a still-mounted command that no later refresh would re-queue.
 	 */
 	resetAnnouncedMounts(): void {
 		this.#announcedMounts.clear();
@@ -1723,14 +1926,14 @@ export class SessionTools {
 	/**
 	 * Seed {@link #announcedMounts} from persisted mount notices the first time a
 	 * notice is consumed. On resume the in-memory mount set is rebuilt from
-	 * scratch, so without replaying history every already-announced dynamic device
+	 * scratch, so without replaying history every already-announced tool command
 	 * would look freshly mounted and re-announce.
 	 */
 	#ensureAnnouncedMountsSeeded(): void {
 		if (this.#announcedMountsSeeded) return;
 		this.#announcedMountsSeeded = true;
 		for (const message of this.#host.agent.state.messages) {
-			if (message.role !== "custom" || message.customType !== XDEV_MOUNT_NOTICE_MESSAGE_TYPE) continue;
+			if (message.role !== "custom" || message.customType !== TOOL_COMMAND_MOUNT_NOTICE_MESSAGE_TYPE) continue;
 			const details = message.details;
 			if (
 				isRecord(details) &&
@@ -1741,34 +1944,6 @@ export class SessionTools {
 			) {
 				for (const name of details.added) this.#announcedMounts.add(name);
 				for (const name of details.removed) this.#announcedMounts.delete(name);
-				continue;
-			}
-
-			// Releases before structured notice details persisted only the rendered
-			// prompt. Replay its two stable inventory sections so the first resume
-			// after upgrading does not re-announce every dynamic device once.
-			if (typeof message.content !== "string") continue;
-			let section: "added" | "removed" | undefined;
-			for (const line of message.content.split("\n")) {
-				if (line === "These tools became available:") {
-					section = "added";
-					continue;
-				}
-				if (line.startsWith("No longer mounted")) {
-					section = "removed";
-					continue;
-				}
-				if (line === "Configured inline device docs:" || line === "</system-notice>") break;
-				if (line.startsWith("Read `xd://<tool>`")) {
-					section = undefined;
-					continue;
-				}
-				if (!section) continue;
-				const match = /^- xd:\/\/(\S+?)(?:\s+—|$)/.exec(line);
-				const name = match?.[1];
-				if (!name) continue;
-				if (section === "added") this.#announcedMounts.add(name);
-				else this.#announcedMounts.delete(name);
 			}
 		}
 	}
@@ -1831,27 +2006,38 @@ export class SessionTools {
 	 * the live set), compaction (which drops old notices), and resume.
 	 */
 	takeEvalPreludeNotice(): CustomMessage<EvalPreludeNoticeDetails> | undefined {
-		const known = new Set(this.#promptSurface.evalPreludes.map(definition => definition.name));
+		const base = this.#baseSystemPrompt.join("\n\n");
+		const known = new Map(this.#promptSurface.evalPreludes.map(definition => [definition.name, base]));
 		for (const message of this.#host.agent.state.messages) {
 			if (message.role !== "custom" || message.customType !== EVAL_PRELUDE_NOTICE_MESSAGE_TYPE) continue;
 			const details = message.details;
 			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
-			for (const name of details.added) if (typeof name === "string") known.add(name);
+			for (const name of details.added) if (typeof name === "string") known.set(name, String(message.content));
 			for (const name of details.removed) if (typeof name === "string") known.delete(name);
 		}
 		const live = this.#host.evalPreludes();
 		const liveNames = new Set(live.map(definition => definition.name));
-		const added = live.filter(definition => !known.has(definition.name));
-		const removed = [...known].filter(name => !liveNames.has(name));
+		const added = live.filter(
+			definition =>
+				!known.has(definition.name) ||
+				(Boolean(definition.guidance) && !known.get(definition.name)?.includes(definition.guidance!.trim())),
+		);
+		const removed = [...known.keys()].filter(name => !liveNames.has(name));
 		if (added.length === 0 && removed.length === 0) return undefined;
 		// Topic docs are served through `read`; sessions without it get them inline,
 		// matching the eval description's `inlineTopics` fallback.
 		const canRead = this.getActiveToolNames().includes("read");
+		const entries = added.map(definition => ({
+			name: definition.name,
+			summary: evalPreludeSummary(definition),
+			firstCall: canRead && Boolean(definition.firstCallDocumentation?.trim()),
+		}));
 		return {
 			role: "custom",
 			customType: EVAL_PRELUDE_NOTICE_MESSAGE_TYPE,
 			content: prompt.render(evalPreludeNoticePrompt, {
-				added: added.map(definition => ({ name: definition.name, summary: evalPreludeSummary(definition) })),
+				added: entries,
+				anyFirstCall: entries.some(entry => entry.firstCall),
 				removed,
 				canRead,
 				sections: added.flatMap(definition => [
@@ -1866,6 +2052,83 @@ export class SessionTools {
 		};
 	}
 
+	/** Preludes with a first-call guide that this conversation has called; cleared when the conversation changes. */
+	#evalPreludesCalled = new Set<string>();
+	#evalPreludeGuideHits = new Map<string, { index: number; message: CustomMessage; content: string; guide: string }>();
+
+	noteEvalPreludeCall(name: string): void {
+		this.#evalPreludesCalled.add(name);
+	}
+
+	clearEvalPreludeCalls(): void {
+		this.#evalPreludesCalled.clear();
+		this.#evalPreludeGuideHits.clear();
+	}
+
+	/**
+	 * Builds the hidden message carrying the first-call guide of each prelude
+	 * this conversation has called, unless a guide message still in context
+	 * holds that guide whole. Like {@link takeEvalPreludeNotice}, what was sent
+	 * is read from the transcript's own typed messages, never from tool output
+	 * or a delivery flag: a message the loop discarded, or a compaction, rewind
+	 * or shake that dropped or shortened a guide, sends it again at the next
+	 * delivery point, and a resumed session does not repeat it.
+	 */
+	takeEvalPreludeGuide(): CustomMessage<EvalPreludeGuideDetails> | undefined {
+		const called = this.#evalPreludesCalled;
+		if (called.size === 0 || !this.getActiveToolNames().includes("read")) return undefined;
+		const messages = this.#host.agent.state.messages;
+		const definitions = this.#host.evalPreludes();
+		const guides: Array<{ name: string; guide: string }> = [];
+		for (const definition of definitions) {
+			const guide = called.has(definition.name) ? definition.firstCallDocumentation?.trim() : undefined;
+			if (!guide) continue;
+			const hit = this.#evalPreludeGuideHits.get(definition.name);
+			if (
+				hit &&
+				messages[hit.index] === hit.message &&
+				hit.message.customType === EVAL_PRELUDE_GUIDE_MESSAGE_TYPE &&
+				hit.message.content === hit.content &&
+				hit.guide === guide
+			) {
+				continue;
+			}
+			let found = false;
+			for (let index = messages.length - 1; index >= 0; index--) {
+				const message = messages[index];
+				if (message.role !== "custom" || message.customType !== EVAL_PRELUDE_GUIDE_MESSAGE_TYPE) continue;
+				const details = message.details;
+				if (!isRecord(details) || !Array.isArray(details.names) || !details.names.includes(definition.name))
+					continue;
+				const expected = details.names.flatMap(name => {
+					const prelude = definitions.find(candidate => candidate.name === name);
+					const text = prelude?.firstCallDocumentation?.trim();
+					return prelude && text ? [{ name: prelude.name, guide: text }] : [];
+				});
+				if (expected.length !== details.names.length) continue;
+				const content = prompt.render(evalPreludeGuidePrompt, { guides: expected });
+				if (message.content !== content) continue;
+				this.#evalPreludeGuideHits.set(definition.name, { index, message, content, guide });
+				found = true;
+				break;
+			}
+			if (!found) {
+				this.#evalPreludeGuideHits.delete(definition.name);
+				guides.push({ name: definition.name, guide });
+			}
+		}
+		if (guides.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: EVAL_PRELUDE_GUIDE_MESSAGE_TYPE,
+			content: prompt.render(evalPreludeGuidePrompt, { guides }),
+			details: { names: guides.map(guide => guide.name) },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
 	/**
 	 * Builds the hidden notice reconciling the user-tagged model agents the task
 	 * description advertises with the live set. Delivered with the next user
@@ -1873,21 +2136,29 @@ export class SessionTools {
 	 * mid-session keeps the provider cache prefix intact.
 	 *
 	 * Known agents are the committed base snapshot, then every agent notice still
-	 * in context, applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 * in context, then every notice in `ahead` (messages queued to reach the model
+	 * before this one), applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 * `only` limits the notice to announcing those agents, leaving every other
+	 * change to the message that carries it.
 	 */
-	takeSessionAgentNotice(): CustomMessage<SessionAgentNoticeDetails> | undefined {
+	takeSessionAgentNotice(
+		ahead: Iterable<AgentMessage> = [],
+		only?: ReadonlySet<string>,
+	): CustomMessage<SessionAgentNoticeDetails> | undefined {
 		const known = new Set(this.#promptSurface.sessionAgents.map(agent => agent.name));
-		for (const message of this.#host.agent.state.messages) {
-			if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
-			const details = message.details;
-			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
-			for (const name of details.added) if (typeof name === "string") known.add(name);
-			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		for (const messages of [this.#host.agent.state.messages, ahead]) {
+			for (const message of messages) {
+				if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
+				const details = message.details;
+				if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+				for (const name of details.added) if (typeof name === "string") known.add(name);
+				for (const name of details.removed) if (typeof name === "string") known.delete(name);
+			}
 		}
 		const live = this.#host.sessionAgents();
 		const liveNames = new Set(live.map(agent => agent.name));
-		const added = live.filter(agent => !known.has(agent.name));
-		const removed = [...known].filter(name => !liveNames.has(name));
+		const added = live.filter(agent => !known.has(agent.name) && (!only || only.has(agent.name)));
+		const removed = only ? [] : [...known].filter(name => !liveNames.has(name));
 		if (added.length === 0 && removed.length === 0) return undefined;
 		return {
 			role: "custom",
@@ -1903,15 +2174,57 @@ export class SessionTools {
 		};
 	}
 
-	/** Previews the hidden `xd://` mount notice and its rendered-content fingerprint. */
-	peekPendingXdevMountNotice(options: {
+	/**
+	 * Builds the hidden notice of skills the live registry has gained, changed or lost since the system
+	 * prompt and the notices still in context listed them. A changed description is announced again
+	 * because the model routes on it. Gated like the prompt's skill list: `skillful` on and an enabled
+	 * tool, top-level or mounted as a command, that reads `skill://`.
+	 */
+	takeSkillNotice(): CustomMessage<SkillNoticeDetails> | undefined {
+		if (cfgSkillful.get(this.#host.settings) !== true) return undefined;
+		if (!this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)))) return undefined;
+		const listed = (skills: readonly Skill[]) => skills.filter(skill => skill.hide !== true);
+		const known = new Map(listed(this.#promptSkills).map(skill => [skill.name, skill.description]));
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== SKILL_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (!isRecord(details) || !Array.isArray(details.announced) || !Array.isArray(details.removed)) continue;
+			for (const entry of details.announced) {
+				if (isRecord(entry) && typeof entry.name === "string" && typeof entry.description === "string") {
+					known.set(entry.name, entry.description);
+				}
+			}
+			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		}
+		const live = listed(this.#skills);
+		const liveNames = new Set(live.map(skill => skill.name));
+		const added = live.filter(skill => !known.has(skill.name));
+		const updated = live.filter(skill => known.has(skill.name) && known.get(skill.name) !== skill.description);
+		const removed = [...known.keys()].filter(name => !liveNames.has(name));
+		if (added.length === 0 && updated.length === 0 && removed.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: SKILL_NOTICE_MESSAGE_TYPE,
+			content: prompt.render(skillNoticePrompt, { added, updated, removed }),
+			details: {
+				announced: [...added, ...updated].map(({ name, description }) => ({ name, description })),
+				removed,
+			},
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	/** Previews the hidden tool command mount notice and its rendered-content fingerprint. */
+	peekPendingToolCommandMountNotice(options: {
 		baseCatalogDelivered: boolean;
-	}): PendingNoticePreview<XdevMountNoticeDetails> | undefined {
-		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
+	}): PendingNoticePreview<ToolCommandMountNoticeDetails> | undefined {
+		const projection = this.#projectPendingToolCommandMountNotice(options.baseCatalogDelivered);
 		if (!projection) return undefined;
 		return {
 			notice: projection.notice,
-			contentKey: this.#xdevNoticeContentKey(projection.notice),
+			contentKey: this.#toolCommandNoticeContentKey(projection.notice),
 		};
 	}
 
@@ -1919,98 +2232,88 @@ export class SessionTools {
 	 * Consumes the mount notice only when its rendered content still matches the
 	 * preview included in the context estimate.
 	 */
-	takePendingXdevMountNotice(options: {
+	takePendingToolCommandMountNotice(options: {
 		baseCatalogDelivered: boolean;
 		expectedContentKey: string;
-	}): CustomMessage<XdevMountNoticeDetails> | undefined {
-		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
+	}): CustomMessage<ToolCommandMountNoticeDetails> | undefined {
+		const projection = this.#projectPendingToolCommandMountNotice(options.baseCatalogDelivered);
 		if (!projection) return undefined;
-		const contentMatches = this.#xdevNoticeContentKey(projection.notice) === options.expectedContentKey;
+		const contentMatches = this.#toolCommandNoticeContentKey(projection.notice) === options.expectedContentKey;
 		if (!contentMatches) {
 			// Changed rendered content can follow mount/catalog changes or a
 			// same-named MCP tool reconnect whose schema replacement does not change
 			// mount membership or the applied-tool signature.
 			// If maintenance delivered a rebuilt base, commit additions carried by
 			// that prompt before deferring the remaining notice content.
-			if (options.baseCatalogDelivered) this.#recordBasePromptXdevAdditions();
+			if (options.baseCatalogDelivered) this.#recordBasePromptToolCommandAdditions();
 			return undefined;
 		}
 		// A hidden base rebuild can leave the projected notice byte-identical. The
 		// exact content was already budgeted, so consume it rather than withholding
 		// both the catalog and its availability notice from this request.
-		this.#pendingXdevMountDelta = undefined;
+		this.#pendingToolCommandMountDelta = undefined;
 		this.#announcedMounts = projection.announcedMounts;
 		return projection.notice;
 	}
 
 	/** Stable fingerprint of a mount notice's rendered text, ignoring its timestamp. */
-	#xdevNoticeContentKey(notice: CustomMessage<XdevMountNoticeDetails> | undefined): string {
+	#toolCommandNoticeContentKey(notice: CustomMessage<ToolCommandMountNoticeDetails> | undefined): string {
 		if (!notice) return "";
 		const { content } = notice;
 		if (typeof content === "string") return content;
 		return content.map(part => (part.type === "text" ? part.text : "")).join("\u0000");
 	}
 
-	#recordBasePromptXdevAdditions(): void {
-		const pending = this.#pendingXdevMountDelta;
+	#recordBasePromptToolCommandAdditions(): void {
+		const pending = this.#pendingToolCommandMountDelta;
 		if (!pending) return;
 		this.#ensureAnnouncedMountsSeeded();
 		let changed = false;
 		for (const name of pending.added) {
-			if (!this.#basePromptXdevNames.has(name)) continue;
+			if (!this.#basePromptToolCommandNames.has(name)) continue;
 			pending.added.delete(name);
 			this.#announcedMounts.add(name);
 			changed = true;
 		}
 		if (!changed) return;
-		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
+		this.#pendingToolCommandMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
 	}
 
-	#projectPendingXdevMountNotice(baseCatalogDelivered: boolean): XdevMountNoticeProjection | undefined {
-		const pending = this.#pendingXdevMountDelta;
+	#projectPendingToolCommandMountNotice(baseCatalogDelivered: boolean): ToolCommandMountNoticeProjection | undefined {
+		const pending = this.#pendingToolCommandMountDelta;
 		if (!pending) return undefined;
 		this.#ensureAnnouncedMountsSeeded();
 		const announcedMounts = new Set(this.#announcedMounts);
-		// A pending add for a device the outgoing base prompt already lists in its
+		// A pending add for a command the outgoing base prompt already lists in its
 		// catalog needs no notice line — but only when the final provider prompt
 		// still carries that base catalog. A `before_agent_start` replacement drops
 		// it, so its additions must remain in the notice. Record prompt-carried
-		// devices announced here, after the final prompt is known and immediately
+		// commands announced here, after the final prompt is known and immediately
 		// before delivery. The pending delta remains untouched by rebuilds, letting
-		// {@link #notifyXdevMountDelta} cancel a mount followed by an unmount before
+		// {@link #notifyToolCommandMountDelta} cancel a mount followed by an unmount before
 		// any request is sent (issue #7139 reviews).
 		if (baseCatalogDelivered) {
 			// Route guidance ships in the same request's append prompt: a pending
-			// add whose route line already carries its catalog summary needs no
-			// notice line — the route renders the same name and summary. Deferred
-			// MCP discovery is the common path — the post-connect mount lands
-			// before the next user turn while the base catalog (which the check
-			// above consults) never lists routed tools — so without this check
-			// the notice would duplicate every route line verbatim. Two devices
-			// keep their notice lines: ones the bounded route projection omits
-			// (no shipped route line to lean on), and ones whose docs the prompt
-			// inlines (their route line has no summary; the notice is what
-			// delivers their docs).
-			let routedSummaryNames: Set<string> | undefined;
-			if (this.#xdev) {
-				const docsPlan = planXdevPromptDocs(
-					this.#xdev,
-					cfgToolsXdevDocs.get(this.#host.settings),
-					cfgToolsXdevInlineDevices.get(this.#host.settings),
-				);
-				routedSummaryNames = new Set(
-					projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(listXdevTools(this.#xdev)))
-						.mappings.filter(mapping => docsPlan.catalog.has(mapping.name))
-						.map(mapping => mapping.name),
-				);
-			}
+			// add whose route line the committed base prompt already carries with
+			// its catalog summary needs no notice line — the route renders the
+			// same name and summary. Deferred MCP discovery is the common path —
+			// the post-connect mount lands before the next user turn while the
+			// base catalog (which the check above consults) never lists routed
+			// tools — so without this check the notice would duplicate every route
+			// line verbatim. Three commands keep their notice lines: ones the
+			// bounded route projection omits (no shipped route line to lean on),
+			// ones whose docs the prompt inlines (their route line has no summary;
+			// the notice is what delivers their docs), and ones mounted after the
+			// base prompt was committed (a frozen prompt never shipped their route).
 			for (const name of pending.added) {
-				if (this.#basePromptXdevNames.has(name) || routedSummaryNames?.has(name)) announcedMounts.add(name);
+				if (this.#basePromptToolCommandNames.has(name) || this.#basePromptRoutedToolCommandNames.has(name)) {
+					announcedMounts.add(name);
+				}
 			}
 		}
 		// Only announce a net change relative to what the model already knows (from
 		// this session and persisted history): a re-mount of an already-announced
-		// device — the common resume/reconnect case — and an unmount for a device
+		// command — the common resume/reconnect case — and an unmount for a command
 		// it was never told about are both suppressed, keeping the provider prompt
 		// cache prefix byte-stable across resumes.
 		const addedNames = [...pending.added].filter(name => !announcedMounts.has(name));
@@ -2020,22 +2323,24 @@ export class SessionTools {
 		if (addedNames.length === 0 && removedNames.length === 0) {
 			return { notice: undefined, announcedMounts };
 		}
-		const summaries = new Map(this.#xdev ? xdevEntries(this.#xdev).map(entry => [entry.name, entry.summary]) : []);
+		const summaries = new Map(
+			this.#toolCommands ? toolCommandEntries(this.#toolCommands).map(entry => [entry.name, entry.summary]) : [],
+		);
 		const added = addedNames.map(name => ({ name, summary: summaries.get(name) ?? "" }));
 		const removed = removedNames.map(name => ({ name }));
-		const docs = this.#xdev
-			? xdevDocsFor(
-					this.#xdev,
+		const docs = this.#toolCommands
+			? toolCommandDocsFor(
+					this.#toolCommands,
 					new Set(addedNames),
-					cfgToolsXdevDocs.get(this.#host.settings),
-					cfgToolsXdevInlineDevices.get(this.#host.settings),
+					cfgToolsCommandDocs.get(this.#host.settings),
+					cfgToolsCommandInline.get(this.#host.settings),
 				)
 			: "";
 		return {
 			notice: {
 				role: "custom",
-				customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
-				content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
+				customType: TOOL_COMMAND_MOUNT_NOTICE_MESSAGE_TYPE,
+				content: prompt.render(toolCommandMountNoticePrompt, { added, removed, docs }),
 				details: { added: addedNames, removed: removedNames },
 				attribution: "agent",
 				display: false,
@@ -2045,56 +2350,60 @@ export class SessionTools {
 		};
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
+	/** Rediscovers reloadable skills and rebuilds the system prompt's skill list. */
 	refreshSkills(): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
-			resetCapabilities();
-			if (this.#skillsReloadable) {
-				const skillsSettings = cfgSkills.get(this.#host.settings);
-				const discovered = await loadSkills({
-					...skillsSettings,
-					cwd: this.#host.sessionManager.getCwd(),
-					disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
-					extensionRoots: this.#host.effectiveExtensionRoots(),
-				});
-				this.#skills = discovered.skills;
-				this.#skillWarnings = discovered.warnings;
-				this.#skillsSettings = skillsSettings;
-
-				if (this.#host.agentKind() === "main") {
-					setActiveSkills(this.#skills);
-				}
-			}
+			await this.#rediscoverSkills();
+			this.#promptSkills = this.#skills;
 			await this.refreshBaseSystemPrompt();
 			this.#host.notifyCommandMetadataChanged();
 		});
 	}
 
+	/**
+	 * Rediscovers skills for the registry only, after a tool wrote or deleted one. The system prompt keeps
+	 * its list so the provider cache prefix survives; {@link takeSkillNotice} tells the model instead.
+	 */
+	reloadSkills(): Promise<void> {
+		return this.runToolRegistryMutation(async () => {
+			await this.#rediscoverSkills();
+			this.#host.notifyCommandMetadataChanged();
+		});
+	}
+
+	async #rediscoverSkills(): Promise<void> {
+		resetCapabilities();
+		if (!this.#skillsReloadable) return;
+		const { discovered, skillsSettings } = await this.#discoverSkills();
+		this.#skills = discovered.skills;
+		this.#skillWarnings = discovered.warnings;
+		this.#skillsSettings = skillsSettings;
+		if (this.#host.agentKind() === "main") {
+			setActiveSkills(this.#skills);
+		}
+	}
+
 	/** Selects enabled tools, ignoring names absent from the registry. */
 	setActiveToolsByName(toolNames: string[]): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
-			const normalized = normalizeToolNames(toolNames);
-			// Transport-write eligibility keys off the *current* active set: an ordinary
-			// selection change should not demote `write` unless it is already active.
 			await this.#applyToolPresentation(
-				normalized,
-				this.#xdev?.mountedNames ?? new Set(),
-				this.getActiveToolNames().includes("write"),
+				normalizeToolNames(toolNames),
+				this.#toolCommands?.mountedNames ?? new Set(),
 			);
 		});
 	}
 
 	/**
-	 * Restore an enabled tool set with its exact top-level versus `xd://` partition.
+	 * Restore an enabled tool set with its exact top-level versus tool command partition.
 	 *
 	 * Both inputs are required because {@link setActiveToolsByName} only receives the
 	 * enabled name list and classifies mounts from the current presentation set.
 	 * Rollback/restore callers must pass the snapshotted mounted subset so names that
-	 * were top-level stay pinned (`#runtimeSelectedToolNames`) and names that were under
-	 * `xd://` remain mount-eligible, even when the live mount set has drifted.
+	 * were top-level stay pinned (`#runtimeSelectedToolNames`) and names that were tool
+	 * commands remain mount-eligible, even when the live mount set has drifted.
 	 *
 	 * Names outside `mountedToolNames` are pinned top-level for this application;
-	 * names in the mounted subset remain eligible for xdev mounting. Set
+	 * names in the mounted subset remain eligible for toolCommands mounting. Set
 	 * `forcePromptRefresh` when an enabled tool's schema or prompt-visible metadata
 	 * changed without changing its name or presentation.
 	 *
@@ -2108,13 +2417,9 @@ export class SessionTools {
 		signal?: AbortSignal,
 	): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
-			const normalized = normalizeToolNames(toolNames);
-			// Restoration targets a snapshot, so write eligibility comes from the
-			// *target* set rather than whatever happens to be active mid-rollback.
 			await this.#applyToolPresentation(
-				normalized,
+				normalizeToolNames(toolNames),
 				new Set(normalizeToolNames(mountedToolNames)),
-				normalized.includes("write"),
 				forcePromptRefresh,
 				signal,
 			);
@@ -2132,13 +2437,13 @@ export class SessionTools {
 			const isLateNonBuiltIn = (name: string) =>
 				!isMCPToolName(name) && !this.hasBuiltInTool(name) && !registered.has(name);
 			const currentMCPToolNames = this.getSelectedMCPToolNames();
-			const currentMountedMCPToolNames = this.getMountedXdevToolNames().filter(isMCPToolName);
+			const currentMountedMCPToolNames = this.getMountedToolCommandNames().filter(isMCPToolName);
 			await this.setActiveToolPresentation(
 				[...nonMCPToolNames, ...currentMCPToolNames, ...this.getEnabledToolNames().filter(isLateNonBuiltIn)],
 				[
 					...nonMCPMountedToolNames,
 					...currentMountedMCPToolNames,
-					...this.getMountedXdevToolNames().filter(isLateNonBuiltIn),
+					...this.getMountedToolCommandNames().filter(isLateNonBuiltIn),
 				],
 			);
 		});
@@ -2146,29 +2451,19 @@ export class SessionTools {
 
 	/**
 	 * Shared body for {@link setActiveToolsByName} and {@link setActiveToolPresentation}:
-	 * pins non-mounted names as the runtime selection (holding `write` back when it is
-	 * transport-only) and applies the set, rolling the selection back if apply throws.
+	 * pins non-mounted names as the runtime selection (leaving names top-level only while
+	 * `bash` is off mount-eligible) and applies the set, rolling the selection back if
+	 * apply throws.
 	 */
 	async #applyToolPresentation(
 		normalized: string[],
 		mounted: ReadonlySet<string>,
-		writeSelected: boolean,
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
 	): Promise<void> {
-		const retainedMountedDevice = [...mounted].some(name => normalized.includes(name));
-		const retainedDeferrableTool = normalized.some(name => this.#toolRegistry.get(name)?.deferrable === true);
-		const deviceOnlyWriteActive = this.#isDeviceOnlyWrite?.() === true;
-		const transportWriteActive =
-			normalized.includes("write") &&
-			this.#builtInToolNames.has("write") &&
-			this.#presentationPinnedToolNames?.has("write") !== true &&
-			this.#runtimeSelectedToolNames?.has("write") !== true &&
-			((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
-				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
-			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
+			normalized.filter(name => !mounted.has(name) && !this.#transportDemotedNames.has(name)),
 		);
 		try {
 			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);
@@ -2239,7 +2534,7 @@ export class SessionTools {
 
 	/**
 	 * Re-resolves settings-gated tools (built-in factories, image/speech generation,
-	 * `xd://` mounting) against live settings: registers newly allowed tools,
+	 * tool command mounting) against live settings: registers newly allowed tools,
 	 * unregisters disallowed ones, and reapplies the enabled set with one forced
 	 * prompt rebuild — unconditionally unless `refreshPrompt` is false, then only
 	 * when the tool set changed. Unrelated selections and MCP/extension tools are
@@ -2250,7 +2545,7 @@ export class SessionTools {
 			const reconcile = this.#reconcileSettingsGatedTools;
 			if (!reconcile || this.#host.isDisposed()) return;
 			// Sampled before the delta: it still carries names mounted under the
-			// `xd://` state the reconcile may release.
+			// tool command state the reconcile may release.
 			const enabled = new Set(this.getEnabledToolNames());
 			const delta = await reconcile(name => this.#builtInToolNames.has(name));
 			for (const name of delta.removed) {
@@ -2261,12 +2556,12 @@ export class SessionTools {
 				this.setToolBuiltIn(name, builtIn);
 				if (activate) enabled.add(name);
 			}
-			const xdevChanged = delta.xdev !== this.#xdev;
-			if (xdevChanged) {
-				this.#xdev = delta.xdev;
-				if (delta.xdev) delta.xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
+			const toolCommandChanged = delta.toolCommands !== this.#toolCommands;
+			if (toolCommandChanged) {
+				this.#toolCommands = delta.toolCommands;
+				if (delta.toolCommands) delta.toolCommands.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 			}
-			if (!refreshPrompt && !xdevChanged && delta.added.length === 0 && delta.removed.length === 0) return;
+			if (!refreshPrompt && !toolCommandChanged && delta.added.length === 0 && delta.removed.length === 0) return;
 			await this.#applyActiveToolsByName([...enabled], true);
 		});
 	}
@@ -2291,6 +2586,12 @@ export class SessionTools {
 		const activeToolNames = this.getActiveToolNames();
 		this.#setActiveToolNames?.(activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const heldRoster =
+			this.#promptRosterHeld && this.#implicitRebuildBinding() !== "free" ? this.#basePromptRoster : undefined;
+		if (heldRoster) {
+			const kept = await this.#prepareHeldRosterPrompt(heldRoster, rebuildSystemPrompt, isCurrent);
+			if (kept) return kept;
+		}
 		// Derive the candidate and run the awaited render inside its scope: the
 		// tool getters read the candidate while the prompt renders, so the built
 		// prompt and the captured signature describe the same state. Nothing is
@@ -2300,12 +2601,12 @@ export class SessionTools {
 		// winner.
 		const candidate = this.#derivePromptSurface();
 		const built = await this.#promptSurfaceScope.run(candidate, () =>
-			rebuildSystemPrompt(activeToolNames, this.#toolRegistry),
+			rebuildSystemPrompt(activeToolNames, this.#toolRegistry, this.#toolCommands),
 		);
 		const promptTools = activeToolNames
 			.map(name => this.#toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool != null);
-		const mountedSignatureTools = [...(this.#xdev?.mountedNames ?? [])].flatMap(name => {
+		const mountedSignatureTools = [...(this.#toolCommands?.mountedNames ?? [])].flatMap(name => {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [tool] : [];
 		});
@@ -2323,13 +2624,11 @@ export class SessionTools {
 				// snapshot, so only carry the prompt forward.
 				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
 				this.#baseSystemPrompt = built.systemPrompt;
+				this.#systemPromptSources = built.sources;
 				this.#promptSurface = candidate;
-				this.#setBasePromptXdevNames(built.xdevCatalogNames);
+				this.#setBasePromptToolCommandNames(built.toolCommandCatalogNames);
 				this.#host.clearMemoryPromotionSnapshot();
-				if (
-					previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
-					previousBaseSystemPrompt.some((part, index) => part !== this.#baseSystemPrompt[index])
-				) {
+				if (!samePromptBlocks(previousBaseSystemPrompt, this.#baseSystemPrompt)) {
 					this.#host.clearInheritedProviderPromptCacheKey();
 				}
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
@@ -2341,7 +2640,48 @@ export class SessionTools {
 				this.#pendingToolRosterDeltaAfterBase = undefined;
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
+				this.#promptTemplate = this.#currentPromptTemplate();
 				this.#lastAppliedToolSignature = signature;
+				this.#recordPromptRoster(activeToolNames);
+				return true;
+			},
+		};
+	}
+
+	/**
+	 * Re-renders a frozen prefix's base prompt against the roster it was
+	 * committed with, so a forced rebuild that changes nothing else (a body-only
+	 * skill update, an unchanged memory refresh) keeps the held roster change
+	 * out of the bound prefix — eval description included — and leaves it to its
+	 * notices. Returns `undefined` when the rebuild changes the prompt anyway:
+	 * the prefix breaks regardless, so the caller absorbs the live roster.
+	 */
+	async #prepareHeldRosterPrompt(
+		roster: PromptRoster,
+		rebuildSystemPrompt: SystemPromptRebuilder,
+		isCurrent: (() => boolean) | undefined,
+	): Promise<SystemPromptPreparation | undefined> {
+		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const candidate: PromptSurface = {
+			...this.#derivePromptSurface(),
+			evalToolNames: this.#promptSurface.evalToolNames,
+			perCallModelAdvertisement: this.#promptSurface.perCallModelAdvertisement,
+		};
+		const built = await this.#promptSurfaceScope.run(candidate, () =>
+			rebuildSystemPrompt(roster.toolNames, roster.tools, roster.toolCommands),
+		);
+		if (!samePromptBlocks(built.systemPrompt, previousBaseSystemPrompt)) return undefined;
+		return {
+			systemPrompt: previousBaseSystemPrompt,
+			commit: () => {
+				if (this.#host.isDisposed() || isCurrent?.() === false) return false;
+				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
+				this.#promptSurface = candidate;
+				this.#host.clearMemoryPromotionSnapshot();
+				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
+				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				return true;
 			},
 		};
@@ -2422,13 +2762,13 @@ export class SessionTools {
 	 *      `readsSkillUris` changes skill catalog/URI guidance with identical
 	 *      names and descriptions, so it must rebuild too.
 	 *   3. The bounded mounted-MCP projection: escaped original-name labels,
-	 *      actual `xd://` paths, and the omission flag in catalog order. These are
-	 *      the exact values rendered by the global transport guidance; catalog
+	 *      command names, and the omission flag in catalog order. These are
+	 *      the exact values rendered by the global command guidance; catalog
 	 *      churn wholly behind the fallback does not change the prompt.
 	 *   4. MCP server instructions text (per server), since `rebuildSystemPrompt`
 	 *      embeds these in the appended prompt under "## MCP Server Instructions".
 	 *      A server upgrade can change instructions while keeping tools identical.
-	 *   5. Sorted names of mounted xd:// skill readers: mounting, unmounting,
+	 *   5. Sorted names of mounted skill-reader commands: mounting, unmounting,
 	 *      or flipping such a reader changes skill catalog/URI guidance without
 	 *      touching the direct inventory, so it must rebuild. Mount churn of
 	 *      capability-less tools leaves this segment empty and the prompt stable.
@@ -2463,8 +2803,8 @@ export class SessionTools {
 		const describeTool = (tool: AgentTool): string =>
 			`${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}|${toolReadsSkillUris(tool)}`;
 		const descriptionSegment = tools.map(describeTool).join("\u0002");
-		const mountedMCPProjection = projectMountedMCPXdevGuidance(
-			collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),
+		const mountedMCPProjection = projectMountedMCPToolCommandGuidance(
+			collectMountedMCPToolRoutes(this.#toolCommands ? listToolCommands(this.#toolCommands) : []),
 		);
 		const mountedMCPRouteSegment =
 			JSON.stringify({
@@ -2482,13 +2822,13 @@ export class SessionTools {
 			entries.sort();
 			instructionsSegment = entries.join("\u0006");
 		}
-		// The non-MCP remainder of the xd:// inventory is deliberately NOT part
+		// The non-MCP remainder of the tool command inventory is deliberately NOT part
 		// of the signature: its mount/unmount announces itself through
-		// `#notifyXdevMountDelta` rather than rewriting the system prompt, keeping
+		// `#notifyToolCommandMountDelta` rather than rewriting the system prompt, keeping
 		// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
 		// exception above, bounded to the exact projection rendered in the global
 		// route guidance so churn wholly behind its fallback does not rebuild.
-		// Mounted xd:// readers stay out of the direct inventory, but a mounted
+		// Mounted reader commands stay out of the direct inventory, but a mounted
 		// skill reader still drives catalog/URI guidance: hash only the sorted
 		// names of mounted readers so their mount/unmount/flip rebuilds, while
 		// mount churn of capability-less tools keeps the prompt byte-stable.
@@ -2501,11 +2841,10 @@ export class SessionTools {
 	}
 
 	/**
-	 * Replace MCP tools in the registry and enable them immediately. Refreshes
-	 * are serialized so an older asynchronous prompt rebuild cannot commit
-	 * after a newer catalog snapshot. Every connected MCP tool becomes available
-	 * (mounted under `xd://` when that transport is active, else top-level);
-	 * while vibe mode is active, activation waits for vibe exit.
+	 * Replace MCP tools in the registry, enabling newly discovered manager tools
+	 * while preserving the selection of existing ones. Refreshes are serialized
+	 * so an older asynchronous prompt rebuild cannot commit after a newer catalog
+	 * snapshot. During vibe mode, new tools wait for vibe exit.
 	 */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		const snapshot = [...mcpTools];
@@ -2520,7 +2859,7 @@ export class SessionTools {
 			if (isMCPToolName(name)) previousMcpTools.set(name, tool);
 		}
 		const previousMcpManagerToolNames = new Set(this.#mcpManagerToolNames);
-		const previousActiveMcpToolNames = this.getEnabledToolNames().filter(isMCPToolName);
+		const previousActiveMcpToolNames = new Set(this.getEnabledToolNames().filter(isMCPToolName));
 		const restorePreviousMcpTools = () => {
 			for (const name of this.#toolRegistry.keys()) {
 				if (isMCPToolName(name)) this.#toolRegistry.delete(name);
@@ -2548,21 +2887,20 @@ export class SessionTools {
 			if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
 		}
 
-		// Connected manager tools become active immediately, except while vibe
-		// narrows the active set to the director's tools: then every MCP tool keeps
-		// its prior selection and vibe exit activates the manager set. Extension-owned
-		// MCP tools always retain their prior selection while both share one registry.
+		// Refresh replaces implementations, not an extension's selection. Walk
+		// the new registry in order so catalog reordering still updates the prompt.
+		// Names previously supplied by extensions keep their selection if ownership changes.
 		const vibeActive = this.#installedVibeToolNames.size > 0;
-		const retainedActiveMcpToolNames = previousActiveMcpToolNames.filter(
-			name => (vibeActive || this.#extensionMcpTools.has(name)) && this.#toolRegistry.has(name),
-		);
-		const nextActive = [
-			...new Set([
-				...this.#getActiveNonMCPToolNames(),
-				...(vibeActive ? [] : this.#mcpManagerToolNames),
-				...retainedActiveMcpToolNames,
-			]),
-		];
+		const nextActive = this.#getActiveNonMCPToolNames();
+		for (const name of this.#toolRegistry.keys()) {
+			if (
+				isMCPToolName(name) &&
+				(previousActiveMcpToolNames.has(name) ||
+					(!vibeActive && this.#mcpManagerToolNames.has(name) && !previousMcpTools.has(name)))
+			) {
+				nextActive.push(name);
+			}
+		}
 		try {
 			await this.#applyActiveToolsByName(nextActive);
 			if (this.#host.isDisposed()) {

@@ -257,7 +257,10 @@ async function exportSessionData(
 	}
 	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
 
-	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`;
+	// Resolve once: Bun on Windows fails to mkdir relative paths that normalize to cwd (oven-sh/bun#45059).
+	const outputPath = path.resolve(
+		opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`,
+	);
 	await writeExportHtml(sessionData, outputPath, opts);
 	return outputPath;
 }

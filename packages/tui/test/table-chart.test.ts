@@ -5,6 +5,7 @@ import {
 	buildChart,
 	type ChartKind,
 	type ChartPlan,
+	isTransition,
 	planChart,
 	worthCharting,
 } from "@oh-my-pi/pi-tui/charts/chart-plan";
@@ -262,6 +263,7 @@ describe("parseCell", () => {
 		expect(parseCell("**4** ✅ (2 attempts)")).toMatchObject({ value: 4, emphasis: true, fit: "note" });
 		expect(parseCell("24–72 h")).toMatchObject({ value: 86_400, upper: 259_200, fit: "range" });
 		expect(parseCell("2,049 → 1,973")).toMatchObject({ value: 2049, to: 1973, toFigure: "1,973" });
+		expect(parseCell("402.7 → 13.3 µs")).toMatchObject({ value: 402.7e-6, to: 13.3e-6, dim: "duration" });
 		expect(parseCell("5/8")).toMatchObject({ value: 5, denominator: 8, dim: "fraction" });
 		expect(parseCell("-33pp")).toMatchObject({ value: -33, dim: "percent", signed: true });
 	});
@@ -273,6 +275,11 @@ describe("parseCell", () => {
 		expect(parseCell("cf89bee60").kind).toBe("id");
 		expect(parseCell("renamed the helper").kind).toBe("text");
 		expect(parseCell("—").kind).toBe("missing");
+	});
+
+	// Regression: `1e400` parsed to Infinity, and the axis looping up to it never ended.
+	it("reads a number past the float range as text", () => {
+		expect(parseCell("1e400 GiB").kind).toBe("text");
 	});
 
 	// Regression: unit lookups read inherited keys, and `3 constructor` threw while rendering.
@@ -304,6 +311,18 @@ describe("analyzeTable", () => {
 		expect(shares.rows).toEqual([0, 1, 2, 3]);
 		expect(shares.totals).toEqual([4]);
 		expect(shares.measures.map(column => column.header)).toEqual(["Tokens", "Share"]);
+	});
+
+	it("ignores cyclic near-equal sums without losing ordinary compositions", () => {
+		const ambiguous = analyze(
+			"| snake_id | label | metric_a | metric_b |\n|---|---|---|---|\n| 0 | none | - | - |\n| 3 | alpha | 85,000,000,000 | 85,000,000,000 |\n| 4 | beta | 86,000,000,000 | 86,000,000,000 |\n| 5 | gamma | 87,000,000,000 | 87,000,000,000 |",
+		);
+		expect(ambiguous.composition).toBeUndefined();
+
+		const exact = analyze(
+			"| label | first | second | total |\n|---|---:|---:|---:|\n| alpha | 2 | 7 | 9 |\n| beta | 4 | 9 | 13 |\n| gamma | 6 | 11 | 17 |",
+		);
+		expect(exact.composition).toEqual({ whole: 3, parts: [1, 2], exact: true });
 	});
 
 	it("drops measure columns that echo one setting", () => {
@@ -394,6 +413,33 @@ describe("analyzeTable", () => {
 			"| case | Go | Zig | speedup |\n|---|---|---|---|\n| a | 80 ms | 20 ms | 4.0× |\n| b | 90 ms | 60 ms | 1.5× |\n| c | 100 ms | 10.0 ms | 10.0× |",
 		);
 		expect(factors.measures.map(column => column.header)).toEqual(["Go", "Zig"]);
+	});
+});
+
+describe("isTransition", () => {
+	it("reads `with`/`to`/`from` as a condition only between headers naming one subject", () => {
+		expect(isTransition("Median", "Runs with ≥10")).toBe(false);
+		expect(isTransition("build without cache", "build with cache")).toBe(true);
+		expect(isTransition("Before (kata)", "After (vmon)")).toBe(true);
+	});
+});
+
+describe("row name nesting", () => {
+	it("keeps a leading number with the name before it", () => {
+		const table = analyzeTable(
+			["Detector", "AUC"],
+			[
+				["Step length alone", "0.690"],
+				["EmbeddingGemma 2 embedding", "0.743"],
+				["EmbeddingGemma 2, layer 14", "0.772"],
+				["Jev 15 + EmbeddingGemma", "0.759"],
+				["Jev 15 + layer 14", "0.783"],
+			],
+		);
+		const spec = buildChart(table, { kind: "bar", label: 0, series: [1], transpose: false });
+		const heads = (spec?.groups ?? []).map(group => group.name).filter(Boolean);
+		expect(heads).not.toContain("EmbeddingGemma");
+		expect(heads).not.toContain("Jev");
 	});
 });
 
@@ -617,6 +663,32 @@ describe("renderChartSvg", () => {
 		const svg = renderChartSvg(buildChart(analysis, { ...planChart(analysis)!, shading: "shared" })!);
 		expect(svg.match(/>Sonnet 5\.5</g)).toHaveLength(1);
 		expect(svg.match(/>bash</g)).toHaveLength(2);
+	});
+
+	// Regression: ticks summed a step under the values' float spacing (1e17 + 5 === 1e17) and never reached the top.
+	it("ends the value axis of values past 2^53", () => {
+		const row = "100,000,000,000,000,000 | 100,000,000,000,000,008 | 100,000,000,000,000,016";
+		const analysis = analyze(
+			`| Run | p50 | p95 | p99 |\n|---|---|---|---|\n| a | ${row} |\n| b | ${row} |\n| c | ${row} |`,
+		);
+		const svg = renderChartSvg(buildChart(analysis, planChart(analysis)!)!);
+		expect(svg.match(/>100,000,000B</g)?.length).toBeLessThan(10);
+	});
+
+	// Regression: finite cells overflowed in a ratio, and the factor axis looped up to Infinity.
+	it("draws no chart whose values overflow to Infinity", () => {
+		const analysis = analyze(
+			"| Name | Before | After |\n|---|---|---|\n| a | 1e-300 ms | 1e300 ms |\n| b | 20 ms | 5 ms |\n| c | 30 ms | 3 ms |",
+		);
+		expect(buildChart(analysis, { ...planChart(analysis)!, kind: "change" })).toBeUndefined();
+	});
+
+	// Regression: `p` and 400 nines parsed to Infinity, and scaling it under 100 never ended.
+	it("ranks a quantile header past the float range as the top rung", () => {
+		const analysis = analyze(
+			`| Run | p50 | p95 | p${"9".repeat(400)} |\n|---|---|---|---|\n| a | 10 ms | 20 ms | 30 ms |\n| b | 11 ms | 22 ms | 33 ms |\n| c | 12 ms | 24 ms | 36 ms |`,
+		);
+		expect(planChart(analysis)?.kind).toBe("ladder");
 	});
 
 	it("draws a heatmap's columns of different quantities as bars on their own axes", () => {

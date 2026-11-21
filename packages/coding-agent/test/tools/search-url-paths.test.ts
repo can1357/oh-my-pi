@@ -17,9 +17,9 @@ function createSession(testDir: string): ToolSession {
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => "*",
-		allocateOutputArtifact: async toolType => {
+		allocateOutputArtifact: async () => {
 			const id = String(nextArtifactId++);
-			return { id, path: path.join(artifactsDir, `${id}.${toolType}.log`) };
+			return { id, path: path.join(artifactsDir, `${id}.log`) };
 		},
 		settings: Settings.isolated({
 			"fetch.enabled": true,
@@ -27,7 +27,7 @@ function createSession(testDir: string): ToolSession {
 			"grep.contextAfter": 0,
 			"astGrep.enabled": true,
 			"astEdit.enabled": true,
-			"tools.xdev": false,
+			"tools.commands": false,
 		}),
 	};
 }

@@ -232,6 +232,28 @@ describe("withAuth", () => {
 		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true, true]);
 	});
 
+	it("retains the exhausted key's reset when every rotated API key rejects authentication", async () => {
+		const quota = usageLimitError();
+		const keys: string[] = [];
+		await expect(
+			withAuth(
+				ctx =>
+					ctx.error === undefined
+						? "exhausted"
+						: ctx.lastChance
+							? keys.length === 1
+								? "stale"
+								: undefined
+							: undefined,
+				async key => {
+					keys.push(key);
+					throw key === "exhausted" ? quota : authError();
+				},
+			),
+		).rejects.toBe(quota);
+		expect(keys).toEqual(["exhausted", "stale"]);
+	});
+
 	it("switches accounts before refreshing the same account on usage limits", async () => {
 		const keys: string[] = [];
 		const contexts: ApiKeyResolveContext[] = [];
@@ -787,6 +809,21 @@ describe("withOAuthAccess", () => {
 		// force-refresh of the same account would duplicate the failed side effect.
 		expect(attempts).toEqual(["dead", "sibling"]);
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, "rotate", { forceRefresh: undefined }]);
+	});
+	it("retains the quota reset when a rotated OAuth sibling rejects authentication", async () => {
+		const quota = usageLimitError();
+		const storage = fakeStorage({
+			initial: access("exhausted", { credentialId: 1 }),
+			rotated: access("stale", { credentialId: 2 }),
+		});
+		const attempts: string[] = [];
+		await expect(
+			withOAuthAccess(storage, "prov", async a => {
+				attempts.push(a.accessToken);
+				throw a.accessToken === "exhausted" ? quota : authError();
+			}),
+		).rejects.toBe(quota);
+		expect(attempts).toEqual(["exhausted", "stale"]);
 	});
 
 	it("passes the failed OAuth bearer to rotation", async () => {

@@ -174,7 +174,7 @@ A normal yield the agent drove itself is treated differently from a deliberate i
 Session/client constraints can preserve a note whose normal delivery path is steering:
 
 - **Plan mode:** every would-be advisor steer is preserved as a visible card, even while the primary loop is streaming, because only user-driven turns converge on ask/resolve.
-- **ACP with deferred agent-initiated turns:** when `deferAgentInitiatedTurns` is enabled and the bridge has not allowed agent-initiated turns, an idle would-be steer is preserved because the client cannot represent the triggered turn as busy. Advice raised while the primary loop is already streaming can still steer into that live turn.
+- **ACP with deferred agent-initiated turns:** when the bridge reports `deferAgentInitiatedTurns` (no client prompt is open), an idle would-be steer is preserved because the client cannot represent the triggered turn as busy. Advice raised while the primary loop is already streaming can still steer into that live turn.
 
 So the advisor can steer and resume a run the agent ended on its own **while it is running or yielded mid-work and the current mode/client permits steering**. When steering is blocked instead, the note is either preserved as a card (the terminal-answer, plan-mode, and deferred-ACP cases above) or, for a concern while the agent is running or yielded mid-work, downgraded to a non-interrupting aside during the `advisor.immuneTurns` cooldown; either way it waits for the next turn boundary or resume rather than waking the agent.
 
@@ -225,6 +225,8 @@ Practical interpretation:
 `strict` with an `agent-end` advisor provides synchronous final review: the primary reaches its final boundary, the advisor reviews the accumulated run, then the primary can finish. Notes delivered at that boundary merge into one message, ordered newest turn first, then severity (`blocker` → `concern` → `nit`). Notes about earlier turns carry a `turns_ago` attribute and a dim `T-N` transcript marker between severity and advisor name. The first merged delivery, then at most once every 50 primary turns, includes guidance that findings may be outdated or wrong and may be ignored.
 
 A batch containing a note at or above `advisor.continueSeverity` can request at most one permitted continuation, even when several advisors report findings together. Stop/abort suppression, concern cooldown, plan-mode policy, and client preservation constraints apply to both buffered and live delivery. Otherwise the notes remain visible without restarting the primary. A continuation an advisor delivery starts does not schedule another review or advance cadence; its updates are captured and sent with the next review, without feeding advisor notes back into them.
+
+Starting that continuation cancels every advisor review of the work it revises that has not finished yet, except the review whose note started it. A cancelled review emits nothing, so it cannot raise the issue again while the agent is fixing it. Each advisor that lost a review reviews once at the continuation's final boundary instead, whatever its `reviewInterval`, covering the original work and the fix together.
 
 Keep turn reviews asynchronous while waiting for final reviews:
 

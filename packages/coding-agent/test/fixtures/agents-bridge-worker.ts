@@ -16,8 +16,8 @@ import { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import { attachIrcWakeTurnMonitor } from "../../src/task/executor";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
-import { loadedModulesChangedSince } from "../../src/thread/code-skew";
 import { PeerAgentSession } from "../../src/thread/peer-agent-session";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
@@ -40,9 +40,11 @@ export interface PeerReport {
 export interface AgentsProbe {
 	threadId(): Promise<string>;
 	/** Build a real session (mock model) and register it as `id` in the (remote) registry. */
-	open(id: string, options: { sessionFile?: string; gated?: boolean }): Promise<string>;
+	open(id: string, options: { sessionFile?: string; gated?: boolean; monitored?: boolean }): Promise<string>;
 	/** Run a prompt on the local session to completion. */
 	prompt(id: string, text: string): Promise<void>;
+	/** Emit a tool call on a specific session, even after another session takes its id. */
+	toolCall(key: string, toolName: string): Promise<void>;
 	/** Let gated model calls answer. */
 	openGate(): Promise<void>;
 	/** Rewrite the second message's text through `replaceMessages`, keeping the first and last objects (as pruning does). */
@@ -134,10 +136,23 @@ const probe: AgentsProbe = {
 			status: "idle",
 		});
 		registry.syncSessionStatus(id, session);
+		if (options.monitored) {
+			attachIrcWakeTurnMonitor(session, {
+				id,
+				agent: { name: id, description: "test", systemPrompt: "test", source: "bundled" },
+			});
+		}
 		return session.instanceKey;
 	},
 	prompt: async (id, text) => {
 		await local(id).prompt(text);
+	},
+	toolCall: async (key, toolName) => {
+		const session = byKey.get(key);
+		if (!session) throw new Error(`no session ${key}`);
+		const call = { toolCallId: `${key}-${toolName}`, toolName };
+		session.agent.emitExternalEvent({ type: "tool_execution_start", ...call, args: {} });
+		session.agent.emitExternalEvent({ type: "tool_execution_end", ...call, result: { content: [] } });
 	},
 	rewriteInterior: async (id, text) => {
 		const session = local(id);
@@ -272,10 +287,7 @@ port.on("message", (message: unknown) => {
 			for (const service of services) await service.boot?.(globals[service.name], link);
 		});
 		link.handle("ping", nonce => nonce);
-		const ready: SubagentWorkerReady = {
-			type: "subagent-worker-ready",
-			changedModules: loadedModulesChangedSince(message.mainStartedAt),
-		};
+		const ready: SubagentWorkerReady = { type: "subagent-worker-ready" };
 		port.postMessage(ready);
 		return;
 	}

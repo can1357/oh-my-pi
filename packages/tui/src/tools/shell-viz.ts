@@ -1,4 +1,5 @@
-import { RunTrace, ShellVisualization, type ShellVizOptions } from "@oh-my-pi/pi-natives";
+import { type PipeStreams, RunTrace, ShellVisualization, type ShellVizOptions } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	ShellTrace,
 	ShellVizPreferences,
@@ -7,24 +8,61 @@ import type {
 	ShellVizSegment,
 	ShellVizWatch,
 } from "@oh-my-pi/pi-wire";
+import { nativeShellStreams, type ShellStream } from "./shell-steps";
 
 /** Native live-run or restored-trace owner; the UI never holds shell syntax. */
 export type ShellVisualizationSource = RunTrace | ShellVisualization;
-const visualizations = new WeakMap<ShellTrace, ShellVisualizationSource>();
+/** Each snapshot's native owner; `null` marks one the engine rejected, so it is not restored again per paint. */
+const visualizations = new WeakMap<ShellTrace, ShellVisualizationSource | null>();
 
-/** Bind the immutable snapshot before publishing it; live paints borrow the actual run. */
-export function attachShellTrace(snapshot: ShellTrace, trace: RunTrace): void {
-	visualizations.set(snapshot, trace);
+/** A live snapshot's run streams: the pipes and files its steps write, read while the run's card is drawn. */
+const kRunStreams = Symbol("shellTrace.streams");
+
+/** A snapshot possibly bound to its run's streams by {@link attachShellTrace}. */
+interface LiveShellTrace extends ShellTrace {
+	[kRunStreams]?: PipeStreams;
 }
 
-/** Historical traces restore their canonical native archive only once per snapshot. */
-export function shellVisualization(snapshot: ShellTrace): ShellVisualizationSource {
+/**
+ * Bind the immutable snapshot before publishing it; live paints borrow the
+ * actual run, and with `streams` the run's tapped pipes and redirected files.
+ */
+export function attachShellTrace(snapshot: ShellTrace, trace: RunTrace, streams?: PipeStreams): void {
+	visualizations.set(snapshot, trace);
+	const live: LiveShellTrace = snapshot;
+	if (streams) live[kRunStreams] = streams;
+}
+
+/**
+ * The streams of the run `snapshot` was taken from, now; undefined for a
+ * snapshot not bound to a live run's streams (a reloaded trace, or a run
+ * without taps), whose steps write only into its own output.
+ */
+export function shellTraceStreams(snapshot: ShellTrace): ShellStream[] | undefined {
+	const live: LiveShellTrace = snapshot;
+	const streams = live[kRunStreams];
+	return streams && nativeShellStreams(streams);
+}
+
+/**
+ * Historical traces restore their canonical native archive only once per snapshot.
+ * `undefined` when the engine rejects the snapshot (e.g. a `tool_result` hook rewrote
+ * `script`); callers then render the plain command and output.
+ */
+export function shellVisualization(snapshot: ShellTrace): ShellVisualizationSource | undefined {
 	let visualization = visualizations.get(snapshot);
-	if (!visualization) {
-		visualization = new ShellVisualization(JSON.stringify(snapshot));
+	if (visualization === undefined) {
+		try {
+			visualization = new ShellVisualization(JSON.stringify(snapshot));
+		} catch (error) {
+			logger.warn("Stored shell trace cannot be restored; rendering without visualization", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			visualization = null;
+		}
 		visualizations.set(snapshot, visualization);
 	}
-	return visualization;
+	return visualization ?? undefined;
 }
 
 /** Python-like Pseudo, all layers enabled, one pane, live, paused, normal speed. */
@@ -39,16 +77,21 @@ export function defaultShellVizPreferences(): ShellVizPreferences {
 	};
 }
 
-/** Render through native ownership; an explicit replay cursor never uses the normal output sink. */
+/**
+ * Render through native ownership; an explicit replay cursor never uses the normal output sink.
+ * `streaming` marks a command whose arguments are still arriving: its unfinished end draws as it will continue.
+ */
 export function readShellPresentation(
 	source: ShellVisualizationSource,
 	preferences: ShellVizPreferences,
 	snapshot?: ShellTrace,
 	output?: string,
+	streaming = false,
 ): ShellVizPresentation {
 	const options: ShellVizOptions = {
 		...preferences,
 		cursorSeq: preferences.cursor === undefined ? undefined : snapshot?.history?.[preferences.cursor - 1]?.seq,
+		streaming,
 	};
 	const presentation = decodeShellPresentation(source.present(options));
 	if (preferences.cursor === undefined && output !== undefined) presentation.output = output;

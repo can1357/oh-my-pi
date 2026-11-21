@@ -32,8 +32,7 @@ afterEach(() => {
 
 const UI = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
 
-/** The notice's Nerd Font stars: `md-star_off_outline`, `fa-star`, `md-star_shooting_outline`. */
-const STAR_OFF = "\u{f155b}";
+/** The notice's Nerd Font stars: `fa-star`, `md-star_shooting_outline`. */
 const STAR = "\uf005";
 const SHOOTING_STAR = "\u{f1742}";
 
@@ -49,7 +48,7 @@ const SAVED: SpotlightDetails = {
 	outTokens: 12_000,
 	savedTokens: 40_000,
 	original: {
-		url: "artifact://7",
+		url: "local://7.log",
 		lines: 5,
 		start: 1,
 		heat: "1-29",
@@ -62,7 +61,7 @@ const SAVED: SpotlightDetails = {
 		task: "Why does ingest\nstall?",
 		commands: ["make build", "./ingest.sh --dry-run"],
 		said: "",
-		intent: "Find the failing step",
+		intent: "Find the failing step: Which ingest step failed, and why?",
 		source: "./ingest.sh",
 		probe: "The most important line in this output is: `",
 		model: "whiskers-latest",
@@ -147,11 +146,11 @@ const RICH: SpotlightDetails = {
 	outTokens: 150,
 	savedTokens: 150,
 	original: {
-		url: "artifact://9",
+		url: "local://9.log",
 		lines: 10,
 		start: 40,
 		path: "src/ingest.ts",
-		heat: "3712849-01",
+		heat: "3712948-01",
 		why: "sabbbracfs",
 		kept: [
 			[1, 2],
@@ -245,7 +244,7 @@ function blocks(h: TspHarness): readonly TspNode[] {
 }
 
 describe("spotlight notice", () => {
-	it("follows a collapsed card as its own block: bright and clickable when shaping saved, dim when it passed", async () => {
+	it("follows a collapsed card with a clickable saving, but adds no block for a passthrough", async () => {
 		setTranscriptActionHandler(() => {});
 		const transcript = new TranscriptContainer();
 		transcript.addChild(bashCard("c1", REDUCED, SAVED));
@@ -265,14 +264,7 @@ describe("spotlight notice", () => {
 			actions: { click: "spotlight" },
 		});
 		expect(kept?.p).toMatchObject({ key: "c2" });
-		expect(keptNotice?.p).toMatchObject({
-			role: "omp.tool.spotlight",
-			key: "spotlight:c2",
-			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }],
-			title: "Spotlight: passthrough",
-		});
-		expect(prop(keptNotice, "actions")).toBeUndefined();
+		expect(keptNotice).toBeUndefined();
 		expect(harness.errors).toEqual([]);
 	});
 
@@ -395,7 +387,7 @@ describe("spotlight notice", () => {
 			spans: [{ t: "Find the failing step" }],
 			lines: 1,
 			truncate: "end",
-			title: "Find the failing step",
+			title: SAVED.request!.intent,
 		});
 		expect(more?.p).toMatchObject({
 			role: "omp.spotlight.more",
@@ -408,6 +400,7 @@ describe("spotlight notice", () => {
 		params = h.find(node => node.p?.role === "omp.spotlight.params");
 		const names = (params?.c ?? []).map(paramRow => words(within(paramRow, "text")[0]));
 		expect(names).toEqual(["intent", "task", "commands", "source", "probe", "model"]);
+		expect(words(within(params?.c?.[0], "text")[1])).toBe(SAVED.request!.intent);
 		expect(words(h.find(node => node.p?.role === "omp.spotlight.more"))).toBe("fewer ▾");
 		const task = h.find(node => node.p?.title === "Why does ingest\nstall?");
 		expect(task?.p).toMatchObject({ spans: [{ t: "Why does ingest stall?" }], lines: 2, truncate: "end" });
@@ -449,7 +442,7 @@ describe("spotlight notice", () => {
 		expect(markAt(41)).toEqual({ line: 41, heat: 7 / 9, tone: "accent", wash: parts(1) });
 		// Hidden: heat only, unless it scored hot.
 		expect(markAt(43)).toEqual({ line: 43, heat: 2 / 9, wash: parts(3) });
-		expect(markAt(44)).toEqual({ line: 44, heat: 8 / 9, tone: "error", wash: parts(4) });
+		expect(markAt(44)).toEqual({ line: 44, heat: 1, tone: "error", wash: parts(4) });
 		// A context line Spotlight never scored still carries its tone.
 		expect(markAt(47)).toEqual({ line: 47, tone: "info", wash: parts(7) });
 		expect(parts(4)[0]).toBeCloseTo(0.8, 2);
@@ -464,7 +457,7 @@ describe("spotlight notice", () => {
 			to: 45,
 			label: "  … 4 lines cut",
 			note: [
-				{ t: "4 lines · peak 0.89", s: "muted" },
+				{ t: "4 lines · peak 1.00", s: "muted" },
 				{ t: " · line 44 cut by the budget", s: "error" },
 			],
 			tone: "error",
@@ -482,7 +475,7 @@ describe("spotlight notice", () => {
 			path: "src/ingest.ts",
 			start: 44,
 			numbers: true,
-			marks: [{ line: 44, heat: 8 / 9, tone: "error", wash: parts(4) }],
+			marks: [{ line: 44, heat: 1, tone: "error", wash: parts(4) }],
 		});
 		expect(prop(sum, "spans")).toEqual([{ t: "0.80 + 0.30 = 1.10 · cutoff 0.88", s: "muted" }]);
 		expect(prop(why, "spans")).toEqual([
@@ -558,7 +551,7 @@ describe("spotlight notice", () => {
 		const shown = [...why].map(c => reasonShows(c as SpotlightReason));
 		const spotlight: SpotlightDetails = {
 			...RICH,
-			original: { url: "artifact://3", lines: 240, start: 1, heat, why, kept: keptRanges(shown) },
+			original: { url: "local://3.log", lines: 240, start: 1, heat, why, kept: keptRanges(shown) },
 		};
 		const card = new SpotlightNotice("c1", spotlight, "").describe().p?.hovercard as TspPropNode | undefined;
 		expect(card?.k).toBe("col");
@@ -582,7 +575,7 @@ describe("spotlight notice", () => {
 		// A long result shares bars; one without reasons draws plain bars and only what was kept.
 		const long: SpotlightDetails = {
 			...SAVED,
-			original: { url: "artifact://4", lines: 1_000, start: 1, heat: "5".repeat(1_000), kept: [[1, 10]] },
+			original: { url: "local://4.log", lines: 1_000, start: 1, heat: "5".repeat(1_000), kept: [[1, 10]] },
 		};
 		const plain = new SpotlightNotice("c2", long, "").describe().p?.hovercard as TspPropNode | undefined;
 		const plainChart = plain?.c?.[0]?.p as TspChartProps | undefined;
@@ -590,21 +583,18 @@ describe("spotlight notice", () => {
 		expect(plainSeries).toHaveLength(120);
 		expect(plainSeries?.every(bar => bar.tone === undefined && bar.value === 5 / 9)).toBe(true);
 		expect(words(plain?.c?.[1])).toBe("kept 10 of 1,000 lines");
-
-		// A passthrough has no card.
-		expect(new SpotlightNotice("c3", PASSTHROUGH, "").describe().p?.hovercard).toBeUndefined();
 	});
 
 	it("draws a held-out result dim with what it would save, and its click opens the would-be cut", async () => {
 		const heldOut: SpotlightDetails = {
 			...RICH,
 			holdout: true,
-			original: { ...RICH.original!, shapedUrl: "artifact://10" },
+			original: { ...RICH.original!, shapedUrl: "local://10.log" },
 		};
 		const notice = new SpotlightNotice("c1", heldOut, RICH_ORIGINAL).describe();
 		expect(notice.p).toMatchObject({
 			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }, { t: "spotlight: held out · would save 150 toks" }],
+			spans: [{ t: "spotlight: held out · would save 150 toks" }],
 		});
 		const card = notice.p?.hovercard as TspPropNode | undefined;
 		expect(words(card?.c?.[1])).toBe("would keep 5 of 10 lines · 2 by score · 1 cut though hot");
@@ -636,12 +626,152 @@ describe("spotlight notice", () => {
 			// A gated trace saves nothing; what it would have saved is `plain`'s tokens less the would-be cut's.
 			savedTokens: 0,
 			plainTokens: RICH.outTokens + 150,
-			original: { ...RICH.original!, shapedUrl: "artifact://10" },
+			original: { ...RICH.original!, shapedUrl: "local://10.log" },
 		};
 		const notice = new SpotlightNotice("c1", gated, RICH_ORIGINAL).describe();
 		expect(notice.p).toMatchObject({
 			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }, { t: "spotlight: kept whole for editing · would save 150 toks" }],
+			spans: [{ t: "spotlight: kept whole for editing · would save 150 toks" }],
 		});
+	});
+
+	it("draws a multi-part read's original one code element per window, each numbered, ranked and folded on its own", async () => {
+		const pyRank = [encodeRankPart([0.5, 0.6, 0.1], 1)];
+		const textRank = [encodeRankPart([0.2, 0.9, 0.8, 0], 1)];
+		const original = ["def f():", "    x = 1", "    return x", "alpha", "beta", "gamma", "delta"].join("\n");
+		const reduced = [
+			"def f():",
+			"    x = 1",
+			"    … 1 line cut",
+			"[a.py: 2 of 3 lines kept]",
+			"… 2 lines cut",
+			"gamma",
+			"delta",
+		].join("\n");
+		const multi: SpotlightDetails = {
+			...SAVED,
+			tool: "read",
+			original: {
+				url: "local://11.log",
+				lines: 7,
+				start: 1,
+				windows: [
+					{
+						at: 0,
+						lines: 3,
+						start: 10,
+						path: "a.py",
+						rank: { parts: ["Spotlight"], max: 1, values: pyRank, cutoff: 0.4 },
+					},
+					{
+						at: 3,
+						lines: 4,
+						start: 1,
+						rank: {
+							parts: ["Spotlight"],
+							max: 1,
+							values: textRank,
+							cutoff: 0.85,
+							budget: 10,
+							used: 9,
+							last: { line: 3, chars: 5 },
+						},
+					},
+				],
+				heat: "345198-",
+				why: "sabbbas",
+				kept: [
+					[1, 2],
+					[6, 7],
+				],
+				map: [1, 2, [3, 3], null, [4, 5], 6, 7],
+			},
+		};
+		await openSheet(multi, original, reduced);
+		const h = harness!;
+		const overlay = h.find(node => node.k === "overlay");
+
+		// Two code elements, each numbered from its window's start, grammar from its path.
+		const codes = within(overlay, "code").filter(node => prop(node, "role") === "omp.spotlight.code");
+		expect(codes).toHaveLength(2);
+		const [py, txt] = codes;
+		expect(py?.p).toMatchObject({ text: "def f():\n    x = 1\n    return x", path: "a.py", start: 10 });
+		expect(txt?.p).toMatchObject({ text: "alpha\nbeta\ngamma\ndelta", start: 1, wrap: true });
+		expect(prop(txt, "path")).toBeUndefined();
+
+		// Marks number and wash by their own window.
+		const pyMarks = prop(py, "marks") as TspCodeMark[];
+		expect(pyMarks.map(mark => mark.line)).toEqual([10, 11, 12]);
+		const txtMarks = prop(txt, "marks") as TspCodeMark[];
+		expect(txtMarks.map(mark => mark.line)).toEqual([1, 2, 3, 4]);
+		expect(txtMarks[1]?.wash?.[0]).toBeCloseTo(0.9, 2);
+
+		// The hidden run crossing the windows' seam folds once per window, under each window's marker.
+		expect(prop(py, "folds")).toEqual([
+			{ from: 12, to: 12, label: "    … 1 line cut", note: [{ t: "1 line · peak 0.56", s: "muted" }] },
+		]);
+		const [cut] = prop(txt, "folds") as TspCodeFold[];
+		expect(cut).toMatchObject({
+			from: 1,
+			to: 2,
+			label: "… 2 lines cut",
+			note: [
+				{ t: "2 lines · peak 1.00", s: "muted" },
+				{ t: " · line 2 cut by the budget", s: "error" },
+			],
+			tone: "error",
+		});
+		// The budget's end is named by its window's numbering and rank.
+		expect(words(cut?.hovercard?.c?.[3])).toBe("cut by the budget: line 3 (0.80) took the last 5 chars");
+
+		// Each window is headed by its path and its own budget and cutoff; the summary carries neither.
+		const heads = within(overlay, "row").filter(node => prop(node, "role") === "omp.spotlight.head");
+		expect(heads.map(head => within(head, "text").map(words))).toEqual([
+			["a.py", "cutoff 0.40"],
+			["budget 9 of 10 chars · cutoff 0.85"],
+		]);
+		const summary = h.find(node => node.p?.role === "omp.spotlight.summary");
+		expect(within(summary, "text").some(node => prop(node, "role") === "omp.spotlight.budget")).toBe(false);
+		const notes = h.find(node => node.p?.role === "omp.spotlight.notes");
+		expect(within(notes, "text").map(words)).toEqual(["notes the model saw", "[a.py: 2 of 3 lines kept]"]);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("says in a window's own head when the view cap cuts it short or leaves it out", async () => {
+		const sizes = [4_998, 10, 5];
+		const original = Array.from({ length: 5_013 }, (_, i) => `const v${i} = ${i};`).join("\n");
+		const multi: SpotlightDetails = {
+			...SAVED,
+			tool: "read",
+			original: {
+				url: "local://12.log",
+				lines: 5_013,
+				start: 1,
+				windows: [
+					{ at: 0, lines: sizes[0], start: 1, path: "a.ts" },
+					{ at: 4_998, lines: sizes[1], start: 1, path: "b.ts" },
+					{ at: 5_008, lines: sizes[2], start: 1, path: "c.ts" },
+				],
+				heat: "",
+				kept: [[1, 5_013]],
+			},
+		};
+		await openSheet(multi, original, original);
+		const h = harness!;
+		const overlay = h.find(node => node.k === "overlay");
+		const sections = within(overlay, "col").filter(node => prop(node, "role") === "omp.spotlight.window");
+		expect(sections).toHaveLength(3);
+		const heads = sections.map(section =>
+			within(section, "row")
+				.filter(node => prop(node, "role") === "omp.spotlight.head")
+				.flatMap(head => within(head, "text").map(words)),
+		);
+		expect(heads).toEqual([
+			["a.ts"],
+			["b.ts", "2 of 10 lines shown"],
+			["c.ts", "not shown: past the first 5,000 lines"],
+		]);
+		expect(sections.map(section => within(section, "code").length)).toEqual([1, 1, 0]);
+		expect(h.errors).toEqual([]);
 	});
 });

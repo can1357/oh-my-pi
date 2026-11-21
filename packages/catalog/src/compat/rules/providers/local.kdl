@@ -5,7 +5,7 @@ provider "local" {
 	allow-unauthenticated #true
 
 	seed api="local-inference" base-url="local://inference" bundle="always" {
-		model "kokoro" name="Kokoro-82M" {
+		model "phonon-31m" name="Phonon 31M" {
 			reasoning #false
 			input "text"
 			cost input=0 output=0 cache-read=0 cache-write=0
@@ -105,7 +105,7 @@ provider "local" {
 		}
 	}
 
-	models "kokoro" {
+	models "phonon-31m" {
 		kind "tts"
 	}
 	models "parakeet-tdt-0.6b-v3" "nemotron-streaming-en-0.6b" "whisper-*" {

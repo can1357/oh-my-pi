@@ -982,10 +982,11 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 
 	it("times out a stalled response without replay and closes its socket", async () => {
 		const fixture = endpoint(() => {});
+		// The fixture's 1 s first-event deadline: a shorter one can expire during the
+		// WebSocket handshake on a loaded machine, which falls back to HTTP instead.
 		const result = await streamOpenAIResponses(fixture.model, fixture.context, {
 			...fixture.options,
 			preferWebsockets: true,
-			streamFirstEventTimeoutMs: 30,
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("timed out");

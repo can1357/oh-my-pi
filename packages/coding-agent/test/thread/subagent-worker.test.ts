@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { RpcClosedError } from "../../src/thread/rpc";
@@ -12,7 +11,6 @@ import {
 	SubagentWorkerPool,
 	type SubagentWorkerPoolOptions,
 } from "../../src/thread/subagent-worker";
-import { CODE_SKEW_SHARED } from "../fixtures/code-skew-shared";
 
 const cleanups: Array<() => void> = [];
 
@@ -63,14 +61,6 @@ async function leaseFrom(pool: SubagentWorkerPool): Promise<{ worker: SubagentWo
 	const worker = placement.worker;
 	if (!worker) throw new Error("the pool kept the run on the main thread");
 	return { worker, release: () => placement.release() };
-}
-
-/** Mark the fixture module `name` as edited after this process started; restored after the test. */
-function touchFixture(name: string): void {
-	const file = path.join(import.meta.dir, "../fixtures", name);
-	const { atime, mtime } = fs.statSync(file);
-	fs.utimesSync(file, atime, new Date());
-	cleanups.push(() => fs.utimesSync(file, atime, mtime));
 }
 
 function probeService(): ThreadService & { installed: WorkerPeer[]; exits: string[] } {
@@ -173,8 +163,8 @@ describe("SubagentWorker", () => {
 });
 
 describe("allowedSubagentWorkers", () => {
-	it("allows no worker below 4 concurrent runs, then one more per doubling up to the cap", () => {
-		const inFlight = [3, 4, 7, 8, 15, 16, 31, 32, 100];
+	it("allows no worker through 8 concurrent runs, then one more per doubling up to the cap", () => {
+		const inFlight = [8, 9, 17, 18, 35, 36, 71, 72, 144];
 		expect(inFlight.map(n => allowedSubagentWorkers(n, 4))).toEqual([0, 1, 1, 2, 2, 3, 3, 4, 4]);
 		expect(inFlight.map(n => allowedSubagentWorkers(n, 1))).toEqual([0, 1, 1, 1, 1, 1, 1, 1, 1]);
 		expect(inFlight.map(n => allowedSubagentWorkers(n, 0))).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -182,33 +172,30 @@ describe("allowedSubagentWorkers", () => {
 });
 
 describe("SubagentWorkerPool", () => {
-	it("keeps 3 concurrent runs on main, balances runs 4–7 over main and one worker, and adds a second at 8", async () => {
+	it("keeps 8 concurrent runs on main, balances runs 9–17 over main and one worker, and adds a second at 18", async () => {
 		const pool = startPool(4);
-		const placements = [pool.place(), pool.place(), pool.place()];
-		expect(placements.map(placement => placement.worker)).toEqual([undefined, undefined, undefined]);
-		expect(pool.mainRuns).toBe(3);
+		const placements = Array.from({ length: 8 }, () => pool.place());
+		expect(placements.every(placement => placement.worker === undefined)).toBe(true);
+		expect(pool.mainRuns).toBe(8);
 
-		// n = 4: one worker slot; empty, so a worker starts (fewer runs than main's 3).
 		placements.push(pool.place());
 		const [first] = pool.workers();
-		if (!first) throw new Error("the 4th run started no worker");
-		expect(placements[3]?.worker).toBe(first);
-		// n = 5..7: main stays at 3, the worker catches up and wins the tie (keeps the TUI thread free).
-		for (let i = 0; i < 3; i++) placements.push(pool.place());
-		expect(placements.slice(4).map(placement => placement.worker)).toEqual([first, first, first]);
-		expect([pool.mainRuns, first.runs]).toEqual([3, 4]);
-		// Once main has fewer runs than the worker, it takes the next one.
+		if (!first) throw new Error("the 9th run started no worker");
+		expect(placements[8]?.worker).toBe(first);
+		// The worker catches up and wins the tie, keeping the TUI thread free.
+		for (let i = 0; i < 8; i++) placements.push(pool.place());
+		expect(placements.slice(9).every(placement => placement.worker === first)).toBe(true);
+		expect([pool.mainRuns, first.runs]).toEqual([8, 9]);
 		placements[0]?.release();
 		const onMain = pool.place();
 		expect(onMain.worker).toBeUndefined();
 		placements[0] = onMain;
 
-		// n = 8: a second worker slot opens, and an empty slot beats every busier candidate.
 		placements.push(pool.place());
 		const second = pool.workers()[1];
 		expect(second).toBeDefined();
-		expect(placements[7]?.worker).toBe(second);
-		expect(pool.runsInFlight).toBe(8);
+		expect(placements[17]?.worker).toBe(second);
+		expect(pool.runsInFlight).toBe(18);
 
 		for (const placement of placements) placement.release();
 		expect(pool.runsInFlight).toBe(0);
@@ -219,7 +206,7 @@ describe("SubagentWorkerPool", () => {
 
 	it("counts main-thread runs that bypass placement toward the balance", () => {
 		const pool = startPool(4);
-		const ends = [pool.beginMainRun(), pool.beginMainRun(), pool.beginMainRun()];
+		const ends = Array.from({ length: 8 }, () => pool.beginMainRun());
 		const placed = pool.place();
 		expect(placed.worker).toBeDefined();
 		for (const end of ends) end();
@@ -230,18 +217,18 @@ describe("SubagentWorkerPool", () => {
 
 	it("starts a worker on prewarm only when the coming spawns reach a worker bracket", async () => {
 		const pool = startPool(4);
-		pool.prewarm(3);
+		pool.prewarm(8);
 		await nextImmediate();
 		expect(pool.workers()).toEqual([]);
-		pool.prewarm(4);
+		pool.prewarm(9);
 		await nextImmediate();
 		const [prewarmed] = pool.workers();
-		if (!prewarmed) throw new Error("prewarm for 4 spawns started no worker");
+		if (!prewarmed) throw new Error("prewarm for 9 spawns started no worker");
 		await prewarmed.ready;
 		expect(prewarmed.booted).toBe(true);
-		// The 4th of those spawns lands on it.
-		const placements = [pool.place(), pool.place(), pool.place(), pool.place()];
-		expect(placements.map(placement => placement.worker)).toEqual([undefined, undefined, undefined, prewarmed]);
+		const placements = Array.from({ length: 9 }, () => pool.place());
+		expect(placements.slice(0, 8).every(placement => placement.worker === undefined)).toBe(true);
+		expect(placements[8]?.worker).toBe(prewarmed);
 		for (const placement of placements) placement.release();
 	});
 
@@ -290,38 +277,16 @@ describe("SubagentWorkerPool", () => {
 		expect(pool.workers()).toEqual([]);
 	});
 
-	it("keeps runs on the main thread once a worker loads code that changed under the main thread", async () => {
-		expect(CODE_SKEW_SHARED).toBe("shared");
-		touchFixture("code-skew-shared.ts");
-		const pool = workerOnlyPool(2, {
-			worker: { entry: new URL("../fixtures/code-skew-worker.ts", import.meta.url) },
-		});
-
-		const first = await pool.acquire();
-		expect(first.worker).toBeUndefined();
-		expect(pool.mainRuns).toBe(1);
-		expect(pool.workers()).toEqual([]);
-		// Decided for the process: no further worker is even started, whatever the concurrency.
-		const second = await pool.acquire();
-		expect(second.worker).toBeUndefined();
-		expect(pool.mainRuns).toBe(2);
-		pool.prewarm(32);
-		await nextImmediate();
-		expect(pool.workers()).toEqual([]);
-		first.release();
-		second.release();
-		expect(pool.mainRuns).toBe(0);
-	});
-
-	it("still uses a worker when only modules the main thread never loaded changed", async () => {
-		touchFixture("code-skew-worker-only.ts");
+	it("fails a run whose worker dies at startup with that worker's own error", async () => {
 		const pool = workerOnlyPool(1, {
-			worker: { entry: new URL("../fixtures/code-skew-worker.ts", import.meta.url) },
+			worker: { entry: new URL("../fixtures/subagent-fatal-worker.ts", import.meta.url) },
 		});
 
-		const lease = await leaseFrom(pool);
-		expect(lease.worker.booted).toBe(true);
-		lease.release();
+		await expect(pool.acquire()).rejects.toThrow(
+			/exited before ready: worker crashed: .*Cannot find module '\.\/gone'/s,
+		);
+		expect(pool.runsInFlight).toBe(0);
+		expect(pool.workers()).toEqual([]);
 	});
 
 	it("restarts an idle worker's countdown on prewarm instead of starting another", async () => {

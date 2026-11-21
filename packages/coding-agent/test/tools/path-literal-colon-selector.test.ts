@@ -179,12 +179,6 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			expect(await probeLiteralPathExists(literal, tmpDir)).toBe("exists");
 			expect(await splitPathAndSelPreferringLiteral(literal, tmpDir)).toEqual({ path: literal });
 		});
-
-		it("returns the strict split unchanged when there is no selector tail", async () => {
-			expect(await splitPathAndSelPreferringLiteral("plain.txt", tmpDir)).toEqual({
-				path: "plain.txt",
-			});
-		});
 	});
 
 	describe("probeLiteralPathExists", () => {

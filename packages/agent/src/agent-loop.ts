@@ -102,6 +102,7 @@ import type {
 	SteeringInterruptSource,
 	SteeringQueueState,
 	StreamFn,
+	ToolApprovalDecision,
 } from "./types";
 import {
 	ASIDE_MESSAGE_COMMIT,
@@ -109,6 +110,24 @@ import {
 	isSoftToolRequirement,
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
+
+/**
+ * A tool's batch concurrency for one call: an unset mode is shared, and a
+ * throwing per-call resolver is exclusive — the ordering that cannot race —
+ * rather than taking down the whole batch.
+ */
+export function resolveToolConcurrency(
+	tool: AgentTool<any, any, any> | undefined,
+	args: Record<string, unknown>,
+): "shared" | "exclusive" {
+	const mode = tool?.concurrency;
+	if (typeof mode !== "function") return mode ?? "shared";
+	try {
+		return mode(args);
+	} catch {
+		return "exclusive";
+	}
+}
 
 async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
 	try {
@@ -665,6 +684,26 @@ export function agentLoop(
 }
 
 /**
+ * Whether `message` is kept out of model context: drawn and saved, never sent (a `!!` bash run, a
+ * custom row sent with `excludeFromContext`).
+ */
+export function isExcludedFromContext(message: AgentMessage): boolean {
+	return "excludeFromContext" in message && message.excludeFromContext === true;
+}
+
+/** Index of the last message the model sees, or -1; rows kept out of context after it do not change the request tail. */
+export function lastContextIndex(messages: readonly AgentMessage[]): number {
+	let i = messages.length - 1;
+	while (i >= 0 && isExcludedFromContext(messages[i])) i--;
+	return i;
+}
+
+/** The last message the model sees (see {@link lastContextIndex}). */
+export function lastContextMessage(messages: readonly AgentMessage[]): AgentMessage | undefined {
+	return messages[lastContextIndex(messages)];
+}
+
+/**
  * Trailing assistant message whose runnable tool calls have no results yet.
  *
  * A harness that strips failed/aborted tool results in order to re-execute
@@ -1078,7 +1117,11 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 	return "require";
 }
 
-function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
+/** Split a traced call's intent (`i`, trimmed, trailing periods dropped) from the arguments its tool reads. */
+export function extractIntent(args: Record<string, unknown>): {
+	intent?: string;
+	strippedArgs: Record<string, unknown>;
+} {
 	const { [INTENT_FIELD]: intent, ...strippedArgs } = args;
 	if (typeof intent !== "string") {
 		return { strippedArgs };
@@ -2000,29 +2043,33 @@ async function prepareProviderCall(
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect: Dialect | undefined =
 		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
-	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
+	const toolOptions: NormalizeToolsOptions = {
+		injectIntent: !!config.intentTracing,
+		intentDescription: config.intentDescription,
+		pruneDescriptions: !!config.pruneToolDescriptions && !ownedDialect,
+	};
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
 		llmContext = config.appendOnlyContext.build(context, {
-			intentTracing: !!config.intentTracing,
-			intentDescription: config.intentDescription,
-			pruneToolDescriptions,
+			intentTracing: toolOptions.injectIntent,
+			intentDescription: toolOptions.intentDescription,
+			pruneToolDescriptions: toolOptions.pruneDescriptions,
 		});
 	} else {
 		llmContext = {
 			systemPrompt: context.systemPrompt,
 			messages: normalizedMessages,
-			tools: normalizeTools(context.tools, {
-				injectIntent: !!config.intentTracing,
-				intentDescription: config.intentDescription,
-				pruneDescriptions: pruneToolDescriptions,
-			}),
+			tools: normalizeTools(context.tools, toolOptions),
 		};
 	}
 	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
-	// re-declares; recomputed below against what the transform returns.
-	if (config.sentToolDefinitions) llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
+	// re-declares; recomputed below against what the transform returns. Standby tools are normalized like
+	// `tools`, so a standby tool's definition matches the one it is sent with once active.
+	if (config.sentToolDefinitions) {
+		const standbyTools = normalizeTools(context.standbyTools, toolOptions);
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, standbyTools);
+	}
 	if (config.transformProviderContext) {
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
@@ -2040,7 +2087,9 @@ async function prepareProviderCall(
 	// After `transformProviderContext`, so the recorded definitions are exactly what the provider receives.
 	if (config.sentToolDefinitions) {
 		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
-		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
+		if (llmContext.inactiveTools) config.sentToolDefinitions.record(llmContext.inactiveTools);
+		// The transformed standby definitions, when no request has declared tools yet.
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, llmContext.inactiveTools);
 	}
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
@@ -2934,10 +2983,11 @@ function resolveToolForCall(
 	return (
 		tools?.find(t => t.name === toolCall.name) ??
 		tools?.find(t => t.customWireName !== undefined && t.customWireName === toolCall.name) ??
-		// Not in the advertised set: let the host route side-transport tools
-		// (e.g. xd:// device mounts) called by their top-level name. It receives
-		// the snapshot searched above, never the agent's live tools, so a
-		// mid-stream roster change cannot widen what this request can reach.
+		// Not in the advertised set: let the host route tools reached through a
+		// side transport (e.g. mounted tool commands run through `bash`) called
+		// by their top-level name. It receives the snapshot searched above, never
+		// the agent's live tools, so a mid-stream roster change cannot widen what
+		// this request can reach.
 		resolveFallbackTool?.(toolCall.name, tools ?? [])
 	);
 }
@@ -2958,9 +3008,10 @@ const MAX_TOOL_NAME_SUGGESTIONS = 3;
  * Both the last `__` and last `_` boundary are tried, so a name that lost only
  * its separator (`…__resolve_library_id`) and one that lost a whole id segment
  * (`…__read`) both recover. `fallbackNames` adds targets the host can route but
- * never advertises (`xd://` device mounts); without them a corrupted device
- * call is the one miss with nothing to suggest, because the capability exists
- * in the session yet appears in no advertised name. Purely advisory: this only
+ * never advertises (tools reached only as mounted tool commands through
+ * `bash`); without them a corrupted command name is the one miss with nothing
+ * to suggest, because the capability exists in the session yet appears in no
+ * advertised name. Purely advisory: this only
  * builds an error string and never selects a tool, so dispatch semantics are
  * unchanged.
  */
@@ -3136,8 +3187,8 @@ async function prepareToolCallDispatch(
 		if (toolCall.type !== "toolCall") continue;
 		if ((toolCall as CursorExecResolvedCarrier)[kCursorExecResolved] === true) continue;
 		const tool = resolveToolForCall(context.tools, toolCall, resolveFallbackTool);
-		// A host fallback accepts aliases (`xd://recall`, a mis-separated MCP
-		// name) that providers reject when replayed as a function-call name.
+		// A host fallback accepts aliases (`recal`, a mis-separated MCP name)
+		// that providers reject when replayed as a function-call name.
 		// Record the call under the resolved tool's canonical name so history,
 		// persistence, and replay agree; custom-wire calls keep their wire name.
 		if (tool && toolCall.name !== tool.name && toolCall.name !== tool.customWireName) {
@@ -3550,7 +3601,11 @@ async function executeToolCalls(
 		flushResultMessages();
 	};
 
-	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
+	const runTool = async (
+		record: (typeof records)[number],
+		index: number,
+		earlierEffectsSettled: Promise<void> | undefined,
+	): Promise<void> => {
 		// A pending interrupt preempts not-yet-started interruptible tools,
 		// except receivers that drain the wake with an already-aborted signal.
 		// Non-interruptible work is never skipped, whatever the source: the
@@ -3659,7 +3714,7 @@ async function executeToolCalls(
 				if (abortBeforeToolExecution()) return;
 
 				const speculativeOutcome = speculationCoordinator
-					? await speculationCoordinator.claim(tool, toolCall, executionArgs)
+					? await speculationCoordinator.claim(tool, toolCall, executionArgs, earlierEffectsSettled, record.signal)
 					: undefined;
 				if (speculativeOutcome) {
 					// Normalize exactly like the ordinary execute path below: third-party
@@ -3678,9 +3733,9 @@ async function executeToolCalls(
 					// ride the loop-owned ToolCallContext (surfacing as
 					// `ctx.toolCall.*`); the host surfaces the sink on the context it
 					// builds, and the loop hands that object to the tool untouched.
-					// Wrapper-dispatched nested calls (for example `write xd://…`)
-					// inherit the context, so their passive hook context joins this
-					// root call at the batch boundary.
+					// Wrapper-dispatched nested calls (for example a `bash` call
+					// running a mounted tool command) inherit the context, so their
+					// passive hook context joins this root call at the batch boundary.
 					const toolContext = getToolContext?.({
 						batchId,
 						index,
@@ -3688,6 +3743,7 @@ async function executeToolCalls(
 						toolCalls: toolCallInfos,
 						steeringSignal: steeringSoftController.signal,
 						providerMetadata: toolCall.providerMetadata,
+						...(earlierEffectsSettled ? { earlierEffectsSettled } : {}),
 						addAdditionalContext: context => {
 							if (isNonBlankContext(context)) record.reportedContext.push(context);
 						},
@@ -3828,6 +3884,10 @@ async function executeToolCalls(
 
 	let lastExclusive: Promise<void> = Promise.resolve();
 	let sharedTasks: Promise<void>[] = [];
+	// The shared calls among `sharedTasks` whose approval, asked with the call's
+	// arguments, is not "read": they may change files that a later call running
+	// beside them reads.
+	let sharedEffects: Promise<void>[] = [];
 	const tasks: Promise<void>[] = [];
 
 	// While tool calls are in flight, queued steering or interrupting IRC would
@@ -3905,25 +3965,17 @@ async function executeToolCalls(
 			: undefined;
 	for (let index = 0; index < records.length; index++) {
 		const record = records[index];
-		const concurrencyMode = record.tool?.concurrency;
-		let concurrency: "shared" | "exclusive";
-		if (typeof concurrencyMode === "function") {
-			// Resolved from the prepared (possibly hook-revised) args — raw args
-			// only when validation failed, and those records error out before
-			// executing. A throwing resolver must not take down the whole batch,
-			// so fall back to the safe (serial) mode.
-			try {
-				concurrency = concurrencyMode(record.args);
-			} catch {
-				concurrency = "exclusive";
-			}
-		} else {
-			concurrency = concurrencyMode ?? "shared";
-		}
+		// Resolved from the prepared (possibly hook-revised) args — raw args
+		// only when validation failed, and those records error out before executing.
+		const concurrency = resolveToolConcurrency(record.tool, record.args);
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
+		const earlierEffectsSettled =
+			concurrency === "shared" && sharedEffects.length > 0
+				? Promise.allSettled(sharedEffects).then(() => undefined)
+				: undefined;
 		const task = start.then(async () => {
 			try {
-				await runTool(record, index);
+				await runTool(record, index, earlierEffectsSettled);
 			} finally {
 				refreshPauseState();
 			}
@@ -3932,8 +3984,23 @@ async function executeToolCalls(
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
 			sharedTasks = [];
+			sharedEffects = [];
 		} else {
 			sharedTasks.push(task);
+			// A dynamic approval is asked with the prepared arguments, as concurrency
+			// is above, and no context; one that throws, or that says anything but
+			// "read", counts as a call that may write. A resolver that says "write"
+			// only with a context or only for transformed arguments is not counted, so
+			// a read after it returns what it read first.
+			const approval = record.tool?.approval;
+			let decision: ToolApprovalDecision | undefined;
+			try {
+				decision = typeof approval === "function" ? approval(record.args) : approval;
+			} catch {
+				decision = undefined;
+			}
+			const tier = typeof decision === "string" ? decision : (decision?.tier ?? "exec");
+			if (tier !== "read") sharedEffects.push(task);
 		}
 	}
 	try {
@@ -3961,9 +4028,9 @@ async function executeToolCalls(
 
 	// Skipped calls never ran. Hook-prepared context also requires a non-error
 	// final result; context the tool itself reported during execution stands.
-	// Within a call, tool-reported context (including nested `xd://` dispatch)
-	// precedes the hook's: wrappers release hook context only after the call
-	// succeeds, so this is the one order every dispatch path can produce.
+	// Within a call, tool-reported context (including nested tool command
+	// dispatch) precedes the hook's: wrappers release hook context only after
+	// the call succeeds, so this is the one order every dispatch path can produce.
 	const additionalContext = joinAdditionalContext(
 		records
 			.filter(record => !record.skipped)

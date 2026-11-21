@@ -151,7 +151,7 @@ function textPdf(text: string): Uint8Array {
 	return Buffer.from(document);
 }
 
-describe("pi-natives", () => {
+describe("omp-natives", () => {
 	beforeAll(async () => {
 		await setupFixtures();
 		return async () => {
@@ -255,6 +255,27 @@ describe("pi-natives", () => {
 			expect(out).toContain("<k>function");
 			expect(out).toContain("<n>1");
 			expect(out).toContain("<c> add");
+		});
+
+		it("highlights Zig via the vendored syntax", () => {
+			expect(getSupportedLanguages()).toContain("Zig");
+			expect(supportsLanguage("zig")).toBe(true);
+			expect(supportsLanguage("zon")).toBe(true);
+
+			const out = highlightCode('const std = @import("std");\n// greet\n', "zig", {
+				comment: "<c>",
+				keyword: "<k>",
+				function: "<f>",
+				variable: "<v>",
+				string: "<s>",
+				number: "<n>",
+				type: "<t>",
+				operator: "<o>",
+				punctuation: "<p>",
+			});
+			expect(out).toContain("<k>const");
+			expect(out).toContain('<s>"std"');
+			expect(out).toContain("<c>// greet");
 		});
 	});
 
@@ -1206,7 +1227,7 @@ console.log("ok");
 		it("should create a stoppable power assertion handle, or surface a descriptive bus/service failure where the host cannot provide one", () => {
 			let assertion: PowerAssertion | undefined;
 			try {
-				assertion = PowerAssertion.start({ reason: "pi-natives test" });
+				assertion = PowerAssertion.start({ reason: "omp-natives test" });
 			} catch (error) {
 				// A host with no bus must fail in the documented bus/service vocabulary,
 				// so a wrong export or a no-op stub fails on any other message.
@@ -1221,7 +1242,7 @@ console.log("ok");
 		it.skipIf(process.platform !== "linux" || !Bun.which("systemd-inhibit"))(
 			"registers a login1 inhibitor for the handle's lifetime",
 			() => {
-				const reason = `pi-natives ${crypto.randomUUID()}`;
+				const reason = `omp-natives ${crypto.randomUUID()}`;
 				const held = (): boolean =>
 					Bun.spawnSync(["systemd-inhibit", "--list", "--no-pager"]).stdout.toString().includes(reason);
 				let assertion: PowerAssertion;

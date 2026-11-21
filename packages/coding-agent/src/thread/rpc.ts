@@ -35,6 +35,12 @@
  * objects): arguments sent to it copy such instances as plain data (see
  * {@link rpcLossy}); everything above still crosses as described.
  *
+ * Encoding is copy-on-write, so a payload that needed none (plain session
+ * data, the common case) is the caller's value itself. Its frame says so
+ * (`raw`) and the receiver uses the clone as is instead of walking it for
+ * tags; on large payloads that walk costs the receiving thread about as much
+ * as encoding costs the sender.
+ *
  * Handle lifetimes: exported functions, signals, and objects are reference
  * counted across the link. The importer releases them when its proxy is
  * garbage collected; the exporter drops its entry once every import has been
@@ -60,15 +66,19 @@ export interface RpcMethod<A extends unknown[], R> {
 /** Method table one side of a link (or one remote object class) serves. */
 export type RpcApi = Record<string, RpcMethod<unknown[], unknown>>;
 
-/** Opaque wire frame; only {@link RpcLink} produces and consumes these. */
+/**
+ * Opaque wire frame; only {@link RpcLink} produces and consumes these.
+ * `raw`: `a`/`v` carries no wire tags (its encoding was the identity), so the
+ * receiver skips the decode walk.
+ */
 export type RpcFrame =
-	| { t: "call"; id: number; m: string; a: unknown[] }
-	| { t: "sync"; id: number; m: string; a: unknown[] }
-	| { t: "ok"; id: number; v: unknown }
+	| { t: "call"; id: number; m: string; a: unknown[]; raw: boolean }
+	| { t: "sync"; id: number; m: string; a: unknown[]; raw: boolean }
+	| { t: "ok"; id: number; v: unknown; raw: boolean }
 	| { t: "err"; id: number; e: unknown }
-	| { t: "note"; m: string; a: unknown[] }
+	| { t: "note"; m: string; a: unknown[]; raw: boolean }
 	| { t: "abort"; sig: number; reason: unknown }
-	| { t: "settle"; p: number; ok: boolean; v: unknown }
+	| { t: "settle"; p: number; ok: boolean; v: unknown; raw: boolean }
 	| { t: "release"; ids: Array<[number, number]> };
 
 /** Bidirectional message channel underneath a link. */
@@ -223,7 +233,7 @@ function readTag(value: object, key: symbol): number | undefined {
 	return typeof tag === "number" ? tag : undefined;
 }
 
-type SyncReply = { id: number; ok: true; v: unknown } | { id: number; ok: false; e: unknown };
+type SyncReply = { id: number; ok: true; v: unknown; raw: boolean } | { id: number; ok: false; e: unknown };
 
 type ErrorTag = {
 	[TAG]: "err";
@@ -481,7 +491,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		const id = this.#nextId++;
 		this.#pending.set(id, settler);
 		try {
-			this.#endpoint.send({ t: "call", id, m: method, a: encoded });
+			this.#endpoint.send({ t: "call", id, m: method, a: encoded, raw: encoded === args });
 		} catch (error) {
 			// DataCloneError: fail this one call, never the link.
 			this.#pending.delete(id);
@@ -491,7 +501,8 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 
 	#notifyRaw(method: string, args: unknown[], lossy = false): void {
 		if (this.#closed !== undefined) return;
-		this.#endpoint.send({ t: "note", m: method, a: this.#encodeArgs(args, lossy) });
+		const encoded = this.#encodeArgs(args, lossy);
+		this.#endpoint.send({ t: "note", m: method, a: encoded, raw: encoded === args });
 	}
 
 	#requestSync(method: string, args: unknown[], lossy = false): unknown {
@@ -499,7 +510,8 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		if (!sync) throw new Error(`RPC link ${this.name} has no sync channel`);
 		if (this.#closed !== undefined) throw RpcClosedError.forLink(this.name, this.#closed);
 		const id = this.#nextId++;
-		this.#endpoint.send({ t: "sync", id, m: method, a: this.#encodeArgs(args, lossy) });
+		const encoded = this.#encodeArgs(args, lossy);
+		this.#endpoint.send({ t: "sync", id, m: method, a: encoded, raw: encoded === args });
 		const deadline = performance.now() + this.#syncTimeoutMs;
 		for (;;) {
 			// Load before draining: a reply posted after the drain bumps the counter and voids the wait.
@@ -510,7 +522,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 				// A late reply to an earlier call that timed out; its caller already gave up.
 				if (reply.id !== id) continue;
 				if (!reply.ok) throw this.#decode(reply.e);
-				return this.#decode(reply.v);
+				return reply.raw ? reply.v : this.#decode(reply.v);
 			}
 			const remaining = deadline - performance.now();
 			if (remaining <= 0) {
@@ -526,10 +538,10 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		if (this.#closed !== undefined) return;
 		switch (frame.t) {
 			case "call":
-				this.#serveAsync(frame.id, frame.m, frame.a);
+				this.#serveAsync(frame.id, frame.m, frame.a, frame.raw);
 				return;
 			case "sync":
-				this.#serveSync(frame.id, frame.m, frame.a);
+				this.#serveSync(frame.id, frame.m, frame.a, frame.raw);
 				return;
 			case "ok":
 			case "err": {
@@ -537,7 +549,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 				if (!pending) return;
 				this.#pending.delete(frame.id);
 				try {
-					if (frame.t === "ok") pending.resolve(this.#decode(frame.v));
+					if (frame.t === "ok") pending.resolve(frame.raw ? frame.v : this.#decode(frame.v));
 					else pending.reject(this.#decode(frame.e));
 				} catch (error) {
 					pending.reject(error);
@@ -547,7 +559,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 			case "note":
 				try {
 					if (frame.m === OBJ_METHOD) {
-						this.#dispatch(frame.m, this.#decodeArgs(frame.a));
+						this.#dispatch(frame.m, this.#decodeArgs(frame.a, frame.raw));
 						return;
 					}
 					const handler = this.#notes.get(frame.m);
@@ -555,7 +567,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 						logger.warn("RPC notification has no handler", { link: this.name, method: frame.m });
 						return;
 					}
-					handler.invoke(this.#decodeArgs(frame.a));
+					handler.invoke(this.#decodeArgs(frame.a, frame.raw));
 				} catch (error) {
 					logger.error("RPC notification handler threw", { link: this.name, method: frame.m, error });
 				}
@@ -570,7 +582,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 				if (!pending) return;
 				this.#promiseImports.delete(frame.p);
 				try {
-					const value = this.#decode(frame.v);
+					const value = frame.raw ? frame.v : this.#decode(frame.v);
 					if (frame.ok) pending.resolve(value);
 					else pending.reject(value);
 				} catch (error) {
@@ -584,14 +596,14 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		}
 	}
 
-	#serveAsync(id: number, method: string, rawArgs: unknown[]): void {
+	#serveAsync(id: number, method: string, wireArgs: unknown[], raw: boolean): void {
 		const fail = (error: unknown): void => {
 			if (this.#closed !== undefined) return;
 			this.#endpoint.send({ t: "err", id, e: this.#encodeError(error) });
 		};
 		let result: unknown;
 		try {
-			result = this.#dispatch(method, this.#decodeArgs(rawArgs));
+			result = this.#dispatch(method, this.#decodeArgs(wireArgs, raw));
 		} catch (error) {
 			fail(error);
 			return;
@@ -599,7 +611,8 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		Promise.resolve(result).then(value => {
 			if (this.#closed !== undefined) return;
 			try {
-				this.#endpoint.send({ t: "ok", id, v: this.#encode(value) });
+				const encoded = this.#encode(value);
+				this.#endpoint.send({ t: "ok", id, v: encoded, raw: encoded === value });
 			} catch (error) {
 				// The result could not be encoded or cloned: report that instead of leaving the caller hanging.
 				fail(error);
@@ -607,7 +620,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		}, fail);
 	}
 
-	#serveSync(id: number, method: string, rawArgs: unknown[]): void {
+	#serveSync(id: number, method: string, wireArgs: unknown[], raw: boolean): void {
 		const channel = this.#syncReplies;
 		if (!channel) {
 			logger.error("Sync RPC received without a reply channel", { link: this.name, method });
@@ -615,12 +628,13 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		}
 		let reply: SyncReply;
 		try {
-			const result = this.#dispatch(method, this.#decodeArgs(rawArgs));
+			const result = this.#dispatch(method, this.#decodeArgs(wireArgs, raw));
 			if (result instanceof Promise) {
 				result.catch(() => {});
 				throw new Error(`Sync RPC ${method} has an async handler`);
 			}
-			reply = { id, ok: true, v: this.#encode(result) };
+			const encoded = this.#encode(result);
+			reply = { id, ok: true, v: encoded, raw: encoded === result };
 		} catch (error) {
 			reply = { id, ok: false, e: this.#encodeError(error) };
 		}
@@ -654,6 +668,7 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		return handler.invoke(args);
 	}
 
+	/** Wire form of `args`; `args` itself when nothing inside needed encoding (never in lossy mode). */
 	#encodeArgs(args: unknown[], lossy: boolean): unknown[] {
 		if (lossy) {
 			// One copy table for the whole vector: an object passed in two positions arrives as one object.
@@ -666,7 +681,8 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 		return Array.isArray(encoded) ? encoded : args;
 	}
 
-	#decodeArgs(args: unknown[]): unknown[] {
+	#decodeArgs(args: unknown[], raw: boolean): unknown[] {
+		if (raw) return args;
 		const [only] = args;
 		if (args.length === 1 && isGraphArgs(only)) return this.#decodeGraph(only.v);
 		const decoded = this.#decode(args);
@@ -1038,9 +1054,9 @@ export class RpcLink<Local extends RpcApi, Remote extends RpcApi> {
 			if (this.#closed !== undefined) return;
 			try {
 				const encoded = ok ? this.#encode(value) : this.#encodeError(value);
-				this.#endpoint.send({ t: "settle", p: id, ok, v: encoded });
+				this.#endpoint.send({ t: "settle", p: id, ok, v: encoded, raw: encoded === value });
 			} catch (error) {
-				this.#endpoint.send({ t: "settle", p: id, ok: false, v: this.#encodeError(error) });
+				this.#endpoint.send({ t: "settle", p: id, ok: false, v: this.#encodeError(error), raw: false });
 			}
 		};
 		promise.then(

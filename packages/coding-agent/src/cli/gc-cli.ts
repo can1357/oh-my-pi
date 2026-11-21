@@ -30,6 +30,7 @@ import type { Setting } from "../config/registry";
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
+import { deleteHistoryRowsForSessions } from "../session/session-db-purge";
 import { readSessionHeaderId } from "../session/session-loader";
 import {
 	FileSessionStorage,
@@ -58,12 +59,18 @@ import {
 	cfgGcStale,
 	cfgGcStaleRetainDays,
 	cfgGcStaleRetainNewest,
+	cfgGcStrip,
+	cfgGcStripAfterDays,
 	cfgGcWal,
 } from "./gc-settings";
+import { applyStrip, planStrip, type StripPlan } from "./gc-strip";
+import { createProgressTracker, type ProgressOutput, type ProgressTracker } from "./progress-reporter";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
+/** Top-level transcripts: `<sessionsRoot>/<cwd>/<id>.jsonl`. */
+const TRANSCRIPT_GLOB = new Bun.Glob("*/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
 const SESSION_STAGING_GLOB = new Bun.Glob("**/.*.jsonl.*.tmp");
@@ -90,6 +97,10 @@ const STALE_POINTER_GRACE_MS = DAY_MS;
  * phases read them through this, never through the process default.
  */
 const LOCAL_SESSION_FILES = new FileSessionStorage();
+/** Sessions (and archived transcripts) stripped at once, so one's reads overlap another's writes. */
+const STRIP_CONCURRENCY = 8;
+/** How long a WAL checkpoint waits on active readers/writers before reporting the database busy. */
+const WAL_CHECKPOINT_BUSY_TIMEOUT_MS = 5000;
 
 export interface GcCommandFlags {
 	apply?: boolean;
@@ -100,16 +111,22 @@ export interface GcCommandFlags {
 	wal?: boolean;
 	stale?: boolean;
 	compress?: boolean;
+	strip?: boolean;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
 	staleRetainNewest?: number;
 	staleRetainDays?: number;
 	compressAfterDays?: number;
+	stripAfterDays?: number;
 }
 
 export interface GcCommandArgs {
 	flags: GcCommandFlags;
+	/** Where to draw transient per-step progress bars; drawn only on a TTY, none when omitted. */
+	progress?: ProgressOutput;
+	/** SQLite busy timeout for WAL checkpoints; defaults to {@link WAL_CHECKPOINT_BUSY_TIMEOUT_MS}. Tests shorten it. */
+	walBusyTimeoutMs?: number;
 }
 
 export interface BlobGcResult {
@@ -198,9 +215,24 @@ export interface CompressGcResult {
 	errors: string[];
 }
 
+export interface StripGcResult {
+	/** Top-level session transcripts found; archived transcripts are scanned as well. */
+	scanned: number;
+	/** Idle sessions (or archived subagent transcripts) with replay data that a running process still owns. */
+	skippedLive: number;
+	/** Transcripts with replay data to strip: session, subagent, and archived. */
+	wouldStrip: number;
+	stripped: number;
+	/** Session records that carry replay data. */
+	records: number;
+	/** JSONL bytes the replay data occupies; uncompressed for archived transcripts. */
+	bytes: number;
+	errors: string[];
+}
+
 /** A phase this run did not perform because it works only on session files on disk. */
 export interface GcRefusal {
-	phase: "archive" | "compress";
+	phase: "strip" | "archive" | "compress";
 	/** The phase was named on the command line, so its refusal fails the run. */
 	requested: boolean;
 	reason: string;
@@ -210,6 +242,7 @@ export interface GcResult {
 	agentDir: string;
 	apply: boolean;
 	stale?: StaleGcResult;
+	strip?: StripGcResult;
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
 	compress?: CompressGcResult;
@@ -252,12 +285,17 @@ interface ResolvedGcOptions {
 	runWal: boolean;
 	runStale: boolean;
 	runCompress: boolean;
+	runStrip: boolean;
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
 	staleRetainNewest: number;
 	staleRetainDays: number;
 	compressAfterDays: number;
+	stripAfterDays: number;
+	walBusyTimeoutMs: number;
+	/** Wraps each slow per-item loop in a progress bar. */
+	track: ProgressTracker;
 }
 
 interface SqliteRunResult {
@@ -289,17 +327,23 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 	return normalizeNumberSetting(fallback, defaultValue);
 }
 
-async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
+async function resolveOptions({
+	flags,
+	progress,
+	walBusyTimeoutMs = WAL_CHECKPOINT_BUSY_TIMEOUT_MS,
+}: GcCommandArgs): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
 	const selected =
 		flags.blobs === true ||
 		flags.archive === true ||
 		flags.wal === true ||
 		flags.stale === true ||
-		flags.compress === true;
+		flags.compress === true ||
+		flags.strip === true;
 	const archiveSelected = selected && flags.archive === true;
 	const staleSelected = selected && flags.stale === true;
 	const compressSelected = selected && flags.compress === true;
+	const stripSelected = selected && flags.strip === true;
 	const needsArchiveSettings =
 		archiveSelected &&
 		(flags.coldArchiveAfterDays === undefined ||
@@ -308,8 +352,9 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 	const needsStaleSettings =
 		staleSelected && (flags.staleRetainNewest === undefined || flags.staleRetainDays === undefined);
 	const needsCompressSettings = compressSelected && flags.compressAfterDays === undefined;
+	const needsStripSettings = stripSelected && flags.stripAfterDays === undefined;
 	const settings =
-		!selected || needsArchiveSettings || needsStaleSettings || needsCompressSettings
+		!selected || needsArchiveSettings || needsStaleSettings || needsCompressSettings || needsStripSettings
 			? flags.apply === true
 				? await Settings.loadIsolated({ agentDir })
 				: await Settings.loadReadOnly({ agentDir })
@@ -324,6 +369,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		runWal: selected ? flags.wal === true : read(cfgGcWal),
 		runStale: selected ? flags.stale === true : read(cfgGcStale),
 		runCompress: selected ? flags.compress === true : read(cfgGcCompress),
+		runStrip: selected ? flags.strip === true : read(cfgGcStrip),
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
 			read(cfgGcColdArchiveAfterDays),
@@ -350,12 +396,16 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 			read(cfgGcCompressAfterDays),
 			cfgGcCompressAfterDays.default,
 		),
+		stripAfterDays: numberSetting(flags.stripAfterDays, read(cfgGcStripAfterDays), cfgGcStripAfterDays.default),
+		walBusyTimeoutMs,
+		track: createProgressTracker(progress),
 	};
 }
 
 export function collectGcErrors(result: GcResult): string[] {
 	return [
 		...(result.stale?.errors ?? []).map(error => `stale: ${error}`),
+		...(result.strip?.errors ?? []).map(error => `strip: ${error}`),
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
@@ -479,6 +529,7 @@ async function collectReferencedBlobHashes(
 	sessionRoots: string[],
 	exactSessionFiles: string[],
 	storage: SessionStorage,
+	track: ProgressTracker,
 ): Promise<Set<string>> {
 	const fsFiles = new Map<string, string>();
 	for (const root of sessionRoots) {
@@ -496,7 +547,7 @@ async function collectReferencedBlobHashes(
 
 	const decoder = new TextDecoder();
 	const hashes = new Set<string>();
-	for (const file of fsFiles.values()) {
+	for (const file of track.each("Scanning transcripts for blob refs", [...fsFiles.values()])) {
 		// Keep raw-text matching: recoverable malformed records can still own blobs.
 		await scanSessionLinesIfPresent(file, line => collectBlobHashesFromText(decoder.decode(line), hashes));
 	}
@@ -578,7 +629,7 @@ async function collectBreadcrumbSessionFiles(breadcrumbDir: string): Promise<str
 	return [...files.values()];
 }
 
-async function collectBlobCandidates(blobDir: string): Promise<BlobScan> {
+async function collectBlobCandidates(blobDir: string, track: ProgressTracker): Promise<BlobScan> {
 	let entries: string[];
 	try {
 		entries = await fs.readdir(blobDir);
@@ -589,7 +640,7 @@ async function collectBlobCandidates(blobDir: string): Promise<BlobScan> {
 
 	const byHash = new Map<string, BlobCandidate>();
 	const staging: BlobStagingFile[] = [];
-	for (const entry of entries) {
+	for (const entry of track.each("Listing blobs", entries)) {
 		const isStaging = BLOB_STAGING_RE.test(entry);
 		const hash = isStaging ? undefined : entry.match(BLOB_FILE_RE)?.[1];
 		if (!isStaging && !hash) continue;
@@ -694,8 +745,13 @@ async function runBlobGc(
 	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
 		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
-	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()], storage);
-	const { candidates, staging } = await collectBlobCandidates(blobDir);
+	const referenced = await collectReferencedBlobHashes(
+		defaultRoots,
+		[...exactSessionFiles.values()],
+		storage,
+		options.track,
+	);
+	const { candidates, staging } = await collectBlobCandidates(blobDir, options.track);
 	const result: BlobGcResult = {
 		referenced: referenced.size,
 		candidates: candidates.length,
@@ -706,7 +762,7 @@ async function runBlobGc(
 	};
 
 	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
-	for (const candidate of candidates) {
+	for (const candidate of options.track.each("Scanning blobs", candidates)) {
 		if (referenced.has(candidate.hash)) continue;
 		if (candidate.mtimeMs > deleteBeforeMs) continue;
 		if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
@@ -869,7 +925,7 @@ async function runStaleGc(options: ResolvedGcOptions, storage: SessionStorage): 
 		bytes: 0,
 		errors: [],
 	};
-	for (const candidate of candidates) {
+	for (const candidate of options.track.each("Scanning stale entries", candidates)) {
 		const lease = candidate.ownedSession ? await tryAcquireSessionFileLease(candidate.ownedSession) : undefined;
 		if (lease === null) continue;
 		try {
@@ -908,7 +964,7 @@ async function tryAcquireSessionFileLease(sessionFile: string): Promise<FileLock
 	}
 }
 
-async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> {
+async function listActiveSessions(sessionsRoot: string, track: ProgressTracker): Promise<SessionInfo[]> {
 	let entries: Array<{ name: string; isDirectory(): boolean }>;
 	try {
 		entries = await fs.readdir(sessionsRoot, { withFileTypes: true });
@@ -919,12 +975,35 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 
 	const storage = LOCAL_SESSION_FILES;
 	const sessions: SessionInfo[] = [];
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
+	for (const entry of track.each(
+		"Listing sessions",
+		entries.filter(entry => entry.isDirectory()),
+	)) {
 		sessions.push(...(await listSessionsReadOnly(path.join(sessionsRoot, entry.name), storage)));
 	}
 	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 	return sessions;
+}
+
+/**
+ * Top-level transcripts under `sessionsRoot`, found by name alone. Unlike
+ * {@link listActiveSessions}, nothing is read, so phases that need only a
+ * transcript's path and mtime start work at once; see {@link isIdleTranscript}.
+ */
+async function collectTranscriptFiles(sessionsRoot: string): Promise<string[]> {
+	try {
+		return await Array.fromAsync(TRANSCRIPT_GLOB.scan(sessionsRoot), name => path.join(sessionsRoot, name));
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
+}
+
+/** Whether `transcript` is a session (it has a header) last written before `idleBeforeMs`. */
+async function isIdleTranscript(transcript: string, idleBeforeMs: number): Promise<boolean> {
+	const stat = await statIfPresent(transcript);
+	if (!stat?.isFile() || stat.mtimeMs > idleBeforeMs) return false;
+	return (await readSessionHeaderId(transcript)) !== undefined;
 }
 
 async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
@@ -1146,41 +1225,9 @@ function tableExists(db: Database, table: string): boolean {
 	return row?.present === 1;
 }
 
-function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { deleted: number; ftsRebuilt: boolean } {
-	if (sessionIds.length === 0) return { deleted: 0, ftsRebuilt: false };
-	const db = new Database(dbPath);
-	try {
-		db.run("PRAGMA busy_timeout = 5000");
-		const hasHistory = tableExists(db, "history") && tableHasColumn(db, "history", "session_id");
-		const hasRecaps = tableExists(db, "session_recaps");
-		const hasTitles = tableExists(db, "session_titles");
-		if (!hasHistory && !hasRecaps && !hasTitles) return { deleted: 0, ftsRebuilt: false };
-		const hasFts = hasHistory && tableExists(db, "history_fts");
-		using deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
-		// Recaps and titles are session-scoped side output with no life beyond their session.
-		using deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
-		using deleteTitlesStmt = hasTitles ? db.prepare("DELETE FROM session_titles WHERE session_id = ?") : undefined;
-		let deleted = 0;
-		const tx = db.transaction((ids: string[]) => {
-			for (const id of ids) {
-				deleteRecapsStmt?.run(id);
-				deleteTitlesStmt?.run(id);
-				if (!deleteStmt) continue;
-				const result = deleteStmt.run(id) as SqliteRunResult;
-				deleted += sqliteNumber(result.changes);
-			}
-			if (deleted > 0 && hasFts) db.run("INSERT INTO history_fts(history_fts) VALUES('rebuild')");
-		});
-		tx(sessionIds);
-		return { deleted, ftsRebuilt: deleted > 0 && hasFts };
-	} finally {
-		db.close();
-	}
-}
-
-async function collectArchivedSessionIds(archiveRoot: string): Promise<string[]> {
+async function collectArchivedSessionIds(archiveRoot: string, track: ProgressTracker): Promise<string[]> {
 	const ids = new Set<string>();
-	for (const file of await collectCompressedJsonlFiles(archiveRoot)) {
+	for (const file of track.each("Scanning archive for history ids", await collectCompressedJsonlFiles(archiveRoot))) {
 		const id = (await scanArchivedSession(file))?.id;
 		if (id) ids.add(id);
 	}
@@ -1198,7 +1245,7 @@ async function cleanupHistoryRowsForArchivedSessions(
 
 	const cleanupIds = new Set(archivedSessionIds);
 	try {
-		for (const id of await collectArchivedSessionIds(archiveRoot)) cleanupIds.add(id);
+		for (const id of await collectArchivedSessionIds(archiveRoot, options.track)) cleanupIds.add(id);
 	} catch (error) {
 		result.errors.push(`history cleanup scan: ${errorMessage(error)}`);
 	}
@@ -1714,10 +1761,11 @@ function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]
 async function collectArchivedStatsSessions(
 	archiveRoot: string,
 	sessionsRoot: string,
+	track: ProgressTracker,
 	onError: (file: string, error: unknown) => void,
 ): Promise<StatsSession[]> {
 	const sessions: StatsSession[] = [];
-	for (const file of await collectCompressedJsonlFiles(archiveRoot)) {
+	for (const file of track.each("Scanning archive for stats", await collectCompressedJsonlFiles(archiveRoot))) {
 		const relative = path.relative(archiveRoot, file);
 		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
 		const sourcePath = path.join(sessionsRoot, relative.slice(0, -".gz".length));
@@ -1768,16 +1816,21 @@ async function cleanupStatsRowsForArchivedSessions(
 
 	let retainedSessions: SessionInfo[];
 	try {
-		for (const session of await collectArchivedStatsSessions(archiveRoot, sessionsRoot, (file, error) => {
-			result.errors.push(`stats cleanup scan ${file}: ${errorMessage(error)}`);
-		})) {
+		for (const session of await collectArchivedStatsSessions(
+			archiveRoot,
+			sessionsRoot,
+			options.track,
+			(file, error) => {
+				result.errors.push(`stats cleanup scan ${file}: ${errorMessage(error)}`);
+			},
+		)) {
 			archivedByPath.set(path.resolve(session.path), session);
 		}
 	} catch (error) {
 		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
 	}
 	try {
-		retainedSessions = await listActiveSessions(sessionsRoot);
+		retainedSessions = await listActiveSessions(sessionsRoot, options.track);
 	} catch (error) {
 		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
 		return;
@@ -1873,7 +1926,7 @@ async function runArchiveGc(
 	registeredSessionPaths: string[],
 ): Promise<ArchiveGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
-	const sessions = await listActiveSessions(sessionsRoot);
+	const sessions = await listActiveSessions(sessionsRoot, options.track);
 	const cutoffMs = Date.now() - options.coldArchiveAfterDays * DAY_MS;
 	const result: ArchiveGcResult = {
 		scanned: sessions.length,
@@ -1895,7 +1948,7 @@ async function runArchiveGc(
 	const inactiveSeenByCwd = new Map<string, number>();
 	const archiveBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
 
-	for (const session of sessions) {
+	for (const session of options.track.each("Scanning sessions to archive", sessions)) {
 		if (session.status && ACTIVE_STATUSES.has(session.status)) {
 			result.skippedActive += 1;
 			continue;
@@ -1935,7 +1988,7 @@ async function runArchiveGc(
 
 	const archivedSessionIds: string[] = [];
 	const archivedSessions: SessionInfo[] = [];
-	for (const candidate of candidates) {
+	for (const candidate of options.track.each("Archiving sessions", candidates)) {
 		try {
 			await moveSessionWithArtifacts(candidate);
 			result.archived += 1;
@@ -1952,9 +2005,9 @@ async function runArchiveGc(
 }
 
 /** Every file of a session: its transcript plus its artifact tree (subagent transcripts, tool output). */
-async function collectSessionFiles(session: SessionInfo): Promise<string[]> {
-	const artifactsDir = sessionArtifactsPath(session.path);
-	const files = [session.path];
+async function collectSessionFiles(transcript: string): Promise<string[]> {
+	const artifactsDir = sessionArtifactsPath(transcript);
+	const files = [transcript];
 	try {
 		for await (const name of ANY_FILE_GLOB.scan({ cwd: artifactsDir, dot: true, onlyFiles: true })) {
 			if (isCompressScratchPath(name)) continue;
@@ -1987,12 +2040,12 @@ async function readArtifactSessionId(file: string): Promise<string | undefined> 
  * them is live or cannot be probed (an unknown owner counts as live).
  */
 async function tryAcquireSessionTreeLeases(
-	session: SessionInfo,
+	transcript: string,
 	files: string[],
 ): Promise<{ leases: FileLockHandle[]; transcripts: Set<string> } | null> {
 	const leases: FileLockHandle[] = [];
 	const leasedIds = new Set<string>();
-	const transcripts = new Set<string>([session.path]);
+	const transcripts = new Set<string>([transcript]);
 	for (const file of files) {
 		let lease: FileLockHandle | null;
 		try {
@@ -2064,16 +2117,16 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 			return result;
 		}
 	}
-	const sessions = await listActiveSessions(sessionsRoot);
-	result.scanned = sessions.length;
+	const transcripts = await collectTranscriptFiles(sessionsRoot);
+	result.scanned = transcripts.length;
 	const cutoffMs = Date.now() - Math.max(options.compressAfterDays * DAY_MS, GC_WRITE_GRACE_MS);
-	for (const session of sessions) {
-		if (session.modified.getTime() > cutoffMs) continue;
+	for (const transcript of options.track.each("Scanning sessions to compress", transcripts)) {
 		let files: string[];
 		try {
-			files = await collectSessionFiles(session);
+			if (!(await isIdleTranscript(transcript, cutoffMs))) continue;
+			files = await collectSessionFiles(transcript);
 		} catch (error) {
-			result.errors.push(`${session.path}: ${errorMessage(error)}`);
+			result.errors.push(`${transcript}: ${errorMessage(error)}`);
 			continue;
 		}
 		const candidates: CompressCandidate[] = [];
@@ -2088,7 +2141,7 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 		if (candidates.length === 0) continue;
 		let tree: { leases: FileLockHandle[]; transcripts: Set<string> } | null = null;
 		try {
-			tree = await tryAcquireSessionTreeLeases(session, files);
+			tree = await tryAcquireSessionTreeLeases(transcript, files);
 			if (tree === null) {
 				result.skippedLive += 1;
 				continue;
@@ -2105,7 +2158,7 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 			result.allocatedAfter += batch.allocatedAfter;
 			result.errors.push(...batch.errors);
 		} catch (error) {
-			result.errors.push(`${session.path}: ${errorMessage(error)}`);
+			result.errors.push(`${transcript}: ${errorMessage(error)}`);
 		} finally {
 			// Held through the rewrite so no omp process resumes the session mid-swap.
 			for (const held of tree?.leases ?? []) held.release();
@@ -2114,7 +2167,127 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 	return result;
 }
 
-async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpointResult> {
+/**
+ * Plan stripping every transcript among `files` idle since `idleBeforeMs`
+ * ({@link planStrip}). `isTranscript` vouches for files known to be
+ * transcripts; any other file counts only with a session header.
+ */
+async function planStrips(
+	files: string[],
+	idleBeforeMs: number,
+	isTranscript: (file: string) => boolean,
+	errors: string[],
+): Promise<StripPlan[]> {
+	const plans: StripPlan[] = [];
+	for (const file of files) {
+		try {
+			if (!isTranscript(file) && (await readArtifactSessionId(file)) === undefined) continue;
+			const plan = await planStrip(file, idleBeforeMs);
+			if (plan) plans.push(plan);
+		} catch (error) {
+			if (codeOf(error) !== "ENOENT") errors.push(`${file}: ${errorMessage(error)}`);
+		}
+	}
+	return plans;
+}
+
+async function applyStripPlans(
+	plans: StripPlan[],
+	options: ResolvedGcOptions,
+	storage: FileSessionStorage,
+	result: StripGcResult,
+): Promise<void> {
+	for (const plan of plans) {
+		result.wouldStrip += 1;
+		result.records += plan.records;
+		result.bytes += plan.bytes;
+		if (!options.apply) continue;
+		try {
+			if (await applyStrip(plan, storage)) result.stripped += 1;
+		} catch (error) {
+			result.errors.push(`${plan.file}: ${errorMessage(error)}`);
+		}
+	}
+}
+
+/**
+ * Strip provider replay data ({@link planStrip}) from every transcript idle for
+ * `stripAfterDays`: active sessions with the subagent transcripts in their
+ * artifact trees, then archived sessions. Leases are taken only for sessions
+ * with replay data to strip: a session is skipped while a running process
+ * holds the lease of any transcript in it, and its leases are held while its
+ * transcripts are rewritten. A transcript that fails is reported and skipped.
+ * Sessions, then archived transcripts, are processed {@link STRIP_CONCURRENCY}
+ * at a time.
+ */
+async function runStripGc(options: ResolvedGcOptions, archiveRoot: string): Promise<StripGcResult> {
+	const transcripts = await collectTranscriptFiles(getSessionsDir(options.agentDir));
+	const idleBeforeMs = Date.now() - Math.max(options.stripAfterDays * DAY_MS, GC_WRITE_GRACE_MS);
+	const result: StripGcResult = {
+		scanned: transcripts.length,
+		skippedLive: 0,
+		wouldStrip: 0,
+		stripped: 0,
+		records: 0,
+		bytes: 0,
+		errors: [],
+	};
+	const storage = new FileSessionStorage();
+	const verb = options.apply ? "Stripping" : "Scanning";
+	const pool = {
+		concurrency: STRIP_CONCURRENCY,
+		detail: () =>
+			`${options.apply ? `${result.stripped}/${result.wouldStrip} stripped` : `${result.wouldStrip} to strip`}, ${formatBytes(result.bytes)}`,
+	};
+	await options.track.pool(`${verb} sessions`, transcripts, pool, async transcript => {
+		let tree: { leases: FileLockHandle[]; transcripts: Set<string> } | null = null;
+		try {
+			if (!(await isIdleTranscript(transcript, idleBeforeMs))) return;
+			const files = await collectSessionFiles(transcript);
+			const plans = await planStrips(files, idleBeforeMs, file => file === transcript, result.errors);
+			if (plans.length === 0) return;
+			tree = await tryAcquireSessionTreeLeases(transcript, files);
+			if (tree === null) {
+				result.skippedLive += 1;
+				return;
+			}
+			await applyStripPlans(plans, options, storage, result);
+		} catch (error) {
+			result.errors.push(`${transcript}: ${errorMessage(error)}`);
+		} finally {
+			for (const held of tree?.leases ?? []) held.release();
+		}
+	});
+
+	const archived = [
+		...(await collectCompressedJsonlFiles(archiveRoot)),
+		...(await collectJsonlFiles(archiveRoot)),
+	].filter(file => !isCompressScratchPath(path.relative(archiveRoot, file)));
+	await options.track.pool(`${verb} archive`, archived, pool, async file => {
+		const [plan] = await planStrips(
+			[file],
+			idleBeforeMs,
+			name => name.endsWith(COMPRESSED_SESSION_SUFFIX),
+			result.errors,
+		);
+		if (!plan) return;
+		// Nothing resumes a gzipped archive; a plain transcript in an archived
+		// artifact tree can still be opened by path.
+		const lease = file.endsWith(COMPRESSED_SESSION_SUFFIX) ? undefined : await tryAcquireSessionFileLease(file);
+		if (lease === null) {
+			result.skippedLive += 1;
+			return;
+		}
+		try {
+			await applyStripPlans([plan], options, storage, result);
+		} finally {
+			lease?.release();
+		}
+	});
+	return result;
+}
+
+async function checkpointWal(dbPath: string, apply: boolean, busyTimeoutMs: number): Promise<WalCheckpointResult> {
 	const walPath = `${dbPath}-wal`;
 	let walBytes = 0;
 	try {
@@ -2136,7 +2309,7 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 	const db = new Database(dbPath);
 	let checkpointAttempted = false;
 	try {
-		db.run("PRAGMA busy_timeout = 5000");
+		db.run(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
 		using checkpointStmt = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)");
 		const row = checkpointStmt.get() as WalCheckpointRow | null;
 		checkpointAttempted = true;
@@ -2162,7 +2335,7 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 async function runWalGc(options: ResolvedGcOptions): Promise<WalGcResult> {
 	const databases = await Promise.all(
 		[getHistoryDbPath(options.agentDir), getModelDbPath(options.agentDir)].map(dbPath =>
-			checkpointWal(dbPath, options.apply),
+			checkpointWal(dbPath, options.apply, options.walBusyTimeoutMs),
 		),
 	);
 	return {
@@ -2348,6 +2521,14 @@ function renderText(result: GcResult): string {
 		);
 		if (stale.errors.length > 0) lines.push(`stale errors: ${stale.errors.length}`);
 	}
+	if (result.strip) {
+		const strip = result.strip;
+		lines.push(
+			`strip: ${strip.stripped}/${strip.wouldStrip} transcripts, ${formatBytes(strip.bytes)} of replay data in ${strip.records} records`,
+		);
+		if (strip.skippedLive > 0) lines.push(`strip skipped live: ${strip.skippedLive}`);
+		if (strip.errors.length > 0) lines.push(`strip errors: ${strip.errors.length}`);
+	}
 	if (result.blobs) {
 		lines.push(
 			`blobs: ${result.blobs.deleted}/${result.blobs.wouldDelete} files, ${formatBytes(result.blobs.bytes)}, ${result.blobs.referenced} refs`,
@@ -2406,10 +2587,11 @@ const DISK_ONLY_PHASE_REASONS = {
 		"archiving gzips session files on disk and judges which sessions are cold from those files, but this store keeps sessions as database rows that phase cannot see",
 	compress:
 		"compression rewrites session files on disk in place, but this store keeps sessions as database rows that phase cannot see",
+	strip: "stripping rewrites session files on disk, but this store keeps sessions as database rows that phase cannot see",
 } as const;
 
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
-	const options = await resolveOptions(args.flags);
+	const options = await resolveOptions(args);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
@@ -2417,7 +2599,7 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		// storage, never only the filesystem: under `session.storage: sql` a
 		// session the files never show is still live.
 		const storage =
-			options.runStale || options.runBlobs || options.runArchive || options.runCompress
+			options.runStale || options.runStrip || options.runBlobs || options.runArchive || options.runCompress
 				? await resolveSessionStorage({
 						settings: await Settings.loadReadOnly({ agentDir: options.agentDir }),
 						env: process.env,
@@ -2439,6 +2621,11 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 				: [];
 		// Pruned collab replicas release their blobs to this run's sweep.
 		if (options.runStale && storage) next.stale = await runStaleGc(options, storage);
+		// Before archiving and compressing, which then store the stripped transcripts.
+		if (options.runStrip) {
+			if (sessionsOnDisk) next.strip = await runStripGc(options, archiveRoot);
+			else refuse("strip", args.flags.strip);
+		}
 		if (options.runBlobs && storage) next.blobs = await runBlobGc(options, archiveRoot, storage);
 		if (options.runArchive) {
 			if (sessionsOnDisk) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);

@@ -25,7 +25,7 @@ import {
 	GC_AUTO_COMPRESS_DISK_ONLY_REASON,
 	SessionStorageUnsupportedError,
 } from "../session/session-storage-config";
-import { spawnDetached } from "../subprocess/shared-worker";
+import { spawnDetached } from "../subprocess/detached";
 import { resolveCliEntryCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { compressMethod } from "./gc-compress";
 

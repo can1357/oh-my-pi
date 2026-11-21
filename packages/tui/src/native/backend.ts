@@ -47,11 +47,15 @@ import { TspDocument } from "./apply";
 import { getNativeBlob, type NativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
+import { estimateRows } from "./measure";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
 import { NARROW_SHEET_COLS } from "./overlay";
 import { resetQuietMotion } from "./quiet";
 import { nativeComponentId, Reconciler } from "./reconcile";
 import { setNativeButtons, setNativePacing, setNativeRendering } from "./state";
+
+/** Share of the viewport's rows a centered sheet's content must reach to fill a narrow pane. */
+const SHEET_FILL_FRACTION = 0.5;
 
 /** A visible TUI overlay, bottom to top. */
 export interface NativeOverlay {
@@ -185,6 +189,14 @@ class NativeContext implements DescribeContext {
 		return this.#features.has(name);
 	}
 
+	/** Adopts the features a `features` event lists; whether they differ from the ones held. */
+	setFeatures(features: readonly string[]): boolean {
+		const next = new Set(features);
+		if (sameSet(next, this.#features)) return false;
+		this.#features = next;
+		return true;
+	}
+
 	/** Whether `other` advertises exactly the same kinds and features. */
 	sameVocabulary(other: NativeContext): boolean {
 		return sameSet(this.#kinds, other.#kinds) && sameSet(this.#features, other.#features);
@@ -203,9 +215,18 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * once the real `hello` lists them, so the optimistic start never emits a node
  * an older terminal cannot draw (`media`: files Tern loads by path; `json`:
  * raw JSON values Tern draws as its own tree; `button`: omp's buttons, which
- * older builds get as role-styled rows; `shell`: the bash tool's live trace).
+ * older builds get as role-styled rows; `shell`: the bash tool's live trace;
+ * `buttons`, `menu`, `doc`: the plan review's dock and editable document).
  */
-const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true, shell: true };
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = {
+	media: true,
+	json: true,
+	button: true,
+	shell: true,
+	buttons: true,
+	menu: true,
+	doc: true,
+};
 
 /**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
@@ -276,17 +297,28 @@ function overlaySize(options: OverlayOptions | undefined, cols: number): "sm" | 
 	return "sm";
 }
 
-/** Blob ids referenced by `image` nodes an op adds or sets. */
+/** Blob ids referenced by `image` nodes and editor `decor` ranges an op adds or sets. */
 function collectBlobs(op: TspOp, out: Set<string>): void {
 	if (op[0] === "set") {
 		const blob = op[2].blob;
 		if (typeof blob === "string") out.add(blob);
+		collectDecorBlobs(op[2].decor, out);
 	} else if (op[0] === "add") {
 		const visit = (wire: TspNode): void => {
 			if (wire.k === "image" && typeof wire.p?.blob === "string") out.add(wire.p.blob);
+			if (wire.k === "editor" || wire.k === "input") collectDecorBlobs(wire.p?.decor, out);
 			if (wire.c) for (const child of wire.c) visit(child);
 		};
 		visit(op[4]);
+	}
+}
+
+/** Blob ids of the ranges of an editor's `decor` prop. */
+function collectDecorBlobs(decor: unknown, out: Set<string>): void {
+	if (!Array.isArray(decor)) return;
+	for (const range of decor) {
+		const blob = typeof range === "object" && range !== null && "blob" in range ? range.blob : undefined;
+		if (typeof blob === "string") out.add(blob);
 	}
 }
 
@@ -310,6 +342,8 @@ export class NativeBackend {
 	#sawResize = false;
 	#live = false;
 	#overlayNodes = new Map<Component, { key: string; node: NativeNode }>();
+	/** Centered sheets measured tall enough to fill a narrow pane; they keep filling until closed. */
+	#fillingSheets = new Set<Component>();
 	/** Pending delivery owns bytes until sent or confirmed held; settled descriptions may already be released. */
 	#blobs = new Map<string, NativeBlob | "sent">();
 	/** `blobs` queries sent, oldest first: the terminal answers each once, in order. */
@@ -533,6 +567,7 @@ export class NativeBackend {
 		if (this.#stats) {
 			logger.debug("TSP frame", { sf: surface.id, ops: ops.length, rows: surface.reconciler.fallbackCount });
 		}
+		this.#measureSheets(surface, overlays);
 		if (ops.length === 0) return;
 		this.#uploadBlobs(ops);
 		this.#sendFrame(surface, ops);
@@ -810,6 +845,16 @@ export class NativeBackend {
 				this.#cx.reduceMotion = event.reduce;
 				this.#host.motionChanged(event.reduce);
 				return;
+			case "features":
+				// A setting changed what the terminal does (Tern's Agents tray): kept for a
+				// resumed surface too, and every component describes itself again, as after a
+				// `hello` with another vocabulary.
+				this.#hello = { ...this.#hello, features: event.features };
+				if (!this.#cx.setFeatures(event.features)) return;
+				setNativePacing(this.#cx.feature("pace"));
+				this.#host.invalidate();
+				this.#host.requestRender();
+				return;
 			case "visible":
 				return;
 			case "error":
@@ -834,7 +879,12 @@ export class NativeBackend {
 			case "edit":
 			case "undo":
 			case "send":
+			case "comment":
+			case "uncomment":
 				this.#routeUiEvent(event);
+				return;
+			case "editing":
+				// Edits arrive as `change` events; the editing state itself is the terminal's.
 				return;
 			case "focus": {
 				const reconciler = this.#surfaceFor(event.sf)?.reconciler;
@@ -852,7 +902,19 @@ export class NativeBackend {
 	#routeUiEvent(
 		event: Extract<
 			TspEvent,
-			{ ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" | "undo" | "send" }
+			{
+				ev:
+					| "toggle"
+					| "select"
+					| "activate"
+					| "action"
+					| "change"
+					| "edit"
+					| "undo"
+					| "send"
+					| "comment"
+					| "uncomment";
+			}
 		>,
 	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
@@ -883,7 +945,19 @@ export class NativeBackend {
 				ui = { type: "action", key: target.keypath, act: event.act, value: event.value, mods: event.mods ?? [] };
 				break;
 			case "change":
-				ui = { type: "change", key: target.keypath, item: event.item, value: event.value };
+				ui =
+					"text" in event
+						? { type: "docChange", key: target.keypath, text: event.text }
+						: { type: "change", key: target.keypath, item: event.item, value: event.value };
+				break;
+			case "comment":
+				ui =
+					"comment" in event
+						? { type: "commentNote", key: target.keypath, comment: event.comment, note: event.note }
+						: { type: "comment", key: target.keypath, quote: event.quote, at: event.at, note: event.note };
+				break;
+			case "uncomment":
+				ui = { type: "uncomment", key: target.keypath, comment: event.comment };
 				break;
 			case "edit": {
 				const { from, to, text, cursor, len } = event;
@@ -910,9 +984,7 @@ export class NativeBackend {
 		const own = overlay.component.nativeOverlay;
 		const anchor = own?.anchor ?? overlayAnchor(overlay.options);
 		let size = own?.size ?? overlaySize(overlay.options, this.#cx.cols);
-		// A centered sheet in a narrow pane fills it instead of floating with margins: `lg`, and a component's own `md`
-		// sheet (an undeclared `md` is a generic dialog sized from its options).
-		if (anchor === "center" && this.#cx.cols < NARROW_SHEET_COLS && (size === "lg" || own?.size === "md")) {
+		if (anchor === "center" && this.#cx.cols < NARROW_SHEET_COLS && this.#fillingSheets.has(overlay.component)) {
 			size = "full";
 		}
 		const modal = overlay.focused || overlay.options?.fullscreen === true;
@@ -931,9 +1003,37 @@ export class NativeBackend {
 		return wrapper;
 	}
 
+	/**
+	 * A narrow pane has no room for a floating sheet with margins, but a sheet
+	 * stretched over content a few lines tall is mostly empty. The terminal lays
+	 * the content out, so estimate its rows from what was just described: a
+	 * centered sheet whose content reaches {@link SHEET_FILL_FRACTION} of the
+	 * viewport fills the pane from the next frame on, and keeps filling while it
+	 * stays open so a filter or a reload never makes it jump between sizes.
+	 */
+	#measureSheets(surface: Surface, overlays: readonly NativeOverlay[]): void {
+		const cols = this.#cx.cols;
+		if (cols >= NARROW_SHEET_COLS) return;
+		const limit = Math.max(1, Math.ceil(this.#host.terminal.rows * SHEET_FILL_FRACTION));
+		let grew = false;
+		for (const { component, options } of overlays) {
+			if (this.#fillingSheets.has(component) || component.nativeSheet?.(this.#cx)) continue;
+			if ((component.nativeOverlay?.anchor ?? overlayAnchor(options)) !== "center") continue;
+			const rows = estimateRows(component, cols, limit, child => surface.reconciler.described(child));
+			if (rows < limit) continue;
+			this.#fillingSheets.add(component);
+			grew = true;
+		}
+		if (grew) this.#host.requestRender();
+	}
+
 	#pruneOverlayNodes(overlays: readonly NativeOverlay[]): void {
 		if (this.#overlayNodes.size <= overlays.length) return;
 		const live = new Set(overlays.map(overlay => overlay.component));
-		for (const component of this.#overlayNodes.keys()) if (!live.has(component)) this.#overlayNodes.delete(component);
+		for (const component of this.#overlayNodes.keys()) {
+			if (live.has(component)) continue;
+			this.#overlayNodes.delete(component);
+			this.#fillingSheets.delete(component);
+		}
 	}
 }

@@ -152,7 +152,8 @@ describe("shell semantic ANSI views", () => {
 		const source = `printf '${"0123456789".repeat(18)}END-OF-COMMAND'`;
 		presentation.rows = [row("0:0:1", source)];
 		const lines = renderShellVisualization(presentation, theme, 30);
-		const plain = lines.map(line => Bun.stripANSI(line)).join("");
+		// Continuations hang under the row's gutter; the source itself is uninterrupted.
+		const plain = lines.map(line => Bun.stripANSI(line).trim()).join("");
 		expect(plain).toContain("0123456789".repeat(18));
 		expect(plain).toContain("END-OF-COMMAND'");
 		expect(lines.every(line => visibleWidth(line) <= 30)).toBe(true);
@@ -194,5 +195,16 @@ describe("shell semantic ANSI views", () => {
 		expect(plain).not.toMatch(/[✓✔]/);
 		expect(plain).toContain("×");
 		expect(plain).toContain("exit 7");
+	});
+	it("marks only the running statement, not the script rows that run with it", () => {
+		const presentation = fixture();
+		presentation.running = true;
+		presentation.rows[0].segments[0].active = true;
+		presentation.rows[0].active = true;
+		presentation.rows[1] = { ...row("0:0:1", ""), role: "document", active: true };
+		presentation.rows[1].segments = [{ text: "import", style: "kw" }];
+		const lines = renderShellVisualization(presentation, theme, 100);
+		expect(Bun.stripANSI(lines[0])).toContain("▶");
+		expect(Bun.stripANSI(lines[1])).not.toContain("▶");
 	});
 });

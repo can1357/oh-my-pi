@@ -58,7 +58,7 @@ import {
 } from "./lifecycle";
 import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 
-import { cfgTaskAgentAccountPools, cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
+import { cfgTaskAgentAccountPools, cfgTaskAgentModelOverrides } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
@@ -827,6 +827,7 @@ export class VibeSessionRegistry {
 		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
 		if (!session.agentOutputManager) {
 			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null), {
+				settings: session.settings,
 				storage: sessionTreeStorage(session),
 			});
 		}
@@ -1314,7 +1315,7 @@ export class VibeSessionRegistry {
 			sessionStorage: record.childStorage,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
-			enableLsp: (session.enableLsp ?? true) && cfgTaskEnableLsp.get(session.settings),
+			enableLsp: session.enableLsp ?? true,
 			signal,
 			eventBus: session.eventBus,
 			subagentEventBus: session.subagentEventBus,
@@ -1325,6 +1326,7 @@ export class VibeSessionRegistry {
 			asyncJobManager: session.asyncJobManager,
 			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
+			mcpToolScope: session.mcpToolScope,
 			contextFiles: session.contextFiles,
 			noContextFiles: session.noContextFiles,
 			skills: [...(session.skills ?? [])],

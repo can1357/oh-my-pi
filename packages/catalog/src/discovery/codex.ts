@@ -4,7 +4,8 @@ import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch, parseServiceTierIds } from "../utils";
-import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
+import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
+import { getCodexClientVersion } from "../wire/codex-version";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
 const DEFAULT_CONTEXT_WINDOW = 272_000;
@@ -130,7 +131,7 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 	const fetchFn = discoveryFetch(options.fetchFn);
 	const baseUrl = normalizeBaseUrl(options.baseUrl);
 	const paths = normalizePaths(options.paths);
-	const clientVersion = normalizeClientVersion(options.clientVersion) ?? CODEX_CLIENT_VERSION;
+	const clientVersion = normalizeClientVersion(options.clientVersion) ?? getCodexClientVersion();
 	const headers = buildCodexHeaders(options, clientVersion);
 
 	let sawSuccessfulResponse = false;
@@ -205,7 +206,6 @@ function buildCodexHeaders(options: CodexModelDiscoveryOptions, clientVersion: s
 	if (options.accountId && options.accountId.trim().length > 0) {
 		headers.set(OPENAI_HEADERS.ACCOUNT_ID, options.accountId);
 	}
-	headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, clientVersion);
 	headers.set("accept", "application/json");

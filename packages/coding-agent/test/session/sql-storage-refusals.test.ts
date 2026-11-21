@@ -8,6 +8,7 @@
  */
 import { SQL } from "bun";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as stats from "@oh-my-pi/omp-stats";
 import * as cleanse from "@oh-my-pi/pi-coding-agent/cleanse/index";
@@ -230,7 +231,7 @@ for (const kind of ["file", "sql"] as const) {
 			const fx = await openFixture(kind);
 			const server = vi
 				.spyOn(stats, "startServer")
-				.mockResolvedValue({ hostname: "127.0.0.1", port: 1, stop: () => {} });
+				.mockResolvedValue({ hostname: "127.0.0.1", port: 1, reused: false, stop: () => {} });
 			const errors: string[] = [];
 			const statuses: string[] = [];
 			const ctx = createInteractiveModeContext({
@@ -261,7 +262,7 @@ for (const kind of ["file", "sql"] as const) {
 			const fx = await openFixture(kind);
 			const server = vi
 				.spyOn(stats, "startServer")
-				.mockResolvedValue({ hostname: "127.0.0.1", port: 1, stop: () => {} });
+				.mockResolvedValue({ hostname: "127.0.0.1", port: 1, reused: false, stop: () => {} });
 			vi.spyOn(ternPage, "openTernPage").mockResolvedValue(null);
 			vi.spyOn(openUtils, "openPath").mockImplementation(() => {});
 			const errors: string[] = [];
@@ -323,6 +324,9 @@ for (const kind of ["file", "sql"] as const) {
 		test(`gc.autoCompress ${refuses ? "logs a refusal instead of launching" : "goes on to the volume check"}`, async () => {
 			const fx = await openFixture(kind);
 			const probe = vi.spyOn(gcCompress, "compressMethod").mockResolvedValue(undefined);
+			// The run lock beside the log needs the agent directory; under SQL storage
+			// no session file has created it yet.
+			await fs.mkdir(fx.agentDir, { recursive: true });
 
 			expect(await scheduleGcAutoCompress(fx.agentDir)).toBeUndefined();
 

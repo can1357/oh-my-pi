@@ -58,12 +58,13 @@ export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
 
 /**
  * How hard agent prompts push subagent delegation for a model lineage
- * (`delegation-bias` axis). `eager` is the unassigned default: the prompt
- * actively pushes fan-out. `restrained` keeps fan-out for genuinely parallel
- * slices but forbids reflexive scouts and single-agent babysitting. `gated`
- * forbids subagents unless the user or a skill asks.
+ * (`delegation-bias` axis). `eager` actively pushes fan-out. `balanced`, the
+ * unassigned default, neither pushes nor restricts fan-out beyond a light
+ * nudge to explore unfamiliar code with a scout. `restrained` keeps fan-out
+ * for genuinely parallel slices but forbids reflexive scouts and single-agent
+ * babysitting. `gated` forbids subagents unless the user or a skill asks.
  */
-export const DELEGATION_BIASES = ["eager", "restrained", "gated"] as const;
+export const DELEGATION_BIASES = ["eager", "balanced", "restrained", "gated"] as const;
 const THINKING_MODES = [
 	"effort",
 	"budget",
@@ -148,7 +149,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
 	"omit-reasoning-effort": wire("omitReasoningEffort", OAI),
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
-	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id"]),
+	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id", "x-session-id"]),
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
 	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
 	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
@@ -175,6 +176,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"replay-reasoning-content": wire("replayReasoningContent", ["openai"]),
 	"synthetic-reasoning-content-fallback": wire("syntheticReasoningContentFallback", ["openai"]),
 	"requires-assistant-after-tool-result": wire("requiresAssistantAfterToolResult", ["openai"]),
+	"fold-user-after-tool-result": wire("foldUserAfterToolResult", OAI),
 	"requires-assistant-content-for-tool-calls": wire("requiresAssistantContentForToolCalls", OAI),
 	"requires-mistral-tool-ids": wire("requiresMistralToolIds", ["openai"]),
 	"requires-reasoning-content-for-all-assistant-turns": wire("requiresReasoningContentForAllAssistantTurns", OAI),
@@ -188,6 +190,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
 	"supports-steering": wire("supportsSteering", ["openai-responses"]),
+	"uncached-instructions": wire("uncachedInstructions", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
@@ -288,6 +291,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
+	"temperature-floor": wire("temperatureFloor", ["devin"]),
 	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
@@ -302,6 +306,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-skip-thought-signature-on-first-function-call": wire("requiresSkipThoughtSignatureOnFirstFunctionCall", [
 		"google",
 	]),
+	"base64-skip-thought-signature": wire("base64SkipThoughtSignature", ["google"]),
 	"supports-function-part-id": wire("supportsFunctionPartId", ["google"]),
 
 	// ── wire: shared across surfaces ──
@@ -351,6 +356,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["freeform", "function"],
 	},
+	/** Paraphrase model-visible prompt prose per install (`perturbContext` in pi-ai). */
+	"prompt-perturbation": { key: "promptPerturbation", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-native-tools": { key: "requiresNativeTools", set: "catalog", shape: "scalar", values: [true, false] },
 	"tool-schemas-in-context": { key: "toolSchemasInContext", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-tool-free-history-for-tool-opt-out": {
@@ -596,6 +603,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * `compat/prompt-cache-persistent.ts`. Unassigned: entries expire.
 	 */
 	"prompt-cache-persistent": { key: "promptCachePersistent", set: "catalog", shape: "scalar", values: [true, false] },
+	/**
+	 * The provider's own endpoint accepts a `max_tokens: 0` pre-warm request
+	 * (Anthropic Messages): it reads the prompt, writes or refreshes the cache at
+	 * its breakpoints, and returns usage with no output billed. The coding
+	 * agent's cache warmer refreshes entries with it instead of a one-token
+	 * replay. Read through `compat/prompt-cache-prewarm.ts`. Unassigned: no
+	 * pre-warm request.
+	 */
+	"prompt-cache-prewarm": { key: "promptCachePrewarm", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**
@@ -723,3 +739,97 @@ export const API_COMPAT_RECORDS: Readonly<Record<string, readonly CompatRecordNa
 	"google-vertex": ["google"],
 	"google-gemini-cli": ["google"],
 };
+
+/** Axis assignments of one rule block, split by namespace and keyed by resolved field. */
+export interface RuleAxes {
+	wire: Record<string, unknown>;
+	thinking: Record<string, unknown>;
+	catalog: Record<string, unknown>;
+}
+
+/**
+ * Object-payload child name → resolved JSON key. Authored names are
+ * kebab-case; an axis-directive spelling maps to its resolved axis key
+ * (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else
+ * converts mechanically (`input-threshold` → `inputThreshold`).
+ */
+export function axisPayloadKey(name: string): string {
+	return AXES[name]?.key ?? name.replace(/-([a-z0-9])/g, (_, first: string) => first.toUpperCase());
+}
+
+/** Whether `value` is in the axis's closed vocabulary; axes without one accept any value. */
+export function axisAcceptsValue(axis: AxisDef, value: unknown): boolean {
+	return (
+		axis.values === undefined ||
+		((typeof value === "string" || typeof value === "boolean") && axis.values.includes(value))
+	);
+}
+
+function isPayloadScalar(value: unknown): value is string | number | boolean {
+	return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+function isPayloadObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** JSON object payload → resolved JSON, with the KDL compiler's key rules (`extra-body` subtrees stay verbatim). */
+function payloadValue(directive: string, object: Record<string, unknown>, verbatim: boolean): Record<string, unknown> {
+	const resolved: Record<string, unknown> = {};
+	for (const name in object) {
+		if (!verbatim && /[A-Z]/.test(name)) {
+			throw new Error(`\`${directive}\`: object payload key \`${name}\` must be kebab-case`);
+		}
+		const value = object[name];
+		const key = verbatim ? name : axisPayloadKey(name);
+		if (isPayloadScalar(value)) resolved[key] = value;
+		else if (isPayloadObject(value))
+			resolved[key] = payloadValue(directive, value, verbatim || name === "extra-body");
+		else throw new Error(`\`${directive}\`: payload key \`${name}\` must be a scalar or an object`);
+	}
+	return resolved;
+}
+
+function directiveValue(name: string, axis: AxisDef, value: unknown): unknown {
+	const scalar = (item: unknown): string | number | boolean => {
+		if (!isPayloadScalar(item)) throw new Error(`\`${name}\` takes a string, number, or boolean`);
+		if (!axisAcceptsValue(axis, item)) throw new Error(`axis \`${name}\` rejects value \`${item}\``);
+		return item;
+	};
+	switch (axis.shape) {
+		case "scalar": {
+			const item = scalar(value);
+			if (axis.key === "editRevision" && (typeof item !== "string" || !item.trim())) {
+				throw new Error(`\`${name}\` takes a non-empty string`);
+			}
+			return item;
+		}
+		case "array":
+			if (!Array.isArray(value)) throw new Error(`\`${name}\` takes an array`);
+			if (value.length === 0 && axis.emptyArray !== true) throw new Error(`\`${name}\` takes at least one value`);
+			return value.map(scalar);
+		case "object":
+			if (!isPayloadObject(value)) throw new Error(`\`${name}\` takes an object`);
+			return payloadValue(name, value, axis.verbatimKeys === true);
+	}
+}
+
+/**
+ * Compiles directive → value assignments, the JSON form of a KDL rule block's
+ * axis lines (`{ "prompt-perturbation": true }`), into resolved axes with the
+ * same validation as the KDL compiler. Object payloads use kebab-case keys.
+ *
+ * @throws Error naming an unknown directive, a value of the wrong shape, a
+ * value outside the axis vocabulary, or two directives assigning one axis.
+ */
+export function compileRuleDirectives(directives: Readonly<Record<string, unknown>>): RuleAxes {
+	const axes: RuleAxes = { wire: {}, thinking: {}, catalog: {} };
+	for (const name in directives) {
+		const axis = AXES[name];
+		if (!axis) throw new Error(`unknown directive \`${name}\``);
+		const map = axes[axis.set];
+		if (axis.key in map) throw new Error(`axis \`${axis.key}\` assigned twice`);
+		map[axis.key] = directiveValue(name, axis, directives[name]);
+	}
+	return axes;
+}

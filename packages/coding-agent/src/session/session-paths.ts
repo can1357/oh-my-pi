@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
 import {
 	getCustomSessionFilesDir,
@@ -14,6 +13,8 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import type { Settings } from "../config/settings";
+import { worktreeFamily } from "../worktree/worktrees";
 import { defaultSessionStorage, type SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
@@ -224,32 +225,30 @@ export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessions
 }
 
 /**
- * Session directories for `cwd`'s folder in the other worktrees of its git
- * repository, under the sessions root holding `sessionDir`: every worktree git
- * lists, plus agent-managed ones (`/wt`, PR checkouts) found by name, so a
- * worktree removed since still counts. `/wt` moves a session into a linked
- * worktree's directory; the session picker lists these so it stays resumable
- * from the checkout it left, and vice versa.
- *
- * Empty outside git, when `cwd` sits outside its checkout, when `sessionDir`
- * is not cwd-derived (a custom `--session-dir`), or when git metadata is
- * unreadable.
+ * Session buckets for both backends, including removed worktrees whose
+ * sessions can be resumed. The bucket names come from `options.storage`
+ * (default: the process-wide session storage): a key-indexed one
+ * (`session.storage: sql`) keeps a bucket as a key prefix with no directory
+ * on disk.
  */
 export async function worktreeSessionDirs(
 	cwd: string,
 	sessionDir: string,
-	storage: SessionStorage = defaultSessionStorage(),
+	options: { settings?: Settings; stranded?: boolean; storage?: SessionStorage } = {},
 ): Promise<string[]> {
 	const sessionsRoot = resolveManagedSessionRoot(sessionDir, cwd);
 	if (!sessionsRoot) return [];
 	try {
-		const repo = vcs.git(cwd);
-		const prefix = repo?.prefixOf(cwd);
-		if (!repo || prefix == null) return [];
+		const family = await worktreeFamily(cwd, options.settings);
+		if (!family) return [];
+		const { primary, prefix, locations } = family;
+		const storage = options.storage ?? defaultSessionStorage();
 		await storage.refresh?.();
-		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot, storage));
-		for (const worktree of await repo.worktrees()) {
-			dirs.add(sessionDirForCwd(path.resolve(worktree.path, prefix), sessionsRoot));
+		const dirs = new Set(managedWorktreeSessionDirs(primary, prefix, sessionsRoot, storage));
+		for (const location of locations) {
+			const dir = sessionDirForCwd(path.resolve(location.root, prefix), sessionsRoot);
+			if (options.stranded && location.offline) dirs.delete(dir);
+			else dirs.add(dir);
 		}
 		dirs.delete(path.resolve(sessionDir));
 		return [...dirs];

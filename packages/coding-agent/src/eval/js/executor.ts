@@ -1,4 +1,9 @@
-import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	type ArtifactAllocator,
+	DEFAULT_MAX_BYTES,
+	type OutputArtifactError,
+	OutputSink,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
 	resolveOutputMaxColumns,
@@ -8,7 +13,8 @@ import {
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
-import { executeInVmContext } from "./context-manager";
+import { executeInVmContext, hasLiveVmContext } from "./context-manager";
+import { formatCellError } from "./error-text";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
@@ -31,6 +37,7 @@ export interface JsExecutorOptions {
 	onReply?: (text: string) => void;
 	signal?: AbortSignal;
 	sessionId: string;
+	parentToolCallId?: string;
 	/** Logical owner identifier; scopes retained-worker cleanup. */
 	kernelOwnerId?: string;
 	reset?: boolean;
@@ -41,8 +48,7 @@ export interface JsExecutorOptions {
 	packages?: string[];
 	/** Package target. Repository mutation requires explicit project selection. */
 	environment?: JsPackageEnvironmentMode;
-	artifactPath?: string;
-	artifactId?: string;
+	allocateArtifact?: ArtifactAllocator;
 	session: ToolSession;
 	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
 	localRoots?: Record<string, string>;
@@ -69,13 +75,6 @@ function getExecutionTimeoutMs(options: Pick<JsExecutorOptions, "deadlineMs" | "
 		return Math.max(1, options.deadlineMs - Date.now());
 	}
 	return options.timeoutMs;
-}
-
-function isAbortError(error: unknown): boolean {
-	return (
-		(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) ||
-		(error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-	);
 }
 
 function isTimeoutReason(reason: unknown): boolean {
@@ -111,8 +110,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	const display = new DisplayOutputCollector();
 	const displayOutputs = display.outputs;
 	const outputSink = new OutputSink({
-		artifactPath: options.artifactPath,
-		artifactId: options.artifactId,
+		allocateArtifact: options.allocateArtifact,
 		spillThreshold: DEFAULT_MAX_BYTES,
 		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(options.session.settings),
@@ -132,9 +130,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		: options.signal;
 	let packageWorkComplete = false;
 	let runtimeEntered = false;
+	const filename = options.filename ?? `js-cell-${crypto.randomUUID()}.js`;
+	const cwd = options.cwd ?? options.session.cwd;
 
 	try {
-		const cwd = options.cwd ?? options.session.cwd;
 		const installOptions = {
 			cwd,
 			packages,
@@ -148,6 +147,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				: await installJsPackages(installOptions);
 		packageSignal?.throwIfAborted();
 		if (install.summary) outputSink.push(`${install.summary}\n`);
+		// Bun's resolver caches node_modules directory listings per process, so a retained
+		// worker cannot see packages added after it looked there: restart it to resolve them.
+		const restartForInstall = packages.length > 0 && !options.reset && hasLiveVmContext(options.sessionId);
+		if (restartForInstall) {
+			outputSink.push(
+				"The retained JS worker was restarted so the new packages resolve; earlier JS globals were cleared.\n",
+			);
+		}
 		packageWorkComplete = true;
 		// Start the legacy compute timer only after host-side package work. The
 		// eval tool's normal idle watchdog is already paused by the status
@@ -172,13 +179,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			localRoots: options.localRoots,
 			packageRoot: install.environment.packageRoot,
 			packageEnvironment: install.environment.description,
-			reset: options.reset,
+			reset: options.reset || restartForInstall,
 			code,
-			filename: options.filename ?? `js-cell-${crypto.randomUUID()}.js`,
+			filename,
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
 				onReply: options.onReply,
+				parentToolCallId: options.parentToolCallId,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {
@@ -208,7 +216,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		};
 	} catch (error) {
 		const activeSignal = packageWorkComplete ? signal : packageSignal;
-		if (activeSignal?.aborted || isAbortError(error)) {
+		// Every requested cancellation (the caller's signal, the cell timeout, the
+		// package-install timeout) aborts `activeSignal`. An error that merely has
+		// a cancellation-like name, thrown by the cell's own code, is a failure.
+		if (activeSignal?.aborted) {
 			const timedOut = packageWorkComplete
 				? Boolean(timeoutSignal?.aborted) || isTimeoutReason(options.signal?.reason)
 				: isTimeoutReason(packageSignal?.reason);
@@ -236,7 +247,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				displayOutputs,
 			};
 		}
-		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		const message =
+			error instanceof Error
+				? formatCellError(error.stack ?? error.message, {
+						filename,
+						cwd,
+						header: Error.prototype.toString.call(error),
+					})
+				: String(error);
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {

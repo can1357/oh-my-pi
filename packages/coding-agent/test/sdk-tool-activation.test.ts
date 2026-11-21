@@ -32,8 +32,7 @@ import { resetYieldTurnState } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 
 import { cfgExternalThinking } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
-import { cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgToolsCommands } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -149,27 +148,24 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toEqual(
 				expect.arrayContaining(["default_active_tool", "default_inactive_tool"]),
 			);
-			// Discoverable extension tools mount as xd:// devices, not top-level active tools.
-			const deviceNames = session.getXdevToolEntries().map(entry => entry.name);
-			expect(deviceNames).toContain("default_active_tool");
-			expect(session.getToolByName("xd://default_active_tool")?.name).toBe("default_active_tool");
+			// Discoverable extension tools mount as bash commands, not top-level active tools.
+			const mountedNames = session.getToolCommandEntries().map(entry => entry.name);
+			expect(mountedNames).toContain("default_active_tool");
 			expect(session.getActiveToolNames()).not.toContain("default_active_tool");
-			expect(deviceNames).not.toContain("default_inactive_tool");
+			expect(mountedNames).not.toContain("default_inactive_tool");
 			expect(session.getActiveToolNames()).not.toContain("default_inactive_tool");
 			expect(session.systemPrompt.join("\n")).toContain("default_active_tool");
 			expect(session.systemPrompt.join("\n")).not.toContain("default_inactive_tool");
 
-			// Presentation lookup must survive clearing the live mount set so
-			// historical prefixed calls retain their canonical renderer.
+			// Re-pinning the mount set top-level drops it from the live mounts.
 			await session.setActiveToolPresentation(session.getActiveToolNames(), []);
-			expect(session.getMountedXdevToolNames()).not.toContain("default_active_tool");
-			expect(session.getToolByName("xd://default_active_tool")?.name).toBe("default_active_tool");
+			expect(session.getMountedToolCommandNames()).not.toContain("default_active_tool");
 		} finally {
 			await session.dispose();
 		}
 	});
 
-	it("mounts discoverable tools under xd:// for explicit tool lists omitting write", async () => {
+	it("keeps discoverable tools top-level when an explicit tool list omits bash", async () => {
 		const tempDir = makeTempDir();
 
 		const { session } = await createAgentSession({
@@ -179,53 +175,14 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			// The device-only xd:// transport write is surfaced in the active set...
-			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "grep", "glob", "write"]));
-			// ...so a discoverable extension tool mounts under xd:// instead of
-			// shipping its full schema top-level on every request.
-			const deviceNames = session.getXdevToolEntries().map(entry => entry.name);
-			expect(deviceNames).toContain("default_active_tool");
-			expect(session.getActiveToolNames()).not.toContain("default_active_tool");
+			// Without bash the command transport is inactive, so a discoverable
+			// extension tool stays top-level and no write transport is granted.
+			expect(session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["read", "grep", "glob", "default_active_tool"]),
+			);
+			expect(session.getActiveToolNames()).not.toContain("write");
 			expect(session.getActiveToolNames()).not.toContain("default_inactive_tool");
-
-			// The transport write rejects filesystem targets: the grant is xd:// only.
-			const write = session.getToolByName("write");
-			expect(write).toBeDefined();
-			await expect(
-				write!.execute("device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Other filesystem paths are refused");
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("preserves a deferrable-only write transport across enabled-set reapplication", async () => {
-		const tempDir = makeTempDir();
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			toolNames: ["read", "ast_edit"],
-		});
-
-		try {
-			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "ast_edit", "write"]));
-			expect(session.getMountedXdevToolNames()).toEqual([]);
-			const write = session.getToolByName("write");
-			expect(write).toBeDefined();
-			await expect(
-				write!.execute("deferrable-transport-before", {
-					path: path.join(tempDir, "before.txt"),
-					content: "x",
-				}),
-			).rejects.toThrow("Other filesystem paths are refused");
-
-			await session.setActiveToolsByName(session.getEnabledToolNames());
-
-			await expect(
-				write!.execute("deferrable-transport-after", {
-					path: path.join(tempDir, "after.txt"),
-					content: "x",
-				}),
-			).rejects.toThrow("Other filesystem paths are refused");
+			expect(session.getToolCommandEntries()).toEqual([]);
 		} finally {
 			await session.dispose();
 		}
@@ -252,7 +209,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 			expect(session.getToolByName("think")).toBeDefined();
 			expect(session.getActiveToolNames()).toContain("think");
-			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("think");
+			expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain("think");
 
 			cfgExternalThinking.set(settings, false);
 			await Promise.resolve();
@@ -472,52 +429,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toEqual(expect.arrayContaining(["late_active_tool", "late_inactive_tool"]));
 			expect(session.getEnabledToolNames()).toContain("late_active_tool");
 			expect(session.getEnabledToolNames()).not.toContain("late_inactive_tool");
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("late_active_tool");
+			expect(session.getToolCommandEntries().map(entry => entry.name)).toContain("late_active_tool");
 			expect(session.getActiveToolNames()).not.toContain("late_active_tool");
 			expect(session.systemPrompt.join("\n")).toContain("late_active_tool");
 			expect(session.systemPrompt.join("\n")).not.toContain("late_inactive_tool");
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("mounts late extension tools through a dormant read-only transport", async () => {
-		const tempDir = makeTempDir();
-		const lateDeviceExtension: ExtensionFactory = pi => {
-			pi.on("session_start", async () => {
-				await Promise.resolve();
-				pi.registerTool({
-					name: "late_device_tool",
-					label: "Late Device Tool",
-					description: "Registered after dormant transport startup.",
-					parameters: type({}),
-					async execute() {
-						return { content: [{ type: "text", text: "late device" }] };
-					},
-				});
-			});
-		};
-
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			extensions: [lateDeviceExtension],
-			toolNames: ["read"],
-		});
-
-		try {
-			expect(session.getActiveToolNames()).not.toContain("write");
-			const runner = session.extensionRunner;
-			if (!runner) throw new Error("expected extension runner");
-			await runner.emit({ type: "session_start" });
-
-			expect(session.getActiveToolNames()).toContain("write");
-			expect(session.getActiveToolNames()).not.toContain("late_device_tool");
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("late_device_tool");
-			const write = session.getToolByName("write");
-			if (!write) throw new Error("expected dormant write transport");
-			await expect(
-				write.execute("late-device-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Other filesystem paths are refused");
 		} finally {
 			await session.dispose();
 		}
@@ -555,7 +470,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toContain("late_requested_tool");
 			expect(session.getEnabledToolNames()).toContain("late_requested_tool");
 			expect(session.getActiveToolNames()).toContain("late_requested_tool");
-			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("late_requested_tool");
+			expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain("late_requested_tool");
 			expect(session.systemPrompt.join("\n")).toContain("late_requested_tool");
 		} finally {
 			await session.dispose();
@@ -595,7 +510,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.hasBuiltInTool("bash")).toBe(false);
 			expect(session.getEnabledToolNames()).not.toContain("bash");
 			expect(session.getActiveToolNames()).not.toContain("bash");
-			expect(session.getMountedXdevToolNames()).not.toContain("bash");
+			expect(session.getMountedToolCommandNames()).not.toContain("bash");
 		} finally {
 			await session.dispose();
 		}
@@ -1146,15 +1061,15 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			expect(session.getActiveToolNames()).toContain("late_becomes_discoverable");
-			expect(session.getMountedXdevToolNames()).toContain("late_becomes_essential");
+			expect(session.getMountedToolCommandNames()).toContain("late_becomes_essential");
 			const runner = session.extensionRunner;
 			if (!runner) throw new Error("expected extension runner");
 			await runner.emit({ type: "session_start" });
 
 			expect(session.getActiveToolNames()).not.toContain("late_becomes_discoverable");
-			expect(session.getMountedXdevToolNames()).toContain("late_becomes_discoverable");
+			expect(session.getMountedToolCommandNames()).toContain("late_becomes_discoverable");
 			expect(session.getActiveToolNames()).toContain("late_becomes_essential");
-			expect(session.getMountedXdevToolNames()).not.toContain("late_becomes_essential");
+			expect(session.getMountedToolCommandNames()).not.toContain("late_becomes_essential");
 		} finally {
 			await session.dispose();
 		}
@@ -1237,7 +1152,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			const enabledBefore = session.getEnabledToolNames();
-			const mountedBefore = session.getMountedXdevToolNames();
+			const mountedBefore = session.getMountedToolCommandNames();
 			const promptBefore = session.systemPrompt;
 			const originalTool = session.getToolByName("bash");
 			expect(session.hasBuiltInTool("bash")).toBe(true);
@@ -1259,7 +1174,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getToolByName("bash")).toBe(originalTool);
 			expect(session.hasBuiltInTool("bash")).toBe(true);
 			expect(session.getEnabledToolNames()).toEqual(enabledBefore);
-			expect(session.getMountedXdevToolNames()).toEqual(mountedBefore);
+			expect(session.getMountedToolCommandNames()).toEqual(mountedBefore);
 			expect(session.systemPrompt).toEqual(promptBefore);
 		} finally {
 			releaseHandler.resolve();
@@ -1422,7 +1337,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toContain("register_then_select_tool");
 			expect(session.getEnabledToolNames()).toContain("read");
 			expect(session.getEnabledToolNames()).not.toContain("register_then_select_tool");
-			expect(session.getMountedXdevToolNames()).not.toContain("register_then_select_tool");
+			expect(session.getMountedToolCommandNames()).not.toContain("register_then_select_tool");
 		} finally {
 			await session.dispose();
 		}
@@ -1601,7 +1516,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("forwards built-in and external xd:// devices to Cursor provider contexts", async () => {
+	it("forwards built-in and external tool commands to Cursor provider contexts", async () => {
 		const tempDir = makeTempDir();
 		const cursorModel = getBundledModel("cursor", "composer-1.5");
 		if (!cursorModel) throw new Error("expected bundled Cursor model");
@@ -1624,8 +1539,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			await session.refreshMCPTools([externalMcpTool]);
-			const deviceNames = session.getXdevToolEntries().map(entry => entry.name);
-			expect(deviceNames).toEqual(expect.arrayContaining(["ast_edit", "mcp__fixture_report"]));
+			const mountedNames = session.getToolCommandEntries().map(entry => entry.name);
+			expect(mountedNames).toEqual(expect.arrayContaining(["ast_edit", "mcp__fixture_report"]));
 			expect(session.getActiveToolNames()).not.toContain("mcp__fixture_report");
 
 			const context = await session.agent.buildSideRequestContext([]);
@@ -1652,7 +1567,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			expect(session.getAllToolNames()).toContain("hidden_custom_tool");
 			expect(session.getActiveToolNames()).not.toContain("hidden_custom_tool");
-			expect(session.getXdevToolEntries().map(e => e.name)).not.toContain("hidden_custom_tool");
+			expect(session.getToolCommandEntries().map(e => e.name)).not.toContain("hidden_custom_tool");
 			expect(session.systemPrompt.join("\n")).not.toContain("hidden_custom_tool");
 		} finally {
 			await session.dispose();
@@ -1689,7 +1604,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			expect(session.getToolByName(hiddenTool.name)?.label).toBe(hiddenTool.label);
 			expect(session.getActiveToolNames()).not.toContain(hiddenTool.name);
-			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(hiddenTool.name);
+			expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain(hiddenTool.name);
 			expect(session.systemPrompt.join("\n")).not.toContain(hiddenTool.name);
 		} finally {
 			await session.dispose();
@@ -1728,12 +1643,12 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			expect(session.getActiveToolNames()).toEqual(
-				expect.arrayContaining(["read", "default_inactive_tool", "write"]),
+				expect.arrayContaining(["read", "default_inactive_tool", "default_active_tool"]),
 			);
-			// The explicitly requested inactive tool stays top-level. The ambient
-			// default-active tool mounts through the device-only xd:// transport.
-			expect(session.getActiveToolNames()).not.toContain("default_active_tool");
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("default_active_tool");
+			// Without bash both the explicitly requested inactive tool and the
+			// ambient default-active tool present top-level.
+			expect(session.getActiveToolNames()).not.toContain("write");
+			expect(session.getToolCommandEntries()).toEqual([]);
 			expect(session.systemPrompt.join("\n")).toContain("default_inactive_tool");
 		} finally {
 			await session.dispose();
@@ -1778,7 +1693,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(keptWithinRun.content).toEqual([{ type: "text", text: "Result submitted." }]);
 
 			resetYieldTurnState(yieldTool);
-			await expect(yieldTool.execute("run2-empty", { type: "result" })).rejects.toThrow(/no text \(thinking only\)/);
+			await expect(yieldTool.execute("run2-empty", { type: "result" })).rejects.toThrow(/none were submitted/);
 		} finally {
 			await session.dispose();
 		}
@@ -1804,54 +1719,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("keeps the write tool registered for plan mode even when no deferrable tool is requested", async () => {
-		// Regression for #1428 (adapted to the xd://propose device): plan mode
-		// submits its finalized plan by writing the chosen slug/title to
-		// xd://propose, dispatched through the plan-proposal handler
-		// (interactive-mode.ts: `setPlanProposalHandler`). With an explicit
-		// read-only `toolNames` (e.g. `read`, `search`, `find`, `web_search`)
-		// the registry has no `write` and no `deferrable` tool; dropping it would
-		// silently activate plan mode with no way to submit the plan.
-		const tempDir = makeTempDir();
-
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			toolNames: ["read", "grep", "glob", "web_search"],
-		});
-
-		try {
-			expect(session.getToolByName("write")).toBeDefined();
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("keeps an idle device-only write out of the active tool set", async () => {
-		const tempDir = makeTempDir();
-
-		const settings = Settings.isolated();
-		cfgPlanEnabled.set(settings, false);
-
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			settings,
-			toolNames: ["read", "grep", "glob", "web_search"],
-		});
-
-		try {
-			// The dormant transport remains registered for later xd:// discovery,
-			// but does not add an inert schema to a pure read-only surface.
-			expect(session.getActiveToolNames()).not.toContain("write");
-			const write = session.getToolByName("write");
-			expect(write).toBeDefined();
-			await expect(
-				write!.execute("device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
-			).rejects.toThrow("Other filesystem paths are refused");
-		} finally {
-			await session.dispose();
-		}
-	});
-
 	it("does not activate write merely because plan mode is available", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
@@ -1867,26 +1734,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("upgrades write explicitly selected by a runtime caller to filesystem access", async () => {
-		const tempDir = makeTempDir();
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			toolNames: ["read"],
-		});
-
-		try {
-			await session.setActiveToolsByName(["read", "write"]);
-			await session.refreshMCPTools([]);
-			expect(session.getActiveToolNames()).toContain("write");
-			const write = session.getToolByName("write");
-			expect(write).toBeDefined();
-			const filePath = path.join(tempDir, "runtime-write.txt");
-			await write!.execute("runtime-full-write", { path: filePath, content: "runtime\n" });
-			expect(await Bun.file(filePath).text()).toBe("runtime\n");
-		} finally {
-			await session.dispose();
-		}
-	});
 	it("registers vibe tools only during explicit vibe activation and exposes parent Todo bookkeeping", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession(baseOptions(tempDir));
@@ -2035,8 +1882,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			expect(session.getToolByName("tts")).toBeDefined();
-			// tts is a discoverable custom tool → mounted as an xd:// device, not top-level.
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("tts");
+			// tts is a discoverable custom tool → mounted as a bash command, not top-level.
+			expect(session.getToolCommandEntries().map(entry => entry.name)).toContain("tts");
 			expect(session.getActiveToolNames()).not.toContain("tts");
 		} finally {
 			await session.dispose();
@@ -2144,7 +1991,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			]) {
 				expect(restricted.getToolByName(name)).toBeUndefined();
 			}
-			expect(restricted.getXdevToolEntries()).toEqual([]);
+			expect(restricted.getToolCommandEntries()).toEqual([]);
 			expect(restricted.systemPrompt.join("\n")).not.toContain("private-server");
 			expect(restricted.systemPrompt.join("\n")).not.toContain("MCP Server Instructions");
 		} finally {
@@ -2164,15 +2011,21 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			const activeToolNames = normal.getActiveToolNames();
 			expect(activeToolNames).toEqual(
-				expect.arrayContaining(["read", "yield", "generate_image", "learn", "manage_skill", "write"]),
+				expect.arrayContaining([
+					"read",
+					"yield",
+					"generate_image",
+					"learn",
+					"manage_skill",
+					"tts",
+					"default_active_tool",
+					"sdk_custom_tool",
+				]),
 			);
-			// Explicit and force-included tools stay top-level. Ambient custom and
-			// extension capabilities mount through the device-only write transport.
-			const mountedNames = normal.getXdevToolEntries().map(entry => entry.name);
-			expect(mountedNames).toEqual(expect.arrayContaining(["tts", "default_active_tool", "sdk_custom_tool"]));
-			expect(activeToolNames).not.toContain("tts");
-			expect(activeToolNames).not.toContain("default_active_tool");
-			expect(activeToolNames).not.toContain("sdk_custom_tool");
+			// Without bash, ambient custom and extension capabilities present
+			// top-level rather than mounting as commands.
+			expect(activeToolNames).not.toContain("write");
+			expect(normal.getToolCommandEntries()).toEqual([]);
 			expect(normal.getAllToolNames()).toEqual(
 				expect.arrayContaining([
 					"generate_image",
@@ -2224,8 +2077,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			expect(normal.systemPrompt.join("\n")).toContain("xd://report_issue");
-			expect(restricted.systemPrompt.join("\n")).not.toContain("xd://report_issue");
+			expect(normal.systemPrompt.join("\n")).toContain("report_issue");
+			expect(restricted.systemPrompt.join("\n")).not.toContain("report_issue");
 		} finally {
 			await Promise.all([normal.dispose(), restricted.dispose()]);
 		}
@@ -2372,16 +2225,13 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		if (!cursorModel) throw new Error("expected bundled Cursor model");
 		const allowedTarget = path.join(tempDir, "allowed.txt");
 		const revokedTarget = path.join(tempDir, "revoked.txt");
-		const transportTarget = path.join(tempDir, "transport-only.txt");
 		fs.writeFileSync(allowedTarget, "remove me");
 		fs.writeFileSync(revokedTarget, "keep me");
-		fs.writeFileSync(transportTarget, "keep me too");
 
 		await withProviderAuth(["cursor"], async () => {
-			const { session } = await createAgentSession({ ...baseOptions(tempDir), toolNames: ["read"] });
+			const { session } = await createAgentSession(baseOptions(tempDir));
 			try {
 				const handlers = await captureCursorExecHandlers(session, cursorModel);
-				await session.setActiveToolsByName(["read", "write"]);
 				const fullWriteDescription = session.getToolByName("write")?.description;
 				expect(fullWriteDescription).toBeDefined();
 
@@ -2400,17 +2250,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				} as never);
 				expect(revoked.isError).toBe(true);
 				expect(fs.existsSync(revokedTarget)).toBe(true);
-
-				session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
-				await session.setActiveToolsByName(["read", "write"]);
-				expect(session.getActiveToolNames()).toContain("write");
-				expect(session.getToolByName("write")?.description).not.toBe(fullWriteDescription);
-				const transportOnly = await handlers.delete({
-					toolCallId: "sdk-write-transport-only",
-					path: transportTarget,
-				} as never);
-				expect(transportOnly.isError).toBe(true);
-				expect(fs.existsSync(transportTarget)).toBe(true);
 			} finally {
 				await session.dispose();
 			}
@@ -2497,10 +2336,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	});
 
 	it("does not execute an unadvertised edit call through the fallback resolver", async () => {
-		// One resolver serves two roles: the session's device resolver is passed
-		// to the bridge as `getTool` AND installed as the agent loop's
+		// One resolver serves two roles: the session's tool-command resolver is
+		// passed to the bridge as `getTool` AND installed as the agent loop's
 		// `resolveFallbackTool`, which runs for ANY call the advertised set does
-		// not contain. It must stay device-only: routing `edit` through it would
+		// not contain. It must stay tool-command-only: routing `edit` through it would
 		// execute a replace-mode edit for a call the model was never offered —
 		// a hallucinated one, or a tool the session deselected after startup.
 		// `pi_edit` gets its instance from `getEditReplaceTool` instead.
@@ -2556,16 +2395,16 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 	});
 
-	it("routes a Claude Code MCP spelling when no xdev state exists", async () => {
-		// `createTools` allocates `session.xdev` only when `tools.xdev` is on and
-		// the session is unrestricted, so alias recovery cannot live in the device
-		// resolver alone: with the setting off, an advertised MCP tool called
+	it("routes a Claude Code MCP spelling when no toolCommands state exists", async () => {
+		// `createTools` allocates `session.toolCommands` only when `tools.commands` is on and
+		// the session is unrestricted, so alias recovery cannot live in the mounted
+		// command resolver alone: with the setting off, an advertised MCP tool called
 		// under the doubled separator this harness primes would still dead-end.
-		// Driven through the real SDK session rather than a fabricated XdevState,
+		// Driven through the real SDK session rather than a fabricated ToolCommandState,
 		// because the absence of that state is precisely what is under test.
 		const tempDir = makeTempDir();
 		const settings = Settings.isolated();
-		cfgToolsXdev.set(settings, false);
+		cfgToolsCommands.set(settings, false);
 
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({ ...baseOptions(tempDir), settings });
@@ -2589,7 +2428,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 				// The configuration under test: advertised top-level, nothing mounted.
 				expect(session.getActiveToolNames()).toContain("mcp__seedpatch_client_bank");
-				expect(session.getMountedXdevToolNames()).toHaveLength(0);
+				expect(session.getMountedToolCommandNames()).toHaveLength(0);
 
 				const toolCallId = "claude-code-spelling-1";
 				const mock = createMockModel({
@@ -2666,7 +2505,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 	});
 
-	it("keeps advisor write full-access when the primary has a device-only transport", async () => {
+	it("keeps advisor write full-access when the primary omits write", async () => {
 		const tempDir = makeTempDir();
 		const target = path.join(tempDir, "advisor-full-write.txt");
 

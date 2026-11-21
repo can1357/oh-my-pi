@@ -55,6 +55,17 @@ provider "muse-code" {
 	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
 	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
 	supports-tool-choice #false
+	// Same >200K Muse Ember card as Meta Model API; on a subscription it burns
+	// plan usage faster (dev.meta.ai/docs/muse-ember, 2026-11-10).
+	models "muse-ember-1.0" {
+		long-context-cost {
+			input-threshold 200000
+			input 0.3
+			output 1.5
+			cache-read 0.012
+			cache-write 0
+		}
+	}
 	// Results can be stored so a dropped stream is recovered: verified 2026-09-29
 	// against api.meta.ai/v1, a stored run keeps generating after the client
 	// socket dies and `GET /responses/{id}` returns it once finished (~60s for

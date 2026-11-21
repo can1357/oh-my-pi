@@ -23,15 +23,11 @@ export interface SubagentWorkerInit {
 	readonly replyPort: MessagePort;
 	/** Backing store of the sync reply counter. */
 	readonly counter: SharedArrayBuffer;
-	/** Main thread start (epoch ms): module files modified later may differ from the code main runs. */
-	readonly mainStartedAt: number;
 }
 
 /** Raw message a worker posts once its link is listening. */
 export interface SubagentWorkerReady {
 	readonly type: "subagent-worker-ready";
-	/** Files of modules the worker loaded that changed after {@link SubagentWorkerInit.mainStartedAt}. */
-	readonly changedModules: readonly string[];
 }
 
 /** What a worker warms up for: the session context its subagents will inherit. */

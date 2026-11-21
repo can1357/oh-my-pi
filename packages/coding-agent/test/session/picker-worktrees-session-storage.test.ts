@@ -103,6 +103,6 @@ describe.skipIf(process.platform === "win32")("resume picker repo scope over the
 		const listed = (await listing.complete).find(s => s.id === session.getSessionId());
 
 		expect(listed?.cwd).toBe(worktree);
-		expect(await SessionManager.isFromRemovedWorktree(listed!, repo)).toBe(true);
+		expect(await SessionManager.isStrandedIn(listed!, repo)).toBe(true);
 	});
 });

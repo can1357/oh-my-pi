@@ -13,7 +13,7 @@ function nodes(children: readonly NativeChild[] | undefined): NativeNode[] {
 }
 
 describe("web_search native view", () => {
-	it("heads with the query and lists sources as linked rows with a domain mark", () => {
+	it("heads with the query and lists sources as linked cards with a domain mark and no excerpt", () => {
 		const view = webSearchToolRenderer.describeResult(
 			{
 				content: [],
@@ -21,7 +21,14 @@ describe("web_search native view", () => {
 					response: {
 						provider: "parallel",
 						answer: "The answer",
-						sources: [{ url: "https://www.example.com/a", title: "Example", ageSeconds: 3 * 86400 }],
+						sources: [
+							{
+								url: "https://www.example.com/a",
+								title: "Example",
+								ageSeconds: 3 * 86400,
+								snippet: "page text",
+							},
+						],
 						model: "m1",
 						usage: { inputTokens: 5 },
 					},
@@ -36,37 +43,116 @@ describe("web_search native view", () => {
 		expect(view?.tool?.badges?.[0]?.title).toContain("in 5");
 		const [answer, sources] = nodes(view?.body);
 		expect(answer?.k).toBe("md");
+		expect(sources?.p?.role).toBe("omp.tool.sources");
 		const rowNode = nodes(sources?.c)[0]!;
 		expect(rowNode.p).toMatchObject({ role: "omp.tool.source", href: "https://www.example.com/a" });
+		expect(nodes(rowNode.c)).toHaveLength(3);
 		const [mark, title, meta] = nodes(rowNode.c);
 		expect(mark?.p).toMatchObject({ text: "E" });
 		expect(title?.p).toMatchObject({ spans: [{ href: "https://www.example.com/a" }] });
 		expect(meta?.p).toMatchObject({ spans: [{ t: "example.com · 3d" }] });
 	});
+
+	it("without a synthesized answer lists each source once with its cleaned excerpt, not the numbered text", () => {
+		const sources = [
+			{
+				url: "https://bun.com/docs/valid-expect",
+				title: "valid-expect | Bun Docs",
+				snippet:
+					"valid-expect\n\n  Require   expect\tto get a value\n```\nexpect ( x )\n```\nlast line\nnever shown",
+			},
+			{ url: "https://github.com/oven-sh/bun/issues/1", title: "Issue #1", ageSeconds: 86400 },
+		];
+		const listing =
+			"[1] valid-expect | Bun Docs\n    https://bun.com/docs/valid-expect\n    valid-expect\n\n```\nexpect ( x )\n```\n[2] Issue #1 (1d ago)\n    https://github.com/oven-sh/bun/issues/1";
+		const view = webSearchToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: listing }],
+				details: { response: { provider: "parallel", sources } } as never,
+			},
+			opts,
+			{ query: "bun expect" },
+		);
+		const body = JSON.stringify(view?.body);
+		expect(body).not.toContain('"k":"md"');
+		expect(body).not.toContain("[1]");
+		const grid = nodes(view?.body);
+		expect(grid).toHaveLength(1);
+		expect(grid[0]?.p?.role).toBe("omp.tool.sources");
+		const rows = nodes(grid[0]?.c);
+		expect(rows.map(n => n.p?.role)).toEqual(["omp.tool.source", "omp.tool.source"]);
+		expect(rows[0]?.p).toMatchObject({ href: sources[0]!.url });
+		expect(nodes(rows[0]!.c).at(-1)?.p).toMatchObject({
+			role: "omp.tool.excerpt",
+			spans: [{ t: "valid-expect\nRequire expect to get a value\nexpect ( x )" }],
+			lines: 3,
+		});
+		// A source without a snippet has no excerpt.
+		expect(nodes(rows[1]!.c).some(n => n.p?.role === "omp.tool.excerpt")).toBe(false);
+		for (const { url } of sources) expect(body.split(`"href":"${url}"`).length - 1).toBe(2);
+	});
 });
 
 describe("ask native view", () => {
-	it("pending call is an inline head naming the question with a waiting line", () => {
-		const view = askToolRenderer.describeCall({ question: "Pick one?\nmore", options: [{ label: "A" }] } as never);
+	it("pending call is an inline head naming the form's first question with a waiting line", () => {
+		const view = askToolRenderer.describeCall({
+			html: '<form><p>Pick one?</p><label><input type="radio" name="pick" value="a"> A</label><label>Why? <input name="why"></label></form>',
+		});
 		expect(view?.inline).toBe(true);
 		expect(view?.tool?.target).toBe("Pick one?");
+		expect(view?.tool?.meta).toEqual(["2 fields"]);
 		expect(nodes(view?.body)).toHaveLength(1);
 	});
 
-	it("answered result marks the chosen option and quotes custom input", () => {
+	it("answered result pairs each question with its answer and marks empty ones", () => {
 		const view = askToolRenderer.describeResult(
 			{
 				content: [],
-				details: { question: "Pick?", options: ["A", "B"], selectedOptions: ["B"], customInput: "own" } as never,
+				details: {
+					answers: [
+						{ name: "db", question: "Database?", answer: "Postgres" },
+						{ name: "notes", question: "Notes", answer: "" },
+					],
+					timedOut: true,
+				},
 			},
 			opts,
 		);
-		const roles = nodes(view?.body)
-			.filter(n => n.k === "row")
-			.map(n => n.p?.role);
-		expect(roles).toEqual(["omp.tool.answer.off", "omp.tool.answer", "omp.tool.answer"]);
-		const custom = nodes(view?.body).at(-1)!;
-		expect(JSON.stringify(custom)).toContain("\u201cown\u201d");
+		const sections = nodes(view?.body).filter(n => n.k === "section");
+		const answers = sections.map(section => nodes(section.c).at(-1)!);
+		expect(answers.map(n => n.p?.role)).toEqual(["omp.tool.answer", "omp.tool.answer.off"]);
+		expect(JSON.stringify(answers[0])).toContain("Postgres");
+		expect(nodes(view?.body).at(-1)?.p).toMatchObject({ role: "omp.tool.notice" });
+	});
+
+	it("renders persisted option notes under their matching answer", () => {
+		const view = askToolRenderer.describeResult(
+			{
+				content: [],
+				details: {
+					answers: [
+						{ name: "unrelated", question: "Unrelated?", answer: "First" },
+						{ name: "db", question: "Database?", answer: "First" },
+					],
+					notes: [{ name: "db", question: "Database?", option: "Second", value: "second", text: "Team standard" }],
+				},
+			},
+			opts,
+		);
+		const sections = nodes(view?.body).filter(node => node.k === "section");
+		expect(nodes(sections[0]!.c).some(node => node.p?.role === "omp.tool.answer.note")).toBe(false);
+		const note = nodes(sections[1]!.c).at(-1)!;
+		expect(note.p?.role).toBe("omp.tool.answer.note");
+		expect(JSON.stringify(note)).toContain("Second: Team standard");
+	});
+
+	it("falls back to the result text when details carry no answers", () => {
+		const view = askToolRenderer.describeResult(
+			{ content: [{ type: "text", text: "The form needs at least one named control" }] },
+			opts,
+		);
+		expect(view?.tone).toBe("warning");
+		expect(JSON.stringify(view?.body)).toContain("at least one named control");
 	});
 });
 

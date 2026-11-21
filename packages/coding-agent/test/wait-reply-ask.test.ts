@@ -94,7 +94,7 @@ describe("a reply wait on an agent in `ask`", () => {
 							type: "toolCall",
 							name: "ask",
 							arguments: {
-								questions: [{ id: "go", question: "Go on?", options: [{ label: "Yes" }, { label: "No" }] }],
+								html: '<form><p>Go on?</p><label><input type="radio" name="go" value="yes"> Yes</label><label><input type="radio" name="go" value="no"> No</label></form>',
 							},
 						},
 					],

@@ -60,6 +60,20 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 	};
 }
 
+describe("todo snapshots saved with the retired blocked status", () => {
+	it("read back as pending, in both user-edit and tool-result entries", () => {
+		const saved = [{ name: "Work", tasks: [{ content: "wait", status: "blocked", blocker: "approval" }] }];
+		const userEdit = { type: "custom", customType: USER_TODO_EDIT_CUSTOM_TYPE, data: { phases: saved } };
+		const toolResult = {
+			type: "message",
+			message: { role: "toolResult", toolName: "todo", details: { op: "append", phases: saved } },
+		};
+		const expected: TodoPhase[] = [{ name: "Work", tasks: [{ content: "wait", status: "pending" }] }];
+		expect(getLatestTodoPhasesFromEntries([userEdit as SessionEntry])).toEqual(expected);
+		expect(getLatestTodoPhasesFromEntries([toolResult as SessionEntry])).toEqual(expected);
+	});
+});
+
 describe("cursor todo persistence", () => {
 	// The replay test drives the real todo renderer, which reads theme + settings.
 	beforeAll(async () => {

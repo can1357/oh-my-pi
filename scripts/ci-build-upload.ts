@@ -40,7 +40,7 @@ const MAX_NOTES_BYTES = 16 << 10;
 const ATTEMPTS = 3;
 
 /** Release asset name → build-service target. Only these are uploaded. */
-export const ASSETS: Readonly<Record<string, { platform: string; arch: string }>> = {
+const ASSETS: Readonly<Record<string, { platform: string; arch: string }>> = {
 	"omp-darwin-arm64": { platform: "macos", arch: "arm64" },
 	"omp-darwin-x64": { platform: "macos", arch: "x86_64" },
 	"omp-linux-x64": { platform: "linux", arch: "x86_64" },

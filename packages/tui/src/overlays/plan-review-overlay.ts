@@ -14,8 +14,18 @@
  * within the focused region and step left into the sidebar. The default focus is
  * `actions`, so the muscle memory of the old single-target overlay carries over:
  * ↑/↓ select options, Enter confirms, ←/→ drives the slider, g/G + PgUp/PgDn
- * scroll, and the external-editor key opens the plan. Under Tern the options
- * are a horizontal bar, so ←/→ select options and Shift+←/→ drive the slider.
+ * scroll, and the external-editor key opens the plan.
+ *
+ * The options are the approval choices, then Save (writes a copy, the review
+ * stays open); while the plan has feedback (annotations, deleted sections) a
+ * Refine option leads them and is preselected.
+ *
+ * Under Tern the plan is one editable, commentable `doc` (double-click edits it
+ * in place, a text selection takes a comment) above a dock: an Approve split
+ * button (Refine while the plan has comments) whose menu holds every approval
+ * choice, the model chip, Save and Cancel. Enter runs the main button, ←/→ pick
+ * the model. Terminals without those kinds get one `md` per section and the
+ * options as a horizontal bar (←/→ select, Shift+←/→ drive the slider).
  */
 import {
 	type Component,
@@ -51,16 +61,17 @@ import {
 	topBorder,
 	topBorderSplit,
 } from "../chrome/overlay-box";
-import { joinPlanSections, parsePlanSections, sectionDeletionSpan } from "./plan-toc";
+import { joinPlanSections, parsePlanSections, sectionDeletionSpan, stripInlineMarkdown } from "./plan-toc";
 import { padToWidth } from "../render/utils";
 import { renderSegmentTrack } from "../chrome/segment-track";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { KeyName } from "../key-hint-format";
-import { col, item, keyed, md, node, row as rowNode, span, text } from "../native/describe";
-import { leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
+import { col, item, keyed, keyNames, md, node, row as rowNode, span, text } from "../native/describe";
+import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
 import { actionButton, actionHint, hintsRow, itemIndex, type NativeHint, selectList } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
+import type { TspDocComment, TspMenuItem } from "@oh-my-pi/pi-wire";
 import { getKeybindings } from "../keybindings";
 
 /** Title shown in the overlay's top border. */
@@ -79,12 +90,29 @@ const SIDEBAR_MIN_BODY_WIDTH = 40;
 const MAX_ANNOTATION_CONTEXT_WIDTH = 120;
 /** Oldest delete/annotate undo snapshots are dropped past this depth (each holds the full plan text). */
 const MAX_UNDO_ENTRIES = 100;
+/** Label of the Save option and button. */
+const SAVE_LABEL = "Save";
+/** Leading heading/list/quote markers stripped from a quote before matching it against rendered rows. */
+const QUOTE_MARKER_RE = /^\s*(?:#{1,6}\s+|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+|>\s*)*/;
+/** An ATX heading line: the title's source is group 2 (offset after group 1). */
+const HEADING_LINE_RE = /^(#{1,6}[ \t]+)(.+?)[ \t]*#*[ \t]*$/;
 
 type Focus = "toc" | "body" | "actions";
 
-type AnnotationTarget = { kind: "section" } | { kind: "line"; row: number; context: string; contextTruncated: boolean };
+/**
+ * What an annotation is attached to: its whole section, one rendered line, or a
+ * quote of the plan source (a native comment on a selection). A quote's `at` is
+ * the UTF-16 offset of its first char in the section's source (the quote may run
+ * past the section's end).
+ */
+type AnnotationTarget =
+	| { kind: "section" }
+	| { kind: "line"; row: number; context: string; contextTruncated: boolean }
+	| { kind: "quote"; quote: string; at: number };
 
 interface OverlayAnnotation {
+	/** Stable per overlay (`c<n>`): the native document's comment id. */
+	id: string;
 	note: string;
 	target: AnnotationTarget;
 }
@@ -123,8 +151,24 @@ interface AnnotationChooser {
 interface NativePlanContent {
 	sections: OverlaySection[];
 	rev: number;
+	/** One `md` per section (terminals without `doc`). */
 	body: NativeNode[];
 	toc: NativeNode[];
+	/** The plan as the native document shows it: the source minus the title heading line. */
+	docText: string;
+	/** Every annotation as a comment on the document. */
+	comments: TspDocComment[];
+}
+
+/**
+ * Where the title heading line sits in the plan source: the document omits it
+ * (the sheet's head shows the title) and puts it back into what it reports.
+ */
+interface TitleLine {
+	/** Offset of the line in the plan source (and of the same point in the document). */
+	start: number;
+	/** The heading line, newline included. */
+	line: string;
 }
 
 /** Serializable annotations retained by the plan-review owner between overlays. */
@@ -138,10 +182,33 @@ export interface PlanReviewAnnotationState {
 			/** Hash of the section source, used to reject ambiguous moved headings. */
 			contentHash?: string;
 		};
-		target: { kind: "section" } | { kind: "line"; row: number; context: string; contextTruncated?: boolean };
+		/** A quote's `at` is the offset of its first char in the section's source. */
+		target:
+			| { kind: "section" }
+			| { kind: "line"; row: number; context: string; contextTruncated?: boolean }
+			| { kind: "quote"; quote: string; at: number };
 		note: string;
 	}>;
 }
+
+/** One approval choice of the review. */
+export interface PlanReviewOverlayChoice {
+	/** What `onPick` reports. */
+	readonly id: string;
+	readonly label: string;
+	/** The native approve menu row's second line (falls back to {@link meta}). */
+	readonly detail?: string;
+	/** Short dim text after the label in the option list (a context size); the menu row's detail without `detail`. */
+	readonly meta?: string;
+	/** Why it can't be chosen now: the option dims and is skipped. */
+	readonly disabled?: string;
+}
+
+/** A row of the option list: Refine (while the plan has feedback), an approval choice, or Save. */
+type OptionEntry =
+	| { readonly kind: "refine"; readonly id: string; readonly label: string }
+	| { readonly kind: "approve"; readonly choice: PlanReviewOverlayChoice }
+	| { readonly kind: "save" };
 
 /** Undo snapshot: joined plan text, annotations aligned by section, and the
  *  accumulated deleted-section feedback at the time of the snapshot. */
@@ -223,18 +290,71 @@ function resolveLineRow(
 	return best;
 }
 
+/** The occurrence of `quote` in `text` nearest `around`, or -1. */
+function nearestOccurrence(text: string, quote: string, around: number): number {
+	if (!quote) return -1;
+	let best = -1;
+	for (let at = text.indexOf(quote); at >= 0; at = text.indexOf(quote, at + 1)) {
+		if (best < 0 || Math.abs(at - around) < Math.abs(best - around)) best = at;
+		if (at > around) break;
+	}
+	return best;
+}
+
+/** Index of the section whose source holds `offset` (`starts` ascending, the first 0); 0 for an empty plan. */
+function sectionAt(starts: readonly number[], offset: number): number {
+	let index = 0;
+	for (let i = 1; i < starts.length; i++) {
+		if (starts[i]! <= offset) index = i;
+		else break;
+	}
+	return index;
+}
+
+/** A quote collapsed to one line, as the feedback and captions show it. */
+function quoteLine(quote: string): string {
+	return quote.replace(/\s+/g, " ").trim();
+}
+
+/** What an annotation is on, as the annotation chooser lists it. */
+function annotationWhere(target: AnnotationTarget): string {
+	if (target.kind === "line") return `line ${target.context}`;
+	return target.kind === "quote" ? `“${quoteLine(target.quote)}”` : "section";
+}
+
+/**
+ * The row of `contexts` (a section's rendered rows) showing `quote`: the first
+ * whose text holds the start of the quote's first line with its Markdown
+ * markers stripped; row 0 (the section's top) when none does.
+ */
+function quoteRow(contexts: readonly LineAnchorContext[], quote: string): number {
+	const firstLine = quote.split("\n").find(line => line.trim() !== "") ?? "";
+	const probe = normalizeLineContext({
+		text: stripInlineMarkdown(firstLine.replace(QUOTE_MARKER_RE, "")).slice(0, 40),
+		truncated: false,
+	});
+	if (!probe) return 0;
+	const row = contexts.findIndex(context => normalizeLineContext(context).includes(probe));
+	return Math.max(0, row);
+}
+
 export interface PlanReviewOverlayCallbacks {
-	/** Invoked with the chosen option label (never a disabled one). */
-	onPick: (label: string) => void;
+	/** Invoked with the chosen choice id (never a disabled one); the overlay locks until it is hidden. */
+	onPick: (id: string) => void;
 	/** Invoked on Esc / cancel. */
 	onCancel: () => void;
+	/**
+	 * Save: invoked with the current full plan text; the review stays open and keeps its state.
+	 * When set, the option list ends with Save and the native dock shows a Save button.
+	 */
+	onSave?: (content: string) => void;
 	/** Invoked with the current full plan text when the copy hotkey is pressed. */
 	onCopyPlan?: (content: string) => void | Promise<void>;
 	/** Invoked when the external-editor key is pressed (overlay stays open). */
 	onExternalEditor?: () => void;
 	/** Invoked when the external-editor key edits the active annotation draft. */
 	onAnnotationExternalEditor?: (draft: string, commit: (text: string | null) => void) => void;
-	/** Invoked with the new full plan text after an in-overlay delete/undo. */
+	/** Invoked with the new full plan text after an in-overlay delete/undo or an in-place native edit. */
 	onPlanEdited?: (content: string) => void;
 	/** Invoked with the Refine feedback markdown whenever annotations change. */
 	onFeedbackChange?: (feedback: string) => void;
@@ -245,9 +365,13 @@ export interface PlanReviewOverlayCallbacks {
 export interface PlanReviewOverlayOptions {
 	/** Prompt rendered above the options (e.g. "Plan mode - next step"). */
 	promptTitle?: string;
-	options: string[];
-	/** Indices into `options` that render dimmed and cannot be selected. */
-	disabledIndices?: number[];
+	/** Approval choices, in order; the first enabled one is the native Approve button's click. */
+	options: readonly PlanReviewOverlayChoice[];
+	/**
+	 * Refine: offered while the plan has feedback (annotations, deleted sections), first and preselected
+	 * in the option list and as the native main button; picking it reports `id`.
+	 */
+	refine?: { readonly id: string; readonly label: string };
 	/** Trailing footer hint (cancel hint); the overlay prepends dynamic help. */
 	helpText?: string;
 	/** Initially highlighted option index. */
@@ -256,8 +380,6 @@ export interface PlanReviewOverlayOptions {
 	slider?: HookSelectorSlider;
 	/** Display label for the external-editor key, surfaced in the footer help. */
 	externalEditorLabel?: string;
-	/** The external editor's name ("Notepad", "nvim") for the native Edit button; `$EDITOR` when unset. */
-	externalEditorName?: string;
 	/** Serializable annotations restored into this overlay instance. */
 	annotationState?: PlanReviewAnnotationState;
 }
@@ -284,12 +406,18 @@ export class PlanReviewOverlay implements Component {
 	/** Titles of sections deleted in the overlay, surfaced as Refine feedback. */
 	#deleted: string[] = [];
 
-	#options: string[];
-	#disabled: Set<number>;
+	#choices: readonly PlanReviewOverlayChoice[];
+	#refine: { readonly id: string; readonly label: string } | undefined;
+	/** The plan has annotations or deleted sections: Refine is offered. */
+	#hasFeedback = false;
+	/** Memoized {@link #entries} for the current {@link #hasFeedback}. */
+	#entryCache: { feedback: boolean; entries: readonly OptionEntry[] } | undefined;
+	/** Bumped by {@link setChoices} so the memoized native root redraws the options. */
+	#choicesRev = 0;
 	#helpSuffix: string | undefined;
 	#externalEditorLabel: string | undefined;
-	#externalEditorName: string | undefined;
 	#promptTitle: string | undefined;
+	/** Index into {@link #entries}. */
 	#selectedIndex: number;
 	#slider: HookSelectorSlider | undefined;
 	#sliderIndex: number;
@@ -338,6 +466,12 @@ export class PlanReviewOverlay implements Component {
 	 * scrolls the body itself: `n` counts the jumps, so each one reveals it again.
 	 */
 	#jump: { section: number; n: number } | undefined;
+	/** The last describe drew the plan as a native `doc` (in-place edits, comments). */
+	#nativeDoc = false;
+	/** The last describe drew the native dock (split Approve button, model chip, Save, Cancel). */
+	#nativeDock = false;
+	/** Last annotation id handed out ({@link #newAnnotationId}). */
+	#annotationSeq = 0;
 
 	constructor(
 		planContent: string,
@@ -351,13 +485,10 @@ export class PlanReviewOverlay implements Component {
 			ellipsis: Ellipsis.Omit,
 			theme: { track: t => theme.fg("dim", t), thumb: t => theme.fg("accent", t) },
 		});
-		this.#options = options.options;
-		this.#disabled = new Set(
-			(options.disabledIndices ?? []).filter(i => Number.isInteger(i) && i >= 0 && i < this.#options.length),
-		);
+		this.#choices = options.options;
+		this.#refine = options.refine;
 		this.#helpSuffix = options.helpText;
 		this.#externalEditorLabel = options.externalEditorLabel;
-		this.#externalEditorName = options.externalEditorName;
 		this.#promptTitle = options.promptTitle;
 		this.#selectedIndex = this.#coerceIndex(options.initialIndex ?? 0);
 		if (options.slider && options.slider.segments.length > 0) {
@@ -376,6 +507,11 @@ export class PlanReviewOverlay implements Component {
 		if (Array.isArray(options.annotationState?.annotations) && options.annotationState.annotations.length > 0) {
 			this.#recomputeFeedback();
 		}
+	}
+
+	#newAnnotationId(): string {
+		this.#annotationSeq++;
+		return `c${this.#annotationSeq}`;
 	}
 
 	invalidate(): void {
@@ -410,18 +546,40 @@ export class PlanReviewOverlay implements Component {
 		this.#tocCursor = Math.min(this.#tocCursor, Math.max(0, this.#toc.length - 1));
 	}
 	#cloneAnnotation(annotation: OverlayAnnotation): OverlayAnnotation {
-		return {
-			note: annotation.note,
-			target:
-				annotation.target.kind === "section"
-					? { kind: "section" }
-					: {
-							kind: "line",
-							row: annotation.target.row,
-							context: annotation.target.context,
-							contextTruncated: annotation.target.contextTruncated,
-						},
-		};
+		return { id: annotation.id, note: annotation.note, target: { ...annotation.target } };
+	}
+
+	/** Offset of each section's first char in the plan source. */
+	#sectionStarts(): number[] {
+		const starts: number[] = [];
+		let offset = 0;
+		for (const section of this.#sections) {
+			starts.push(offset);
+			offset += section.raw.length;
+		}
+		return starts;
+	}
+
+	/** The plan source exactly as the sections hold it (no trailing-newline normalization). */
+	#source(): string {
+		let source = "";
+		for (const section of this.#sections) source += section.raw;
+		return source;
+	}
+
+	/** The title heading line the native document omits, when the plan has a title. */
+	#titleLine(): TitleLine | undefined {
+		const section = this.#sections[this.#titleIndex];
+		if (!section) return undefined;
+		const newline = section.raw.indexOf("\n");
+		const line = newline < 0 ? section.raw : section.raw.slice(0, newline + 1);
+		return { start: this.#sectionStarts()[this.#titleIndex]!, line };
+	}
+
+	/** A plan-source offset as an offset into the native document (inside the title line: where it was). */
+	#docOffset(offset: number, title: TitleLine | undefined): number {
+		if (!title || offset < title.start) return offset;
+		return offset < title.start + title.line.length ? title.start : offset - title.line.length;
 	}
 
 	#sectionPaths(): string[][] {
@@ -451,15 +609,7 @@ export class PlanReviewOverlay implements Component {
 						path: sectionPaths[sectionIndex]!,
 						contentHash: this.#sectionContentHash(section),
 					},
-					target:
-						annotation.target.kind === "section"
-							? { kind: "section" }
-							: {
-									kind: "line",
-									row: annotation.target.row,
-									context: annotation.target.context,
-									contextTruncated: annotation.target.contextTruncated,
-								},
+					target: { ...annotation.target },
 					note: annotation.note,
 				});
 			}
@@ -471,6 +621,8 @@ export class PlanReviewOverlay implements Component {
 		if (!state || !Array.isArray(state.annotations)) return;
 		const sectionPaths = this.#sectionPaths();
 		const contentHashes = this.#sections.map(section => this.#sectionContentHash(section));
+		const starts = this.#sectionStarts();
+		const source = this.#source();
 		for (const entry of state.annotations) {
 			if (
 				!entry ||
@@ -517,7 +669,24 @@ export class PlanReviewOverlay implements Component {
 			);
 			const section = this.#sections[sectionIndex]!;
 			if (entry.target.kind === "section") {
-				if (section.level >= 1) section.annotations.push({ note, target: { kind: "section" } });
+				if (section.level >= 1) {
+					section.annotations.push({ id: this.#newAnnotationId(), note, target: { kind: "section" } });
+				}
+				continue;
+			}
+			if (entry.target.kind === "quote") {
+				const { quote, at } = entry.target;
+				if (typeof quote !== "string" || !quote || !Number.isFinite(at)) continue;
+				// The quote where it was, else its nearest occurrence (possibly in another section).
+				const stored = starts[sectionIndex]! + Math.max(0, Math.trunc(at));
+				const found = source.startsWith(quote, stored) ? stored : nearestOccurrence(source, quote, stored);
+				if (found < 0) continue;
+				const owner = sectionAt(starts, found);
+				this.#sections[owner]!.annotations.push({
+					id: this.#newAnnotationId(),
+					note,
+					target: { kind: "quote", quote, at: found - starts[owner]! },
+				});
 				continue;
 			}
 			if (
@@ -536,6 +705,7 @@ export class PlanReviewOverlay implements Component {
 			if (row < 0) continue;
 			const context = contexts[row]!;
 			section.annotations.push({
+				id: this.#newAnnotationId(),
 				note,
 				target: {
 					kind: "line",
@@ -544,6 +714,148 @@ export class PlanReviewOverlay implements Component {
 					contextTruncated: context.truncated,
 				},
 			});
+		}
+	}
+
+	/**
+	 * Replace the plan source with `next` (an in-place native edit), keeping every
+	 * annotation: offsets outside the edited span move with the text around them;
+	 * a quote touching the edit is found again nearest where it was; section and
+	 * line notes follow their heading (same title and ancestry), a line note whose
+	 * row is gone becomes a note on its section, and a note whose heading is gone
+	 * lands on the section now at its old place.
+	 */
+	#replaceText(next: string): void {
+		const previous = this.#source();
+		const oldStarts = this.#sectionStarts();
+		const oldPaths = this.#sectionPaths();
+		const carried = this.#sections.flatMap((section, index) =>
+			section.annotations.map(annotation => ({ annotation, section, index })),
+		);
+		// The edit is the span between the common prefix and suffix of the two sources.
+		const limit = Math.min(previous.length, next.length);
+		let prefix = 0;
+		while (prefix < limit && previous.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix++;
+		let suffix = 0;
+		while (
+			suffix < limit - prefix &&
+			previous.charCodeAt(previous.length - 1 - suffix) === next.charCodeAt(next.length - 1 - suffix)
+		) {
+			suffix++;
+		}
+		const delta = next.length - previous.length;
+		const editEnd = previous.length - suffix;
+		const mapOffset = (offset: number): number =>
+			offset <= prefix ? offset : offset >= editEnd ? offset + delta : prefix;
+
+		this.#setSections(next);
+		const starts = this.#sectionStarts();
+		const paths = this.#sectionPaths();
+		for (const { annotation, section: oldSection, index } of carried) {
+			const target = annotation.target;
+			if (target.kind === "quote") {
+				const oldAt = oldStarts[index]! + target.at;
+				const untouched = oldAt + target.quote.length <= prefix || oldAt >= editEnd;
+				const found = untouched ? mapOffset(oldAt) : nearestOccurrence(next, target.quote, mapOffset(oldAt));
+				// Not found: keep it where its text was; the document shows it orphaned.
+				const at = found >= 0 ? found : Math.min(mapOffset(oldAt), next.length);
+				const owner = sectionAt(starts, at);
+				this.#sections[owner]?.annotations.push({ ...annotation, target: { ...target, at: at - starts[owner]! } });
+				continue;
+			}
+			const mappedStart = mapOffset(oldStarts[index]!);
+			const oldPath = oldPaths[index]!;
+			let owner = -1;
+			for (let i = 0; i < this.#sections.length; i++) {
+				const path = paths[i]!;
+				if (
+					this.#sections[i]!.title !== oldSection.title ||
+					this.#sections[i]!.level !== oldSection.level ||
+					path.length !== oldPath.length ||
+					!path.every((segment, pathIndex) => segment === oldPath[pathIndex])
+				) {
+					continue;
+				}
+				if (owner < 0 || Math.abs(starts[i]! - mappedStart) < Math.abs(starts[owner]! - mappedStart)) owner = i;
+			}
+			if (owner < 0) owner = sectionAt(starts, mappedStart);
+			const section = this.#sections[owner];
+			if (!section) continue;
+			if (target.kind === "line") {
+				const contexts = lineContexts(section.md.render(MAX_ANNOTATION_CONTEXT_WIDTH));
+				const row = resolveLineRow(
+					target.row,
+					{ text: target.context, truncated: target.contextTruncated },
+					contexts,
+				);
+				if (row >= 0) {
+					const context = contexts[row]!;
+					section.annotations.push({
+						...annotation,
+						target: { kind: "line", row, context: context.text, contextTruncated: context.truncated },
+					});
+					continue;
+				}
+			}
+			section.annotations.push({ ...annotation, target: { kind: "section" } });
+		}
+	}
+
+	/**
+	 * The native document's edited source: the plan with its title heading line
+	 * put back (where it was, or on top when the text before it changed). The
+	 * annotations follow ({@link #replaceText}); undo snapshots predate the edit
+	 * and are dropped; the owner gets the full text.
+	 */
+	#applyDocText(text: string): void {
+		const title = this.#titleLine();
+		let next = text;
+		if (title) {
+			const at = text.startsWith(this.#source().slice(0, title.start)) ? title.start : 0;
+			const rest = text.slice(at);
+			const line = rest && !title.line.endsWith("\n") ? `${title.line}\n` : title.line;
+			next = text.slice(0, at) + line + rest;
+		}
+		if (next === this.#source()) return;
+		this.#replaceText(next);
+		this.#undo = [];
+		this.callbacks.onPlanEdited?.(joinPlanSections(this.#sections));
+		this.#recomputeFeedback();
+	}
+
+	/** A comment on the native document's `quote` at document offset `at`, filed under the section holding it. */
+	#addQuoteAnnotation(quote: string, at: number, note: string): void {
+		const trimmed = note.trim();
+		if (!trimmed || !quote) return;
+		// Document offsets past the omitted title line sit one title line further into the source.
+		const title = this.#titleLine();
+		const docAt = Math.max(0, Math.trunc(at));
+		const offset = Math.min(title && docAt >= title.start ? docAt + title.line.length : docAt, this.#source().length);
+		const starts = this.#sectionStarts();
+		const owner = sectionAt(starts, offset);
+		const section = this.#sections[owner];
+		if (!section) return;
+		this.#pushUndo();
+		section.annotations.push({
+			id: this.#newAnnotationId(),
+			note: trimmed,
+			target: { kind: "quote", quote, at: offset - starts[owner]! },
+		});
+		this.#recomputeFeedback();
+	}
+
+	/** Set (or, blank, delete) the note of annotation `id`. */
+	#setAnnotationNote(id: string, note: string): void {
+		for (const section of this.#sections) {
+			const index = section.annotations.findIndex(annotation => annotation.id === id);
+			if (index < 0) continue;
+			const trimmed = note.trim();
+			if (trimmed === section.annotations[index]!.note) return;
+			this.#pushUndo();
+			if (trimmed) section.annotations[index]!.note = trimmed;
+			else section.annotations.splice(index, 1);
+			this.#recomputeFeedback();
+			return;
 		}
 	}
 
@@ -565,39 +877,66 @@ export class PlanReviewOverlay implements Component {
 		this.#tocBaseLevel = this.#toc.length > 0 ? Math.min(...this.#toc.map(i => this.#sections[i]!.level)) : 1;
 	}
 
+	/** The option list: Refine while the plan has feedback, the approval choices, then Save. */
+	#entries(): readonly OptionEntry[] {
+		const feedback = this.#hasFeedback && this.#refine !== undefined;
+		if (this.#entryCache?.feedback === feedback) return this.#entryCache.entries;
+		const entries: OptionEntry[] = [];
+		if (feedback && this.#refine) entries.push({ kind: "refine", ...this.#refine });
+		for (const choice of this.#choices) entries.push({ kind: "approve", choice });
+		if (this.callbacks.onSave) entries.push({ kind: "save" });
+		this.#entryCache = { feedback, entries };
+		return entries;
+	}
+
+	#isDisabled(index: number): boolean {
+		const entry = this.#entries()[index];
+		return entry?.kind === "approve" && entry.choice.disabled !== undefined;
+	}
+
 	/** Clamp `index` to range, then walk to the nearest enabled option so the
 	 *  cursor never rests on a disabled row. */
 	#coerceIndex(index: number): number {
-		const max = this.#options.length - 1;
+		const max = this.#entries().length - 1;
 		if (max < 0) return -1;
 		const clamped = Math.max(0, Math.min(index, max));
-		if (!this.#disabled.has(clamped)) return clamped;
-		for (let i = clamped + 1; i <= max; i++) if (!this.#disabled.has(i)) return i;
-		for (let i = clamped - 1; i >= 0; i--) if (!this.#disabled.has(i)) return i;
+		if (!this.#isDisabled(clamped)) return clamped;
+		for (let i = clamped + 1; i <= max; i++) if (!this.#isDisabled(i)) return i;
+		for (let i = clamped - 1; i >= 0; i--) if (!this.#isDisabled(i)) return i;
 		return clamped;
 	}
 
 	/** First enabled option index (or -1 when none), used to detect the "top". */
 	#firstEnabledIndex(): number {
-		for (let i = 0; i < this.#options.length; i++) if (!this.#disabled.has(i)) return i;
+		const count = this.#entries().length;
+		for (let i = 0; i < count; i++) if (!this.#isDisabled(i)) return i;
 		return -1;
 	}
 
 	/** Move the option cursor by `delta`, skipping disabled rows, stopping at the
 	 *  list edge. */
 	#moveSelection(delta: number): void {
-		const max = this.#options.length - 1;
+		const max = this.#entries().length - 1;
 		if (max < 0) return;
 		let index = this.#selectedIndex;
 		while (true) {
 			const next = Math.max(0, Math.min(index + delta, max));
 			if (next === index) return;
 			index = next;
-			if (!this.#disabled.has(index)) {
+			if (!this.#isDisabled(index)) {
 				this.#selectedIndex = index;
 				return;
 			}
 		}
+	}
+
+	/** Track Refine coming and going: it arrives preselected; when it leaves, the cursor keeps its option. */
+	#setHasFeedback(hasFeedback: boolean): void {
+		if (hasFeedback === this.#hasFeedback) return;
+		this.#hasFeedback = hasFeedback;
+		if (!this.#refine) return;
+		this.#selectedIndex = hasFeedback ? 0 : this.#coerceIndex(Math.max(0, this.#selectedIndex - 1));
+		this.#hoveredOption = undefined;
 	}
 
 	/** Step the slider by `delta`, clamped to its edges (narrow-terminal mode). */
@@ -616,23 +955,59 @@ export class PlanReviewOverlay implements Component {
 		this.#moveSlider(index - this.#sliderIndex);
 	}
 
-	/** Commit an external answer through the same input-locking path as Enter; false when nothing was committed. */
-	selectOption(label: string): boolean {
-		if (this.#committed) return false;
-		const index = this.#options.indexOf(label);
-		if (index < 0 || this.#disabled.has(index)) return false;
-		this.#selectedIndex = index;
-		this.#confirmSelection();
-		return this.#committed;
+	/** Replace the approval choices (e.g. re-measured for a new slider tier); the cursor leaves a now-disabled row. */
+	setChoices(choices: readonly PlanReviewOverlayChoice[]): void {
+		this.#choices = choices;
+		this.#entryCache = undefined;
+		this.#choicesRev++;
+		this.#selectedIndex = this.#coerceIndex(this.#selectedIndex);
+		if (this.#hoveredOption !== undefined && this.#isDisabled(this.#hoveredOption)) this.#hoveredOption = undefined;
 	}
 
-	#confirmSelection(): void {
-		const index = this.#selectedIndex;
-		if (index >= 0 && index < this.#options.length && !this.#disabled.has(index)) {
-			this.#committed = true;
-			this.#committedLabel = this.#options[index]!;
-			this.callbacks.onPick(this.#options[index]!);
+	/**
+	 * Commit an external answer through the same input-locking path as Enter: an
+	 * enabled approval choice, or Refine (offered or not: the caller brings its own
+	 * feedback). False when nothing was committed.
+	 */
+	selectOption(id: string): boolean {
+		if (this.#committed) return false;
+		if (this.#refine?.id === id) {
+			this.#commit(id, this.#refine.label);
+			return true;
 		}
+		const choice = this.#choices.find(candidate => candidate.id === id);
+		if (!choice || choice.disabled !== undefined) return false;
+		this.#commit(choice.id, choice.label);
+		return true;
+	}
+
+	#commit(id: string, label: string): void {
+		this.#committed = true;
+		this.#committedLabel = label;
+		this.callbacks.onPick(id);
+	}
+
+	/** Run the option at `index`: Save keeps the review open, the others commit. */
+	#runEntry(index: number): void {
+		const entry = this.#entries()[index];
+		if (!entry || this.#isDisabled(index)) return;
+		if (entry.kind === "save") this.#save();
+		else if (entry.kind === "refine") this.#commit(entry.id, entry.label);
+		else this.#commit(entry.choice.id, entry.choice.label);
+	}
+
+	#save(): void {
+		this.callbacks.onSave?.(joinPlanSections(this.#sections));
+	}
+
+	/** The native main button: Refine while the plan has feedback, else the first enabled approval choice. */
+	#runMainAction(): void {
+		if (this.#hasFeedback && this.#refine) {
+			this.#commit(this.#refine.id, this.#refine.label);
+			return;
+		}
+		const choice = this.#choices.find(candidate => candidate.disabled === undefined);
+		if (choice) this.#commit(choice.id, choice.label);
 	}
 
 	handleInput(keyData: string): void {
@@ -659,6 +1034,10 @@ export class PlanReviewOverlay implements Component {
 		if (matchesSelectCancel(keyData)) {
 			this.#committed = true;
 			this.callbacks.onCancel();
+			return;
+		}
+		if (this.#nativeDock && isNativeRendering()) {
+			this.#handleDockKeys(keyData);
 			return;
 		}
 		if (this.#focus !== "actions" && keyData === "u") {
@@ -726,10 +1105,10 @@ export class PlanReviewOverlay implements Component {
 			if (!event.leftClick) return true;
 			const optionIndex = this.#optionClickRows.get(event.row);
 			if (optionIndex !== undefined) {
-				if (!this.#disabled.has(optionIndex)) {
+				if (!this.#isDisabled(optionIndex)) {
 					this.#focus = "actions";
 					this.#selectedIndex = optionIndex;
-					this.#confirmSelection();
+					this.#runEntry(this.#selectedIndex);
 				}
 				return true;
 			}
@@ -750,7 +1129,39 @@ export class PlanReviewOverlay implements Component {
 	/** Set the hovered option from a hit-tested row, ignoring disabled rows and
 	 *  non-option rows (both clear the highlight). */
 	#setHoveredOption(index: number | undefined): void {
-		this.#hoveredOption = index !== undefined && !this.#disabled.has(index) ? index : undefined;
+		this.#hoveredOption = index !== undefined && !this.#isDisabled(index) ? index : undefined;
+	}
+
+	/**
+	 * Keys under the native dock: Enter runs the main button (Approve, or Refine
+	 * while the plan has feedback), ←/→ pick the model, ↑/↓ walk the Contents,
+	 * `d` deletes its section and `u` undoes. Without the native document (whose
+	 * selections take comments) `a`/`e` annotate the Contents section.
+	 */
+	#handleDockKeys(data: string): void {
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			this.#runMainAction();
+			return;
+		}
+		if (matchesKey(data, "left")) {
+			this.#moveSlider(-1);
+			return;
+		}
+		if (matchesKey(data, "right")) {
+			this.#moveSlider(1);
+			return;
+		}
+		if (data === "u") {
+			this.#undoLast();
+			return;
+		}
+		if (!this.#sidebarShown) return;
+		this.#focus = "toc";
+		if (matchesSelectUp(data) || matchesKey(data, "k")) this.#moveTocCursor(-1);
+		else if (matchesSelectDown(data) || matchesKey(data, "j")) this.#moveTocCursor(1);
+		else if (data === "d" || matchesKey(data, "delete")) this.#deleteSelectedSection();
+		else if (!this.#nativeDoc && data === "a") this.#startSectionAnnotate();
+		else if (!this.#nativeDoc && data === "e") this.#editCurrentAnnotation();
 	}
 
 	#cycleRegion(direction: number): void {
@@ -794,7 +1205,7 @@ export class PlanReviewOverlay implements Component {
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			this.#confirmSelection();
+			this.#runEntry(this.#selectedIndex);
 			return;
 		}
 		this.#handleBodyScroll(data);
@@ -825,7 +1236,7 @@ export class PlanReviewOverlay implements Component {
 		}
 		if (matchesSelectDown(data) || matchesKey(data, "j")) return;
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			this.#confirmSelection();
+			this.#runEntry(this.#selectedIndex);
 			return;
 		}
 		this.#handleBodyScroll(data);
@@ -1037,21 +1448,27 @@ export class PlanReviewOverlay implements Component {
 		this.#annotationChooser = undefined;
 		this.#editingAnnotation = selection;
 		this.#annotationTarget =
-			annotation.target.kind === "section"
-				? { sectionIndex: selection.sectionIndex, row: null, context: null }
-				: {
+			annotation.target.kind === "line"
+				? {
 						sectionIndex: selection.sectionIndex,
 						row: annotation.target.row,
 						context: annotation.target.context,
 						contextTruncated: annotation.target.contextTruncated,
-					};
+					}
+				: { sectionIndex: selection.sectionIndex, row: null, context: null };
 		this.#annotating = true;
 		this.#editor.setText(annotation.note);
 	}
 
 	#annotationMatchesBodyAnchor(annotation: OverlayAnnotation, anchor: BodyRowAnchor): boolean {
 		if (annotation.target.kind === "section") return true;
-		if (annotation.target.row === anchor.row && annotation.target.context === anchor.context) return true;
+		if (
+			annotation.target.kind === "line" &&
+			annotation.target.row === anchor.row &&
+			annotation.target.context === anchor.context
+		) {
+			return true;
+		}
 		const seenRows = new Set<number>();
 		const sectionAnchors: LineAnchorContext[] = [];
 		for (const candidate of this.#bodyRowAnchors) {
@@ -1059,11 +1476,14 @@ export class PlanReviewOverlay implements Component {
 			seenRows.add(candidate.row);
 			sectionAnchors.push({ text: candidate.context, truncated: candidate.contextTruncated });
 		}
-		const resolvedRow = resolveLineRow(
-			annotation.target.row,
-			{ text: annotation.target.context, truncated: annotation.target.contextTruncated },
-			sectionAnchors,
-		);
+		const resolvedRow =
+			annotation.target.kind === "quote"
+				? quoteRow(sectionAnchors, annotation.target.quote)
+				: resolveLineRow(
+						annotation.target.row,
+						{ text: annotation.target.context, truncated: annotation.target.contextTruncated },
+						sectionAnchors,
+					);
 		return resolvedRow === anchor.row;
 	}
 
@@ -1145,6 +1565,7 @@ export class PlanReviewOverlay implements Component {
 		if (!section) return;
 		this.#pushUndo();
 		section.annotations.push({
+			id: this.#newAnnotationId(),
 			note,
 			target:
 				target.row === null
@@ -1170,7 +1591,8 @@ export class PlanReviewOverlay implements Component {
 		this.#annotationRev++;
 		this.callbacks.onAnnotationStateChange?.(this.#annotationState());
 		const annotated = this.#sections.filter(section => section.annotations.length > 0);
-		if (annotated.length === 0 && this.#deleted.length === 0) {
+		this.#setHasFeedback(annotated.length > 0 || this.#deleted.length > 0);
+		if (!this.#hasFeedback) {
 			this.callbacks.onFeedbackChange?.("");
 			return;
 		}
@@ -1183,6 +1605,7 @@ export class PlanReviewOverlay implements Component {
 			feedback += `\n## ${section.title || "Plan preamble"}\n`;
 			for (const annotation of section.annotations) {
 				if (annotation.target.kind === "line") feedback += `> Line: ${annotation.target.context}\n`;
+				else if (annotation.target.kind === "quote") feedback += `> "${quoteLine(annotation.target.quote)}"\n`;
 				feedback += this.#formatAnnotationFeedback(annotation.note);
 			}
 		}
@@ -1215,11 +1638,18 @@ export class PlanReviewOverlay implements Component {
 		return [trackLine, `  ${theme.fg("dim", "↳")} ${theme.fg("muted", detail)}`];
 	}
 
+	/** An option's label and, for an approval choice with one, its dim `meta`. */
+	#entryLabel(entry: OptionEntry): { label: string; meta?: string } {
+		if (entry.kind === "approve") return { label: entry.choice.label, meta: entry.choice.meta };
+		return { label: entry.kind === "refine" ? entry.label : SAVE_LABEL };
+	}
+
 	#renderOptionLines(): string[] {
 		const active = this.#focus === "actions";
-		return this.#options.map((label, i) => {
+		return this.#entries().map((entry, i) => {
+			const { label, meta } = this.#entryLabel(entry);
 			const selected = i === this.#selectedIndex;
-			const isDisabled = this.#disabled.has(i);
+			const isDisabled = this.#isDisabled(i);
 			const hovered = !isDisabled && i === this.#hoveredOption;
 			// The cursor marks the selected option; it dims when actions are not the
 			// focused region so the active region's highlight stays unambiguous.
@@ -1232,6 +1662,7 @@ export class PlanReviewOverlay implements Component {
 			// A pointer hovering an option paints a highlight band behind its label,
 			// distinct from the keyboard selection (cursor glyph + bold accent) which
 			// stays where it is. One space of padding gives the band a button shape.
+			if (meta) text += ` ${theme.fg("dim", `(${meta})`)}`;
 			if (hovered) text = theme.bg("selectedBg", ` ${text} `);
 			return cursor + text;
 		});
@@ -1329,21 +1760,24 @@ export class PlanReviewOverlay implements Component {
 			renderedSections.push(rendered);
 			const contexts = lineContexts(rendered);
 			// Resolve each note's row once; notes on one row keep their array order.
-			let notesByRow: Map<number, string[]> | undefined;
+			let notesByRow: Map<number, OverlayAnnotation[]> | undefined;
 			for (const annotation of section.annotations) {
+				const target = annotation.target;
 				const annotationRow =
-					annotation.target.kind === "section"
+					target.kind === "section"
 						? 0
-						: resolveLineRow(
-								annotation.target.row,
-								{ text: annotation.target.context, truncated: annotation.target.contextTruncated },
-								contexts,
-							);
+						: target.kind === "quote"
+							? quoteRow(contexts, target.quote)
+							: resolveLineRow(
+									target.row,
+									{ text: target.context, truncated: target.contextTruncated },
+									contexts,
+								);
 				if (annotationRow < 0) continue;
 				notesByRow ??= new Map();
 				const notes = notesByRow.get(annotationRow);
-				if (notes) notes.push(annotation.note);
-				else notesByRow.set(annotationRow, [annotation.note]);
+				if (notes) notes.push(annotation);
+				else notesByRow.set(annotationRow, [annotation]);
 			}
 			for (let row = 0; row < rendered.length; row++) {
 				const context = contexts[row]!;
@@ -1357,7 +1791,9 @@ export class PlanReviewOverlay implements Component {
 				anchors.push(anchor);
 				const notes = notesByRow?.get(row);
 				if (!notes) continue;
-				for (const note of notes) this.#appendAnnotationCallout(lines, anchors, note, anchor, bodyContentWidth);
+				for (const annotation of notes) {
+					this.#appendAnnotationCallout(lines, anchors, annotation, anchor, bodyContentWidth);
+				}
 			}
 		}
 		this.#sectionOffsets = offsets;
@@ -1375,14 +1811,22 @@ export class PlanReviewOverlay implements Component {
 		return lines;
 	}
 
+	/** A note under its anchor row; a quote note leads with the quoted text. */
 	#appendAnnotationCallout(
 		lines: string[],
 		anchors: BodyRowAnchor[],
-		note: string,
+		annotation: OverlayAnnotation,
 		anchor: BodyRowAnchor,
 		bodyContentWidth: number,
 	): void {
-		const noteLines = note.split(/\r?\n/);
+		if (annotation.target.kind === "quote") {
+			const prefix = theme.fg("warning", "▎ ");
+			const quote = `“${replaceTabs(sanitizeText(quoteLine(annotation.target.quote)))}”`;
+			const available = Math.max(0, bodyContentWidth - visibleWidth(prefix));
+			lines.push(`${prefix}${theme.fg("muted", truncateToWidth(quote, available, Ellipsis.Unicode))}`);
+			anchors.push(anchor);
+		}
+		const noteLines = annotation.note.split(/\r?\n/);
 		for (let i = 0; i < noteLines.length; i++) {
 			const prefix =
 				i === 0
@@ -1474,7 +1918,7 @@ export class PlanReviewOverlay implements Component {
 			const section = this.#sections[selection.sectionIndex];
 			const annotation = section?.annotations[selection.annotationIndex];
 			if (!section || !annotation) continue;
-			const target = annotation.target.kind === "section" ? "section" : `line ${annotation.target.context}`;
+			const target = annotationWhere(annotation.target);
 			const note = sanitizeStatusText(annotation.note);
 			const marker = optionIndex === chooser.selected ? theme.fg("accent", "› ") : "  ";
 			const label = `${marker}${sanitizeStatusText(section.title || "Plan preamble")} · ${target} · ${note}`;
@@ -1534,20 +1978,30 @@ export class PlanReviewOverlay implements Component {
 		return this.#nativeOverlay.props;
 	}
 
-	describe(): NativeNode {
-		// The terminal lays out the sidebar; it is shown whenever the Contents has
-		// enough entries, which is also what Tab cycling consults.
-		this.#sidebarShown = this.#toc.length >= SIDEBAR_MIN_HEADINGS;
-		if (this.#annotating) this.#editor.focused = true;
+	describe(cx: DescribeContext): NativeNode {
+		const doc = cx.supports("doc");
+		const dock = cx.supports("buttons") && cx.supports("menu");
+		this.#nativeDoc = doc;
+		this.#nativeDock = dock;
 		const content = this.#describeContent();
+		// The terminal lays out the sidebar; it is shown whenever the Contents has
+		// enough entries, which is also what Tab cycling consults. The document's
+		// comment margin takes its place while the plan has comments.
+		this.#sidebarShown = this.#toc.length >= SIDEBAR_MIN_HEADINGS && !(doc && content.comments.length > 0);
+		if (this.#annotating) this.#editor.focused = true;
 		const chooser = this.#annotationChooser;
 		const target = this.#annotationTarget;
 		const sig = [
+			doc ? "doc" : "md",
+			dock ? "dock" : "list",
+			this.#sidebarShown,
+			this.#hasFeedback,
 			this.#focus,
 			this.#tocCursor,
 			this.#jump?.n ?? 0,
 			this.#selectedIndex,
 			this.#sliderIndex,
+			this.#choicesRev,
 			this.#committed ? `committed:${this.#committedLabel ?? ""}` : "",
 			this.#annotating
 				? `annotating:${target?.sectionIndex}:${target?.row}:${target?.context}:${this.#editingAnnotation !== undefined}`
@@ -1559,34 +2013,21 @@ export class PlanReviewOverlay implements Component {
 		if (this.#nativeRoot && sig === this.#nativeSig && content === this.#nativeRootContent) return this.#nativeRoot;
 
 		const children: NativeChild[] = [];
-		const tools = this.#describeTools();
-		if (tools) children.push(tools);
-		// The section a Contents jump targets scrolls to the body's top.
-		const jump = this.#jump;
-		const body = jump
-			? content.body.map((section): NativeNode =>
-					section.key === `s${jump.section}` ? { ...section, reveal: { at: "start", n: jump.n } } : section,
-				)
-			: content.body;
-		const bodyCol = node(
-			"col",
-			{ role: "omp.plan.body", grow: 1, gap: "md", tone: this.#focus === "body" ? "accent" : undefined },
-			body,
-			"body",
-		);
+		if (!dock && !this.#committed && !this.#annotating && !chooser) children.push(this.#describeCancelTool());
+		const bodyCol = doc ? this.#describeDocBody(content) : this.#describeMdBody(content);
 		if (this.#sidebarShown) {
 			const tocSection = this.#toc[this.#tocCursor];
 			const toc = selectList("toc", content.toc, {
 				selected: tocSection === undefined ? null : `h${tocSection}`,
 				role: "omp.plan.toc",
-				tone: this.#focus === "toc" ? "accent" : undefined,
+				tone: !dock && this.#focus === "toc" ? "accent" : undefined,
 			});
 			const sidebar = node("col", { max: { w: "32ch" }, shrink: 0 }, [toc], "sidebar");
 			children.push(keyed(rowNode([sidebar, bodyCol], { gap: "lg", align: "start" }), "split"));
 		} else {
 			children.push(bodyCol);
 		}
-		if (this.#promptTitle) {
+		if (!dock && this.#promptTitle) {
 			children.push(keyed(text([span(this.#promptTitle, "muted")], { role: "omp.plan.prompt" }), "prompt"));
 		}
 		if (this.#committed) {
@@ -1600,16 +2041,20 @@ export class PlanReviewOverlay implements Component {
 					"footer",
 				),
 			);
+		} else if (dock) {
+			children.push(this.#describeDock());
+			children.push(...this.#describeFooter());
 		} else {
 			children.push(...this.#describeSlider());
 			// The decision bar: Tern lays the list out as buttons, the first one the hero.
-			const optionItems = this.#options.map((label, i) =>
-				item(`o${i}`, {
-					label,
-					disabled: this.#disabled.has(i) || undefined,
+			const optionItems = this.#entries().map((entry, i) => {
+				const { label, meta } = this.#entryLabel(entry);
+				return item(`o${i}`, {
+					label: meta ? `${label} (${meta})` : label,
+					disabled: this.#isDisabled(i) || undefined,
 					hint: i === this.#selectedIndex ? ["enter"] : undefined,
-				}),
-			);
+				});
+			});
 			children.push(
 				selectList("options", optionItems, {
 					selected: this.#selectedIndex >= 0 ? `o${this.#selectedIndex}` : null,
@@ -1627,47 +2072,160 @@ export class PlanReviewOverlay implements Component {
 		return this.#nativeRoot;
 	}
 
-	/** Head tools: Copy `c`, the external editor and Cancel, mirroring their keys. */
-	#describeTools(): NativeNode | undefined {
-		if (this.#committed) return undefined;
-		const buttons: NativeNode[] = [];
-		if (this.callbacks.onCopyPlan)
-			buttons.push(actionButton("Copy", "copyPlan", { keys: "c", title: "Copy plan  c" }));
-		// Unbound: the button still mirrors the callback, without a keycap.
-		const editorKeyId = getKeybindings().getKeys("app.editor.external")[0];
-		if (this.callbacks.onExternalEditor) {
-			buttons.push(
-				actionButton(
-					`Edit in ${this.#externalEditorName ?? "$EDITOR"}`,
-					"externalEditor",
-					editorKeyId ? { keys: editorKeyId } : {},
+	/** The plan as one editable, commentable document; a Contents pick scrolls its heading to the top. */
+	#describeDocBody(content: NativePlanContent): NativeNode {
+		const jump = this.#jump;
+		let heading = 0;
+		if (jump) {
+			for (let i = 0; i < Math.min(jump.section, this.#sections.length); i++) {
+				if (this.#sections[i]!.level >= 1 && i !== this.#titleIndex) heading++;
+			}
+		}
+		const docNode = node(
+			"doc",
+			{
+				role: "omp.plan.doc",
+				text: content.docText,
+				edit: true,
+				comment: true,
+				comments: content.comments,
+				...(jump ? { jump: { heading, n: jump.n } } : {}),
+			},
+			undefined,
+			"doc",
+		);
+		return node("col", { role: "omp.plan.body", grow: 1 }, [docNode], "body");
+	}
+
+	/** One `md` per section with its note callouts (terminals without `doc`); a Contents pick reveals its section. */
+	#describeMdBody(content: NativePlanContent): NativeNode {
+		const jump = this.#jump;
+		const body = jump
+			? content.body.map((section): NativeNode =>
+					section.key === `s${jump.section}` ? { ...section, reveal: { at: "start", n: jump.n } } : section,
+				)
+			: content.body;
+		return node(
+			"col",
+			{ role: "omp.plan.body", grow: 1, gap: "md", tone: this.#focus === "body" ? "accent" : undefined },
+			body,
+			"body",
+		);
+	}
+
+	/**
+	 * The decision dock: the Approve split button (Refine while the plan has
+	 * feedback) whose menu holds every approval choice, the model chip (two or
+	 * more tiers; picking one is a slider move), then Save and Cancel.
+	 */
+	#describeDock(): NativeNode {
+		const refine = this.#hasFeedback && this.#refine !== undefined;
+		const main = node(
+			"button",
+			{
+				text: refine ? "Refine" : "Approve",
+				variant: "primary",
+				keys: ["enter"],
+				actions: { click: refine ? "refine" : "approve" },
+			},
+			undefined,
+			"main",
+		);
+		const menuItems: TspMenuItem[] = this.#choices.map(choice => {
+			const detail = choice.detail ?? choice.meta;
+			return {
+				id: choice.id,
+				label: choice.label,
+				...(detail ? { detail } : {}),
+				...(choice.disabled !== undefined ? { disabled: choice.disabled || true } : {}),
+			};
+		});
+		const more = node(
+			"menu",
+			{ trigger: "primary", icon: "chev", title: "Approve options", align: "start", items: menuItems },
+			undefined,
+			"more",
+		);
+		const children: NativeNode[] = [
+			node("buttons", { variant: "split", role: "omp.plan.approve" }, [main, more], "approve"),
+		];
+		const slider = this.#slider;
+		if (slider && slider.segments.length >= 2) {
+			const active = slider.segments[this.#sliderIndex]!;
+			children.push(
+				node(
+					"menu",
+					{
+						role: "omp.plan.model",
+						text: active.detail ?? active.label,
+						caret: true,
+						title: "Model that executes the plan",
+						items: slider.segments.map((segment, i) => ({
+							id: `tier:${i}`,
+							label: segment.label,
+							...(segment.detail ? { detail: segment.detail } : {}),
+							radio: "tier",
+							checked: i === this.#sliderIndex,
+						})),
+					},
+					undefined,
+					"model",
 				),
 			);
 		}
-		// Cancel the review the way the cancel key does; while annotating that key
-		// only leaves the draft/chooser, so the button is hidden there.
-		if (!this.#annotating && !this.#annotationChooser) {
-			const cancelKeyId = getKeybindings().getKeys("tui.select.cancel")[0];
-			buttons.push(actionButton("Cancel", "cancel", cancelKeyId ? { keys: cancelKeyId } : {}));
+		children.push(node("spacer", { grow: 1 }));
+		if (this.callbacks.onSave) {
+			children.push(
+				node("button", { role: "omp.btn", text: SAVE_LABEL, actions: { click: "save" } }, undefined, "save"),
+			);
 		}
-		if (buttons.length === 0) return undefined;
-		return node("row", { role: "omp.plan.tools", gap: "sm", align: "center", justify: "end" }, buttons, "tools");
+		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
+		children.push(
+			node(
+				"button",
+				{
+					role: "omp.btn",
+					text: "Cancel",
+					...(cancelKey ? { keys: keyNames(cancelKey) } : {}),
+					actions: { click: "cancel" },
+				},
+				undefined,
+				"cancel",
+			),
+		);
+		return node("row", { role: "omp.plan.dock", gap: "sm", align: "center" }, children, "dock");
+	}
+
+	/** A head Cancel button running the cancel key's path (terminals without the dock). */
+	#describeCancelTool(): NativeNode {
+		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
+		return node(
+			"row",
+			{ role: "omp.plan.tools", gap: "sm", align: "center", justify: "end" },
+			[actionButton("Cancel", "cancel", cancelKey ? { keys: cancelKey } : {})],
+			"tools",
+		);
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#committed) return;
-		if (event.type === "action") {
-			// Head tools run exactly what `c`, the external-editor key and Esc run.
-			if (this.#annotating || this.#annotationChooser) return;
-			if (event.act === "copyPlan" && this.callbacks.onCopyPlan) {
-				void this.callbacks.onCopyPlan(joinPlanSections(this.#sections));
-			} else if (event.act === "externalEditor") {
-				this.callbacks.onExternalEditor?.();
-			} else if (event.act === "cancel") {
-				this.#committed = true;
-				this.callbacks.onCancel();
-			}
-			return;
+		switch (event.type) {
+			case "docChange":
+				this.#applyDocText(event.text);
+				return;
+			case "comment":
+				this.#addQuoteAnnotation(event.quote, event.at, event.note);
+				return;
+			case "commentNote":
+				this.#setAnnotationNote(event.comment, event.note);
+				return;
+			case "uncomment":
+				this.#setAnnotationNote(event.comment, "");
+				return;
+			case "action":
+				// While a note is drafted in omp's editor, the draft owns the sheet.
+				if (!this.#annotating && !this.#annotationChooser) this.#handleNativeAction(event.key, event.act);
+				return;
 		}
 		if (event.type !== "select" && event.type !== "activate") return;
 		const activate = event.type === "activate";
@@ -1683,10 +2241,10 @@ export class PlanReviewOverlay implements Component {
 			}
 			case "options": {
 				const index = itemIndex(event.item, "o");
-				if (index < 0 || index >= this.#options.length || this.#disabled.has(index)) return;
+				if (index < 0 || index >= this.#entries().length || this.#isDisabled(index)) return;
 				this.#focus = "actions";
 				this.#selectedIndex = index;
-				if (activate) this.#confirmSelection();
+				if (activate) this.#runEntry(this.#selectedIndex);
 				return;
 			}
 			case "tabs": {
@@ -1708,7 +2266,72 @@ export class PlanReviewOverlay implements Component {
 		}
 	}
 
-	/** Plan body (one `md` per section, annotation callouts after it) and Contents items. */
+	/**
+	 * A dock or head-tool click: the main button, an approval choice from its
+	 * menu, a model tier from the model chip, Save or Cancel.
+	 */
+	#handleNativeAction(key: string, act: string): void {
+		switch (leafKey(key)) {
+			case "more": {
+				const choice = this.#choices.find(candidate => candidate.id === act);
+				if (choice && choice.disabled === undefined) this.#commit(choice.id, choice.label);
+				return;
+			}
+			case "model": {
+				const index = itemIndex(act, "tier:");
+				if (index >= 0) this.#moveSlider(index - this.#sliderIndex);
+				return;
+			}
+		}
+		switch (act) {
+			case "approve": {
+				const choice = this.#choices.find(candidate => candidate.disabled === undefined);
+				if (choice) this.#commit(choice.id, choice.label);
+				return;
+			}
+			case "refine":
+				if (this.#hasFeedback && this.#refine) this.#commit(this.#refine.id, this.#refine.label);
+				return;
+			case "save":
+				this.#save();
+				return;
+			case "cancel":
+				this.#committed = true;
+				this.callbacks.onCancel();
+				return;
+		}
+	}
+
+	/**
+	 * Where a section or line note sits in the native document: a quote of the
+	 * plan source and its plan offset. A line note quotes its line when the
+	 * source has the rendered text verbatim; otherwise (and for section notes)
+	 * the note quotes the section's heading title, or its first line of text
+	 * when the heading is the sheet's title or there is none (the preamble).
+	 */
+	#noteAnchor(sectionIndex: number, start: number, target: AnnotationTarget): { quote: string; at: number } {
+		const raw = this.#sections[sectionIndex]!.raw;
+		if (target.kind === "line") {
+			const line =
+				target.contextTruncated && target.context.endsWith("…") ? target.context.slice(0, -1) : target.context;
+			const probe = line
+				.replace(/^[\s•◦▪‣·*+>-]+/, "")
+				.replace(/^\d+[.)]\s+/, "")
+				.trim();
+			const found = probe ? raw.indexOf(probe) : -1;
+			if (found >= 0) return { quote: probe, at: start + found };
+		}
+		const newline = raw.indexOf("\n");
+		const isTitle = sectionIndex === this.#titleIndex;
+		const heading = isTitle ? null : HEADING_LINE_RE.exec(newline < 0 ? raw : raw.slice(0, newline));
+		if (heading) return { quote: heading[2]!, at: start + heading[1]!.length };
+		const bodyStart = isTitle ? (newline < 0 ? raw.length : newline + 1) : 0;
+		const firstLine = /\S[^\n]*/.exec(raw.slice(bodyStart));
+		if (!firstLine) return { quote: "", at: start };
+		return { quote: firstLine[0].trimEnd(), at: start + bodyStart + firstLine.index };
+	}
+
+	/** Plan body (one `md` per section, annotation callouts after it), the document's text and comments, and Contents items. */
 	#describeContent(): NativePlanContent {
 		const cached = this.#nativeContent;
 		if (cached && cached.sections === this.#sections && cached.rev === this.#annotationRev) return cached;
@@ -1728,8 +2351,12 @@ export class PlanReviewOverlay implements Component {
 			for (const [n, annotation] of section.annotations.entries()) {
 				// A margin note: the anchored line quoted, then the note, on one ink-pen bar.
 				const note: NativeNode[] = [];
-				if (annotation.target.kind === "line") {
-					note.push(text([span(annotation.target.context, "muted")], { truncate: "end", lines: 1 }));
+				if (annotation.target.kind !== "section") {
+					const quoted =
+						annotation.target.kind === "line"
+							? annotation.target.context
+							: `“${quoteLine(annotation.target.quote)}”`;
+					note.push(text([span(quoted, "muted")], { truncate: "end", lines: 1 }));
 				}
 				note.push(text(sanitizeText(annotation.note), { wrap: "word" }));
 				children.push(node("col", { role: "omp.plan.note", gap: "xs" }, note, `n${n}`));
@@ -1745,7 +2372,27 @@ export class PlanReviewOverlay implements Component {
 				role: `omp.plan.toc.depth${section.level - this.#tocBaseLevel}`,
 			});
 		});
-		this.#nativeContent = { sections: this.#sections, rev: this.#annotationRev, body, toc };
+		const title = this.#titleLine();
+		const source = this.#source();
+		const docText = title ? source.slice(0, title.start) + source.slice(title.start + title.line.length) : source;
+		const comments: TspDocComment[] = [];
+		const starts = this.#sectionStarts();
+		for (const [sectionIndex, section] of this.#sections.entries()) {
+			for (const annotation of section.annotations) {
+				const target = annotation.target;
+				const anchor =
+					target.kind === "quote"
+						? { quote: target.quote, at: starts[sectionIndex]! + target.at }
+						: this.#noteAnchor(sectionIndex, starts[sectionIndex]!, target);
+				comments.push({
+					id: annotation.id,
+					quote: anchor.quote,
+					at: this.#docOffset(anchor.at, title),
+					note: annotation.note,
+				});
+			}
+		}
+		this.#nativeContent = { sections: this.#sections, rev: this.#annotationRev, body, toc, docText, comments };
 		return this.#nativeContent;
 	}
 
@@ -1777,7 +2424,7 @@ export class PlanReviewOverlay implements Component {
 			const entries = chooser.entries.map((selection, i) => {
 				const section = this.#sections[selection.sectionIndex];
 				const annotation = section?.annotations[selection.annotationIndex];
-				const where = annotation?.target.kind === "line" ? `line ${annotation.target.context}` : "section";
+				const where = annotation ? annotationWhere(annotation.target) : "section";
 				return item(`c${i}`, {
 					label: sanitizeStatusText(annotation?.note ?? ""),
 					detail: `${sanitizeStatusText(section?.title || "Plan preamble")} · ${where}`,
@@ -1835,6 +2482,19 @@ export class PlanReviewOverlay implements Component {
 			label,
 		});
 		const hints: (NativeHint | undefined)[] = [];
+		if (this.#nativeDock) {
+			// The dock's buttons carry their own keycaps (Enter, Esc); the hints name the rest.
+			if (this.#slider) hints.push(key(["left", "right"], "model"));
+			if (this.#sidebarShown) {
+				hints.push(upDown("section"), key("d", "delete section"));
+				if (!this.#nativeDoc) hints.push(key("a", "annotate"), key("e", "edit"));
+			}
+			hints.push(key("u", "undo"));
+			if (this.#nativeDoc) {
+				hints.push({ keys: [], label: "double-click to edit" }, { keys: [], label: "select text to comment" });
+			}
+			return hints;
+		}
 		switch (this.#focus) {
 			case "actions":
 				hints.push(key(["left", "right"], "select"), key("enter", "confirm"));
@@ -1862,7 +2522,6 @@ export class PlanReviewOverlay implements Component {
 				);
 				break;
 		}
-		// Copy and the external editor are head buttons with their keycaps; the hints skip them.
 		hints.push(key("tab", "regions"));
 		hints.push(this.#helpSuffix ? { keys: [], label: this.#helpSuffix } : actionHint("tui.select.cancel", "cancel"));
 		return hints;

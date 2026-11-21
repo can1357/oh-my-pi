@@ -47,6 +47,7 @@ function makeLimit(opts: {
 	tier?: string;
 	accountId?: string;
 	provider?: string;
+	modelId?: string;
 	notes?: string[];
 	shared?: boolean;
 	sharedGroup?: string;
@@ -60,6 +61,7 @@ function makeLimit(opts: {
 			windowId: opts.windowId,
 			tier: opts.tier,
 			accountId: opts.accountId,
+			...(opts.modelId !== undefined ? { modelId: opts.modelId } : {}),
 			...(opts.shared !== undefined ? { shared: opts.shared } : {}),
 			...(opts.sharedGroup !== undefined ? { shared: true, sharedGroup: opts.sharedGroup } : {}),
 		},
@@ -596,7 +598,7 @@ describe("usage JSON policy", () => {
 
 	it("reports a provider-exhausted account as exhausted and carries reclaimAbovePct", () => {
 		const walled = makeReport("anthropic", "walled@example.test", [
-			makeLimit({ id: "5h", provider: "anthropic", usedFraction: 0.995, status: "exhausted" }),
+			makeLimit({ id: "5h", provider: "anthropic", usedFraction: 0.995, status: "exhausted", shared: true }),
 		]);
 		const options: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: 10,
@@ -634,6 +636,78 @@ describe("usage JSON policy", () => {
 		expect(policy?.remainingPct).toBe(98);
 		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now(), undefined, [], options));
 		expect(text).toContain("eligible · 98.0% left");
+	});
+
+	it("keeps the shared pool's state when only a model-scoped weekly row is spent", () => {
+		const report = makeReport("anthropic", "fable-spent@example.test", [
+			makeLimit({ id: "anthropic:5h", usedFraction: 0.3, windowId: "5h", shared: true }),
+			makeLimit({ id: "anthropic:7d", usedFraction: 0.98, windowId: "7d", shared: true }),
+			makeLimit({ id: "anthropic:7d:fable", label: "Claude 7 Day (Fable)", usedFraction: 1, tier: "fable" }),
+			makeLimit({ id: "anthropic:7d:opus", label: "Claude 7 Day (Opus)", usedFraction: 0.995, tier: "opus" }),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 1,
+			getAccountPolicy: (_provider, identity) => ({ provider: "anthropic", account: { email: identity.email } }),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toEqual({
+			priority: 0,
+			reservePct: 1,
+			reserveSource: "global",
+			scopedExhausted: ["anthropic:7d:fable"],
+			state: "eligible",
+			remainingPct: 2,
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now(), undefined, [], options));
+		expect(text).toContain("eligible · 2.0% left · Claude 7 Day (Fable) exhausted");
+	});
+
+	it("keeps every row in the pool when only subpool rows are marked shared", () => {
+		// Antigravity marks its third-party subpool `shared` with a `sharedGroup`; its Gemini counter stays unmarked.
+		const report = makeReport("google-antigravity", "subpool@example.test", [
+			makeLimit({ id: "gemini", provider: "google-antigravity", usedFraction: 0.95 }),
+			makeLimit({
+				id: "third-party",
+				provider: "google-antigravity",
+				usedFraction: 0.2,
+				sharedGroup: "third-party",
+			}),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({
+				provider: "google-antigravity",
+				account: { email: identity.email },
+			}),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toMatchObject({ state: "inside-reserve", remainingPct: 5 });
+	});
+
+	it("keeps a spent shared per-model meter out of the account-wide state", () => {
+		// Codex marks its Spark meter `shared` with a `modelId`; routing gates only Spark requests on it.
+		const report = makeReport("openai-codex", "spark-spent@example.test", [
+			makeLimit({ id: "openai-codex:primary", provider: "openai-codex", usedFraction: 0.4, shared: true }),
+			makeLimit({
+				id: "openai-codex:spark:primary",
+				label: "5 Hour (Spark)",
+				provider: "openai-codex",
+				usedFraction: 1,
+				tier: "spark",
+				modelId: "GPT-5.3-Codex-Spark",
+				shared: true,
+			}),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({ provider: "openai-codex", account: { email: identity.email } }),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toMatchObject({
+			state: "eligible",
+			remainingPct: 60,
+			scopedExhausted: ["openai-codex:spark:primary"],
+		});
 	});
 });
 
@@ -1447,24 +1521,27 @@ describe("formatUsageBreakdown", () => {
 		},
 		{ mode: "unset", verdict: "→ an open interactive omp session asks before spending it", lost: false },
 		{ mode: "no", verdict: "→ not spent automatically", lost: true },
-	])("says what codexResets.autoRedeem=$mode does with an expiring reset", ({ mode, verdict, lost }) => {
-		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		const report = codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] });
-		const text = stripVTControlCharacters(
-			formatUsageBreakdown(
-				[report],
-				[],
-				now,
-				undefined,
-				[],
-				undefined,
-				resetExpiryOptions({ "codexResets.autoRedeem": mode }),
-			),
-		);
-		expect(text).toContain(`${verdict}  (codexResets.autoRedeem: ${mode})\n`);
-		expect(text.includes("within 24h and will be lost")).toBe(lost);
-		expect(text).toContain(lost ? "spend it:  /usage reset" : "or now:  /usage reset");
-	});
+	])(
+		"says what codexResets.autoRedeemWeekly=$mode does with a weekly-governed expiring reset",
+		({ mode, verdict, lost }) => {
+			const now = Date.parse("2026-01-01T00:00:00.000Z");
+			const report = codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] });
+			const text = stripVTControlCharacters(
+				formatUsageBreakdown(
+					[report],
+					[],
+					now,
+					undefined,
+					[],
+					undefined,
+					resetExpiryOptions({ "codexResets.autoRedeemWeekly": mode }),
+				),
+			);
+			expect(text).toContain(`${verdict}  (codexResets.autoRedeemWeekly: ${mode})\n`);
+			expect(text.includes("within 24h and will be lost")).toBe(lost);
+			expect(text).toContain(lost ? "spend it:  /usage reset" : "or now:  /usage reset");
+		},
+	);
 
 	it("decides each provider's expiring reset by its own setting", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
@@ -1472,11 +1549,31 @@ describe("formatUsageBreakdown", () => {
 			codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] }),
 			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [cedarGrant(now, "cedar", 3 * HOUR)]),
 		];
-		const options = resetExpiryOptions({ "codexResets.autoRedeem": "yes", "claudeResets.autoRedeem": "no" });
+		const options = resetExpiryOptions({
+			"codexResets.autoRedeemWeekly": "yes",
+			"claudeResets.autoRedeemWeekly": "no",
+		});
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
 		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
-		expect(text).toContain("(codexResets.autoRedeem: yes)");
-		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeem: no)");
+		expect(text).toContain("(codexResets.autoRedeemWeekly: yes)");
+		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
+	});
+
+	it("counts only expiring resets that the warned reset's setting decides", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const fable = cedarGrant(now, "fable", 12 * HOUR, { clears: ["anthropic:5h", "anthropic:7d:fable"] });
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.8, "anthropic:7d:fable": 0.6 }, [
+			cedarGrant(now, "cedar", 6 * HOUR),
+			fable,
+		]);
+		const options = resetExpiryOptions({
+			"claudeResets.autoRedeemWeekly": "no",
+			"claudeResets.autoRedeemFable": "yes",
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
+		// The Fable reset follows its own key, so the weekly verdict covers the Cedar reset alone.
+		expect(text).toContain("▲ 1 saved reset expires within 24h and will be lost\n");
+		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
 	});
 
 	it.each([
@@ -1511,12 +1608,12 @@ describe("formatUsageBreakdown", () => {
 	])("counts $name among the expiring Claude resets", ({ grants, header, title, eligibleNow }) => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.5 }, grants(now));
-		const options = resetExpiryOptions({ "claudeResets.autoRedeem": "yes" });
+		const options = resetExpiryOptions({ "claudeResets.autoRedeemWeekly": "yes" });
 		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
 		expect(text).toContain(header);
 		expect(text).toContain(title);
 		expect(text).toContain(
-			`→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeem: yes)${eligibleNow ? "" : " · not eligible now"}\n`,
+			`→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeemWeekly: yes)${eligibleNow ? "" : " · not eligible now"}\n`,
 		);
 		// Only a reset the provider lets omp spend now gets a command that spends it.
 		expect(text.includes("/usage reset")).toBe(eligibleNow);
@@ -1557,13 +1654,15 @@ describe("formatUsageBreakdown", () => {
 			fetchedAt: now - fetchedAgoMs,
 		};
 		const options = resetExpiryOptions({
-			"claudeResets.autoRedeem": "yes",
+			"claudeResets.autoRedeem5h": "yes",
+			"claudeResets.autoRedeemWeekly": "yes",
 			"claudeResets.salvageHorizonHours": 0,
 		});
 		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
-		const verdict =
-			"→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeem: yes)";
-		expect(text).toContain(eligibleNow ? `${verdict}\n` : `${verdict} · not eligible now\n`);
+		const verdict = text.match(
+			/→ an open interactive omp session spends it by its last 5 min if eligible then {2}\(claudeResets\.autoRedeem\w+: yes\)(.*)\n/,
+		);
+		expect(verdict?.[1]).toBe(eligibleNow ? "" : " · not eligible now");
 		expect(text).not.toContain("will be lost");
 		expect(text).toContain("or now:  /usage reset");
 	});

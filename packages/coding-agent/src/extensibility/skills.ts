@@ -636,6 +636,12 @@ export interface SkillRediscoveryHost {
 	replaceSkills?: (skills: readonly Skill[]) => Promise<void>;
 	/** Runs `rediscover`, or joins the holder's pass already in flight, so concurrent misses share one. */
 	shareRediscovery?: (rediscover: () => Promise<readonly Skill[]>) => Promise<readonly Skill[]>;
+	/**
+	 * Rediscovers the holder's own skills for a `skill://` name its list lacks (a skill created or
+	 * installed since), rate-limited by the holder; undefined when it skips the pass. Absent for a
+	 * fixed list, which gains no new skills.
+	 */
+	rediscoverForUnknownName?: () => Promise<readonly Skill[]> | undefined;
 	/** Settings for a one-off discovery; without them a fixed list cannot be re-pointed. */
 	settings?: Settings;
 	cwd?: string;

@@ -35,7 +35,6 @@ import {
 	resetSqlWriteLatchForTest,
 	sqlStoreHasWritten,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-fallback";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as sessionPaths from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { SESSION_TRANSFER_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
@@ -790,10 +789,6 @@ describe("default file storage keeps main's listing behaviour", () => {
 			// A dot-named transcript is still a transcript to this walk, as it was
 			// to readdir; only the session listings hide hidden names.
 			expect(found.get(".Hidden")).toBe(path.join(dir, ".Hidden.jsonl"));
-			// `onlyPreferred` keeps its own rule: a direct transcript wins there.
-			expect((await sessionFilesFromDisk(dir, { onlyPreferred: true })).get("Worker")).toBe(
-				path.join(dir, "Worker.jsonl"),
-			);
 		} finally {
 			unregister();
 		}

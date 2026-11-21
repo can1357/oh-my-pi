@@ -31,7 +31,7 @@ describe("out://", () => {
 	it("is advertised only where replies reach the user", () => {
 		const router = InternalUrlRouter.instance();
 		const advertised = (outReplies: boolean) =>
-			router.describe({ ...host, outReplies }).some(line => line.startsWith("`out://`"));
+			router.describe({ ...host, outReplies }).some(line => line.startsWith("out://"));
 		expect(advertised(true)).toBe(true);
 		expect(advertised(false)).toBe(false);
 	});

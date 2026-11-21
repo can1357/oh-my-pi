@@ -1,14 +1,17 @@
 import type { Component } from "../tui";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import { visibleWidth } from "../utils";
 import {
 	cappedHeadLines,
 	formatBadge,
 	formatDuration,
 	formatErrorDetail,
+	formatExpandHint,
 	formatStatusIcon,
 	PREVIEW_LIMITS,
 	TRUNCATE_LENGTHS,
 	type ToolUIColor,
+	wrapTextWithAnsi,
 } from "../render/render-utils";
 import type { Theme } from "../theme/theme";
 import type { NativeToolView, RenderResultOptions } from "./renderer";
@@ -17,41 +20,72 @@ import { ansi, compact, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { errorText, noteText, toolHead } from "./native-view";
 import type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "./wait";
+import { jobDisplayLabel } from "./job-label";
 import type { IrcDeliveryReceipt } from "./irc";
-import type { DaemonSnapshot } from "./daemon";
+import { type PersistedSnapshot, type ServiceView, serviceView } from "./daemon";
 import { styleTerminalRow } from "./terminal-output";
 import { card, type CardToolResult as ToolResult, firstText, safe } from "./result-card";
 
 export interface ProcReadDetails {
 	jobs?: JobSnapshot[];
 	agents?: AgentActivitySnapshot[];
-	daemons?: DaemonSnapshot[];
+	daemons?: PersistedSnapshot[];
 	job?: JobSnapshot;
-	daemon?: DaemonSnapshot;
+	daemon?: PersistedSnapshot;
 	log?: string;
 	terminalRows?: string[];
 }
 
 export type ProcWriteDetails =
 	| CoordinationDetails
-	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string };
+	| { action: "stop" | "stdin" | "mode"; daemon: PersistedSnapshot; input?: string; mode?: string };
 
 /** Process operation selected by a write URL, independent of its content. */
 export type ProcWriteAction = "stdin" | "mode" | "kill";
 
-function preview(body: string, expanded: boolean, theme: Theme, tone: "dim" | "toolOutput" = "dim"): string[] {
+function preview(
+	body: string,
+	expanded: boolean,
+	theme: Theme,
+	tone: "dim" | "toolOutput" = "dim",
+	width?: number,
+): string[] {
 	if (!body.trim()) return [];
-	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
-	const shown = cappedHeadLines(
-		body.split("\n").filter(line => line.trim()),
-		limit,
-	);
 	const quote = theme.fg("dim", theme.md.quoteBorder);
-	const lines = shown.lines.map(
-		line =>
-			`  ${quote} ${theme.fg(tone, truncateToWidth(safe(line.trim()), TRUNCATE_LENGTHS.LINE, Ellipsis.Unicode))}`,
-	);
-	if (shown.hidden) lines.push(`  ${quote} ${theme.fg("dim", `… +${shown.hidden} more lines`)}`);
+	const prefix = `  ${quote} `;
+	const source = body.split("\n").filter(line => line.trim());
+	// An expanded IRC card (the only caller passing a width) shows the whole
+	// message. Without a width this is a proc/job card, whose expanded view
+	// keeps a budget: a job log with thousands of lines would push the
+	// transcript off the screen.
+	const ircExpanded = expanded && width !== undefined;
+	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
+	const shown = ircExpanded ? source : cappedHeadLines(source, limit).lines;
+	const hidden = source.length - shown.length;
+	// Each row is clipped to the card width, so the text budget is that width
+	// minus the quote rail; with no card width the fixed cap stands.
+	const contentWidth = width === undefined ? TRUNCATE_LENGTHS.LINE : Math.max(1, width - visibleWidth(prefix));
+	const cap = Math.min(TRUNCATE_LENGTHS.LINE, contentWidth);
+	let cut = false;
+	const lines: string[] = [];
+	for (const line of shown) {
+		const text = safe(line.trim());
+		// IRC cards pass the card width: an expanded body soft-wraps instead of
+		// being cut. Collapsed rows keep the fixed cap, narrowed to the card.
+		if (ircExpanded) {
+			for (const row of wrapTextWithAnsi(text, contentWidth)) lines.push(`${prefix}${theme.fg(tone, row)}`);
+			continue;
+		}
+		cut ||= visibleWidth(text) > cap;
+		lines.push(`${prefix}${theme.fg(tone, truncateToWidth(text, cap, Ellipsis.Unicode))}`);
+	}
+	// The hint is not width-gated: a caller that passes no width (the proc/job
+	// card) still elides lines, and a silent cap reads as if the log ended there.
+	if (hidden > 0 || cut) {
+		const hint = formatExpandHint(theme, expanded, true);
+		const marker = hidden > 0 ? `… +${hidden} more lines` : "…";
+		lines.push(`${prefix}${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
+	}
 	return lines;
 }
 
@@ -91,7 +125,7 @@ export function renderAgentWrite(
 		);
 		if (result?.isError && receipts.length === 0)
 			return [header, formatErrorDetail(firstText(result) || "Message delivery failed.", theme)];
-		const lines = [header, ...preview(body, expanded, theme)];
+		const lines = [header, ...preview(body, expanded, theme, "dim", width)];
 		if (result && receipts.length === 0)
 			lines.push(theme.fg("muted", firstText(result) || "No live peers to broadcast to."));
 		if (receipts.length > 1 || failed > 0) {
@@ -113,21 +147,26 @@ export function renderAgentWrite(
 	}, options);
 }
 
-function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
+function daemonMeta(daemon: ServiceView, theme: Theme): string[] {
 	const stateColor =
 		daemon.state === "ready" || daemon.state === "running"
 			? "success"
 			: daemon.state === "failed"
 				? "error"
 				: "warning";
-	const meta = [theme.fg(stateColor, daemon.state)];
-	if (daemon.pid !== undefined) meta.push(`pid ${daemon.pid}`);
-	meta.push(
-		`${daemon.exitedAt === undefined ? "up" : "ran"} ${formatDuration(Math.max(0, (daemon.exitedAt ?? Date.now()) - daemon.startedAt))}`,
+	return [theme.fg(stateColor, daemon.state), ...serviceFacts(daemon)];
+}
+
+/** A service's facts after its state: pid, run time, and what keeps it alive. */
+function serviceFacts(service: ServiceView): string[] {
+	const facts: string[] = [];
+	if (service.pid !== undefined) facts.push(`pid ${service.pid}`);
+	facts.push(
+		`${service.exitedAt === undefined ? "up" : "ran"} ${formatDuration(Math.max(0, (service.exitedAt ?? Date.now()) - service.startedAt))}`,
 	);
-	if (daemon.detached) meta.push("detached");
-	else if (daemon.persist) meta.push("persistent");
-	return meta;
+	if (service.hold === "detached") facts.push("detached");
+	else if (service.hold === "persist") facts.push("persistent");
+	return facts;
 }
 
 function jobRow(job: JobSnapshot, theme: Theme): string {
@@ -141,7 +180,7 @@ function jobRow(job: JobSnapshot, theme: Theme): string {
 					: "success",
 		theme,
 	);
-	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(job.intent || job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
+	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(jobDisplayLabel(job)))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
 }
 
 /** Render live and completed process writes with the URL-selected operation. */
@@ -162,7 +201,7 @@ export function renderProcWrite(
 				icon:
 					result === undefined ? "pending" : result.isError ? "error" : action === "kill" ? "aborted" : "success",
 				title,
-				meta: daemon ? daemonMeta(daemon, theme) : action === "mode" && content ? [safe(content)] : [],
+				meta: daemon ? daemonMeta(serviceView(daemon), theme) : action === "mode" && content ? [safe(content)] : [],
 			},
 			theme,
 		);
@@ -206,7 +245,7 @@ export function renderProcRead(
 			{
 				icon: result === undefined ? "pending" : result.isError ? "error" : "info",
 				title,
-				meta: daemon ? daemonMeta(daemon, theme) : [],
+				meta: daemon ? daemonMeta(serviceView(daemon), theme) : [],
 			},
 			theme,
 		);
@@ -239,7 +278,7 @@ export function renderProcRead(
 			return [header, ...preview(firstText(result), expanded, theme, "toolOutput")];
 		}
 		const jobs = details?.jobs ?? [];
-		const services = details?.daemons ?? [];
+		const services = (details?.daemons ?? []).map(serviceView);
 		const agents = details?.agents ?? [];
 		const meta = [
 			`${jobs.length} jobs`,
@@ -250,7 +289,7 @@ export function renderProcRead(
 		const items = [
 			...jobs.map(job => ({ label: jobRow(job, theme) })),
 			...services.map(service => ({
-				label: `${formatBadge("service", "accent", theme)} ${theme.fg("toolOutput", safe(service.name))} ${formatBadge(service.state, service.state === "failed" ? "error" : service.state === "ready" || service.state === "running" ? "success" : "warning", theme)} ${daemonMeta(service, theme).slice(1).join(theme.sep.dot)}`,
+				label: `${formatBadge("service", "accent", theme)} ${theme.fg("toolOutput", safe(service.name))} ${formatBadge(service.state, service.state === "failed" ? "error" : service.state === "ready" || service.state === "running" ? "success" : "warning", theme)} ${serviceFacts(service).join(theme.sep.dot)}`,
 			})),
 			...agents.map(agent => ({
 				label: `${formatBadge("agent", agent.live ? "accent" : "warning", theme)} ${theme.fg("toolOutput", safe(agent.id))} ${theme.fg("dim", formatDuration(agent.ageMs))}`,
@@ -277,15 +316,8 @@ export function renderProcRead(
 // Native (TSP) views
 // =============================================================================
 
-function daemonMetaText(daemon: DaemonSnapshot): string {
-	const meta: string[] = [daemon.state];
-	if (daemon.pid !== undefined) meta.push(`pid ${daemon.pid}`);
-	meta.push(
-		`${daemon.exitedAt === undefined ? "up" : "ran"} ${formatDuration(Math.max(0, (daemon.exitedAt ?? Date.now()) - daemon.startedAt))}`,
-	);
-	if (daemon.detached) meta.push("detached");
-	else if (daemon.persist) meta.push("persistent");
-	return meta.join(" · ");
+function daemonMetaText(daemon: ServiceView): string {
+	return [daemon.state, ...serviceFacts(daemon)].join(" · ");
 }
 
 function jobTone(status: JobSnapshot["status"]): TspTone {
@@ -303,7 +335,7 @@ function jobItem(job: JobSnapshot, badge?: { text: string; tone: TspTone }): Nat
 		"item",
 		{
 			label: [span(job.type, "accent"), span(" "), span(safe(job.id), "toolOutput")],
-			detail: [span(safe(job.intent || job.label), "muted")],
+			detail: [span(safe(jobDisplayLabel(job)), "muted")],
 			value: badge ? [span(badge.text, badge.tone)] : [span(formatDuration(job.durationMs), "muted")],
 			tone: badge?.tone ?? jobTone(job.status),
 		},
@@ -384,7 +416,7 @@ export function describeProcWrite(
 	const head = toolHead(
 		`Proc ${action}`,
 		span(safe(id || "…"), "accent"),
-		daemon ? daemonMetaText(daemon) : action === "mode" && content ? safe(content) : undefined,
+		daemon ? daemonMetaText(serviceView(daemon)) : action === "mode" && content ? safe(content) : undefined,
 	);
 	if (result?.isError) {
 		return { head, tone: "error", body: [errorText(firstText(result) || "Process operation failed.")] };
@@ -425,7 +457,11 @@ export function describeProcRead(
 ): NativeToolView {
 	const daemon = details?.daemon;
 	const title = id ? "Proc" : "Proc jobs & services";
-	const head = toolHead(title, id ? span(safe(id), "accent") : undefined, daemon ? daemonMetaText(daemon) : undefined);
+	const head = toolHead(
+		title,
+		id ? span(safe(id), "accent") : undefined,
+		daemon ? daemonMetaText(serviceView(daemon)) : undefined,
+	);
 	if (result?.isError) {
 		return { head, tone: "error", body: [errorText(firstText(result) || "Process read failed.")] };
 	}
@@ -448,7 +484,7 @@ export function describeProcRead(
 		return { head, body: compact<NativeChild>([quotedPreview(firstText(result), "toolOutput")]) };
 	}
 	const jobs = details?.jobs ?? [];
-	const services = details?.daemons ?? [];
+	const services = (details?.daemons ?? []).map(serviceView);
 	const agents = details?.agents ?? [];
 	const items: NativeNode[] = [
 		...jobs.map(job => jobItem(job)),

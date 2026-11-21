@@ -157,7 +157,7 @@ System prompt construction (`src/system-prompt.ts`) uses discovered skills as fo
 
 - if an active tool declares `readsSkillUris: true`:
    - include the discovered skills list, excluding hidden skills
-   - mounted `xd://` tools count when their capability metadata is projected
+   - mounted tool commands count when their capability metadata is projected
 - otherwise:
    - omit the discovered list
 
@@ -222,6 +222,7 @@ Resolution details:
 - Agent Plugins and Skillshare skills also realpath-check containment within their package root, preventing symlink escapes; symlinks to another location inside that package are allowed
 - directories return directory listings
 - missing files return an explicit `File not found` error
+- a name no loaded skill owns rediscovers the main session's skills before failing, so a skill created or installed after the session started resolves (and joins the session's skill list and system prompt); such misses start at most one rediscovery every 2 seconds, and a subagent's inherited list gains no new skills
 
 Content type:
 

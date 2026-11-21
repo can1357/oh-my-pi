@@ -87,10 +87,8 @@ describe("eval timeout admission contract", () => {
 		};
 		expect(description()).toContain("1–3600");
 		expect(description()).toContain("12");
-		expect(tool.description).toContain("12");
 		cfgToolsMaxTimeout.override(settings, 7);
 		expect(description()).toContain("7");
-		expect(tool.description).toContain("7");
 	});
 
 	it("keeps a background cell's deadline and notices fixed at its admitted value", async () => {

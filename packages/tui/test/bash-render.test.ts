@@ -6,7 +6,10 @@ import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/t
 import { bashToolRenderer, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
+import { RunTrace } from "@oh-my-pi/pi-natives";
+import { defaultShellVizPreferences, readShellPresentation } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
@@ -116,8 +119,8 @@ describe("bashToolRenderer", () => {
 			{ command: "python3 scripts/edit-benchmark.py", timeout: 1200 },
 		);
 		const rendered = sanitizeText(component.render(120).join("\n"));
-		expect(rendered).toContain("Timeout: 120s");
-		expect(rendered).not.toContain("Timeout: 1200s");
+		expect(rendered).toContain(`${uiTheme.status.pending} 2m`);
+		expect(rendered).not.toContain(`${uiTheme.status.pending} 20m`);
 	});
 
 	it("renders wall time alongside the timeout label and strips the textual notice", async () => {
@@ -132,8 +135,7 @@ describe("bashToolRenderer", () => {
 			{ command: "echo hi" },
 		);
 		const rendered = sanitizeText(component.render(120).join("\n"));
-		expect(rendered).toContain("Wall: 1.23s");
-		expect(rendered).toContain("Timeout: 5s");
+		expect(rendered).toContain(`${uiTheme.icon.time} 1.2s/5.0s`);
 		// Notice text must not appear in the output region — the styled label is the
 		// only place wall time is shown so users don't read it twice.
 		expect(rendered).not.toContain("Wall time: 1.23 seconds");
@@ -150,7 +152,7 @@ describe("bashToolRenderer", () => {
 			const component = bashToolRenderer.renderResult(result, options, uiTheme, args);
 			const rendered = sanitizeText(component.render(120).join("\n"));
 			expect(rendered.match(/Wall time: 0\.02 seconds/gu)).toHaveLength(1);
-			expect(rendered).toContain("Wall: 0.02s");
+			expect(rendered).toContain(`${uiTheme.icon.time} 20ms`);
 			const view = bashToolRenderer.describeResult(result, options, args);
 			const output = (view.body ?? [])
 				.flatMap(node => ("k" in node ? (node.c ?? []) : []))
@@ -171,12 +173,12 @@ describe("bashToolRenderer", () => {
 			{ command: "bun run dev", name: "web", ready: { log: "READY" } },
 		);
 		const rendered = sanitizeText(component.render(120).join("\n"));
-		expect(rendered).toContain("Service: web");
-		expect(rendered).toContain("State: ready");
-		expect(rendered).toContain("Ready: yes");
-		expect(rendered).toContain("PID: 42");
+		expect(rendered).toContain(`${uiTheme.icon.server} web`);
+		expect(rendered).toContain(`${uiTheme.status.success} ready`);
+		expect(rendered).toContain(`${uiTheme.status.success} ready`);
+		expect(rendered).toContain(`${uiTheme.icon.pid}42`);
 		expect(rendered).toContain("listening");
-		expect(rendered).not.toContain("Timeout:");
+		expect(rendered).not.toContain(uiTheme.status.pending);
 	});
 
 	it("renders a backgrounded job as a static footer notice, with or without a stated deadline", async () => {
@@ -204,7 +206,7 @@ describe("bashToolRenderer", () => {
 			);
 			const rendered = sanitizeText(component.render(120).join("\n"));
 			expect(rendered, label).toContain("started");
-			expect(rendered, label).toContain("Backgrounded: bash-42");
+			expect(rendered, label).toContain(`${uiTheme.icon.job} bash-42`);
 			// Shared by every notice form, so a row whose notice is not stripped fails here.
 			expect(rendered, label).not.toContain("injected into the conversation");
 			expect(rendered, label).not.toContain("Do NOT poll");
@@ -215,7 +217,7 @@ describe("bashToolRenderer", () => {
 	it("folds raw output artifact notices into the status footer", async () => {
 		const component = bashToolRenderer.renderResult(
 			{
-				content: [{ type: "text", text: "filtered\n[raw output: artifact://13]\n\nWall time: 0.08 seconds" }],
+				content: [{ type: "text", text: "filtered\n[raw output: local://13.log]\n\nWall time: 0.08 seconds" }],
 				details: { timeoutSeconds: 300, wallTimeMs: 80 },
 				isError: false,
 			},
@@ -225,11 +227,10 @@ describe("bashToolRenderer", () => {
 		);
 		const rendered = sanitizeText(component.render(120).join("\n"));
 		expect(rendered).toContain("filtered");
-		expect(rendered).toContain("Wall: 0.08s");
-		expect(rendered).toContain("Timeout: 300s");
-		expect(rendered).toContain("Artifact: 13");
-		expect(rendered).not.toContain("[raw output: artifact://13]");
-		expect(rendered).not.toContain("artifact://13");
+		expect(rendered).toContain(`${uiTheme.icon.time} 80ms/5m`);
+		// The footer notice leaves the body; its URL shows once, in the status line.
+		expect(rendered).not.toContain("[raw output:");
+		expect(rendered.split(spillUrl(13))).toHaveLength(2);
 	});
 	it("renders the exit status in the footer and strips the textual exit notice for failed commands", async () => {
 		const component = bashToolRenderer.renderResult(
@@ -244,9 +245,8 @@ describe("bashToolRenderer", () => {
 		);
 		const rendered = sanitizeText(component.render(120).join("\n"));
 		// The footer carries the styled stats including the non-zero exit status.
-		expect(rendered).toContain("Wall: 0.02s");
-		expect(rendered).toContain("Timeout: 300s");
-		expect(rendered).toContain("Exit: 1");
+		expect(rendered).toContain(`${uiTheme.icon.time} 20ms/5m`);
+		expect(rendered).toContain(`${uiTheme.status.error} 1`);
 		// Both the exit-code and wall-time notices are folded into the footer, not
 		// echoed verbatim in the output region.
 		expect(rendered).not.toContain("Command exited with code 1");
@@ -286,9 +286,8 @@ describe("bashToolRenderer", () => {
 			{ command: "true" },
 		);
 		const rendered = sanitizeText(component.render(120).join("\n"));
-		expect(rendered).toContain("Wall: 0.02s");
-		expect(rendered).toContain("Timeout: 300s");
-		expect(rendered).not.toContain("Exit:");
+		expect(rendered).toContain(`${uiTheme.icon.time} 20ms/5m`);
+		expect(rendered).not.toContain(uiTheme.status.error);
 	});
 
 	it("bypasses truncation/styling for SIXEL lines", async () => {
@@ -319,6 +318,58 @@ describe("bashToolRenderer", () => {
 		const lines = component.render(80);
 
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
+	});
+
+	it("keeps a long embedded argument wrapped inside the pending card under its nesting indent", () => {
+		const command = `pip3 list 2>/dev/null | grep -i -E "onnx|torch|ultralytics|opencv|numpy|espeak|sounddevice|piper|mediapipe|tflite|tf-|tensorflow"; sw_vers`;
+		const shellPresentation = readShellPresentation(new RunTrace(command), defaultShellVizPreferences());
+		const component = bashToolRenderer.renderCall(
+			{ command },
+			{ expanded: false, isPartial: true, shellPresentation },
+			uiTheme,
+		);
+		const rows = component.render(77).map(row => Bun.stripANSI(row));
+		for (const row of rows) {
+			expect(visibleWidth(row)).toBeLessThanOrEqual(77);
+			expect(row).toMatch(/^[│╭╰].*[│╮╯]$/);
+		}
+		const inner = rows.slice(1, -1).map(row => row.slice(1, -1));
+		expect(inner.filter(row => row.trim().length === 0)).toEqual([]);
+		const indent = (row: string) => row.length - row.trimStart().length;
+		const topLevel = indent(inner.find(row => row.includes("sw_vers"))!);
+		const body = inner.filter(row => /onnx|tensorflow/.test(row));
+		expect(body.join("").replace(/\s/g, "")).toContain("tflite|tf-|tensorflow");
+		for (const row of body) expect(indent(row)).toBeGreaterThan(topLevel);
+	});
+
+	it("keeps the interpreted command when a result lands before the run's first trace", () => {
+		// An `async` call returns its background-start result before the trace poll ran once.
+		setThemeInstance(uiTheme);
+		const command = 'cd /elsewhere && for v in a b; do echo "$v" || break; done';
+		const shellPresentation = readShellPresentation(new RunTrace(command), defaultShellVizPreferences());
+		// Rows between the card's top border and the next divider (`Output`, or the bottom border).
+		const commandPane = (rows: readonly string[]) => {
+			const plain = rows.map(row => Bun.stripANSI(row));
+			const end = plain.findIndex((row, index) => index > 0 && /^[├╰]/.test(row));
+			return plain.slice(1, end);
+		};
+		const call = bashToolRenderer.renderCall(
+			{ command },
+			{ expanded: false, isPartial: true, shellPresentation },
+			uiTheme,
+		);
+		const result = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: { async: { state: "running", jobId: "bg_1", type: "bash" }, cwd: "/elsewhere" },
+			},
+			{ expanded: false, isPartial: false, shellPresentation },
+			uiTheme,
+			{ command },
+		);
+		const callPane = commandPane(call.render(90));
+		expect(commandPane(result.render(90))).toEqual(callPane);
+		expect(callPane.join("\n")).not.toContain("echo");
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {
@@ -427,7 +478,7 @@ describe("bashToolRenderer", () => {
 		const filter = `\x1b[31mlint\x1b[0m\tun\x07safe\nfooter ${"界".repeat(30)}`;
 		const label = `lint unsafe footer ${"界".repeat(10)}…`;
 		const result = {
-			content: [{ type: "text" as const, text: "1 error\n[raw output: artifact://2]" }],
+			content: [{ type: "text" as const, text: "1 error\n[raw output: local://2.log]" }],
 			details: { meta: { minimized: { filter, inputBytes: 1960, outputBytes: 27, artifactId: "2" } } },
 		};
 		const args = { command: "pnpm lint" };
@@ -437,8 +488,8 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("\x07");
 		const footer = Bun.stripANSI(rendered)
 			.split("\n")
-			.find(line => line.includes("Minimized:"));
-		expect(footer).toContain(`Minimized: ${label} 1.9KB → 27B`);
+			.find(line => line.includes(uiTheme.icon.minimize));
+		expect(footer).toContain(`${uiTheme.icon.minimize} ${label} 1.9KB → 27B`);
 		expect(footer).not.toContain("\t");
 		const view = JSON.stringify(bashToolRenderer.describeResult(result, options, args));
 		expect(view).toContain(`Minimized ${label} 1.9KB → 27B`);
@@ -449,7 +500,7 @@ describe("bashToolRenderer", () => {
 		const home = spyOn(os, "homedir").mockReturnValue("/home/alice");
 		try {
 			const result = {
-				content: [{ type: "text" as const, text: "ok\n[raw output: artifact://3]" }],
+				content: [{ type: "text" as const, text: "ok\n[raw output: local://3.log]" }],
 				details: {
 					meta: {
 						minimized: { filter: "/home/alice/bin/lint", inputBytes: 1960, outputBytes: 27, artifactId: "3" },
@@ -461,7 +512,7 @@ describe("bashToolRenderer", () => {
 				.renderResult(result, options, uiTheme, { command: "lint" })
 				.render(200)
 				.join("\n");
-			expect(Bun.stripANSI(rendered)).toContain("Minimized: ~/bin/lint 1.9KB → 27B");
+			expect(Bun.stripANSI(rendered)).toContain(`${uiTheme.icon.minimize} ~/bin/lint 1.9KB → 27B`);
 			expect(rendered).not.toContain("/home/alice");
 		} finally {
 			home.mockRestore();

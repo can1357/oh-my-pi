@@ -106,7 +106,6 @@ describe("advisor classifier-refusal fallback", () => {
 			settings,
 			modelRegistry,
 			extensionRunner,
-			advisorTools: [],
 			advisorStreamFn: (model, context, options) => {
 				advisorRequests.push(model.id);
 				const refuses =

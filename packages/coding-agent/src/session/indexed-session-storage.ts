@@ -13,7 +13,7 @@ import {
 	type SessionStorageWriteOptions,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
-import { isAssistantMessageLine, SESSION_TITLE_SLOT_BYTES } from "./session-entries";
+import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { eexist, enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
@@ -22,6 +22,7 @@ import {
 	type SessionTitleUpdate,
 	titleUpdateFromSlot,
 } from "./session-title-slot";
+import { purgeDeletedSessionRows } from "./session-db-purge";
 
 export interface SessionStorageIndexEntry {
 	path: string;
@@ -219,7 +220,7 @@ export class IndexedSessionStorage implements SessionStorage {
 				});
 			}
 			const settled = (path: string): boolean => !window.has(path) && !this.#pendingFrames.has(path);
-			for (const path of [...this.#index.keys()]) {
+			for (const path of this.#index.keys()) {
 				if (!fresh.has(path) && settled(path)) this.#index.delete(path);
 			}
 			for (const [path, entry] of fresh) {
@@ -420,11 +421,10 @@ export class IndexedSessionStorage implements SessionStorage {
 		return { text: bytes.subarray(offset, end).toString("utf-8"), size: bytes.length };
 	}
 
-	async hasAssistantTurn(path: string): Promise<boolean> {
+	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
 		for (const line of (await this.readText(path)).split("\n")) {
-			if (isAssistantMessageLine(line)) return true;
+			if (visit(line)) return;
 		}
-		return false;
 	}
 
 	async writeText(path: string, content: string): Promise<void> {
@@ -572,7 +572,10 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+	async deleteSessionWithArtifacts(
+		sessionPath: string,
+		options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void> {
 		// Rows another client committed under the artifacts directory (a
 		// subagent transcript, a draft) go too: the refresh brings the ones
 		// committed so far into this view, and the backend removes every key
@@ -582,6 +585,14 @@ export class IndexedSessionStorage implements SessionStorage {
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
+		// Capture the transcript before removal. History/stats are purged only
+		// after the backend remove succeeds, so a failed delete does not drop
+		// rows for a session that is still listed. An unreadable transcript
+		// still deletes; its id cannot be resolved.
+		let content: string | undefined;
+		try {
+			content = await this.readText(sessionPath);
+		} catch {}
 
 		const artifactsDir = sessionPath.slice(0, -6);
 		const prefix = artifactsDir.endsWith("/") ? artifactsDir : `${artifactsDir}/`;
@@ -609,6 +620,16 @@ export class IndexedSessionStorage implements SessionStorage {
 			for (const [path] of previous) this.#failFrame(path, sessionEntry.mtimeMs);
 			throw toError(err);
 		}
+
+		// Best-effort: a busy dashboard store never fails the delete itself.
+		try {
+			purgeDeletedSessionRows(sessionPath, {
+				content,
+				historyDbPath: options?.historyDbPath,
+				statsDbPath: options?.statsDbPath,
+			});
+		} catch {}
+
 		// Tool artifacts and sidecars stay on local disk whatever holds the
 		// transcripts, so removing the session removes them as the file
 		// backend's delete does.

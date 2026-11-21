@@ -58,9 +58,9 @@ export type { CollabSessionState };
  * that serialize into those shapes.
  */
 export type CollabFrame =
-	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
+	// guest -> host (every guest frame but prompt is taken verbatim from the wire grammar)
 	| Exclude<GuestFrame, { t: "prompt" }>
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	| { t: "prompt"; text: string; images?: ImageContent[]; followUp?: true }
 	// host -> guest
 	| {
 			t: "welcome";
@@ -99,7 +99,8 @@ export type CollabFrame =
 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }
-	| { t: "error"; message: string };
+	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
+	| { t: "error"; message: string; resync?: true };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pre-serialized frames: the host bounds replicated payloads by serializing
@@ -137,6 +138,10 @@ const SNAPSHOT_CHUNK_FINAL = `],"${SNAPSHOT_CHUNK_FIELDS.final}":`;
 /** The single construction point of {@link EncodedFrame}. */
 function encodedFrame(json: string): EncodedFrame {
 	return json as EncodedFrame;
+}
+
+export function encodeFrame(frame: CollabFrame): EncodedFrame {
+	return encodedFrame(JSON.stringify(frame));
 }
 
 /** `{ t: "entry", entry }` from the entry's JSON. */

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
@@ -112,12 +111,12 @@ describe("ExtensionContext.agent", () => {
 	// on the advisor's own investigation (issue #13598).
 	test("an advisor's tool calls report the advisor, not the session's agent", async () => {
 		const RealSessionAdvisors = sessionAdvisors.SessionAdvisors;
-		let advisorTools: AgentTool[] = [];
+		let advisorTools: sessionAdvisors.AdvisorToolFactory | undefined;
 		const advisorsSpy = spyOn(sessionAdvisors, "SessionAdvisors").mockImplementation(function (
 			host: sessionAdvisors.SessionAdvisorsHost,
 			options: sessionAdvisors.SessionAdvisorsOptions,
 		) {
-			advisorTools = options.tools ?? [];
+			advisorTools = options.tools;
 			return new RealSessionAdvisors(host, options);
 		} as never);
 		const seen: Array<{ event: string; toolCallId: string; agent: ExtensionAgentIdentity }> = [];
@@ -136,7 +135,7 @@ describe("ExtensionContext.agent", () => {
 			advisorsSpy.mockRestore();
 		}
 		try {
-			const advisorGrep = advisorTools.find(tool => tool.name === "grep");
+			const advisorGrep = advisorTools?.create(new Set(["grep"])).tools.find(tool => tool.name === "grep");
 			await advisorGrep!.execute("advisor-call", { pattern: "needle", path: tempDir });
 			await session.getToolByName("read")!.execute("main-call", { path: path.join(tempDir, "probe.txt") });
 		} finally {

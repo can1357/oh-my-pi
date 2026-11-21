@@ -13,7 +13,7 @@ import { card, kbd, keyNames, list, node, row, span, text } from "./describe";
 import type { NativeChild, NativeNode } from "./node";
 import { nativeButtons } from "./state";
 
-/** Below this many columns a centered sheet fills the pane instead of floating with margins. */
+/** Below this many columns a centered sheet with tall content fills the pane instead of floating with margins. */
 export const NARROW_SHEET_COLS = 100;
 
 /** One footer hint: the keys that trigger it and what it does. */

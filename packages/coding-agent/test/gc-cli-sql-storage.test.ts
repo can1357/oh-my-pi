@@ -163,33 +163,59 @@ describe("omp gc --stale under session.storage: sql", () => {
 });
 
 describe("omp gc disk-only phases under session.storage: sql", () => {
+	/**
+	 * A cold session file on disk with replay data outside its latest replay
+	 * turn: the first response's signed reasoning is what `--strip` removes, so
+	 * a strip that ran would change the bytes as well as report itself.
+	 */
 	async function coldLocalSession(): Promise<{ file: string; bytes: Uint8Array }> {
 		const file = path.join(getSessionsDir(root), "project", "cold.jsonl");
+		const assistant = (thinking: string, signature: string) =>
+			JSON.stringify({
+				type: "message",
+				message: {
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "stop",
+					content: [
+						{ type: "thinking", thinking, thinkingSignature: signature },
+						{ type: "text", text: "done" },
+					],
+				},
+			});
+		const prompt = JSON.stringify({
+			type: "message",
+			message: { role: "user", content: [{ type: "text", text: "again" }] },
+		});
 		await Bun.write(
 			file,
-			`${transcript("cold", "old")}${JSON.stringify({ type: "message", message: { role: "assistant", content: [] } })}\n`,
+			`${transcript("cold", "old")}${assistant("earlier", "EqQBearly")}\n${prompt}\n${assistant("latest", "EqQBlatest")}\n`,
 		);
 		const old = new Date(Date.now() - 90 * 86_400_000);
 		await fs.utimes(file, old, old);
 		return { file, bytes: await Bun.file(file).bytes() };
 	}
 
-	for (const phase of ["archive", "compress"] as const) {
+	for (const phase of ["archive", "compress", "strip"] as const) {
 		test(`--${phase} --apply refuses, names the storage, and leaves session files alone`, async () => {
 			const { file, bytes } = await coldLocalSession();
 
 			const result = await runGcCommand({
 				flags: {
 					agentDir: root,
-					...(phase === "archive" ? { archive: true } : { compress: true }),
+					[phase]: true,
 					apply: true,
 					coldArchiveAfterDays: 0,
 					retainNewestGlobal: 0,
 					retainNewestPerCwd: 0,
 					compressAfterDays: 0,
+					stripAfterDays: 0,
 				},
 			});
 
+			expect(await Bun.file(file).bytes()).toEqual(new Uint8Array(bytes));
 			expect(result[phase]).toBeUndefined();
 			expect(result.refused).toEqual([
 				{ phase, requested: true, reason: expect.stringContaining("unavailable with session.storage: sql") },
@@ -197,7 +223,6 @@ describe("omp gc disk-only phases under session.storage: sql", () => {
 			expect(collectGcErrors(result)).toEqual([
 				expect.stringContaining(`${phase}: unavailable with session.storage: sql`),
 			]);
-			expect(await Bun.file(file).bytes()).toEqual(new Uint8Array(bytes));
 			expect(await Bun.file(path.join(root, "archive")).exists()).toBe(false);
 		});
 	}

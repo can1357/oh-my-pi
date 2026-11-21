@@ -12,6 +12,8 @@ import {
 	truncateToWidth,
 	clipCollapsed,
 } from "../render/render-utils";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { singleLine } from "../utils";
 import type { NativeToolView, RenderResultOptions, ToolRenderer, ToolRenderResult } from "./renderer";
 import { ansi, kv } from "../native/describe";
 import type { NativeChild } from "../native/node";
@@ -88,43 +90,20 @@ export function formatSessionSnapshot(snapshot: DebugSessionSnapshot): string[] 
 	return lines;
 }
 
-function summarizeDebugCall(args: DebugRenderArgs): string {
-	const action = args.action ? args.action.replaceAll("_", " ") : "request";
-	if (args.program) {
-		return `${action} ${truncateToWidth(args.program, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.file && args.line !== undefined) {
-		return `${action} ${truncateToWidth(`${args.file}:${args.line}`, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.function) {
-		return `${action} ${truncateToWidth(args.function, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.expression) {
-		return `${action} ${truncateToWidth(args.expression, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.command) {
-		return `${action} ${truncateToWidth(args.command, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.memory_reference) {
-		return `${action} ${truncateToWidth(args.memory_reference, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.instruction_reference) {
-		return `${action} ${truncateToWidth(args.instruction_reference, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.data_id) {
-		return `${action} ${truncateToWidth(args.data_id, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.name) {
-		return `${action} ${truncateToWidth(args.name, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	return action;
+/**
+ * Model-authored arg text is untrusted: strip ANSI escapes and control
+ * characters, then hand the value to the shared single-line projection
+ * (`singleLine`: tab expansion + line-break collapse) before it lands in a
+ * card row or native head (same treatment as every sibling renderer, e.g.
+ * `replaceTabs` in bash.ts).
+ */
+function sanitizeDebugArg(value: string): string {
+	return singleLine(sanitizeText(value));
 }
 
-/** Untruncated `[action, target]` for native heads; mirrors {@link summarizeDebugCall}'s field precedence. */
-function debugCallParts(args: DebugRenderArgs | undefined, fallbackAction: string): [string, string | undefined] {
-	const action = (args?.action ?? fallbackAction).replaceAll("_", " ");
-	if (!args) return [action, undefined];
-	const target =
+/** Highest-precedence identifying arg for a debug call head; mirrors the summary field order. */
+function debugCallTarget(args: DebugRenderArgs): string | undefined {
+	return (
 		args.program ||
 		(args.file && args.line !== undefined ? `${args.file}:${args.line}` : undefined) ||
 		args.function ||
@@ -134,8 +113,22 @@ function debugCallParts(args: DebugRenderArgs | undefined, fallbackAction: strin
 		args.instruction_reference ||
 		args.data_id ||
 		args.name ||
-		undefined;
-	return [action, target];
+		undefined
+	);
+}
+
+function summarizeDebugCall(args: DebugRenderArgs): string {
+	const action = args.action ? sanitizeDebugArg(args.action.replaceAll("_", " ")) : "request";
+	const target = debugCallTarget(args);
+	return target ? `${action} ${truncateToWidth(sanitizeDebugArg(target), TRUNCATE_LENGTHS.TITLE)}` : action;
+}
+
+/** Untruncated `[action, target]` for native heads; mirrors {@link summarizeDebugCall}'s field precedence. */
+function debugCallParts(args: DebugRenderArgs | undefined, fallbackAction: string): [string, string | undefined] {
+	const action = sanitizeDebugArg((args?.action ?? fallbackAction).replaceAll("_", " "));
+	if (!args) return [action, undefined];
+	const target = debugCallTarget(args);
+	return [action, target === undefined ? undefined : sanitizeDebugArg(target)];
 }
 
 function describeDebugResult(
@@ -197,7 +190,7 @@ export const debugToolRenderer = {
 		args?: DebugRenderArgs,
 	): Component {
 		return framedToolCard(theme, () => {
-			const action = (args?.action ?? result.details?.action ?? "debug").replaceAll("_", " ");
+			const action = sanitizeDebugArg((args?.action ?? result.details?.action ?? "debug").replaceAll("_", " "));
 			const success = !options.isPartial && !result.isError;
 			const statusIcon = success
 				? theme.styledSymbol("tool.debug", "accent")

@@ -15,9 +15,11 @@ import { cfgCompactionExperimentalContextManagement } from "../session/context-s
  * The session's `local://` mapping: its pinned {@link LocalProtocolOptions}
  * (subagents and multi-session hosts pin a parent/foreign root) or else its own
  * artifacts dir and session id, so `local://` never falls through to another
- * session's root.
+ * session's root. Takes a tool session or a `SessionManager`.
  */
-export function sessionLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
+export function sessionLocalProtocolOptions(
+	session: Pick<ToolSession, "localProtocolOptions" | "getArtifactsDir" | "getSessionId">,
+): LocalProtocolOptions {
 	return (
 		session.localProtocolOptions ?? {
 			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,

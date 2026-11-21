@@ -109,4 +109,39 @@ describe("CommandController /shake", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 		expect(showStatus).toHaveBeenCalledWith("Dropped 2 thinking blocks from this session.");
 	});
+
+	it("reports kept thinking without rebuilding the transcript", async () => {
+		const rebuildChatFromMessages = vi.fn();
+		const invalidate = vi.fn();
+		const requestRender = vi.fn();
+		const showStatus = vi.fn();
+		const ctx = {
+			session: {
+				shake: vi.fn(async () => ({
+					mode: "thinking" as const,
+					toolResultsDropped: 0,
+					blocksDropped: 0,
+					thinkingBlocksDropped: 0,
+					thinkingBlocksKept: 3,
+					tokensFreed: 0,
+				})),
+			},
+			rebuildChatFromMessages,
+			statusLine: { invalidate },
+			ui: { requestRender },
+			showStatus,
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+
+		await new CommandController(ctx).handleShakeCommand("thinking");
+
+		// Nothing changed on disk or on screen, so only the status line speaks.
+		expect(rebuildChatFromMessages).not.toHaveBeenCalled();
+		expect(invalidate).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(showStatus).toHaveBeenCalledTimes(1);
+		const status = showStatus.mock.calls[0]?.[0] as string;
+		expect(status).toContain("3 thinking blocks");
+		expect(status).toContain("kept");
+	});
 });

@@ -213,6 +213,8 @@ export function shellTimeoutSeconds(timeoutMs: number | undefined): number | und
 
 /** The bash tool's deadline when its `timeout` is omitted. */
 const BASH_DEFAULT_DEADLINE_SECONDS = 300;
+/** The longest deadline the bash tool accepts; it clamps a longer one and annotates the result. */
+const BASH_MAX_DEADLINE_SECONDS = 3600;
 
 /**
  * The bash-tool kill deadline, in seconds, for a Cursor `ShellArgs`/`ShellStreamArgs` frame.
@@ -222,12 +224,17 @@ const BASH_DEFAULT_DEADLINE_SECONDS = 300;
  * deadline is `hard_timeout`. Without one, a short wait (`block_until_ms: 5000` on a build) must not
  * kill the command: the deadline stays the bash default (`undefined`), raised to the wait only when
  * the wait is longer.
+ *
+ * Cursor's native Shell sends a 24 h `hard_timeout` on every call. Both budgets stop at the bash
+ * ceiling here, so the tool does not clamp them itself and append a clamp notice to every result.
  */
 export function shellDeadlineSeconds(args: { timeout: number; hardTimeout?: number }): number | undefined {
 	const hardSeconds = shellTimeoutSeconds(args.hardTimeout);
-	if (hardSeconds !== undefined) return hardSeconds;
+	if (hardSeconds !== undefined) return Math.min(hardSeconds, BASH_MAX_DEADLINE_SECONDS);
 	const waitSeconds = shellTimeoutSeconds(args.timeout);
-	return waitSeconds !== undefined && waitSeconds > BASH_DEFAULT_DEADLINE_SECONDS ? waitSeconds : undefined;
+	return waitSeconds !== undefined && waitSeconds > BASH_DEFAULT_DEADLINE_SECONDS
+		? Math.min(waitSeconds, BASH_MAX_DEADLINE_SECONDS)
+		: undefined;
 }
 
 /**

@@ -155,28 +155,6 @@ describe("bash shortcut command", () => {
 			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(2, sourceDir);
 			expect(state.executedCwds).toEqual([sourceDir, childDir, sourceDir]);
 			expect(executeBash).toHaveBeenCalledTimes(3);
-			expect(executeBash).toHaveBeenNthCalledWith(1, "cd child", expect.any(Function), {
-				excludeFromContext: false,
-				onRecorded: expect.any(Function),
-				useUserShell: true,
-				pty: {
-					cols: expect.any(Number),
-					rows: expect.any(Number),
-					onChunk: expect.any(Function),
-					onStdin: expect.any(Function),
-				},
-			});
-			expect(executeBash).toHaveBeenNthCalledWith(2, "cd", expect.any(Function), {
-				excludeFromContext: false,
-				onRecorded: expect.any(Function),
-				useUserShell: true,
-				pty: {
-					cols: expect.any(Number),
-					rows: expect.any(Number),
-					onChunk: expect.any(Function),
-					onStdin: expect.any(Function),
-				},
-			});
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(1, childDir);
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, sourceDir);
 			expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(2);

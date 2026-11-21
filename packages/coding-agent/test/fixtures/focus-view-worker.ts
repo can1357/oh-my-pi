@@ -21,7 +21,6 @@ import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentSession } from "../../src/session/agent-session";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
-import { loadedModulesChangedSince } from "../../src/thread/code-skew";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
@@ -29,7 +28,6 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { authService } from "../../src/thread/services/auth";
 import { identityThreadService } from "../../src/thread/services/identity";
-import { getApprovalGrants } from "../../src/tools/approval-cache";
 
 /** What the worker-side session reports about itself. */
 export interface FocusSessionReport {
@@ -50,10 +48,6 @@ export interface FocusProbe {
 	/** Release the reply held between its two deltas. */
 	release(): Promise<void>;
 	report(id: string): Promise<FocusSessionReport>;
-	/** Approve approval scope `key` for the rest of the session, as its extension wrapper does. */
-	grantSessionApproval(id: string, key: string): Promise<void>;
-	/** Remember `always-ask-cached` grant `key` in the session's conversation tier. */
-	recordSessionGrant(id: string, key: string): Promise<void>;
 	/** Drop every queued follow-up for good, as queue editing does. */
 	dropFollowUps(id: string): Promise<void>;
 }
@@ -181,17 +175,6 @@ const probe: FocusProbe = {
 		const session = local(id);
 		session.dropQueuedMessages(session.agent.peekFollowUpQueue());
 	},
-	grantSessionApproval: async (id, key) => {
-		local(id).extensionRunner?.grantSessionApproval(key);
-	},
-	recordSessionGrant: async (id, key) => {
-		const session = local(id);
-		getApprovalGrants(session.settings.getAgentDir(), session.sessionManager.getSessionId()).record(
-			key,
-			"read",
-			"session",
-		);
-	},
 };
 
 function isProbeGlobals(value: unknown): value is FocusProbeGlobals {
@@ -251,7 +234,6 @@ port.on("message", (message: unknown) => {
 		link.handle("ping", nonce => nonce);
 		const ready: SubagentWorkerReady = {
 			type: "subagent-worker-ready",
-			changedModules: loadedModulesChangedSince(message.mainStartedAt),
 		};
 		port.postMessage(ready);
 		return;

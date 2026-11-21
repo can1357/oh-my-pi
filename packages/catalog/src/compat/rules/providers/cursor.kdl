@@ -70,6 +70,14 @@ provider "cursor" {
 			}
 		}
 	}
+	// The 500k Grok 4.7 lane is an explicit long-context SKU: selecting it is
+	// the opt-in to a 500k window, and the long-context tier still bills 2x/3x
+	// above 256k. Capping the window to the threshold would make the lane
+	// indistinguishable from the base row. The base `grok-4.7` lane keeps the
+	// cap because its wire context stays pinned to 256k.
+	models "grok-4.7*-500k*" "cursor-grok-4.7*-500k*" {
+		long-context-window-uncapped #true
+	}
 	class "openai" {
 		// GPT images are fitted to 1024×1024 like Claude's (see above).
 		image-max-edge 1024
@@ -188,6 +196,15 @@ provider "cursor" {
 			cache-write 12.5
 		}
 	}
+	// Claude Fable 5.2: $8/$40, cache $0.20/$10. Up to 1M same rates.
+	models "claude-fable-5-2*" {
+		cost-patch {
+			input 8.0
+			output 40.0
+			cache-read 0.2
+			cache-write 10.0
+		}
+	}
 	// Claude Haiku 5.5: $0.10/$0.50, cache $0.01/$0.125. Requests above
 	// 100k input tokens bill every leg at 5x ($0.50/$2.50, cache
 	// $0.05/$0.625), on the 1M lane too.
@@ -204,6 +221,15 @@ provider "cursor" {
 			output 2.5
 			cache-read 0.05
 			cache-write 0.625
+		}
+	}
+	// Claude 4.5 Haiku: $1/$5, cache $0.10/$1.25.
+	models "claude-haiku-4-5*" {
+		cost-patch {
+			input 1.0
+			output 5.0
+			cache-read 0.1
+			cache-write 1.25
 		}
 	}
 	// Claude 4.7 Opus: $5/$25, cache $0.50/$6.25. Up to 1M same rates.
@@ -290,6 +316,15 @@ provider "cursor" {
 			input 2.0
 			output 10.0
 			cache-read 0.2
+			cache-write 2.5
+		}
+	}
+	// Claude Sonnet 5.5: $2/$10, cache $0.10/$2.50. Up to 1M same rates.
+	models "claude-sonnet-5-5*" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
 			cache-write 2.5
 		}
 	}
@@ -387,6 +422,25 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
+	// Grok 4.7 500k: Cursor's explicit 500K SKU bills at the long-context
+	// rate from the first token: $4/$12, cache read $1.00.
+	models "grok-4.7-500k" "cursor-grok-4.7-500k" {
+		cost-patch {
+			input 4.0
+			output 12.0
+			cache-read 1.0
+			cache-write 0
+		}
+	}
+	// Grok 4.7 500k (Fast): $6/$18, cache read $1.50.
+	models "grok-4.7-500k-fast" "cursor-grok-4.7-500k-fast" {
+		cost-patch {
+			input 6.0
+			output 18.0
+			cache-read 1.5
+			cache-write 0
+		}
+	}
 	// DeepSeek V4.1 Flash 1017: $0.30/$1.20, cache read $0.006, no write fee.
 	// The bare id and every reasoning-effort wire id share one card.
 	models "deepseek-v41-flash-1017*" {
@@ -460,10 +514,38 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
-	// Gemini 4 Argon: $2/$10, cache read $0.10. Other Models bill at the
-	// model's API price, so the card follows Google's list-price increase to
-	// $4/$20, cache read $0.20, from 2026-12-01 (midnight US Pacific).
-	models "gemini-4-argon" {
+	// Gemini 2.5 Flash: $0.30/$2.50, cache read $0.03.
+	models "gemini-2.5-flash" {
+		cost-patch {
+			input 0.3
+			output 2.5
+			cache-read 0.03
+			cache-write 0
+		}
+	}
+	// Gemini 4 Hydrogen: $1.50/$7.50, cache read $0.075.
+	models "gemini-4-hydrogen*" {
+		cost-patch {
+			input 1.5
+			output 7.5
+			cache-read 0.075
+			cache-write 0
+		}
+	}
+	// Gemini 4 Neon: $3/$15, cache read $0.15.
+	models "gemini-4-neon*" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.15
+			cache-write 0
+		}
+	}
+	// Gemini 4 Argon and Carbon: $2/$10, cache read $0.10. Other Models bill at
+	// the model's API price, so the card follows Google's list-price increase to
+	// $4/$20, cache read $0.20, from 2026-12-01 (midnight US Pacific); Cursor's
+	// table states that switch for Carbon.
+	models "gemini-4-argon" "gemini-4-carbon" {
 		cost-patch {
 			input 2.0
 			output 10.0
@@ -489,12 +571,39 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
+	// GLM 5.3: $1.40/$4.40, cache read $0.26.
+	models "glm-5p3" "glm-5.3" {
+		cost-patch {
+			input 1.4
+			output 4.4
+			cache-read 0.26
+			cache-write 0
+		}
+	}
+	// GLM 5.3 Flash: $0.15/$0.50, cache read $0.029.
+	models "glm-5p3-flash" "glm-5.3-flash" {
+		cost-patch {
+			input 0.15
+			output 0.5
+			cache-read 0.029
+			cache-write 0
+		}
+	}
 	// GPT-5 Mini: $0.25/$2.00, cache read $0.025.
 	models "gpt-5-mini" {
 		cost-patch {
 			input 0.25
 			output 2.0
 			cache-read 0.025
+			cache-write 0
+		}
+	}
+	// GPT-5.1: $1.25/$10.00, cache read $0.125.
+	models "gpt-5.1" "gpt-5.1-high" "gpt-5.1-low" {
+		cost-patch {
+			input 1.25
+			output 10.0
+			cache-read 0.125
 			cache-write 0
 		}
 	}
@@ -754,6 +863,17 @@ provider "cursor" {
 			input 1.25
 			output 4.25
 			cache-read 0.15
+			cache-write 0
+		}
+	}
+	// Muse Wonder 1.0: $4/$20, cached input $0.20, no write charge. Cursor
+	// documents the same per-token rates in Max Mode, with no long-context
+	// multiplier.
+	models "muse-wonder-1.0*" {
+		cost-patch {
+			input 4.0
+			output 20.0
+			cache-read 0.2
 			cache-write 0
 		}
 	}

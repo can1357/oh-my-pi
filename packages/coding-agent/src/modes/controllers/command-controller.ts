@@ -5,10 +5,12 @@ import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-a
 import {
 	getEnvApiKey,
 	getProviderDetails,
+	type Model,
 	type ProviderDetails,
 	resolveUsedFraction,
 	type UsageLimit,
 	type UsageReport,
+	usageSubscriptionPlan,
 } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
@@ -43,6 +45,7 @@ import {
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { promptCacheDetails } from "@oh-my-pi/pi-tui/status-line/prompt-cache";
@@ -64,7 +67,7 @@ import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
-import type { CompactMode } from "../../session/compact-modes";
+import { type CompactMode, findCompactMode } from "../../session/compact-modes";
 import {
 	currentRuntimeIdentity,
 	formatRuntimeIdentity,
@@ -77,13 +80,14 @@ import {
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
-	type SessionWorktree,
+	runSessionWorktreeHook,
 } from "../../session/session-worktree";
 import {
 	assertSessionsOnDisk,
 	SessionStorageUnsupportedError,
 	STATS_DISK_ONLY_REASON,
 } from "../../session/session-storage-config";
+import type { SessionWorktree } from "../../worktree/backend";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import {
 	codexUsagePlan,
@@ -332,7 +336,7 @@ export class CommandController {
 				this.ctx.showError(
 					`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (failed to re-align workspace to ${actual})`,
 				);
-				await this.ctx.shutdown();
+				await this.ctx.shutdown({ cancellable: false });
 				return;
 			}
 			this.ctx.showError(
@@ -354,7 +358,7 @@ export class CommandController {
 		} catch {}
 		if (!realigned) {
 			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
-			await this.ctx.shutdown();
+			await this.ctx.shutdown({ cancellable: false });
 			return;
 		}
 		this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
@@ -594,6 +598,7 @@ export class CommandController {
 		let info = "";
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
+		info += `${theme.fg("dim", "Local:")} ${this.ctx.session.localRoot}\n`;
 		const builds = runtimeIdentityHistory(this.ctx.session.sessionManager.getEntries());
 		const running = currentRuntimeIdentity();
 		// A source checkout's diff hash changes with each edit, so a long-lived session can collect
@@ -912,7 +917,7 @@ export class CommandController {
 			const agent = row.agent && row.agent.id !== job.id ? ` ${theme.bold(row.agent.id)}` : "";
 			info += `${guide}${renderJobLine(job, now)}${agent}\n`;
 			// What the job is for leads; full mode follows it with what the command does and the whole command.
-			const text = full ? (job.command ?? job.label) : (job.intent ?? job.label);
+			const text = full ? (job.command ?? job.label) : jobDisplayLabel(job);
 			if (text === job.id) continue;
 			const indent = jobTreeIndent(row, theme);
 			const prefix = theme.fg("dim", indent);
@@ -999,7 +1004,7 @@ export class CommandController {
 	handleToolsCommand(): void {
 		const tools = buildToolsMarkdown({
 			tools: this.ctx.session.agent.state.tools,
-			xdevTools: this.ctx.session.getXdevToolEntries(),
+			mountedCommands: this.ctx.session.getToolCommandEntries(),
 		});
 		this.#showMarkdownPanel("Available Tools", tools);
 	}
@@ -1457,10 +1462,7 @@ export class CommandController {
 
 		// An in-place fork moves this process onto the new file; a running turn
 		// would finish there and leave the original transcript cut mid-turn.
-		if (this.ctx.session.isStreaming) {
-			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
-			return;
-		}
+		if (this.ctx.session.isStreaming) await this.ctx.session.abort();
 		if (this.ctx.loadingAnimation) {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
@@ -1760,7 +1762,8 @@ export class CommandController {
 	}
 
 	/**
-	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
+	 * `/wt [<branch>]` — fork the checkout into a new worktree (an ovnfs
+	 * checkout when ovnfs is found, else a linked git worktree) on
 	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along
 	 * unless `keepChanges` is false, then relocate the session there like `/move`.
 	 * Returns the worktree only when the session now lives in it.
@@ -1822,6 +1825,32 @@ export class CommandController {
 			return true;
 		});
 		return created;
+	}
+
+	/**
+	 * Runs the `post-checkout` hook of a worktree `/wt` created under a status spinner, then shows
+	 * its warnings. It removes only its own row, so a turn's working loader survives the hook's end;
+	 * a turn starting or ending during the hook clears the status rows, spinner included.
+	 */
+	async runWorktreeHook(worktree: SessionWorktree): Promise<void> {
+		const loader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			"Running post-checkout hook…",
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(loader);
+		this.ctx.ui.requestRender();
+		let warnings: string[];
+		try {
+			warnings = await runSessionWorktreeHook(worktree, this.ctx.session);
+		} finally {
+			loader.stop();
+			this.ctx.statusContainer.removeChild(loader);
+			this.ctx.ui.requestRender();
+		}
+		for (const warning of warnings) this.ctx.showWarning(warning);
 	}
 
 	/** Save source settings before acquiring the gate for a complete relocation operation. */
@@ -2106,7 +2135,7 @@ export class CommandController {
 		customInstructions?: string,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
-		internalGuidance?: string,
+		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome> {
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
@@ -2124,21 +2153,22 @@ export class CommandController {
 		// through as a CompactOptions field instead. That caller also dispatches
 		// the execution turn itself, so the compaction must not resume the
 		// plan-approval turn it aborted.
-		if (internalGuidance) {
+		if (options?.internalGuidance) {
 			return this.executeCompaction(
-				{ internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
+				{ internalGuidance: options.internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
 				false,
 				beforeFlush,
 				mode,
+				options.readerModel,
 			);
 		}
-		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
+		return this.executeCompaction(customInstructions, false, beforeFlush, mode, options?.readerModel);
 	}
 
 	/**
 	 * Run the `/compact` queued for the next yield once the session goes quiet. One watcher serves the
-	 * request from the moment it is queued, so no single event (an `agent_end` that a stale-settle guard
-	 * skips, a setup that bails without one) can strand it; later calls join the running watcher.
+	 * request from the moment it is queued, so no single event (a setup that bails without an
+	 * `agent_end`) can strand it; later calls join the running watcher.
 	 * Follow-ups queued behind the request wait in `compactionQueuedMessages` and flush once it ends.
 	 */
 	runYieldCompaction(): Promise<void> {
@@ -2159,7 +2189,7 @@ export class CommandController {
 			await session.waitForAdmittedSubmissions();
 			// Let a session switch commit or roll back before judging which conversation is live.
 			if (session.isSessionTransitioning) await session.waitForSessionTransition();
-			if (session.hasPendingAsyncWork()) await session.settleAsyncWork();
+			await session.waitForRunEnd();
 			if (this.ctx.session !== session) return;
 			if (this.ctx.yieldCompaction !== request) {
 				// Dequeued (and maybe queued again): serve whatever request is pending now.
@@ -2167,14 +2197,14 @@ export class CommandController {
 				request = this.ctx.yieldCompaction;
 				continue;
 			}
-			// The run yielded only once nothing can continue it: no turn, retry, queued input, pending
-			// submission, background job, or transition. Otherwise something is mid-flight; look again.
+			// The run yielded only once nothing can continue it: no open run, retry, queued input, pending
+			// submission, or transition. Otherwise something is mid-flight; look again.
 			if (
 				!session.isStreaming &&
 				!session.isRetrying &&
 				!session.isSessionTransitioning &&
 				!session.hasAdmittedSubmission &&
-				!session.hasPendingAsyncWork() &&
+				!session.isRunActive &&
 				session.queuedMessageCount === 0 &&
 				!this.ctx.hasPendingSubmission()
 			) {
@@ -2212,8 +2242,10 @@ export class CommandController {
 
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content,
-	 * `images` strips image blocks, and `thinking` drops all thinking blocks.
-	 * Rebuilds the chat and reports counts.
+	 * `images` strips image blocks, and `thinking` drops the thinking blocks the
+	 * request rebuilds from them, keeping the turns it replays natively (they
+	 * are reported as kept and the transcript is left alone). Rebuilds the chat
+	 * and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -2230,7 +2262,8 @@ export class CommandController {
 			(result.imagesDropped ?? 0) +
 			(result.thinkingBlocksDropped ?? 0);
 		if (dropped === 0) {
-			this.ctx.showStatus("Nothing to shake.");
+			// Replayed thinking was left in place: nothing to rebuild, but say so.
+			this.ctx.showStatus((result.thinkingBlocksKept ?? 0) > 0 ? formatShakeSummary(result) : "Nothing to shake.");
 			return;
 		}
 		this.ctx.rebuildChatFromMessages();
@@ -2244,188 +2277,94 @@ export class CommandController {
 		isAuto = false,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 		mode?: CompactMode,
+		readerModel?: Model,
 	): Promise<CompactionOutcome> {
-		if (this.ctx.loadingAnimation) {
-			this.ctx.loadingAnimation.stop();
-			this.ctx.loadingAnimation = undefined;
+		const instructions = typeof customInstructionsOrOptions === "string" ? customInstructionsOrOptions : undefined;
+		const baseOptions = typeof customInstructionsOrOptions === "object" ? customInstructionsOrOptions : undefined;
+		const effectiveMode = mode ?? baseOptions?.mode;
+		const options =
+			baseOptions || effectiveMode || readerModel
+				? { ...baseOptions, mode: effectiveMode, readerModel: readerModel ?? baseOptions?.readerModel }
+				: undefined;
+		const session = this.ctx.session;
+		const background = effectiveMode !== undefined && findCompactMode(effectiveMode)?.background === true;
+		if (session.isBackgroundCompacting || (background && session.isCompacting)) {
+			this.ctx.showWarning("Context compaction is already in progress");
+			return "failed";
 		}
-		this.ctx.statusContainer.disposeChildren();
+		const sessionId = background ? this.ctx.sessionManager.getSessionId() : undefined;
+		const inView = () =>
+			!background || (this.ctx.viewSession === session && this.ctx.sessionManager.getSessionId() === sessionId);
 
 		const cancelHint = `(${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
-		const label = isAuto ? `Auto-compacting context... ${cancelHint}` : `Compacting context... ${cancelHint}`;
-		const compactingLoader = new Loader(
+		const verb = isAuto ? "Auto-compacting context" : "Compacting context";
+		const label = background ? `${verb} in the background` : verb;
+		const startedAt = Date.now();
+		const loader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
 			text => theme.fg("muted", text),
-			label,
+			`${label}… ${cancelHint}`,
 			getSymbolTheme().spinnerFrames,
 		);
-		const compactionStartMs = Date.now();
-		compactingLoader.setWorkingRow(
+		loader.setWorkingRow(
 			() => ({
-				label: isAuto ? "Auto-compacting context…" : "Compacting context…",
-				startedAt: compactionStartMs,
+				label: `${label}…`,
+				startedAt,
 				variant: { kind: "compaction" },
 				interruptKey: this.ctx.maintenanceInterruptKey(),
 			}),
 			() => this.ctx.interruptFromPointer(),
 		);
-		this.ctx.statusContainer.addChild(compactingLoader);
+		if (background) {
+			// The composer stays free: the run takes the status row only while no turn holds it.
+			this.ctx.backgroundCompaction.start({ loader, label: `${label} ${cancelHint}`, startedAt, inView });
+		} else {
+			if (this.ctx.loadingAnimation) {
+				this.ctx.loadingAnimation.stop();
+				this.ctx.loadingAnimation = undefined;
+			}
+			this.ctx.statusContainer.disposeChildren();
+			this.ctx.statusContainer.addChild(loader);
+		}
 		this.ctx.ui.requestRender();
 
 		let outcome: CompactionOutcome = "ok";
 		try {
-			const instructions = typeof customInstructionsOrOptions === "string" ? customInstructionsOrOptions : undefined;
-			const baseOptions =
-				customInstructionsOrOptions && typeof customInstructionsOrOptions === "object"
-					? customInstructionsOrOptions
-					: undefined;
-			// The slash path passes `mode` positionally; the extension path carries
-			// it inside the options object. Either source wins over no mode.
-			const effectiveMode = mode ?? baseOptions?.mode;
-			const options =
-				baseOptions || effectiveMode
-					? { ...baseOptions, ...(effectiveMode ? { mode: effectiveMode } : {}) }
-					: undefined;
-			await this.ctx.session.compact(instructions, options);
-
-			compactingLoader.stop();
-			this.ctx.statusContainer.disposeChildren();
-			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
-
-			this.ctx.statusLine.invalidate();
-			// Same pairing as the auto-compaction arm in event-controller: the
-			// rebuild clears the container's emission ledger, so every block
-			// re-emits on this frame while the previous copy is still in native
-			// scrollback — without a clear the collapse-disabled path appends a
-			// duplicate transcript, exactly as `/compact` reproduced (#12140).
-			this.ctx.ui.requestRender(true, { clearScrollback: true });
+			try {
+				await session.compact(instructions, options);
+			} finally {
+				if (background) {
+					this.ctx.backgroundCompaction.stop();
+					this.ctx.ui.requestRender();
+				} else {
+					loader.stop();
+					this.ctx.statusContainer.removeChild(loader);
+				}
+			}
+			if (inView()) {
+				this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
+				this.ctx.statusLine.invalidate();
+				if (background) this.ctx.showStatus("Compaction complete");
+				// Rebuilding resets the transcript's emission ledger. Clear terminal
+				// scrollback before re-emitting its blocks (#12140).
+				this.ctx.ui.requestRender(true, { clearScrollback: true });
+			}
 		} catch (error) {
 			if (error instanceof CompactionCancelledError) {
 				outcome = "cancelled";
-				this.ctx.showError("Compaction cancelled");
+				if (inView()) this.ctx.showError("Compaction cancelled");
 			} else {
 				outcome = "failed";
 				const message = error instanceof Error ? error.message : String(error);
-				this.ctx.showError(`Compaction failed: ${message}`);
+				logger.error("Compaction failed", { error: message });
+				if (inView()) this.ctx.showError(`Compaction failed: ${message}`);
 			}
-		} finally {
-			compactingLoader.stop();
-			this.ctx.statusContainer.disposeChildren();
 		}
-		// Run the caller's pre-flush hook (e.g. the plan-approval model transition)
-		// before queued user input is dispatched, so any turn queued during
-		// compaction executes on the post-compaction model rather than the model
-		// compaction itself ran on.
+		// A plan approval may switch models before queued input can dispatch.
 		if (beforeFlush) await beforeFlush(outcome);
-		await this.ctx.flushCompactionQueue({ willRetry: false });
+		if (!background) await this.ctx.flushCompactionQueue({ willRetry: false });
 		return outcome;
-	}
-
-	async handleHandoffCommand(customInstructions?: string): Promise<void> {
-		if (this.ctx.session.isStreaming) {
-			this.ctx.showWarning("Wait for the current response to finish or abort it before handing off.");
-			return;
-		}
-		if (this.ctx.session.isCompacting) {
-			this.ctx.showWarning("Wait for context compaction to finish or cancel it before handing off.");
-			return;
-		}
-
-		const entries = this.ctx.sessionManager.getEntries();
-		const messageCount = entries.filter(e => e.type === "message").length;
-
-		if (messageCount < 2) {
-			this.ctx.showWarning("Nothing to hand off (no messages yet)");
-			return;
-		}
-
-		if (this.ctx.loadingAnimation) {
-			this.ctx.loadingAnimation.stop();
-			this.ctx.loadingAnimation = undefined;
-		}
-		this.ctx.statusContainer.disposeChildren();
-
-		const handoffLoader = new Loader(
-			this.ctx.ui,
-			spinner => theme.fg("accent", spinner),
-			text => theme.fg("muted", text),
-			`Generating handoff… (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`,
-			getSymbolTheme().spinnerFrames,
-		);
-		this.ctx.statusContainer.addChild(handoffLoader);
-		this.ctx.ui.requestRender();
-
-		try {
-			// Handoff generation runs as a oneshot request; the document is then
-			// committed as a compaction entry on this session.
-			const result = await this.ctx.session.handoff(customInstructions);
-
-			if (!result) {
-				this.ctx.showError("Handoff cancelled");
-				return;
-			}
-
-			// Rebuild chat from the session, which now shows the handoff compaction divider.
-			this.ctx.clearTransientSessionUi();
-			await this.ctx.renderInitialMessages();
-			this.ctx.statusLine.invalidate();
-			this.ctx.updateEditorBorderColor();
-			await this.ctx.reloadTodos();
-
-			this.ctx.present([
-				new Spacer(1),
-				new Text(
-					`${theme.fg("accent", `${theme.status.success} Context handed off and compacted in place`)}`,
-					1,
-					1,
-				),
-			]);
-			if (result.savedPath) {
-				this.ctx.showStatus(`Handoff document saved to: ${result.savedPath}`);
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			// `session.handoff()` normalizes genuine cancellations to this exact message; a
-			// provider error (even one named AbortError) is re-thrown verbatim so it surfaces
-			// as a real failure instead of a false "cancelled".
-			if (message === "Handoff cancelled") {
-				this.ctx.showError("Handoff cancelled");
-			} else {
-				// Persist the real failure so it is debuggable after the transient
-				// TUI error clears (#7993).
-				logger.error("Handoff failed", { error: message });
-				this.ctx.showError(`Handoff failed: ${message}`);
-			}
-		} finally {
-			this.#finishHandoffUi(handoffLoader);
-			await this.ctx.flushCompactionQueue({ willRetry: false });
-		}
-		this.ctx.ui.requestRender(true, { clearScrollback: true });
-	}
-
-	#finishHandoffUi(handoffLoader: Loader): void {
-		handoffLoader.stop();
-		// A retry/compaction event may replace the handoff overlay while transcript
-		// replay yields. Preserve it only while it still owns the status row; a
-		// reference to a loader disposed earlier must not retain the handoff overlay.
-		const maintenanceLoader = this.ctx.autoCompactionLoader ?? this.ctx.retryLoader;
-		if (maintenanceLoader && this.ctx.statusContainer.children.includes(maintenanceLoader)) return;
-		this.ctx.statusContainer.disposeChildren();
-		// `disposeChildren()` disposed any working loader mounted by a delayed
-		// `agent_start` during transcript replay, which stops its animation timer.
-		// Drop the now-frozen reference so the reconciler below never reattaches it
-		// (`ensureLoadingAnimation()` only re-adds an existing instance, never
-		// restarts it).
-		if (this.ctx.loadingAnimation) {
-			this.ctx.loadingAnimation.stop();
-			this.ctx.loadingAnimation = undefined;
-		}
-		if (this.ctx.session.isStreaming) {
-			// A new turn won the race with handoff cleanup; mount a fresh, running
-			// loader for it now that the stale reference is cleared.
-			this.ctx.ensureLoadingAnimation();
-		}
 	}
 }
 
@@ -2503,12 +2442,13 @@ function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme):
 	return uiTheme.fg("dim", `(${windowLabel})`);
 }
 
-/** ` (org)` suffix for providers whose orgName is an organization. */
+/** ` (org · plan)` suffix for providers whose orgName is an organization. */
 function orgSuffix(report: UsageReport): string {
 	const orgName = report.metadata?.orgName;
 	const orgId = report.metadata?.orgId;
 	const org = typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-	return org ? ` (${org})` : "";
+	const detail = [org, usageSubscriptionPlan(report)].filter(Boolean).join(" · ");
+	return detail ? ` (${detail})` : "";
 }
 
 /** Keep the existing TUI `(plan)` layout while using the live Codex usage plan. */
