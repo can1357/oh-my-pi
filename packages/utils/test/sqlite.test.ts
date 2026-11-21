@@ -7,6 +7,7 @@ import {
 	openSqliteDatabase,
 	openSqliteDatabaseSync,
 	readSalvageableRows,
+	SALVAGE_MAX_IMAGE_BYTES,
 } from "../src/sqlite";
 import { TempDir } from "../src/temp";
 
@@ -272,26 +273,57 @@ test("a non-corruption init failure on a store that fails quick_check is preserv
 	expect(await fs.promises.readFile(path.join(dir.path(), backups[0]!))).toEqual(damaged);
 });
 
-/** Seeds 200 rows spread over several leaf pages and returns each leaf's row ids in page order. */
-function seedLeaves(dbPath: string): { pageSize: number; leaves: Array<{ page: number; ids: number[] }> } {
+/** Decodes the rowids a table leaf page holds, in rowid order. Page indices are 0-based file pages. */
+function leafPageIds(bytes: Buffer, page: number, pageSize: number): number[] {
+	const start = page * pageSize;
+	if (page === 0 || bytes[start] !== 0x0d) return [];
+	const header = start;
+	const cells = bytes.readUInt16BE(header + 3);
+	const ids: number[] = [];
+	for (let index = 0; index < cells; index++) {
+		const cell = start + bytes.readUInt16BE(header + 8 + index * 2);
+		if (cell < header + 8 + cells * 2 || cell + 5 > start + pageSize) continue;
+		// Table leaf cell: payload-size varint, then the rowid varint.
+		let offset = cell;
+		for (let consumed = 0; offset < start + pageSize; consumed++, offset++) {
+			const byte = bytes[offset]!;
+			if (consumed === 8 || byte < 0x80) {
+				offset++;
+				break;
+			}
+		}
+		let key = 0n;
+		for (let byteIndex = 0; offset < start + pageSize; byteIndex++, offset++) {
+			const byte = bytes[offset]!;
+			key = (key << BigInt(byteIndex === 8 ? 8 : 7)) | BigInt(byteIndex === 8 ? byte : byte & 0x7f);
+			if (byteIndex === 8 || byte < 0x80) break;
+		}
+		const rowid = Number(BigInt.asIntN(64, key));
+		if (Number.isSafeInteger(rowid)) ids.push(rowid);
+	}
+	return ids.sort((a, b) => a - b);
+}
+
+/** Seeds rows spread over several leaf pages and returns each leaf's row ids in rowid order. */
+function seedLeaves(dbPath: string, count = 200): { pageSize: number; leaves: Array<{ page: number; ids: number[] }> } {
 	const db = new Database(dbPath);
-	// Zero freed space so each row's marker appears only on the leaf that holds it.
+	// Zero freed space so each row's bytes appear only on the leaf that holds it.
 	db.run("PRAGMA secure_delete = ON");
 	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
 	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
 	db.transaction(() => {
-		for (let id = 1; id <= 200; id++) insert.run(id, `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
+		for (let id = 1; id <= count; id++) insert.run(id, `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
 	})();
 	insert.finalize();
 	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
 	db.close();
 	const bytes = fs.readFileSync(dbPath);
-	const byPage = new Map<number, number[]>();
-	for (let id = 1; id <= 200; id++) {
-		const page = Math.floor(bytes.indexOf(`row-${String(id).padStart(4, "0")}-`) / pageSize);
-		byPage.set(page, [...(byPage.get(page) ?? []), id]);
+	const leaves: Array<{ page: number; ids: number[] }> = [];
+	for (let page = 1; page < bytes.length / pageSize; page++) {
+		const ids = leafPageIds(bytes, page, pageSize);
+		if (ids.length > 0) leaves.push({ page, ids });
 	}
-	const leaves = [...byPage].map(([page, ids]) => ({ page, ids })).sort((a, b) => a.ids[0]! - b.ids[0]!);
+	leaves.sort((a, b) => a.ids[0]! - b.ids[0]!);
 	return { pageSize, leaves };
 }
 
@@ -317,5 +349,370 @@ test.each([
 		expect(rows.map(row => row.id)).toEqual(expected);
 	} finally {
 		db.close();
+	}
+});
+
+test("salvage keeps readable rows between separate damaged regions", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-island-");
+	const dbPath = dir.join("store.db");
+	const { pageSize, leaves } = seedLeaves(dbPath);
+	const damaged = [leaves[0]!, leaves[2]!, leaves[3]!];
+	const fd = fs.openSync(dbPath, "r+");
+	try {
+		for (const leaf of damaged) {
+			fs.writeSync(fd, Buffer.alloc(pageSize, 0xff), 0, pageSize, leaf.page * pageSize);
+		}
+	} finally {
+		fs.closeSync(fd);
+	}
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const middleId = leaves[1]!.ids[0]!;
+		expect(db.query("SELECT id FROM entries WHERE id = ?").get(middleId)).toEqual({ id: middleId });
+		const rows = readSalvageableRows<{ id: number }>(db, "entries", "id");
+		const expected = leaves.filter(leaf => !damaged.includes(leaf)).flatMap(leaf => leaf.ids);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		db.close();
+	}
+});
+
+test("salvage recovers unbounded instead of imaging an oversized store", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-oversize-");
+	const dbPath = dir.join("store.db");
+	const { pageSize, leaves } = seedLeaves(dbPath);
+	const damaged = [leaves[0]!, leaves[2]!, leaves[3]!];
+	const expected = leaves.filter(leaf => !damaged.includes(leaf)).flatMap(leaf => leaf.ids);
+	const damageLeaves = (target: string): void => {
+		const fd = fs.openSync(target, "r+");
+		try {
+			for (const leaf of damaged) {
+				fs.writeSync(fd, Buffer.alloc(pageSize, 0xff), 0, pageSize, leaf.page * pageSize);
+			}
+		} finally {
+			fs.closeSync(fd);
+		}
+	};
+	const boundedPath = dir.join("bounded.db");
+	fs.copyFileSync(dbPath, boundedPath);
+	damageLeaves(boundedPath);
+	// Grow the store past the image cap with pages the drop leaves on the
+	// freelist, so the entries pages keep their numbers while imaging the store
+	// would copy the whole file.
+	const grow = new Database(dbPath);
+	const chunk = Buffer.alloc(1024 * 1024, 0x61);
+	grow.run("CREATE TABLE junk (payload BLOB)");
+	const insertJunk = grow.prepare("INSERT INTO junk (payload) VALUES (?)");
+	grow.transaction(() => {
+		for (let index = 0; index < SALVAGE_MAX_IMAGE_BYTES / (1024 * 1024) + 2; index++) insertJunk.run(chunk);
+	})();
+	insertJunk.finalize();
+	grow.run("DROP TABLE junk");
+	grow.close();
+	damageLeaves(dbPath);
+
+	const bounded = new Database(boundedPath, { readonly: true });
+	try {
+		expect(readSalvageableRows<{ id: number }>(bounded, "entries", "id").map(row => row.id)).toEqual(expected);
+	} finally {
+		bounded.close();
+	}
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		expect(() => db.query("SELECT count(*) FROM entries").get()).toThrow();
+		const ids = readSalvageableRows<{ id: number }>(db, "entries", "id").map(row => row.id);
+		expect(ids.length).toBeGreaterThan(0);
+		for (const id of ids) expect(expected).toContain(id);
+		// Without the interior bounds the readable island between the damaged
+		// regions is lost again, which is exactly what firing the guard produces.
+		expect(ids).not.toEqual(expected);
+	} finally {
+		db.close();
+	}
+});
+
+/** Breaks the overflow chain of the oversized row: the first overflow page's next-pointer points at page 0x7fffffff. */
+function breakFirstOverflowChain(dbPath: string, pageSize: number): void {
+	const bytes = fs.readFileSync(dbPath);
+	// The oversized row's payload spills into dedicated overflow pages. The
+	// first of them is the lowest page that carries a long `y` run but is not
+	// a table leaf (the leaf may also hold a local prefix of the run).
+	const needle = Buffer.from("y".repeat(256));
+	for (let page = 1; page < bytes.length / pageSize; page++) {
+		const start = page * pageSize;
+		if (bytes[start] === 0x0d || bytes[start] === 0x05) continue;
+		if (bytes.indexOf(needle, start) < start + pageSize) {
+			const corrupted = Buffer.from(bytes);
+			corrupted.writeUInt32BE(0x7fffffff, start);
+			fs.writeFileSync(dbPath, corrupted);
+			return;
+		}
+	}
+	throw new Error("no overflow page found for the oversized row");
+}
+
+test("salvage keeps rows around one row with a broken overflow chain", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-overflow-");
+	const dbPath = dir.join("store.db");
+	const db = new Database(dbPath);
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 40; id++) {
+			insert.run(id, id === 20 ? "y".repeat(9000) : `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
+		}
+	})();
+	insert.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	db.close();
+	breakFirstOverflowChain(dbPath, pageSize);
+
+	const reopened = new Database(dbPath, { readonly: true });
+	try {
+		// Only row 20 is undecodable; every other row, before and after it,
+		// must survive even though they share leaf pages with the damage.
+		// The salvage selects the payload column so reading row 20 itself
+		// follows the broken overflow chain, as callers reading prompts do.
+		expect(() => reopened.query("SELECT id, value FROM entries WHERE id = 20").get()).toThrow();
+		const rows = readSalvageableRows<{ id: number; value: string }>(reopened, "entries", "id, value");
+		const expected = Array.from({ length: 40 }, (_, index) => index + 1).filter(id => id !== 20);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		reopened.close();
+	}
+});
+
+test("salvage keeps rows after a broken overflow chain in a single-leaf root", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-single-leaf-");
+	const dbPath = dir.join("store.db");
+	const db = new Database(dbPath);
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 8; id++) {
+			insert.run(id, id === 3 ? "y".repeat(9000) : `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
+		}
+	})();
+	insert.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	db.close();
+	breakFirstOverflowChain(dbPath, pageSize);
+
+	const reopened = new Database(dbPath, { readonly: true });
+	try {
+		// The root is a single leaf, so there are no interior subtree keys and
+		// the recovery must still cost only the damaged row itself.
+		expect(() => reopened.query("SELECT id, value FROM entries WHERE id = 3").get()).toThrow();
+		const rows = readSalvageableRows<{ id: number; value: string }>(reopened, "entries", "id, value");
+		const expected = Array.from({ length: 8 }, (_, index) => index + 1).filter(id => id !== 3);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		reopened.close();
+	}
+});
+
+test("salvage falls back when interior separator keys are damaged", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-interior-");
+	const dbPath = dir.join("store.db");
+	const { pageSize, leaves } = seedLeaves(dbPath);
+	expect(leaves.length).toBeGreaterThan(5);
+	// Corrupt the first interior separator key so it no longer sorts below the
+	// second key: the page's boundaries are damaged data and must not be used
+	// as skip points. The key stays a small single-byte varint, so only seeks
+	// up to the corrupted key are mis-routed into the damaged first leaf.
+	const bytes = fs.readFileSync(dbPath);
+	const rootPage = bytes.findIndex(
+		(byte, offset) => byte === 0x05 && offset % pageSize === (Math.floor(offset / pageSize) === 0 ? 100 : 0),
+	);
+	expect(rootPage).toBeGreaterThan(0);
+	const page = Math.floor(rootPage / pageSize);
+	const firstCell = page * pageSize + bytes.readUInt16BE(rootPage + 12);
+	const secondCell = page * pageSize + bytes.readUInt16BE(rootPage + 14);
+	const secondKey = bytes[secondCell + 4]!;
+	expect(secondKey).toBeLessThan(100);
+	const corrupted = Buffer.from(bytes);
+	corrupted[firstCell + 4] = secondKey + 10;
+	// Damage the first leaf, which the corrupted separator now also routes the
+	// following rowids into.
+	corrupted.fill(0xff, leaves[0]!.page * pageSize, (leaves[0]!.page + 1) * pageSize);
+	fs.writeFileSync(dbPath, corrupted);
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const ids = readSalvageableRows<{ id: number }>(db, "entries", "id").map(row => row.id);
+		// The unsorted separator makes SQLite's own seek routing inside the
+		// first two subtrees unreliable, so only assert what must hold: the
+		// bogus boundary is not used as a skip point, every leaf past the
+		// corrupted key's subtree is fully recovered, and no row of the
+		// damaged leaf is fabricated or returned.
+		expect(ids).toEqual(expect.arrayContaining(leaves.slice(3).flatMap(leaf => leaf.ids)));
+		expect(ids.filter(id => leaves[0]!.ids.includes(id))).toEqual([]);
+		expect(new Set(ids).size).toBe(ids.length);
+	} finally {
+		db.close();
+	}
+});
+
+test("salvage charges a run of adjacent damaged leaves as one damaged region", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-run-");
+	const dbPath = dir.join("store.db");
+	// Enough leaves that a contiguous damaged run longer than the
+	// damaged-region cap can be survived when it counts as one region.
+	const { pageSize, leaves } = seedLeaves(dbPath, 24000);
+	expect(leaves.length).toBeGreaterThan(1100);
+	const runStart = 100;
+	const runLength = 1050;
+	const fd = fs.openSync(dbPath, "r+");
+	try {
+		const blank = Buffer.alloc(pageSize, 0xff);
+		for (let index = runStart; index < runStart + runLength; index++) {
+			fs.writeSync(fd, blank, 0, pageSize, leaves[index]!.page * pageSize);
+		}
+	} finally {
+		fs.closeSync(fd);
+	}
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const rows = readSalvageableRows<{ id: number }>(db, "entries", "id");
+		const expected = leaves
+			.filter((leaf, index) => index < runStart || index >= runStart + runLength)
+			.flatMap(leaf => leaf.ids);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		db.close();
+	}
+});
+
+test("salvage falls back when an interior child link is duplicated", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-cross-link-");
+	const dbPath = dir.join("store.db");
+	const db = new Database(dbPath);
+	db.run("PRAGMA page_size = 512");
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 24; id++) insert.run(id, `row-${String(id).padStart(2, "0")}-${"x".repeat(90)}`);
+	})();
+	insert.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	const rootPage = db
+		.query<{ rootpage: number }, []>("SELECT rootpage FROM sqlite_schema WHERE name = 'entries'")
+		.get()!.rootpage;
+	db.close();
+	const bytes = Buffer.from(fs.readFileSync(dbPath));
+	const leaves: Array<{ page: number; ids: number[] }> = [];
+	for (let page = 1; page < bytes.length / pageSize; page++) {
+		const ids = leafPageIds(bytes, page, pageSize);
+		if (ids.length > 0) leaves.push({ page, ids });
+	}
+	leaves.sort((a, b) => a.ids[0]! - b.ids[0]!);
+	const leafOf = (id: number) => leaves.find(leaf => leaf.ids.includes(id))!;
+	// Repoint the `<= 8` child at the `21-24` leaf, so one leaf is reachable
+	// twice and the interior separators no longer bound the subtrees they name.
+	const header = (rootPage - 1) * pageSize + (rootPage === 1 ? 100 : 0);
+	const cells = bytes.readUInt16BE(header + 3);
+	let repointed = false;
+	for (let index = 0; index < cells; index++) {
+		const cell = (rootPage - 1) * pageSize + bytes.readUInt16BE(header + 12 + index * 2);
+		const key = bytes[cell + 4]!;
+		if (key < 0x80 && key === 8) {
+			bytes.writeUInt32BE(leafOf(24).page + 1, cell);
+			repointed = true;
+		}
+	}
+	expect(repointed).toBe(true);
+	// Damage the `1-4` and `13-16` leaves the scan must not fabricate rows from.
+	for (const id of [1, 13]) {
+		const page = leafOf(id).page;
+		bytes.fill(0xff, page * pageSize, (page + 1) * pageSize);
+	}
+	fs.writeFileSync(dbPath, bytes);
+
+	const reopened = new Database(dbPath, { readonly: true });
+	try {
+		const ids = readSalvageableRows<{ id: number }>(reopened, "entries", "id").map(row => row.id);
+		// The duplicated link must void every separator bound: the readable
+		// `17-24` rows survive via unbounded recovery instead of the scan
+		// resuming at the cross-linked `21` and dropping `17-20`.
+		expect(ids).toEqual(expect.arrayContaining([17, 18, 19, 20, 21, 22, 23, 24]));
+		expect(ids.filter(id => id <= 4 || (id >= 13 && id <= 16))).toEqual([]);
+		expect(new Set(ids).size).toBe(ids.length);
+	} finally {
+		reopened.close();
+	}
+});
+
+test("salvage falls back when an interior child link is redirected to a foreign leaf", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-redirect-");
+	const dbPath = dir.join("store.db");
+	const db = new Database(dbPath);
+	db.run("PRAGMA page_size = 512");
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	db.run("CREATE TABLE other (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insertEntries = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	const insertOther = db.prepare("INSERT INTO other (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 24; id++) insertEntries.run(id, `row-${String(id).padStart(2, "0")}-${"x".repeat(90)}`);
+		for (let id = 21; id <= 24; id++) insertOther.run(id, `other-${id}-${"x".repeat(90)}`);
+	})();
+	insertEntries.finalize();
+	insertOther.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	const rootPage = db
+		.query<{ rootpage: number }, []>("SELECT rootpage FROM sqlite_schema WHERE name = 'entries'")
+		.get()!.rootpage;
+	// The `other` table fits in one leaf whose rowids mirror `entries`' last leaf.
+	const foreignPage = db
+		.query<{ rootpage: number }, []>("SELECT rootpage FROM sqlite_schema WHERE name = 'other'")
+		.get()!.rootpage;
+	db.close();
+	const bytes = Buffer.from(fs.readFileSync(dbPath));
+	const leaves: Array<{ page: number; ids: number[] }> = [];
+	for (let page = 1; page < bytes.length / pageSize; page++) {
+		const ids = leafPageIds(bytes, page, pageSize);
+		if (ids.length > 0) leaves.push({ page, ids });
+	}
+	leaves.sort((a, b) => a.ids[0]! - b.ids[0]!);
+	const leafOf = (id: number) => leaves.find(leaf => leaf.ids.includes(id))!;
+	// Repoint the `<= 8` child at the other table's `21-24` leaf: the link stays in
+	// range and unvisited, so only its keys betray the redirection.
+	const header = (rootPage - 1) * pageSize + (rootPage === 1 ? 100 : 0);
+	const cells = bytes.readUInt16BE(header + 3);
+	let repointed = false;
+	for (let index = 0; index < cells; index++) {
+		const cell = (rootPage - 1) * pageSize + bytes.readUInt16BE(header + 12 + index * 2);
+		const key = bytes[cell + 4]!;
+		if (key < 0x80 && key === 8) {
+			bytes.writeUInt32BE(foreignPage, cell);
+			repointed = true;
+		}
+	}
+	expect(repointed).toBe(true);
+	// Damage the `1-4` and `13-16` leaves the scan must not fabricate rows from.
+	for (const id of [1, 13]) {
+		const page = leafOf(id).page;
+		bytes.fill(0xff, page * pageSize, (page + 1) * pageSize);
+	}
+	fs.writeFileSync(dbPath, bytes);
+
+	const reopened = new Database(dbPath, { readonly: true });
+	try {
+		const ids = readSalvageableRows<{ id: number }>(reopened, "entries", "id").map(row => row.id);
+		// The redirected child's keys fall outside the range its separators
+		// establish, so every bound is voided and the readable `17-24` rows
+		// survive via unbounded recovery instead of the scan resuming at the
+		// foreign leaf and dropping `17-20`.
+		expect(ids).toEqual(expect.arrayContaining([17, 18, 19, 20, 21, 22, 23, 24]));
+		expect(ids.filter(id => id <= 4 || (id >= 13 && id <= 16))).toEqual([]);
+		expect(new Set(ids).size).toBe(ids.length);
+	} finally {
+		reopened.close();
 	}
 });
