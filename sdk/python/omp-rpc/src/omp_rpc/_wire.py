@@ -171,6 +171,11 @@ _NOTIFY_TYPE_VALUES: Final[frozenset[str]] = frozenset({"info", "warning", "erro
 _decode_notify_type = cast("Decoder[NotifyType]", literal(_NOTIFY_TYPE_VALUES))
 
 
+AccountSwitchReason: TypeAlias = Literal["unavailable", "blocked", "plan", "cold", "reserve", "allowance-spent", "reclaim", "released", "pinned"]
+_ACCOUNT_SWITCH_REASON_VALUES: Final[frozenset[str]] = frozenset({"unavailable", "blocked", "plan", "cold", "reserve", "allowance-spent", "reclaim", "released", "pinned"})
+_decode_account_switch_reason = cast("Decoder[AccountSwitchReason]", literal(_ACCOUNT_SWITCH_REASON_VALUES))
+
+
 PromptStatus: TypeAlias = Literal["completed", "aborted", "error"]
 _PROMPT_STATUS_VALUES: Final[frozenset[str]] = frozenset({"completed", "aborted", "error"})
 _decode_prompt_status = cast("Decoder[PromptStatus]", literal(_PROMPT_STATUS_VALUES))
@@ -1241,6 +1246,20 @@ class RetryFallbackSucceededEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class AccountSwitchedEvent:
+    """The OAuth account serving `provider` changed since the session's last turn on it."""
+    type: Literal["account_switched"] = "account_switched"
+    provider: str
+    model: str
+    """The model that served the first turn on the new account."""
+    to: str
+    from_: str | None = None
+    """The previous account's label; absent once that account is no longer stored."""
+    reason: AccountSwitchReason | None = None
+    """The routing rule that moved the session; absent when unknown."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class ModelChangedEvent:
     type: Literal["model_changed"] = "model_changed"
 
@@ -1802,7 +1821,7 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | AccountSwitchedEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
@@ -2753,6 +2772,18 @@ def parse_retry_fallback_succeeded_event(value: object, path: str = "RetryFallba
     )
 
 
+def parse_account_switched_event(value: object, path: str = "AccountSwitchedEvent") -> AccountSwitchedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["account_switched"]]', literal(frozenset({"account_switched"}))), path)
+    return AccountSwitchedEvent(
+        provider=required(payload, "provider", decode_str, path),
+        model=required(payload, "model", decode_str, path),
+        to=required(payload, "to", decode_str, path),
+        from_=optional(payload, "from", decode_str, path),
+        reason=optional(payload, "reason", _decode_account_switch_reason, path),
+    )
+
+
 def parse_model_changed_event(value: object, path: str = "ModelChangedEvent") -> ModelChangedEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["model_changed"]]', literal(frozenset({"model_changed"}))), path)
@@ -3414,6 +3445,7 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "cache_warming_end": parse_cache_warming_end_event,
         "retry_fallback_applied": parse_retry_fallback_applied_event,
         "retry_fallback_succeeded": parse_retry_fallback_succeeded_event,
+        "account_switched": parse_account_switched_event,
         "model_changed": parse_model_changed_event,
         "config_warnings_changed": parse_config_warnings_changed_event,
         "advisor_cost_changed": parse_advisor_cost_changed_event,
@@ -3473,6 +3505,7 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "cache_warming_end": parse_rpc_agent_event,
         "retry_fallback_applied": parse_rpc_agent_event,
         "retry_fallback_succeeded": parse_rpc_agent_event,
+        "account_switched": parse_rpc_agent_event,
         "model_changed": parse_rpc_agent_event,
         "config_warnings_changed": parse_rpc_agent_event,
         "advisor_cost_changed": parse_rpc_agent_event,
@@ -4136,6 +4169,10 @@ class WireClient:
         """Subscribe to `retry_fallback_succeeded` frames."""
         return self._listen("retry_fallback_succeeded", listener)
 
+    def on_account_switched(self, listener: Callable[[AccountSwitchedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `account_switched`: The OAuth account serving `provider` changed since the session's last turn on it."""
+        return self._listen("account_switched", listener)
+
     def on_model_changed(self, listener: Callable[[ModelChangedEvent], None]) -> Callable[[], None]:
         """Subscribe to `model_changed` frames."""
         return self._listen("model_changed", listener)
@@ -4188,6 +4225,8 @@ class WireClient:
 __all__ = [
     "AbortAndDeliverQueueResult",
     "AbortAndRestoreQueueResult",
+    "AccountSwitchReason",
+    "AccountSwitchedEvent",
     "AdvisorCostChangedEvent",
     "AdvisorYieldedEvent",
     "AgentEndEvent",
@@ -4397,6 +4436,7 @@ __all__ = [
     "WidgetPlacement",
     "parse_abort_and_deliver_queue_result",
     "parse_abort_and_restore_queue_result",
+    "parse_account_switched_event",
     "parse_advisor_cost_changed_event",
     "parse_advisor_yielded_event",
     "parse_agent_end_event",

@@ -17,8 +17,30 @@
  * stick or re-rank.
  */
 
+import type { AccountSwitchReason } from "@oh-my-pi/pi-ai";
+import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
 import type { AuthStorage } from "./auth-storage";
 import type { SessionManager } from "./session-manager";
+
+/** A change of the OAuth account serving a session, between two recorded pins. */
+export interface AccountSwitch {
+	provider: string;
+	/** The previous account's label; absent once that account is no longer stored. */
+	from?: string;
+	to: string;
+	/** Absent when no routing rule of this process's auth store moved the session onto `to` since the last report (another process routed it, the branch's last pin predates an earlier switch, or a worker seam without `sessions.takeSwitchReason`). */
+	reason?: AccountSwitchReason;
+}
+
+/**
+ * A recorded {@link AccountSwitch} and the stored credential ids on each side,
+ * which the log records in place of the account labels (emails).
+ */
+export interface RecordedAccountSwitch {
+	event: AccountSwitch;
+	fromCredentialId?: number;
+	toCredentialId?: number;
+}
 
 /** Account fields shared by `OAuthAccountIdentity` and `OAuthAccountSummary`. */
 interface CredentialPinIdentity {
@@ -58,19 +80,32 @@ export function credentialPinHash(provider: string, identity: CredentialPinIdent
  * Appends a `credential_pin` entry only when the account differs from the
  * branch's latest pin, so steady-state sessions add a single entry; the
  * effective last-use time is derived from later assistant turns on read
- * (see `SessionManager.getCredentialPins`).
+ * (see `SessionManager.getCredentialPins`). Returns the switch when an earlier
+ * pin named another account. Every call consumes the auth store's switch
+ * reason, so a reason is reported with the turn its switch served or not at all.
  */
 export function recordCredentialPin(
 	authStorage: AuthStorage,
 	sessionManager: SessionManager,
 	sessionId: string,
 	provider: string,
-): void {
+): RecordedAccountSwitch | undefined {
+	const reason = authStorage.sessions.takeSwitchReason?.(provider, sessionId);
 	const identity = authStorage.oauth.identity(provider, sessionId);
-	if (!identity) return;
+	if (!identity) return undefined;
 	const hash = credentialPinHash(provider, identity);
-	if (!hash || sessionManager.getCredentialPins().get(provider)?.hash === hash) return;
+	const previousHash = sessionManager.getCredentialPins().get(provider)?.hash;
+	if (!hash || previousHash === hash) return undefined;
 	sessionManager.appendCredentialPin(provider, hash);
+	const to = formatActiveAccountLabel(identity);
+	if (previousHash === undefined || to === undefined) return undefined;
+	const accounts = authStorage.oauth.accounts(provider, sessionId);
+	const from = accounts.find(account => credentialPinHash(provider, account) === previousHash);
+	return {
+		event: { provider, from: formatActiveAccountLabel(from), to, reason },
+		fromCredentialId: from?.credentialId,
+		toCredentialId: accounts.find(account => account.active)?.credentialId,
+	};
 }
 
 /**

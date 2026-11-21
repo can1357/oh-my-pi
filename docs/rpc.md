@@ -909,6 +909,7 @@ Common event types:
 - `auto_retry_start`, `auto_retry_end`
 - `cache_warming_start`, `cache_warming_end`
 - `retry_fallback_applied`, `retry_fallback_succeeded`
+- `account_switched`
 - `model_changed`, `thinking_level_changed`, `config_warnings_changed`
 - `advisor_cost_changed`, `advisor_yielded`
 - `ttsr_triggered` (rule injection)
@@ -993,6 +994,7 @@ report a manual compaction only through the `compact` response.
 | `auto_compaction_start`, `auto_compaction_end` | An automatic compaction (threshold, overflow, idle, incomplete response) began or ended. Never sent for a manual compaction.       | `reason`, `action`; `result?`, `aborted`, `willRetry`, `errorMessage?`, `skipped?`                                                             |
 | `retry_fallback_applied`                       | A retryable failure switched the session to the next model of a `retry.fallbackChains` chain.                                      | `from`, `to` (model selectors), `role`, `reason?` (the error)                                                                                  |
 | `retry_fallback_succeeded`                     | The fallback model answered.                                                                                                       | `model`, `role`                                                                                                                                |
+| `account_switched`                             | The OAuth account serving a provider changed since the session's last turn on it (sent once, after the first turn on the new one). | `provider`, `model`, `from?`, `to` (account labels), `reason?`: `unavailable`, `blocked`, `plan`, `cold`, `reserve`, `allowance-spent`, `reclaim`, `released`, `pinned` |
 | `ttsr_triggered`                               | Rule injection: a TTSR rule matched the streamed output and its text was injected into the conversation.                           | `rules`: each rule object carries at least `name`, `path`, and `content`                                                                       |
 | `goal_updated`                                 | Goal mode changed, through the `goal` command or the agent's `goal` tool.                                                          | `goal` (or `null`), `state?`                                                                                                                   |
 

@@ -15,6 +15,8 @@ export const eventDefs = {
 	CacheWarmingMethod: "'prewarm' | 'replay'",
 	CacheWarmingOutcome: "'hit' | 'miss' | 'error' | 'aborted'",
 	NotifyType: "'info' | 'warning' | 'error'",
+	AccountSwitchReason:
+		"'unavailable' | 'blocked' | 'plan' | 'cold' | 'reserve' | 'allowance-spent' | 'reclaim' | 'released' | 'pinned'",
 
 	AgentStartEvent: {
 		type: "'agent_start'",
@@ -156,6 +158,17 @@ export const eventDefs = {
 		"reason?": "string",
 	},
 	RetryFallbackSucceededEvent: { type: "'retry_fallback_succeeded'", model: "string", role: "string" },
+	AccountSwitchedEvent: doc(
+		{
+			type: "'account_switched'",
+			provider: "string",
+			model: doc("string", "The model that served the first turn on the new account."),
+			"from?": doc("string", "The previous account's label; absent once that account is no longer stored."),
+			to: "string",
+			"reason?": doc("AccountSwitchReason", "The routing rule that moved the session; absent when unknown."),
+		},
+		"The OAuth account serving `provider` changed since the session's last turn on it.",
+	),
 	ModelChangedEvent: { type: "'model_changed'" },
 	ConfigWarningsChangedEvent: { type: "'config_warnings_changed'" },
 	AdvisorCostChangedEvent: { type: "'advisor_cost_changed'" },
@@ -225,6 +238,7 @@ export const eventDefs = {
 			"CacheWarmingEndEvent",
 			"RetryFallbackAppliedEvent",
 			"RetryFallbackSucceededEvent",
+			"AccountSwitchedEvent",
 			"ModelChangedEvent",
 			"ConfigWarningsChangedEvent",
 			"AdvisorCostChangedEvent",

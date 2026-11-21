@@ -1,7 +1,13 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { getEnvApiKey } from "../env-api-key";
-import type { AuthCredential, OAuthCredential, SessionRestrictionLease, SessionsApi } from "./types";
+import type {
+	AccountSwitchReason,
+	AuthCredential,
+	OAuthCredential,
+	SessionRestrictionLease,
+	SessionsApi,
+} from "./types";
 import type { AuthCredentialStore } from "./store";
 import type { CredentialPool } from "./pool";
 import type { KeyOverrides } from "./cascade";
@@ -38,6 +44,12 @@ export type SessionCredential = {
 	lastUsedAtMs?: number;
 	/** Set only by the public user-facing pin API; automatic warm affinity leaves it absent. */
 	explicit?: true;
+	/**
+	 * Why this credential replaced the one that served the session before, until
+	 * `SessionsApi.takeSwitchReason` reads it; absent for a session's first
+	 * credential. Kept in memory only, never persisted.
+	 */
+	switchReason?: AccountSwitchReason;
 };
 
 /** One installed restriction: the allowed OAuth identity keys and the lease that lifts it. */
@@ -56,6 +68,8 @@ export class SessionAffinity implements SessionsApi {
 	#sessionLastCredential: Map<string, LRUCache<string, SessionCredential>> = new Map();
 	/** Persisted sticky rows per provider, keyed by session id, so unchanged re-records skip the write. */
 	#persistedSticky: Map<string, LRUCache<string, PersistedSticky>> = new Map();
+	/** Credential id each session held when {@link release} cleared its pin; the next record names it `released`. */
+	#released: Map<string, LRUCache<string, number>> = new Map();
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
 	#overrides: KeyOverrides;
@@ -133,6 +147,7 @@ export class SessionAffinity implements SessionsApi {
 	clearProvider(provider: string): void {
 		this.#sessionLastCredential.delete(provider);
 		this.#persistedSticky.delete(provider);
+		this.#released.delete(provider);
 		const prefix = `${SESSION_STICKY_CACHE_PREFIX}${provider}:`;
 		try {
 			this.#store.deleteCachePrefix?.(prefix);
@@ -174,6 +189,13 @@ export class SessionAffinity implements SessionsApi {
 			previous?.type === type &&
 			(credentialId !== undefined ? previous.credentialId === credentialId : previous.index === index);
 		const isExplicit = explicit || (sameCredential && previous?.explicit === true);
+		const releasedCredentialId = this.#released.get(provider)?.get(sessionId);
+		if (releasedCredentialId !== undefined) this.#released.get(provider)?.delete(sessionId);
+		const switchReason: AccountSwitchReason | undefined = sameCredential
+			? previous?.switchReason
+			: releasedCredentialId !== undefined && releasedCredentialId !== credentialId
+				? "released"
+				: undefined;
 		const sessionCredential: SessionCredential = {
 			type,
 			index,
@@ -181,7 +203,7 @@ export class SessionAffinity implements SessionsApi {
 			lastUsedAtMs: nowMs,
 			...(isExplicit ? { explicit: true as const } : {}),
 		};
-		sessionMap.set(sessionId, sessionCredential);
+		sessionMap.set(sessionId, switchReason ? { ...sessionCredential, switchReason } : sessionCredential);
 
 		if (credentialId === undefined) return;
 		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
@@ -209,6 +231,23 @@ export class SessionAffinity implements SessionsApi {
 			persistedSessions.delete(sessionId);
 			logger.debug("Failed to write session sticky credential to persistent store cache", { err });
 		}
+	}
+
+	/**
+	 * Attach `reason` to the session's pin when it is still `credentialId`, the
+	 * account selection just moved the session to.
+	 */
+	noteSwitch(provider: string, sessionId: string, credentialId: number, reason: AccountSwitchReason): void {
+		const live = this.#sessionLastCredential.get(provider)?.get(sessionId);
+		if (live?.credentialId === credentialId) live.switchReason = reason;
+	}
+
+	/** `SessionsApi.takeSwitchReason`: return the session's switch reason and clear it. */
+	takeSwitchReason(provider: string, sessionId: string): AccountSwitchReason | undefined {
+		const live = this.#sessionLastCredential.get(provider)?.get(sessionId);
+		const reason = live?.switchReason;
+		if (live) delete live.switchReason;
+		return reason;
 	}
 
 	/**
@@ -317,6 +356,7 @@ export class SessionAffinity implements SessionsApi {
 		}
 		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
 		this.#persistedSticky.get(provider)?.delete(sessionId);
+		this.#released.get(provider)?.delete(sessionId);
 		try {
 			this.#store.setCache(cacheKey, "", 0);
 		} catch (err) {
@@ -381,7 +421,11 @@ export class SessionAffinity implements SessionsApi {
 		const target = stored[index];
 		if (target?.credential.type !== "oauth" || !this.allows(provider, sessionId, target.credential)) return false;
 		const restoredAtMs = options?.restoredAtMs;
+		const previousCredentialId = this.get(provider, sessionId)?.credentialId;
 		this.record(provider, sessionId, "oauth", index, restoredAtMs, restoredAtMs === undefined);
+		if (restoredAtMs === undefined && previousCredentialId !== undefined && previousCredentialId !== credentialId) {
+			this.noteSwitch(provider, sessionId, credentialId, "pinned");
+		}
 		return true;
 	}
 
@@ -425,8 +469,12 @@ export class SessionAffinity implements SessionsApi {
 	 * headroom, before considering a model/provider fallback.
 	 */
 	release(provider: string, sessionId: string): boolean {
-		if (!this.get(provider, sessionId)) return false;
+		const pin = this.get(provider, sessionId);
+		if (!pin) return false;
 		this.clear(provider, sessionId);
+		if (pin.credentialId !== undefined) {
+			SessionAffinity.#sessionsFor(this.#released, provider).set(sessionId, pin.credentialId);
+		}
 		return true;
 	}
 }

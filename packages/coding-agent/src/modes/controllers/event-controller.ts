@@ -54,6 +54,7 @@ import {
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatNoticeAccountLabel } from "../../slash-commands/helpers/active-oauth-account";
 import { PROPOSE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
 import { proposeDispatchDetails } from "../../tools/resolve";
@@ -472,6 +473,7 @@ export class EventController {
 			},
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
+			account_switched: e => this.#handleAccountSwitched(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
@@ -2921,6 +2923,12 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>,
 	): Promise<void> {
 		this.ctx.showStatus(`Fallback succeeded on ${event.model}`);
+	}
+
+	async #handleAccountSwitched(event: Extract<AgentSessionEvent, { type: "account_switched" }>): Promise<void> {
+		const from = event.from === undefined ? "a removed account" : formatNoticeAccountLabel(event.from);
+		const reason = event.reason ? ` (${event.reason})` : "";
+		this.ctx.showStatus(`${event.provider} account: ${from} -> ${formatNoticeAccountLabel(event.to)}${reason}`);
 	}
 
 	async #handleTtsrTriggered(event: Extract<AgentSessionEvent, { type: "ttsr_triggered" }>): Promise<void> {

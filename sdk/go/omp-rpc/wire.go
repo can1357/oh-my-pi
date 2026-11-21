@@ -3777,6 +3777,33 @@ func (v *NotifyType) UnmarshalJSON(data []byte) error {
 	return unknownValue("NotifyType", s)
 }
 
+type AccountSwitchReason string
+
+const (
+	AccountSwitchReasonUnavailable    AccountSwitchReason = "unavailable"
+	AccountSwitchReasonBlocked        AccountSwitchReason = "blocked"
+	AccountSwitchReasonPlan           AccountSwitchReason = "plan"
+	AccountSwitchReasonCold           AccountSwitchReason = "cold"
+	AccountSwitchReasonReserve        AccountSwitchReason = "reserve"
+	AccountSwitchReasonAllowanceSpent AccountSwitchReason = "allowance-spent"
+	AccountSwitchReasonReclaim        AccountSwitchReason = "reclaim"
+	AccountSwitchReasonReleased       AccountSwitchReason = "released"
+	AccountSwitchReasonPinned         AccountSwitchReason = "pinned"
+)
+
+func (v *AccountSwitchReason) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "AccountSwitchReason")
+	if err != nil {
+		return err
+	}
+	switch value := AccountSwitchReason(s); value {
+	case AccountSwitchReasonUnavailable, AccountSwitchReasonBlocked, AccountSwitchReasonPlan, AccountSwitchReasonCold, AccountSwitchReasonReserve, AccountSwitchReasonAllowanceSpent, AccountSwitchReasonReclaim, AccountSwitchReasonReleased, AccountSwitchReasonPinned:
+		*v = value
+		return nil
+	}
+	return unknownValue("AccountSwitchReason", s)
+}
+
 type AgentStartEvent struct {
 	// Calls of an unpaired assistant tail a continued run executes before its first model request.
 	ResumedToolCallIds []string `json:"resumedToolCallIds,omitempty"`
@@ -4422,6 +4449,43 @@ func (v RetryFallbackSucceededEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"retry_fallback_succeeded"`, nil)
 }
 
+// The OAuth account serving `provider` changed since the session's last turn on it.
+type AccountSwitchedEvent struct {
+	Provider string `json:"provider"`
+	// The model that served the first turn on the new account.
+	Model string `json:"model"`
+	To    string `json:"to"`
+	// The previous account's label; absent once that account is no longer stored.
+	From *string `json:"from,omitempty"`
+	// The routing rule that moved the session; absent when unknown.
+	Reason *AccountSwitchReason `json:"reason,omitempty"`
+}
+
+func (v *AccountSwitchedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "AccountSwitchedEvent", v.decodeFrom)
+}
+
+func (v *AccountSwitchedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out AccountSwitchedEvent
+	d := fieldDecoder{raw: raw, owner: "AccountSwitchedEvent"}
+	d.constant("type", "account_switched")
+	d.required("provider", &out.Provider)
+	d.required("model", &out.Model)
+	d.required("to", &out.To)
+	d.optional("from", &out.From)
+	d.optional("reason", &out.Reason)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v AccountSwitchedEvent) MarshalJSON() ([]byte, error) {
+	type plain AccountSwitchedEvent
+	return encodeObject(plain(v), `"type":"account_switched"`, nil)
+}
+
 type ModelChangedEvent struct{}
 
 func (v *ModelChangedEvent) UnmarshalJSON(data []byte) error {
@@ -4765,6 +4829,7 @@ func (CacheWarmingStartEvent) isRpcAgentEvent()      {}
 func (CacheWarmingEndEvent) isRpcAgentEvent()        {}
 func (RetryFallbackAppliedEvent) isRpcAgentEvent()   {}
 func (RetryFallbackSucceededEvent) isRpcAgentEvent() {}
+func (AccountSwitchedEvent) isRpcAgentEvent()        {}
 func (ModelChangedEvent) isRpcAgentEvent()           {}
 func (ConfigWarningsChangedEvent) isRpcAgentEvent()  {}
 func (AdvisorCostChangedEvent) isRpcAgentEvent()     {}
@@ -4840,6 +4905,8 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[RetryFallbackAppliedEvent](raw)
 	case "retry_fallback_succeeded":
 		value, err = decodeVariant[RetryFallbackSucceededEvent](raw)
+	case "account_switched":
+		value, err = decodeVariant[AccountSwitchedEvent](raw)
 	case "model_changed":
 		value, err = decodeVariant[ModelChangedEvent](raw)
 	case "config_warnings_changed":
@@ -7041,6 +7108,7 @@ func (CacheWarmingStartEvent) isRpcNotification()       {}
 func (CacheWarmingEndEvent) isRpcNotification()         {}
 func (RetryFallbackAppliedEvent) isRpcNotification()    {}
 func (RetryFallbackSucceededEvent) isRpcNotification()  {}
+func (AccountSwitchedEvent) isRpcNotification()         {}
 func (ModelChangedEvent) isRpcNotification()            {}
 func (ConfigWarningsChangedEvent) isRpcNotification()   {}
 func (AdvisorCostChangedEvent) isRpcNotification()      {}
@@ -7153,6 +7221,8 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[RetryFallbackAppliedEvent](raw)
 	case "retry_fallback_succeeded":
 		value, err = decodeVariant[RetryFallbackSucceededEvent](raw)
+	case "account_switched":
+		value, err = decodeVariant[AccountSwitchedEvent](raw)
 	case "model_changed":
 		value, err = decodeVariant[ModelChangedEvent](raw)
 	case "config_warnings_changed":
@@ -7246,6 +7316,7 @@ func (CacheWarmingStartEvent) isRpcServerFrame()       {}
 func (CacheWarmingEndEvent) isRpcServerFrame()         {}
 func (RetryFallbackAppliedEvent) isRpcServerFrame()    {}
 func (RetryFallbackSucceededEvent) isRpcServerFrame()  {}
+func (AccountSwitchedEvent) isRpcServerFrame()         {}
 func (ModelChangedEvent) isRpcServerFrame()            {}
 func (ConfigWarningsChangedEvent) isRpcServerFrame()   {}
 func (AdvisorCostChangedEvent) isRpcServerFrame()      {}
@@ -7368,6 +7439,8 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[RetryFallbackAppliedEvent](raw)
 	case "retry_fallback_succeeded":
 		value, err = decodeVariant[RetryFallbackSucceededEvent](raw)
+	case "account_switched":
+		value, err = decodeVariant[AccountSwitchedEvent](raw)
 	case "model_changed":
 		value, err = decodeVariant[ModelChangedEvent](raw)
 	case "config_warnings_changed":
