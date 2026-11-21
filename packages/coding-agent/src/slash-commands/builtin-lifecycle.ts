@@ -8,7 +8,7 @@ import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-b
 import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, findCompactMode, type ParsedCompactArgs, parseCompactArgs } from "../session/compact-modes";
-import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { isInterruptReason } from "../session/messages";
 import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
 import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
@@ -50,10 +50,7 @@ async function handleCompact(command: ParsedSlashCommand, runtime: SlashCommandR
 			);
 		} catch (err) {
 			// Don't append an out-of-turn notice after the host already reported its interrupt.
-			if (
-				err instanceof CompactionCancelledError &&
-				(err.cause === USER_INTERRUPT_LABEL || runtime.signal?.aborted)
-			) {
+			if (err instanceof CompactionCancelledError && (isInterruptReason(err.cause) || runtime.signal?.aborted)) {
 				return;
 			}
 			const message = errorMessage(err);

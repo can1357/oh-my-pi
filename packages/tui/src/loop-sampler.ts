@@ -6,7 +6,7 @@
  * stack every millisecond while it runs JS and nothing while the loop idles,
  * so the samples taken during a block name the code that caused it.
  */
-import { type SamplingProfileStackTraces, samplingProfilerStackTraces, startSamplingProfiler } from "bun:jsc";
+import { profile, type SamplingProfileStackTraces, samplingProfilerStackTraces, startSamplingProfiler } from "bun:jsc";
 
 // Exported by bun:jsc at runtime but not yet declared by bun-types.
 declare module "bun:jsc" {
@@ -31,6 +31,8 @@ export interface LoopSample {
 export interface LoopSampler {
 	/** Starts sampling; idempotent. */
 	start(): void;
+	/** Stops sampling; idempotent. Samples nobody drained are dropped once no sampler runs. */
+	stop(): void;
 	/** Returns the samples taken since the previous drain, oldest first, and forgets them. */
 	drain(): LoopSample[];
 }
@@ -50,16 +52,10 @@ const UNKNOWN_LINE = 4294967295;
 /** Most callers `top` lists. */
 const TOP_LIMIT = 4;
 
-// JSC has no stop call: one profiler serves every sampler for the rest of the process.
-let profilerStarted = false;
-/** `performance.now()` of the last drain by any sampler. */
-let lastDrainAt = 0;
-/**
- * How long the buffer may go undrained before its samples are dropped. Nothing
- * drains while every watchdog is stopped (an external editor, a suspended
- * TUI), and the profiler keeps recording each millisecond of JS that runs.
- */
-const IDLE_DISCARD_MS = 2_000;
+// One JSC profiler serves every sampler in the process, and runs while any of
+// them does. Each sample it records keeps the functions on its stack, and what
+// they close over, alive until drained.
+let runningSamplers = 0;
 
 /**
  * The bun:jsc-backed sampler, or null when sampling is disabled: by env
@@ -72,19 +68,21 @@ export function createJscLoopSampler(): LoopSampler | null {
 	for (const arg of process.execArgv) {
 		if (arg.startsWith("--cpu-prof")) return null;
 	}
+	let running = false;
 	return {
 		start(): void {
-			if (profilerStarted) return;
-			startSamplingProfiler();
-			profilerStarted = true;
-			lastDrainAt = performance.now();
-			const discard: Timer = setInterval(() => {
-				if (performance.now() - lastDrainAt >= IDLE_DISCARD_MS) samplingProfilerStackTraces();
-			}, IDLE_DISCARD_MS);
-			discard.unref();
+			if (running) return;
+			running = true;
+			if (runningSamplers++ === 0) startSamplingProfiler();
+		},
+		stop(): void {
+			if (!running) return;
+			running = false;
+			// bun:jsc has no stop call; profile() pauses the shared profiler and
+			// clears its buffer once its callback returns.
+			if (--runningSamplers === 0) profile(() => {});
 		},
 		drain(): LoopSample[] {
-			lastDrainAt = performance.now();
 			const { traces } = samplingProfilerStackTraces();
 			return traces.map((trace): LoopSample => ({
 				atMs: trace.timestamp * 1000,

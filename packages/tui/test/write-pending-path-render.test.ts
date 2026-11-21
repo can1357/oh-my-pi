@@ -28,7 +28,7 @@ describe("pending write path rendering", () => {
 			{ expanded: false, isPartial: true, spinnerFrame: 0 },
 			uiTheme,
 		);
-		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+		if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 
 		const rendered = component.render(120).join("\n");
 		const target = rendered.match(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/)?.[1];

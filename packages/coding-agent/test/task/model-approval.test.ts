@@ -389,6 +389,7 @@ describe("per-call model advertisement", () => {
 				state: { tools: [], messages: [], systemPrompt: [] },
 				setSystemPrompt: () => {},
 				setTools: () => {},
+				setStandbyTools: () => {},
 			} as unknown as Agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
@@ -552,6 +553,17 @@ describe("per-call model grants", () => {
 
 	it("captures a faithfully representable parent upstream pin", () => {
 		expect(parentModelGrantPattern(pinnedSonnet)).toBe("openrouter/anthropic/claude-sonnet-4.5@anthropic");
+	});
+
+	it("treats an OpenRouter route variant and its base as separate grants", () => {
+		const nitro = parseModelPattern("openrouter/anthropic/claude-sonnet-4.5:nitro", [sonnet]).model!;
+		const nitroRole = Settings.isolated({ modelRoles: { fast: "openrouter/anthropic/claude-sonnet-4.5:nitro" } });
+		const baseRole = Settings.isolated({ modelRoles: { fast: "openrouter/anthropic/claude-sonnet-4.5" } });
+		expect(nitro.id).toBe("anthropic/claude-sonnet-4.5:nitro");
+		expect(approved(nitro, { settings: nitroRole, agentName: "worker" })).toBe(true);
+		expect(approved(sonnet, { settings: nitroRole, agentName: "worker" })).toBe(false);
+		expect(approved(nitro, { settings: baseRole, agentName: "worker" })).toBe(false);
+		expect(approved(sonnet, { settings: baseRole, agentName: "worker" })).toBe(true);
 	});
 
 	it("never trusts a project agent file that claims a user source", () => {

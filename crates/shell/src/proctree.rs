@@ -760,10 +760,10 @@ impl Process {
 		Self { inner }
 	}
 
-	/// Walk the live descendant tree from scratch. Cheap and idempotent — call
-	/// it again before each signal wave so grandchildren spawned during a grace
-	/// period are not missed.
-	fn live_descendants(&self) -> Vec<Self> {
+	/// Walk the live descendant tree from scratch, children first. Cheap and
+	/// idempotent — call it again before each signal wave so grandchildren
+	/// spawned during a grace period are not missed.
+	pub fn live_descendants(&self) -> Vec<Self> {
 		self
 			.inner
 			.descendants()

@@ -319,7 +319,6 @@ export class SessionFocusController {
 			if (!target.isStreaming) this.ctx.eventController.showAsyncWait();
 		} else {
 			setRunStatus({ state: "idle" });
-			this.ctx.eventController.markViewIdle();
 		}
 		if (generation !== this.#attachGeneration) return undefined;
 		const replayed = new Map<unknown, AgentMessage[]>();

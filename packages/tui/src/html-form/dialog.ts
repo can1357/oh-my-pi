@@ -43,7 +43,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { ASK_RESERVED_ROWS, type FoldedRows, renderFoldedQuestion } from "../chrome/ask-fold";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
-import { convertImageToPngShared } from "../chat/image-loading";
+import { convertImageToPngShared } from "../png-conversion";
 import { Editor } from "../components/editor";
 import { Image, type ImageBudget, measureRender } from "../components/image";
 import { Input } from "../components/input";
@@ -439,6 +439,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	readonly #form: HtmlForm;
 	readonly #options: HtmlFormDialogOptions;
 	readonly #stops: Stop[] = [];
+	/** The keys reach one field only: Enter on it submits, there being no next field to move to. */
+	readonly #sole: boolean;
 	readonly #fieldIndex = new Map<FormField, number>();
 	readonly #checked = new Map<ChoiceField, Set<number>>();
 	readonly #inputs = new Map<TextField, Input>();
@@ -532,6 +534,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			}
 		}
 		this.#stops.push({ kind: "submit" });
+		this.#sole = new Set(this.#stops.flatMap(stop => (stop.kind === "submit" ? [] : [stop.field]))).size === 1;
 		// Open where the answer is, so Enter accepts a preselected choice instead of overwriting it.
 		this.#focus = this.#answerStop(this.#fieldOfStop(0));
 		this.#panel = new OverlayPanel(options.title ?? DEFAULT_TITLE);
@@ -725,7 +728,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			// Enter picks a radio; on a checkbox group with nothing checked yet it checks the focused box, so
 			// Enter alone never leaves the group empty.
 			if (!stop.field.multi || this.#checked.get(stop.field)?.size === 0) this.#toggle(stop.field, stop.option);
-			this.#moveField(1);
+			this.#advance();
 		}
 	}
 
@@ -954,7 +957,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		input.mask = field.type === "password";
 		input.placeholder = field.placeholder || undefined;
 		input.setValue(field.value, { cursor: "start" });
-		input.onSubmit = () => this.#moveField(1);
+		input.onSubmit = () => this.#advance();
 		this.#inputs.set(field, input);
 	}
 
@@ -1302,7 +1305,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		if (getKeybindings().matches(data, "tui.input.submit")) {
-			this.#moveField(1);
+			this.#advance();
 			return;
 		}
 		const before = editor.getText();
@@ -1323,7 +1326,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (getKeybindings().matches(data, "tui.select.confirm")) {
 			// Back on Other after picking an option: Enter makes the kept text the answer again.
 			if (!field.multi && input.getValue().trim() !== "") this.#checked.get(field)!.clear();
-			this.#moveField(1);
+			this.#advance();
 			return;
 		}
 		const before = input.getValue();
@@ -1352,7 +1355,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		if (getKeybindings().matches(data, "tui.select.confirm")) {
-			this.#moveField(1);
+			this.#advance();
 			return;
 		}
 		const typed = extractPrintableText(data);
@@ -1422,6 +1425,12 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		this.#setFocus(this.#focus + delta);
+	}
+
+	/** Enter on a field: the next field, or submit when the form asks only this one. */
+	#advance(): void {
+		if (this.#sole) this.#submit();
+		else this.#moveField(1);
 	}
 
 	/** Jump to the first stop of the next (or previous) field; Submit counts as a field. */
@@ -1720,14 +1729,15 @@ export class HtmlFormDialog implements Component, Focusable {
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		if (this.#open)
 			return `${upDown} highlight · ${enter} choose${noteHint} · ${editorKey("tui.select.cancel")} close`;
+		const next = this.#sole ? "submit" : "next";
 		let action: string;
 		if (stop.kind === "submit") action = `${enter} submit`;
-		else if (stop.kind === "text") action = `${enter} next`;
-		else if (stop.kind === "other") action = `type your own · ${enter} next`;
+		else if (stop.kind === "text") action = `${enter} ${next}`;
+		else if (stop.kind === "other") action = `type your own · ${enter} ${next}`;
 		else if (stop.kind === "select")
-			action = `${formatKeyHint("space")} open · ${formatKeyHint("left")}/${formatKeyHint("right")} change · ${enter} next`;
-		else if (stop.field.multi) action = `${formatKeyHint("space")} toggle · ${enter} next`;
-		else action = `${enter} choose`;
+			action = `${formatKeyHint("space")} open · ${formatKeyHint("left")}/${formatKeyHint("right")} change · ${enter} ${next}`;
+		else if (stop.field.multi) action = `${formatKeyHint("space")} toggle · ${enter} ${next}`;
+		else action = `${enter} ${this.#sole ? "submit" : "choose"}`;
 		if (stop.kind === "option" || stop.kind === "select") action += noteHint;
 		const hints = [action, `${upDown} move`];
 		if (stop.kind !== "submit") hints.push(`${formatKeyHint("tab")} next field`);
@@ -2198,7 +2208,10 @@ export class HtmlFormDialog implements Component, Focusable {
 						),
 					]
 				: []),
-			actionButton(SUBMIT_LABEL, "submit", { ...(stop.kind === "submit" ? { keys: "enter" } : {}), tone: "accent" }),
+			actionButton(SUBMIT_LABEL, "submit", {
+				...(stop.kind === "submit" || this.#sole ? { keys: "enter" } : {}),
+				tone: "accent",
+			}),
 		]);
 	}
 
