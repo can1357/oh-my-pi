@@ -498,10 +498,10 @@ describe("todo backend", () => {
 			session.getTodoPhases().flatMap(phase => phase.tasks.map(task => task.content));
 
 		it("an accepted todo call commits, and the backend is not told a second time, nor sent a list a client set again meanwhile", async () => {
-			for (const elsewhere of [false, true]) {
+			for (const waitsFor of ["tracker", "other", "heir"]) {
 				const backend = tracker("tracker", true);
-				const other = tracker("other");
-				const { session } = await open([backend.extension, other.extension], "tracker");
+				const [heir, other] = [tracker(), tracker("other")];
+				const { session } = await open([backend.extension, heir.extension, other.extension], "tracker");
 				const gate = Promise.withResolvers<void>();
 				backend.applyHold = gate.promise;
 
@@ -509,10 +509,13 @@ describe("todo backend", () => {
 				const call = todo(session, { op: "init", items: ["a", "b"] });
 				await deciding;
 				// The list omp already has: sent after the backend's answer, it would take the change back.
-				// Set while another backend was selected for a moment, it is still that backend's to get.
-				if (elsewhere) cfgTodoBackend.override(session.settings, "other");
+				// Set while another backend was selected, or after the id went to the next extension, it
+				// is still theirs to get.
+				if (waitsFor === "other") cfgTodoBackend.override(session.settings, "other");
+				const holder = session.extensionRunner?.getTodoBackends().get("tracker")?.extension;
+				if (waitsFor === "heir") session.extensionRunner?.setSuspendedExtensions(extension => extension === holder);
 				session.commitTodoPhases([]);
-				if (elsewhere) cfgTodoBackend.override(session.settings, "native");
+				if (waitsFor !== "tracker") cfgTodoBackend.override(session.settings, "native");
 				gate.resolve();
 				const result = await call;
 				await settled(session);
@@ -521,7 +524,10 @@ describe("todo backend", () => {
 				expect(backend.asked).toEqual([{ op: "init", previous: [], next: session.getTodoPhases() }]);
 				expect(committed(session)).toEqual(["a", "b"]);
 				expect(backend.calls).toEqual([]);
-				expect(tasksOf(other)).toEqual(elsewhere ? [[]] : []);
+				expect([tasksOf(other), tasksOf(heir)]).toEqual([
+					waitsFor === "other" ? [[]] : [],
+					waitsFor === "heir" ? [[]] : [],
+				]);
 			}
 		});
 

@@ -1822,9 +1822,10 @@ export class ExtensionRunner {
 			// keeps that change for a session omp is no longer in. Nor once it is no longer selected,
 			// or its extension no longer holds the id: omp has stopped mirroring changes to it. A list
 			// waiting for another backend gives way, as it would to a commit: that one is not selected.
+			const owns = () => this.getTodoBackends().get(backend)?.extension === extension;
 			const resync = () => {
 				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
-				if (this.getTodoBackends().get(backend)?.extension !== extension) return;
+				if (!owns()) return;
 				this.#todoStale = true;
 				if (this.#todoPending?.backend !== backend) this.#todoPending = { backend, sessionId, phases: current() };
 				this.#queueTodoBackendCall();
@@ -1860,10 +1861,11 @@ export class ExtensionRunner {
 			if (verdict === true) {
 				// Accepted for a session omp has left: its record of what the backend holds stays unknown.
 				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
-				// A list queued for this backend while the call was with it (a late acceptance's correction,
-				// or a client setting the list it had) would go out before the tool commits `next` and take
-				// the change back. That commit's list replaces it; when the list changed, what waits goes out.
-				if (this.#todoPending?.backend === backend && Bun.deepEquals(current(), change.previous))
+				// A list waiting for this backend (a late acceptance's correction, or a client setting the
+				// list it had) would go out before the tool commits `next` and take the change back. The
+				// backend holds `next`, which the tool commits; when the list changed, what waits goes out,
+				// as it does when the id went to another extension meanwhile.
+				if (this.#todoPending?.backend === backend && owns() && Bun.deepEquals(current(), change.previous))
 					this.#todoPending = undefined;
 				// `next` is recorded as held only when this backend held `previous`. After a failed call,
 				// or when it was selected or took the id over since, the commit's list still goes out.
