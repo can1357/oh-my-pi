@@ -312,6 +312,8 @@ function trimFabricatedCloser(rows: readonly string[], source: string): readonly
  */
 export class AssistantMessageComponent extends Container {
 	readonly transcriptBlockMode = "appendOnly" as const;
+	/** Whether named links append their target URL in parentheses (`tui.showLinkUrl`). */
+	linkUrls: boolean;
 	#contentContainer: Container;
 	#markerSlot: Container;
 	#cacheMarker?: CacheInvalidationMarkerComponent;
@@ -662,6 +664,7 @@ export class AssistantMessageComponent extends Container {
 		linkTargets?: ReadonlyMap<string, string>,
 		expandThinkingBlocks = false,
 		textRendering?: AssistantTextRendering,
+		linkUrls = true,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
@@ -672,6 +675,7 @@ export class AssistantMessageComponent extends Container {
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
 		this.#expandThinkingBlocks = expandThinkingBlocks;
+		this.linkUrls = linkUrls;
 
 		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
@@ -1574,6 +1578,7 @@ export class AssistantMessageComponent extends Container {
 						color: (value: string) => theme.fg("thinkingText", value),
 						italic: true,
 					});
+		md.linkUrls = this.linkUrls;
 		md.tableLocks = tableLocks;
 		return md;
 	}
