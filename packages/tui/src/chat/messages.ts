@@ -97,18 +97,17 @@ export function isSilentAbort(message: Pick<AssistantMessage, "errorId" | "error
 	return AIError.is(message.errorId, AIError.Flag.SilentAbort) || message.errorMessage === SILENT_ABORT_MARKER;
 }
 
-/** Reason threaded through `AbortController.abort(reason)` when the user aborts
+/** Reason threaded through `AbortController.abort(reason)` when a person aborts
  *  the turn with Esc (see `AgentSession.abort`). The agent keeps it on the
- *  aborted assistant message's `errorMessage` so queued follow-ups/tool-result
+ *  aborted assistant message's `errorMessage` so queued follow-ups and tool
  *  placeholders can distinguish a deliberate interrupt from a bare lifecycle
  *  abort, but interactive renderers suppress this redundant transcript line.
- *  A parent agent's kill uses {@link AGENT_KILL_LABEL} instead. */
+ *  Parent kills use {@link AGENT_KILL_LABEL}. */
 export const USER_INTERRUPT_LABEL = "Interrupted by user";
 
-/** Reason threaded through `AgentSession.abort` when a parent agent kills its
- *  subagent (`proc://<id>/kill`). It interrupts the turn exactly as
- *  {@link USER_INTERRUPT_LABEL} does. Only the transcript text differs, so a
- *  reader can tell an agent's kill from a person's interrupt. */
+/** Reason passed to `AgentSession.abort` when a parent kills a subagent through
+ *  `proc://<id>/kill`. It interrupts the turn just like
+ *  {@link USER_INTERRUPT_LABEL}, with distinct transcript text. */
 export const AGENT_KILL_LABEL = "Stopped by parent agent";
 
 /** An abort reason that marks a deliberate interrupt by a person or a parent agent. */

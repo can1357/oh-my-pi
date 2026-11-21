@@ -634,9 +634,9 @@ export async function stopAgentRun(
  * sent to it later reopens its transcript). It is the kill path for a task
  * job's agent and for a keep-alive subagent that was budget-aborted, went
  * `idle`/`parked`, and outlived its job row. The caller supplies `reason` to
- * control its interrupt label. Scope limits this to the caller's own descendants
- * and keeps cross-agent kills impossible. An unowned caller (no owner id) reaches
- * only parentless subs. The function never touches Main, the caller, or advisor transcripts.
+ * control its interrupt label. Scope limits this function to the caller's own
+ * descendants and blocks cross-agent kills. An unowned caller reaches only
+ * parentless subs. The function never touches Main, the caller, or advisor transcripts.
  */
 export async function cancelAgentRegistration(
 	session: AgentKillScope,
