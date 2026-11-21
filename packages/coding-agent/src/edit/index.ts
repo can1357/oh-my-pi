@@ -58,7 +58,7 @@ import { resolveEditMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
-import { MAGIC_EDIT_FORMATS, magicEditPaths, runMagicEdit } from "./magic";
+import { MAGIC_EDIT_GRAMMAR, magicEditPaths, runMagicEdit } from "./magic";
 import magicEditDescription from "../prompts/tools/magic-edit.md" with { type: "text" };
 import { getLspBatchRequest } from "../lsp/batch";
 import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "@oh-my-pi/pi-tui/tools/edit";
@@ -84,7 +84,6 @@ import {
 	cfgEditEnforceSeenLines,
 	cfgEditFuzzyMatch,
 	cfgEditFuzzyThreshold,
-	cfgEditMagicFormat,
 } from "./settings";
 import {
 	cfgLspDiagnosticsDeduplicate,
@@ -418,9 +417,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get description(): string {
-		if (this.#magic) {
-			return prompt.render(magicEditDescription, { xml: cfgEditMagicFormat.get(this.session.settings) === "xml" });
-		}
+		if (this.#magic) return prompt.render(magicEditDescription);
 		return resolveEditToolDescription(this.mode, this.session.getActiveModel?.());
 	}
 
@@ -447,7 +444,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get customFormat(): { syntax: "lark"; definition: string } | undefined {
-		if (this.#magic) return MAGIC_EDIT_FORMATS[cfgEditMagicFormat.get(this.session.settings)];
+		if (this.#magic) return MAGIC_EDIT_GRAMMAR;
 		const definition = editGrammar(this.mode);
 		return definition === null ? undefined : { syntax: "lark", definition };
 	}
@@ -688,8 +685,7 @@ export class EditTool implements AgentTool<TInput> {
 		if (this.#magic) {
 			// The payload names its files itself; the native inspectors do not know its syntax.
 			const input = (args as { input?: unknown } | null | undefined)?.input;
-			const format = cfgEditMagicFormat.get(this.session.settings);
-			return { paths: typeof input === "string" ? magicEditPaths(input, format) : [], entries: [], fileOps: [] };
+			return { paths: typeof input === "string" ? magicEditPaths(input) : [], entries: [], fileOps: [] };
 		}
 		const tagged = typeof args === "object" && args !== null ? (args as InspectedArgs) : undefined;
 		const cached = tagged?.[kInspection];

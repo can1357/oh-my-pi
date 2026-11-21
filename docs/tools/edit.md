@@ -32,22 +32,13 @@ This page primarily documents hashline. The schema, prompt, examples, renderer, 
 `edit.mode: magic` (or `PI_EDIT_VARIANT=magic`) keeps the `edit` tool but changes its contract: the payload describes the changes in words, one section per file, and an auxiliary model writes each file's patch. `edit.modelVariants` cannot select it. Source: `packages/coding-agent/src/edit/magic.ts`; model-facing prompt: `packages/coding-agent/src/prompts/tools/magic-edit.md`.
 
 ```text
-<edit file="src/jobs.ts">
-In `drain()`, declare `limit` before `batch`.
-</edit>
-<edit file="src/parse.ts">
-Rename every `retrunValue` to `returnValue`.
-</edit>
-```
-
-`edit.magic.format` (or `PI_EDIT_MAGIC_FORMAT`) selects the section syntax: `xml`, the default shown above, or `markdown`:
-
-```text
 # src/jobs.ts
-In `drain()`, declare `limit` before `batch`.
+- In `drain()`, declare `limit` before `batch`.
+# src/parse.ts
+- Rename every `retrunValue` to `returnValue`.
 ```
 
-The schema is `{ input: string }`. Providers with custom-tool grammars receive the payload's Lark grammar and send it raw, as in `hashline` mode. In `xml` text outside the elements is rejected; in `markdown` a line starting with `# ` always opens the next file. Sections naming the same path merge.
+The schema is `{ input: string }`. Providers with custom-tool grammars receive the payload's Lark grammar and send it raw, as in `hashline` mode. A line starting with `# ` opens the next file unless it sits inside a code fence; text before the first `# path` line is rejected. Sections naming the same path merge.
 
 1. Each file is read and shown to the apply model with a line-number gutter, together with its changes. A line that opens a block shows the block's span instead of its number (`20-49`), so the model copies where a block ends instead of counting. A file of 200 lines or more is first shown as an excerpt when that leaves out at least half of it: the lines the change quotes, names by identifier, or gives by number, each with the block it opens and twelve lines of context, plus the head and tail of the file; `⋮ lines A-B not shown` marks each gap. A reply that is rejected or declines against an excerpt is asked for again with the whole file.
 2. It answers with line operations, one JSON array per line, numbered against the file as shown: `["delete",12,14]`, `["replace",9,9,"text"]`, `["sub",7,"old","new"]` (`"all"` instead of a line for every occurrence in the file), `["insert","after",15,"text"]`, `["move",20,41,"before",3]`, `["swap",20,49,51,74]`, `["indent",13,17,2]` / `["dedent",…]`. Existing text is never retyped, so deleting, moving or re-indenting a block costs a few tokens whatever its size. A first line `CANNOT: <reason>` declines the change. Fences, an outer array, quoted numbers and commentary after the operations are accepted; operations after commentary are not. Source: `packages/coding-agent/src/edit/magic-lines.ts`.

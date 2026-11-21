@@ -11,6 +11,7 @@
 
 ### Added
 
+- The editor now shows described changes for `magic` mode as Markdown in the transcript until the apply model returns final diffs
 - Added handling of `features` terminal events to update UI without waiting for a new hello
 
 ### Changed

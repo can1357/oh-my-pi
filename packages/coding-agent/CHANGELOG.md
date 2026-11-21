@@ -4,6 +4,7 @@
 
 ### Added
 
+- Standardized the `magic` edit mode to use Markdown bulleted lists as the mandatory input format, replacing the previous `xml` and `markdown` options
 - `get_model_picker` RPC command: omp's session model picker (Recent block, search ranking, role chips, `@` quick roles, thinking slider) for remote pickers such as the Chrome side panel.
 - `get_state` reports `configuredThinkingLevel` and `thinkingLevels`; `set_model` takes `thinkingLevel` and `role`, and `set_thinking_level` accepts `auto`.
 - `resume` and `abort_and_deliver_queue` RPC commands: the TUI's `.`/`c` continue shortcut and its empty-Enter interrupt that sends the queued messages.
@@ -20,7 +21,7 @@
 ### Added
 
 - Accepted Unicode set mode (`v`) in slash-delimited `secrets.yml` regexes.
-- Added the `magic` edit mode (`edit.mode: magic`): `edit` takes changes described in words inside one `<edit file="path">` element per file (or under one `# path` line with `edit.magic.format: markdown`), and a fast model (`edit.magic.model`, a model or role alias such as `@slow`; by default the `smol` role) writes and applies each file's patch, returning the diffs
+- Added the `magic` edit mode (`edit.mode: magic`): `edit` takes changes described in words as `- ` bullets under one `# path` line per file, and a fast model (`edit.magic.model`, a model or role alias such as `@slow`; by default the `smol` role) writes and applies each file's patch, returning the diffs; until then Tern shows each file's described changes as Markdown
 - `magic` edits of long files show the apply model only the lines the description quotes, names or numbers (with their blocks and context) instead of the whole file, so files beyond the apply model's context window can be edited and large ones cost less
 - Sloppy edits can replace, delete or move a syntax block by its opening line without quoting its body, and rename a whole identifier with `*** Find all`
 - MCP servers now run in the omp daemon instead of inside every session: sessions with the same server configuration share one process for servers on MCP 2026-07-28, and `/mcp list` shows each server's state, pid and how many sessions share it. Turn off with `mcp.shared` ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))

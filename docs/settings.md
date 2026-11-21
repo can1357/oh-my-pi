@@ -808,7 +808,6 @@ read:
 | Key                       | Type    | Default    | Notes                                                                                                             |
 | ------------------------- | ------- | ---------- | ----------------------------------------------------------------------------------------------------------------- |
 | `edit.mode`               | enum    | `hashline` | `apply_patch`, `hashline`, `patch`, `replace`, `sloppy`, `magic` (describe the changes; a model writes them). `PI_EDIT_VARIANT` pins the mode.|
-| `edit.magic.format`       | enum    | `xml`      | How `magic` payloads name each file: `xml` (`<edit file="path">` elements) or `markdown` (`# path` lines).       |
 | `edit.magic.model`        | string  | unset      | Model selector, or role alias such as `@slow`, for the model that writes `magic` changes; unset uses the `smol` role. Reasoning is off unless the selector carries a thinking suffix (`…:low`). |
 | `edit.modelVariants`      | record  | `{}`       | Case-insensitive model-selector substring → edit mode; the longest matching key wins, ties keep config order.     |
 | `edit.fuzzyMatch`         | boolean | `true`     | Allow fuzzy anchor matching.                                                                                      |

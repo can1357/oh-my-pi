@@ -1,20 +1,13 @@
 /**
  * `magic` edit mode: edit a file from a described change.
  *
- * The calling agent states the changes in words, one section per file, in the
- * syntax `edit.magic.format` selects:
+ * The calling agent states the changes in words, one `# path` section per file:
  *
  * ```text
  * # src/jobs.ts
- * In `drain()`, declare `limit` before `batch`.
+ * - In `drain()`, declare `limit` before `batch`.
  * # src/parse.ts
- * Rename every `retrunValue` to `returnValue`.
- * ```
- *
- * ```text
- * <edit file="src/jobs.ts">
- * In `drain()`, declare `limit` before `batch`.
- * </edit>
+ * - Rename every `retrunValue` to `returnValue`.
  * ```
  *
  * For each file an auxiliary model (the `edit.magic.model` selector, else the
@@ -29,6 +22,7 @@ import { type Api, completeSimple, type Model, retryTransientCompletion } from "
 import { parseCodeStatus } from "@oh-my-pi/pi-natives";
 import type { EditToolDetails, EditToolPerFileResult } from "@oh-my-pi/pi-tui/tools/edit";
 import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { splitMagicSections } from "@oh-my-pi/pi-tui/tools/magic-sections";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -42,7 +36,7 @@ import { blockHints, compileLineEdits } from "./magic-lines";
 import { type FileView, fileViews } from "./magic-view";
 import { normalizeToLF, stripBom } from "./normalize";
 import type { ReplaceBatchParams } from "./schemas";
-import { cfgEditMagicFormat, cfgEditMagicModel } from "./settings";
+import { cfgEditMagicModel } from "./settings";
 
 /** Completions per call: the first reply plus corrections after a rejected batch. */
 const MAX_ATTEMPTS = 3;
@@ -65,22 +59,14 @@ const OUTPUT_SLACK_TOKENS = 256;
 
 const APPLY_SYSTEM_PROMPT = prompt.render(applySystemPromptSource);
 
-/** Payload syntax, as `edit.magic.format` names it. */
-export type MagicFormat = "markdown" | "xml";
-
-const PATH_HEADER = /^# +(\S.*?)\s*$/;
-const EDIT_OPEN = /<edit\s+file="([^"\n]+)"\s*>/g;
-const EDIT_CLOSE = "</edit>";
-
 /**
- * Constrained-decoding grammar of each payload syntax: sections that name a
- * file and carry at least one line of changes. The objects are shared, so the
- * tool's wire identity is stable across requests.
+ * Constrained-decoding grammar of the payload: `# path` sections that carry at
+ * least one line of changes. The object is shared, so the tool's wire identity
+ * is stable across requests.
  */
-export const MAGIC_EDIT_FORMATS: Record<MagicFormat, { syntax: "lark"; definition: string }> = {
-	markdown: {
-		syntax: "lark",
-		definition: `start: section+
+export const MAGIC_EDIT_GRAMMAR: { syntax: "lark"; definition: string } = {
+	syntax: "lark",
+	definition: `start: section+
 section: PATH_HEADER LF LF* CHANGE_TEXT (LF change_line* CHANGE_TEXT?)?
 change_line: CHANGE_TEXT LF | LF
 
@@ -90,21 +76,6 @@ CHANGE_TEXT: /[^\\r\\n]+/ & ~PATH_HEADER
 
 %import common.LF
 `,
-	},
-	xml: {
-		syntax: "lark",
-		definition: `start: edit (LF+ edit)* LF*
-edit: EDIT_OPEN LF LF* CHANGE_TEXT LF change_line* EDIT_CLOSE
-change_line: CHANGE_TEXT LF | LF
-
-EDIT_OPEN: /<edit file="[^"\\r\\n]+">/
-EDIT_CLOSE: "</edit>"
-// LLGuidance supports terminal intersection/complement, not priorities or lookarounds.
-CHANGE_TEXT: /[^\\r\\n]+/ & ~EDIT_CLOSE
-
-%import common.LF
-`,
-	},
 };
 
 type ReplaceEdit = ReplaceBatchParams["edits"][number];
@@ -116,47 +87,8 @@ export interface MagicSection {
 }
 
 /** Files a payload names so far, in order and without repeats; tolerates a payload still streaming in. */
-export function magicEditPaths(input: string, format: MagicFormat): string[] {
-	const text = normalizeToLF(input);
-	const found =
-		format === "xml"
-			? Array.from(text.matchAll(EDIT_OPEN), match => match[1])
-			: text.split("\n").map(line => PATH_HEADER.exec(line)?.[1]);
-	return [...new Set(found.filter(path => path !== undefined))];
-}
-
-/** `(path, text)` runs of a payload in order; `outside` is whatever belongs to no section. */
-function splitSections(input: string, format: MagicFormat): { runs: [string, string][]; outside: string } {
-	const text = normalizeToLF(input);
-	const runs: [string, string][] = [];
-	let outside = "";
-	if (format === "xml") {
-		let cursor = 0;
-		for (const open of text.matchAll(EDIT_OPEN)) {
-			if (open.index < cursor) continue;
-			const bodyStart = open.index + open[0].length;
-			const close = text.indexOf(EDIT_CLOSE, bodyStart);
-			if (close === -1) throw new ToolError(`\`<edit file="${open[1]}">\` has no closing \`</edit>\`.`);
-			outside += text.slice(cursor, open.index);
-			runs.push([open[1], text.slice(bodyStart, close)]);
-			cursor = close + EDIT_CLOSE.length;
-		}
-		outside += text.slice(cursor);
-		return { runs, outside };
-	}
-	let current: [string, string] | undefined;
-	for (const line of text.split("\n")) {
-		const header = PATH_HEADER.exec(line);
-		if (header) {
-			current = [header[1], ""];
-			runs.push(current);
-		} else if (current) {
-			current[1] += `${line}\n`;
-		} else {
-			outside += line;
-		}
-	}
-	return { runs, outside };
+export function magicEditPaths(input: string): string[] {
+	return [...new Set(splitMagicSections(input).runs.map(run => run.path))];
 }
 
 /**
@@ -164,18 +96,17 @@ function splitSections(input: string, format: MagicFormat): { runs: [string, str
  * merge, in order, so every file is edited once.
  *
  * # Errors
- * {@link ToolError} when there is no section, when text sits outside the
- * sections, when a section describes no change, or (xml) when an element is
- * not closed.
+ * {@link ToolError} when there is no section, when text precedes the first
+ * `# path` line, or when a section describes no change.
  */
-export function parseMagicInput(input: string, format: MagicFormat): MagicSection[] {
-	const shape =
-		format === "xml" ? '`<edit file="path">` … `</edit>` element' : "`# path` line followed by its changes";
-	const { runs, outside } = splitSections(input, format);
-	if (runs.length === 0) throw new ToolError(`Give one ${shape} per file.`);
-	if (outside.trim() !== "") throw new ToolError(`Every change belongs to a file: use one ${shape} per file.`);
+export function parseMagicInput(input: string): MagicSection[] {
+	const { runs, outside } = splitMagicSections(input);
+	if (runs.length === 0) throw new ToolError("Give one `# path` line followed by its changes per file.");
+	if (outside.trim() !== "") {
+		throw new ToolError("Every change belongs to a file: put it under that file's `# path` line.");
+	}
 	const bodies = new Map<string, string[]>();
-	for (const [path, text] of runs) {
+	for (const { path, text } of runs) {
 		const body = bodies.get(path) ?? [];
 		bodies.set(path, body);
 		body.push(text.trim());
@@ -449,7 +380,7 @@ export async function runMagicEdit(options: {
 	signal?: AbortSignal;
 }): Promise<AgentToolResult<EditToolDetails>> {
 	const { session, signal } = options;
-	const sections = parseMagicInput(options.input, cfgEditMagicFormat.get(session.settings));
+	const sections = parseMagicInput(options.input);
 	const applier = await resolveApplier(session, signal);
 	// Completions overlap; writes go one at a time, as within any other edit call.
 	let writes: Promise<unknown> = Promise.resolve();

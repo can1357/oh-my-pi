@@ -348,35 +348,20 @@ const APPLY_MODEL = {
 } as Model<Api>;
 
 describe("parseMagicInput", () => {
-	it("splits `# path` sections and merges sections naming the same file", () => {
+	it("splits `# path` sections, merges sections naming the same file, and keeps a fenced `# ` line as change text", () => {
 		expect(
 			parseMagicInput(
-				"# a.ts\nRename x to y.\n\n# b.ts\nDelete line 3.\n# a.ts\nThen drop the import.\n",
-				"markdown",
+				"# a.ts\n- Rename x to y.\n\n# b.sh\n- Add after line 2:\n```sh\n# starts the job\nstart\n```\n# a.ts\n- Then drop the import.\n",
 			),
 		).toEqual([
-			{ path: "a.ts", change: "Rename x to y.\n\nThen drop the import." },
-			{ path: "b.ts", change: "Delete line 3." },
+			{ path: "a.ts", change: "- Rename x to y.\n\n- Then drop the import." },
+			{ path: "b.sh", change: "- Add after line 2:\n```sh\n# starts the job\nstart\n```" },
 		]);
 	});
 
 	it("rejects text before the first header and a section without changes", () => {
-		expect(() => parseMagicInput("Rename x to y.\n# a.ts\nok", "markdown")).toThrow("# path");
-		expect(() => parseMagicInput("# a.ts\n# b.ts\nDelete line 3.", "markdown")).toThrow("a.ts");
-	});
-
-	it("reads xml `<edit file>` elements, inline or multi-line, and keeps `# ` lines as change text", () => {
-		const input =
-			'<edit file="a.ts">\n# Heading stays text\nRename x to y.\n</edit>\n\n<edit file="b.ts">Delete line 3.</edit>\n';
-		expect(parseMagicInput(input, "xml")).toEqual([
-			{ path: "a.ts", change: "# Heading stays text\nRename x to y." },
-			{ path: "b.ts", change: "Delete line 3." },
-		]);
-	});
-
-	it("rejects an unclosed xml element and text outside the elements", () => {
-		expect(() => parseMagicInput('<edit file="a.ts">\nRename x to y.', "xml")).toThrow("</edit>");
-		expect(() => parseMagicInput('Also fix b.ts.\n<edit file="a.ts">\nok\n</edit>', "xml")).toThrow("<edit file=");
+		expect(() => parseMagicInput("- Rename x to y.\n# a.ts\n- ok")).toThrow("# path");
+		expect(() => parseMagicInput("# a.ts\n# b.ts\n- Delete line 3.")).toThrow("a.ts");
 	});
 });
 
@@ -386,8 +371,8 @@ describe("edit tool in magic mode", () => {
 	});
 
 	/** A session in `magic` mode whose apply model answers each file's request through `reply`. */
-	function magicTool(cwd: string, reply: (request: string) => string, format: "markdown" | "xml" = "markdown") {
-		const settings = Settings.isolated({ "edit.mode": "magic", "edit.magic.format": format });
+	function magicTool(cwd: string, reply: (request: string) => string) {
+		const settings = Settings.isolated({ "edit.mode": "magic" });
 		settings.setModelRole("smol", "llama.cpp/apply-model");
 		const session = makeSession(cwd, settings, {
 			modelRegistry: {
@@ -412,7 +397,7 @@ describe("edit tool in magic mode", () => {
 		const { tool, requests } = magicTool(tempDir.path(), () => '["sub",7,"sum;","sum + 1;"]');
 
 		expect(tool.parameters).toBe(magicEditSchema);
-		const input = "# sample.ts\nMake total return sum + 1.";
+		const input = "# sample.ts\n- Make total return sum + 1.";
 		expect(tool.matcherPaths({ input })).toEqual(["sample.ts"]);
 		const result = await tool.execute("call", { input });
 
@@ -429,18 +414,16 @@ describe("edit tool in magic mode", () => {
 		// 3,200 lines: more than half of the apply model's 32,768-token window.
 		const source = longSource(400);
 		await Bun.write(file, source);
-		const { tool, requests } = magicTool(tempDir.path(), () => '["sub",2404,"- 300","+ 300"]', "xml");
+		const { tool, requests } = magicTool(tempDir.path(), () => '["sub",2404,"- 300","+ 300"]');
 
 		await tool.execute("call", {
-			input: '<edit file="sample.ts">\nIn `step300()`, replace `return doubled - 300;` with `return doubled + 300;`.\n</edit>',
+			input: "# sample.ts\n- In `step300()`, replace `return doubled - 300;` with `return doubled + 300;`.",
 		});
 		expect(requests).toHaveLength(1);
 		expect(requests[0]).toContain("⋮ lines 13-2388 not shown");
 		expect(await Bun.file(file).text()).toBe(source.replace("doubled - 300;", "doubled + 300;"));
 
-		const error = await rejectionOf(
-			tool.execute("call", { input: '<edit file="sample.ts">\nTidy up the error handling.\n</edit>' }),
-		);
+		const error = await rejectionOf(tool.execute("call", { input: "# sample.ts\n- Tidy up the error handling." }));
 		expect(String(error)).toContain("quote the lines to change, or give their line numbers");
 		expect(requests).toHaveLength(1);
 	});
@@ -450,18 +433,14 @@ describe("edit tool in magic mode", () => {
 		const file = path.join(tempDir.path(), "sample.ts");
 		await Bun.write(file, SOURCE);
 		const changed = SOURCE.replace("let sum = 0;", "let sum = 10;");
-		const { tool } = magicTool(
-			tempDir.path(),
-			() => {
-				// Someone else saves the file between the read and the write.
-				fs.writeFileSync(file, changed);
-				return '["delete",6,6]';
-			},
-			"xml",
-		);
+		const { tool } = magicTool(tempDir.path(), () => {
+			// Someone else saves the file between the read and the write.
+			fs.writeFileSync(file, changed);
+			return '["delete",6,6]';
+		});
 
 		const error = await rejectionOf(
-			tool.execute("call", { input: '<edit file="sample.ts">\nDelete the `console.log(sum);` line.\n</edit>' }),
+			tool.execute("call", { input: "# sample.ts\n- Delete the `console.log(sum);` line." }),
 		);
 		expect(String(error)).toContain("could not be applied");
 		expect(await Bun.file(file).text()).toBe(changed);
@@ -488,24 +467,9 @@ describe("edit tool in magic mode", () => {
 		});
 
 		await new EditTool(session).execute("call", {
-			input: '<edit file="sample.ts">\nMake total return sum + 1.\n</edit>',
+			input: "# sample.ts\n- Make total return sum + 1.",
 		});
 		expect(used).toEqual(["role-model"]);
-	});
-
-	it("reads the payload as xml when edit.magic.format says so", async () => {
-		using tempDir = TempDir.createSync("@omp-magic-edit-xml-");
-		const file = path.join(tempDir.path(), "sample.ts");
-		await Bun.write(file, SOURCE);
-		const { tool } = magicTool(tempDir.path(), () => '["sub",7,"sum;","sum + 1;"]', "xml");
-
-		const input = '<edit file="sample.ts">\nMake total return sum + 1.\n</edit>';
-		expect(tool.matcherPaths({ input })).toEqual(["sample.ts"]);
-		await tool.execute("call", { input });
-		expect(await Bun.file(file).text()).toBe(SOURCE.replace("return sum;", "return sum + 1;"));
-		// The markdown syntax is not this format's payload.
-		const error = await rejectionOf(tool.execute("call", { input: "# sample.ts\nMake total return sum + 2." }));
-		expect(String(error)).toContain("<edit file=");
 	});
 
 	it("applies each file of a batch on its own and reports the one that was refused", async () => {
@@ -519,7 +483,7 @@ describe("edit tool in magic mode", () => {
 		);
 
 		const result = await tool.execute("call", {
-			input: "# first.ts\nStart the sum at 1.\n# second.ts\nRemove `drain`.",
+			input: "# first.ts\n- Start the sum at 1.\n# second.ts\n- Remove `drain`.",
 		});
 
 		expect(requests).toHaveLength(2);
