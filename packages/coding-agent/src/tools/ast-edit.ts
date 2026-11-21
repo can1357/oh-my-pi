@@ -361,9 +361,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
 					: "";
 				const grammarMessage = grammarNote ? `\n${grammarNote}` : "";
-				const wrapperMessage = ops.some(([pat]) => PHP_MEMBER_PATTERN.test(pat))
-					? `\n${prompt.render(astEditPhpMemberHint)}`
-					: "";
+				const wrapperMessage =
+					ops.some(([pat]) => PHP_MEMBER_PATTERN.test(pat)) && !result.missingGrammars?.includes("php")
+						? `\n${prompt.render(astEditPhpMemberHint)}`
+						: "";
 				return toolResult(baseDetails)
 					.text(`No replacements made${wrapperMessage}${parseMessage}${grammarMessage}`)
 					.done();

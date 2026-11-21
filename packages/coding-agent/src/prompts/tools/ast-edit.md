@@ -4,7 +4,7 @@ Structural AST-aware rewrites via ast-grep. Use for codemods where text replace 
 - **Patterns match AST structure, not text.** `$NAME` = one node; `$_` = unbound; `$$$NAME` = zero-or-more.
   - Use `$$$NAME`, NOT `$$NAME` (invalid). Names UPPERCASE, whole node — partial like `prefix$VAR` fails.
 - Same metavariable twice → MUST match identical code (`$A == $A` matches `x == x`, not `x == y`).
-- Rewrite patterns MUST parse as single AST node. Non-standalone → wrap: `class $_ { … }`.
+- Rewrite patterns MUST parse as single AST node. Non-standalone → wrap: `class $_ { … }` (name the class metavariable — `class $CLS { … }` — when the wrapper appears in `out` too, since `$_` carries nothing there).
 - TS: tolerate annotations — `async function $NAME($$$ARGS): $_ { $$$BODY }`. Delete with empty `out`: `{"pat":"console.log($$$)","out":""}`.
 - 1:1 substitution — no splitting/merging captures.
 - Matches are STAGED as a proposal, not applied: finalize with `resolve <one-sentence reason>` (apply) or `reject <reason>` (discard).
