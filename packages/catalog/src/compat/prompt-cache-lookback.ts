@@ -1,9 +1,11 @@
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model } from "../types";
+import { onCascadeRulesChange } from "./cascade";
 import { resolveCatalogAxes } from "./resolve";
 
 const lookbackCache = new Map<string, number | null>();
 const LOOKBACK_CACHE_MAX = 8192;
+onCascadeRulesChange(() => lookbackCache.clear());
 
 /**
  * Block positions the provider's prompt cache checks back from a breakpoint for

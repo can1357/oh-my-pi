@@ -3578,7 +3578,7 @@ describe("ExtensionRunner", () => {
 			expect(events).toEqual([{ path: "src/secret.ts", paths: ["src/secret.ts"] }]);
 		});
 
-		it("leaves path unset and reports all targets for multi-file hashline edits", async () => {
+		it.each(["", " \t\u0085"])("reports all multi-file hashline edit targets with header suffix %j", async suffix => {
 			const eventsPath = path.join(tempDir.path(), "tool-call-multi-path-events.jsonl");
 			const extCode = `
 				import * as fs from "node:fs";
@@ -3610,7 +3610,7 @@ describe("ExtensionRunner", () => {
 
 			await expect(
 				wrapped.execute("tool-call-id", {
-					input: "[plans/switch-case-array-syntax.md#ABC1]\nPUT 27.=27:\n+new content\n[packages/coding-agent/src/main.ts#DEF2]\nPUT 1.=1:\n+changed",
+					input: `[plans/switch-case-array-syntax.md#ABC1]${suffix}\nPUT 27.=27:\n+new content\n[packages/coding-agent/src/main.ts#DEF2]\nPUT 1.=1:\n+changed`,
 				}),
 			).rejects.toThrow("Blocked: undefined");
 
@@ -4049,7 +4049,7 @@ describe("ExtensionRunner", () => {
 		it("forwards passive context from wrapper-dispatched calls through the tool context", async () => {
 			const extCode = `
 				export default function(pi) {
-					pi.on("tool_call", async () => ({ additionalContext: "nested device context" }));
+					pi.on("tool_call", async () => ({ additionalContext: "nested dispatch context" }));
 				}
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "tool-call-wrapper-context.ts"), extCode);
@@ -4075,7 +4075,7 @@ describe("ExtensionRunner", () => {
 				},
 			} as unknown as AgentToolContext);
 
-			expect(delivered).toEqual(["nested device context"]);
+			expect(delivered).toEqual(["nested dispatch context"]);
 		});
 
 		it("discards collected additional context when a later handler blocks", async () => {
@@ -4238,7 +4238,7 @@ describe("ExtensionRunner", () => {
 			// The agent loop emits tool_call at arg-prep time (session beforeToolCall
 			// wiring) and marks the dispatch on the runner; the wrapper must not fire
 			// handlers a second time for the same call. The marker is consume-once,
-			// so a dispatch the loop never marked (nested xd://, Cursor direct)
+			// so a dispatch the loop never marked (a nested dispatch, Cursor direct)
 			// still emits.
 			const recordPath = path.join(tempDir.path(), "loop-marker.jsonl");
 			const extCode = `
@@ -4272,42 +4272,6 @@ describe("ExtensionRunner", () => {
 				.split("\n")
 				.map(line => JSON.parse(line));
 			expect(executed).toEqual([{ command: "echo original" }, { command: "echo revised" }]);
-		});
-
-		it("forfeits the xd:// prompt bypass when a handler revises the input", async () => {
-			// write.ts dispatches xd:// devices with xdevPolicyKey because its
-			// outer gate already approved the ORIGINAL device input. A tool_call
-			// revision may raise the tier, so revised input must face the full gate
-			// (here: no interactive UI => reject) instead of riding the outer approval.
-			const recordPath = path.join(tempDir.path(), "xdev-revised.jsonl");
-			const extCode = `
-				export default function(pi) {
-					pi.on("tool_call", async (event) => {
-						if (event.toolName !== "bash") return;
-						return { input: { command: "echo revised" } };
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "tool-call-xdev-revise.ts"), extCode);
-
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
-			const xdevContext = {
-				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
-				xdevPolicyKey: "bash",
-			} as never;
-
-			await expect(
-				wrapped.execute("xdev-call-id", { command: "echo original" }, undefined, undefined, xdevContext),
-			).rejects.toThrow(/requires approval but no interactive UI available/);
-			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 
 		it.each([
@@ -4346,8 +4310,8 @@ describe("ExtensionRunner", () => {
 			expect(fs.existsSync(recordPath)).toBe(false);
 		});
 
-		it("reports the effective tier after a tool_call handler revises xd:// input", async () => {
-			const recordPath = path.join(tempDir.path(), "xdev-effective-tier.jsonl");
+		it("reports the effective tier after a tool_call handler revises the input", async () => {
+			const recordPath = path.join(tempDir.path(), "tool-command-effective-tier.jsonl");
 			const extCode = `
 				export default function(pi) {
 					pi.on("tool_call", async (event) => {
@@ -4356,7 +4320,7 @@ describe("ExtensionRunner", () => {
 					});
 				}
 			`;
-			fs.writeFileSync(path.join(extensionsDir, "tool-call-xdev-tier.ts"), extCode);
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-tool-command-tier.ts"), extCode);
 
 			const result = await loadTestExtensions();
 			const runner = new ExtensionRunner(
@@ -4377,17 +4341,70 @@ describe("ExtensionRunner", () => {
 					: "read";
 			const wrapped = new ExtensionToolWrapper(tool, runner);
 			let effectiveTier: string | undefined;
-			const xdevContext = {
+			const dispatchContext = {
 				settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
-				xdevPolicyKey: "bash",
-				xdevTierResolved: (tier: string) => {
+				toolCommandTierResolved: (tier: string) => {
 					effectiveTier = tier;
 				},
 			} as never;
 
-			await wrapped.execute("xdev-tier-id", { command: "echo original" }, undefined, undefined, xdevContext);
+			await wrapped.execute(
+				"tool-command-tier-id",
+				{ command: "echo original" },
+				undefined,
+				undefined,
+				dispatchContext,
+			);
 			expect(JSON.parse(fs.readFileSync(recordPath, "utf8"))).toEqual({ command: "echo revised" });
 			expect(effectiveTier).toBe("write");
+		});
+
+		it("calls onApprovalPrompt once before the prompt and never when the policy allows", async () => {
+			const recordPath = path.join(tempDir.path(), "approval-prompt-notice.jsonl");
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const order: string[] = [];
+			initApprovalRunner(runner, async () => {
+				order.push("prompt");
+				return "Approve";
+			});
+			const wrapped = new ExtensionToolWrapper(createArgGatedTool(recordPath), runner);
+			const contextFor = (mode: string) => ({
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: Settings.isolated({ "tools.approvalMode": mode }),
+				onApprovalPrompt: () => {
+					order.push(`notice:${mode}`);
+				},
+			});
+
+			await wrapped.execute(
+				"notice-prompt-call",
+				{ command: "echo prompted" },
+				undefined,
+				undefined,
+				contextFor("always-ask"),
+			);
+			expect(order).toEqual(["notice:always-ask", "prompt"]);
+
+			await wrapped.execute(
+				"notice-allow-call",
+				{ command: "echo allowed" },
+				undefined,
+				undefined,
+				contextFor("yolo"),
+			);
+			expect(order).toEqual(["notice:always-ask", "prompt"]);
 		});
 
 		it("emits tool_call before the approval prompt so approval sees the final input", async () => {

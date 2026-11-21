@@ -5,13 +5,11 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { GithubTool } from "@oh-my-pi/pi-coding-agent/tools/gh";
-import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import type { ForgeCliResult } from "@oh-my-pi/pi-coding-agent/utils/forge-cli";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
+import { bashToolRenderer, type BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
-import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
 
@@ -308,126 +306,98 @@ it("keeps multiline gh stderr on one terminal diagnostic row", async () => {
 });
 
 describe("pr_create concise output", () => {
-	for (const route of ["direct", "xd"] as const) {
-		for (const summaryAvailable of [true, false]) {
-			it(`${route} preserves the creation body without echoing it when the summary lookup ${summaryAvailable ? "succeeds" : "fails"}`, async () => {
-				const session = await createSession();
-				const body = "SENTINEL".repeat(6656);
-				const input = {
-					op: "pr_create" as const,
-					repo: "owner/repo",
-					title: "Add gizmo",
-					body,
-					base: "main",
-					head: "feature/gizmo",
-					draft: true,
-				};
-				let submittedBody: string | undefined;
-				let requestedFields: string[] = [];
-				const runSpy = vi.spyOn(github, "run").mockImplementation(async (_cwd, args) => {
-					if (args[0] === "pr" && args[1] === "create") {
-						const bodyFlagIndex = args.indexOf("--body-file");
-						expect(bodyFlagIndex).toBeGreaterThanOrEqual(0);
-						submittedBody = await Bun.file(args[bodyFlagIndex + 1]).text();
-						return { exitCode: 0, stdout: "https://github.com/owner/repo/pull/77", stderr: "" };
-					}
-					if (args[0] !== "pr" || args[1] !== "view") {
-						throw new Error(`Unexpected gh command: ${args.join(" ")}`);
-					}
-					requestedFields = args[args.indexOf("--json") + 1].split(",");
-					if (!summaryAvailable) return { exitCode: 1, stdout: "", stderr: "summary lookup unavailable" };
-					return {
-						exitCode: 0,
-						stderr: "",
-						stdout: JSON.stringify({
-							number: 77,
-							url: "https://github.com/owner/repo/pull/77",
-							title: input.title,
-							state: "OPEN",
-							isDraft: true,
-							headRefName: input.head,
-							baseRefName: input.base,
-							body,
-						}),
-					};
-				});
-				const tool = Object.assign(new GithubTool(session), githubToolRenderer);
-				const xdev: XdevState = {
-					tools: new Map([[tool.name, tool]]),
-					mountedNames: new Set([tool.name]),
-					builtInNames: new Set([tool.name]),
-					isActive: () => false,
-					resolve: name => resolveXdevTool(xdev, name),
-				};
-				session.xdev = xdev;
-				const result =
-					route === "direct"
-						? await tool.execute("create-output", input)
-						: await new WriteTool(session).execute("create-output", {
-								path: "xd://github",
-								content: JSON.stringify(input),
-							});
-				expect(submittedBody).toBe(body);
-				expect(input.body).toBe(body);
-				expect(runSpy).toHaveBeenCalledTimes(2);
-				const text = result.content.find(block => block.type === "text")?.text ?? "";
-				expect(result.isError).not.toBe(true);
-				expect(text).toContain("# Created Pull Request #77: Add gizmo");
-				expect(text).toContain("URL: https://github.com/owner/repo/pull/77");
-				expect(text).toContain("Head: feature/gizmo");
-				expect(text).toContain("Base: main");
-				expect(text).toContain("Draft: true");
-				if (summaryAvailable) expect(text).toContain("State: OPEN");
-				expect(text).not.toContain("## Body");
-				expect(JSON.stringify(result)).not.toContain("SENTINEL");
-				expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(2048);
-				for (const field of ["body", "files", "comments", "reviews", "reviewComments"]) {
-					expect(requestedFields).not.toContain(field);
+	for (const summaryAvailable of [true, false]) {
+		it(`preserves the creation body without echoing it when the summary lookup ${summaryAvailable ? "succeeds" : "fails"}`, async () => {
+			const session = await createSession();
+			const body = "SENTINEL".repeat(6656);
+			const input = {
+				op: "pr_create" as const,
+				repo: "owner/repo",
+				title: "Add gizmo",
+				body,
+				base: "main",
+				head: "feature/gizmo",
+				draft: true,
+			};
+			let submittedBody: string | undefined;
+			let requestedFields: string[] = [];
+			const runSpy = vi.spyOn(github, "run").mockImplementation(async (_cwd, args) => {
+				if (args[0] === "pr" && args[1] === "create") {
+					const bodyFlagIndex = args.indexOf("--body-file");
+					expect(bodyFlagIndex).toBeGreaterThanOrEqual(0);
+					submittedBody = await Bun.file(args[bodyFlagIndex + 1]).text();
+					return { exitCode: 0, stdout: "https://github.com/owner/repo/pull/77", stderr: "" };
 				}
-				if (route === "xd") {
-					await themeModule.initTheme();
-					const theme = await themeModule.getThemeByName("dark");
-					if (!theme) throw new Error("expected an initialized theme");
-					const rebuilt: typeof result = JSON.parse(JSON.stringify(result));
-					// Result rebuilds must work from the projected dispatch, without
-					// recovering the original body-bearing write arguments.
-					const options = {
-						expanded: true,
-						isPartial: false,
-						renderContext: { resolveXdevMounted: xdev.resolve },
-					};
-					const rendered = writeToolRenderer.renderResult(rebuilt, options, theme);
-					const output = Bun.stripANSI(rendered.render(120).join("\n"));
-					expect(output).toContain("owner/repo");
-					expect(output).toContain("Created Pull Request #77: Add gizmo");
-					expect(output).toContain("https://github.com/owner/repo/pull/77");
-					expect(output).not.toContain("SENTINEL");
-					const described = JSON.stringify(writeToolRenderer.describeResult?.(rebuilt, options));
-					expect(described).toContain("owner/repo");
-					expect(described).toContain("Created Pull Request #77: Add gizmo");
-					expect(described).not.toContain("SENTINEL");
+				if (args[0] !== "pr" || args[1] !== "view") {
+					throw new Error(`Unexpected gh command: ${args.join(" ")}`);
 				}
+				requestedFields = args[args.indexOf("--json") + 1].split(",");
+				if (!summaryAvailable) return { exitCode: 1, stdout: "", stderr: "summary lookup unavailable" };
+				return {
+					exitCode: 0,
+					stderr: "",
+					stdout: JSON.stringify({
+						number: 77,
+						url: "https://github.com/owner/repo/pull/77",
+						title: input.title,
+						state: "OPEN",
+						isDraft: true,
+						headRefName: input.head,
+						baseRefName: input.base,
+						body,
+					}),
+				};
 			});
-		}
-	}
-
-	it("retains renderer arguments for other GitHub operations", async () => {
-		const session = await createSession();
-		vi.spyOn(github, "run").mockResolvedValue({ exitCode: 0, stdout: '{"items":[]}', stderr: "" });
-		const tool = new GithubTool(session);
-		const xdev: XdevState = {
-			tools: new Map([[tool.name, tool]]),
-			mountedNames: new Set([tool.name]),
-			builtInNames: new Set([tool.name]),
-			isActive: () => false,
-			resolve: name => resolveXdevTool(xdev, name),
-		};
-		session.xdev = xdev;
-		const input = { op: "search_prs", query: "is:open", repo: "owner/repo" };
-		const result = await new WriteTool(session).execute("other-output", {
-			path: "xd://github",
-			content: JSON.stringify(input),
+			const tool = Object.assign(new GithubTool(session), githubToolRenderer);
+			const result = await tool.execute("create-output", input);
+			expect(submittedBody).toBe(body);
+			expect(input.body).toBe(body);
+			expect(runSpy).toHaveBeenCalledTimes(2);
+			const text = result.content.find(block => block.type === "text")?.text ?? "";
+			expect(result.isError).not.toBe(true);
+			expect(text).toContain("# Created Pull Request #77: Add gizmo");
+			expect(text).toContain("URL: https://github.com/owner/repo/pull/77");
+			expect(text).toContain("Head: feature/gizmo");
+			expect(text).toContain("Base: main");
+			expect(text).toContain("Draft: true");
+			if (summaryAvailable) expect(text).toContain("State: OPEN");
+			expect(text).not.toContain("## Body");
+			expect(JSON.stringify(result)).not.toContain("SENTINEL");
+			expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(2048);
+			for (const field of ["body", "files", "comments", "reviews", "reviewComments"]) {
+				expect(requestedFields).not.toContain(field);
+			}
+			await themeModule.initTheme();
+			const theme = await themeModule.getThemeByName("dark");
+			if (!theme) throw new Error("expected an initialized theme");
+			const rebuilt: typeof result = JSON.parse(JSON.stringify(result));
+			// The nested card rebuilds from the projected dispatch, without the
+			// original body-bearing command line.
+			const bashResult: { content: Array<{ type: string; text?: string }>; details: BashToolDetails } = {
+				content: rebuilt.content,
+				details: {
+					toolCommands: [{ tool: "github", mode: "execute", exitCode: 0, args: input, inner: rebuilt.details }],
+				},
+			};
+			const bashArgs = { command: "github pr_create" };
+			const options = {
+				expanded: true,
+				isPartial: false,
+				renderContext: {
+					resolveToolCommandMounted: (name: string) => (name === "github" ? tool : undefined),
+				},
+			};
+			const rendered = bashToolRenderer.renderResult(bashResult, options, theme, bashArgs);
+			if (!rendered) throw new Error("expected a rendered nested card");
+			const output = Bun.stripANSI(rendered.render(120).join("\n"));
+			expect(output).toContain("owner/repo");
+			expect(output).toContain("Created Pull Request #77: Add gizmo");
+			expect(output).toContain("https://github.com/owner/repo/pull/77");
+			expect(output).not.toContain("SENTINEL");
+			const described = JSON.stringify(bashToolRenderer.describeResult?.(bashResult, options, bashArgs));
+			expect(described).toContain("owner/repo");
+			expect(described).toContain("Created Pull Request #77: Add gizmo");
+			expect(described).not.toContain("SENTINEL");
 		});
-		expect(result.details?.xdev?.args).toEqual(input);
-	});
+	}
 });

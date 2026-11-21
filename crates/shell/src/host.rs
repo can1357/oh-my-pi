@@ -31,6 +31,7 @@ use crate::{
 		ModeId, NativeRef, OsHandle, ResolveCtx, Resolved, Rlimit, Signal, SpawnFuture, SpawnSpec,
 		StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict,
 	},
+	commands::{self, SessionCommands},
 	output_decode,
 	sys::{End, Exits, NativeSpawner, OutputDecoding, Relays, Sessions, SpawnConfig, StdFile},
 	tools::{SpawnLog, ToolConfig},
@@ -534,6 +535,13 @@ impl PiHost {
 		self.tools.speech.set(speech);
 	}
 
+	/// Resolve the names of `commands` for the commands run from now on,
+	/// after pi's extras and before shell functions, aliases and `PATH`;
+	/// `None`: no session commands.
+	pub fn set_commands(&self, commands: Option<SessionCommands>) {
+		self.tools.commands.set(commands);
+	}
+
 	/// The standard streams the shell's fds 0, 1 and 2 forward to.
 	pub const fn streams(&self) -> &StdStreams {
 		&self.launcher.streams
@@ -564,7 +572,9 @@ impl crate::bash::Host for PiHost {
 	/// pi's order ([`crate::extras`]): the engine's intrinsics (`suspend`
 	/// withheld), the tools (`timeout`, `nohup`, `git`, the extras that run
 	/// command lines), the other extras, the shells the engine runs itself
-	/// (`sh`, `bash`, `zsh`: [`loopback`]), then `PATH`. A name with a slash
+	/// (`sh`, `bash`, `zsh`: [`loopback`]), the run's session commands
+	/// ([`crate::commands`], which the engine asks for before functions and
+	/// aliases: [`Self::preempts_functions`]), then `PATH`. A name with a slash
 	/// is only ever a path; `exec` searches `PATH` without asking.
 	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		if why.has_slash {
@@ -585,6 +595,9 @@ impl crate::bash::Host for PiHost {
 		}
 		if crate::sys::shebang::is_self_shell(name) {
 			return Resolved::SelfShell;
+		}
+		if let Some(command) = self.tools.commands.lookup(name) {
+			return Resolved::Device(command);
 		}
 		Resolved::NotFound
 	}
@@ -615,12 +628,24 @@ impl crate::bash::Host for PiHost {
 				))
 	}
 
-	/// Runs the extra `cmd` names on the runtime ([`crate::extras::ExtraTask`]),
-	/// or refuses `suspend`.
+	/// The run's session commands ([`crate::commands`]) come before shell
+	/// functions and aliases of their names, so nothing the persistent shell
+	/// defined earlier stands in for one.
+	fn preempts_functions(&mut self, name: &BStr) -> bool {
+		self.tools.commands.lookup(name).is_some()
+	}
+
+	/// Runs the extra `cmd` names on the runtime ([`crate::extras::ExtraTask`])
+	/// or the run's session command it names ([`crate::commands`]), or refuses
+	/// `suspend`.
 	fn start(&mut self, cmd: &NativeRef, inv: Invocation<'_>) -> io::Result<Box<dyn Task>> {
 		if *cmd == crate::extras::SUSPEND {
 			let [_, _, stderr] = inv.stdio;
 			return Ok(Box::new(crate::extras::Refusal::new(b"suspend", stderr)));
+		}
+		if commands::is_command(*cmd) {
+			let commands = self.tools.commands.get().ok_or(io::ErrorKind::NotFound)?;
+			return Ok(Box::new(commands.start(&self.runtime, *cmd, inv)?));
 		}
 		let name = crate::extras::native_name(*cmd).ok_or(io::ErrorKind::NotFound)?;
 		let mut invocation = crate::extras::invocation(

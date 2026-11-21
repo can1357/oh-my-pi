@@ -3,14 +3,14 @@
  *
  * Each server's enabled tools become async methods of one eval global
  * (`mcp__github_create_issue` → `github.create_issue(args)`) and leave the
- * top-level and `xd://` tool surfaces. A method calls its registry tool
+ * top-level and tool-command surfaces. A method calls its registry tool
  * through the eval bridge op {@link EVAL_MCP_BRIDGE_NAME}, which runs the
  * tool exactly as `tool.<name>(args)` does (approval, ACP gates, extension
  * hooks stay the tool's own) and maps its MCP content to a script value
  * ({@link mcpNamespaceValue}): images, audio and binary resources land as
  * `local://mcp/…` files. Full docs (every method with its description and
  * argument type, plus the server's advertised resources) live behind
- * `read xd://eval/<namespace>`; the eval namespace listing carries a
+ * `read help://eval/<namespace>`; the eval namespace listing carries a
  * model-written "when to use" hint, cached like skill descriptions and empty
  * until generated.
  *
@@ -58,7 +58,7 @@ const PYTHON_KEYWORDS = new Set(
 /**
  * Lowercase identifiers a namespace global must not take: either language's
  * keywords, runtime globals, Python builtins, the modules and helpers the eval
- * preludes bind, and the fixed `xd://eval/<topic>` doc topics. Sanitized
+ * preludes bind, and the fixed `help://eval/<topic>` doc topics. Sanitized
  * server names are lowercase, so camelCase globals cannot collide.
  */
 const RESERVED_NAMESPACES = new Set([
