@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- The async delivery session-switch tests no longer depend on the developer's `disabledProviders` setting; they failed with "No API key found for anthropic" when it listed `anthropic` ([#19390](https://github.com/can1357/oh-my-pi/pull/19390) by [@Xytronix](https://github.com/Xytronix))
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
 - Fixed AST edits and searches across several targets duplicating explicit `local://` file names (such as `local://example.ts/example.ts`) or replacing symlinked file names in previews, search results, and the edit journal ([#20025](https://github.com/can1357/oh-my-pi/pull/20025) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Claude-format plugin agents losing tools whose Claude Code names match no OMP built-in: frontmatter `tools:` now translates `WebFetch`, `WebSearch`, `TodoWrite`, `AskUserQuestion`, `MultiEdit`, `Agent`, and the rest to their OMP equivalents, and `Agent` infers unrestricted spawns like `Task` ([#19887](https://github.com/can1357/oh-my-pi/pull/19887) by [@joseotaviorf](https://github.com/joseotaviorf))
