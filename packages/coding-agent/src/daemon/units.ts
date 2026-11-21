@@ -193,7 +193,8 @@ async function fileTextSlice(filePath: string, head: boolean): Promise<string> {
 			: await file.slice(Math.max(0, stat.size - LOG_READ_BYTES)).text();
 	} catch (error) {
 		if (isEnoent(error)) return "";
-		throw error;
+		logger.warn("Failed to read unit log file", { filePath, error: errorMessage(error) });
+		return "";
 	}
 }
 
@@ -1805,11 +1806,22 @@ export class UnitTable {
 				size = (await fsp.stat(logPath)).size;
 			} catch (error) {
 				if (isEnoent(error)) return;
-				throw error;
+				logger.warn("Failed to stat detached unit log", { id: entry.snapshot.id, error: errorMessage(error) });
+				return;
 			}
+			const previousOffset = entry.outputOffset;
 			if (size < entry.outputOffset) entry.outputOffset = 0;
 			if (size === entry.outputOffset) return;
-			const raw = await Bun.file(logPath).slice(entry.outputOffset, size).text();
+			let raw: string;
+			try {
+				raw = await Bun.file(logPath).slice(entry.outputOffset, size).text();
+			} catch (error) {
+				// Keep the pre-read offset: a failed read of a truncated replacement
+				// must not pin it to 0, or the old log replays from the start when it returns.
+				entry.outputOffset = previousOffset;
+				logger.warn("Failed to read detached unit log", { id: entry.snapshot.id, error: errorMessage(error) });
+				return;
+			}
 			if (launch !== runtime.launch) return;
 			entry.outputOffset = size;
 			entry.snapshot.outputBytes = size;
