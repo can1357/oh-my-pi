@@ -2,14 +2,21 @@
 //! Automation delivery.
 
 use std::{
-	ptr::{null_mut, with_exposed_provenance_mut},
+	ptr::{null_mut, with_exposed_provenance, with_exposed_provenance_mut},
 	time::{Duration, Instant},
 };
 
 use windows_sys::{
 	Win32::{
-		Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT},
-		Graphics::Gdi::ScreenToClient,
+		Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT},
+		Graphics::{
+			Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
+			Gdi::{
+				COMPLEXREGION, CombineRgn, CreateRectRgn, DeleteObject, EnumDisplayMonitors,
+				GDI_REGION_TYPE, GetWindowRgnBox, HDC, HMONITOR, HRGN, IntersectRect, NULLREGION,
+				RGN_AND, RGN_COMBINE_MODE, RGN_DIFF, RGN_ERROR, RGN_OR, SIMPLEREGION, ScreenToClient,
+			},
+		},
 		Security::{
 			GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
 			TOKEN_QUERY, TokenIntegrityLevel,
@@ -26,9 +33,11 @@ use windows_sys::{
 			Input::KeyboardAndMouse::IsWindowEnabled,
 			WindowsAndMessaging::{
 				CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx,
-				EnumChildWindows, GA_PARENT, GA_ROOT, GUITHREADINFO, GetAncestor, GetClassNameW,
-				GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, IsChild,
-				IsWindowVisible, SetForegroundWindow,
+				EnumChildWindows, EnumWindows, GA_PARENT, GA_ROOT, GUITHREADINFO, GWL_EXSTYLE,
+				GWL_STYLE, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
+				GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
+				IsChild, IsIconic, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, SetForegroundWindow,
+				WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 			},
 		},
 	},
@@ -104,6 +113,205 @@ pub(super) fn owns_foreground(hwnd: HWND) -> bool {
 	// SAFETY: GetForegroundWindow has no preconditions.
 	let foreground = unsafe { GetForegroundWindow() };
 	!foreground.is_null() && root(foreground) == root(hwnd)
+}
+
+/// Whether `hwnd` is drawn by Chromium (its own class or a renderer child),
+/// which runs its own occlusion check: once that finds nothing of the window
+/// showing, Chromium can mark its pages hidden and stop painting them and
+/// updating their accessibility tree, while Windows keeps composing the last
+/// frame.
+pub(super) fn paused_while_covered(hwnd: HWND) -> bool {
+	with_class_name(hwnd, is_chromium_class) || has_chromium_descendant(hwnd)
+}
+
+/// Whether top-level `hwnd` appears fully covered: no part of its frame lies
+/// on a display outside the windows above it in the z-order that Chromium
+/// counts as covers (see [`occluder`]). An approximation of Chromium's own
+/// check, whose geometry differs in places. False when any of that cannot be
+/// read.
+pub(super) fn fully_covered(hwnd: HWND) -> bool {
+	struct Walk {
+		target: HWND,
+		shown:  Region,
+		kind:   GDI_REGION_TYPE,
+	}
+
+	unsafe extern "system" fn visit(window: HWND, state: LPARAM) -> BOOL {
+		// SAFETY: `state` is the exposed address of the walk owned by the
+		// enclosing call, which outlives this synchronous enumeration.
+		let walk = unsafe { &mut *with_exposed_provenance_mut::<Walk>(state as usize) };
+		if window == walk.target {
+			return BOOL::from(false);
+		}
+		if let Some(rect) = occluder(window) {
+			walk.kind =
+				Region::new(rect).map_or(RGN_ERROR, |cover| walk.shown.combine(&cover, RGN_DIFF));
+		}
+		// Every window still to come lies below what already covers it all.
+		BOOL::from(walk.kind == SIMPLEREGION || walk.kind == COMPLEXREGION)
+	}
+
+	let (Some(frame), Some(displays)) = (frame_bounds(hwnd), displays()) else {
+		return false;
+	};
+	let Some(shown) = Region::new(frame) else {
+		return false;
+	};
+	let kind = shown.combine(&displays, RGN_AND);
+	let mut walk = Walk { target: hwnd, shown, kind };
+	if walk.kind == SIMPLEREGION || walk.kind == COMPLEXREGION {
+		// SAFETY: `visit` runs only during this synchronous call and receives
+		// the address of `walk`, which outlives it.
+		unsafe {
+			EnumWindows(Some(visit), (&raw mut walk).expose_provenance() as LPARAM);
+		}
+	}
+	// Nothing left showing, whether the walk reached `hwnd` or stopped above
+	// it; an error or any part still showing reads as not covered.
+	walk.kind == NULLREGION
+}
+
+/// The union of every display's rectangle, `None` when one cannot be read.
+fn displays() -> Option<Region> {
+	unsafe extern "system" fn add(_: HMONITOR, _: HDC, rect: *mut RECT, state: LPARAM) -> BOOL {
+		// SAFETY: `state` is the exposed address of the region owned by the
+		// enclosing call, which outlives this synchronous enumeration; `rect`
+		// is the monitor's rectangle for the duration of the callback.
+		let (union, rect) = unsafe { (&*with_exposed_provenance::<Region>(state as usize), *rect) };
+		BOOL::from(
+			Region::new(rect).is_some_and(|monitor| union.combine(&monitor, RGN_OR) != RGN_ERROR),
+		)
+	}
+
+	let union = Region::new(RECT::default())?;
+	// SAFETY: `add` runs only during this synchronous call and receives the
+	// address of `union`, which outlives it.
+	let complete = unsafe {
+		EnumDisplayMonitors(
+			null_mut(),
+			std::ptr::null(),
+			Some(add),
+			(&raw const union).expose_provenance() as LPARAM,
+		)
+	} != 0;
+	complete.then_some(union)
+}
+
+/// The screen rectangle `hwnd` hides what lies under, as Chromium's own
+/// occlusion check counts it (`IsWindowVisibleAndFullyOpaque` in
+/// `ui/gfx/win/hwnd_util.cc`): none unless it is visible, not minimized, not
+/// cloaked (another virtual desktop, a suspended UWP frame), without
+/// `WS_EX_TRANSPARENT`, not a tool window other than the taskbar, not a popup
+/// other than the taskbar or a Chromium widget, and not see-through layered;
+/// its frame, cut to a rectangular window region, and none for an empty or
+/// shaped one.
+fn occluder(hwnd: HWND) -> Option<RECT> {
+	let mut cloaked = 0u32;
+	// SAFETY: every call validates the handle; the out-pointers are writable
+	// locals of the advertised size.
+	unsafe {
+		if IsWindowVisible(hwnd) == 0
+			|| IsIconic(hwnd) != 0
+			|| DwmGetWindowAttribute(
+				hwnd,
+				DWMWA_CLOAKED as u32,
+				(&raw mut cloaked).cast(),
+				size_of::<u32>() as u32,
+			) >= 0
+				&& cloaked != 0
+		{
+			return None;
+		}
+		let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+		// Chromium skips these windows as covers even when they are opaque, so
+		// it keeps drawing under them and its reads stay current.
+		if style & WS_EX_TRANSPARENT != 0 {
+			return None;
+		}
+		let tool = style & WS_EX_TOOLWINDOW != 0;
+		if (tool || GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_POPUP != 0)
+			&& with_class_name(hwnd, |class| {
+				class != "Shell_TrayWnd" && (tool || !class.starts_with("Chrome_WidgetWin_"))
+			}) {
+			return None;
+		}
+		if style & WS_EX_LAYERED != 0 {
+			// Without attributes the window was drawn by UpdateLayeredWindow, with
+			// per-pixel alpha.
+			let (mut alpha, mut flags) = (0u8, 0u32);
+			if GetLayeredWindowAttributes(hwnd, null_mut(), &raw mut alpha, &raw mut flags) == 0
+				|| flags & LWA_COLORKEY != 0
+				|| flags & LWA_ALPHA != 0 && alpha < u8::MAX
+			{
+				return None;
+			}
+		}
+		let frame = frame_bounds(hwnd)?;
+		let mut region = RECT::default();
+		match GetWindowRgnBox(hwnd, &raw mut region) {
+			// No window region: the whole frame shows.
+			RGN_ERROR => Some(frame),
+			SIMPLEREGION => {
+				// The region box is relative to the window rectangle.
+				let mut window = RECT::default();
+				if GetWindowRect(hwnd, &raw mut window) == 0 {
+					return None;
+				}
+				let shown = RECT {
+					left:   window.left + region.left,
+					top:    window.top + region.top,
+					right:  window.left + region.right,
+					bottom: window.top + region.bottom,
+				};
+				let mut both = RECT::default();
+				(IntersectRect(&raw mut both, &raw const shown, &raw const frame) != 0).then_some(both)
+			},
+			_ => None,
+		}
+	}
+}
+
+/// The part of `hwnd` Windows draws on screen, in physical pixels: DWM's
+/// frame bounds, which leave out the invisible resize borders.
+fn frame_bounds(hwnd: HWND) -> Option<RECT> {
+	let mut rect = RECT::default();
+	// SAFETY: both calls validate the handle and write one RECT.
+	let read = unsafe {
+		DwmGetWindowAttribute(
+			hwnd,
+			DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+			(&raw mut rect).cast(),
+			size_of::<RECT>() as u32,
+		) >= 0
+			|| GetWindowRect(hwnd, &raw mut rect) != 0
+	};
+	(read && rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
+}
+
+/// A GDI region, deleted on drop.
+struct Region(HRGN);
+
+impl Region {
+	fn new(rect: RECT) -> Option<Self> {
+		// SAFETY: CreateRectRgn takes plain coordinates; null means failure.
+		let region = unsafe { CreateRectRgn(rect.left, rect.top, rect.right, rect.bottom) };
+		(!region.is_null()).then_some(Self(region))
+	}
+
+	/// Combines `other` into this region with `mode` and returns the
+	/// result's kind.
+	fn combine(&self, other: &Self, mode: RGN_COMBINE_MODE) -> GDI_REGION_TYPE {
+		// SAFETY: both regions are live; GDI allows the destination to be a
+		// source.
+		unsafe { CombineRgn(self.0, self.0, other.0, mode) }
+	}
+}
+
+impl Drop for Region {
+	fn drop(&mut self) {
+		// SAFETY: the region is owned here and selected into no device context.
+		unsafe { DeleteObject(self.0) };
+	}
 }
 
 /// Whether a Chromium or CEF renderer lives in a descendant of `hwnd`.
@@ -493,4 +701,177 @@ pub(super) fn ensure_pattern_safe(root: HWND) -> CoreResult<()> {
 		)));
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use windows_sys::Win32::{
+		Graphics::Gdi::SetWindowRgn,
+		System::LibraryLoader::GetModuleHandleW,
+		UI::WindowsAndMessaging::{
+			CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, RegisterClassW,
+			SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+			SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+		},
+	};
+
+	use super::{super::capture, *};
+
+	fn wide(text: &str) -> Vec<u16> {
+		text.encode_utf16().chain(Some(0)).collect()
+	}
+
+	/// An ordinary opaque top-level window of class `class` whose visible frame
+	/// is `frame`, shown without activation in the topmost band above every
+	/// window made before it, so the desktop's own windows never cover it.
+	fn window(class: &str, frame: RECT) -> HWND {
+		let class = wide(class);
+		// SAFETY: the class name outlives the call; no parent, menu or data.
+		let hwnd = unsafe {
+			CreateWindowExW(
+				0,
+				class.as_ptr(),
+				class.as_ptr(),
+				WS_OVERLAPPEDWINDOW,
+				frame.left,
+				frame.top,
+				frame.right - frame.left,
+				frame.bottom - frame.top,
+				null_mut(),
+				null_mut(),
+				GetModuleHandleW(std::ptr::null()),
+				std::ptr::null(),
+			)
+		};
+		assert!(!hwnd.is_null());
+		// SAFETY: this thread owns `hwnd`.
+		unsafe {
+			SetWindowPos(
+				hwnd,
+				HWND_TOPMOST,
+				0,
+				0,
+				0,
+				0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+			);
+		}
+		place(hwnd, frame);
+		hwnd
+	}
+
+	/// Moves `hwnd` so that its visible frame is `frame`, around which the
+	/// window rectangle keeps its invisible resize border.
+	fn place(hwnd: HWND, frame: RECT) {
+		let mut window = RECT::default();
+		// SAFETY: this thread owns `hwnd`; `window` is a writable RECT.
+		unsafe { GetWindowRect(hwnd, &raw mut window) };
+		let shown = frame_bounds(hwnd).expect("the frame of a shown window");
+		let (left, top) = (shown.left - window.left, shown.top - window.top);
+		let (right, bottom) = (window.right - shown.right, window.bottom - shown.bottom);
+		// SAFETY: this thread owns `hwnd`.
+		unsafe {
+			SetWindowPos(
+				hwnd,
+				null_mut(),
+				frame.left - left,
+				frame.top - top,
+				frame.right - frame.left + left + right,
+				frame.bottom - frame.top + top + bottom,
+				SWP_NOZORDER | SWP_NOACTIVATE,
+			);
+		}
+	}
+
+	const fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+		RECT { left, top, right, bottom }
+	}
+
+	#[test]
+	fn a_chromium_window_is_marked_only_when_nothing_of_it_shows() {
+		let chromium = wide("Chrome_WidgetWin_7");
+		// SAFETY: the class name outlives the registration's use in this test.
+		unsafe {
+			RegisterClassW(&WNDCLASSW {
+				lpfnWndProc: Some(DefWindowProcW),
+				hInstance: GetModuleHandleW(std::ptr::null()),
+				lpszClassName: chromium.as_ptr(),
+				..Default::default()
+			});
+		}
+		let native = window("STATIC", rect(100, 100, 300, 300));
+		let target = window("Chrome_WidgetWin_7", rect(100, 100, 300, 300));
+		let cover = window("STATIC", rect(50, 50, 400, 400));
+		let marked = |hwnd: HWND| capture::window_covered(&(hwnd as usize).to_string());
+		assert!(marked(target), "an opaque window over all of it");
+		assert!(!marked(native), "covered too, but the app keeps drawing");
+		assert!(!marked(cover));
+
+		place(cover, rect(50, 50, 299, 400));
+		assert!(!marked(target), "one column still shows");
+
+		place(cover, rect(50, 50, 400, 400));
+		// SAFETY: this thread owns `cover`; the system owns each region it is
+		// given.
+		unsafe { SetWindowRgn(cover, CreateRectRgn(0, 0, 100, 100), 1) };
+		assert!(!marked(target), "the cover's window region leaves most of it showing");
+		// SAFETY: as above; a null region restores the whole window.
+		unsafe { SetWindowRgn(cover, null_mut(), 1) };
+		assert!(marked(target));
+
+		// SAFETY: `GetWindowLongW` validates the handle.
+		let plain = unsafe { GetWindowLongW(cover, GWL_EXSTYLE) };
+		// SAFETY: this thread owns `cover`.
+		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain | WS_EX_TRANSPARENT as i32) };
+		assert!(
+			!marked(target),
+			"Chromium does not count an opaque WS_EX_TRANSPARENT window as covering it"
+		);
+		// SAFETY: as above.
+		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain) };
+		assert!(marked(target));
+
+		// SAFETY: this thread owns `cover`.
+		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain | WS_EX_TOOLWINDOW as i32) };
+		assert!(!marked(target), "Chromium does not count an opaque tool window as covering it");
+		// SAFETY: as above.
+		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain) };
+		assert!(marked(target));
+
+		// SAFETY: `GetWindowLongW` validates the handle.
+		let framed = unsafe { GetWindowLongW(cover, GWL_STYLE) };
+		// SAFETY: this thread owns `cover`.
+		unsafe { SetWindowLongW(cover, GWL_STYLE, framed | WS_POPUP as i32) };
+		assert!(!marked(target), "Chromium does not count an opaque popup as covering it");
+		let widget = window("Chrome_WidgetWin_7", rect(50, 50, 400, 400));
+		// SAFETY: this thread owns `widget`.
+		unsafe {
+			let style = GetWindowLongW(widget, GWL_STYLE);
+			SetWindowLongW(widget, GWL_STYLE, style | WS_POPUP as i32);
+		}
+		assert!(marked(target), "but it counts a popup of its own");
+		// SAFETY: this thread owns both windows.
+		unsafe {
+			DestroyWindow(widget);
+			SetWindowLongW(cover, GWL_STYLE, framed);
+		}
+		assert!(marked(target));
+
+		// SAFETY: this thread owns `cover`.
+		unsafe {
+			SetWindowLongW(cover, GWL_EXSTYLE, plain | WS_EX_LAYERED as i32);
+			SetLayeredWindowAttributes(cover, 0, 200, LWA_ALPHA);
+		}
+		assert!(!marked(target), "the target shows through a translucent window");
+
+		place(target, rect(-30_000, -30_000, -29_800, -29_800));
+		assert!(marked(target), "off every display");
+
+		// SAFETY: this thread owns the windows.
+		unsafe {
+			DestroyWindow(cover);
+			DestroyWindow(target);
+			DestroyWindow(native);
+		}
+	}
 }

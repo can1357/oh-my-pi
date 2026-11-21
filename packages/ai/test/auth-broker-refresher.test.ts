@@ -6,6 +6,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { AuthBrokerRefresher } from "@oh-my-pi/pi-ai/auth-broker";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
+import { logger } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
@@ -149,6 +150,66 @@ describe("AuthBrokerRefresher", () => {
 
 		expect(disableEvents).toHaveLength(0);
 		expect(storage.credentials.snapshot().credentials).toHaveLength(1);
+	});
+
+	test.each([
+		{
+			scenario: "the token lapses before the next sweep",
+			expiresIn: 30_000,
+			peerExpiresIn: undefined,
+			level: "warn",
+		},
+		{
+			scenario: "the token outlives the next sweep",
+			expiresIn: 2 * 60_000,
+			peerExpiresIn: undefined,
+			level: "debug",
+		},
+		{
+			scenario: "a peer stored a fresh token during the refresh",
+			expiresIn: 30_000,
+			peerExpiresIn: 60 * 60_000,
+			level: "debug",
+		},
+	])("logs a transient failure at $level when $scenario", async ({ expiresIn, peerExpiresIn, level }) => {
+		const now = 1_700_000_000_000;
+		await store!.saveOAuth("anthropic", {
+			access: "old",
+			refresh: "old-refresh",
+			expires: now + expiresIn,
+			accountId: "a",
+		});
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
+			if (peerExpiresIn !== undefined) {
+				await store!.saveOAuth("anthropic", {
+					access: "peer",
+					refresh: "peer-refresh",
+					expires: now + peerExpiresIn,
+					accountId: "a",
+				});
+			}
+			throw new Error("fetch failed: ECONNREFUSED");
+		});
+
+		storage = new AuthStorage(store!);
+		await storage.credentials.reload();
+		const refresher = new AuthBrokerRefresher({
+			storage,
+			refreshSkewMs: 5 * 60_000,
+			refreshIntervalMs: 60_000,
+			now: () => now,
+		});
+		const failures: string[] = [];
+		const dispose = logger.registerLogSink(event => {
+			if (event.message.startsWith("auth-broker refresh failed")) failures.push(event.level);
+		});
+		try {
+			await refresher.tick();
+		} finally {
+			dispose();
+		}
+
+		expect(failures).toEqual([level]);
 	});
 
 	test("does not disable a credential a peer rotated during the refresh (CAS)", async () => {

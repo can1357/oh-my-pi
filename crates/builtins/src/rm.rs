@@ -189,6 +189,8 @@ pub fn safe_remove_file(host: &mut Host,
 ) -> Option<bool> {
 	let (parent, file_name) = native_entry(host, path)?;
 	let dir_fd = DirFd::open(&parent, SymlinkBehavior::Follow).ok()?;
+	// The unlink below bypasses the filesystem facade.
+	host.fs().note_change(parent.join(&file_name));
 
 	match dir_fd.unlink_at(&file_name, false) {
 		Ok(_) => {
@@ -315,6 +317,9 @@ pub fn safe_remove_dir_recursive(host: &mut Host,
 			return show_removal_error(host, e, path);
 		},
 	};
+
+	// The traversal below unlinks by descriptor, bypassing the filesystem facade.
+	host.fs().note_change(&path_fs);
 
 	// Try to open the directory using DirFd for secure traversal
 	let dir_fd = match DirFd::open(&path_fs, SymlinkBehavior::Follow) {

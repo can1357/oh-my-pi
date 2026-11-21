@@ -210,6 +210,11 @@ export class BashInteractiveOverlayComponent implements Component {
 		return promise;
 	}
 
+	/** Whether the cursor sits after text on its row, where a line prompt leaves it. */
+	cursorAfterText(): boolean {
+		return this.#terminal.buffer.active.cursorX > 0;
+	}
+
 	/** Records process completion and stops forwarding keyboard input. */
 	setComplete(result: { exitCode: number | undefined; cancelled: boolean; timedOut: boolean }): void {
 		this.#exitCode = result.exitCode;

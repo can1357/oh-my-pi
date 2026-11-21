@@ -6,9 +6,9 @@ import type { AgentEvent, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Process } from "@oh-my-pi/pi-natives";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { isRecord, ptree, readLines, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { isAlive, waitFor } from "./fixtures/daemon-harness";
 
-const device = "mcp__stub_regression_announce";
-const deviceUri = `xd://${device}`;
+const toolCommand = "mcp__stub_regression_announce";
 const cli = path.join(import.meta.dir, "../src/cli.ts");
 const peer = path.join(import.meta.dir, "fixtures/rpc-mcp-server.ts");
 const fakeModel = path.join(import.meta.dir, "rpc-wire/fake-openai-server.ts");
@@ -39,15 +39,6 @@ async function auditEntries(audit: string): Promise<Record<string, unknown>[]> {
 	});
 }
 
-function isAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 // Both modes enter main.ts -> createAgentSession -> runRpcMode. An SDK-only
 // fixture would miss a lost MCP manager at that launch boundary.
 describe("CLI RPC MCP discovery", () => {
@@ -68,6 +59,9 @@ describe("CLI RPC MCP discovery", () => {
 				PI_CONFIG_DIR: ".omp",
 				PI_CODING_AGENT_DIR: agentDir,
 				PI_NO_TITLE: "1",
+				// Wait for the stub at startup: a server the MCP host has never seen is
+				// probed before it serves, which outlasts the default startup window.
+				OMP_MCP_STARTUP_TIMEOUT_MS: "0",
 			};
 			using model = ptree.spawn([process.execPath, fakeModel, agentDir], {
 				cwd: project,
@@ -130,30 +124,35 @@ describe("CLI RPC MCP discovery", () => {
 					try {
 						await client.start();
 						const state = await client.getState();
-						expect(state.dumpTools?.map(tool => tool.name)).toEqual(expect.arrayContaining(["read", "write"]));
-						expect(state.dumpTools?.some(tool => tool.name === device)).toBe(false);
-						const listing = toolResult(await client.promptAndWait("read_uri xd://"), "read", { path: "xd://" });
+						expect(state.dumpTools?.map(tool => tool.name)).toEqual(
+							expect.arrayContaining(["read", "write", "bash"]),
+						);
+						expect(state.dumpTools?.some(tool => tool.name === toolCommand)).toBe(false);
+						const invokeCommand = `${toolCommand} -j '{}'`;
 						if (phase === "disabled") {
-							expect(listing).not.toContain(device);
-							const events = await client.promptAndWait(`write_uri ${deviceUri} {}`);
-							const error = toolResult(events, "write", { path: deviceUri, content: "{}" });
+							const events = await client.promptAndWait(`run_command ${invokeCommand}`);
+							expect(toolResult(events, "bash", { command: invokeCommand })).not.toContain("rpc-mcp-invoked");
 							expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({ isError: true });
-							expect(error).toContain(`No such tool: ${deviceUri}`);
 							expect(await auditEntries(audit)).toEqual([]);
 						} else {
-							expect(listing).toContain(device);
-							const docs = toolResult(await client.promptAndWait(`read_uri ${deviceUri}`), "read", {
-								path: deviceUri,
+							// Deferred discovery may land after the first turn starts: wait until the command is mounted.
+							const probe = `type ${toolCommand}`;
+							for (let attempt = 0; attempt < 20; attempt++) {
+								const seen = toolResult(await client.promptAndWait(`run_command ${probe}`), "bash", {
+									command: probe,
+								});
+								if (!seen.includes("not found")) break;
+							}
+							const help = toolResult(await client.promptAndWait(`run_command ${toolCommand} --help`), "bash", {
+								command: `${toolCommand} --help`,
 							});
-							expect(docs).toContain("Return an independently audited invocation marker.");
+							expect(help).toContain("Return an independently audited invocation marker.");
 							const invoke = async () => {
 								const before = (await auditEntries(audit)).filter(
 									entry => entry.method === "tools/call",
 								).length;
-								const events = await client.promptAndWait(`write_uri ${deviceUri} {}`);
-								expect(toolResult(events, "write", { path: deviceUri, content: "{}" })).toContain(
-									"rpc-mcp-invoked",
-								);
+								const events = await client.promptAndWait(`run_command ${invokeCommand}`);
+								expect(toolResult(events, "bash", { command: invokeCommand })).toContain("rpc-mcp-invoked");
 								expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({
 									isError: false,
 								});
@@ -178,11 +177,24 @@ describe("CLI RPC MCP discovery", () => {
 						child.stdin.end();
 						child.attachTimeout(10_000);
 						expect(await child.exited).toBe(0);
-						const spawns = (await auditEntries(audit)).filter(entry => entry.event === "spawn");
-						expect(spawns).toHaveLength(phase === "disabled" ? 0 : 1);
+						const entries = await auditEntries(audit);
+						const spawns = entries.filter(entry => entry.event === "spawn");
+						if (phase === "disabled") {
+							expect(spawns).toHaveLength(0);
+						} else {
+							// The host launches the stub to probe it and again to serve. Every
+							// invocation, across both session switches, reached that one server.
+							const firstCall = entries.findIndex(entry => entry.method === "tools/call");
+							const lastSpawn = entries.findLastIndex(entry => entry.event === "spawn");
+							expect(lastSpawn).toBeGreaterThanOrEqual(0);
+							expect(firstCall).toBeGreaterThan(lastSpawn);
+						}
 						for (const spawn of spawns) {
 							if (typeof spawn.pid !== "number") throw new Error("Missing MCP PID");
-							expect(isAlive(spawn.pid), `MCP peer ${spawn.pid} survived RPC shutdown`).toBe(false);
+							const pid = spawn.pid;
+							// The MCP host owns the peer and stops it once the exiting session lets
+							// go: shortly after the CLI is gone, with no event this test could await.
+							await waitFor(() => !isAlive(pid), `MCP peer ${pid} to stop after RPC shutdown`, 5_000);
 						}
 					} finally {
 						observingEof = false;

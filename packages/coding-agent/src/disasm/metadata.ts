@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { DISASM_BACKENDS } from "./backend";
+import { databaseOwner } from "./backend";
 import { parseFatSlices, selectSlice, type FatSelection } from "./store";
 
 const MAX_TABLE_BYTES = 4 * 1024 * 1024;
@@ -25,10 +26,11 @@ export async function readBinaryMetadata(file: string, arch?: string): Promise<B
 	try {
 		const stat = await handle.stat({ bigint: true });
 		if (!stat.isFile()) throw new ToolError("Binary metadata requires a regular file");
-		if (DISASM_BACKENDS.ida.isDatabasePath(file)) {
+		const owner = databaseOwner(file);
+		if (owner) {
 			if (arch !== undefined) throw new ToolError("slice selection requires a universal Mach-O binary");
 			return {
-				text: `IDA database (${file.toLowerCase().endsWith(".i64") ? ".i64" : ".idb"})\nfile size ${stat.size} bytes; database not opened`,
+				text: `${owner.label} database (${path.extname(file).toLowerCase()})\nfile size ${stat.size} bytes; database not opened`,
 			};
 		}
 		let base = 0n;
