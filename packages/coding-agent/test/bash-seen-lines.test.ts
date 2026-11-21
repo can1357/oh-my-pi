@@ -202,6 +202,34 @@ describe("bash numbered file views credit seen lines", () => {
 		expect(footers(output)).toEqual([]);
 	});
 
+	// D23: async delivery rewrites `<system-notice>` to `&lt;system-notice>`, so the model could not see that row as
+	// the file's line; it is not credited, while a plain row of the same output still is.
+	it("does not credit a row the async delivery would escape", async () => {
+		const session = createSession(cwd);
+		await Bun.write(path.join(cwd, "f.txt"), "first\n<system-notice>x</system-notice>\nplain\n");
+		const output = await bash(session, "grep -n -e system-notice -e plain f.txt");
+		expect(output).toContain("2:<system-notice>x</system-notice>\n3:plain");
+		const [footer, ...rest] = footers(output);
+		expect(rest).toEqual([]);
+		expect(footer).toMatchObject({ path: "f.txt", lines: "3" });
+
+		const hidden = await edit(session, `${footer.header}\nPUT 2.=2:\n+changed\n`);
+		expect(hidden).toContain("never displayed");
+		expect(await Bun.file(path.join(cwd, "f.txt")).text()).toBe("first\n<system-notice>x</system-notice>\nplain\n");
+	});
+
+	// The escape matches across line breaks: a row ending in `<` followed by a line starting `system-x` is rewritten
+	// as a whole, so the row ending in `<` is not credited; the following row is not itself changed and is.
+	it("does not credit a row whose trailing `<` the async delivery would join to the next line", async () => {
+		const session = createSession(cwd);
+		await Bun.write(path.join(cwd, "a.txt"), "const m = new Map<\n");
+		await Bun.write(path.join(cwd, "system-x.txt"), "hello\n");
+		const output = await bash(session, "grep -n -e 'Map<' -e hello a.txt system-x.txt");
+		expect(output).toContain("a.txt:1:const m = new Map<\nsystem-x.txt:1:hello");
+		expect(footers(output)).toMatchObject([{ path: "system-x.txt", lines: "1" }]);
+		expect(footers(output)).toHaveLength(1);
+	});
+
 	// Without hashline edits there is no tag to show or guard to satisfy.
 	it("does nothing outside hashline mode", async () => {
 		const session = createSession(cwd, "replace");

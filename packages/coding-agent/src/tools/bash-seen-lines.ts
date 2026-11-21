@@ -21,6 +21,7 @@ import { normalizeToLF, stripBom } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { InternalUrlRouter } from "../internal-urls";
 import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
+import { escapeHarnessTags } from "../session/harness-tags";
 import type { ToolSession } from ".";
 import { resolveArtifactSpillThreshold } from "./output-meta";
 import { formatPathRelativeToCwd, normalizeWindowsDriveAliasPath } from "./path-utils";
@@ -75,7 +76,15 @@ interface ParsedRows {
 function parseRows(outputText: string): ParsedRows {
 	const bare: NumberedRow[] = [];
 	const prefixed: PrefixedRow[] = [];
-	for (const row of outputText.split("\n")) {
+	// Async delivery escapes harness tags, so the model would receive `&lt;system-notice>` instead of the file's
+	// line. A result may be backgrounded after it is built, so this applies on every path. The escape matches
+	// across line breaks (`<` ending a row, `system-x…` starting the next), so it is applied to the whole output;
+	// it only replaces `<` with `&lt;`, so line indexes align, and a row it changes is skipped.
+	const escaped = escapeHarnessTags(outputText).split("\n");
+	const rows = outputText.split("\n");
+	for (let n = 0; n < rows.length; n++) {
+		const row = rows[n];
+		if (escaped[n] !== row) continue;
 		const tab = TAB_ROW.exec(row);
 		if (tab) bare.push({ line: Number(tab[1]), text: tab[2] });
 		const plain = BARE_ROW.exec(row);
@@ -235,10 +244,18 @@ function claim(claims: Map<string, ClaimedRows>, absolutePath: string, row: Numb
 	texts.add(row.text);
 }
 
-/** Read a file the way the edit store snapshots it: BOM-stripped, LF-normalized UTF-8; undefined when unusable. */
-async function readSnapshotText(absolutePath: string): Promise<string | undefined> {
+/**
+ * Read a file the way the edit store snapshots it: BOM-stripped, LF-normalized UTF-8. `reservedSize` is the size
+ * probed (and charged to the read budget) before this read; at most one byte more is read, and a longer file
+ * (grown or replaced after the probe) is unusable. Undefined when unusable.
+ */
+async function readSnapshotText(absolutePath: string, reservedSize: number): Promise<string | undefined> {
 	try {
-		const decoded = decodeUtf8Text(await Bun.file(absolutePath).bytes());
+		const bytes = await Bun.file(absolutePath)
+			.slice(0, reservedSize + 1)
+			.bytes();
+		if (bytes.length > reservedSize) return undefined;
+		const decoded = decodeUtf8Text(bytes);
 		return decoded === null ? undefined : normalizeToLF(stripBom(decoded).text);
 	} catch (err) {
 		logger.debug("bash seen-lines: unreadable file", { path: absolutePath, err: String(err) });
@@ -329,15 +346,15 @@ export async function findBashSeenLines(command: string, cwd: string, outputText
 	if (claims.size === 0) return [];
 	// Output that only looks numbered (`path:line:col` diagnostics of a failing build) names real files nobody
 	// viewed; the total budget keeps reading them cheap. Sizes come from the probe's cached stats.
-	const entries: [string, ClaimedRows][] = [];
+	const entries: [string, ClaimedRows, number][] = [];
 	let budget = MAX_TOTAL_READ_BYTES;
 	for (const entry of claims) {
 		const size = await probe.size(entry[0]);
 		if (size === undefined || size > MAX_SNAPSHOT_FILE_BYTES || size > budget) continue;
 		budget -= size;
-		entries.push(entry);
+		entries.push([entry[0], entry[1], size]);
 	}
-	const texts = await Promise.all(entries.map(([absolutePath]) => readSnapshotText(absolutePath)));
+	const texts = await Promise.all(entries.map(([absolutePath, , size]) => readSnapshotText(absolutePath, size)));
 	const files: BashSeenFile[] = [];
 	entries.forEach(([absolutePath, claimed], index) => {
 		const text = texts[index];
