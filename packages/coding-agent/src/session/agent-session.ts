@@ -554,6 +554,7 @@ const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
 
 import { StallGuard, stalledWaiters } from "./stalled-waiters";
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
+import { StuckTurnGuard } from "./stuck-turn-guard";
 import { AutoParallelCoordinator } from "./auto-parallel";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
@@ -1433,6 +1434,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
+	readonly #stuckTurnGuard: StuckTurnGuard;
 	#promptInFlightCount = 0;
 	/**
 	 * Brackets owned by a client-submitted prompt (`#prompt`) only: claimed
@@ -2616,10 +2618,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#pendingRewindReport = undefined;
 				await this.#applyRewind(rewindReport, messages, context);
 			}
-			this.#loopGuards.recordTurn(messages, context);
+			// The stuck-turn verdict runs alongside the rest of the turn-end work and
+			// settles before mid-run maintenance, so a nudge lands in the next request.
+			const stuckVerdict = this.#stuckTurnGuard.ask(messages, context, signal);
+			const redirected = this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			if (context?.willContinue) this.#steerAnthropicWrapUp();
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
+			if (stuckVerdict) await this.#stuckTurnGuard.settle(messages, stuckVerdict, { signal, corrected: redirected });
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
@@ -2871,6 +2877,33 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
+		this.#stuckTurnGuard = new StuckTurnGuard({
+			agent: this.agent,
+			settings: this.settings,
+			sessionManager: this.sessionManager,
+			promptGeneration: () => this.#promptGeneration,
+			planModeEnabled: () => this.#planModeState?.enabled === true,
+			judge: () => {
+				const judge = resolveJudge({
+					settings: this.settings,
+					registry: this.#modelRegistry,
+					sessionModel: this.model,
+					sessionId: this.sessionId,
+					metadataResolver: provider => this.agent.metadataForProvider(provider),
+					purpose: "stuck-turn",
+					onUsage: journalJudgmentUsage(this.sessionManager),
+					telemetry: this.agent.telemetry,
+					cache: sharedJudgmentCache(),
+					costGate: this.#costGate,
+				});
+				// The cut carries session text, so it follows this session's credential redaction policy.
+				return {
+					label: judge.label,
+					judge: (request, options) =>
+						withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () => judge.judge(request, options)),
+				};
+			},
+		});
 		this.#agentId = config.agentId;
 		this.#agentRegistry = config.agentRegistry;
 		this.#agentKind = config.agentKind ?? "main";

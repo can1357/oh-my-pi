@@ -276,7 +276,8 @@ export function didSessionMessagesChange(previousMessages: AgentMessage[], nextM
 	);
 }
 
-function textFromContent(content: unknown): string {
+/** Trimmed text blocks of a message's content, joined by blank lines; thinking, images, and tool calls are skipped. */
+export function textFromContent(content: unknown): string {
 	if (typeof content === "string") return content.trim();
 	if (!Array.isArray(content)) return "";
 	const parts: string[] = [];
