@@ -596,12 +596,15 @@ describe("system prompt tool inventory", () => {
 	it.each([
 		["compact", true],
 		["inline", false],
-	] as const)("keeps direct tools that share a mounted command name in the %s inventory", async (_mode, nativeTools) => {
-		const { inventory } = await renderMountedWebSearch({ nativeTools, directDefinition: true });
+	] as const)(
+		"keeps direct tools that share a mounted command name in the %s inventory",
+		async (_mode, nativeTools) => {
+			const { inventory } = await renderMountedWebSearch({ nativeTools, directDefinition: true });
 
-		expect(inventory).toContain(nativeTools ? "\nread, web_search" : "type web_search = (");
-		if (!nativeTools) expect(inventory).toContain(DIRECT_WEB_SEARCH.description);
-	});
+			expect(inventory).toContain(nativeTools ? "\nread, web_search" : "type web_search = (");
+			if (!nativeTools) expect(inventory).toContain(DIRECT_WEB_SEARCH.description);
+		},
+	);
 
 	it("keeps Eval preludes out of the inventory while their guidance ships", async () => {
 		const tools = new Map(TOOLS);
