@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning. In an ovnfs checkout only a `core.hooksPath` hook runs
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
