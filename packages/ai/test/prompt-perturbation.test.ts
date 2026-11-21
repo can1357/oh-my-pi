@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { readFileSync } from "node:fs";
 import * as catalogPolicy from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import poolText from "../src/prompts/perturbation-pool.json.txt" with { type: "text" };
 import { perturbContext, perturbPromptText, resetPromptPerturbation } from "../src/prompts/perturbation";
 import type { Context } from "../src/types";
 
-const pool: { entries: { source: string; variants: string[]; manual?: boolean }[] } = JSON.parse(poolText);
+const pool: { entries: { source: string; variants: string[]; manual?: boolean }[] } = JSON.parse(
+	readFileSync(new URL("../src/prompts/perturbation-pool.json.txt", import.meta.url), "utf8"),
+);
 
 const sample = pool.entries.find(entry => !entry.manual && entry.source.startsWith("`todo`"));
 if (!sample) throw new Error("pool lost the todo guidance line");
