@@ -133,11 +133,34 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
 			modelRegistry,
 			evalToolSession,
+			agentId: evalToolSession?.getAgentId?.() ?? undefined,
 			ownedAsyncJobManager:
 				evalToolSession?.asyncJobManager instanceof AsyncJobManager ? evalToolSession.asyncJobManager : undefined,
 		});
 		session.subscribe(() => {});
 		return { session, mock };
+	}
+
+	function createWaitHarness(agentId?: string) {
+		const manager = new AsyncJobManager({});
+		const toolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings: Settings.isolated({ "launch.enabled": false }),
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			...(agentId ? { getAgentId: () => agentId } : {}),
+			asyncJobManager: manager,
+		};
+		let replayedWaitText: string | undefined;
+		const waitTool = new WaitTool(toolSession);
+		const executeWait = waitTool.execute.bind(waitTool);
+		waitTool.execute = async (toolCallId, params, signal, onUpdate) => {
+			const result = await executeWait(toolCallId, params, signal, onUpdate);
+			replayedWaitText = result.content.find(block => block.type === "text")?.text;
+			return result;
+		};
+		return { manager, toolSession, waitTool, replayedText: () => replayedWaitText };
 	}
 
 	it("goes on with a turn a crash cut off mid tool call, running the cut-off call again", async () => {
@@ -167,27 +190,11 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		expect(last?.role === "assistant" && last.content).toContainEqual({ type: "text", text: "done after restore" });
 	});
 
-	it("reports a background bash job lost on process exit to wait and proc", async () => {
+	it("reports an unfinished background bash job with unknown outcome to wait and proc without preempting tool replay", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
-		const manager = new AsyncJobManager({});
-		const toolSession: ToolSession = {
-			cwd: tempDir.path(),
-			hasUI: false,
-			settings: Settings.isolated({ "launch.enabled": false }),
-			getSessionFile: () => null,
-			getSessionSpawns: () => null,
-			asyncJobManager: manager,
-		};
-		let replayedWaitText: string | undefined;
-		const waitTool = new WaitTool(toolSession);
-		const executeWait = waitTool.execute.bind(waitTool);
-		waitTool.execute = async (toolCallId, params, signal, onUpdate) => {
-			const result = await executeWait(toolCallId, params, signal, onUpdate);
-			replayedWaitText = result.content.find(block => block.type === "text")?.text;
-			return result;
-		};
-		const { session } = reopen(
+		const { manager, toolSession, waitTool, replayedText } = createWaitHarness("main");
+		const { session, mock } = reopen(
 			model,
 			closedByExitRecovery([
 				{ role: "user", content: "run a command and wait", timestamp: Date.now() },
@@ -217,18 +224,107 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
 		await session.waitForIdle();
 
-		expect(replayedWaitText).toContain("bg_1");
-		expect(replayedWaitText).toContain("previous OMP process exited");
-		expect(replayedWaitText).not.toContain("Nothing to wait for");
+		expect(replayedText()).toContain("bg_1");
+		expect(replayedText()).toContain("Previous OMP process exited");
+		expect(replayedText()).toContain("outcome is unknown");
+		expect(replayedText()).toContain("verify before rerunning");
+		expect(replayedText()).not.toContain("Nothing to wait for");
+		expect(mock.calls.length).toBe(1);
+		expect(session.agent.state.messages.some(msg => msg.role === "custom" && msg.customType === "async-result")).toBe(
+			false,
+		);
 
 		const proc = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://bg_1"), { session: toolSession });
 		expect(proc.content).toContain("bg_1 [bash] — failed");
-		expect(proc.content).toContain("previous OMP process exited");
+		expect(proc.content).toContain("outcome is unknown");
+		expect(proc.content).toContain("verify before rerunning");
 
 		manager.evictCompletedJobs();
 		const nextId = manager.register("bash", "next command", async () => "done");
 		expect(nextId).toBe("bg_2");
 		await manager.getJob(nextId)?.promise;
+	});
+
+	it("replays a cut-off tool batch before delivering an orphaned bash job's async-result", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const executed: string[] = [];
+		const { toolSession } = createWaitHarness("main");
+		const { session } = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run a background command and probe", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: "sleep 60" } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_probe", name: "probe", arguments: { value: "again" } }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[probeTool(executed)],
+			[
+				{ content: ["probe done"], stopReason: "stop" },
+				{ content: ["noted bg_1"], stopReason: "stop" },
+			],
+			toolSession,
+		);
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(executed).toEqual(["again"]);
+		const asyncResult = session.agent.state.messages.find(
+			msg => msg.role === "custom" && msg.customType === "async-result",
+		);
+		expect(asyncResult).toBeDefined();
+		expect(asyncResult?.role === "custom" ? asyncResult.content : "").toContain("outcome is unknown");
+	});
+
+	it("does not publish lost bash jobs when restoreInterruptedTurn declines without a model", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const { manager, toolSession, waitTool } = createWaitHarness("main");
+		const { session } = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run a command and wait", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: "sleep 60" } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[waitTool as AgentTool],
+			[],
+			toolSession,
+		);
+		session.agent.state.model = undefined as unknown as Model;
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
+		expect(manager.getJob("bg_1")).toBeUndefined();
 	});
 
 	it("does not turn an already delivered bash result into a process-exit failure", async () => {
@@ -270,23 +366,7 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		for (const result of createInterruptedToolResults(branch)) sessionManager.appendMessage(result);
 		sessionManager.appendMessage(abort);
 
-		const manager = new AsyncJobManager({});
-		const toolSession: ToolSession = {
-			cwd: tempDir.path(),
-			hasUI: false,
-			settings: Settings.isolated({ "launch.enabled": false }),
-			getSessionFile: () => null,
-			getSessionSpawns: () => null,
-			asyncJobManager: manager,
-		};
-		let replayedWaitText: string | undefined;
-		const waitTool = new WaitTool(toolSession);
-		const executeWait = waitTool.execute.bind(waitTool);
-		waitTool.execute = async (toolCallId, params, signal, onUpdate) => {
-			const result = await executeWait(toolCallId, params, signal, onUpdate);
-			replayedWaitText = result.content.find(block => block.type === "text")?.text;
-			return result;
-		};
+		const { manager, toolSession, waitTool, replayedText } = createWaitHarness("main");
 		const { session } = open(
 			model,
 			sessionManager,
@@ -298,7 +378,7 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
 		await session.waitForIdle();
 
-		expect(replayedWaitText).toContain("Nothing to wait for");
+		expect(replayedText()).toContain("Nothing to wait for");
 		expect(manager.getJob("bg_1")).toBeUndefined();
 	});
 

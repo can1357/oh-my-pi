@@ -473,16 +473,18 @@ function forgetSettledJobDetails(details: unknown, running: Map<string, Interrup
 
 /**
  * Recreate terminal rows for background bash jobs the previous process left
- * without a persisted outcome. Its shell children cannot survive the process,
- * so leaving these ids absent makes a replayed `wait` and `proc://` falsely
- * report that the jobs never existed. Ordinary async-result, wait/cancel and
- * proc snapshots settle their rows and prevent a false process-exit failure.
+ * without a persisted outcome. Leaving these ids absent makes a replayed `wait`
+ * and `proc://` falsely report that the jobs never existed, while the previous
+ * process may have exited abruptly (e.g. SIGKILL) before stopping external
+ * subprocesses, so the job's outcome is reported as unknown rather than
+ * guaranteed terminated. Ordinary async-result, wait/cancel and proc snapshots
+ * settle their rows and prevent a false process-exit failure.
  */
 export function restoreTerminatedBashJobs(
 	entries: readonly SessionEntry[],
 	manager: AsyncJobManagerApi,
 	ownerId: string | undefined,
-): string[] {
+): void {
 	const commands = new Map<string, string>();
 	const running = new Map<string, InterruptedBashJob>();
 	for (const entry of entries) {
@@ -525,16 +527,13 @@ export function restoreTerminatedBashJobs(
 		}
 	}
 
-	const restored: string[] = [];
 	for (const job of running.values()) {
 		if (manager.getJob(job.id)) continue;
 		manager.publishFailed(
 			"bash",
 			job.label,
-			`Background job ${job.id} terminated when the previous OMP process exited before delivering its final result.`,
+			`Previous OMP process exited before background job ${job.id} delivered its final result; its outcome is unknown. Its subprocess may still be running or may have partially completed — verify before rerunning.`,
 			{ id: job.id, ownerId },
 		);
-		restored.push(job.id);
 	}
-	return restored;
 }

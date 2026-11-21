@@ -712,13 +712,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			structured: result.structured,
 			agentOutputPublished: result.agentOutputPublished,
 		};
-		this.#jobs.set(id, job);
-		this.#evicted.delete(id);
-		this.#recordAgentReply(job);
-		this.#enqueueDelivery(id, result.text);
-		this.#scheduleEviction(id);
-		this.#notifyJobsChanged(id);
-		return id;
+		return this.#publishSettled(job, result.text);
 	}
 
 	/**
@@ -747,11 +741,17 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			agentId: options.agentId,
 			errorText,
 		};
-		this.#jobs.set(id, job);
+		return this.#publishSettled(job, errorText);
+	}
+
+	#publishSettled(job: AsyncJob, deliveryText: string): string {
+		this.#jobs.set(job.id, job);
+		this.#evicted.delete(job.id);
 		this.#recordAgentReply(job);
-		this.#enqueueDelivery(id, errorText);
-		this.#scheduleEviction(id);
-		return id;
+		this.#enqueueDelivery(job.id, deliveryText);
+		this.#scheduleEviction(job.id);
+		this.#notifyJobsChanged(job.id);
+		return job.id;
 	}
 
 	/**
