@@ -559,6 +559,37 @@ describe("chat-completions history estimate", () => {
 		expect(withoutReplay.countMessage(turn)).toBe(withoutReplay.countMessage({ ...turn, content: [toolCall] }));
 	});
 
+	test.each([
+		{ view: "base", compatConfig: { reasoningOpaqueReplay: true } },
+		{ view: "whenThinking", compatConfig: { whenThinking: { reasoningOpaqueReplay: true } } },
+	])("counts a custom wrapper's $view replayed summary once without its opaque state", ({ compatConfig }) => {
+		const compat = { ...dropping.compat, reasoningOpaqueReplay: true };
+		const model = buildModel<Api>({
+			...dropping,
+			api: "custom-chat-completions",
+			id: "custom-chat-test",
+			compat: compatConfig,
+		});
+		const opaque = "opaque-state".repeat(300);
+		const signature = JSON.stringify({ field: "reasoning_text", reasoningOpaque: opaque });
+		const turn = thinkingTurn(model, signature);
+		const tokenizer = new Tokenizer(model);
+		const expected = tokenizer.countMessage({ ...turn, content: [toolCall] }) + tokenizer.countTokens(THINKING);
+		expect(tokenizer.countMessage(turn)).toBe(expected);
+		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
+
+		const wrapper = model as Model<"openai-completions">;
+		const [replayed] = convertMessages(wrapper, { messages: [turn] }, compat);
+		expect(replayed).toMatchObject({ role: "assistant", reasoning_opaque: opaque, reasoning_text: THINKING });
+
+		const foreign = { ...model, id: "other-chat-test" };
+		const foreignTurn = thinkingTurn(foreign, signature);
+		const [assistant] = convertMessages(wrapper, { messages: [foreignTurn] }, compat);
+		expect(assistant?.role).toBe("assistant");
+		expect(assistant).not.toHaveProperty("reasoning_opaque");
+		expect(assistant).not.toHaveProperty("reasoning_text");
+	});
+
 	test.each([{ base: true }, { base: false }])("counts opaque replay from either view ($base)", ({ base }) => {
 		const model = buildModel({
 			...copilotGemini,

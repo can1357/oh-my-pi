@@ -155,4 +155,35 @@ describe("deduplicateToolCallIds with composite Responses ids", () => {
 			[`${idB}_dup1`, [{ type: "text", text: "fourth" }]],
 		]);
 	});
+
+	it("keeps the original reasoning envelope but strips it when a later turn's call ID changes", () => {
+		const id = "call_x|fc_y";
+		const makeTurn = (reasoningOpaque: string): AssistantMessage => {
+			const turn = assistantWithCall(id);
+			turn.content.unshift({
+				type: "thinking",
+				thinking: "Read the file.",
+				thinkingSignature: JSON.stringify({ field: "reasoning_text", reasoningOpaque }),
+			});
+			return turn;
+		};
+		const first = makeTurn("first-state");
+		const later = makeTurn("later-state");
+
+		const transformed = transformMessages(
+			[first, toolResult(id, "first"), later, toolResult(id, "second")],
+			makeModel(),
+		);
+		const assistants = transformed.filter(message => message.role === "assistant");
+
+		expect(assistants[0]?.content[0]).toEqual({
+			type: "thinking",
+			thinking: "Read the file.",
+			thinkingSignature: JSON.stringify({ field: "reasoning_text", reasoningOpaque: "first-state" }),
+		});
+		expect(assistants[1]?.content).toEqual([
+			{ type: "thinking", thinking: "Read the file.", thinkingSignature: "reasoning_text" },
+			{ type: "toolCall", id: "call_x_dup1|fc_y_dup1", name: "read", arguments: { path: "a" } },
+		]);
+	});
 });
