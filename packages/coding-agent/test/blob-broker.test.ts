@@ -10,7 +10,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import { LocalBlobBackend } from "../src/blob-broker/broker";
 import { contextHasImageUrls, supportsRemoteImageUrls } from "../src/blob-broker/context-images";
 import { ImageUrlService } from "../src/blob-broker/service";
-import { type BlobPersistence, BlobRegistry } from "../src/blob-broker/store";
+import { type BlobPersistence, BlobRegistry, type LazyBlobFetcher } from "../src/blob-broker/store";
 import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallback";
 import { createCommandUploader, extractUploadUrl, splitCommandTemplate } from "../src/blob-broker/uploaders";
 import { BlobStore as SessionBlobStore } from "../src/session/blob-store";
@@ -116,11 +116,90 @@ describe("LocalBlobBackend (serve mode)", () => {
 	});
 });
 
+describe("LocalBlobBackend liveness", () => {
+	/**
+	 * Park the next registry `lookup` until the returned gate opens, so a
+	 * request sits past the backend's liveness check while `stop()` runs.
+	 */
+	function gateLookup() {
+		const original = BlobRegistry.prototype.lookup;
+		const entered = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const spy = vi.spyOn(BlobRegistry.prototype, "lookup").mockImplementation(async function (
+			this: BlobRegistry,
+			key: string,
+		) {
+			entered.resolve();
+			await gate.promise;
+			return await original.call(this, key);
+		});
+		return { entered: entered.promise, open: () => gate.resolve(), restore: () => spy.mockRestore() };
+	}
+
+	it("returns no url when the backend stops while a lookup is in flight", async () => {
+		const backend = new LocalBlobBackend({ kind: "direct", options: {}, credentials: {}, bindHost: "127.0.0.1" });
+		cleanups.push(() => backend.stop());
+		const getBytes = () => new Uint8Array(Buffer.from(PNG_B64, "base64"));
+		expect(await backend.ensureBlob("in-flight", "image/png", getBytes)).not.toBeNull();
+
+		const lookup = gateLookup();
+		try {
+			// Both calls re-resolve the already published entry, so a resumed
+			// request would hand back the old url without touching the server.
+			const ensure = backend.ensureBlob("in-flight", "image/png", getBytes);
+			const probe = backend.lookupBlob("in-flight");
+			await lookup.entered;
+
+			backend.stop();
+			lookup.open();
+
+			// stop() tore the server down, so the url is unreachable and both
+			// callers must fall back to inline bytes.
+			expect(await ensure).toBeNull();
+			expect(await probe).toBeNull();
+		} finally {
+			lookup.restore();
+		}
+	});
+
+	it("returns no url when the backend stops while a lazy registration is in flight", async () => {
+		const backend = new LocalBlobBackend({ kind: "direct", options: {}, credentials: {}, bindHost: "127.0.0.1" });
+		cleanups.push(() => backend.stop());
+		const fetcher = async () => new Uint8Array(Buffer.from("lazy-bytes"));
+		expect(await backend.ensureLazy("lazy-in-flight", "image/png", fetcher)).not.toBeNull();
+
+		const original = BlobRegistry.prototype.registerLazy;
+		const entered = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const spy = vi.spyOn(BlobRegistry.prototype, "registerLazy").mockImplementation(async function (
+			this: BlobRegistry,
+			key: string,
+			mimeType: string,
+			lazyFetcher: LazyBlobFetcher,
+		) {
+			entered.resolve();
+			await gate.promise;
+			return await original.call(this, key, mimeType, lazyFetcher);
+		});
+		try {
+			const pending = backend.ensureLazy("lazy-in-flight", "image/png", fetcher);
+			await entered.promise;
+
+			backend.stop();
+			gate.resolve();
+
+			expect(await pending).toBeNull();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+});
+
 describe("BlobRegistry lazy blobs", () => {
 	it("registers lazily without rendering and lets re-registration swap the fetcher", async () => {
 		const store = new BlobRegistry();
 		let renders = 0;
-		const entry = store.registerLazy("lazy-1", "image/png", async () => {
+		const entry = await store.registerLazy("lazy-1", "image/png", async () => {
 			renders++;
 			return new Uint8Array(Buffer.from("0123456789"));
 		});
@@ -129,7 +208,7 @@ describe("BlobRegistry lazy blobs", () => {
 		expect(entry.bytes).toBe(0);
 		// Re-registration keeps the token (URL stability across session restarts)
 		// but replaces the fetcher with the newest source.
-		expect(store.registerLazy("lazy-1", "image/png", async () => null).path).toBe(entry.path);
+		expect((await store.registerLazy("lazy-1", "image/png", async () => null)).path).toBe(entry.path);
 
 		const response = await store.serve(new Request(`http://blob.local/${entry.path}`));
 		// The replacement fetcher answers (and reports the source gone): 410, and
@@ -142,7 +221,7 @@ describe("BlobRegistry lazy blobs", () => {
 		const store = new BlobRegistry({ maxBytes: 10 });
 		let renders = 0;
 		const bytes = new Uint8Array(Buffer.from("0123456789"));
-		const lazyEntry = store.registerLazy("lazy", "image/png", async () => {
+		const lazyEntry = await store.registerLazy("lazy", "image/png", async () => {
 			renders++;
 			return bytes;
 		});
@@ -162,6 +241,22 @@ describe("BlobRegistry lazy blobs", () => {
 	});
 });
 
+describe("BlobRegistry memory mode", () => {
+	it("mints one token when the same key registers concurrently", async () => {
+		const store = new BlobRegistry();
+		const bytes = new Uint8Array(Buffer.from("concurrent-dedup"));
+		// Dedup depends on the lookup and the insert running without an await
+		// between them: a split pair lets both callers see null and insert,
+		// leaving two tokens for one content key.
+		const [first, second] = await Promise.all([
+			store.registerBytes("same-key", "image/png", bytes),
+			store.registerBytes("same-key", "image/png", bytes),
+		]);
+		expect(second.path).toBe(first.path);
+		expect((await store.status()).metrics.activeBlobs).toBe(1);
+	});
+});
+
 describe("BlobRegistry persistence", () => {
 	let persistSeq = 0;
 	function makePersist(ttlMs: number): BlobPersistence {
@@ -170,6 +265,53 @@ describe("BlobRegistry persistence", () => {
 		cleanups.push(() => void fs.promises.rm(dir, { recursive: true, force: true }));
 		return { blobsDir: dir, indexPath: path.join(dir, "urls-index.json"), ttlMs };
 	}
+
+	it("starts fresh instead of rejecting when the persisted index is corrupt", async () => {
+		// A structurally corrupt index (valid JSON, wrong shape) must not reject
+		// the background load: the rejection would be unhandled and take the
+		// process down. The registry starts fresh and keeps serving.
+		const persist = makePersist(60_000);
+		await Bun.write(persist.indexPath, JSON.stringify({ entries: [null] }));
+
+		const registry = new BlobRegistry({ persist });
+		const entry = await registry.registerBytes("corrupt-image", "image/png", new Uint8Array(Buffer.from("bytes")));
+		expect(entry.bytes).toBe(5);
+		expect((await registry.status()).metrics.activeBlobs).toBe(1);
+	});
+
+	it("reads the persisted index on first use, not when the registry is constructed", async () => {
+		// The index does not exist yet when the registry is constructed: an eager
+		// read at construction would settle on ENOENT and forget this entry.
+		const persist = makePersist(60_000);
+		const token = "0".repeat(31) + "1";
+		const registry = new BlobRegistry({ persist });
+		await Bun.write(
+			persist.indexPath,
+			JSON.stringify({
+				entries: [
+					{ key: "late-index", token, mimeType: "image/png", ext: "png", bytes: 7, touchedAt: Date.now() },
+				],
+			}),
+		);
+
+		expect((await registry.lookup("late-index"))?.path).toBe(`${token}.png`);
+	});
+
+	it("does not write the index after the registry was stopped", async () => {
+		// A registry released while the initial read is still pending must not
+		// save afterwards: the replacement backend writes the same index path.
+		const persist = makePersist(60_000);
+		await Bun.write(persist.indexPath, JSON.stringify({ entries: [], counters: {} }));
+
+		const registry = new BlobRegistry({ persist });
+		registry.stop();
+		await registry.registerBytes("late-image", "image/png", new Uint8Array(Buffer.from("late")));
+
+		// `flush()` runs any save that is still pending in the debounce window,
+		// so a missing `#stopped` guard shows up here instead of 500ms later.
+		registry.flush();
+		expect(await Bun.file(persist.indexPath).text()).not.toContain("late-image");
+	});
 
 	it("keeps the same link across registry restarts, serving bytes from the blob store", async () => {
 		const persist = makePersist(60_000);
@@ -183,7 +325,7 @@ describe("BlobRegistry persistence", () => {
 		// A fresh registry (daemon restart / conversation resume) resolves the
 		// same key to the same token without needing the bytes again…
 		const second = new BlobRegistry({ persist });
-		const resumed = second.lookup("conv-image");
+		const resumed = await second.lookup("conv-image");
 		expect(resumed?.path).toBe(entry.path);
 		expect(resumed?.bytes).toBe(bytes.byteLength);
 		// …and serves the content from the content-addressed store on disk.
@@ -201,7 +343,7 @@ describe("BlobRegistry persistence", () => {
 
 		clock += 260;
 		expect((await registry.serve(new Request(`http://blob.local/${entry.path}`))).status).toBe(410);
-		expect(registry.lookup("ttl-image")).toBeNull();
+		expect(await registry.lookup("ttl-image")).toBeNull();
 		// A post-expiry re-registration is a fresh link.
 		expect((await registry.registerBytes("ttl-image", "image/png", bytes)).path).not.toBe(entry.path);
 	});
@@ -215,7 +357,7 @@ describe("BlobRegistry persistence", () => {
 
 		clock += 500;
 		// The resumed conversation re-registers (lookup hit) → window re-armed.
-		const resumed = registry.lookup("resumed-image");
+		const resumed = await registry.lookup("resumed-image");
 		expect(resumed?.path).toBe(entry.path);
 		expect(resumed?.bytes).toBe(bytes.byteLength);
 		clock += 500;
@@ -259,8 +401,8 @@ describe("BlobRegistry persistence", () => {
 		}
 
 		const reloaded = new BlobRegistry({ persist });
-		expect(reloaded.lookup("first-image")).not.toBeNull();
-		expect(reloaded.lookup("second-image")).not.toBeNull();
+		expect(await reloaded.lookup("first-image")).not.toBeNull();
+		expect(await reloaded.lookup("second-image")).not.toBeNull();
 	});
 });
 

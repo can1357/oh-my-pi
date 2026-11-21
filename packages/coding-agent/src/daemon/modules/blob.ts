@@ -324,7 +324,7 @@ class BlobUnit implements ModuleUnit {
 				// Status remains available when the optional savings journal is unreadable.
 			}
 		}
-		return { ...this.#info(), ...this.#backend.storeStatus(), savings };
+		return { ...this.#info(), ...(await this.#backend.storeStatus()), savings };
 	}
 
 	#append(upload: string, data: string): void {
