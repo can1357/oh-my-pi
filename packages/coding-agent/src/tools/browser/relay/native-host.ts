@@ -84,12 +84,13 @@ export async function runNativeHost(): Promise<void> {
 /**
  * Starts `command` in `cwd` with an environment for a headless panel session: the browser tool drives the user's
  * Chrome through the relay and nothing else (`PI_BROWSER_RELAY=only`), whatever the configured default: the user
- * watching the panel sees every tab the session opens.
+ * watching the panel sees every tab the session opens. `PI_SESSION_ORIGIN=chrome` marks its sessions as the panel's,
+ * which keeps them out of the terminal's resume picker and `--continue`.
  */
 export function spawnRpcChild(command: readonly string[], cwd: string, relayUrl: string): RpcChild {
 	const child = Bun.spawn([...command], {
 		cwd,
-		env: { ...process.env, PI_BROWSER_RELAY: "only", PI_PANEL_RELAY_URL: relayUrl },
+		env: { ...process.env, PI_BROWSER_RELAY: "only", PI_PANEL_RELAY_URL: relayUrl, PI_SESSION_ORIGIN: "chrome" },
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -188,7 +189,9 @@ function isToNativeHost(value: unknown): value is NativeRequest {
 	const t: unknown = Reflect.get(value, "t");
 	if (t === "open") {
 		const extensionId = Reflect.get(value, "extensionId");
-		return typeof Reflect.get(value, "cwd") === "string" && (extensionId === undefined || typeof extensionId === "string");
+		return (
+			typeof Reflect.get(value, "cwd") === "string" && (extensionId === undefined || typeof extensionId === "string")
+		);
 	}
 	if (t === "link") return typeof Reflect.get(value, "extensionId") === "string";
 	if (t === "rpc" || t === "relay") return typeof Reflect.get(value, "line") === "string";
@@ -250,7 +253,12 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 		return;
 	}
 	if (open.extensionId === undefined) {
-		send({ t: "exit", code: null, stderr: "Chrome is running an older omp extension worker. Reload omp at chrome://extensions, then reopen the side panel." });
+		send({
+			t: "exit",
+			code: null,
+			stderr:
+				"Chrome is running an older omp extension worker. Reload omp at chrome://extensions, then reopen the side panel.",
+		});
 		return;
 	}
 	const cwd = resolveSessionCwd(open.cwd);
@@ -275,7 +283,11 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 		child = io.spawn(cwd, `http://127.0.0.1:${relay.port}`);
 	} catch (error) {
 		relay?.stop();
-		send({ t: "exit", code: null, stderr: `failed to start omp: ${error instanceof Error ? error.message : String(error)}` });
+		send({
+			t: "exit",
+			code: null,
+			stderr: `failed to start omp: ${error instanceof Error ? error.message : String(error)}`,
+		});
 		return;
 	}
 	send({ t: "linked" });
@@ -305,7 +317,9 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 				try {
 					frame = rpcFrames.push(JSON.parse(line));
 				} catch (error) {
-					io.log(`dropping a broken rpc chunk sequence: ${error instanceof Error ? error.message : String(error)}`);
+					io.log(
+						`dropping a broken rpc chunk sequence: ${error instanceof Error ? error.message : String(error)}`,
+					);
 					rpcFrames = new RpcFrameDecoder();
 					return;
 				}
