@@ -534,6 +534,8 @@ export interface OpenAICompat {
 	toolStrictMode?: "all_strict" | "none";
 	/** Whether request shaping may send reasoning params at all. Default: auto-detected (disabled for GitHub Copilot chat-completions). */
 	supportsReasoningParams?: boolean;
+	/** Capture and replay `reasoning_opaque` with its summary on chat completions. Default: false unless enabled by provider policy. */
+	reasoningOpaqueReplay?: boolean;
 	/** Whether Responses requests may include `reasoning.summary`. Default: true except on known incompatible hosts. */
 	supportsReasoningSummary?: boolean;
 	/** Whether to chain OpenAI Responses turns using stored response ids. Unset uses the official-endpoint default; env and call options take precedence. */

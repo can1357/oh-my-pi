@@ -14,6 +14,7 @@
 ### Fixed
 
 - Broker-backed credential stores now detect a login the broker stores but does not serve and keep it in the local `agent.db` (`HybridAuthCredentialStore`) instead of losing it on the next snapshot; a broker-only `RemoteAuthCredentialStore` fails the upload with `AuthBrokerUnservedProviderError`.
+- GitHub Copilot's Gemini models now retain their reasoning state across tool calls. ([#19989](https://github.com/can1357/oh-my-pi/pull/19989) by [@ashtacore](https://github.com/ashtacore))
 - OpenAI Codex requests no longer send the `session_id` and `conversation_id` headers; the session goes out only as `session-id`, like the Codex CLI, so proxies that reject underscore header names (Envoy, nginx defaults) pass them ([#20018](https://github.com/can1357/oh-my-pi/issues/20018))
 - Preserved the intended conversation structure when a user message follows a tool result for models that fold user messages after tool results.
 - LiteLLM requests now rotate to another configured API key when a 422 budget-exceeded response disables the current key. ([#19860](https://github.com/can1357/oh-my-pi/issues/19860))
