@@ -1168,4 +1168,66 @@ describe("Cursor runs relayed across an external executor's requests", () => {
 			expect(text(third)).toBe("Paused for compaction.");
 		});
 	});
+
+	it("rebinds liveSteering to the resuming request when a parked Cursor run resumes", async () => {
+		const cursor = drivenCursor();
+		const states = new Map<string, ProviderSessionState>();
+		const secondOutcomes: string[] = [];
+		const firstChannel = {
+			wait: async (signal: AbortSignal) => {
+				if (signal.aborted) return;
+				const deferred = Promise.withResolvers<void>();
+				signal.addEventListener("abort", () => deferred.resolve(), { once: true });
+				await deferred.promise;
+			},
+			claim: async () => undefined,
+		};
+		let secondClaimed = false;
+		const secondChannel = {
+			wait: async (signal: AbortSignal) => {
+				if (secondClaimed && !signal.aborted) {
+					const deferred = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => deferred.resolve(), { once: true });
+					await deferred.promise;
+				}
+			},
+			claim: async () => {
+				if (secondClaimed) return undefined;
+				secondClaimed = true;
+				return {
+					messages: [{ role: "user" as const, content: "switch to tabs", timestamp: 2 }],
+					accept: () => secondOutcomes.push("accepted"),
+					absorb: () => secondOutcomes.push("absorbed"),
+					reject: () => secondOutcomes.push("rejected"),
+				};
+			},
+		};
+		// Ensure firstChannel records if anything wrongly tried to claim after parking.
+		const firstClaimSpy = vi.spyOn(firstChannel, "claim");
+
+		await withCursorServer(cursor.serve, async baseUrl => {
+			const firstReply = respond(baseUrl, [user], relayOptions(states, { liveSteering: firstChannel }));
+			const run = await cursor.run(0);
+			await run.send(
+				Buffer.concat([readStarted(1), execFrame(2, { case: "mcpArgs", value: readArgs(1) }, true), listed(1)]),
+			);
+			const first = await firstReply;
+			expect(first.answeredSteering).toBeUndefined();
+
+			const secondReply = respond(
+				baseUrl,
+				[user, first, fileResult(1)],
+				relayOptions(states, { liveSteering: secondChannel }),
+			);
+			await run.answered(1);
+			run.end(finished("Done with tabs."));
+			const second = await secondReply;
+
+			const mcpExec = run.execMessages.find(message => message.message.case === "mcpResult");
+			expect(mcpExec?.hookAdditionalContexts.map(item => item.content)).toEqual(["switch to tabs"]);
+			expect(secondOutcomes).toEqual(["absorbed"]);
+			expect(firstClaimSpy).not.toHaveBeenCalled();
+			expect(second.answeredSteering).toEqual([{ text: "switch to tabs", beforeContentIndex: 0 }]);
+		});
+	});
 });

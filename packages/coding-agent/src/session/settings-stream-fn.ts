@@ -187,7 +187,12 @@ export function createSettingsAwareStreamFn(
 			},
 			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? cfgOmitThinking.get(settings),
 			// An off switch, not a default: the agent loop always offers its queue.
-			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
+			// Cursor delivers live steering over its normal exec-result channel (not the
+			// opt-in OpenAI WebSocket), so cursor-agent does not require the OpenAI toggle.
+			liveSteering:
+				model.api === "cursor-agent" || cfgProvidersOpenaiLiveSteering.get(settings)
+					? streamOptions?.liveSteering
+					: undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 			...(storeResponses !== undefined ? { storeResponses } : {}),
 			// A per-call worker never switches models: no fallback chain, including a

@@ -1905,6 +1905,9 @@ function streamCursorWithWireMode(
 							return nextStream;
 						},
 					};
+					if (steering && steering.absorbed.length > 0) output.answeredSteering = [...steering.absorbed];
+					await steering?.close();
+					steering = undefined;
 					relay.states.get(CURSOR_RELAY_SESSION_STATE_KEY)?.close();
 					relay.states.set(CURSOR_RELAY_SESSION_STATE_KEY, parked);
 					const idleTimer = setTimeout(parked.close, CURSOR_RELAY_IDLE_TIMEOUT_MS);
@@ -1925,6 +1928,8 @@ function streamCursorWithWireMode(
 					const latestContextTokens = output.usage.contextTokens;
 					const wrappedForBudget = output.contextBudgetWrapUp === true;
 					({ context, options, stream } = resumption);
+					steering = options.liveSteering ? new CursorSteeringRelay(options.liveSteering) : undefined;
+					if (steering) await Bun.sleep(0);
 					output = createCursorOutput(model, Date.now());
 					if (latestContextTokens !== undefined) output.usage.contextTokens = latestContextTokens;
 					if (wrappedForBudget) output.contextBudgetWrapUp = true;
@@ -6474,26 +6479,33 @@ interface CursorRecordReplay {
 
 /**
  * The host's copies of steering a turn absorbed, by copy index, each mapped to
- * the turn's index and the content boundary where the model read it. The host
- * records absorbed steering after the response that answered it, so a copy is
- * history that belongs inside its turn, never input.
+ * the turn's index and the content boundary where the model read it, plus the
+ * turns whose every absorbed copy still matches verbatim (eligible for opaque
+ * server-record replay). The host records absorbed steering after the response
+ * that answered it, so a copy is history that belongs inside its turn, never input.
  */
 interface AnsweredSteeringCopy {
 	turnIndex: number;
 	beforeContentIndex?: number;
 }
 
-type AnsweredSteering = ReadonlyMap<number, AnsweredSteeringCopy>;
+interface AnsweredSteering {
+	readonly copies: ReadonlyMap<number, AnsweredSteeringCopy>;
+	readonly completeTurns: ReadonlySet<number>;
+}
 
 function findAnsweredSteering(messages: Message[]): AnsweredSteering {
-	const answered = new Map<number, AnsweredSteeringCopy>();
+	const copies = new Map<number, AnsweredSteeringCopy>();
+	const completeTurns = new Set<number>();
 	for (const [turnIndex, message] of messages.entries()) {
 		if (message.role !== "assistant" || !message.answeredSteering) continue;
-		for (const copy of findSteeringCopies(messages, turnIndex, message.answeredSteering) ?? []) {
-			answered.set(copy.copyIndex, { turnIndex, beforeContentIndex: copy.beforeContentIndex });
+		const matched = findSteeringCopies(messages, turnIndex, message.answeredSteering);
+		for (const copy of matched.copies) {
+			copies.set(copy.copyIndex, { turnIndex, beforeContentIndex: copy.beforeContentIndex });
 		}
+		if (matched.complete) completeTurns.add(turnIndex);
 	}
-	return answered;
+	return { copies, completeTurns };
 }
 
 function isTextOnlyMessage(message: UserMessage | DeveloperMessage): boolean {
@@ -6503,25 +6515,34 @@ function isTextOnlyMessage(message: UserMessage | DeveloperMessage): boolean {
 /**
  * The host's copies of a turn's absorbed steering: the text-only user or
  * developer messages that follow the turn (past its tool results and the
- * passive context its tools reported), one per absorbed entry, in delivery
- * order. Undefined when they no longer match (e.g. edited text, added/replaced
- * image, or removal): the edited copy is then the user's newer input.
+ * passive context its tools reported), matched in delivery order. When a copy
+ * was edited, gained an image, or was removed, `complete` is false (invalidating
+ * opaque server records for the turn) while independently matched copies stay
+ * placed inside the fallback rebuild so Cursor does not act on them twice.
  */
 function findSteeringCopies(
 	messages: Message[],
 	turnIndex: number,
 	answeredSteering: readonly AnsweredSteeringEntry[],
-): Array<{ copyIndex: number; beforeContentIndex?: number }> | undefined {
+): { copies: Array<{ copyIndex: number; beforeContentIndex?: number }>; complete: boolean } {
 	const copies: Array<{ copyIndex: number; beforeContentIndex?: number }> = [];
+	let complete = true;
 	let index = turnIndex + 1;
 	for (const entry of answeredSteering) {
 		while (index < messages.length && precedesSteeringCopy(messages[index], entry.text)) index++;
 		const copy = messages[index];
-		if (index >= messages.length || (copy.role !== "user" && copy.role !== "developer")) return undefined;
-		if (!isTextOnlyMessage(copy) || extractUserMessageText(copy) !== entry.text) return undefined;
+		if (
+			index >= messages.length ||
+			(copy.role !== "user" && copy.role !== "developer") ||
+			!isTextOnlyMessage(copy) ||
+			extractUserMessageText(copy) !== entry.text
+		) {
+			complete = false;
+			continue;
+		}
 		copies.push({ copyIndex: index++, beforeContentIndex: entry.beforeContentIndex });
 	}
-	return copies;
+	return { copies, complete };
 }
 
 /** What the host appends between a turn and its steering copies: tool results and passive tool context. */
@@ -6549,8 +6570,6 @@ function resolveCursorRecordReplays(
 	answered: AnsweredSteering,
 ): Map<number, CursorRecordReplay> {
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const answeredTurns = new Set<number>();
-	for (const entry of answered.values()) answeredTurns.add(entry.turnIndex);
 	const replays = new Map<number, CursorRecordReplay>();
 	// The message a turn was recorded against, chosen as `withPromptLast` chooses
 	// it: a user prompt outranks developer context sent beside it.
@@ -6573,7 +6592,7 @@ function resolveCursorRecordReplays(
 			continue;
 		}
 		// The records carry the steering as first read; an edited copy would contradict them.
-		if (msg.answeredSteering && !answeredTurns.has(index)) continue;
+		if (msg.answeredSteering && !answered.completeTurns.has(index)) continue;
 		replays.set(index, {
 			records: msg.providerPayload.records.map(record => new TextEncoder().encode(record)),
 			toolCallIds: msg.content.flatMap(block =>
@@ -7009,7 +7028,7 @@ function buildRootPromptMessagesJson(
 	for (let i = 0; i < historyEnd; i++) {
 		const msg = messages[i];
 		if (msg.role === "user" || msg.role === "developer") {
-			if (!answered.has(i)) pushUserContent(msg.content);
+			if (!answered.copies.has(i)) pushUserContent(msg.content);
 		} else if (msg.role === "assistant") {
 			const replay = replays.get(i);
 			if (replay) {
@@ -7019,7 +7038,7 @@ function buildRootPromptMessagesJson(
 			}
 			const turnSteering: Array<{ copyIndex: number; beforeContentIndex?: number }> = [];
 			let steeringBoundaries: Set<number> | undefined;
-			for (const [copyIndex, entry] of answered) {
+			for (const [copyIndex, entry] of answered.copies) {
 				if (entry.turnIndex !== i) continue;
 				turnSteering.push({ copyIndex, beforeContentIndex: entry.beforeContentIndex });
 				if (entry.beforeContentIndex !== undefined) {
@@ -7206,7 +7225,7 @@ function buildConversationTurns(
 ): Uint8Array[] {
 	// Answered steering belongs to the turn that absorbed it and does not open a new one.
 	const continuesTurn = (index: number) =>
-		answered.has(index) || (messages[index].role !== "user" && messages[index].role !== "developer");
+		answered.copies.has(index) || (messages[index].role !== "user" && messages[index].role !== "developer");
 	const turns: Uint8Array[] = [];
 
 	let i = 0;
@@ -7217,7 +7236,7 @@ function buildConversationTurns(
 			continue;
 		}
 		if (i === activeUserMessageIndex) break;
-		if (answered.has(i)) {
+		if (answered.copies.has(i)) {
 			i++;
 			continue;
 		}
@@ -7541,7 +7560,9 @@ async function buildGrpcRequestForWireMode(
 	const lastIndex = context.messages.length - 1;
 	const lastMessage = context.messages[lastIndex];
 	const activeUserMessage =
-		!state.resume && (lastMessage?.role === "user" || lastMessage?.role === "developer") && !answered.has(lastIndex)
+		!state.resume &&
+		(lastMessage?.role === "user" || lastMessage?.role === "developer") &&
+		!answered.copies.has(lastIndex)
 			? lastMessage
 			: undefined;
 	const historyEndIndex = activeUserMessage ? lastIndex : -1;

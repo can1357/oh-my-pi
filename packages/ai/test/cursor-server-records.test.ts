@@ -488,6 +488,29 @@ describe("Cursor server records", () => {
 		expect(recordsWith(records, "use spaces")).toHaveLength(1);
 	});
 
+	it("keeps an unchanged earlier steering inside the rebuilt turn when a later copy is edited", async () => {
+		const [assistant, toolResult] = await steeredK3Turn(["use tabs", "keep comments"]);
+		const history = [firstUser, assistant, toolResult, userText("use tabs"), userText("drop comments"), secondUser];
+
+		const { ids, records } = await rootPromptIds(model("kimi-k3"), history);
+
+		// Opaque server records must be invalidated because the second copy changed.
+		expect(ids.slice(2, 2 + SPAN.length)).not.toEqual(SPAN_IDS);
+		// The unchanged first copy belongs inside the turn (before its final assistant reply),
+		// while the edited second copy stays outside after the assistant as new user input.
+		expect(records.map(record => JSON.parse(record).role)).toEqual([
+			"system",
+			"user",
+			"assistant",
+			"tool",
+			"user",
+			"assistant",
+			"user",
+		]);
+		expect(recordsWith(records, "use tabs")).toEqual([records[4]]);
+		expect(recordsWith(records, "drop comments")).toEqual([records[6]]);
+	});
+
 	it("invalidates answered steering when an image is added to the host copy", async () => {
 		const [assistant, toolResult] = await steeredK3Turn(["use tabs"]);
 		const editedWithImage: Message = {

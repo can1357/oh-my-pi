@@ -627,3 +627,25 @@ describe("per-call server-side fallback switch", () => {
 		expect(base.calls[0]!.options?.fallbacks).toEqual(disabled ? undefined : [{ model: "claude-opus-5" }]);
 	});
 });
+
+describe("liveSteering gating", () => {
+	it("forwards liveSteering to cursor-agent by default while keeping other APIs behind providers.openaiLiveSteering", () => {
+		const liveSteering = { wait: async () => {}, claim: async () => undefined };
+		const base = captureBase();
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated({}), base.fn);
+
+		wrapped({ api: "cursor-agent", provider: "cursor", id: "composer-2.5" } as unknown as Model, stubContext, {
+			liveSteering,
+		});
+		wrapped(
+			{ api: "openai-codex-responses", provider: "openai-codex", id: "gpt-6" } as unknown as Model,
+			stubContext,
+			{
+				liveSteering,
+			},
+		);
+
+		expect(base.calls[0]?.options?.liveSteering).toBe(liveSteering);
+		expect(base.calls[1]?.options?.liveSteering).toBeUndefined();
+	});
+});
