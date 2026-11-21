@@ -456,6 +456,8 @@ export interface UsageLimitMarkResult {
 	priorBlockedUntilMs?: number;
 	priorBlockedUntilTimed?: boolean;
 	reportResetAtMs?: number;
+	/** Type of the credential this call marked, when it resolved one. */
+	credentialType?: AuthCredential["type"];
 }
 
 /** Combined model availability state across stored accounts. */
@@ -1388,6 +1390,16 @@ export interface HealthApi {
 
 /** Usage-limit blocking and credential rotation operations. */
 export interface LimitsApi {
+	/**
+	 * Whether any stored credential of `credentialType` the session may use can
+	 * serve `modelId` now, unblocked under the scopes credential selection reads.
+	 */
+	hasAvailableCredential(
+		provider: string,
+		sessionId: string | undefined,
+		credentialType: AuthCredential["type"],
+		modelId?: string,
+	): Promise<boolean>;
 	/**
 	 * Marks the current session's credential as temporarily blocked due to usage limits.
 	 * Uses usage reports to determine accurate reset time when available.

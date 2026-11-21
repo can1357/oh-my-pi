@@ -572,6 +572,14 @@ class RemoteLimits implements LimitsApi {
 	): Promise<UsageLimitMarkResult> {
 		return this.#remote.call("limits.markReached", provider, sessionId, options);
 	}
+	hasAvailableCredential(
+		provider: string,
+		sessionId: string | undefined,
+		credentialType: AuthCredential["type"],
+		modelId?: string,
+	): Promise<boolean> {
+		return this.#remote.call("limits.hasAvailableCredential", provider, sessionId, credentialType, modelId);
+	}
 	rotate(
 		provider: string,
 		sessionId: string | undefined,

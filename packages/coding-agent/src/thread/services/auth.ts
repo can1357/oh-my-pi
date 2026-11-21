@@ -303,6 +303,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 
 		"limits.markReached": (storage, provider, sessionId, options) =>
 			storage.limits.markReached(provider, sessionId, options),
+		"limits.hasAvailableCredential": (storage, provider, sessionId, credentialType, modelId) =>
+			storage.limits.hasAvailableCredential(provider, sessionId, credentialType, modelId),
 		"limits.rotate": (storage, provider, sessionId, options) => storage.limits.rotate(provider, sessionId, options),
 		"limits.invalidateMatching": (storage, provider, apiKey, options) =>
 			storage.limits.invalidateMatching(provider, apiKey, options),

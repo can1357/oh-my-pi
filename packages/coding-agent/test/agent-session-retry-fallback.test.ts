@@ -714,6 +714,211 @@ describe("AgentSession retry fallback", () => {
 		expect(session.agent.state.systemPrompt).toEqual([`model:${primaryModel.provider}/${primaryModel.id}`]);
 	});
 
+	it("ends a usage-limit fallback as soon as the primary's provider has an available credential", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+
+		let primaryExhausted = true;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push(
+					model.provider === primaryModel.provider && primaryExhausted
+						? { throw: "429 usage_limit_reached" }
+						: { content: [`ok:${model.provider}/${model.id}`] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		// Every OAuth account of the primary's provider is spent when the limit hits.
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({
+			switched: false,
+			credentialType: "oauth",
+		});
+		const availableProviders = new Set<string>();
+		const availability = vi
+			.spyOn(modelRegistry.authStorage.limits, "hasAvailableCredential")
+			.mockImplementation(async (provider, _sessionId, credentialType) =>
+				credentialType === "oauth" ? availableProviders.has(provider) : true,
+			);
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		// The clock never reaches the usage-limit cooldown in this test.
+		const now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await session.prompt("Hit the usage limit");
+		await session.waitForIdle();
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+
+		// Another provider healing says nothing about the primary's accounts.
+		availableProviders.add(fallbackModel.provider);
+		requestedModels.length = 0;
+		await session.prompt("Still limited");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
+		expect(availability).toHaveBeenCalledWith(primaryModel.provider, session.sessionId, "oauth", primaryModel.id);
+
+		// A sibling account heals (or its window resets) long before the cooldown:
+		// the very next turn runs on the primary again.
+		primaryExhausted = false;
+		availableProviders.add(primaryModel.provider);
+		requestedModels.length = 0;
+		await session.prompt("Sibling healed");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
+	describe("usage-limit fallback revert across sessions sharing a registry", () => {
+		function sessions() {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const exhaustedFor = new Set<string>();
+			const requests = new Map<string, string[]>();
+			const start = () => {
+				const mock = createMockModel();
+				let id = "";
+				const agent = new Agent({
+					getApiKey: model => `${model.provider}-test-key`,
+					initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+					streamFn: (model, context, options) => {
+						requests.get(id)?.push(`${model.provider}/${model.id}`);
+						mock.push(
+							model.provider === primaryModel.provider && exhaustedFor.has(id)
+								? { throw: "429 usage_limit_reached" }
+								: { content: [`ok:${model.provider}/${model.id}`] },
+						);
+						return mock.stream(model, context, options);
+					},
+				});
+				const settings = Settings.isolated({
+					"compaction.enabled": false,
+					"retry.baseDelayMs": 5,
+					"retry.maxRetries": 0,
+					"retry.fallbackChains": { default: [fallbackSelector] },
+					"retry.fallbackRevertPolicy": "cooldown-expiry",
+				});
+				settings.setModelRole("default", primarySelector);
+				const created = new AgentSession({
+					agent,
+					sessionManager: SessionManager.inMemory(),
+					settings,
+					modelRegistry,
+				});
+				id = created.sessionId;
+				requests.set(id, []);
+				exhaustedFor.add(id);
+				return created;
+			};
+			const turn = async (session: AgentSession, text: string): Promise<string[]> => {
+				requests.get(session.sessionId)!.length = 0;
+				await session.prompt(text);
+				await session.waitForIdle();
+				return [...requests.get(session.sessionId)!];
+			};
+			// The clock never reaches the usage-limit cooldown in these tests.
+			const now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			return { primarySelector, fallbackSelector, fallbackModel, exhaustedFor, start, turn };
+		}
+
+		it("lets only the session whose own accounts recovered leave a shared usage-limit fallback", async () => {
+			const { primarySelector, fallbackSelector, fallbackModel, exhaustedFor, start, turn } = sessions();
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({
+				switched: false,
+				credentialType: "oauth",
+			});
+			const recovered = new Set<string>();
+			vi.spyOn(modelRegistry.authStorage.limits, "hasAvailableCredential").mockImplementation(
+				async (_provider, sessionId) => sessionId !== undefined && recovered.has(sessionId),
+			);
+			const first = start();
+			const second = start();
+			try {
+				for (const each of [first, second]) {
+					await turn(each, "Hit the usage limit");
+					expect(each.model?.provider).toBe(fallbackModel.provider);
+				}
+				// Only the first session's account pool has a usable account again.
+				recovered.add(first.sessionId);
+				exhaustedFor.delete(first.sessionId);
+				expect(await turn(first, "Recovered")).toEqual([primarySelector]);
+				expect(await turn(second, "Still limited")).toEqual([fallbackSelector]);
+				expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(true);
+			} finally {
+				await first.dispose();
+				await second.dispose();
+			}
+		});
+
+		it("judges each session by the credential type its own limit hit, not another session's", async () => {
+			const { fallbackSelector, primarySelector, fallbackModel, exhaustedFor, start, turn } = sessions();
+			const first = start();
+			const second = start();
+			// The first session's OAuth accounts ran out; the second session ran
+			// on an API key, whose limit suppresses the same primary selector.
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockImplementation(async (_provider, sessionId) => ({
+				switched: false,
+				credentialType: sessionId === first.sessionId ? "oauth" : "api_key",
+			}));
+			// No OAuth account is usable; an API key is.
+			vi.spyOn(modelRegistry.authStorage.limits, "hasAvailableCredential").mockImplementation(
+				async (_provider, _sessionId, credentialType) => credentialType === "api_key",
+			);
+			try {
+				await turn(first, "OAuth limit");
+				await turn(second, "API key limit");
+				expect(first.model?.provider).toBe(fallbackModel.provider);
+				expect(second.model?.provider).toBe(fallbackModel.provider);
+
+				expect(await turn(first, "Still on OAuth")).toEqual([fallbackSelector]);
+				expect(first.model?.provider).toBe(fallbackModel.provider);
+				// The second session's API key serves the primary again.
+				exhaustedFor.delete(second.sessionId);
+				expect(await turn(second, "API key usable")).toEqual([primarySelector]);
+			} finally {
+				await first.dispose();
+				await second.dispose();
+			}
+		});
+
+		it("keeps the fallback when the availability check fails", async () => {
+			const { fallbackSelector, fallbackModel, start, turn } = sessions();
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({
+				switched: false,
+				credentialType: "oauth",
+			});
+			vi.spyOn(modelRegistry.authStorage.limits, "hasAvailableCredential").mockRejectedValue(
+				new Error("auth broker unavailable"),
+			);
+			const session = start();
+			try {
+				await turn(session, "Hit the usage limit");
+				expect(await turn(session, "Broker down")).toEqual([fallbackSelector]);
+				expect(session.model?.provider).toBe(fallbackModel.provider);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
 	it("hops to the chain owned by a fallback that is the last entry of the chain it came from", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const firstFallback = getBundledModel("openai", "gpt-4o-mini");

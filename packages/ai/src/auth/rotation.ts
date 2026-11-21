@@ -249,6 +249,32 @@ export class RateLimits implements LimitsApi {
 	}
 
 	/**
+	 * Whether any stored credential of `credentialType` the session may use can
+	 * serve `modelId` now: unblocked under the same scopes selection reads. A
+	 * fallback that left the provider because its accounts of that type hit
+	 * their limits can end as soon as this holds; a credential of another type
+	 * (an API key billed per token beside spent OAuth accounts) does not count.
+	 */
+	async hasAvailableCredential(
+		provider: string,
+		sessionId: string | undefined,
+		credentialType: AuthCredential["type"],
+		modelId?: string,
+	): Promise<boolean> {
+		await this.#deps.pool.adoptExternalChanges();
+		const candidates = this.#deps.pool
+			.credentials(provider)
+			.map((credential, index) => ({ credential, index }))
+			.filter(
+				entry =>
+					entry.credential.type === credentialType &&
+					this.#deps.affinity.allows(provider, sessionId, entry.credential),
+			);
+		const routing = this.#credentialBlockRouting(provider, credentialType, modelId);
+		return this.#siblingAvailability(provider, routing, candidates).free;
+	}
+
+	/**
 	 * Re-check blocked OAuth siblings whose block a healthy live report can
 	 * lift, exactly as selection does. Returns whether any probe ran.
 	 */
@@ -362,6 +388,7 @@ export class RateLimits implements LimitsApi {
 		);
 		return {
 			...rotation,
+			credentialType,
 			requestedBlockedUntilMs,
 			...(reportResetAtMs === undefined ? {} : { reportResetAtMs }),
 		};
