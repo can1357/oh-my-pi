@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { googleGeminiCliProjectHook } from "@oh-my-pi/pi-ai/oauth/google-gemini-cli";
+import { googleAntigravityProjectHook } from "@oh-my-pi/pi-ai/oauth/google-antigravity";
 import { extractGoogleValidationUrl } from "@oh-my-pi/pi-ai/utils/google-validation";
 
 const VALIDATION_URL = "https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsbtTOKEN";
@@ -53,7 +53,7 @@ describe("extractGoogleValidationUrl", () => {
 });
 
 async function runProjectHook(email?: string) {
-	return googleGeminiCliProjectHook(
+	return googleAntigravityProjectHook(
 		{
 			access: "access-token",
 			refresh: "refresh-token",
@@ -61,7 +61,7 @@ async function runProjectHook(email?: string) {
 			...(email ? { email } : {}),
 		},
 		{
-			provider: "google-gemini-cli",
+			provider: "google-antigravity",
 			phase: "login",
 			raw: { refresh_token: "refresh-token" },
 			fetch,

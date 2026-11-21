@@ -47,6 +47,7 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
+const OSC11_FORWARDED_REPLY_TIMEOUT_MS = 5000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
 /**
@@ -886,6 +887,7 @@ export class ProcessTerminal implements Terminal {
 	#nextAppearanceRequestToken = 1;
 	#osc11ResponseBuffer = "";
 	#osc11CacheRefreshTimer?: Timer;
+	#osc11Da1GraceTimer?: Timer;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -1250,10 +1252,8 @@ export class ProcessTerminal implements Terminal {
 		// data handler are installed. Keep this false throughout temporary stops.
 		this.#active = true;
 		// Query terminal background color via OSC 11 for dark/light detection.
-		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
-		// sequences in order, so if DA1 arrives before OSC 11 response,
-		// the terminal does not support OSC 11. This avoids indefinite hangs.
-		// Technique used by Neovim, bat, fish, and terminal-colorsaurus.
+		// DA1 bounds unanswered queries; Zellij may forward OSC 11 after answering
+		// DA1 locally, so its forwarded reply gets a short additional window.
 		this.#queryBackgroundColor();
 
 		// Query OSC 99 notification capabilities for Kitty. The query uses the
@@ -1628,22 +1628,22 @@ export class ProcessTerminal implements Terminal {
 				switch (owner.kind) {
 					case "osc11": {
 						if (this.#osc11Pending) {
-							// DA1 arrived before OSC 11 response: terminal doesn't support OSC 11.
-							this.#osc11Pending = false;
-							this.#osc11ActiveToken = undefined;
-							this.#osc11ResponseBuffer = "";
+							if (terminalMultiplexerSessions().some(multiplexer => multiplexer.backgroundReplyMayFollowDa1)) {
+								// Zellij answers DA1 locally while the OSC query is still in flight to its host.
+								this.#osc11Da1GraceTimer = setTimeout(() => {
+									this.#osc11Da1GraceTimer = undefined;
+									this.#osc11Pending = false;
+									this.#osc11ActiveToken = undefined;
+									this.#osc11ResponseBuffer = "";
+									this.#startQueuedOsc11Query();
+								}, OSC11_FORWARDED_REPLY_TIMEOUT_MS);
+							} else {
+								this.#osc11Pending = false;
+								this.#osc11ActiveToken = undefined;
+								this.#osc11ResponseBuffer = "";
+							}
 						}
-						// Start a queued OSC 11 query once the prior cycle is fully drained.
-						if (
-							this.#osc11QueuedQuery !== undefined &&
-							!this.#osc11Pending &&
-							!this.#da1SentinelOwners.some(o => o.kind === "osc11") &&
-							!this.#dead
-						) {
-							const query = this.#osc11QueuedQuery;
-							this.#osc11QueuedQuery = undefined;
-							this.#startOsc11Query(query.cache, query.token);
-						}
+						this.#startQueuedOsc11Query();
 						break;
 					}
 					case "privateMode": {
@@ -1754,7 +1754,12 @@ export class ProcessTerminal implements Terminal {
 					const requestToken = this.#osc11ActiveToken;
 					this.#osc11ActiveToken = undefined;
 					this.#osc11ResponseBuffer = "";
+					if (this.#osc11Da1GraceTimer) {
+						clearTimeout(this.#osc11Da1GraceTimer);
+						this.#osc11Da1GraceTimer = undefined;
+					}
 					this.#handleOsc11Response(rHex!, gHex!, bHex!, requestToken);
+					this.#startQueuedOsc11Query();
 					return;
 				}
 			}
@@ -1894,8 +1899,8 @@ export class ProcessTerminal implements Terminal {
 
 	/**
 	 * Send OSC 11 background color query followed by DA1 sentinel.
-	 * DA1 avoids indefinite hangs: if DA1 response arrives before OSC 11,
-	 * the terminal does not support OSC 11.
+	 * A DA1 reply normally ends an unanswered query; forwarding multiplexers
+	 * may deliver OSC 11 later, so those queries expire after a bounded delay.
 	 */
 	#queryBackgroundColor(
 		cache?: TerminalMultiplexerBackgroundColorCache,
@@ -1939,6 +1944,19 @@ export class ProcessTerminal implements Terminal {
 		this.#da1SentinelOwners.push({ kind: "osc11" });
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+	}
+
+	#startQueuedOsc11Query(): void {
+		if (
+			this.#osc11QueuedQuery === undefined ||
+			this.#osc11Pending ||
+			this.#da1SentinelOwners.some(owner => owner.kind === "osc11") ||
+			this.#dead
+		)
+			return;
+		const query = this.#osc11QueuedQuery;
+		this.#osc11QueuedQuery = undefined;
+		this.#startOsc11Query(query.cache, query.token);
 	}
 
 	#queryProgramStatusSupport(): void {
@@ -2603,6 +2621,10 @@ export class ProcessTerminal implements Terminal {
 		if (this.#osc11CacheRefreshTimer) {
 			clearTimeout(this.#osc11CacheRefreshTimer);
 			this.#osc11CacheRefreshTimer = undefined;
+		}
+		if (this.#osc11Da1GraceTimer) {
+			clearTimeout(this.#osc11Da1GraceTimer);
+			this.#osc11Da1GraceTimer = undefined;
 		}
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];
