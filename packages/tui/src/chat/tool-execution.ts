@@ -1,7 +1,36 @@
+import { RunTrace } from "@oh-my-pi/pi-natives";
+import {
+	INTENT_FIELD,
+	isShellTrace,
+	type ShellTrace,
+	type ShellVizPreferences,
+	type ShellVizPresentation,
+	toolIntentLabel,
+	type TspCardStatus,
+	type TspPreview,
+	type TspText,
+	type TspTone,
+} from "@oh-my-pi/pi-wire";
+import {
+	defaultShellVizPreferences,
+	readShellPresentation,
+	shellTraceStreams,
+	shellVisualization,
+} from "../tools/shell-viz";
+import { type ShellStepView, ShellSteps } from "../tools/shell-steps";
+import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-trace";
+import { ShellVisualizer } from "../apps/shell-visualizer";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
-import { SPINNER_ADVANCE_MS } from "../components/loader";
+import {
+	onSpinnerIntervalChange,
+	sharedSpinnerFrame,
+	spinnerAnimated,
+	spinnerInterval,
+	spinnerTickDelay,
+} from "../spinner-clock";
 import { Image } from "../components/image";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
@@ -20,7 +49,6 @@ import {
 	toolRenderers,
 } from "../tools/index";
 import { describeDefaultToolExecution, formatDefaultToolExecution } from "../tools/default-renderer";
-import { INTENT_FIELD, type TspCardStatus, type TspPreview, type TspText, type TspTone } from "@oh-my-pi/pi-wire";
 import { card, col, EMPTY_NODE, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
@@ -29,8 +57,8 @@ import {
 	type NativeUiEvent,
 	rootToggleExpanded,
 } from "../native/node";
-import { plainText } from "../native/spans";
-import { diagnosticsSection, displayPath, toolHead } from "../tools/native-view";
+import { plainLine, plainText } from "../native/spans";
+import { diagnosticsSection, displayPath, resultText, toolHead } from "../tools/native-view";
 import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
 import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
@@ -46,13 +74,16 @@ import {
 	replaceTabs,
 	resolveImageOptions,
 } from "../render/render-utils";
-import type { XdevMountedState } from "../tools/xdev";
+import type { ToolCommandMountedState } from "../tools/tool-commands";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
-import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "../png-conversion";
 import { FenceFigure } from "./fence-figure";
+import { SpotlightNotices } from "./spotlight";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import { renderDiff } from "../chrome/diff";
 import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-container";
+import { LateDiagnosticsMessageComponent } from "./late-diagnostics-message";
+import { compactRows, presentNative, TranscriptPresentationState } from "./transcript-presentation";
 
 /** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
@@ -74,6 +105,7 @@ interface ToolImageBlock {
 	mimeType?: string;
 }
 
+/** Images a tool keeps in `details.images` (extension and custom tools) rather than in its result content. */
 function imageBlocksFromDetails(details: unknown): ToolImageBlock[] {
 	if (!isRecord(details) || !Array.isArray(details.images)) return [];
 	return details.images.filter(
@@ -93,6 +125,18 @@ function displaceableToolName(
 	if (toolName === "wait" && isWaitingPollDetails(result.details)) return "wait";
 	if (toolName === "todo" && !isPartial && isTodoToolDetails(result.details)) return "todo";
 	return undefined;
+}
+
+/** Tool command presentation state of the session behind a tool instance, when it carries one. */
+function toolCommandState(tool: unknown): ToolCommandMountedState | undefined {
+	if (!isRecord(tool) || !isRecord(tool.session) || !isToolCommandMountedState(tool.session.toolCommands)) {
+		return undefined;
+	}
+	return tool.session.toolCommands;
+}
+
+function isToolCommandMountedState(value: unknown): value is ToolCommandMountedState {
+	return isRecord(value) && value.mountedNames instanceof Set && value.tools instanceof Map;
 }
 
 function isEditLikeToolName(toolName: string): boolean {
@@ -125,6 +169,9 @@ function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined
 
 /** The describe hooks of a registry renderer or of a custom tool object. */
 type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
+
+/** Optional kinds of the host's vocabulary the describe hooks branch on. */
+type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json" | "shell" | "tray">>;
 
 class SafeToolRendererComponent implements Component {
 	#toolName: string;
@@ -211,12 +258,17 @@ export interface ToolExecutionUi {
 	requestComponentRender(component: Component): void;
 	resetDisplay(): void;
 	imageBudget?: TUI["imageBudget"];
+	showOverlay?: TUI["showOverlay"];
+	setFocus?: TUI["setFocus"];
+	terminal?: { readonly rows: number };
 }
 
 export interface ToolExecutionOptions {
 	showImages?: boolean; // default: true (only used if terminal supports images)
 	/** Allow the name-keyed renderer registry only when the active tool is the built-in implementation. */
 	useBuiltInRenderer?: boolean;
+	/** Ask the extension transcript presenters; false for a replayed transcript (overlays). Default: true. */
+	transcriptPresenters?: boolean;
 }
 
 /** A tool result or progress frame as a card shows it. */
@@ -233,12 +285,14 @@ export interface ToolExecutionHandle extends Component {
 	setArgsComplete(toolCallId?: string): void;
 	setExecutionStarted(toolCallId?: string): void;
 	setExpanded(expanded: boolean): void;
-	setToolActivityVisible(visible: boolean): void;
 	/** Mark the call parked: it returned, but stays tracked for async job frames. */
 	parkAsBackground(): void;
 	/** Seal the block as final history and stop its animations. */
 	seal(): void;
 }
+
+/** {@link ToolExecutionComponent.nativeTrailers} of a hidden call without late diagnostics. */
+const EMPTY_TRAILERS: readonly Component[] = [];
 
 /** Tools whose returned call hands its card to the background job it started (see {@link parksAsBackground}). */
 const JOB_CARD_TOOLS: Record<string, "always" | "native"> = { task: "always", bash: "native", eval: "native" };
@@ -293,26 +347,27 @@ const NATIVE_STATUS_TONE: Record<TspCardStatus, TspTone | undefined> = {
 	cancelled: "info",
 };
 
-/** Phase-locked spinner glyph index shared by every live tool block so parallel
- * spinners advance in lockstep instead of each tracking its own start time. */
-export function sharedSpinnerFrame(frameCount: number, now: number = performance.now()): number {
-	return frameCount > 0 ? Math.floor(now / SPINNER_ADVANCE_MS) % frameCount : 0;
-}
-
 /** Live tool blocks currently driving a spinner. A single shared ticker (below)
  * advances and repaints every registered block per glyph step, so N concurrent
- * live/streaming blocks — e.g. parallel `task` subagents — cost one 80ms timer
- * and one coalesced render frame per tick instead of N unsynchronized timers
- * each independently waking the render scheduler (issue #8731). */
+ * live/streaming blocks — e.g. parallel `task` subagents — cost one timer at the
+ * shared spinner cadence and one coalesced render frame per tick instead of N
+ * unsynchronized timers each independently waking the render scheduler
+ * (issue #8731). The glyph index comes from `sharedSpinnerFrame`, so blocks
+ * stay in phase with every other spinner on the clock. */
 const liveSpinnerBlocks = new Set<ToolExecutionComponent>();
 let sharedSpinnerTimer: NodeJS.Timeout | undefined;
 
-/** Arm the shared spinner ticker if it is not already running. */
+/**
+ * Arm the shared ticker if it is not already running and spinners animate. Ticks land on the shared
+ * clock's boundaries, so this ticker and the working row repaint in the same frame. Each tick re-reads
+ * the period; a tick under a static spinner paints frame 0 and leaves the ticker stopped.
+ */
 function ensureSharedSpinnerTicker(): void {
-	if (sharedSpinnerTimer || isNativeRendering()) return;
-	sharedSpinnerTimer = setInterval(() => {
-		// A native surface opened while blocks were live: the terminal clocks
-		// their spinners, so the repaint ticker has nothing left to do.
+	if (sharedSpinnerTimer || isNativeRendering() || !spinnerAnimated()) return;
+	sharedSpinnerTimer = setTimeout(() => {
+		sharedSpinnerTimer = undefined;
+		// A native surface opened while blocks were live: the terminal clocks their spinners, so the
+		// repaint ticker has nothing left to do — drop the live blocks and stay stopped.
 		if (isNativeRendering()) {
 			stopSharedSpinnerTicker();
 			return;
@@ -320,8 +375,13 @@ function ensureSharedSpinnerTicker(): void {
 		const frame = sharedSpinnerFrame(theme.spinnerFrames.length);
 		// Removing the current block mid-iteration is safe on a Set.
 		for (const block of liveSpinnerBlocks) block.tickSpinner(frame);
-	}, SPINNER_ADVANCE_MS);
+		if (liveSpinnerBlocks.size > 0) ensureSharedSpinnerTicker();
+	}, spinnerTickDelay(spinnerInterval()));
 }
+// Static → animated: nothing is ticking, so restart.
+onSpinnerIntervalChange(() => {
+	if (liveSpinnerBlocks.size > 0) ensureSharedSpinnerTicker();
+});
 
 /** Register a live block with the shared ticker, starting it on first use. */
 function registerSpinnerBlock(block: ToolExecutionComponent): void {
@@ -333,23 +393,32 @@ function registerSpinnerBlock(block: ToolExecutionComponent): void {
 function unregisterSpinnerBlock(block: ToolExecutionComponent): void {
 	if (!liveSpinnerBlocks.delete(block)) return;
 	if (liveSpinnerBlocks.size === 0 && sharedSpinnerTimer) {
-		clearInterval(sharedSpinnerTimer);
+		clearTimeout(sharedSpinnerTimer);
 		sharedSpinnerTimer = undefined;
 	}
 }
 
 /** Stop the shared spinner ticker and drop every registered live block.
  *  Called on interactive-mode teardown so a stray live block cannot keep the
- *  process-wide 80ms interval alive past shutdown (lingering event-loop
+ *  process-wide spinner timer alive past shutdown (lingering event-loop
  *  handles pin the process; cf. `postmortem.quit`). Test files that assert on
  *  ticker arming also use this to start from a clean slate. */
 export function stopSharedSpinnerTicker(): void {
 	liveSpinnerBlocks.clear();
 	if (sharedSpinnerTimer) {
-		clearInterval(sharedSpinnerTimer);
+		clearTimeout(sharedSpinnerTimer);
 		sharedSpinnerTimer = undefined;
 	}
 }
+
+/** Whether the shared spinner ticker has a tick armed. Test seam: other timers on a fake clock
+ *  (collab relay heartbeats) make a raw timer count ambiguous. */
+export function sharedSpinnerTickerArmed(): boolean {
+	return sharedSpinnerTimer !== undefined;
+}
+
+/** How often a native bash card repaints while its run writes streams (see `ShellSteps`). */
+const SHELL_STREAM_REPAINT_MS = 250;
 
 // Stable per-instance counter so each tool execution's inline images get a
 // graphics id that survives child re-creation (the image budget keys off it).
@@ -359,6 +428,27 @@ let toolExecutionInstanceSeq = 0;
  * Component that renders a tool call with its result (updateable)
  */
 export class ToolExecutionComponent extends Container {
+	#shellPreferences: ShellVizPreferences = defaultShellVizPreferences();
+	#shellPendingTrace: RunTrace | undefined;
+	#shellPendingScript: string | undefined;
+	#shellPresentation: ShellVizPresentation | undefined;
+	#shellPresentationKey: string | undefined;
+	#shellTrace: ShellTrace | undefined;
+	#shellTraceDetails: unknown;
+	#shellReplayTimer: NodeJS.Timeout | undefined;
+	#shellReplayAt = 0;
+	#shellReplayNs = 0;
+	#shellReplayPositioned = false;
+	#shellReplayEpoch = 0;
+	#shellInspector: { hide(): void } | undefined;
+	/** Which output the native card shows: the step the user clicked, else what the run writes now. */
+	readonly #shellSteps = new ShellSteps();
+	/** The run's own output as last seen, and when it last changed (ms since the UNIX epoch). */
+	#shellOutput: { text: string; at: number } | undefined;
+	/** Repaints the native card while the run writes streams, so the shown one and the step it follows stay current. */
+	#shellStreamTicker: NodeJS.Timeout | undefined;
+	/** Counts {@link #shellStreamTicker} ticks; part of the native card's memo key. */
+	#shellStreamTick = 0;
 	#contentBox: Box; // Used for custom tools and bash visual truncation
 	#contentText: WidthAwareText; // Generic fallback (no custom/built-in renderer)
 	// Which container the constructor mounted: bespoke/built-in renderers use
@@ -411,6 +501,7 @@ export class ToolExecutionComponent extends Container {
 	// Memoized #getTextOutput(), keyed by every input it reads: the result
 	// (versioned by #resultVersion), #showImages, and the image protocol.
 	#textOutput = "";
+	#textOutputTrimmed: string | undefined;
 	#textOutputKey: string | undefined;
 	#tool?: AgentTool;
 	#renderer?: ToolRenderer;
@@ -438,6 +529,8 @@ export class ToolExecutionComponent extends Container {
 	#spinnerActive = false;
 	// Todo write completion strikethrough reveal animation
 	#todoStrikeInterval?: NodeJS.Timeout;
+	// Once-a-second repaint for renderers that show live elapsed time (`tickElapsed`)
+	#elapsedTicker?: NodeJS.Timeout;
 	// Track if args are still being streamed (for edit/write spinner)
 	#argsComplete = false;
 	#executionStarted = false;
@@ -454,11 +547,36 @@ export class ToolExecutionComponent extends Container {
 	#executionStartedAtNow: number | undefined;
 	// When the call settled (final result or seal), same clock; freezes the native elapsed timer.
 	#executionEndedAtNow: number | undefined;
-	readonly #toolCallId: string | undefined;
+	#toolCallId: string | undefined;
 	readonly #native = new Memo();
 	// LSP diagnostics that arrived after the result (native only), shown in the frame.
 	#lateDiagnostics: readonly FileDiagnosticsResult[] | undefined;
+	/** The standalone block showing {@link #lateDiagnostics} while the card is not drawn in full. */
+	#lateDiagnosticsBlock:
+		| { files: readonly FileDiagnosticsResult[]; block: LateDiagnosticsMessageComponent }
+		| undefined;
+	/** Whether presenters draw this card (not a replayed transcript). */
+	#presented = true;
+	/** What the presenters chose; an expanded card always draws in full. */
+	readonly #presentation = new TranscriptPresentationState(
+		() =>
+			this.#presented
+				? {
+						type: "toolCall",
+						id: this.#toolCallId ?? "",
+						toolName: this.#toolName,
+						args: this.#args,
+						result: this.#result ? { content: this.#result.content, details: this.#rawDetails } : undefined,
+						isError: this.#result?.isError === true,
+						isPartial: this.#result === undefined || this.#isPartial,
+					}
+				: undefined,
+		() => this.#expanded,
+		this,
+	);
 	readonly #nativeImages = new NativeImageCache();
+	// The Spotlight notice drawn after the card in a native transcript (see nativeTrailers).
+	readonly #spotlight = new SpotlightNotices();
 	// Wall clock captured whenever a task card is rebuilt.
 	#taskRenderNowMs = Date.now();
 	// Set on each `render()` when the last painted pending shape must be
@@ -474,6 +592,11 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
+		readonly shellPresentation?: ShellVizPresentation;
+		shellTrace?: ShellTrace;
+		shellReplayEpoch?: number;
+		/** Live: read at render time, so a ticking spinner advances it. */
+		readonly elapsedMs?: number;
 	} = {
 		expanded: false,
 		isPartial: true,
@@ -491,12 +614,21 @@ export class ToolExecutionComponent extends Container {
 		toolCallId?: string,
 	) {
 		super();
+		Object.defineProperty(this.#renderState, "elapsedMs", {
+			get: () => this.#elapsedMs(this.#nativeStatus()),
+			enumerable: true,
+		});
+		Object.defineProperty(this.#renderState, "shellPresentation", {
+			get: () => (this.#toolName === "bash" ? this.#getShellPresentation() : undefined),
+			enumerable: true,
+		});
 		ensureThemeSync();
 		this.#toolCallId = toolCallId;
 		this.#toolName = toolName;
 		this.#toolLabel = tool?.label ?? toolName;
 		this.#renderer = options.useBuiltInRenderer === false ? undefined : toolRenderers[toolName];
 		this.#showImages = options.showImages ?? true;
+		this.#presented = options.transcriptPresenters ?? true;
 		this.#tool = tool;
 		this.#ui = ui;
 		this.#args = args;
@@ -527,6 +659,154 @@ export class ToolExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	#updateShellTrace(details: unknown): void {
+		if (this.#toolName !== "bash" || details === this.#shellTraceDetails) return;
+		this.#shellTraceDetails = details;
+		const candidate = isRecord(details) ? details.trace : undefined;
+		if (candidate === undefined || candidate === this.#shellTrace) return;
+		const next = isShellTrace(candidate) ? candidate : undefined;
+		const old = this.#shellTrace;
+		if (old === next) return;
+		if (this.#shellPreferences.cursor !== undefined) {
+			const applied = old?.history?.[this.#shellPreferences.cursor - 1]?.seq;
+			const records = next?.history ?? [];
+			this.#shellPreferences = {
+				...this.#shellPreferences,
+				cursor:
+					applied === undefined
+						? Math.min(this.#shellPreferences.cursor, records.length)
+						: records.filter(record => record.seq <= applied).length,
+			};
+		}
+		this.#shellTrace = next;
+		if (next?.historyTruncated && this.#shellPreferences.cursor === 0 && this.#shellReplayPositioned) {
+			this.#shellReplayNs = Math.max(this.#shellReplayNs, next.history?.[0]?.t_ns ?? 0);
+		}
+		this.#shellPresentationKey = undefined;
+	}
+
+	#getShellPresentation(): ShellVizPresentation | undefined {
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization) return undefined;
+		const script =
+			this.#shellTrace?.script ??
+			(isRecord(this.#args) && typeof this.#args.command === "string" ? this.#args.command : undefined);
+		if (!script) return undefined;
+		if (script !== this.#shellPendingScript) {
+			this.#shellPendingTrace = undefined;
+			this.#shellPendingScript = script;
+			this.#shellPresentationKey = undefined;
+		}
+		const key = `${this.#resultVersion}|${this.#displayInputVersion}`;
+		if (this.#shellPresentation && key === this.#shellPresentationKey) return this.#shellPresentation;
+		const source = this.#shellTrace
+			? shellVisualization(this.#shellTrace)
+			: (this.#shellPendingTrace ??= new RunTrace(script));
+		// An unrestorable stored trace renders like visualization-off: plain command and output.
+		if (!source) {
+			this.#shellPresentation = undefined;
+			return undefined;
+		}
+		this.#shellPresentation = readShellPresentation(
+			source,
+			this.#shellPreferences,
+			this.#shellTrace,
+			this.#result ? resultText(this.#result) : undefined,
+			!this.#shellTrace && !this.#argsComplete,
+		);
+		this.#shellPresentationKey = key;
+		return this.#shellPresentation;
+	}
+
+	#shellChanged(): void {
+		this.#shellPresentationKey = undefined;
+		this.#displayInputVersion++;
+		this.#blockVersion++;
+		this.#updateDisplay();
+		this.#ui.requestRender();
+	}
+
+	#stopShellReplay(): void {
+		clearInterval(this.#shellReplayTimer);
+		this.#shellReplayTimer = undefined;
+		this.#shellPreferences = { ...this.#shellPreferences, playing: false };
+	}
+
+	/** Handle exactly the shared native action vocabulary; inspector uses this same controller. */
+	shellVizAction(action: string): void {
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization) return;
+		if (action === "inspect") {
+			this.openShellVisualizer();
+			return;
+		}
+		const before = this.#shellPreferences;
+		const wasPlaying = before.playing;
+		const history = this.#shellTrace?.history ?? [];
+		const now = performance.now();
+		if (wasPlaying) this.#shellReplayNs += (now - this.#shellReplayAt) * 1_000_000 * before.speed;
+		this.#shellPreferences = changeShellVizPreferences(before, action, history.length);
+		const seeking = action === "reset" || action === "step" || /^seek:[0-9]+$/.test(action);
+		const restarting = action === "play" && (before.cursor === undefined || before.cursor >= history.length);
+		if (action === "reset" || action === "live" || /^seek:[0-9]+$/.test(action) || restarting)
+			this.#shellReplayEpoch++;
+		if (action === "live") this.#shellReplayPositioned = false;
+		else if (seeking || restarting || (!this.#shellReplayPositioned && this.#shellPreferences.playing)) {
+			const cursor = this.#shellPreferences.cursor ?? 0;
+			this.#shellReplayNs =
+				history[cursor - 1]?.t_ns ?? (this.#shellTrace?.historyTruncated ? (history[0]?.t_ns ?? 0) : 0);
+			this.#shellReplayPositioned = true;
+		}
+		if (this.#shellPreferences.playing) {
+			this.#shellReplayAt = now;
+			if (!this.#shellReplayTimer) {
+				this.#shellReplayTimer = setInterval(() => {
+					const history = this.#shellTrace?.history ?? [];
+					const now = performance.now();
+					this.#shellReplayNs += (now - this.#shellReplayAt) * 1_000_000 * this.#shellPreferences.speed;
+					this.#shellReplayAt = now;
+					let cursor = this.#shellPreferences.cursor ?? 0;
+					while (cursor < history.length && history[cursor].t_ns <= this.#shellReplayNs) cursor++;
+					if (cursor === history.length) this.#stopShellReplay();
+					if (cursor !== this.#shellPreferences.cursor || !this.#shellPreferences.playing) {
+						this.#shellPreferences = { ...this.#shellPreferences, cursor };
+						this.#shellChanged();
+					}
+				}, 80);
+				this.#shellReplayTimer.unref();
+			}
+		} else this.#stopShellReplay();
+		this.#shellChanged();
+	}
+
+	/** Open the focused inspector without intercepting composer input while it is closed. */
+	openShellVisualizer(): void {
+		if (this.#toolName !== "bash" || !chatTranscriptDisplayPreferences.shellVisualization || !this.#ui.showOverlay)
+			return;
+		if (this.#shellInspector) return;
+		const inspector = new ShellVisualizer({
+			presentation: () => this.#getShellPresentation(),
+			replayEpoch: () => this.#shellReplayEpoch,
+			liveOrigin: () => this.#executionStarted,
+			action: action => this.shellVizAction(action),
+			close: () => {
+				this.#stopShellReplay();
+				this.#shellInspector?.hide();
+				this.#shellInspector = undefined;
+				this.#shellChanged();
+			},
+			requestRender: () => this.#ui.requestRender(),
+			height: () => this.#ui.terminal?.rows ?? 24,
+		});
+		this.#shellInspector = this.#ui.showOverlay(inspector, {
+			anchor: "top-left",
+			width: "100%",
+			maxHeight: "100%",
+			fullscreen: true,
+			margin: 0,
+		});
+		this.#ui.setFocus?.(inspector);
+		this.#ui.requestRender();
+	}
+
 	updateArgs(args: unknown, _toolCallId?: string): void {
 		// Reference-equality short-circuit before any further work. Callers
 		// always allocate a new arg object on each streamed delta (see
@@ -534,6 +814,7 @@ export class ToolExecutionComponent extends Container {
 		// signals "nothing meaningful changed" and the renderer can skip.
 		if (args === this.#args) return;
 		this.#args = args;
+		this.#presentation.markStale();
 		this.#displayInputVersion++;
 		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
@@ -554,8 +835,8 @@ export class ToolExecutionComponent extends Container {
 
 	/**
 	 * Signal that this specific call has begun executing (`tool_execution_start`).
-	 * Distinct from {@link setArgsComplete}: exclusive writes are marked complete
-	 * at `message_end` but stay queued until this fires for that call.
+	 * Distinct from {@link setArgsComplete}, which only marks the arguments final:
+	 * this starts the elapsed timer and moves the card from `pending` to `running`.
 	 */
 	setExecutionStarted(_toolCallId?: string): void {
 		if (this.#executionStarted) return;
@@ -635,6 +916,11 @@ export class ToolExecutionComponent extends Container {
 		this.#firstResultViewportRepaintShapePainted = false;
 		this.#partialResultShapePainted = false;
 		this.#rawDetails = result.details;
+		this.#updateShellTrace(result.details);
+		if (this.#toolName === "bash") {
+			const output = resultText(result);
+			if (output !== this.#shellOutput?.text) this.#shellOutput = { text: output, at: Date.now() };
+		}
 		// Renderers receive sanitized details for display; raw paths are available
 		// separately for links and media through the built-in render context.
 		const details = sanitizeTextDeep(result.details);
@@ -642,7 +928,13 @@ export class ToolExecutionComponent extends Container {
 		this.#resultVersion++;
 		this.#blockVersion++;
 		this.#isPartial = isPartial;
+		this.#presentation.markStale();
+		// A final frame can land after the card retired to scrollback, which is never drawn again.
+		if (!isPartial) this.#presentation.recheck();
 		this.#displaceableByToolName = displaceableToolName(this.#toolName, result, isPartial);
+		if (!isPartial && this.#toolCallId !== undefined) {
+			this.#spotlight.set(this.#toolCallId, result.details, resultText(result));
+		}
 		// When tool is complete, ensure args are marked complete so spinner stops
 		if (!isPartial) {
 			this.#argsComplete = true;
@@ -662,18 +954,15 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
-	 * Get all image blocks from result content and details.
-	 * Some tools (like generate_image) store images in details to avoid bloating
-	 * model context. Xdev-dispatched tools preserve those details under
-	 * details.xdev.inner.
+	 * Image blocks of the result content plus those kept in its details. A
+	 * bash run's tool command images already arrive as content blocks.
 	 */
 	#getAllImageBlocks(): ToolImageBlock[] {
 		if (!this.#result) return [];
 		const contentImages = this.#result.content.filter(block => block.type === "image");
 		const details = this.#result.details;
 		const detailImages = imageBlocksFromDetails(details);
-		const xdevImages = isRecord(details) && isRecord(details.xdev) ? imageBlocksFromDetails(details.xdev.inner) : [];
-		return [...contentImages, ...detailImages, ...xdevImages];
+		return [...contentImages, ...detailImages];
 	}
 
 	/**
@@ -703,14 +992,15 @@ export class ToolExecutionComponent extends Container {
 			// Convert async - catch errors from processing
 			convertImageToPngShared(image)
 				.then(converted => {
+					this.#kittyConversionsAwaited.delete(key);
 					this.#kittyConverted.set(key, converted);
 					this.#displayInputVersion++;
 					this.#updateDisplay();
 					this.#ui.requestRender();
 				})
 				.catch(() => {
-					// Ignore conversion failures - display will use original image format
 					this.#kittyConversionsAwaited.delete(key);
+					this.#ui.requestRender();
 				});
 		}
 	}
@@ -772,6 +1062,32 @@ export class ToolExecutionComponent extends Container {
 				this.#renderState.spinnerFrame = undefined;
 			}
 		}
+		this.#updateElapsedTicker(isBackgroundAsyncRunning);
+	}
+
+	/**
+	 * Repaint once a second while a `tickElapsed` renderer's call executes, so a
+	 * quiet command's elapsed time advances without the 30fps spinner ticker.
+	 */
+	#updateElapsedTicker(isBackgroundAsyncRunning: boolean): void {
+		const needsTicker =
+			this.#renderer?.tickElapsed === true &&
+			this.#executionStarted &&
+			this.#isPartial &&
+			!this.#sealed &&
+			!isBackgroundAsyncRunning &&
+			!isNativeRendering();
+		if (needsTicker && !this.#elapsedTicker) {
+			this.#elapsedTicker = setInterval(() => this.#ui.requestComponentRender(this), 1000);
+		} else if (!needsTicker) {
+			this.#stopElapsedTicker();
+		}
+	}
+
+	#stopElapsedTicker(): void {
+		if (!this.#elapsedTicker) return;
+		clearInterval(this.#elapsedTicker);
+		this.#elapsedTicker = undefined;
 	}
 
 	/**
@@ -825,9 +1141,13 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
-	/** Whether the result's figure still waits for its raster; the transcript holds retirement meanwhile. */
+	/** Hold visible results until their figures and Kitty images are ready for immutable scrollback. */
 	isTranscriptBlockPending(): boolean {
-		return this.#toolActivityVisible && this.#figure?.pending === true;
+		return (
+			this.#toolActivityVisible &&
+			this.#presentation.shown.mode === "full" &&
+			((this.#showImages && this.#kittyConversionsAwaited.size > 0) || this.#figure?.pending === true)
+		);
 	}
 
 	/**
@@ -902,6 +1222,9 @@ export class ToolExecutionComponent extends Container {
 	 * interval alive and keep being repainted.
 	 */
 	override dispose(): void {
+		this.#stopShellReplay();
+		this.#shellInspector?.hide();
+		this.#shellInspector = undefined;
 		this.stopAnimation();
 		super.dispose();
 	}
@@ -917,6 +1240,8 @@ export class ToolExecutionComponent extends Container {
 			this.#renderState.spinnerFrame = undefined;
 		}
 		this.#stopTodoStrikeAnimation();
+		this.#stopElapsedTicker();
+		this.#syncShellStreamTicker(false);
 		this.#previewReady?.resolve();
 	}
 
@@ -928,8 +1253,69 @@ export class ToolExecutionComponent extends Container {
 
 	/** Mirrors the card collapsed or expanded in the terminal, so `Ctrl+O` and native toggles share one state. */
 	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization) {
+			// A clicked step shows its output in the card (again: the run's); Show output goes back to it.
+			if (event.type === "action" && event.act === "unpin") {
+				this.#shellSteps.follow();
+				this.#shellChanged();
+				return;
+			}
+			const action = shellVizEventAction(event, this.#shellPreferences);
+			if (action?.startsWith("select:")) {
+				this.#shellSteps.select(action.slice("select:".length));
+				this.#shellChanged();
+				return;
+			}
+			if (action) {
+				this.shellVizAction(action);
+				return;
+			}
+		}
 		const expanded = rootToggleExpanded(event);
 		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	/**
+	 * Blocks of their own right after the card: the result's Spotlight notice (visible while it is
+	 * collapsed), and late diagnostics the card absorbed while a presenter compacts or hides it, so
+	 * they stay visible.
+	 */
+	nativeTrailers(): readonly Component[] {
+		const mode = this.#presentation.shown.mode;
+		const late = this.#lateDiagnostics;
+		// Drawn in full, the card shows its diagnostics itself: the notices' own (stable) list.
+		if (mode === "full" || late === undefined) return mode === "hidden" ? EMPTY_TRAILERS : this.#spotlight.list();
+		if (this.#lateDiagnosticsBlock?.files !== late) {
+			this.#lateDiagnosticsBlock = { files: late, block: new LateDiagnosticsMessageComponent([...late]) };
+		}
+		const diagnostics = this.#lateDiagnosticsBlock.block;
+		// Not a transcript child: the transcript-wide visibility reaches it only through this card.
+		diagnostics.setToolActivityVisible(this.#toolActivityVisible);
+		// A call a presenter hides takes its notice with it.
+		return mode === "hidden" ? [diagnostics] : [...this.#spotlight.list(), diagnostics];
+	}
+
+	refreshTranscriptPresentation(ids?: ReadonlySet<string>): boolean {
+		if (!this.#presentation.refresh(ids)) return false;
+		this.#blockVersion++;
+		super.invalidate();
+		return true;
+	}
+
+	/** The streamed call's id changed (or an empty one was filled in): presenters see, and refresh by, the new one. */
+	renameToolCallId(toolCallId: string): void {
+		if (toolCallId === this.#toolCallId) return;
+		this.#toolCallId = toolCallId;
+		this.#presentation.markStale();
+		this.#blockVersion++;
+		super.invalidate();
+	}
+
+	isTranscriptBlockCompact(): boolean {
+		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
+			return false;
+		}
+		return this.#presentation.shown.mode === "compact";
 	}
 
 	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
@@ -978,15 +1364,22 @@ export class ToolExecutionComponent extends Container {
 	 * `elapsed` timer in the head and terminal-local collapse clamped to the
 	 * view's preview. Renderers without describe hooks (and extension tools
 	 * with only render hooks) get the generic card. Hidden tool activity stays
-	 * mounted so toggling it is one prop change.
+	 * mounted so toggling it is one prop change; a presenter's answer applies on top.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
 		const dataFirst = cx?.supports("tool") === true;
-		const media = cx?.supports("media") === true;
+		const host: NativeHostKinds = {
+			media: cx?.supports("media") === true,
+			json: cx?.supports("json") === true,
+			shell: cx?.supports("shell") === true,
+			tray: cx?.feature("tray") === true,
+		};
+		const presentation = this.#presentation.draw();
 		const key = [
 			dataFirst,
 			this.#resultVersion,
+			this.#toolCallId,
 			this.#expanded,
 			this.#isPartial,
 			this.#argsComplete,
@@ -994,14 +1387,26 @@ export class ToolExecutionComponent extends Container {
 			this.#sealed,
 			this.#parkedBackground,
 			this.#showImages,
+			this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization,
 			this.#displayInputVersion,
+			this.#shellStreamTick,
 			this.#toolActivityVisible,
-			media,
+			host.media,
+			host.json,
+			host.shell,
+			host.tray,
 			getThemeEpoch(),
+			presentation,
 		];
-		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool(media) : this.#describeCard(media), !this.#toolActivityVisible),
-		);
+		return this.#native.get(key, () => {
+			const full = dataFirst ? this.#describeTool(host) : this.#describeCard(host);
+			const shown = presentNative(full, presentation, {
+				role: `omp.tool.${this.#toolName}`,
+				title: this.#toolLabel,
+				target: this.#activitySummary().detail,
+			});
+			return withHidden(shown, !this.#toolActivityVisible);
+		});
 	}
 
 	/** Milliseconds since execution started (running) or its total (settled); undefined before it starts. */
@@ -1014,13 +1419,15 @@ export class ToolExecutionComponent extends Container {
 
 	/**
 	 * The native `collapsed` prop: the transcript's expand state, except that a
-	 * view that asks to be {@link NativeToolView.open} never starts folded, and
+	 * view that asks to be {@link NativeToolView.open} never starts folded, one
+	 * that asks to be {@link NativeToolView.folded} always does, and
 	 * a call streaming its body (edit, write) stays open until it settles, then
 	 * folds like a finished thought. The user's own toggle still wins meanwhile:
 	 * the terminal keeps local collapse state until this prop changes.
 	 */
 	#nativeCollapsed(status: TspCardStatus, view: NativeToolView): boolean {
 		if (view.open) return false;
+		if (view.folded) return true;
 		const live = status === "pending" || status === "running";
 		return !this.#expanded && !(live && streamsBody(this.#toolName));
 	}
@@ -1046,8 +1453,8 @@ export class ToolExecutionComponent extends Container {
 	 * The data-first `tool` node (§7.2): the renderer's head data, status,
 	 * timer, exit and intent as props; its body as borderless children.
 	 */
-	#describeTool(media: boolean): NativeNode {
-		const view = this.#nativeView(media);
+	#describeTool(host: NativeHostKinds): NativeNode {
+		const view = this.#nativeView(host);
 		const status = this.#nativeStatus();
 		const head = view.tool;
 		const late = this.#lateDiagnosticsParts();
@@ -1081,7 +1488,7 @@ export class ToolExecutionComponent extends Container {
 				status,
 				age: live ? ms : undefined,
 				took: live ? undefined : ms,
-				intent: typeof intent === "string" && intent ? plainText(intent) : undefined,
+				intent: typeof intent === "string" && intent ? plainText(toolIntentLabel(intent)) : undefined,
 				frame: inline ? "inline" : "card",
 				collapsible: hasBody,
 				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
@@ -1116,8 +1523,8 @@ export class ToolExecutionComponent extends Container {
 		return spans;
 	}
 
-	#describeCard(media: boolean): NativeNode {
-		const view = this.#nativeView(media);
+	#describeCard(host: NativeHostKinds): NativeNode {
+		const view = this.#nativeView(host);
 		const status = this.#nativeStatus();
 		const late = this.#lateDiagnosticsParts();
 		const fallbackHead = this.#fallbackHead(view);
@@ -1159,6 +1566,42 @@ export class ToolExecutionComponent extends Container {
 		);
 	}
 
+	/**
+	 * The output source the native card shows for its traced command (see
+	 * {@link ShellSteps}), with the run's live streams while it runs; a
+	 * reloaded trace has none, so its steps show their slices of the output.
+	 * While a stream stays open the card repaints on a timer.
+	 */
+	#shellStepView(presentation: ShellVizPresentation | undefined, status: TspCardStatus): ShellStepView | undefined {
+		if (!presentation) return undefined;
+		const trace = this.#shellTrace;
+		const streams = (trace && shellTraceStreams(trace)) ?? [];
+		const settled = status !== "running" && status !== "pending";
+		this.#syncShellStreamTicker(!settled && streams.some(stream => stream.open));
+		return this.#shellSteps.show({
+			trace,
+			presentation,
+			streams,
+			output: this.#result ? this.#getTrimmedTextOutput() : "",
+			outputModified: this.#shellOutput?.at,
+			settled,
+		});
+	}
+
+	/** Start or stop the {@link #shellStreamTicker}. */
+	#syncShellStreamTicker(on: boolean): void {
+		if (on && !this.#shellStreamTicker) {
+			this.#shellStreamTicker = setInterval(() => {
+				this.#shellStreamTick++;
+				this.#ui.requestRender();
+			}, SHELL_STREAM_REPAINT_MS);
+			this.#shellStreamTicker.unref();
+		} else if (!on && this.#shellStreamTicker) {
+			clearInterval(this.#shellStreamTicker);
+			this.#shellStreamTicker = undefined;
+		}
+	}
+
 	#nativeStatus(): TspCardStatus {
 		if (this.#isBenignSkip()) return "cancelled";
 		if (this.#result !== undefined && !this.#isPartial) return this.#result.isError ? "error" : "done";
@@ -1171,10 +1614,11 @@ export class ToolExecutionComponent extends Container {
 	 * the result view (merged renderers) or the call head over both bodies.
 	 * A renderer that throws falls back to the generic card.
 	 */
-	#nativeView(media: boolean): NativeToolView {
+	#nativeView(host: NativeHostKinds): NativeToolView {
 		const status = this.#nativeStatus();
+		const shellPresentation = this.#getShellPresentation();
 		const options: RenderResultContextOptions = {
-			media,
+			...host,
 			expanded: this.#expanded,
 			isPartial: this.#isPartial,
 			argsComplete: this.#argsComplete,
@@ -1182,6 +1626,10 @@ export class ToolExecutionComponent extends Container {
 			elapsedMs: this.#elapsedMs(status),
 			cancelled: status === "cancelled",
 			renderContext: this.#buildRenderContext(),
+			shellPresentation,
+			shellTrace: this.#shellTrace,
+			shellReplayEpoch: this.#shellReplayEpoch,
+			shellStep: host.shell ? this.#shellStepView(shellPresentation, status) : undefined,
 		};
 		// Custom tools (MCP, extensions) carry their own describe hooks, mirroring
 		// the ANSI path's preference for the tool's renderCall/renderResult.
@@ -1213,6 +1661,7 @@ export class ToolExecutionComponent extends Container {
 				tone: resultView.tone ?? callView.tone,
 				preview: resultView.preview ?? callView.preview,
 				open: resultView.open ?? callView.open,
+				folded: resultView.folded ?? callView.folded,
 				inline: resultView.inline ?? callView.inline,
 				tools: resultView.tools ?? callView.tools,
 			};
@@ -1276,6 +1725,8 @@ export class ToolExecutionComponent extends Container {
 
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
+		this.#spotlight.setHidden(!visible);
+		this.#lateDiagnosticsBlock?.block.setToolActivityVisible(visible);
 		super.invalidate();
 	}
 
@@ -1289,12 +1740,24 @@ export class ToolExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	override releaseRenderCaches(): void {
+		super.releaseRenderCaches();
+		this.#textOutput = "";
+		this.#textOutputTrimmed = undefined;
+		this.#textOutputKey = undefined;
+		this.#shellPresentation = undefined;
+		this.#shellPresentationKey = undefined;
+		this.#shellPendingTrace = undefined;
+		this.#shellPendingScript = undefined;
+		this.#lateDiagnosticsBlock?.block.releaseRenderCaches();
+	}
+
 	#updateDisplay(): void {
 		// `TERMINAL.imageProtocol` is resolved by an async capability probe during
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}|${this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -1340,6 +1803,15 @@ export class ToolExecutionComponent extends Container {
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
 			return [];
 		}
+		const presentation = this.#presentation.draw();
+		if (presentation.mode === "hidden") return [];
+		if (presentation.mode === "compact") {
+			// A squeezed allocation keeps the head (identity, spinner) and as many rows as fit.
+			return compactRows(this.#compactText(width), presentation, width, this.#compactGlyph()).slice(
+				0,
+				this.#allocation,
+			);
+		}
 		let lines = super.render(width);
 		if (this.#allocation < 3) {
 			// A squeezed allocation degrades only blocks that genuinely overflow it.
@@ -1356,9 +1828,12 @@ export class ToolExecutionComponent extends Container {
 		return lines;
 	}
 
-	#renderCompact(width: number): readonly string[] {
+	/** The one-row summary: bold label, muted detail, and the elapsed seconds of a running call. */
+	#compactText(width: number): string {
 		const summary = this.#activitySummary();
-		const detail = summary.detail ? theme.fg("muted", ` · ${summary.detail.replace(/\s+/g, " ")}`) : "";
+		// Raw call input (a bash command): stripped of ANSI and control characters before theming.
+		const shownDetail = summary.detail ? plainLine(summary.detail) : "";
+		const detail = shownDetail ? theme.fg("muted", ` · ${shownDetail}`) : "";
 		// Elapsed ticks only while the call is genuinely running; a settled
 		// placeholder row must not read as live ("Todo · running 0s").
 		const elapsed =
@@ -1368,15 +1843,21 @@ export class ToolExecutionComponent extends Container {
 						` ${Math.max(0, Math.floor((this.#presentationFrame.now - this.#executionStartedAtNow) / 1000))}s`,
 					)
 				: "";
-		const text = truncateToWidth(
-			`${theme.fg("toolTitle", theme.bold(summary.label))}${detail}${elapsed}`,
+		return truncateToWidth(
+			`${theme.fg("toolTitle", theme.bold(plainLine(summary.label)))}${detail}${elapsed}`,
 			Math.max(1, width - 4),
 		);
-		if (this.#allocation === 1) {
-			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
-			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
-			return [truncateToWidth(`${styledGlyph} ${text}`, width)];
-		}
+	}
+
+	/** The one-row form's lead glyph: the spinner while it animates, else a dim bullet. */
+	#compactGlyph(): string {
+		const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
+		return theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
+	}
+
+	#renderCompact(width: number): readonly string[] {
+		const text = this.#compactText(width);
+		if (this.#allocation === 1) return [truncateToWidth(`${this.#compactGlyph()} ${text}`, width)];
 		return [truncateToWidth(`${theme.fg("dim", "╭─")} ${text}`, width), theme.fg("dim", "╰")];
 	}
 
@@ -1820,19 +2301,29 @@ export class ToolExecutionComponent extends Container {
 			context.rawDetails = this.#rawDetails;
 		}
 		if (this.#toolName === "bash") {
+			this.#renderState.shellTrace = this.#shellTrace;
+			this.#renderState.shellReplayEpoch = this.#shellReplayEpoch;
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
 			// plus this context to keep the inline command preview visible while tool-call JSON is still streaming.
 			if (this.#result) {
 				// Pass raw output and expanded state - renderer handles width-aware truncation
-				const output = this.#getTextOutput().trimEnd();
-				context.output = output;
+				Object.defineProperty(context, "output", {
+					get: () => this.#getTrimmedTextOutput(),
+					enumerable: true,
+				});
 			}
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
+			// Nested tool command cards render through the host's canonical resolver, which covers mounted
+			// tools and active top-level tools, so custom and MCP renderers draw their own invocations.
+			const resolveToolCommandMounted = toolCommandState(this.#tool)?.resolve;
+			if (resolveToolCommandMounted) context.resolveToolCommandMounted = resolveToolCommandMounted;
 		} else if (this.#toolName === "eval" && this.#result) {
-			const output = this.#getTextOutput().trimEnd();
-			context.output = output;
+			Object.defineProperty(context, "output", {
+				get: () => this.#getTrimmedTextOutput(),
+				enumerable: true,
+			});
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 		} else if (this.#toolName === "task") {
@@ -1862,16 +2353,6 @@ export class ToolExecutionComponent extends Container {
 				if (fallback) context.editStreamingFallback = fallback;
 			}
 			context.renderDiff = renderDiff;
-		} else if (this.#toolName === "write") {
-			// Device-dispatch previews render through the host's canonical resolver,
-			// which covers mounted devices and active top-level tools (the `write`
-			// transport accepts both). Deciding the predicate here instead would
-			// leave a `write xd://<top-level tool>` card on the generic fallback.
-			const writeTool = this.#tool as { session?: { xdev?: XdevMountedState } } | undefined;
-			const resolveXdevMounted = writeTool?.session?.xdev?.resolve;
-			if (resolveXdevMounted) {
-				context.resolveXdevMounted = resolveXdevMounted;
-			}
 		}
 
 		return context;
@@ -1908,7 +2389,14 @@ export class ToolExecutionComponent extends Container {
 
 		this.#textOutputKey = key;
 		this.#textOutput = output;
+		this.#textOutputTrimmed = undefined;
 		return output;
+	}
+
+	#getTrimmedTextOutput(): string {
+		const output = this.#getTextOutput();
+		this.#textOutputTrimmed ??= output.trimEnd();
+		return this.#textOutputTrimmed;
 	}
 
 	/** Re-tint (only when the tint changed) and reformat the generic #contentText card. */

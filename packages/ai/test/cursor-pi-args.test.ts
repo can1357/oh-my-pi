@@ -101,6 +101,10 @@ describe("cursorRawReadPath", () => {
 		expect(cursorRawReadPath("/tmp/note.txt:10-20")).toBe("/tmp/note.txt:raw:10-20");
 	});
 
+	it("keeps a bare start line open-ended when inserting raw before it", () => {
+		expect(cursorRawReadPath("/tmp/note.txt:10")).toBe("/tmp/note.txt:raw:10-");
+	});
+
 	it("leaves a path that already carries raw alone", () => {
 		expect(cursorRawReadPath("/tmp/note.txt:raw")).toBe("/tmp/note.txt:raw");
 		expect(cursorRawReadPath("/tmp/note.txt:raw:2+3")).toBe("/tmp/note.txt:raw:2+3");

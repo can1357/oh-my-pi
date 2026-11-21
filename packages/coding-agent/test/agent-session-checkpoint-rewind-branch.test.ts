@@ -17,43 +17,37 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { RewindTool, toolCommandDispatches, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const checkpointSchema = type({ goal: type("string") });
 const rewindSchema = type({ report: type("string") });
 
-const xdevWriteSchema = type({ path: type("string"), content: type("string") });
+const toolCommandBashSchema = type({ command: type("string") });
 
-const xdevWriteTool: AgentTool<typeof xdevWriteSchema, unknown> = {
-	name: "write",
-	label: "Write",
-	description: "Dispatch a write to an xd:// device",
-	parameters: xdevWriteSchema,
+const toolCommandBashTool: AgentTool<typeof toolCommandBashSchema, unknown> = {
+	name: "bash",
+	label: "Bash",
+	description: "Run a session tool command",
+	parameters: toolCommandBashSchema,
 	async execute(_toolCallId, params) {
-		const tool = params.path === "xd://checkpoint" ? "checkpoint" : "rewind";
-		if (/^\s*(?:\?|help)?\s*$/i.test(params.content)) {
+		const command = params.command.trim();
+		const tool = command.split(/\s+/)[0] ?? "";
+		const rest = command.slice(tool.length).trim();
+		if (rest === "--help") {
 			return {
-				content: [{ type: "text" as const, text: `${tool} docs via xdev` }],
-				details: { xdev: { tool, mode: "help" } },
+				content: [{ type: "text" as const, text: `${tool} usage` }],
+				details: { toolCommands: [{ tool, mode: "help", exitCode: 0 }] },
 			};
 		}
-		const parsed: unknown = JSON.parse(params.content);
-		const args = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-		const goal = "goal" in args && typeof args.goal === "string" ? args.goal : undefined;
-		const report = "report" in args && typeof args.report === "string" ? args.report : undefined;
-		const inner = tool === "checkpoint" ? { goal, startedAt: "2026-01-01T00:00:00.000Z" } : { report, rewound: true };
+		const value = rest.replace(/^"|"$/g, "");
+		const args = tool === "rewind" ? { report: value } : { goal: value };
+		const inner =
+			tool === "rewind" ? { report: value, rewound: true } : { goal: value, startedAt: "2026-01-01T00:00:00.000Z" };
 		return {
-			content: [{ type: "text" as const, text: `${tool} via xdev` }],
-			details: {
-				xdev: {
-					tool,
-					mode: "execute",
-					args,
-					inner,
-				},
-			},
+			content: [{ type: "text" as const, text: `${tool} ran` }],
+			details: { toolCommands: [{ tool, mode: "execute", exitCode: 0, args, inner }] },
 		};
 	},
 };
@@ -114,7 +108,6 @@ async function createHarness(
 	tools: AgentTool[] = [checkpointTool as AgentTool, rewindTool as AgentTool],
 	options?: {
 		onAgentEnd?: (willContinue: boolean | undefined) => void;
-		resolveFallbackTool?: (name: string) => AgentTool | undefined;
 	},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-checkpoint-rewind-branch-");
@@ -142,7 +135,6 @@ async function createHarness(
 		},
 		convertToLlm,
 		streamFn: mock.stream,
-		resolveFallbackTool: options?.resolveFallbackTool,
 	});
 
 	const sessionManager = SessionManager.inMemory(tempDir.path());
@@ -213,7 +205,7 @@ async function expectNoActiveCheckpointError(session: AgentSession): Promise<voi
 }
 
 describe("AgentSession checkpoint rewind branch context", () => {
-	it("rebuilds active history through branch_summary before the post-rewind assistant turn", async () => {
+	it("rebuilds active history at the checkpoint before the post-rewind assistant turn", async () => {
 		const report = "findings: kept checkpoint; risks: stale signed thinking";
 		const { session, mock } = await createHarness([
 			{
@@ -241,22 +233,10 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(mock.calls.length).toBe(3);
 		const finalCall = mock.calls[2];
 		if (!finalCall) throw new Error("Expected final post-rewind provider call");
-		const summaryIndex = finalCall.context.messages.findIndex(message => {
-			if (message.role !== "user") return false;
-			const text = messageText(message);
-			const openIndex = text.indexOf("<summary>");
-			const closeIndex = text.indexOf("</summary>", openIndex + "<summary>".length);
-			return (
-				openIndex >= 0 &&
-				closeIndex > openIndex + "<summary>".length &&
-				text.slice(openIndex + "<summary>".length, closeIndex).trim().length > 0
-			);
-		});
 		const reportIndex = finalCall.context.messages.findIndex(
 			message => message.role === "developer" && messageText(message).includes(report),
 		);
-		expect(summaryIndex).toBeGreaterThan(-1);
-		expect(reportIndex).toBeGreaterThan(summaryIndex);
+		expect(reportIndex).toBeGreaterThan(-1);
 		const reportMessage = finalCall.context.messages[reportIndex];
 		if (!reportMessage) throw new Error("Expected rewind report context");
 		const reportText = messageText(reportMessage);
@@ -270,7 +250,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		).toBe(false);
 
 		const activeRoles = session.messages.map(message => message.role);
-		expect(activeRoles).toEqual(["user", "assistant", "toolResult", "branchSummary", "custom", "assistant"]);
+		expect(activeRoles).toEqual(["user", "assistant", "toolResult", "custom", "assistant"]);
 		expect(activeRoles).toEqual(session.sessionManager.buildSessionContext().messages.map(message => message.role));
 
 		const finalAssistant = expectLastAssistant(session.messages);
@@ -479,6 +459,53 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(messageText(reportMessages[0]!)).toContain(report);
 	});
 
+	it("carries each rewind report into model context exactly once across checkpoint cycles", async () => {
+		const reportA = "findings from checkpoint cycle A";
+		const reportB = "findings from checkpoint cycle B";
+		const { session, mock } = await createHarness([
+			{
+				content: [
+					{ type: "toolCall", id: "call_checkpoint_a", name: "checkpoint", arguments: { goal: "inspect A" } },
+				],
+				stopReason: "toolUse",
+			},
+			{
+				content: [{ type: "toolCall", id: "call_rewind_a", name: "rewind", arguments: { report: reportA } }],
+				stopReason: "toolUse",
+			},
+			{
+				content: [
+					{ type: "toolCall", id: "call_checkpoint_b", name: "checkpoint", arguments: { goal: "inspect B" } },
+				],
+				stopReason: "toolUse",
+			},
+			{
+				content: [{ type: "toolCall", id: "call_rewind_b", name: "rewind", arguments: { report: reportB } }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		await session.prompt("investigate with two checkpoints");
+
+		const finalCall = mock.calls.at(-1);
+		if (!finalCall) throw new Error("Expected final post-rewind provider call");
+		const contextText = finalCall.context.messages.map(messageText).join("\n");
+		expect(contextText.split(reportA)).toHaveLength(2);
+		expect(contextText.split(reportB)).toHaveLength(2);
+		// Resume rebuilds the same context from the persisted session.
+		const resumedText = convertToLlm(session.sessionManager.buildSessionContext().messages)
+			.map(messageText)
+			.join("\n");
+		expect(resumedText.split(reportA)).toHaveLength(2);
+		expect(resumedText.split(reportB)).toHaveLength(2);
+		// The transcript still shows each rewind as a branch summary.
+		const transcriptSummaries = session.sessionManager
+			.buildSessionContext({ transcript: true })
+			.messages.flatMap(message => (message.role === "branchSummary" ? [message.summary] : []));
+		expect(transcriptSummaries).toEqual([reportA, reportB]);
+	});
+
 	it("ignores a completed cycle's rewind result after rebuilding context", async () => {
 		const staleReport = "findings from the previous checkpoint";
 		const currentReport = "findings from the current checkpoint";
@@ -523,7 +550,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(session.getLastCompletedRewind()?.report).toBe(currentReport);
 	});
 
-	it("does not start checkpoint tracking for xdev help envelopes", async () => {
+	it("does not start checkpoint tracking for tool command help output", async () => {
 		const { session } = await createHarness(
 			[
 				{
@@ -531,15 +558,15 @@ describe("AgentSession checkpoint rewind branch context", () => {
 						{
 							type: "toolCall",
 							id: "call_checkpoint_help",
-							name: "write",
-							arguments: { path: "xd://checkpoint", content: "help" },
+							name: "bash",
+							arguments: { command: "checkpoint --help" },
 						},
 					],
 					stopReason: "toolUse",
 				},
 				{ content: ["DONE"], stopReason: "stop" },
 			],
-			[xdevWriteTool],
+			[toolCommandBashTool],
 		);
 
 		await session.prompt("show checkpoint help");
@@ -547,20 +574,17 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(session.getCheckpointState()).toBeUndefined();
 	});
 
-	it("tracks checkpoint and rewind through execute xdev write results", async () => {
-		const report = "findings: xdev wrapper";
+	it("tracks checkpoint and rewind through bash tool commands", async () => {
+		const report = "findings: bash transport";
 		const { session, mock } = await createHarness(
 			[
 				{
 					content: [
 						{
 							type: "toolCall",
-							id: "call_checkpoint_xdev",
-							name: "write",
-							arguments: {
-								path: "xd://checkpoint",
-								content: JSON.stringify({ goal: "inspect" }),
-							},
+							id: "call_checkpoint_tool_command",
+							name: "bash",
+							arguments: { command: "checkpoint inspect" },
 						},
 					],
 					stopReason: "toolUse",
@@ -569,32 +593,31 @@ describe("AgentSession checkpoint rewind branch context", () => {
 					content: [
 						{
 							type: "toolCall",
-							id: "call_rewind_xdev",
-							name: "write",
-							arguments: {
-								path: "xd://rewind",
-								content: JSON.stringify({ report }),
-							},
+							id: "call_rewind_tool_command",
+							name: "bash",
+							arguments: { command: `rewind "${report}"` },
 						},
 					],
 					stopReason: "toolUse",
 				},
 				{ content: ["DONE"], stopReason: "stop" },
 			],
-			[xdevWriteTool],
+			[toolCommandBashTool],
 		);
 
-		await session.prompt("investigate with an xdev checkpoint");
+		await session.prompt("investigate with a checkpoint");
 
 		const finalCall = mock.calls.at(-1);
 		if (!finalCall) throw new Error("Expected final post-rewind provider call");
 		expect(
 			finalCall.context.messages.some(
-				message => message.role === "toolResult" && message.toolCallId === "call_rewind_xdev",
+				message => message.role === "toolResult" && message.toolCallId === "call_rewind_tool_command",
 			),
 		).toBe(false);
 		expect(
-			session.messages.some(message => message.role === "toolResult" && message.toolCallId === "call_rewind_xdev"),
+			session.messages.some(
+				message => message.role === "toolResult" && message.toolCallId === "call_rewind_tool_command",
+			),
 		).toBe(false);
 		expect(session.messages).toEqual(session.sessionManager.buildSessionContext().messages);
 
@@ -605,8 +628,8 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		});
 	});
 
-	it("tracks direct xd:// checkpoint and rewind calls through the session lifecycle", async () => {
-		const report = "findings: prefixed direct calls";
+	it("tracks direct checkpoint and rewind calls through the session lifecycle", async () => {
+		const report = "findings: direct calls";
 		const proceed = Promise.withResolvers<void>();
 		const secondRequestStarted = Promise.withResolvers<void>();
 		const { session } = await createHarness(
@@ -615,8 +638,8 @@ describe("AgentSession checkpoint rewind branch context", () => {
 					content: [
 						{
 							type: "toolCall",
-							id: "call_checkpoint_direct_xdev",
-							name: "xd://checkpoint",
+							id: "call_checkpoint_direct_tool_command",
+							name: "checkpoint",
 							arguments: { goal: "inspect" },
 						},
 					],
@@ -628,8 +651,8 @@ describe("AgentSession checkpoint rewind branch context", () => {
 					content: [
 						{
 							type: "toolCall",
-							id: "call_rewind_direct_xdev",
-							name: "xd://rewind",
+							id: "call_rewind_direct_tool_command",
+							name: "rewind",
 							arguments: { report },
 						},
 					],
@@ -638,23 +661,16 @@ describe("AgentSession checkpoint rewind branch context", () => {
 				yield { content: ["DONE"], stopReason: "stop" };
 			})() as MockResponseSource,
 			[checkpointTool as AgentTool, rewindTool as AgentTool],
-			{
-				resolveFallbackTool: name => {
-					if (name === "xd://checkpoint") return checkpointTool as AgentTool;
-					if (name === "xd://rewind") return rewindTool as AgentTool;
-					return undefined;
-				},
-			},
 		);
 
-		const promptPromise = session.prompt("investigate with direct xd device calls");
+		const promptPromise = session.prompt("investigate with direct checkpoint calls");
 		await secondRequestStarted.promise;
 
 		// Exercise the real RewindTool while the provider's second response is
-		// paused: prefixed checkpoint results must activate its session state.
+		// paused: direct checkpoint results must activate its session state.
 		const checkpointState = session.getCheckpointState();
 		const rewindProbe = await rewindToolForSession(session)
-			.execute("probe_rewind_after_direct_xdev", { report: "probe" })
+			.execute("probe_rewind_after_direct_tool_command", { report: "probe" })
 			.then(
 				result => ({ result }),
 				error => ({ error }),
@@ -672,7 +688,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		});
 		expect(
 			session.messages.some(
-				message => message.role === "toolResult" && message.toolCallId === "call_rewind_direct_xdev",
+				message => message.role === "toolResult" && message.toolCallId === "call_rewind_direct_tool_command",
 			),
 		).toBe(false);
 	});
@@ -931,19 +947,16 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(expectLastAssistant(session.messages).stopReason).toBe("stop");
 	});
 
-	it("rehydrates an active checkpoint from an xdev write after branching and resume", async () => {
+	it("rehydrates an active checkpoint from a bash tool command after branching and resume", async () => {
 		const harness = await createHarness(
 			[
 				{
 					content: [
 						{
 							type: "toolCall",
-							id: "call_checkpoint_xdev",
-							name: "write",
-							arguments: {
-								path: "xd://checkpoint",
-								content: JSON.stringify({ goal: "inspect" }),
-							},
+							id: "call_checkpoint_tool_command",
+							name: "bash",
+							arguments: { command: "checkpoint inspect" },
 						},
 					],
 					stopReason: "toolUse",
@@ -952,30 +965,26 @@ describe("AgentSession checkpoint rewind branch context", () => {
 					content: [
 						{
 							type: "toolCall",
-							id: "call_rewind_xdev",
-							name: "write",
-							arguments: {
-								path: "xd://rewind",
-								content: JSON.stringify({ report: "findings" }),
-							},
+							id: "call_rewind_tool_command",
+							name: "bash",
+							arguments: { command: 'rewind "findings"' },
 						},
 					],
 					stopReason: "toolUse",
 				},
 				{ content: ["DONE"], stopReason: "stop" },
 			],
-			[xdevWriteTool],
+			[toolCommandBashTool],
 		);
-		await harness.session.prompt("investigate with an xdev checkpoint");
+		await harness.session.prompt("investigate with a checkpoint");
 
 		const checkpointEntry = harness.session.sessionManager.getBranch().find(entry => {
-			if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "write") {
-				return false;
-			}
-			const details = entry.message.details as { xdev?: { tool?: string } } | undefined;
-			return details?.xdev?.tool === "checkpoint";
+			if (entry.type !== "message" || entry.message.role !== "toolResult") return false;
+			return toolCommandDispatches(entry.message.toolName, entry.message).some(
+				dispatch => dispatch.tool === "checkpoint",
+			);
 		});
-		if (!checkpointEntry) throw new Error("Expected xdev checkpoint tool result entry");
+		if (!checkpointEntry) throw new Error("Expected a checkpoint tool command result entry");
 		harness.session.sessionManager.branch(checkpointEntry.id);
 
 		const reloadedMock = createMockModel({ responses: [] });
@@ -987,7 +996,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 			"todo.reminders": false,
 		});
 		reloadedSettings.setModelRole("default", `${reloadedMock.provider}/${reloadedMock.id}`);
-		const reloadedTools = [xdevWriteTool as AgentTool];
+		const reloadedTools = [toolCommandBashTool as AgentTool];
 		const reloadedAgent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -1005,7 +1014,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 			settings: reloadedSettings,
 			modelRegistry: new ModelRegistry(
 				harness.authStorage,
-				path.join(harness.tempDir.path(), "models-xdev-reloaded.yml"),
+				path.join(harness.tempDir.path(), "models-tool-command-reloaded.yml"),
 			),
 			toolRegistry: new Map(reloadedTools.map(tool => [tool.name, tool])),
 		});
@@ -1017,7 +1026,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		});
 		expect(reloadedSession.getLastCompletedRewind()).toBeUndefined();
 		await expect(
-			rewindToolForSession(reloadedSession).execute("call_rewind_after_xdev_resume", {
+			rewindToolForSession(reloadedSession).execute("call_rewind_after_tool_command_resume", {
 				report: "post-resume findings",
 			}),
 		).resolves.toMatchObject({ details: { report: "post-resume findings", rewound: true } });

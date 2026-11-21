@@ -186,6 +186,58 @@ describe("native transcript redesign", () => {
 		expect(actions).toEqual([{ act: "copy", text: "Fix the build" }, { act: "rewind" }]);
 	});
 
+	it("offers a prompt's turn actions to a phone's long press, each naming the prompt by role and time", async () => {
+		const actions: TranscriptAction[] = [];
+		setTranscriptActionHandler(action => actions.push(action));
+		const at = Date.UTC(2026, 0, 1, 12, 30);
+		harness = await TspHarness.start();
+		harness.tui.addChild(new UserMessageComponent("Fix the build", { timestamp: at }));
+		await harness.render();
+		const card = harness.find(node => node.k === "card" && node.p?.role === "omp.user")!;
+		const hold = (prop(card, "actions") as { hold: { id: string }[] }).hold;
+		expect(hold.map(entry => entry.id)).toEqual([
+			"copy-message",
+			"edit-turn",
+			"retry-turn",
+			"rewind-turn",
+			"fork-turn",
+		]);
+		for (const entry of hold)
+			harness.event({ ev: "action", sf: harness.terminal.surface!, id: card.id, act: entry.id });
+		const message = { role: "user", at } as const;
+		expect(actions).toEqual([
+			{ act: "copy", text: "Fix the build" },
+			{ act: "turn", turn: "edit", message },
+			{ act: "turn", turn: "retry", message },
+			{ act: "turn", turn: "rewind", message },
+			{ act: "turn", turn: "fork", message },
+		]);
+	});
+
+	it("offers a settled answer's turn actions, without Edit, and none before the turn ends", async () => {
+		const actions: TranscriptAction[] = [];
+		setTranscriptActionHandler(action => actions.push(action));
+		const component = new AssistantMessageComponent({
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content: [{ type: "text", text: "Done." }],
+			timestamp: 42,
+		});
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		await harness.render();
+		const reply = () => harness!.find(node => node.p?.role === "omp.assistant")!;
+		expect(prop(reply(), "actions")).toBeUndefined();
+
+		component.setTurnUsage({ elapsedMs: 1_000, input: 10, output: 5, cost: 0 });
+		await harness.render();
+		const hold = (prop(reply(), "actions") as { hold: { id: string }[] }).hold;
+		expect(hold.map(entry => entry.id)).toEqual(["copy-answer", "retry-turn", "rewind-turn", "fork-turn"]);
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: reply().id, act: "fork-turn" });
+		expect(actions).toEqual([{ act: "turn", turn: "fork", message: { role: "assistant", at: 42 } }]);
+	});
+
 	it("copies a turn's answer from its footer: the text blocks a blank line apart, no thinking", async () => {
 		const actions: TranscriptAction[] = [];
 		setTranscriptActionHandler(action => actions.push(action));
@@ -247,6 +299,21 @@ describe("native transcript redesign", () => {
 		await harness.render();
 		expect(harness.find(node => node.k === "toast")?.p).toMatchObject({ text: "Thinking blocks: shown" });
 		expect(harness.find(node => node.k === "text" && node.p?.text === "Thinking blocks: hidden")).toBeUndefined();
+	});
+
+	it("puts a notice's action on its toast, kept up for the button, and runs it on a click", async () => {
+		let undone = 0;
+		const notice = new StatusNotice("Rewound 2 turns", {
+			action: { act: "undo", label: "Undo", run: () => undone++ },
+		});
+		harness = await TspHarness.start();
+		harness.tui.addChild(notice);
+		await harness.render();
+		const toast = harness.find(node => node.k === "toast")!;
+		expect(toast.p).toMatchObject({ text: "Rewound 2 turns", action: "undo", label: "Undo" });
+		expect(prop(toast, "ttl")).toBeUndefined();
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: toast.id, act: "undo" });
+		expect(undone).toBe(1);
 	});
 
 	it("keeps a toast: false notice off a native terminal until a later status reuses it", async () => {

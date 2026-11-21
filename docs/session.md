@@ -58,7 +58,7 @@ Terminal breadcrumb files are written under:
 ~/.omp/agent/terminal-sessions/<terminal-id>
 ```
 
-Breadcrumb content begins with cwd and session file path. Optional extra lines are `fresh` and `cwdstat <device> <inode>`. A fresh breadcrumb preserves an initially created, lazy session whose JSONL file does not exist yet, preventing `continueRecent()` from reopening the previous session. Explicit `newSession()` boundaries materialize their header before returning. The directory identity permits automatic re-rooting after a same-filesystem project rename; a missing cwd alone is not move evidence. Writes are synchronous, ordered, and best-effort.
+Breadcrumb content begins with cwd and session file path. Optional extra lines are `fresh` and `cwdstat <device> <inode>`. A fresh breadcrumb preserves an initially created, lazy session whose JSONL file does not exist yet, preventing `continueRecent()` from reopening the previous session. Explicit `newSession()` boundaries materialize their header before returning, except the lazy successor created by `drop` (`/delete`). The directory identity permits automatic re-rooting after a same-filesystem project rename; a missing cwd alone is not move evidence. Writes are synchronous, ordered, and best-effort.
 
 ## File Format
 
@@ -72,17 +72,18 @@ Session files are JSONL: one JSON object per line. Current files physically begi
 
 ```json
 {
-  "type": "session",
-  "version": 3,
-  "id": "019c625b-b900-7000-8000-000000000001",
-  "timestamp": "2026-02-16T10:20:30.000Z",
-  "cwd": "/work/pi",
-  "title": "optional session title",
-  "titleSource": "auto",
-  "additionalDirectories": ["/work/shared"],
-  "previousSessionFiles": ["/old/location/session.jsonl"],
-  "providerPromptCacheKey": "optional inherited cache identity",
-  "parentSession": "optional lineage marker"
+	"type": "session",
+	"version": 3,
+	"id": "019c625b-b900-7000-8000-000000000001",
+	"timestamp": "2026-02-16T10:20:30.000Z",
+	"cwd": "/work/pi",
+	"title": "optional session title",
+	"titleSource": "auto",
+	"additionalDirectories": ["/work/shared"],
+	"previousSessionFiles": ["/old/location/session.jsonl"],
+	"providerPromptCacheKey": "optional inherited cache identity",
+	"taskPromptCacheKey": "optional local-only Task sibling family key",
+	"parentSession": "optional lineage marker"
 }
 ```
 
@@ -92,6 +93,11 @@ Notes:
 - `additionalDirectories` records normalized, deduplicated workspace roots beyond `cwd`.
 - `previousSessionFiles` records prior absolute locations after successful moves.
 - `providerPromptCacheKey` carries an inherited provider prompt-cache identity for eligible full forks.
+- `taskPromptCacheKey` is a local-only Task sibling family key (`<parent cache key>:<agent name>`), omitted from shares and HTML exports.
+   - The executor derives it once the child session exists, regardless of the child's initial model. An empty parent cache lineage derives nothing, so those children keep their own session identity.
+   - Until a request uses it, the key lives in a session-scoped, non-persisted stash. The first primary request on a model that opts into `shared-prompt-cache` writes it to the header, so fork and reopen keep it.
+   - Each request decides consumption against its own model: an explicit session key wins; otherwise the family key applies only on opted-in models.
+   - The stash does not survive a fork, move, branch, new-session reset, or switch to a different session; a rolled-back move or switch restores it.
 - `parentSession` is an opaque lineage string. Current code writes either a session id or a session path depending on flow (`fork`, `forkFrom`, `createBranchedSession`, or explicit `newSession({ parentSession })`). Treat it as metadata, not a typed foreign key.
 
 - `titleSource` is `auto` or `user`; automatic renames cannot overwrite a user title.
@@ -102,10 +108,10 @@ All non-header entries include:
 
 ```json
 {
-  "type": "...",
-  "id": "8-char-id",
-  "parentId": "previous-or-branch-parent",
-  "timestamp": "2026-02-16T10:20:30.000Z"
+	"type": "...",
+	"id": "8-char-id",
+	"parentId": "previous-or-branch-parent",
+	"timestamp": "2026-02-16T10:20:30.000Z"
 }
 ```
 
@@ -138,33 +144,33 @@ Stores an `AgentMessage` directly.
 
 ```json
 {
-  "type": "message",
-  "id": "a1b2c3d4",
-  "parentId": null,
-  "timestamp": "2026-02-16T10:21:00.000Z",
-  "message": {
-    "role": "assistant",
-    "api": "anthropic-messages",
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-5",
-    "content": [{ "type": "text", "text": "Done." }],
-    "usage": {
-      "input": 100,
-      "output": 20,
-      "cacheRead": 0,
-      "cacheWrite": 0,
-      "totalTokens": 120,
-      "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
-        "cacheWrite": 0,
-        "total": 0
-      }
-    },
-    "stopReason": "stop",
-    "timestamp": 1760000000000
-  }
+	"type": "message",
+	"id": "a1b2c3d4",
+	"parentId": null,
+	"timestamp": "2026-02-16T10:21:00.000Z",
+	"message": {
+		"role": "assistant",
+		"api": "anthropic-messages",
+		"provider": "anthropic",
+		"model": "claude-sonnet-4-5",
+		"content": [{ "type": "text", "text": "Done." }],
+		"usage": {
+			"input": 100,
+			"output": 20,
+			"cacheRead": 0,
+			"cacheWrite": 0,
+			"totalTokens": 120,
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0,
+				"total": 0
+			}
+		},
+		"stopReason": "stop",
+		"timestamp": 1760000000000
+	}
 }
 ```
 
@@ -213,16 +219,83 @@ optional `errorMessage`. These records contribute usage accounting, not model
 messages or transcript turns. `appendModelUsage()` attaches the record to the
 initiating session/branch and rejects stale session ownership.
 
+Optional fields describe the call without copying the static prompt, which is
+identified by `purpose`.
+
+- `duration` / `ttft`: request wall time and time to first token, in ms.
+- `judgment`: a native judge query (TypeSafe jev and other judgment APIs).
+  `state` is the `sha256` of the canonical state, which is `states.id` in the
+  judgment answer cache (`~/.omp/cache/judgment-cache.db`): that database holds
+  the state text once and, under `oracle(state, model, name)`, each question's
+  rendered instructions, criteria, and full answer. `answers` keeps the headline
+  of each answer the request produced, by question id: a noul's probability of
+  yes, `[label, confidence]` for a choice, `[score, confidence]` for a score,
+  `[top, bottom, left, right, confidence]` for a box. `cached` counts questions
+  the cache answered instead (not billed, not in `answers`). A judgment answered
+  wholly from the cache writes no entry; a failed request has empty `answers`.
+- `completion`: a text side channel (title generation, recaps, commit
+  messages, memory extraction, …). `prompt` is the dynamic user-turn text the
+  model was sent; it is absent when the request read the conversation at the
+  entry's `parentId` (`title-fork`, `recap`, `btw`). `reply` is the raw reply
+  before parsing, or the tool arguments as JSON when the call answered through
+  a forced tool call. Either side is left out, never truncated, when it exceeds
+  4,000 characters (a diff, a transcript). Calls whose result the session
+  already stores (`compaction:<method>`, `branch-summary`, `web-search`,
+  `image-gen`, `image-describe`) journal usage and timing only. Compaction
+  purposes name the method that made the request: `compaction:remote`
+  (provider-native compaction, including OpenAI `/responses/compact` and V2
+  streaming), `compaction:soft` (local summary requests), `compaction:handoff`
+  (the handoff document); an advisor compacting its own history journals
+  `compaction:advisor`.
+
+An on-device model call that produced output is journaled with zero usage, so
+its count and `duration` are still visible.
+
+```json
+{
+	"type": "model_usage",
+	"id": "4e1e5bcf",
+	"parentId": "40ec204f",
+	"timestamp": "2026-11-18T10:16:19.964Z",
+	"purpose": "find",
+	"role": "typesafe",
+	"api": "typesafe",
+	"provider": "typesafe",
+	"model": "jev-1.14.0",
+	"usage": { "input": 824, "output": 87, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 911, "cost": { "input": 0.0000346, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.0000346 } },
+	"stopReason": "stop",
+	"duration": 212,
+	"judgment": {
+		"state": "9f2c1a7b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8",
+		"answers": { "p00": 0.46, "p01": 0.02, "kind": ["helper", 0.41] },
+		"cached": 1
+	}
+}
+```
+
+```json
+{
+	"type": "model_usage",
+	"purpose": "title",
+	"duration": 640,
+	"ttft": 410,
+	"completion": {
+		"prompt": "<user>\nfix the share bar\n</user>",
+		"reply": "<title>Fix stats share bar</title>"
+	}
+}
+```
+
 ### `model_change`
 
 ```json
 {
-  "type": "model_change",
-  "id": "b1c2d3e4",
-  "parentId": "a1b2c3d4",
-  "timestamp": "2026-02-16T10:21:30.000Z",
-  "model": "openai/gpt-4o",
-  "role": "default"
+	"type": "model_change",
+	"id": "b1c2d3e4",
+	"parentId": "a1b2c3d4",
+	"timestamp": "2026-02-16T10:21:30.000Z",
+	"model": "openai/gpt-4o",
+	"role": "default"
 }
 ```
 
@@ -235,11 +308,11 @@ default instead of restoring that role's temporary model.
 
 ```json
 {
-  "type": "service_tier_change",
-  "id": "c1d2e3f4",
-  "parentId": "b1c2d3e4",
-  "timestamp": "2026-02-16T10:21:45.000Z",
-  "serviceTier": { "openai": "priority", "google": "flex" }
+	"type": "service_tier_change",
+	"id": "c1d2e3f4",
+	"parentId": "b1c2d3e4",
+	"timestamp": "2026-02-16T10:21:45.000Z",
+	"serviceTier": { "openai": "priority", "google": "flex" }
 }
 ```
 
@@ -249,11 +322,11 @@ default instead of restoring that role's temporary model.
 
 ```json
 {
-  "type": "thinking_level_change",
-  "id": "c1d2e3f4",
-  "parentId": "b1c2d3e4",
-  "timestamp": "2026-02-16T10:22:00.000Z",
-  "thinkingLevel": "high"
+	"type": "thinking_level_change",
+	"id": "c1d2e3f4",
+	"parentId": "b1c2d3e4",
+	"timestamp": "2026-02-16T10:22:00.000Z",
+	"thinkingLevel": "high"
 }
 ```
 
@@ -263,17 +336,17 @@ default instead of restoring that role's temporary model.
 
 ```json
 {
-  "type": "compaction",
-  "id": "d1e2f3a4",
-  "parentId": "c1d2e3f4",
-  "timestamp": "2026-02-16T10:23:00.000Z",
-  "summary": "Conversation summary",
-  "shortSummary": "Short recap",
-  "firstKeptEntryId": "a1b2c3d4",
-  "tokensBefore": 42000,
-  "details": { "readFiles": ["src/a.ts"] },
-  "preserveData": { "hookState": true },
-  "fromExtension": false
+	"type": "compaction",
+	"id": "d1e2f3a4",
+	"parentId": "c1d2e3f4",
+	"timestamp": "2026-02-16T10:23:00.000Z",
+	"summary": "Conversation summary",
+	"shortSummary": "Short recap",
+	"firstKeptEntryId": "a1b2c3d4",
+	"tokensBefore": 42000,
+	"details": { "readFiles": ["src/a.ts"] },
+	"preserveData": { "hookState": true },
+	"fromExtension": false
 }
 ```
 
@@ -287,14 +360,14 @@ replacement history so later entries still replay normally.
 
 ```json
 {
-  "type": "branch_summary",
-  "id": "e1f2a3b4",
-  "parentId": "a1b2c3d4",
-  "timestamp": "2026-02-16T10:24:00.000Z",
-  "fromId": "a1b2c3d4",
-  "summary": "Summary of abandoned path",
-  "details": { "note": "optional" },
-  "fromExtension": true
+	"type": "branch_summary",
+	"id": "e1f2a3b4",
+	"parentId": "a1b2c3d4",
+	"timestamp": "2026-02-16T10:24:00.000Z",
+	"fromId": "a1b2c3d4",
+	"summary": "Summary of abandoned path",
+	"details": { "note": "optional" },
+	"fromExtension": true
 }
 ```
 
@@ -310,24 +383,26 @@ Opaque, non-LLM records owned by core subsystems or extensions. `buildSessionCon
 
 ```json
 {
-  "type": "custom",
-  "id": "f1a2b3c4",
-  "parentId": "e1f2a3b4",
-  "timestamp": "2026-02-16T10:25:00.000Z",
-  "customType": "com.example.my-extension.state",
-  "data": { "state": 1 }
+	"type": "custom",
+	"id": "f1a2b3c4",
+	"parentId": "e1f2a3b4",
+	"timestamp": "2026-02-16T10:25:00.000Z",
+	"customType": "com.example.my-extension.state",
+	"data": { "state": 1 }
 }
 ```
 
 Current core-owned values include:
 
-| `customType`             | `data` schema                                                                                                                                                                                                                                            | Writer and consumer                                                                                                                                                                                                                                                                                        |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool_execution_start`   | `{ toolCallId: string, toolName: string, startedAt: string, args?: { command?: string, path?: string }, intent?: string }`                                                                                                                               | `AgentSession` writes a marker immediately before a tool implementation starts. Exit diagnostics combine it with assistant tool calls and tool results to reconstruct calls left pending. Argument summaries are truncated projections; older full argument objects are accepted on read.                  |
-| `session_exit`           | `{ reason: string, kind: "normal" \| "signal" \| "fatal" \| "process_exit", recordedAt: string, pendingToolCalls?: Array<{ toolCallId?: string, toolName: string, args?: unknown, intent?: string, assistantTimestamp?: number, startedAt?: string }> }` | Normal disposal and postmortem teardown record the exit when the session has assistant history or pending tool calls. The writer immediately calls `flushSync()` so a subsequent process can inspect the last durable turn; a flush failure is logged. Resume diagnostics consume the latest valid record. |
-| `user_todo_edit`         | `{ phases: TodoPhase[] }`                                                                                                                                                                                                                                | SDK/UI todo editing persists the complete phase snapshot. Todo restoration scans backward for the latest snapshot (or a successful `todo` tool result) and restores its phases.                                                                                                                            |
-| `vibe-session-lifecycle` | Version-1 event with `{ version: 1, id, ownerId, parentSessionId, action, ... }`; `spawn` adds `cli`, `agent`, `childSessionFile`, and `createdAt`; turn events add `turn`; tombstone events add `reason`.                                               | Vibe runtime persists and replays child spawn, turn-started/settled, tombstone, and tombstone-revoked transitions to recover owned child sessions and in-flight state. Invalid or out-of-scope events are ignored.                                                                                         |
-| `autoresearch-control`   | `{ mode: "on" \| "off" \| "clear", goal?: string }`                                                                                                                                                                                                      | The built-in autoresearch command writes mode/goal changes, and experiment-limit shutdown writes `mode: "off"`. `reconstructControlState()` replays valid records on resume to restore whether autoresearch is active and its goal; `clear` removes the goal.                                              |
+| `customType`             | `data` schema                                                                                                                                                                                                                                            | Writer and consumer                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool_execution_start`   | `{ toolCallId: string, toolName: string, startedAt: string, args?: { command?: string, path?: string }, intent?: string }`                                                                                                                               | `AgentSession` writes a marker immediately before a tool implementation starts. Exit diagnostics combine it with assistant tool calls and tool results to reconstruct calls left pending. Argument summaries are truncated projections; older full argument objects are accepted on read.                                                                                                                                                                              |
+| `session_exit`           | `{ reason: string, kind: "normal" \| "signal" \| "fatal" \| "process_exit", recordedAt: string, pendingToolCalls?: Array<{ toolCallId?: string, toolName: string, args?: unknown, intent?: string, assistantTimestamp?: number, startedAt?: string }> }` | Normal disposal and postmortem teardown record the exit when the session has assistant history or pending tool calls. The writer immediately calls `flushSync()` so a subsequent process can inspect the last durable turn; a flush failure is logged. Resume diagnostics consume the latest valid record.                                                                                                                                                             |
+| `tool_approval_requested` | `{ toolCallId: string, parentToolCallId?: string, toolName: string, approvalMode: string, reason?: string, requestedAt: string }` | The extension tool wrapper writes it to disk before the approval prompt opens, whether or not an extension listens to the matching event, creating the session file if there is no assistant message yet. The call is still waiting until a `tool_approval_resolved` or a tool result for its `toolCallId` follows, or, when an eval cell or kernel-defined tool dispatched it, a tool result for its `parentToolCallId` (fork and resume repair close an interrupted assistant call with a tool result, but never the nested calls an eval made), so another process reading the file can tell a session blocked on the user from one still working. |
+| `tool_approval_resolved` | `{ toolCallId: string, toolName: string, approved: boolean, reason?: string, resolvedAt: string }` | Ends that wait: approved, denied (`reason: "denied by user"`), aborted, or refused because no interactive UI is available. |
+| `user_todo_edit`         | `{ phases: TodoPhase[] }`                                                                                                                                                                                                                                | SDK/UI todo editing persists the complete phase snapshot. Todo restoration scans backward for the latest snapshot (or a successful `todo` tool result) and restores its phases.                                                                                                                                                                                                                                                                                        |
+| `vibe-session-lifecycle` | Version-1 event with `{ version: 1, id, ownerId, parentSessionId, action, ... }`; `spawn` adds `cli`, `agent`, `childSessionFile`, and `createdAt`; turn events add `turn`; tombstone events add `reason`.                                               | Vibe runtime persists and replays child spawn, turn-started/settled, tombstone, and tombstone-revoked transitions to recover owned child sessions and in-flight state. Invalid or out-of-scope events are ignored.                                                                                                                                                                                                                                                     |
+| `autoresearch-control`   | `{ mode: "on" \| "off" \| "clear", goal?: string }`                                                                                                                                                                                                      | The built-in autoresearch command writes mode/goal changes, and experiment-limit shutdown writes `mode: "off"`. `reconstructControlState()` replays valid records on resume to restore whether autoresearch is active and its goal; `clear` removes the goal. See [Autoresearch](./autoresearch.md).                                                                                                                                                                   |
 | `system-prompt-digest`   | Hexadecimal string: a hash of the base system prompt blocks (before a per-turn hook override)                                                                                                                                                            | `AgentSession` appends it just before a primary assistant reply with provider output whose prompt differs from the branch's latest record, and carries it onto a rewind branch with the reparented sibling reply. Before a resumed session's first model call, a prefix-bound tool-list rebuild commits only if it reproduces that prompt; without a record it freezes. Memory recall injected into the base prompt is part of the hash, so such sessions stay frozen. |
 
 On resume, a valid latest `session_exit` after a non-terminal conversation tail causes `AgentSession`/SDK initialization to append a synthetic assistant message with `stopReason: "aborted"` and rebuild the display/agent context. A normal exit only triggers that transition when it recorded pending tool calls; abnormal exit kinds can trigger it without that list. This prevents the restored transcript from presenting an interrupted turn as still live.
@@ -336,19 +411,19 @@ The strings in the table are reserved for their core consumers. Extensions MUST 
 
 ### `custom_message`
 
-Extension-provided message that does participate in LLM context. `content` can be a string or text/image content blocks, and `attribution` records whether the user or agent initiated it.
+Extension-provided message that participates in LLM context unless `excludeFromContext` is `true` (then it is only drawn and saved, like a `!!` bash row). `content` can be a string or text/image content blocks, and `attribution` records whether the user or agent initiated it.
 
 ```json
 {
-  "type": "custom_message",
-  "id": "a2b3c4d5",
-  "parentId": "f1a2b3c4",
-  "timestamp": "2026-02-16T10:26:00.000Z",
-  "customType": "my-extension",
-  "content": "Injected context",
-  "display": true,
-  "details": { "debug": false },
-  "attribution": "agent"
+	"type": "custom_message",
+	"id": "a2b3c4d5",
+	"parentId": "f1a2b3c4",
+	"timestamp": "2026-02-16T10:26:00.000Z",
+	"customType": "my-extension",
+	"content": "Injected context",
+	"display": true,
+	"details": { "debug": false },
+	"attribution": "agent"
 }
 ```
 
@@ -356,12 +431,12 @@ Extension-provided message that does participate in LLM context. `content` can b
 
 ```json
 {
-  "type": "label",
-  "id": "b2c3d4e5",
-  "parentId": "a2b3c4d5",
-  "timestamp": "2026-02-16T10:27:00.000Z",
-  "targetId": "a1b2c3d4",
-  "label": "checkpoint"
+	"type": "label",
+	"id": "b2c3d4e5",
+	"parentId": "a2b3c4d5",
+	"timestamp": "2026-02-16T10:27:00.000Z",
+	"targetId": "a1b2c3d4",
+	"label": "checkpoint"
 }
 ```
 
@@ -377,11 +452,11 @@ Append-only audit entry for a session rename. It records `title`, `source` (`aut
 
 ```json
 {
-  "type": "ttsr_injection",
-  "id": "c2d3e4f5",
-  "parentId": "b2c3d4e5",
-  "timestamp": "2026-02-16T10:28:00.000Z",
-  "injectedRules": ["ruleA", "ruleB"]
+	"type": "ttsr_injection",
+	"id": "c2d3e4f5",
+	"parentId": "b2c3d4e5",
+	"timestamp": "2026-02-16T10:28:00.000Z",
+	"injectedRules": ["ruleA", "ruleB"]
 }
 ```
 
@@ -393,25 +468,37 @@ Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pi
 
 ```json
 {
-  "type": "session_init",
-  "id": "d2e3f4a5",
-  "parentId": "c2d3e4f5",
-  "timestamp": "2026-02-16T10:29:00.000Z",
-  "systemPrompt": ["...", "..."],
-  "task": "...",
-  "tools": ["read", "edit"],
-  "outputSchema": { "type": "object" },
-  "outputSchemaMode": "strict",
-  "restrictToolNames": true,
-  "spawns": "*",
-  "readSummarize": false
+	"type": "session_init",
+	"id": "d2e3f4a5",
+	"parentId": "c2d3e4f5",
+	"timestamp": "2026-02-16T10:29:00.000Z",
+	"systemPrompt": ["...", "..."],
+	"task": "...",
+	"tools": ["read", "edit"],
+	"outputSchema": { "type": "object" },
+	"outputSchemaMode": "strict",
+	"restrictToolNames": true,
+	"spawns": "*",
+	"readSummarize": false
 }
 ```
 
 The latest `session_init` is also the cold-subagent revival contract. Optional
-fields include `agent`, `modelRole`, `resolvedModel`, `retryFallback`, `readOnly`,
+fields include `agent`, `modelRole`, `resolvedModel`, `perCallModel` (boolean),
+`perCallModelIdentity`, `perCallThinkingLevel`, `retryFallback`, `readOnly`,
 `advisor`, and `compactionThreshold` (`thresholdPercent`/`thresholdTokens`).
+For `perCallModel: true`, cold revival requires both `perCallModelIdentity` (the
+exact `provider/model-id[@upstream]`, without an effort suffix) and
+`perCallThinkingLevel` (the configured effort selector, including `auto`, or
+`null` for unset). Legacy per-call records missing either field refuse revival
+rather than guessing from the historical-display `resolvedModel`. These fields
+are preserved in anonymized exports under the same flag, model-identity and
+effort rules as other session metadata.
 `isolated: true` marks an isolation-worktree child that cannot be cold-revived.
+`mountedTools` names the entries of `tools` presented as tool commands rather than top-level
+tools; cold revival mounts them again, so the revived session sends the same tool list and tool
+inventory. Files without it revive every name in `tools` top-level. Anonymized exports treat it like
+`tools`.
 `systemPrompt` holds the base prompt blocks a model call was built from (never a per-turn
 `before_agent_start` override), and revival replays them unchanged. A session appends a newer
 `session_init` when a model call runs on a different base prompt or work-pool yield items
@@ -423,12 +510,12 @@ as a single block.
 
 ```json
 {
-  "type": "mode_change",
-  "id": "e2f3a4b5",
-  "parentId": "d2e3f4a5",
-  "timestamp": "2026-02-16T10:30:00.000Z",
-  "mode": "plan",
-  "data": { "planFilePath": "local://PLAN.md" }
+	"type": "mode_change",
+	"id": "e2f3a4b5",
+	"parentId": "d2e3f4a5",
+	"timestamp": "2026-02-16T10:30:00.000Z",
+	"mode": "plan",
+	"data": { "planFilePath": "local://PLAN.md" }
 }
 ```
 
@@ -487,7 +574,7 @@ The underlying model is append-only tree + mutable leaf pointer:
 
 `getEntries()` returns all non-header entries in insertion order. There is no separate persisted leaf field: loading rebuilds the leaf from the last physical entry. Pointer-only `branch()`/`resetLeaf()` changes therefore need a subsequent append to survive reload. `discardEntryDurably()` appends a metadata branch marker and rewrites the journal to make a discarded path durable.
 
-`createBranchedSession(leafId, { copyArtifacts? })` creates a new identity containing only the selected root-to-leaf path. It drops old label records and recreates the resolved labels for retained entries. Unlike a full fork, it does not inherit the provider prompt-cache key. With `copyArtifacts` (used by `AgentSession.fork(entryId)`), the artifacts directory is copied in the background and the new artifact manager waits for the copy before allocating ids or resolving `artifact://`, as for a move to a sibling file.
+`createBranchedSession(leafId, { copyArtifacts? })` creates a new identity containing only the selected root-to-leaf path. It drops old label records and recreates the resolved labels for retained entries. Unlike a full fork, it does not inherit the provider prompt-cache key. With `copyArtifacts` (used by `AgentSession.fork(entryId)`), the artifacts directory is copied in the background and the new artifact manager waits for the copy before allocating ids or resolving spills (`local://N.log`), as for a move to a sibling file.
 
 ## Context Reconstruction (`buildSessionContext`)
 
@@ -526,7 +613,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 
 - A new ordinary session remains memory-only until it contains an assistant message or a caller invokes `ensureOnDisk()`.
 - Before that gate, entries remain in memory; crossing it writes the full title slot, header, and accumulated entries.
-- Explicit `newSession()` (including `/new`) calls `ensureOnDisk()` before returning, preserving an empty session boundary across terminals.
+- Explicit `newSession()` (including `/new`) calls `ensureOnDisk()` before returning, preserving an empty session boundary across terminals. The `/delete` successor (`drop`) is the exception: it stays lazy, because the fresh terminal breadcrumb already pins this terminal to it and a failed deletion leaves the predecessor as a legitimate resume target; a zero-turn quit must not leave an empty file.
 - Afterwards, entries append incrementally.
 - Saving an editor draft forces a discoverable header and stores `draft.txt` with a marker; if the draft disappears while only startup metadata remains, close removes that draft-only session. Explicit `ensureOnDisk()` sessions remain resumable.
 - Concurrent completed appends supersede an in-flight atomic rewrite with an authoritative full-body rewrite so stale publication cannot clobber them.
@@ -537,9 +624,10 @@ Ordinary completed appends update memory and local file storage synchronously on
 - `flush()` drains async disk/storage queues and the open writer (no `fsync`); `flushSync()` drains synchronously supported work or rewrites a non-current file. It cannot confirm queued remote publication; those backends still require awaited `flush()`/drain.
 - Atomic full rewrites use storage `writeTextAtomic` with a commit guard and expected byte-size precondition; file storage stages then renames over the target, including an EPERM-safe move-aside fallback.
 - Local appends and publication share a cross-process publish lock. A changed byte size raises `SessionWriteConflictError`; lock contention raises `SessionLockError` without publishing the staged rewrite. This is not a content-hash comparison and cannot protect against non-cooperating external writers.
-- `FileSessionStorage` holds a process-owned OS lease on each session a process writes, keyed by the session id rather than the file's path, so every process that reaches one journal (through a symlink, a hard link, or after a move) meets the same lease. The lease is `pi-utils` `tryAcquireFileLock` on `<session-owners>/<session-id>`, where `<session-owners>` is `~/.omp/run/session-owners` (XDG: `$XDG_STATE_HOME/omp/run/session-owners`), shared across profiles: on Linux an abstract socket and on Windows a named mutex, neither of which creates a file; on macOS and other non-Linux Unix a `flock` on a sidecar in that directory. Only write paths claim it, so the first process to write a session owns it; opening a session to inspect it (`omp share`, `--export`, `render`) never does. Managers in one process share the lease; it is released on close or a session switch, and the kernel drops it when its process exits. Processes with different home or state directories do not meet in this lease. A plain copy of a session file keeps its id, so a process writing the copy while the original's writer is live moves to a sibling; a collab guest's replica takes its own id (`parentSession` is the host's) so it never contends with the host.
-- A process never writes a session whose lease another live process holds: its first write moves the session to a fresh sibling `<timestamp>_<new-session-id>.jsonl` in the same directory, publishes the whole in-memory transcript there once, and continues appending incrementally. The owner's file is left untouched. Like `fork`, the sibling gets a new session id with `parentSession` pointing at the old one and keeps the provider prompt-cache key, so resume-by-id, the title index, and the picker never see two files for one id. The artifacts directory is copied in the background without overwriting files the moved session has already written; its artifact manager waits for the copy before allocating ids or resolving `artifact://`, and `flush()`/`close()` await it. `local://` and `agent://` reads that bypass the artifact manager can miss pre-move files until the copy finishes.
+- `FileSessionStorage` holds a process-owned OS lease on each session a process writes, keyed by the session id rather than the file's path, so every process that reaches one journal (through a symlink, a hard link, or after a move) meets the same lease. The lease is `pi-utils` `tryAcquireFileLock` on `<session-owners>/<session-id>`, where `<session-owners>` is `~/.omp/run/session-owners` (XDG: `$XDG_STATE_HOME/omp/run/session-owners`), shared across profiles: on Windows a named mutex, which creates no file; on Linux an open-file-description (`F_OFD_SETLK`) lock and on macOS and other Unix a `flock`, both on a sidecar in that directory. On Linux a lease whose abstract-socket name an older omp build still binds also counts as held. Only write paths claim it, so the first process to write a session owns it; opening a session to inspect it (`omp share`, `--export`, `render`) never does. Managers in one process share the lease; it is released on close or a session switch, and the kernel drops it when its process exits. Processes with different home or state directories do not meet in this lease. A plain copy of a session file keeps its id, so a process writing the copy while the original's writer is live moves to a sibling; a collab guest's replica takes its own id (`parentSession` is the host's) so it never contends with the host.
+- A process never writes a session whose lease another live process holds: its first write moves the session to a fresh sibling `<timestamp>_<new-session-id>.jsonl` in the same directory, publishes the whole in-memory transcript there once, and continues appending incrementally. The owner's file is left untouched. Like `fork`, the sibling gets a new session id with `parentSession` pointing at the old one and keeps the provider prompt-cache key, so resume-by-id, the title index, and the picker never see two files for one id. The artifacts directory is copied in the background without overwriting files the moved session has already written; its artifact manager waits for the copy before allocating ids or resolving spills, and `flush()`/`close()` await it. `local://` and `agent://` reads that bypass the artifact manager can miss pre-move files until the copy finishes.
 - `moveTo()` refuses, before anything moves or any directory is created, to move a session another live process writes or to replace a destination file whose session (by its header id) another live process writes.
+- Another program can check ownership without claiming: `isSessionLeaseHeld(sessionId)`, `omp session lease --json -- <id>...` (`{"held": [...], "unknown": [...]}`), and RPC `get_session_lease` observe the lease without taking it (an `F_OFD_GETLK` query plus a connect probe of the older abstract-socket name on Linux, `F_GETLK` on other Unix, a `\BaseNamedObjects` directory listing on Windows), so they never make a concurrent claim fork the session.
 - Under `bun test`, the lease directory is `<os temp>/omp-test-session-owners-<uid>` instead of the real state directory. It is exported as `PI_TEST_SESSION_OWNERS_DIR` when `session-storage` loads; a test that spawns an omp process which writes sessions must pass `env: process.env` (Bun's default is the launch environment), or run under `ci-test-ts`, whose children inherit `PI_TEST_RUNTIME=1` and derive the same directory.
 - On the file and memory backends, a `SessionWriteConflictError` on durable bytes during a full rewrite means a writer without the lease (an older omp, an external tool) changed the file. The manager reads it back, keeps the entries it lacks as a side branch (the active leaf stays its own), and retries against the size it read, up to three times per rewrite. If that writer changes the file inside every retry, the session leaves the file to it and moves to a sibling (`reason: "contested"`) rather than re-serializing the transcript on every later write. A deleted file is recreated; a file that no longer reads as this session is left untouched and the session moves to a sibling. Indexed backends keep reporting the conflict, since there it can be the manager racing its own unconfirmed publish.
 - `appendEntriesAtomically()` groups a synchronous callback's appends into one atomic publication. Failure rolls back staged entries and repairs retained concurrent work.
@@ -592,7 +680,11 @@ The compress phase is opt-in as well: `--compress` or `gc.compress` (default off
 
 Other filesystems report the phase as unsupported.
 
-Journal payload I/O is streamed during blob-reference scans, archive history/stats reconciliation, gzip creation, and rollback. Active `.jsonl`, recoverable `.jsonl.*.bak`, and archived `.jsonl.gz` records all participate in reference discovery, including references in malformed JSON text. Compressed scans drain and validate the complete stream before their results can authorize deletion. Archives retain the original JSONL bytes when decompressed, and artifact trees keep their existing layout.
+The strip phase is opt-in too: `--strip` or `gc.strip` (default off). Providers return state only they can read back, which omp persists so a resumed turn replays natively: signed and encrypted reasoning, the verbatim wire response kept for prompt caching, request controls, uploaded-file references. Once a transcript has been idle for `gc.stripAfterDays` (default 30, `--strip-after-days`), past every provider's cache and response retention, the phase rewrites it without that state: incremental OpenAI Responses histories, Cursor and Gemini native histories, `requestControls`, `inputTransformations`, opaque `thinkingSignature`s, `itemId`s, `redactedThinking` blocks, tool-call `thoughtSignature`s and leftover streaming state, and image `providerFile` references. Each turn then reads like one recorded by another model, which every provider already replays (reasoning as plain text, or not at all). The latest replay turn keeps everything: its run of assistant responses joined by tool results, which a provider replays as one assistant message and validates as a unit, since a resumed tool loop must replay every one of those responses' reasoning unmodified. State with no copy elsewhere also stays: reasoning source markers (`reasoning_content`, including the one a chat-completions `reasoning_details` envelope carries, which the envelope is reduced to), text signatures (OpenAI message phase), Anthropic message controls and native compaction blocks, OpenAI snapshot histories, and compaction entries (an OpenAI remote compaction's stored summary is only a placeholder for its encrypted history). It covers each session's transcript and the subagent transcripts in its artifact tree, under the same ownership-lease rules as compression, and archived `.jsonl.gz` sessions, which are recompressed. Lines without replay data keep their bytes, the title slot included, and the transcript keeps its mtime, so session ordering is unchanged; the stats database reparses a rewritten transcript once. The phase runs before archiving and compression so both store the stripped transcripts.
+
+To compress without running the command, enable `gc.autoCompress` (default off). Once an interactive session has painted its first frame, omp starts a detached `omp gc --compress --apply` at low CPU priority when the last background run is at least a day old and the sessions directory supports compression. Support is checked by compressing a throwaway probe file in the sessions directory, so a volume whose compressor stores files uncompressed (macOS 27's `ditto --hfsCompression`, #16244) is not copied and hashed every day; when the check fails, `gc-auto-compress.log` records why and the next check is a day later. Launches claim the run under an OS lock keyed on the log and recheck the interval while holding it, so simultaneous launches start one child. The child outlives the launching session, writes its summary to `gc-auto-compress.log` in the agent dir, and that file's mtime marks the last run; a spawn that fails removes the log so the next launch retries. The child takes `gc.lock` like any other gc run, so a run that finds gc already running exits with that error in the log and is retried a day later. A file that compresses but does not shrink stays a candidate and is copied again on later runs. Print, RPC, and ACP launches never start it.
+
+Journal payload I/O is streamed during blob-reference scans, archive history/stats reconciliation, gzip creation, and rollback. Active `.jsonl`, recoverable `.jsonl.*.bak`, and archived `.jsonl.gz` records all participate in reference discovery, including references in malformed JSON text. Compressed scans drain and validate the complete stream before their results can authorize deletion. Archives retain the original JSONL bytes when decompressed (less any replay data the strip phase removed), and artifact trees keep their existing layout.
 
 Streaming avoids materializing a whole journal; it does not make GC constant-memory. A single long record, reference sets, and history/stats identity collections still consume memory. Original files and temporary compressed output also coexist during archive publication.
 

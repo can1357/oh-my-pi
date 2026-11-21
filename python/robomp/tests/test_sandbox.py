@@ -1804,10 +1804,10 @@ def test_ensure_workspace_populates_from_natives_cache(tmp_path: Path, upstream_
     assert native_dir2.is_dir(), "populate should have created native/ on hit"
     node_name = f"pi_natives.{triple}.node"
     assert (native_dir2 / node_name).read_bytes() == b"ELFx"
-    # The .node is hardlinked, sharing the cache's inode.
     cached_node = cache.entry_dir("octo/widget", key) / node_name
     ws2_node = native_dir2 / node_name
-    assert cached_node.stat().st_ino == ws2_node.stat().st_ino
+    ws2_node.write_bytes(b"workspace rewrite")
+    assert cached_node.read_bytes() == b"ELFx"
 
 
 def test_ensure_workspace_cache_miss_is_silent_noop(tmp_path: Path, upstream_repo: Path) -> None:

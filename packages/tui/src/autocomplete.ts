@@ -226,9 +226,25 @@ export interface AutocompleteItem {
 	state?: string;
 	/** Dim hint text shown inline after cursor when this item is selected */
 	hint?: string;
+	/**
+	 * Slash command matched only through its description, not its name or an alias:
+	 * a browse hit, so Enter submits the typed text instead of running it unless the
+	 * user moved the selection onto it.
+	 */
+	descriptionMatch?: boolean;
 }
 
 type Awaitable<T> = T | Promise<T>;
+
+/**
+ * `^` model mention completion at the cursor. `unhandled` means no mention token there, or
+ * another completion outranks it, so the async {@link AutocompleteProvider.getSuggestions} decides.
+ * `pending` is a model discovery pass that may add candidates (it never rejects); re-query once it settles.
+ */
+export type ModelMentionCompletion =
+	| { kind: "unhandled" }
+	| { kind: "no-match" }
+	| { kind: "matched"; suggestions: { items: AutocompleteItem[]; prefix: string }; pending?: Promise<void> };
 
 export interface SlashCommand {
 	name: string;
@@ -288,6 +304,11 @@ export interface AutocompleteProvider {
 	 * the collapsed `/skill:` namespace row. Returns null outside a command-name token or with no match.
 	 */
 	trySyncSlashCompletion?(textBeforeCursor: string): { items: AutocompleteItem[]; prefix: string } | null;
+	/**
+	 * Synchronously list `^` model mention completions for the token at the cursor, so a
+	 * shown mention popup never lags the typed text.
+	 */
+	trySyncModelMentionCompletion?(lines: string[], cursorLine: number, cursorCol: number): ModelMentionCompletion;
 	/**
 	 * Synchronously try to expand text immediately before the cursor (no async I/O).
 	 * Called after every single-character insert. Implementations MUST cheaply
@@ -437,6 +458,7 @@ function buildSlashCommandCompletions(
 						...(cmd.iconName && { iconName: cmd.iconName }),
 						...(fullDesc && { description: fullDesc }),
 						...nativeTextMemo,
+						...(nameScore === 0 && { descriptionMatch: true }),
 					};
 				}
 
@@ -444,7 +466,11 @@ function buildSlashCommandCompletions(
 					for (const alias of getCommandAliases(cmd)) {
 						if (alias === name) continue;
 						const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
-						if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
+						if (aliasScore === 0) continue;
+						// An alias can match even when the description outranks it; Enter
+						// must still accept the command rather than submit the raw query.
+						if (best?.descriptionMatch) delete best.descriptionMatch;
+						if (best && aliasScore <= best.score) continue;
 						const fullDesc = resolveFullDesc();
 						best = {
 							value: alias,
@@ -493,6 +519,13 @@ function commandBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
  * Match a bare skill name from the beginning of any hyphen-delimited segment.
  * This stays allocation-free on the hot path: it scans segment boundaries
  * in-place and never materializes split/slice arrays.
+ *
+ * Inner-segment hits rank at leading-prefix strength (900), never above it:
+ * a command whose name starts with the query must not lose to a skill that
+ * only contains the query mid-name (`/job` → `jobs` before
+ * `skill:…-job-…`; #18891). Only a bare-name-exact hit keeps the 1000 tier.
+ * Ties fall back to registry order in the stable sort, so builtins win, and
+ * {@link collapseSkillNamespace} keeps the popup command-only on a tie.
  */
 function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): number {
 	if (lowerPrefix.length === 0) return 0;
@@ -507,13 +540,7 @@ function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): 
 		segmentStart += 1;
 		if (segmentStart >= lowerBareName.length) break;
 
-		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) {
-			let segmentEnd = segmentStart;
-			while (segmentEnd < lowerBareName.length && lowerBareName.charCodeAt(segmentEnd) !== 45) {
-				segmentEnd += 1;
-			}
-			return lowerPrefix.length === segmentEnd - segmentStart ? 1000 : 900;
-		}
+		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) return 900;
 	}
 
 	return 0;
@@ -632,7 +659,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	#commands: CommandEntry[];
 	#basePath: string;
 	#commandUsage?: (name: string) => number;
-	// Intentionally separate from pi-natives cache: this cache is a local,
+	// Intentionally separate from omp-natives cache: this cache is a local,
 	// per-directory readdir fast-path for prefix completions. Global fuzzy
 	// discovery continues to use native fuzzyFind + shared scan cache.
 	#dirCache: Map<string, { entries: fs.Dirent[]; timestamp: number }> = new Map();

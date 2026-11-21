@@ -9,6 +9,7 @@ import type { PrivateModeReportHandler } from "@oh-my-pi/pi-tui/terminal";
 import * as capabilities from "@oh-my-pi/pi-tui/terminal-capabilities";
 import * as multiplexer from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { $ } from "bun";
+import { BackloggedTerminal } from "./backlogged-terminal";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 import { WidthReplayProvider } from "./width-replay-provider";
@@ -19,19 +20,14 @@ const SYNC_BEGIN = "\x1b[?2026h";
 const SYNC_END = "\x1b[?2026l";
 const REBUILDING = "↻ Rebuilding…";
 
-class RecordingTerminal extends VirtualTerminal {
+class RecordingTerminal extends BackloggedTerminal {
 	written: string[] = [];
-	pendingBytes = 0;
 	/** False records writes without feeding them to the VT engine (multi-MiB replays). */
 	mirror = true;
 	report?: PrivateModeReportHandler;
 
 	onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.report = callback;
-	}
-
-	get pendingOutputBytes(): number {
-		return this.pendingBytes;
 	}
 
 	override write(data: string): void {

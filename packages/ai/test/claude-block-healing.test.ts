@@ -1,12 +1,14 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
-import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeRankingStrategy, parseClaudeUsagePayload } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeResetClearedBlockScopes } from "@oh-my-pi/pi-ai/usage/claude-reset";
 
 /**
  * A reactive Fable 429 blocks the credential until the reset that error
@@ -17,23 +19,28 @@ import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
  * only when every limit gating that scope has headroom: the shared 5-hour wall
  * blocks Fable too, so a spent 5h window must keep the block alive.
  */
-function sharedLimit(id: string, windowId: string, usedFraction: number): UsageLimit {
+function sharedLimit(
+	id: string,
+	windowId: string,
+	usedFraction: number,
+	resetsAt = Date.now() + 60 * 60_000,
+): UsageLimit {
 	return {
 		id: `anthropic:${id}`,
 		label: id,
 		scope: { provider: "anthropic", shared: true, windowId },
-		window: { id: windowId, label: windowId, resetsAt: Date.now() + 60 * 60_000 },
+		window: { id: windowId, label: windowId, resetsAt },
 		amount: { usedFraction, unit: "percent" },
 		status: usedFraction >= 1 ? "exhausted" : "ok",
 	};
 }
 
-function tierLimit(tier: string, usedFraction: number): UsageLimit {
+function tierLimit(tier: string, usedFraction: number, resetsAt = Date.now() + 24 * 60 * 60_000): UsageLimit {
 	return {
 		id: `anthropic:7d:${tier}`,
 		label: `7d ${tier}`,
 		scope: { provider: "anthropic", tier, windowId: "7d" },
-		window: { id: "7d", label: "7d", resetsAt: Date.now() + 24 * 60 * 60_000 },
+		window: { id: "7d", label: "7d", resetsAt },
 		amount: { usedFraction, unit: "percent" },
 		status: usedFraction >= 1 ? "exhausted" : "ok",
 	};
@@ -46,6 +53,37 @@ function claudeReport(limits: UsageLimit[], fetchedAt = Date.now()): UsageReport
 		limits,
 		metadata: { accountId: "account-1" },
 	};
+}
+
+/**
+ * The live `/usage` shape of an account with no running 5-hour window:
+ * `five_hour: null` and no `session` row in `limits[]`.
+ */
+function noSessionPayload(weeklyPercent: number): Record<string, unknown> {
+	// Same reset horizon as the harness sibling, so ranking prefers this account whenever it is unblocked.
+	const weeklyReset = new Date(Date.now() + 60 * 60_000).toISOString();
+	return {
+		five_hour: null,
+		seven_day: { utilization: weeklyPercent, resets_at: weeklyReset },
+		seven_day_opus: null,
+		seven_day_sonnet: null,
+		limits: [
+			{ kind: "weekly_all", percent: weeklyPercent, resets_at: weeklyReset, scope: null, is_active: false },
+			{
+				kind: "weekly_scoped",
+				percent: 81,
+				resets_at: weeklyReset,
+				scope: { model: { id: null, display_name: "Fable" }, surface: null },
+				is_active: true,
+			},
+		],
+	};
+}
+
+function parsedReport(payload: Record<string, unknown>): UsageReport {
+	const report = parseClaudeUsagePayload(payload, { accountId: "account-1" });
+	if (!report) throw new Error("payload did not parse");
+	return report;
 }
 
 /**
@@ -82,11 +120,20 @@ interface HealHarness {
 	blocks: Map<string, number>;
 }
 
-function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarness {
-	const rows = [oauthRow(1), oauthRow(2)];
+function makeHarness(
+	report: UsageReport,
+	blockScope = "tier:fable",
+	options?: { reports?: UsageReport[]; blockedCredentialId?: number; blockedUntilMs?: number; seedBlock?: boolean },
+): HealHarness {
+	const rows = options?.reports ? options.reports.map((_, index) => oauthRow(index + 1)) : [oauthRow(1), oauthRow(2)];
 	const cache = new Map<string, { value: string; expiresAtSec: number }>();
 	const blocks = new Map<string, number>();
-	blocks.set(`1:${blockScope}`, Date.now() + 3 * 24 * 60 * 60_000);
+	if (options?.seedBlock !== false) {
+		blocks.set(
+			`${options?.blockedCredentialId ?? 1}:${blockScope}`,
+			options?.blockedUntilMs ?? Date.now() + 3 * 24 * 60 * 60_000,
+		);
+	}
 	const clearedScopes: string[] = [];
 	let probes = 0;
 	const store: AuthCredentialStore = {
@@ -122,6 +169,11 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 		id: "anthropic",
 		fetchUsage: async params => {
 			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			if (options?.reports) {
+				probes += 1;
+				const index = rows.findIndex(row => row.credential.type === "oauth" && row.credential.access === access);
+				return options.reports[index] ?? null;
+			}
 			if (access === "access-2") return nearlySpentSiblingReport();
 			probes += 1;
 			return report;
@@ -215,6 +267,156 @@ describe("claude usage-block healing", () => {
 
 		expect(clearedScopes).not.toContain("tier:fable");
 		expect(await storage.keys.get("anthropic", "s-partial", { modelId: "claude-fable-5-1" })).toBe("access-2");
+	});
+
+	it("heals a global block from a healthy partial report only when its reset matches the block deadline", async () => {
+		const resetAt = Date.now() + 60 * 60_000;
+		const { storage, clearedScopes } = makeHarness(claudeReport([sharedLimit("7d", "7d", 0, resetAt)]), "", {
+			blockedUntilMs: resetAt,
+		});
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		expect(await storage.keys.get("anthropic", "s-global-reset-match", { modelId: "claude-opus-5-5" })).toBe(
+			"access-1",
+		);
+		expect(clearedScopes).toContain("");
+	});
+
+	it("treats a reset within 60 seconds of the block deadline as a match", async () => {
+		const resetAt = Date.now() + 60 * 60_000;
+		const { storage, clearedScopes } = makeHarness(claudeReport([sharedLimit("7d", "7d", 0, resetAt)]), "", {
+			blockedUntilMs: resetAt + 59_000,
+		});
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).toContain("");
+	});
+
+	it("keeps a global block when the partial report's reset is more than 60 seconds off", async () => {
+		const resetAt = Date.now() + 60 * 60_000;
+		const { storage, clearedScopes, blocks } = makeHarness(claudeReport([sharedLimit("7d", "7d", 0, resetAt)]), "", {
+			blockedUntilMs: resetAt + 61_000,
+		});
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).not.toContain("");
+		expect(blocks.has("1:")).toBe(true);
+	});
+
+	it("keeps a global block when a healthy partial report has no reset", async () => {
+		const blockedUntil = Date.now() + 60 * 60_000;
+		const limit = sharedLimit("7d", "7d", 0);
+		const noReset: UsageLimit = { ...limit, window: { id: "7d", label: "7d" } };
+		const { storage, clearedScopes, blocks } = makeHarness(claudeReport([noReset]), "", {
+			blockedUntilMs: blockedUntil,
+		});
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).not.toContain("");
+		expect(blocks.has("1:")).toBe(true);
+	});
+
+	const partialKeepCases: { name: string; report: (resetAt: number) => UsageReport }[] = [
+		{
+			name: "its only window is exhausted",
+			report: resetAt => claudeReport([sharedLimit("7d", "7d", 1, resetAt)]),
+		},
+		{
+			name: "it comes from rate-limit headers",
+			report: resetAt => ({
+				...claudeReport([sharedLimit("7d", "7d", 0, resetAt)]),
+				metadata: { accountId: "account-1", source: "ratelimit-headers" },
+			}),
+		},
+		{
+			name: "a model-family weekly limit is exhausted",
+			report: resetAt => claudeReport([sharedLimit("7d", "7d", 0, resetAt), tierLimit("opus", 1)]),
+		},
+		{
+			name: "only a model-family row's reset matches the deadline",
+			report: resetAt => {
+				const tier = tierLimit("opus", 0);
+				return claudeReport([
+					sharedLimit("7d", "7d", 0, resetAt + 60 * 60_000),
+					{ ...tier, window: { id: "7d", label: "7d", resetsAt: resetAt } },
+				]);
+			},
+		},
+	];
+	for (const { name, report } of partialKeepCases) {
+		it(`keeps a global block from a reset-matching partial report when ${name}`, async () => {
+			const resetAt = Date.now() + 60 * 60_000;
+			const { storage, clearedScopes, blocks } = makeHarness(report(resetAt), "", { blockedUntilMs: resetAt });
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+			expect(clearedScopes).not.toContain("");
+			expect(blocks.has("1:")).toBe(true);
+		});
+	}
+
+	describe("tier block on a report carrying only the shared weekly window", () => {
+		const now = new Date("2026-11-17T12:00:00Z").getTime();
+		const resetAt = now + 60 * 60_000;
+		beforeEach(() => setSystemTime(now));
+		afterEach(() => setSystemTime());
+
+		it("heals once that window, whose reset the block carries, has room", async () => {
+			// A Fable 429 behind the shared weekly wall blocks `tier:fable` until
+			// that wall's reset; a report without the 5-hour window must lift it as
+			// it lifts the account-wide block, or failover never returns here.
+			const { storage, clearedScopes } = makeHarness(
+				claudeReport([sharedLimit("7d", "7d", 0.4, resetAt), tierLimit("fable", 0.8)]),
+				"tier:fable",
+				{ blockedUntilMs: resetAt },
+			);
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "s-tier-reset-match", { modelId: "claude-fable-5-1" })).toBe(
+				"access-1",
+			);
+			expect(clearedScopes).toContain("tier:fable");
+		});
+
+		const tierKeepCases: { name: string; report: () => UsageReport }[] = [
+			{
+				name: "its weekly row is exhausted",
+				report: () =>
+					claudeReport([sharedLimit("7d", "7d", 0, resetAt), tierLimit("fable", 1, resetAt - 30 * 60_000)]),
+			},
+			{
+				name: "it comes from rate-limit headers",
+				report: () => ({
+					...claudeReport([sharedLimit("7d", "7d", 0, resetAt), tierLimit("fable", 0)]),
+					metadata: { accountId: "account-1", source: "ratelimit-headers" },
+				}),
+			},
+		];
+		for (const { name, report } of tierKeepCases) {
+			it(`keeps it when ${name}`, async () => {
+				const { storage, clearedScopes, blocks } = makeHarness(report(), "tier:fable", { blockedUntilMs: resetAt });
+				storages.push(storage);
+				await storage.credentials.reload();
+
+				await storage.health.model("anthropic", { modelId: "claude-fable-5-1", reserveFraction: 0.1 });
+
+				expect(clearedScopes).not.toContain("tier:fable");
+				expect(blocks.has("1:tier:fable")).toBe(true);
+			});
+		}
 	});
 
 	it("heals a stale account-wide block without claiming to clear an absent tier row", async () => {
@@ -340,5 +542,229 @@ describe("claude usage-block healing", () => {
 		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("healthy");
 		expect(blocks.has("1:")).toBe(false);
 		expect(blocks.has("1:tier:fable")).toBe(false);
+	});
+
+	it("rotates a usage-limited session onto a sibling whose stale block live usage lifts", async () => {
+		// Every sibling looked blocked, so rotation reported no switch and the turn
+		// waited out the provider's multi-day retry-after, though the next resolve
+		// would have served the recovered account.
+		const { storage } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+		storage.sessions.pin("anthropic", "s-rotate", 2);
+
+		const mark = await storage.limits.markReached("anthropic", "s-rotate", {
+			modelId: "claude-sonnet-5-5",
+			retryAfterMs: 38 * 60 * 60_000,
+			providerTimed: true,
+		});
+
+		expect(mark.switched).toBe(true);
+		expect(await storage.keys.get("anthropic", "s-rotate", { modelId: "claude-sonnet-5-5" })).toBe("access-1");
+	});
+
+	describe("an account with no running 5-hour window", () => {
+		it("heals a stale account-wide block", async () => {
+			const { storage, blocks } = makeHarness(parsedReport(noSessionPayload(55)), "");
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "no-session", { modelId: "claude-opus-5-5" })).toBe("access-1");
+			expect(blocks.has("1:")).toBe(false);
+		});
+
+		it("keeps the block while the weekly window is spent", async () => {
+			const { storage, blocks } = makeHarness(parsedReport(noSessionPayload(100)), "");
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "no-session-spent", { modelId: "claude-opus-5-5" })).toBe(
+				"access-2",
+			);
+			expect(blocks.has("1:")).toBe(true);
+		});
+
+		it("keeps the block when the 5-hour field is missing rather than null", async () => {
+			const { five_hour: _omitted, ...payload } = noSessionPayload(55);
+			const { storage, blocks } = makeHarness(parsedReport(payload), "");
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "no-field", { modelId: "claude-opus-5-5" })).toBe("access-2");
+			expect(blocks.has("1:")).toBe(true);
+		});
+
+		it("clears the account-wide block after a weekly reset", () => {
+			expect(claudeResetClearedBlockScopes(["anthropic:7d"], parsedReport(noSessionPayload(55)))).toContain(
+				undefined,
+			);
+		});
+	});
+});
+
+describe("Claude Mythos rotation with a stale usable sibling", () => {
+	for (const hasSession of [false, true]) {
+		it(`serves B after A's 429 without restoring Mythos-denied C/D (${hasSession ? "running" : "inactive"} 5h window)`, async () => {
+			const modelId = "claude-mythos-5-2";
+			const modelScope = `model-policy:${modelId}`;
+			const retryAfterMs = 77_000_000;
+			const reset = new Date(Date.now() + 60 * 60_000).toISOString();
+			const limits: Record<string, unknown>[] = [
+				{ kind: "weekly_all", percent: 20, resets_at: reset, scope: null, is_active: false },
+				{
+					kind: "weekly_scoped",
+					percent: 10,
+					resets_at: reset,
+					scope: { model: { id: null, display_name: "Mythos" }, surface: null },
+					is_active: true,
+				},
+			];
+			const payload: Record<string, unknown> = { ...noSessionPayload(20), limits };
+			if (hasSession) {
+				payload.five_hour = { utilization: 10, resets_at: reset };
+				limits.push({ kind: "session", percent: 10, resets_at: reset, scope: null, is_active: false });
+			}
+			const recovered = parsedReport(payload);
+			const healthy = claudeReport([
+				sharedLimit("5h", "5h", 0.1),
+				sharedLimit("7d", "7d", 0.2),
+				tierLimit("mythos", 0),
+			]);
+			const { storage, blocks } = makeHarness(recovered, "tier:mythos", {
+				reports: [healthy, recovered, healthy, healthy],
+				blockedCredentialId: 2,
+			});
+			try {
+				await storage.credentials.reload();
+				// Write entitlement blocks through the actual failure path, not
+				// by seeding the scope this regression is meant to protect.
+				const denial = new ProviderHttpError(
+					`404 {"type":"error","error":{"type":"not_found_error","message":"model: ${modelId}"}}`,
+					404,
+				);
+				for (const id of [3, 4]) {
+					await storage.limits.rotate("anthropic", "mythos-denial", {
+						error: denial,
+						apiKey: `access-${id}`,
+						modelId,
+					});
+				}
+
+				// An already active request on A need not rank/probe B first.
+				// B must still be stale when rotation judges sibling availability.
+				storage.sessions.pin("anthropic", "mythos-request", 1);
+				const first = await storage.keys.get("anthropic", "mythos-request", { modelId });
+				expect(first).toBe("access-1");
+				expect(blocks.has("2:tier:mythos")).toBe(true);
+				const before429 = Date.now();
+				const rotation = await storage.limits.rotate("anthropic", "mythos-request", {
+					apiKey: first,
+					modelId,
+					error: new ProviderHttpError(
+						`429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit."}} retry-after-ms=${retryAfterMs}`,
+						429,
+					),
+				});
+				const after429 = Date.now();
+				expect(rotation.switched).toBe(true);
+				expect(await storage.keys.get("anthropic", "mythos-request", { modelId })).toBe("access-2");
+				expect(blocks.has("2:tier:mythos")).toBe(false);
+				expect(blocks.get("1:tier:mythos")).toBeGreaterThanOrEqual(before429 + retryAfterMs);
+				expect(blocks.get("1:tier:mythos")).toBeLessThanOrEqual(after429 + retryAfterMs);
+				for (const id of [3, 4]) {
+					expect(blocks.get(`${id}:${modelScope}`)).toBeGreaterThan(Date.now());
+					expect(blocks.has(`${id}:auth`)).toBe(false);
+					expect(blocks.has(`${id}:account-policy`)).toBe(false);
+					expect(blocks.has(`${id}:`)).toBe(false);
+				}
+
+				// A denial of Mythos must not disable the same OAuth row for Opus.
+				storage.sessions.pin("anthropic", "opus-request", 3);
+				expect(await storage.keys.get("anthropic", "opus-request", { modelId: "claude-opus-5-5" })).toBe(
+					"access-3",
+				);
+				expect(blocks.get(`3:${modelScope}`)).toBeGreaterThan(Date.now());
+				expect(blocks.get(`4:${modelScope}`)).toBeGreaterThan(Date.now());
+			} finally {
+				storage.close();
+			}
+		});
+	}
+
+	it("rotates onto a sibling whose model-scoped weekly counter is labelled with another family", async () => {
+		// Anthropic meters Mythos on the scoped weekly row it labels "Fable"; row 2 holds a stale tier:mythos block.
+		const modelId = "claude-mythos-5-2";
+		const retryAfterMs = 186_987_000;
+		// The provider's hint is the binding row's reset countdown, so the report
+		// reset and the hint agree (as they did on the wire).
+		const failedReset = Date.now() + retryAfterMs;
+		const siblingReset = Date.now() + 74 * 60 * 60_000;
+		const failed = claudeReport([
+			sharedLimit("5h", "5h", 0),
+			sharedLimit("7d", "7d", 0.93, failedReset),
+			tierLimit("fable", 1, failedReset),
+		]);
+		const sibling = claudeReport([
+			sharedLimit("5h", "5h", 0.1, siblingReset),
+			sharedLimit("7d", "7d", 0.86, siblingReset),
+			tierLimit("fable", 0.05, siblingReset),
+		]);
+		const { storage, blocks } = makeHarness(failed, "tier:mythos", {
+			reports: [failed, sibling],
+			blockedCredentialId: 2,
+			blockedUntilMs: siblingReset,
+		});
+		try {
+			await storage.credentials.reload();
+			expect(blocks.has("2:tier:mythos")).toBe(true);
+
+			const before = Date.now();
+			const rotation = await storage.limits.rotate("anthropic", "scoped-label", {
+				apiKey: "access-1",
+				modelId,
+				error: new ProviderHttpError(
+					`429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}} retry-after-ms=${retryAfterMs}`,
+					429,
+				),
+			});
+			const after = Date.now();
+			expect(rotation.switched).toBe(true);
+			expect(await storage.keys.get("anthropic", "scoped-label", { modelId })).toBe("access-2");
+			expect(blocks.has("2:tier:mythos")).toBe(false);
+			const failedUntil = blocks.get("1:tier:mythos");
+			expect(failedUntil).toBeGreaterThanOrEqual(before + retryAfterMs);
+			expect(failedUntil).toBeLessThanOrEqual(after + retryAfterMs);
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("skips an account whose model-scoped weekly counter is exhausted, whatever its label", async () => {
+		// The same gauge gates Mythos requests, so selection must not route a Mythos
+		// turn onto an account sitting at 100% of it and eat a 429 first. Row 2 is
+		// given the tighter shared weekly window, so only the scoped row can move
+		// the choice off row 1.
+		const modelId = "claude-mythos-5-2";
+		const reset = Date.now() + 52 * 60 * 60_000;
+		const failed = claudeReport([
+			sharedLimit("5h", "5h", 0, reset),
+			sharedLimit("7d", "7d", 0.9, reset),
+			tierLimit("fable", 1, reset),
+		]);
+		const sibling = claudeReport([
+			sharedLimit("5h", "5h", 0.1, reset),
+			sharedLimit("7d", "7d", 0.95, reset),
+			tierLimit("fable", 0.05, reset),
+		]);
+		const { storage } = makeHarness(failed, "", { reports: [failed, sibling], seedBlock: false });
+		try {
+			await storage.credentials.reload();
+			expect(await storage.keys.get("anthropic", "capped-scoped", { modelId })).toBe("access-2");
+		} finally {
+			storage.close();
+		}
 	});
 });

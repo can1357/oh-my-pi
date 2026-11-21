@@ -7,19 +7,25 @@
  * entry per operation and hand it back as a native redirect, so handle I/O,
  * links, and metadata are the host filesystem's own. Other schemes are
  * read-only files holding their rendered resource bytes (or directories, for
- * enumerable containers). Writes reach only mutable file-written schemes
- * (`local://`), within the tier the command was approved at; handler-owned
- * writes (messages, process stdin, devices) stay with the `write` tool.
+ * enumerable containers). Writes reach mutable file-written schemes (`local://`)
+ * natively and handler-written schemes (`proc://`, `agent://`, `cfg://`,
+ * `out://`, …) through write-only handles whose bytes become one handler write
+ * when the handle closes, all within the tier the command was approved at.
  *
  * Node types never depend on the operation: a bare `skill://<name>` is the
  * skill directory everywhere (its instructions are `skill://<name>/SKILL.md`),
  * and a symlink whose target is a URL is followed through this filesystem
  * while `readlink` keeps its literal spelling.
+ *
+ * A URL ending in a read selector names what `read` shows for it: `:raw` is the
+ * entry itself, and a line selector (`:10-20`, `:raw:5`, `:-30`) is a read-only
+ * file holding exactly those lines. An existing entry spelled that way wins.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ToolTier } from "@oh-my-pi/pi-agent-core";
 import {
+	type ShellFileChange,
 	type ShellFilesystem,
 	ShellFsFileType,
 	type ShellFsMetadata,
@@ -31,19 +37,28 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { isFsError } from "@oh-my-pi/pi-utils";
 import { TIER_RANK } from "../tools/approval";
+import { type ParsedSelector, parseSel, resolveTailSelector } from "../tools/read-selector";
 import { UrlContainmentError } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
 import { InternalUrlRouter } from "./router";
-import type { InternalResource, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
+import type {
+	InternalResource,
+	InternalWriteResult,
+	ProtocolHandler,
+	ResolveContext,
+	SchemeSpec,
+	WriteContext,
+} from "./types";
 
 const URL_PATH_RE = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/is;
 /** Symlink hops before ELOOP (Linux MAXSYMLINKS). */
 const MAX_SYMLINK_HOPS = 40;
 const VIRTUAL_FILE_MODE = 0o444;
 const VIRTUAL_DIR_MODE = 0o555;
+const SINK_FILE_MODE = 0o222;
 const ERRNO_CODE_RE = /^E[A-Z0-9]+$/;
 const DENIED_MESSAGE_RE = /\b(?:not allowed|escapes|outside)\b/i;
-const INVALID_MESSAGE_RE = /\b(?:requires? an?|invalid|malformed)\b/i;
+const INVALID_MESSAGE_RE = /\b(?:requires? an?|invalid|malformed|must be numeric)\b/i;
 const MISSING_MESSAGE_RE = /\b(?:not found|unknown|does not exist|no such|unavailable)\b/i;
 
 /** Whether `input` is spelled `scheme://…`: the only form the shell filesystem hands to URL handlers. */
@@ -63,7 +78,7 @@ export class UrlFsError extends Error {
 	}
 }
 
-/** A URL split at its mount root, with `.`/`..`/empty segments resolved lexically. */
+/** A URL split at its mount root; remote paths keep their server-side path semantics. */
 interface UrlPath {
 	scheme: string;
 	/** `scheme://` when the authority is a path segment (local://), else `scheme://<authority>`. */
@@ -76,6 +91,12 @@ function parseUrlPath(input: string, spec: SchemeSpec): UrlPath {
 	const match = URL_PATH_RE.exec(input);
 	if (!match) throw new UrlFsError("EINVAL", `Not a URL path: ${input}`);
 	const scheme = match[1].toLowerCase();
+	if (spec.backing === "remote" && !spec.pathAuthority) {
+		// Remote .. may cross a symlink or the /~/ account-home boundary. It
+		// cannot be collapsed locally, and must never pop the URL authority.
+		const [authority, ...segments] = match[2].split("/");
+		return { scheme, root: `${scheme}://${authority}`, segments };
+	}
 	// The authority takes part in `..` resolution: `skill://a/..` is `skill://`.
 	const segments: string[] = [];
 	for (const part of match[2].split("/")) {
@@ -87,12 +108,16 @@ function parseUrlPath(input: string, spec: SchemeSpec): UrlPath {
 	return { scheme, root: `${scheme}://${segments[0] ?? ""}`, segments: segments.slice(1) };
 }
 
+/** `scheme:`: a bare `scheme://` root once its slashes are trimmed. */
+const BARE_SCHEME_RE = /^[a-z][a-z0-9+.-]*:$/i;
+
 /** `url` followed by `segments`, without doubling the slash after a bare `scheme://`. */
 function appendSegments(url: string, segments: readonly string[]): string {
 	if (segments.length === 0) return url;
 	const trimmed = url.replace(/\/+$/, "");
-	// Trimming `scheme://` leaves `scheme:`; its segments follow the `//` directly.
-	return trimmed.endsWith(":") ? `${trimmed}//${segments.join("/")}` : `${trimmed}/${segments.join("/")}`;
+	// Trimming `scheme://` leaves `scheme:`; its segments follow the `//` directly. An authority
+	// may end in `:` too: a wrapped resource URI (`mcp://test://x`) keeps its `test:` authority.
+	return BARE_SCHEME_RE.test(trimmed) ? `${trimmed}//${segments.join("/")}` : `${trimmed}/${segments.join("/")}`;
 }
 
 function formatUrlPath(target: UrlPath): string {
@@ -127,7 +152,7 @@ function encodeSegment(name: string): string {
 
 /**
  * `base` URL followed by a `/`-separated path of raw entry names (a native
- * walk's root-relative result), each name percent-encoded as `pi_vfs::child_path` does.
+ * walk's root-relative result), each name percent-encoded as `omp_vfs::child_path` does.
  */
 export function joinUrlPath(base: string, relative: string): string {
 	return appendSegments(
@@ -168,9 +193,36 @@ interface VirtualNode {
 	entries?: ReadonlyMap<string, ShellFsFileType>;
 	/** Host directory a directory resource lists. */
 	sourcePath?: string;
+	/** JSON path named no stored value. Bytes stay the `"null"` sentinel. */
+	absent?: boolean;
 }
 
 type FsNode = NativeNode | HostNode | VirtualNode;
+
+/**
+ * Write-only handle on a handler-written URL (`proc://<id>/kill`, `agent://<id>`, `out://`, …):
+ * bytes buffer until close, then reach the scheme's `write()` as one payload.
+ */
+interface WriteSink {
+	kind: "sink";
+	url: string;
+	/** A reply URL (`out://`): blank text is dropped, and delivered text also reaches the run's reply sink. */
+	reply: boolean;
+	chunks: Uint8Array[];
+	size: number;
+	/** The scheme's `write.maxBytes`; writes past it fail with EFBIG and discard the payload. */
+	maxBytes: number;
+	overflowed: boolean;
+}
+
+/** A handler's answer to one write a shell command made to a handler-written URL other than a reply. */
+export interface UrlWriteReport {
+	url: string;
+	/** The handler's model-facing text, or why the write was refused; empty when the handler said nothing. */
+	text: string;
+	/** The write was refused; the command saw its open, write, or close fail. */
+	failed: boolean;
+}
 
 /** Handler and spec serving a URL's scheme (the MCP resource fallback has no handler of its own). */
 interface Route {
@@ -205,6 +257,32 @@ function childEntries(leaves: Iterable<string>, url: string): Map<string, ShellF
 	return entries;
 }
 
+/** A read selector naming lines of its resource, pinned to absolute lines or counted from the end. */
+type LineSelector = Extract<ParsedSelector, { kind: "lines" | "tail" }>;
+
+/**
+ * Bytes of the lines `selector` names in `bytes`, each with its terminator, in
+ * file order. Lines past the end select nothing, as `sed -n` prints nothing for them.
+ */
+function selectLines(bytes: Uint8Array, selector: LineSelector): Uint8Array {
+	const starts: number[] = [];
+	if (bytes.length > 0) {
+		starts.push(0);
+		for (let at = bytes.indexOf(10); at !== -1 && at + 1 < bytes.length; at = bytes.indexOf(10, at + 1)) {
+			starts.push(at + 1);
+		}
+	}
+	const resolved = resolveTailSelector(selector, starts.length);
+	if (resolved.kind !== "lines") return bytes;
+	const chunks: Uint8Array[] = [];
+	for (const { startLine, endLine } of resolved.ranges) {
+		if (startLine > starts.length) break;
+		const end = endLine === undefined || endLine >= starts.length ? bytes.length : starts[endLine];
+		chunks.push(bytes.subarray(starts[startLine - 1], end));
+	}
+	return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
+}
+
 async function isHostDirectory(hostPath: string): Promise<boolean> {
 	try {
 		return (await fs.stat(hostPath)).isDirectory();
@@ -225,6 +303,11 @@ export interface UrlFileStat {
 	size: number;
 	/** Host modification time; 0 for rendered resources, which have none. */
 	mtimeMs: number;
+	/**
+	 * The URL named no stored JSON value. Bytes are still the `"null"` sentinel.
+	 * Only the search-list split probe treats this as missing.
+	 */
+	absent?: boolean;
 }
 
 export interface InternalUrlFilesystemOptions {
@@ -232,6 +315,26 @@ export interface InternalUrlFilesystemOptions {
 	context: ResolveContext;
 	/** Approval tier the shell command ran under; schemes whose read or write tier exceeds it are refused. */
 	tier: ToolTier;
+	/**
+	 * Receives the text a command wrote to a reply URL (`out://`) once its handle closes, after
+	 * the scheme's handler accepted it. Absent: reply URLs refuse writes (EROFS).
+	 */
+	onReply?: (text: string) => void;
+	/**
+	 * Receives the handler's answer to each write a command made to another handler-written URL
+	 * (`proc://<id>/kill`, `agent://<id>`, …), including refusals: on Unix the shell
+	 * reports only the errno, so this is where the reason surfaces. Absent: such URLs refuse writes
+	 * (EROFS), so search and edit tools never act through a handler.
+	 */
+	onWrite?: (report: UrlWriteReport) => void;
+	/**
+	 * Receives each host text file git would track that a command changed itself, with its
+	 * content before and after: a builtin's write, rename or removal (`sed -i`, `cp`, `mv`, `rm`)
+	 * and a redirection's target, once the command is done with it. Absent: changes are not tracked.
+	 */
+	onFileChange?: (change: ShellFileChange) => void;
+	/** Tool call the command runs under; handler writes carry its id. */
+	toolCallId?: string;
 }
 
 /**
@@ -243,7 +346,11 @@ export class InternalUrlFilesystem {
 	readonly #router: InternalUrlRouter;
 	readonly #context: ResolveContext;
 	readonly #tier: ToolTier;
-	readonly #handles = new Map<number, VirtualNode>();
+	readonly #onReply: ((text: string) => void) | undefined;
+	readonly #onWrite: ((report: UrlWriteReport) => void) | undefined;
+	readonly #onFileChange: ((change: ShellFileChange) => void) | undefined;
+	readonly #toolCallId: string | undefined;
+	readonly #handles = new Map<number, VirtualNode | WriteSink>();
 	#nextHandle = 1;
 	/** Sandbox schemes whose session root this run has already created. */
 	readonly #sandboxRoots = new Set<string>();
@@ -257,14 +364,24 @@ export class InternalUrlFilesystem {
 		// Directory nodes never serve their rendered listing, so handlers skip building it.
 		this.#context = { ...options.context, skipDirectoryListing: true };
 		this.#tier = options.tier;
+		this.#onReply = options.onReply;
+		this.#onWrite = options.onWrite;
+		this.#onFileChange = options.onFileChange;
+		this.#toolCallId = options.toolCallId;
 	}
 
 	/** Native shell binding: URL paths reach {@link handle}; host paths stay on the native filesystem. */
 	shellFilesystem(): ShellFilesystem {
+		const onFileChange = this.#onFileChange;
 		return {
 			handler: (error, request) =>
 				error ? Promise.resolve({ error: { code: "EIO", message: error.message } }) : this.handle(request),
 			nativeLocalPaths: true,
+			onFileChange:
+				onFileChange &&
+				((error, change) => {
+					if (!error) onFileChange(change);
+				}),
 		};
 	}
 
@@ -292,9 +409,11 @@ export class InternalUrlFilesystem {
 		try {
 			const node = await this.#node(input, true, false);
 			if (node.kind === "virtual") {
-				return node.directory
+				const stat: UrlFileStat = node.directory
 					? { type: "directory", size: 0, mtimeMs: 0 }
 					: { type: "file", size: node.bytes.length, mtimeMs: 0 };
+				if (node.absent === true) stat.absent = true;
+				return stat;
 			}
 			const stats = await fs.stat(node.path);
 			return {
@@ -326,7 +445,10 @@ export class InternalUrlFilesystem {
 		// Handles are released even after the run is cancelled.
 		if (op === ShellFsOp.Close) {
 			const handle = requireField(request.handle, "handle", op);
-			if (!this.#handles.delete(handle)) throw new UrlFsError("EBADF", `Bad file handle: ${handle}`);
+			const file = this.#handles.get(handle);
+			if (!file) throw new UrlFsError("EBADF", `Bad file handle: ${handle}`);
+			this.#handles.delete(handle);
+			if (file.kind === "sink") await this.#deliver(file);
 			return {};
 		}
 		this.#throwIfAborted();
@@ -361,26 +483,52 @@ export class InternalUrlFilesystem {
 				return this.#open(requireField(request.path, "path", op), requireField(request.open, "open", op));
 			case ShellFsOp.Read: {
 				const file = this.#handle(request.handle);
+				if (file.kind === "sink") throw new UrlFsError("EBADF", `File is not open for reading: ${file.url}`);
 				const start = Number(requireField(request.offset, "offset", op));
 				const end = Math.min(file.bytes.length, start + requireField(request.length, "length", op));
 				return { data: start >= end ? new Uint8Array() : file.bytes.subarray(start, end) };
 			}
-			case ShellFsOp.Write:
-				this.#handle(request.handle);
-				throw new UrlFsError("EBADF", "File is not open for writing");
+			case ShellFsOp.Write: {
+				const file = this.#handle(request.handle);
+				if (file.kind !== "sink") throw new UrlFsError("EBADF", "File is not open for writing");
+				const data = requireField(request.data, "data", op);
+				if (file.overflowed || file.size + data.length > file.maxBytes) {
+					const error = new UrlFsError(
+						"EFBIG",
+						`${schemeOf(file.url)}:// writes are capped at ${file.maxBytes} bytes`,
+					);
+					if (file.overflowed) throw error;
+					// A truncated payload would read as complete; none of it is delivered.
+					file.overflowed = true;
+					file.chunks = [];
+					throw this.#refuseSink(file, error);
+				}
+				// The native side may reuse its buffer once the write is acknowledged.
+				file.chunks.push(Uint8Array.from(data));
+				file.size += data.length;
+				return { written: data.length, offset: file.size };
+			}
 			case ShellFsOp.Flush:
 			case ShellFsOp.Sync:
 				this.#handle(request.handle);
 				return {};
-			case ShellFsOp.FileMetadata:
-				return { metadata: virtualMetadata(this.#handle(request.handle)) };
+			case ShellFsOp.FileMetadata: {
+				const file = this.#handle(request.handle);
+				if (file.kind === "sink") {
+					return { metadata: { fileType: ShellFsFileType.File, size: file.size, mode: SINK_FILE_MODE } };
+				}
+				return { metadata: virtualMetadata(file) };
+			}
 			case ShellFsOp.IsLocked:
 				this.#handle(request.handle);
 				throw new UrlFsError("ENOTSUP", "Rendered resources do not expose advisory locks");
 			case ShellFsOp.SetLen:
 			case ShellFsOp.FileSetTimes:
-			case ShellFsOp.FileSetPermissions:
-				throw this.#readOnly(this.#handle(request.handle));
+			case ShellFsOp.FileSetPermissions: {
+				const file = this.#handle(request.handle);
+				if (file.kind === "sink") throw new UrlFsError("EINVAL", `Write-only handles only append: ${file.url}`);
+				throw this.#readOnly(file);
+			}
 			case ShellFsOp.CreateDir: {
 				// mkdir never follows its final component; `-p` creates missing parents inside the root.
 				const node = await this.#node(requireField(request.path, "path", op), request.recursive === true, true);
@@ -437,6 +585,10 @@ export class InternalUrlFilesystem {
 		if (!node.directory) throw new UrlFsError("ENOTDIR", `Not a directory: ${node.url}`);
 		if (node.entries) return { entries: Array.from(node.entries, ([name, fileType]) => ({ name, fileType })) };
 		if (node.sourcePath) return { local: node.sourcePath };
+		const handler = this.#router.getHandler(schemeOf(node.url));
+		if (handler?.readDirectory) {
+			return { entries: await handler.readDirectory(parseInternalUrl(node.url), this.#context) };
+		}
 		throw new UrlFsError("ENOTSUP", `${node.url} lists only through the read tool`);
 	}
 
@@ -450,11 +602,14 @@ export class InternalUrlFilesystem {
 
 	async #open(input: string, open: OpenRequest): Promise<ShellFsResponse> {
 		const create = open.create === true || open.createNew === true;
+		const writes = open.write === true || open.append === true || open.truncate === true || create;
+		if (writes && isUrlPath(input)) {
+			const { spec } = this.#route(input);
+			if (spec.write?.via === "handler") return this.#openSink(input, spec, open);
+		}
 		// O_EXCL never follows a final symlink; every other open does.
 		const node = await this.#node(input, open.createNew !== true, create);
-		if (open.write === true || open.append === true || open.truncate === true || create) {
-			return { local: this.#writablePath(node) };
-		}
+		if (writes) return { local: this.#writablePath(node) };
 		if (node.kind !== "virtual") {
 			// The native handle of a read-only scheme's backing file refuses fd-level mutation too.
 			return this.#writeRefusal(node) ? { local: node.path, readonly: true } : { local: node.path };
@@ -463,6 +618,99 @@ export class InternalUrlFilesystem {
 		const handle = this.#nextHandle++;
 		this.#handles.set(handle, node);
 		return { handle };
+	}
+
+	/**
+	 * Write-only handle on a handler-written URL. Refused without a consumer for the write (a reply
+	 * sink for `out://`, {@link InternalUrlFilesystemOptions.onWrite} otherwise), for reads, where
+	 * the gate denies the write, and for appends to targets whose content a handler write replaces.
+	 */
+	#openSink(url: string, spec: SchemeSpec, open: OpenRequest): ShellFsResponse {
+		const scheme = schemeOf(url);
+		const sink: WriteSink = {
+			kind: "sink",
+			url,
+			reply: spec.write?.scope === "reply",
+			chunks: [],
+			size: 0,
+			maxBytes: spec.write?.maxBytes ?? Number.POSITIVE_INFINITY,
+			overflowed: false,
+		};
+		if (sink.reply && !this.#onReply) {
+			throw new UrlFsError("EROFS", `${scheme}:// replies reach the user only from a foreground command: ${url}`);
+		}
+		if (!sink.reply && !this.#onWrite) throw this.#readOnly({ url, spec });
+		if (open.read === true) {
+			throw this.#refuseSink(sink, new UrlFsError("EACCES", `${scheme}:// write handles are write-only: ${url}`));
+		}
+		// Reply, process and message channels hold no content, so appending to one is writing to it.
+		if (open.truncate !== true && spec.backing !== "device" && spec.write?.scope !== "coordination") {
+			throw this.#refuseSink(
+				sink,
+				new UrlFsError(
+					"EINVAL",
+					`${scheme}:// writes replace ${url} whole; truncate (>) instead of appending (>>)`,
+				),
+			);
+		}
+		const refusal = this.#tierRefusal(url);
+		if (refusal) throw this.#refuseSink(sink, refusal);
+		const handle = this.#nextHandle++;
+		this.#handles.set(handle, sink);
+		return { handle };
+	}
+
+	/**
+	 * Hand a closed sink's bytes to its scheme's handler as one write. A reply drops blank text and
+	 * then reaches the run's reply sink; any other write reports the handler's answer, and a
+	 * refusal fails the close. An overflowed sink or a cancelled run delivers nothing.
+	 */
+	async #deliver(sink: WriteSink): Promise<void> {
+		if (sink.overflowed || this.#context.signal?.aborted) return;
+		let text: string;
+		try {
+			text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(sink.chunks));
+		} catch {
+			throw this.#refuseSink(
+				sink,
+				new UrlFsError("EINVAL", `${schemeOf(sink.url)}:// writes take UTF-8 text: ${sink.url}`),
+			);
+		}
+		// A handler write's tier is resolved from its payload, which the sink holds only once it closes.
+		const refusal = this.#tierRefusal(sink.url, text);
+		if (refusal) throw this.#refuseSink(sink, refusal);
+		if (sink.reply) {
+			if (text.trim().length === 0) return;
+			await this.#router.write(sink.url, text, this.#writeContext());
+			this.#onReply?.(text);
+			return;
+		}
+		let result: InternalWriteResult | void;
+		try {
+			result = await this.#router.write(sink.url, text, this.#writeContext());
+		} catch (error) {
+			if (this.#context.signal?.aborted) throw error;
+			const { code, message } = this.#errno(error);
+			throw this.#refuseSink(sink, new UrlFsError(code, message));
+		}
+		const answer = result ? result.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n") : "";
+		if (result?.isError === true) {
+			throw this.#refuseSink(sink, new UrlFsError("EIO", answer || `${sink.url} refused the write`));
+		}
+		this.#onWrite?.({ url: sink.url, text: answer, failed: false });
+	}
+
+	/** `error`, after reporting it as the refusal of a non-reply sink's write. */
+	#refuseSink(sink: WriteSink, error: UrlFsError): UrlFsError {
+		if (!sink.reply) this.#onWrite?.({ url: sink.url, text: error.message, failed: true });
+		return error;
+	}
+
+	/** Handler write context: the session's, cancelled by the run's signal, under the command's tool call. */
+	#writeContext(): WriteContext {
+		const { cwd, signal, localProtocolOptions, session } = this.#context;
+		const toolCall = this.#toolCallId === undefined ? undefined : { id: this.#toolCallId };
+		return { cwd, signal, localProtocolOptions, session, toolCall };
 	}
 
 	/**
@@ -549,6 +797,10 @@ export class InternalUrlFilesystem {
 		if (!isUrlPath(input)) return { kind: "native", path: input };
 		if (hops > MAX_SYMLINK_HOPS) throw new UrlFsError("ELOOP", `Too many levels of symbolic links: ${input}`);
 		const route = this.#route(input);
+		if (!create) {
+			const selected = await this.#selectedNode(route, input, follow, hops);
+			if (selected) return selected;
+		}
 		const { handler, spec } = route;
 		const target = parseUrlPath(input, spec);
 		const url = formatUrlPath(target);
@@ -584,16 +836,58 @@ export class InternalUrlFilesystem {
 		} catch (error) {
 			// A symlink holding a URL looks dangling to the host; follow it through this filesystem.
 			if (!(error instanceof UrlContainmentError)) throw error;
+			if (this.#context.containSkillPaths && schemeOf(url) === "skill") throw error;
 			const redirected = await this.#urlSymlinkTarget(route, target);
 			if (redirected === undefined) throw error;
 			return this.#node(redirected, follow, create, hops + 1);
 		}
 		if (located !== null) return { kind: "host", url, spec, path: located };
 		const redirected = await this.#urlSymlinkTarget(route, target);
-		if (redirected !== undefined) return this.#node(redirected, follow, create, hops + 1);
+		if (redirected !== undefined) {
+			if (this.#context.containSkillPaths && schemeOf(url) === "skill") {
+				throw new UrlContainmentError(`Skill link resolves outside its filesystem root: ${url}`);
+			}
+			return this.#node(redirected, follow, create, hops + 1);
+		}
 		if (create) throw this.#readOnly({ url, spec });
 		// No backing file (agent://<id>/<json-path>) or a missing entry: the handler renders it or reports why not.
 		return this.#virtualNode(route, target, url);
+	}
+
+	/**
+	 * The node a URL ending in a read selector names: the selector-free URL's own
+	 * node for `:raw`, a read-only file of the selected lines for a line selector.
+	 * Undefined when `input` ends in neither, or spells an existing entry.
+	 */
+	async #selectedNode(route: Route, input: string, follow: boolean, hops: number): Promise<FsNode | undefined> {
+		const { path: bare, sel } = this.#router.split(input);
+		if (sel === undefined) return undefined;
+		let selector: ParsedSelector;
+		try {
+			selector = parseSel(sel);
+		} catch (error) {
+			throw new UrlFsError("EINVAL", error instanceof Error ? error.message : String(error));
+		}
+		if (selector.kind !== "raw" && selector.kind !== "lines" && selector.kind !== "tail") return undefined;
+		if (await this.#entryExists(route, input)) return undefined;
+		if (selector.kind === "raw") return this.#node(bare, follow, false, hops);
+		const node = await this.#node(bare, true, false, hops);
+		if (node.kind === "virtual" && node.directory) throw new UrlFsError("EISDIR", `Is a directory: ${node.url}`);
+		const bytes = node.kind === "virtual" ? node.bytes : await Bun.file(node.path).bytes();
+		return { kind: "virtual", url: input, spec: route.spec, directory: false, bytes: selectLines(bytes, selector) };
+	}
+
+	/** Whether a file-backed scheme holds an entry spelled exactly `input`. */
+	async #entryExists(route: Route, input: string): Promise<boolean> {
+		if (!route.handler?.locate || route.spec.backing !== "file") return false;
+		try {
+			const located = await this.#locate(route, formatUrlPath(parseUrlPath(input, route.spec)), false);
+			if (located === null) return false;
+			await fs.lstat(located);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	/**
@@ -639,7 +933,7 @@ export class InternalUrlFilesystem {
 				return { kind: "virtual", url, spec, directory: true, bytes: new Uint8Array(), entries };
 			}
 		}
-		let resource: InternalResource;
+		let resource: InternalResource<string | Buffer>;
 		try {
 			resource = await this.#router.resolve(url, this.#context);
 		} catch (error) {
@@ -658,7 +952,14 @@ export class InternalUrlFilesystem {
 				sourcePath: resource.sourcePath,
 			};
 		}
-		return { kind: "virtual", url, spec, directory: false, bytes: Buffer.from(resource.content, "utf-8") };
+		return {
+			kind: "virtual",
+			url,
+			spec,
+			directory: false,
+			bytes: typeof resource.content === "string" ? Buffer.from(resource.content, "utf-8") : resource.content,
+			...(resource.absent === true ? { absent: true } : {}),
+		};
 	}
 
 	#enumerated(scheme: string): Promise<Map<string, string>> {
@@ -715,10 +1016,19 @@ export class InternalUrlFilesystem {
 		if (node.kind === "native") return undefined;
 		if (node.kind === "virtual" || node.spec.write?.via !== "file" || node.spec.immutable)
 			return this.#readOnly(node);
-		const decision = this.#router.writeTier(node.url, undefined, this.#context.session);
-		const scheme = schemeOf(node.url);
+		return this.#tierRefusal(node.url);
+	}
+
+	/**
+	 * Why the write gate refuses writing `content` (unknown before a handle closes) to `url`: a
+	 * denying scheme, or a tier above this command's. Undefined when it allows the write.
+	 */
+	#tierRefusal(url: string, content?: string): UrlFsError | undefined {
+		const session = this.#context.session;
+		const decision = this.#router.writeTier(url, content, session);
+		const scheme = schemeOf(url);
 		if (typeof decision !== "string" && decision.policy === "deny") {
-			return new UrlFsError("EROFS", decision.reason ?? `${scheme}:// is read-only: ${node.url}`);
+			return new UrlFsError("EROFS", decision.reason ?? `${scheme}:// is read-only: ${url}`);
 		}
 		const tier = typeof decision === "string" ? decision : decision.tier;
 		if (TIER_RANK[tier] > TIER_RANK[this.#tier]) {
@@ -735,12 +1045,12 @@ export class InternalUrlFilesystem {
 		return new UrlFsError(
 			"EROFS",
 			node.spec.write?.via === "handler"
-				? `${scheme}:// is written through the write tool, not the shell: ${node.url}`
+				? `${scheme}:// takes only whole writes (a bash redirect or the write tool): ${node.url}`
 				: `${scheme}:// is read-only: ${node.url}`,
 		);
 	}
 
-	#handle(handle: number | undefined): VirtualNode {
+	#handle(handle: number | undefined): VirtualNode | WriteSink {
 		const file = handle === undefined ? undefined : this.#handles.get(handle);
 		if (!file) throw new UrlFsError("EBADF", `Bad file handle: ${handle}`);
 		return file;

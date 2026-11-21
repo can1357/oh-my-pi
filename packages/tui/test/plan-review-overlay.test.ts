@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { PlanReviewOverlay, type PlanReviewOverlayChoice } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
 
@@ -21,12 +21,18 @@ function render(component: PlanReviewOverlay): string {
 	return stripVTControlCharacters(component.render(80).join("\n"));
 }
 
-const APPROVAL_OPTIONS = [
+const APPROVAL_LABELS = [
 	"Approve and execute",
 	"Approve and compact context",
 	"Approve and keep context",
 	"Refine plan",
 ];
+/** Choices whose ids are their labels, so picks read as the option text. */
+const APPROVAL_OPTIONS: PlanReviewOverlayChoice[] = APPROVAL_LABELS.map(label => ({ id: label, label }));
+/** {@link APPROVAL_OPTIONS} with "Approve and keep context" disabled. */
+const KEEP_DISABLED: PlanReviewOverlayChoice[] = APPROVAL_OPTIONS.map((choice, i) =>
+	i === 2 ? { ...choice, disabled: "Context is too full" } : choice,
+);
 
 describe("PlanReviewOverlay", () => {
 	beforeAll(async () => {
@@ -55,7 +61,7 @@ describe("PlanReviewOverlay", () => {
 		expect(out).toContain("My Plan");
 		expect(out).toContain("step one then step two");
 		expect(out).toContain("Plan mode - next step");
-		for (const option of APPROVAL_OPTIONS) expect(out).toContain(option);
+		for (const option of APPROVAL_LABELS) expect(out).toContain(option);
 		expect(out).toContain("esc cancel");
 		// Outlined like the /copy overlay.
 		expect(out).toContain(theme.boxRound.topLeft);
@@ -128,7 +134,7 @@ describe("PlanReviewOverlay", () => {
 		// Disable index 2 ("Approve and keep context").
 		const overlay = new PlanReviewOverlay(
 			"plan",
-			{ promptTitle: "next", options: APPROVAL_OPTIONS, disabledIndices: [2] },
+			{ promptTitle: "next", options: KEEP_DISABLED },
 			{ onPick, onCancel: vi.fn() },
 		);
 		// 0 -> 1 -> (skip 2) -> 3.
@@ -1003,6 +1009,75 @@ describe("PlanReviewOverlay", () => {
 		expect(feedback).toContain("Goal");
 	});
 
+	it("offers Refine first and preselected only while the plan has feedback", () => {
+		const onPick = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			SECTION_PLAN,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS, refine: { id: "refine", label: "Refine with notes" } },
+			{ onPick, onCancel: vi.fn(), onPlanEdited: vi.fn() },
+		);
+		expect(render(overlay)).not.toContain("Refine with notes");
+		overlay.handleInput(TAB); // -> toc (Overview)
+		overlay.handleInput(DOWN); // -> Goal
+		overlay.handleInput("d"); // delete Goal: feedback now exists
+		expect(render(overlay)).toContain("Refine with notes");
+		overlay.handleInput("u"); // undo: no feedback, no Refine
+		expect(render(overlay)).not.toContain("Refine with notes");
+		overlay.handleInput("d");
+		overlay.handleInput(TAB); // -> body
+		overlay.handleInput(TAB); // -> actions, cursor on Refine
+		overlay.handleInput(ENTER);
+		expect(onPick).toHaveBeenCalledWith("refine");
+	});
+
+	it("saves through Save without closing the review", () => {
+		const onSave = vi.fn();
+		const onPick = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Plan\n\nbody\n",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS.slice(0, 1) },
+			{ onPick, onCancel: vi.fn(), onSave },
+		);
+		overlay.handleInput(DOWN); // -> Save
+		overlay.handleInput(ENTER);
+		expect(onSave).toHaveBeenCalledWith("# Plan\n\nbody\n");
+		expect(onPick).not.toHaveBeenCalled();
+		expect(render(overlay)).not.toContain("submitting");
+		overlay.handleInput(UP);
+		overlay.handleInput(ENTER);
+		expect(onPick).toHaveBeenCalledWith("Approve and execute");
+	});
+
+	it("restores a quote annotation under the line holding the quote and lists it in the feedback", () => {
+		const onFeedbackChange = vi.fn();
+		const plan = "# Plan\n\n## Goal\n\nShip the credits ledger.\n\n## Steps\n\nWrite the migration.\n";
+		const at = "## Steps\n\n".length;
+		const overlay = new PlanReviewOverlay(
+			plan,
+			{
+				promptTitle: "next",
+				options: APPROVAL_OPTIONS,
+				annotationState: {
+					annotations: [
+						{
+							section: { index: 2, title: "Steps" },
+							target: { kind: "quote", quote: "the migration", at: at + "Write ".length },
+							note: "which table?",
+						},
+					],
+				},
+			},
+			{ onPick: vi.fn(), onCancel: vi.fn(), onFeedbackChange },
+		);
+		expect(onFeedbackChange).toHaveBeenLastCalledWith(
+			'Refinement feedback on the plan:\n\n## Steps\n> "the migration"\n- which table?\n',
+		);
+		const lines = render(overlay).split("\n");
+		const row = lines.findIndex(line => line.includes("Write the migration."));
+		expect(lines[row + 1]).toContain("“the migration”");
+		expect(lines[row + 2]).toContain("which table?");
+	});
+
 	it("drives the slider with both arrows even when a sidebar is present", () => {
 		const changes: number[] = [];
 		const slider: HookSelectorSlider = {
@@ -1093,7 +1168,7 @@ describe("PlanReviewOverlay", () => {
 	it("never hovers a disabled option", () => {
 		const overlay = new PlanReviewOverlay(
 			"plan body text",
-			{ promptTitle: "next", options: APPROVAL_OPTIONS, disabledIndices: [2] },
+			{ promptTitle: "next", options: KEEP_DISABLED },
 			{ onPick: vi.fn(), onCancel: vi.fn() },
 		);
 		const selectedBg = theme.getBgAnsi("selectedBg");

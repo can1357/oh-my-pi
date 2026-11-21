@@ -2,7 +2,13 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
-import { mapOpenAIReasoningEffort } from "../openai-shared";
+import { stripOpenAIResponsesInternalMetadataForReplay } from "../../utils";
+import {
+	mapOpenAIReasoningEffort,
+	type ResponsesToolCallKind,
+	responsesToolCallKind,
+	responsesToolOutputKind,
+} from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
 export type CodexReasoningContext = "auto" | "current_turn" | "all_turns";
@@ -50,6 +56,7 @@ export interface InputItem {
 	type?: string | null;
 	role?: string;
 	content?: unknown;
+	internal_chat_message_metadata_passthrough?: unknown;
 	call_id?: string | null;
 	name?: string;
 	output?: unknown;
@@ -179,14 +186,12 @@ function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
 
 	return input
 		.filter(item => item.type !== "item_reference")
-		.map(item => {
-			if (item.type === "computer_call") return item;
-			if (item.id != null) {
-				const { id: _id, ...rest } = item;
-				return rest as InputItem;
-			}
-			return item;
-		});
+		.map(item =>
+			stripOpenAIResponsesInternalMetadataForReplay(
+				item,
+				item.type !== "computer_call" && item.id != null ? "drop-id" : "preserve",
+			),
+		);
 }
 
 const CODEX_ORPHAN_OUTPUT_LIMIT = 16_000;
@@ -212,22 +217,6 @@ function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputIt
 		role: "assistant",
 		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
 	} as InputItem;
-}
-
-type ToolCallKind = "function" | "custom" | "computer";
-
-function toolCallKind(type: unknown): ToolCallKind | undefined {
-	if (type === "function_call") return "function";
-	if (type === "custom_tool_call") return "custom";
-	if (type === "computer_call") return "computer";
-	return undefined;
-}
-
-function toolOutputKind(type: unknown): ToolCallKind | undefined {
-	if (type === "function_call_output") return "function";
-	if (type === "custom_tool_call_output") return "custom";
-	if (type === "computer_call_output") return "computer";
-	return undefined;
 }
 
 /**
@@ -279,13 +268,13 @@ export function sanitizeInputCallIds(input: InputItem[]): void {
 }
 
 function repairToolCallPairs(input: InputItem[]): InputItem[] {
-	const callKinds = new Map<string, ToolCallKind>();
-	const outputKinds = new Map<string, ToolCallKind>();
+	const callKinds = new Map<string, ResponsesToolCallKind>();
+	const outputKinds = new Map<string, ResponsesToolCallKind>();
 	for (const item of input) {
 		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
 		if (callId === undefined) continue;
-		const callKind = toolCallKind(item.type);
-		const outputKind = toolOutputKind(item.type);
+		const callKind = responsesToolCallKind(item.type);
+		const outputKind = responsesToolOutputKind(item.type);
 		if (callKind) callKinds.set(callId, callKind);
 		if (outputKind) outputKinds.set(callId, outputKind);
 	}
@@ -293,8 +282,8 @@ function repairToolCallPairs(input: InputItem[]): InputItem[] {
 	const repaired: InputItem[] = [];
 	for (const item of input) {
 		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
-		const callKind = toolCallKind(item.type);
-		const outputKind = toolOutputKind(item.type);
+		const callKind = responsesToolCallKind(item.type);
+		const outputKind = responsesToolOutputKind(item.type);
 
 		if (outputKind && callId !== undefined && callKinds.get(callId) !== outputKind) {
 			repaired.push(orphanFunctionOutputToMessage(item, callId));
@@ -349,18 +338,67 @@ function stripImageDetails(input: unknown[]): void {
  */
 export interface CodexLiteShapedBody {
 	instructions?: unknown;
+	prompt_cache_key?: unknown;
 	tools?: unknown;
 	tool_choice?: unknown;
 	input?: unknown;
 	parallel_tool_calls?: unknown;
 }
 
+/** Request fields codex-rs serializes ahead of `input` (`ResponsesApiRequest`, `ResponseCreateWsRequest`). */
+const CODEX_ROUTING_FIELDS = ["type", "model", "stream", "service_tier", "previous_response_id"] as const;
+
+/**
+ * Returns a shallow copy whose routing fields lead in codex-rs order; every
+ * other field keeps its position. Since 0.161 (openai/codex#49675) codex-rs
+ * serializes `model`, `stream` and `service_tier` before a potentially
+ * multi-megabyte `input`, so gateways can route on the leading bytes.
+ * WebSocket frames keep `type` first, as serde's tagged enum does.
+ */
+export function withCodexRoutingFieldsFirst<T extends object>(body: T): T {
+	const ordered: Record<string, unknown> = {};
+	for (const key of CODEX_ROUTING_FIELDS) {
+		if (Object.hasOwn(body, key)) ordered[key] = (body as Record<string, unknown>)[key];
+	}
+	for (const [key, value] of Object.entries(body)) {
+		if (!Object.hasOwn(ordered, key)) ordered[key] = value;
+	}
+	return ordered as T;
+}
+
+/** Content-item kind codex-rs tags its base-instructions developer message with. */
+const CODEX_BASE_INSTRUCTIONS_KIND = "model.base_instructions";
+
+/**
+ * Moves top-level `instructions` into a leading developer message in place, as
+ * codex-rs has done for every Responses and `/responses/compact` request since
+ * 0.162 (openai/codex#51156): `BaseInstructionsFragment`, tagged
+ * `model.base_instructions`, with id `msg_<uuidv5(uuidv5(OID, thread), text)>`.
+ * The thread is the prompt cache key, so the id stays stable across retries and
+ * resumed sessions; without one the id is omitted. Empty instructions are
+ * dropped, matching codex-rs.
+ */
+export function moveCodexInstructionsToInput(body: CodexLiteShapedBody): void {
+	const text = body.instructions;
+	delete body.instructions;
+	if (typeof text !== "string" || text.length === 0) return;
+	const thread = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : "";
+	const item: InputItem = {
+		...(thread ? { id: `msg_${Bun.randomUUIDv5(text, Bun.randomUUIDv5(thread, "oid"))}` } : {}),
+		type: "message",
+		role: "developer",
+		content: [{ type: "input_text", text }],
+		internal_chat_message_metadata_passthrough: { content_item_kinds: [CODEX_BASE_INSTRUCTIONS_KIND] },
+	};
+	body.input = [item, ...(Array.isArray(body.input) ? body.input : [])];
+}
+
 /**
  * Applies the Responses Lite body contract in place (codex-rs
  * `build_responses_request` with `use_responses_lite`): strips pinned image
  * detail, forces parallel tool calling off, moves tools into a leading
- * `additional_tools` developer item and the base instructions into a
- * developer message, then omits top-level `instructions`/`tools`. Because the
+ * `additional_tools` developer item ahead of the base-instructions message
+ * ({@link moveCodexInstructionsToInput}), then omits top-level `tools`. Because the
  * rewrite removes top-level `tools`, a forced hosted-tool choice (e.g.
  * `{ type: "web_search" }`) would leave the backend unable to validate the
  * choice against a tools collection and it rejects the request with HTTP 400
@@ -371,6 +409,7 @@ export interface CodexLiteShapedBody {
  * paths — codex-rs routes `/responses/compact` through the same builder.
  */
 export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
+	moveCodexInstructionsToInput(body);
 	const input = Array.isArray(body.input) ? body.input : [];
 	stripImageDetails(input);
 	sanitizeInputCallIds(input as InputItem[]);
@@ -396,19 +435,10 @@ export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
 			body.tool_choice = "required";
 		}
 	}
-	const prefix: InputItem[] = [{ type: "additional_tools", role: "developer", tools: additionalTools }];
-	if (typeof body.instructions === "string" && body.instructions.length > 0) {
-		prefix.push({
-			type: "message",
-			role: "developer",
-			content: [{ type: "input_text", text: body.instructions }],
-		});
-	}
-	body.input = [...prefix, ...input];
+	body.input = [{ type: "additional_tools", role: "developer", tools: additionalTools }, ...input];
 	if (body.tool_choice !== "none" && body.tool_choice !== "required") {
 		body.tool_choice = "auto";
 	}
-	delete body.instructions;
 	delete body.tools;
 }
 
@@ -486,6 +516,7 @@ export async function transformRequestBody(
 		}
 	}
 
+	moveCodexInstructionsToInput(body);
 	const responsesLite = resolveCodexResponsesLite(options.responsesLite);
 	if (responsesLite) {
 		applyCodexResponsesLiteShape(body);

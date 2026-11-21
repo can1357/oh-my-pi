@@ -94,7 +94,7 @@ export const toolSchema = type({
 		name: "string >= 1",
 		"description?": "string",
 		"parameters?": type({ "[string]": "unknown" }),
-		/** OpenAI structured-output strict mode. Accepted, not enforced upstream. */
+		/** Preserve the caller's strict-mode choice for the upstream provider. */
 		"strict?": "boolean",
 	},
 });

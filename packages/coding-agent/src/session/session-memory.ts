@@ -50,7 +50,8 @@ export interface SessionMemoryHost {
 	setHindsightSessionState(state: HindsightSessionState | undefined): void;
 	getMnemopiSessionState(): MnemopiSessionState | undefined;
 	takeMnemopiSessionState(): MnemopiSessionState | undefined;
-	setBaseSystemPrompt(prompt: string[]): void;
+	/** Restores the base prompt captured before a memory promotion; the committed prompt sources stay. */
+	restoreBaseSystemPromptBeforeMemoryPromotion(prompt: string[]): void;
 	refreshBaseSystemPrompt(): Promise<void>;
 	replaceMemoryTools(tools: AgentTool[]): Promise<void>;
 }
@@ -232,7 +233,7 @@ export class SessionMemory {
 		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
 		if (hadPromotedMemoryPrompt) {
-			this.#host.setBaseSystemPrompt(this.#baseSystemPromptBeforeMemoryPromotion!);
+			this.#host.restoreBaseSystemPromptBeforeMemoryPromotion(this.#baseSystemPromptBeforeMemoryPromotion!);
 			this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		}
 		if (resetHindsight || resetMnemopi || hadPromotedMemoryPrompt) {

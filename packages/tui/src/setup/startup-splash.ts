@@ -1,10 +1,8 @@
 import { type Component, type OverlayFocusOwner } from "../tui";
 import { matchesKey } from "../keys";
-import { col } from "../native/describe";
-import type { NativeNode, NativeUiEvent } from "../native/node";
-import { Memo } from "../native/memo";
+import type { NativeNode, NativeScreen, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
-import type { SetupUiHost } from "./scenes/types";
+import { SETUP_SURFACE_ROLE, type SetupUiHost } from "./scenes/types";
 import { describeSetupSplash, renderSetupSplash, SETUP_SPLASH_MS, SETUP_TICK_MS } from "./scenes/splash";
 
 /** Timing controls for the standalone startup animation. */
@@ -19,7 +17,6 @@ class StartupSplashComponent implements Component, OverlayFocusOwner {
 	#timer: NodeJS.Timeout | undefined;
 	/** Native path: one-shot at the end of the splash; the terminal clocks the motion. */
 	#deadline: NodeJS.Timeout | undefined;
-	#native = new Memo();
 	#done = Promise.withResolvers<void>();
 	#disposed = false;
 	readonly #durationMs: number;
@@ -67,9 +64,13 @@ class StartupSplashComponent implements Component, OverlayFocusOwner {
 		return renderSetupSplash(Math.max(1, width), Math.max(1, this.ctx.ui.terminal.rows), elapsedMs);
 	}
 
+	/** The setup page's splash, on a screen surface of the setup page's role. */
+	describeScreen(): NativeScreen {
+		return { role: SETUP_SURFACE_ROLE, main: [this], dock: [] };
+	}
+
 	describe(): NativeNode {
-		const splash = describeSetupSplash();
-		return this.#native.get([splash], () => col([splash], { grow: 1, role: "omp.app.startup-splash" }));
+		return describeSetupSplash();
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {

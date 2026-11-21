@@ -1,8 +1,11 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
-import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
+import { CODEX_BASE_URL } from "../wire/codex";
+import { getCodexClientVersion } from "../wire/codex-version";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { decodeKiroCredential, kiroCredentialCacheScope } from "../wire/kiro";
+import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	SINGULARITYAPI_TECH_API_BASE_URL,
@@ -26,6 +29,27 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// than from the synchronous, credential-less startup read.
 	"singularityapi-dev": true,
 	"singularityapi-tech": true,
+	// Kimi Code's roster is plan-gated and discovery is authoritative, so a
+	// shared namespace would serve one plan's ids to another plan's credential.
+	"kimi-code": true,
+	// Otari's roster is the set of models one workspace enables, and discovery
+	// is authoritative, so a shared namespace would serve one workspace's ids,
+	// prices, and limits to another workspace's key for the full TTL.
+	otari: true,
+	// LiteLLM virtual keys have different /v1/models rosters on the same proxy.
+	litellm: true,
+	// Kiro's namespace is scoped per login route (OAuth) or per key and region
+	// (API key), so a synchronous bare-provider read would leak another
+	// credential's catalog or hide the scoped one.
+	kiro: true,
+	// Bifrost virtual keys can restrict the gateway's /v1/models roster per key.
+	bifrost: true,
+	// OpenRouter's keyed roster is the set of models the key's workspace
+	// guardrails allow, and discovery is authoritative.
+	openrouter: true,
+	// A Modal proxy token is workspace-scoped and the roster is the endpoints it
+	// may call, so a shared namespace would serve one workspace's ids to another.
+	modal: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -37,6 +61,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 	switch (providerId) {
 		case "charm-hyper":
 			return CHARM_HYPER_API_BASE_URL;
+		case "kimi-code":
+			return "https://api.kimi.com/coding/v1";
 		case "meta":
 		case "muse-code":
 			return "https://api.meta.ai/v1";
@@ -44,6 +70,12 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "modal":
+			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
+		case "otari":
+			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
+		case "bifrost":
+			return Bun.env.BIFROST_BASE_URL?.trim() || "http://localhost:8080/v1";
 		case "opencode-go":
 			return "https://opencode.ai/inference/go/v1";
 		case "opencode-zen":
@@ -71,11 +103,11 @@ export function resolveOllamaModelCacheProviderId(providerId: string, baseUrl?: 
 }
 
 /**
- * The `sub` claim of a Cursor access token. Cursor access tokens are JWTs
- * that `refreshCursorToken` rotates (new `exp`/`iat`) for the same account,
+ * The `sub` claim of a JWT access token. Cursor and Kimi Code access tokens
+ * are JWTs that refresh rotates (new `exp`/`iat`/`jti`) for the same account,
  * so the subject is the stable account scope. Non-JWT keys return undefined.
  */
-function cursorCredentialSubject(apiKey: string): string | undefined {
+function jwtCredentialSubject(apiKey: string): string | undefined {
 	const parts = apiKey.split(".");
 	if (parts.length !== 3 || !parts[1]) return undefined;
 	try {
@@ -97,8 +129,19 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// namespace must follow the endpoint. The official backend keeps the
 			// unhashed namespace so existing caches stay valid.
 			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "");
-			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${CODEX_CLIENT_VERSION}`;
-			return `${providerId}:${CODEX_CLIENT_VERSION}:${Bun.hash(baseUrl).toString(36)}`;
+			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${getCodexClientVersion()}`;
+			return `${providerId}:${getCodexClientVersion()}:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "kiro": {
+			// An undecodable credential gets its own namespace, never a shared one.
+			if (!options.apiKey) return providerId;
+			let scope: string;
+			try {
+				scope = kiroCredentialCacheScope(decodeKiroCredential(options.apiKey));
+			} catch {
+				scope = `invalid:${options.apiKey}`;
+			}
+			return `kiro:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
@@ -110,10 +153,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// from the KDL rate card; v4 keys the scope on the token's stable
 			// account subject instead of the rotating JWT; v5 drops rows that still
 			// mark the account default `isProviderDefault`, which startup now honors.
+			// v6 refetches rosters written while rich variants were gated on GetUsableModels slugs, which hid models Cursor serves (GLM 5.3, Grok 4.7).
 			const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
 			const apiKey = options.apiKey ?? "";
-			const scope = `${cursorCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
-			return `cursor:rich-models-v5:${Bun.hash(scope).toString(36)}`;
+			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
+			return `cursor:rich-models-v6:${Bun.hash(scope).toString(36)}`;
 		}
 		case "charm-hyper": {
 			// Discovery is authoritative for this gateway, so a warm cache is served
@@ -132,10 +176,26 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// `/v1`-suffixed one; both must land on one namespace.
 			return `charm-hyper:models-v1:${Bun.hash(normalizeCharmHyperBaseUrl(options.baseUrl)).toString(36)}`;
 		}
-		case "muse-code": {
+		case "kimi-code": {
+			// The `/coding/v1/models` roster depends on the subscription plan behind
+			// the credential, and discovery is authoritative: a namespace without the
+			// credential would serve the previous plan's roster for the full TTL,
+			// including ids the current plan cannot call. OAuth access tokens rotate on
+			// refresh, so the scope is the token's account subject, not the token.
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const apiKey = options.apiKey ?? "";
+			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
+			return `kimi-code:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		// Per-key rosters (Otari: one workspace's enabled models; Bifrost: one
+		// virtual key's allowed models) behind a configurable endpoint: scope by
+		// both so switching either re-runs discovery.
+		case "muse-code":
+		case "otari":
+		case "bifrost": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
+			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "singularityapi-dev":
 		case "singularityapi-tech": {
@@ -158,16 +218,21 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
+		case "modal": {
+			// The roster is the endpoints one proxy token may call on a deployment;
+			// switching either the token or MODAL_BASE_URL must re-run discovery.
+			const baseUrl = normalizeModalBaseUrl(options.baseUrl ?? Bun.env.MODAL_BASE_URL);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `modal:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
 		case "litellm": {
-			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			// rich-v12 invalidates namespaced ids that missed bare catalog references.
-			// rich-v11 excluded ClinePass gateway metadata (issue #10932). rich-v10
-			// filtered known non-conversational LiteLLM modes, unioned compat across
-			// the management endpoints, and keyed the deployment's `supports_vision`
-			// declaration into it; earlier versions invalidated rows whose
-			// `compatConfig` retained a colliding bundled model's provider-specific
-			// transport (e.g. Fireworks `wireModelIdMode`) (issue #9938).
-			return `litellm:rich-v12:${Bun.hash(baseUrl).toString(36)}`;
+			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).trim().replace(/\/+$/, "");
+			// The selectable roster is issued per virtual key; old rich-only
+			// snapshots must not survive the switch to scoped discovery. Bump the
+			// version whenever the LiteLLM mappers change, or warm caches keep
+			// serving pre-change rows for the full TTL (rich-v1…v14 history in git).
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `litellm:scoped-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "gmi-cloud":
 		case "siliconflow":
@@ -205,8 +270,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "factory-droid":
 			return factoryDroidModelCacheProviderId(options);
-		case "openrouter":
-			return "openrouter:pseudo-api";
+		case "openrouter": {
+			// `pseudo-api` keeps pre-`api: "openrouter"` caches out. A keyed
+			// `/models` is filtered by the workspace guardrails and discovery is
+			// authoritative, so the namespace follows the key and endpoint: a
+			// keyless or wider-key roster never serves a guardrailed key.
+			const baseUrl = (options.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `openrouter:pseudo-api:${Bun.hash(scope).toString(36)}`;
+		}
 		case "vllm": {
 			// v2: qwen3.8 rows cached before the reasoning/template-effort upgrade
 			// carry `reasoning: false` and must be refetched.
@@ -217,7 +289,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// v2: rows cached before Fusion pairings carried their lead uid as
 			// `requestModelId` send the composite uid and fail with
 			// `permission_denied: no API providers are available`.
-			return "devin:models-v2";
+			// v3: rows cached before discovery read `ModelInfo.maxTokens` hold a
+			// 200K window on every model.
+			return "devin:models-v3";
 		default:
 			return providerId;
 	}

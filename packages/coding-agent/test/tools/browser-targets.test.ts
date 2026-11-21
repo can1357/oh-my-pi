@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { findFreeCdpPort, relayTargets } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { cdpTargets, findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
 	type TabSnapshot,
@@ -21,12 +21,16 @@ const BLOCKS = [
 ];
 
 const ENV_KEYS = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN", "PI_BROWSER_RELAY"] as const;
-const savedEnv = new Map(ENV_KEYS.map(key => [key, process.env[key]]));
+let savedEnv: Map<string, string | undefined>;
 
 let daemon: FakeDaemon | undefined;
 let relay: RelayServer | undefined;
 let extension: WebSocket | undefined;
 const opened: string[] = [];
+
+beforeEach(() => {
+	savedEnv = new Map(ENV_KEYS.map(key => [key, process.env[key]]));
+});
 
 afterEach(async () => {
 	for (const name of opened.splice(0)) await releaseTab(name, { kill: false }).catch(() => undefined);
@@ -103,7 +107,7 @@ describe("browser targets in Tern", () => {
 		await startWindow(BLOCKS);
 		const tool = session();
 		opened.push("docs");
-		await invoke(tool, { action: "open", name: "docs", timeout: 5, app: { target: "Docs C" } });
+		await invoke(tool, { action: "open", name: "docs", timeout: 5, target: "Docs C" });
 		const { text, value } = await invoke(tool, { action: "targets", timeout: 5 });
 		expect(value).toEqual([
 			{ target: "5", title: "Docs A", url: "https://docs.example/a", shown: false, docked: true, driven: false },
@@ -118,7 +122,7 @@ describe("browser targets in Tern", () => {
 				tab: "docs",
 			},
 		]);
-		expect(text).toStartWith("Tern browser blocks (adopt one with app.target set to its id):\n");
+		expect(text).toStartWith("Tern browser blocks (adopt one with target set to its id):\n");
 		expect(text).toContain('- 5 "Docs A" https://docs.example/a (docked, not on screen)');
 		expect(text).toContain('- 7 "Docs C" https://docs.example/c (docked, on screen, driven by omp tab "docs")');
 	});
@@ -132,15 +136,38 @@ describe("browser targets in Tern", () => {
 });
 
 describe("browser targets elsewhere", () => {
-	it("explains that targets exist only inside Tern or with the relay", async () => {
+	it("explains that targets exist only inside Tern, with the relay, or at a CDP endpoint", async () => {
 		for (const key of ENV_KEYS) delete process.env[key];
 		const failure = await invoke(session(), { action: "targets", timeout: 5 }).catch((error: unknown) => error);
 		expect(String(failure)).toContain("targets exist only inside a Tern pane");
-		expect(String(failure)).toContain("app.relay: true or the browser.relay setting");
+		expect(String(failure)).toContain("at a CDP endpoint");
+	});
+
+	it("lists a CDP endpoint's pages from its /json list", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		using server = Bun.serve({
+			port: 0,
+			fetch: request =>
+				new URL(request.url).pathname === "/json"
+					? Response.json([
+							{ id: "A", type: "page", url: "https://mail.example/", title: "Mail" },
+							{ id: "B", type: "service_worker", url: "https://mail.example/sw.js", title: "sw" },
+						])
+					: new Response("not found", { status: 404 }),
+		});
+		const app = `http://127.0.0.1:${server.port}`;
+		const { text, value } = await invoke(session(), { action: "targets", timeout: 5, app });
+		expect(value).toStrictEqual([{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/" }]);
+		expect(text).toBe(
+			`Pages at ${app} (adopt one with target set to its URL or a title substring):\n- "Mail" https://mail.example/`,
+		);
+		// The object `app` of older releases names the same endpoint.
+		const legacy = await invoke(session(), { action: "targets", timeout: 5, app: { cdp_url: app } });
+		expect(legacy.value).toStrictEqual(value);
 	});
 });
 
-describe("relayTargets", () => {
+describe("cdpTargets", () => {
 	it("keeps live, non-internal pages with their URL as the target", () => {
 		const entries = [
 			{ id: "a", type: "page", url: "https://mail.example/", title: "Mail", active: "true", discarded: "false" },
@@ -151,7 +178,7 @@ describe("relayTargets", () => {
 			{ id: "f", type: "page", title: "no url" },
 			"garbage",
 		];
-		expect(relayTargets(entries)).toEqual([
+		expect(cdpTargets(entries)).toEqual([
 			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/", shown: true },
 			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/", shown: false },
 		]);
@@ -210,13 +237,13 @@ describe("browser targets with the relay", () => {
 			snapshot(3, { url: "https://old.example/", title: "Old", discarded: true }),
 		]);
 		const tool = session({ "browser.relayUrl": `http://127.0.0.1:${port}` });
-		const { text, value } = await invoke(tool, { action: "targets", timeout: 10, app: { relay: true } });
+		const { text, value } = await invoke(tool, { action: "targets", timeout: 10, app: "relay" });
 		expect(value).toEqual([
 			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/", shown: true },
 			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/", shown: false },
 		]);
 		expect(text).toBe(
-			'Chrome pages via the relay (adopt one with app.target set to its URL or a title substring):\n- "Mail" https://mail.example/ (active)\n- "Docs" https://docs.example/',
+			'Chrome pages via the relay (adopt one with target set to its URL or a title substring):\n- "Mail" https://mail.example/ (active)\n- "Docs" https://docs.example/',
 		);
 	}, 20_000);
 });

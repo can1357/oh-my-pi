@@ -62,6 +62,18 @@ describe("task renderer: streaming call preview", () => {
 		expect(out).toContain("First");
 	});
 
+	it("previews a stepped item by its first step and step count in both renderers", () => {
+		const args: TaskParams = {
+			tasks: [{ name: "Implement", steps: ["Add the parser.\nDetails follow.", "Wire it in.", "Test it."] }],
+		};
+		const out = render(args);
+		const view = taskToolRenderer.describeCall(args, { argsComplete: true, expanded: false, isPartial: false });
+
+		expect(out).toContain("Implement: Add the parser. [3 steps]");
+		expect(view?.body).toMatchObject([{ k: "agent", p: { name: "Implement" } }]);
+		expect(JSON.stringify(view?.body)).toContain("Add the parser.");
+	});
+
 	it("always renders the full task markdown, collapsed or expanded", () => {
 		const taskLines = Array.from({ length: 6 }, (_, i) => `Step ${i + 1}: do the thing.`);
 		const args: TaskParams = {

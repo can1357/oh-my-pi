@@ -1,6 +1,6 @@
 import type { AgentOptions } from "@oh-my-pi/pi-agent-core";
 import type { OAuthAccessResolution, OAuthRefreshReason } from "@oh-my-pi/pi-ai";
-import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
+import { type ApiKeyResolver, createOAuthProvenance } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { AuthStorage } from "../session/auth-storage";
@@ -118,7 +118,12 @@ export function selectSecurityAuth(
 export async function resolveExactSecurityOAuthAccess(
 	authStorage: AuthStorage,
 	account: SecurityAccountRef,
-	options: { forceRefresh: boolean; refreshReason?: OAuthRefreshReason; signal?: AbortSignal },
+	options: {
+		forceRefresh: boolean;
+		refreshReason?: OAuthRefreshReason;
+		rejectedAccessToken?: string;
+		signal?: AbortSignal;
+	},
 ): Promise<Extract<OAuthAccessResolution, { ok: true }>> {
 	const resolution = await authStorage.oauth.accessById(account.provider, account.credentialId, options);
 	if (!resolution) throw new Error("The pinned security OAuth credential is unavailable");
@@ -142,14 +147,19 @@ export function createExactSecurityOAuthResolver(
 		if (model.provider !== account.provider) {
 			throw new Error("Security scan authentication provider mismatch");
 		}
+		// The bearer may be a structured credential wrapping the access token, so
+		// a 401 names the token behind the bearer the request actually sent.
+		const provenance = createOAuthProvenance();
 		const resolver: ApiKeyResolver = async context => {
 			if (context.lastChance) return undefined;
 			const resolution = await resolveExactSecurityOAuthAccess(authStorage, account, {
 				forceRefresh: context.error !== undefined,
 				refreshReason: AIError.status(context.error) === 401 ? "auth-recovery" : undefined,
+				rejectedAccessToken: provenance.accessFor(context.previousKey),
 				signal: context.signal,
 			});
-			return resolution.accessToken;
+			provenance.record({ apiKey: resolution.apiKey, oauthAccess: resolution.accessToken });
+			return resolution.apiKey;
 		};
 		return resolver;
 	};

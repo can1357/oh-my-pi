@@ -1,3 +1,4 @@
+import { resolveAnthropicApiVersion } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { OpenAIHttpError, ProviderHttpError } from "../error/classes";
 import type { FetchImpl } from "../types";
 
@@ -129,7 +130,7 @@ export async function validateAnthropicCompatibleApiKey(options: AnthropicCompat
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
-			"anthropic-version": "2023-06-01",
+			"anthropic-version": resolveAnthropicApiVersion(baseUrl),
 			"x-api-key": options.apiKey,
 		},
 		body: JSON.stringify({

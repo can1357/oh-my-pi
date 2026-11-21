@@ -28,6 +28,7 @@ interface MCPTransportErrorOptions {
 	code?: string | number;
 	data?: string;
 	traceId?: string;
+	rpc?: JsonRpcError;
 	cause?: unknown;
 }
 
@@ -61,6 +62,13 @@ export class MCPTransportError extends Error {
 	readonly data: string | undefined;
 	/** Safe server trace or request identifier. */
 	readonly traceId: string | undefined;
+	/**
+	 * The server's JSON-RPC error as received, for {@link createMCPJsonRpcError}
+	 * failures. The MCP host forwards it to sessions unchanged: `data` drives
+	 * protocol decisions (`supported` versions, required capabilities) that the
+	 * redacted {@link data} string cannot.
+	 */
+	readonly rpc: JsonRpcError | undefined;
 
 	constructor(options: MCPTransportErrorOptions) {
 		super(
@@ -75,7 +83,25 @@ export class MCPTransportError extends Error {
 		this.code = options.code;
 		this.data = options.data;
 		this.traceId = options.traceId;
+		this.rpc = options.rpc;
 	}
+}
+
+/** Prevent replay once a request may have reached the server. */
+export function nonRetryableMCPTransportError(error: MCPTransportError): MCPTransportError {
+	if (!error.retryable) return error;
+	return new MCPTransportError({
+		transport: error.transport,
+		stage: error.stage,
+		failure: error.failure,
+		message: error.message,
+		retryable: false,
+		code: error.code,
+		data: error.data,
+		traceId: error.traceId,
+		rpc: error.rpc,
+		cause: error,
+	});
 }
 
 function errorCode(error: unknown): string | number | undefined {
@@ -185,6 +211,7 @@ export function createMCPJsonRpcError(
 		code: error.code,
 		data: serializeData(error.data),
 		traceId: safeTraceId(traceId) ?? findTraceId(error.data),
+		rpc: error,
 	});
 }
 
@@ -206,7 +233,12 @@ export function normalizeMCPTransportError(
 		normalizedCode === "CONNECTIONREFUSED" ||
 		normalizedCode === "ENETUNREACH" ||
 		normalizedCode === "EHOSTUNREACH" ||
-		/\b(?:ECONNREFUSED|ConnectionRefused|ENETUNREACH|EHOSTUNREACH)\b/i.test(message)
+		normalizedCode === "ENOTFOUND" ||
+		normalizedCode === "EAI_AGAIN" ||
+		normalizedCode === "FAILEDTOOPENSOCKET" ||
+		/\b(?:ECONNREFUSED|ConnectionRefused|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|FailedToOpenSocket)\b/i.test(
+			message,
+		)
 	) {
 		failure = "connect";
 		retryable = true;
@@ -246,11 +278,21 @@ export function normalizeMCPTransportError(
 }
 
 function nextStep(error: MCPTransportError): string {
+	// Every connection-class failure is retryable before dispatch, so a non-retryable one was lost after sending.
+	if (
+		!error.retryable &&
+		(error.failure === "connect" ||
+			error.failure === "eof" ||
+			error.failure === "reset" ||
+			error.failure === "closed")
+	) {
+		return "The connection was lost after the request was sent, so it may already have run; check its effect before retrying.";
+	}
 	switch (error.failure) {
 		case "connect":
 			return "Check that the MCP server is running and reachable, then retry.";
 		case "timeout":
-			return "Check server health or increase the MCP timeout; the request outcome is unknown.";
+			return "Raise this server's `timeout` (ms) in its MCP config or set OMP_MCP_TIMEOUT_MS; the request outcome is unknown.";
 		case "eof":
 		case "reset":
 			return error.transport === "stdio"

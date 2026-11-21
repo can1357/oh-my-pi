@@ -1,5 +1,5 @@
 import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
-import { MCPManager } from "../mcp/manager";
+import { MCPManager, type MCPManagerApi } from "../mcp/manager";
 import type { MCPResourceReadResult } from "../mcp/types";
 import mcpDoc from "../prompts/internal-urls/mcp.md" with { type: "text" };
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
@@ -15,10 +15,6 @@ export interface McpResourceReadOptions {
 	signal?: AbortSignal;
 }
 
-function escapeRegex(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function getUriTemplateMatchScore(
 	uri: string,
 	uriTemplate: string,
@@ -26,7 +22,7 @@ function getUriTemplateMatchScore(
 	const expressionPattern = /\{[^}]+\}/g;
 	const literalSegments = uriTemplate.split(expressionPattern);
 	const expressionCount = (uriTemplate.match(expressionPattern) ?? []).length;
-	const pattern = literalSegments.map(escapeRegex).join("(.*?)");
+	const pattern = literalSegments.map(segment => RegExp.escape(segment)).join("(.*?)");
 	const regex = new RegExp(`^${pattern}$`);
 	if (!regex.test(uri)) return undefined;
 	const literalChars = literalSegments.reduce((total, segment) => total + segment.length, 0);
@@ -53,7 +49,7 @@ function extractResourceUri(url: InternalUrl): string {
 	return uri;
 }
 
-function resolveTargetServer(mcpManager: MCPManager, uri: string, exact: boolean): string | undefined {
+function resolveTargetServer(mcpManager: MCPManagerApi, uri: string, exact: boolean): string | undefined {
 	const servers = mcpManager.getConnectedServers();
 	for (const name of servers) {
 		const serverResources = mcpManager.getServerResources(name);
@@ -106,7 +102,7 @@ function resolveTargetServer(mcpManager: MCPManager, uri: string, exact: boolean
 	return bestTemplateMatch?.serverName;
 }
 
-function formatAvailableResources(mcpManager: MCPManager): string {
+function formatAvailableResources(mcpManager: MCPManagerApi): string {
 	const available = mcpManager
 		.getConnectedServers()
 		.flatMap(name => {
@@ -121,7 +117,7 @@ function formatAvailableResources(mcpManager: MCPManager): string {
 }
 
 /** Load connected catalogs before waiting on unrelated servers; check again after pending connects settle. */
-async function settleCatalogs(mcpManager: MCPManager, uri: string, exact: boolean): Promise<void> {
+async function settleCatalogs(mcpManager: MCPManagerApi, uri: string, exact: boolean): Promise<void> {
 	await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
 	if (resolveTargetServer(mcpManager, uri, exact)) return;
 	await mcpManager.waitForPendingConnections();
@@ -136,10 +132,10 @@ async function settleCatalogs(mcpManager: MCPManager, uri: string, exact: boolea
  * (the work itself stays in flight for the manager).
  */
 export async function readMcpResource(
-	mcpManager: MCPManager,
+	mcpManager: MCPManagerApi,
 	url: InternalUrl,
 	options?: McpResourceReadOptions,
-): Promise<InternalResource | undefined> {
+): Promise<InternalResource<string | Buffer> | undefined> {
 	const { exact = false, waitMs, signal } = options ?? {};
 	const uri = extractResourceUri(url);
 	let targetServer = resolveTargetServer(mcpManager, uri, exact);
@@ -170,6 +166,18 @@ export async function readMcpResource(
 		throw new Error(`Server "${targetServer}" returned no content for "${uri}".`);
 	}
 
+	// A lone binary part is the resource's bytes, typed by the server's MIME type.
+	const [only] = result.contents;
+	if (result.contents.length === 1 && (only.text === undefined || only.text === null) && only.blob) {
+		const bytes = Buffer.from(only.blob, "base64");
+		return {
+			url: url.href,
+			content: bytes,
+			contentType: only.mimeType ?? "application/octet-stream",
+			size: bytes.length,
+			notes: [`MCP server: ${targetServer}`],
+		};
+	}
 	const textParts: string[] = [];
 	for (const item of result.contents) {
 		if (item.text !== undefined && item.text !== null) {
@@ -187,6 +195,14 @@ export async function readMcpResource(
 		size: Buffer.byteLength(content, "utf-8"),
 		notes: [`MCP server: ${targetServer}`],
 	};
+}
+
+/** No connected MCP server advertises the requested resource URI. */
+export class McpResourceNotFoundError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "McpResourceNotFoundError";
+	}
 }
 
 /**
@@ -209,14 +225,14 @@ export class McpProtocolHandler implements ProtocolHandler {
 		return mcpDoc.trim();
 	}
 
-	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
 		const mcpManager = await MCPManager.load();
 		if (!mcpManager) {
 			throw new Error("No MCP manager available. MCP servers may not be configured.");
 		}
 		const resource = await readMcpResource(mcpManager, url, { signal: context?.signal });
 		if (resource) return resource;
-		throw new Error(
+		throw new McpResourceNotFoundError(
 			`No MCP server has resource "${extractResourceUri(url)}".\n\nAvailable resources:\n${formatAvailableResources(mcpManager)}`,
 		);
 	}

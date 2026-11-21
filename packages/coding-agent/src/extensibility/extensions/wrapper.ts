@@ -10,20 +10,25 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
+	approvalRestrictions,
 	denyError,
+	recordApprovalGrant,
 	requestApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
 	sessionApprovalScope,
 	truncateForPrompt,
 } from "../../tools/approval";
+import { getApprovalGrants } from "../../tools/approval-cache";
+import { withToolApprovalScope } from "../../tools/approval-scope";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
+import { recordToolApprovalRequested, recordToolApprovalResolved } from "../../session/tool-approval-records";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
@@ -235,11 +240,21 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<TDetails, TParameters>> {
+		return withToolApprovalScope(() => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<TDetails, TParameters>> {
 		// The agent loop emits `tool_call` at arg-prep time (session
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
 		// unconditionally so it cannot go stale; emit here only for dispatches
-		// the loop never saw — nested xd:// device dispatches and direct
+		// the loop never saw — tool commands run inside bash and direct
 		// (non-loop) execution such as Cursor exec handlers.
 		const inheritedLoopDispatch = (context as LoopAwareToolContext | undefined)?.[LOOP_DISPATCH_CONTEXT] === true;
 		const loopDispatchedToolCall =
@@ -252,10 +267,26 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
+		const approvalSettings = context?.settings ?? this.runner.sessionSettings;
 		const { approvalMode, userPolicies } = resolveApprovalFromContext(
-			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
+			context ?? (approvalSettings ? { settings: approvalSettings } : undefined),
 		);
-		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
+		// `always-ask-cached` grants for this conversation, shared by the pre-check, the full gate,
+		// and the record after an approval.
+		const approvalGrants =
+			approvalMode === "always-ask-cached"
+				? getApprovalGrants(approvalSettings?.getAgentDir(), this.runner.sessionId)
+				: undefined;
+		const restrictions = approvalRestrictions(approvalSettings, this.runner.cwd);
+		const preResolved = resolveApproval(
+			this.tool,
+			approvalArgs(params, context),
+			approvalMode,
+			userPolicies,
+			approvalGrants,
+			restrictions,
+			context,
+		);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
 		}
@@ -280,6 +311,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						type: "tool_call",
 						toolName: this.tool.name,
 						toolCallId,
+						...(context?.parentToolCallId !== undefined && { parentToolCallId: context.parentToolCallId }),
 						input: normalizeToolEventInput(
 							this.tool.name,
 							resolveToolEventInput(this.tool, toolEventArgs(params, context)),
@@ -327,33 +359,45 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
-		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
-		context?.xdevTierResolved?.(resolved.tier);
+		this.tool.bindApprovalTargets?.(resolvedArgs);
+		const resolved = resolveApproval(
+			this.tool,
+			resolvedArgs,
+			approvalMode,
+			userPolicies,
+			approvalGrants,
+			restrictions,
+			context,
+		);
+		context?.toolCommandTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
 			cancelPreflight();
 			throw denyError(resolved, this.tool.name);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
-		// Outer approvals only cover the original input. `xd://` approval skips
-		// tier-only prompts while the same object flows through; ACP approval also
-		// satisfies explicit prompts, but compares against a deep snapshot because
-		// handlers can mutate the original argument object in place. Denies were
-		// enforced above, and provider safety checks remain independently required.
-		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
-		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
+		// ACP approval satisfies prompts only for the input the client approved: it compares
+		// against a deep snapshot because handlers can mutate the original argument object in
+		// place. Denies were enforced above, and provider safety checks remain independently
+		// required.
 		const acpBypass =
 			context !== undefined &&
 			Object.hasOwn(context, "acpApprovedArgs") &&
 			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
-		// A prompt the approval mode raised can be approved for the rest of the session; provider
-		// safety checks are per-call, so they never offer it.
+		// Only a prompt `always-ask-cached` itself raised can be remembered by target; provider safety
+		// checks are per-call, so they never offer a grant of any kind.
+		const grantable =
+			approvalGrants !== undefined &&
+			resolved.policy === "prompt" &&
+			resolved.source === "mode" &&
+			pendingSafetyChecks.length === 0;
+		const cacheTargets = grantable ? (this.tool.approvalCacheTargets?.(resolvedArgs)?.length ?? 0) > 0 : false;
+		// A prompt the approval mode raised can be approved for the rest of the session — unless the call
+		// can be remembered by target instead, which keeps the grant to what it touches.
 		const sessionScope =
-			pendingSafetyChecks.length === 0 ? sessionApprovalScope(resolved, this.tool.name) : undefined;
+			pendingSafetyChecks.length === 0 && !cacheTargets ? sessionApprovalScope(resolved, this.tool.name) : undefined;
 		const sessionApproved = sessionScope !== undefined && this.runner.hasSessionApproval(sessionScope.key);
 		const approvalCheck = {
-			required:
-				pendingSafetyChecks.length > 0 ||
-				(resolved.policy === "prompt" && !acpBypass && !sessionApproved && (explicitPrompt || !xdevBypass)),
+			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && !acpBypass && !sessionApproved),
 			reason: resolved.reason,
 		};
 
@@ -369,6 +413,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			const hasApprovalHandlers =
 				this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
 			const sessionId = context?.sessionManager?.getSessionId() ?? "";
+			await recordToolApprovalRequested(this.runner.approvalRecords, {
+				toolCallId,
+				...(context?.parentToolCallId !== undefined && { parentToolCallId: context.parentToolCallId }),
+				toolName: this.tool.name,
+				approvalMode,
+				...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+			});
 			if (hasApprovalHandlers) {
 				await this.runner.emit({
 					type: "tool_approval_requested",
@@ -381,6 +432,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const emitApprovalResolved = async (approved: boolean, reason?: string) => {
+				await recordToolApprovalResolved(this.runner.approvalRecords, {
+					toolCallId,
+					toolName: this.tool.name,
+					approved,
+					...(reason ? { reason } : {}),
+				});
 				if (!hasApprovalHandlers) return;
 				await this.runner.emit({
 					type: "tool_approval_resolved",
@@ -403,6 +460,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
 					);
 				}
+				if (resolved.source === "restriction") {
+					throw new Error(
+						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+							`Reason: ${resolved.reason}\n` +
+							`A restricted folder (tools.restrictedFolders) asks in every approval mode.`,
+					);
+				}
 				throw new Error(
 					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
 						`Options:\n` +
@@ -417,13 +481,23 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
 			let approved: boolean;
 			try {
-				const answer = await requestApproval(uiContext, this.tool, resolvedArgs, {
-					reason: approvalCheck.reason,
-					appendix: safetyAppendix,
-					sessionSubject: sessionScope?.subject,
-				});
+				context?.onApprovalPrompt?.();
+				// The call's signal closes the prompt: aborting the turn (Esc, a session switch) must not
+				// wait on an approval the user can no longer see or answer.
+				const answer = await untilAborted(signal, () =>
+					requestApproval(uiContext, this.tool, resolvedArgs, {
+						reason: approvalCheck.reason,
+						appendix: safetyAppendix,
+						sessionSubject: sessionScope?.subject,
+						grants: cacheTargets,
+						signal,
+					}),
+				);
 				approved = answer !== "deny";
 				if (answer === "session" && sessionScope) this.runner.grantSessionApproval(sessionScope.key);
+				if (typeof answer === "object" && approvalGrants) {
+					recordApprovalGrant(this.tool, resolvedArgs, approvalGrants, resolved.tier, answer);
+				}
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				cancelPreflight();
@@ -458,7 +532,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 			);
 		} catch (err) {
-			executionError = err instanceof Error ? err : new Error(String(err));
+			executionError = toError(err);
 			result = {
 				content: [{ type: "text", text: executionError.message }],
 				details: undefined as TDetails,
@@ -476,6 +550,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					type: "tool_result",
 					toolName: this.tool.name,
 					toolCallId,
+					...(context?.parentToolCallId !== undefined && { parentToolCallId: context.parentToolCallId }),
 					input: normalizeToolEventInput(
 						this.tool.name,
 						resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),

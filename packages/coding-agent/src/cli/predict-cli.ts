@@ -22,7 +22,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { col, compact, keyed, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import { Memo } from "@oh-my-pi/pi-tui/native/memo";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
-import { actionBar, actionButton } from "@oh-my-pi/pi-tui/native/overlay";
+import { actionBar, actionButton, iconButton } from "@oh-my-pi/pi-tui/native/overlay";
 import {
 	type WordCompletionEngine,
 	WordCompletionProvider,
@@ -30,7 +30,7 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { closeDaemonClients } from "../launch/client";
+import { closeDaemonClient } from "../daemon/client";
 import type { TextPredictMethod } from "../predict/protocol";
 import { closeTextPrediction, requestTextPrediction } from "../predict/client";
 
@@ -267,13 +267,7 @@ class PredictCompareComponent implements Component, Focusable {
 									align: "center",
 									role: "omp.app.fresh",
 								}),
-							node("icon", {
-								name: "x",
-								role: "omp.app.ibtn",
-								title: "Quit  esc",
-								aria: "Quit",
-								actions: { click: "quit" },
-							}),
+							iconButton("x", "quit", "Quit  esc", { aria: "Quit" }),
 						]),
 						{ gap: "md", align: "center", role: "omp.app.tools" },
 					),
@@ -354,6 +348,6 @@ export async function runPredictCompare(): Promise<void> {
 		ui.stop();
 		// The daemon socket and the global broker lease would keep the process alive.
 		closeTextPrediction();
-		await closeDaemonClients();
+		await closeDaemonClient();
 	}
 }

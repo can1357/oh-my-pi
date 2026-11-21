@@ -17,5 +17,6 @@ export * from "./shared";
 export * from "./streaming-panel";
 export * from "./tool-activity";
 export * from "./transcript-container";
+export * from "./transcript-notice";
 export * from "./transcript-status";
 export * from "./visual-truncate";

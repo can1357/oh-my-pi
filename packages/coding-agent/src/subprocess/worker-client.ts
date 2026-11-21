@@ -9,7 +9,6 @@ import {
 	isExecutable,
 	isFullyQualifiedPath,
 	logger,
-	openCloexecSync,
 	postmortem,
 	stripWindowsExtendedLengthPathPrefix,
 	WhichCachePolicy,
@@ -91,6 +90,12 @@ export interface SpawnedSubprocess<Outbound> {
 	 * wall-clock timers.
 	 */
 	stderrDrained: Promise<void>;
+	/**
+	 * Resolves once the IPC channel closed (the child exited, a SIGKILL included, or either side
+	 * disconnected). Bun hands every message the child sent before that to `inbound` first, so a
+	 * caller that awaits it after a kill has seen the child's last message.
+	 */
+	disconnected: Promise<void>;
 }
 
 /**
@@ -156,6 +161,56 @@ export function resolveCliEntryCmd(): string[] {
 }
 
 /**
+ * Resolve the command for `/restart` to re-exec the build the launcher on PATH
+ * now names. A compiled binary's `process.execPath` is the realpath of the
+ * image that started this process; with versioned installs (Homebrew kegs) an
+ * upgrade repoints the launcher while the old keg stays installed, so
+ * re-execing `process.execPath` would bring the open session back on the old
+ * version (issue #19454). Re-exec the launcher this process was started
+ * through when it now points at a different executable: `argv0` itself when
+ * it is a full path, else its PATH lookup. Never a different `omp` on PATH: a
+ * build started by path restarts as itself. On Windows a bare `argv0` names no
+ * launcher: `cmd.exe` runs a copy in the current directory before PATH and
+ * still passes the bare name, while PowerShell passes the full path. Keep the
+ * unchanged entry command otherwise, and leave workers on
+ * {@link resolveExecutablePath} so they stay pinned to the parent build
+ * (issues #16262, #19259).
+ */
+export function resolveRestartCmd(): string[] {
+	if (!isCompiledBinary()) return resolveCliEntryCmd();
+	const executable = resolveExecutablePath();
+	const running = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	const argv0 = stripWindowsExtendedLengthPathPrefix(process.argv0);
+	const isPath = argv0.includes("/") || argv0.includes("\\") || argv0.includes(":");
+	const launcher = isPath
+		? isFullyQualifiedPath(argv0)
+			? argv0
+			: null
+		: process.platform === "win32"
+			? null
+			: $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass });
+	if (!launcher || !isExecutable(launcher)) return [executable];
+	let sameBuild: boolean;
+	try {
+		sameBuild = fs.realpathSync(launcher) === fs.realpathSync(running);
+	} catch {
+		sameBuild = path.resolve(launcher) === path.resolve(running);
+	}
+	return sameBuild ? [executable] : [launcher];
+}
+
+/** Whether the file at `process.execPath` is no longer the image this process runs (replaced or unlinked). */
+function runningImageReplaced(): boolean {
+	try {
+		const running = fs.statSync("/proc/self/exe");
+		const onDisk = fs.statSync(process.execPath, { throwIfNoEntry: false });
+		return onDisk?.ino !== running.ino || onDisk.dev !== running.dev;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Resolve the command used to relaunch the agent CLI into worker mode. In a
  * compiled binary the entry point is the binary itself; otherwise re-enter the
  * declared worker-host entry by absolute path. Workers deliberately spawn
@@ -165,9 +220,16 @@ export function resolveCliEntryCmd(): string[] {
  * into newly opened terminal tabs. With no declared host entry (bun test, SDK
  * embedding) fall back to a cwd-relative `src/cli.ts`, which Bun subprocess
  * IPC handles more reliably under `bun test`.
+ *
+ * `sameBuild` keeps a worker that runs host-sent code (JS eval preludes) on
+ * this process's build: after an in-place upgrade the on-disk binary is a
+ * different one, but Linux can still exec the running image.
  */
-export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
-	const executable = resolveExecutablePath();
+export function resolveWorkerSpawnCmd(workerArg: string, options?: { sameBuild?: boolean }): WorkerSpawnCommand {
+	const executable =
+		options?.sameBuild && process.platform === "linux" && isCompiledBinary() && runningImageReplaced()
+			? "/proc/self/exe"
+			: resolveExecutablePath();
 	if (isCompiledBinary()) return { cmd: [executable, workerArg] };
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {
@@ -222,7 +284,7 @@ export function nativeLibraryPathOverlay(
 
 /**
  * Env for an ONNX inference worker: the parent env plus the native library
- * path. Only these workers get it — the daemon broker spawns user PTY sessions
+ * path. Only these workers get it — the daemon spawns user PTY sessions
  * and eval kernels through {@link workerEnvFromParent}, and rewriting the
  * loader search path of arbitrary user commands risks a `GLIBCXX` mismatch.
  */
@@ -259,6 +321,7 @@ export function createWorkerSubprocess<Outbound>(options: {
 	const intentionalExit = { value: false };
 	const stderrTail = new StderrTail(STDERR_TAIL_LIMIT_BYTES);
 	const stderrDrained = Promise.withResolvers<void>();
+	const disconnected = Promise.withResolvers<void>();
 	const stderrCapture = createStderrCapture(options.exitLabel);
 	let stderrDrainStarted = false;
 	// Reassigned once the worker IPC fault handler is registered (after spawn);
@@ -281,6 +344,9 @@ export function createWorkerSubprocess<Outbound>(options: {
 		windowsHide: true,
 		ipc(message) {
 			for (const handler of inbound) handler(message as Outbound);
+		},
+		onDisconnect() {
+			disconnected.resolve();
 		},
 		onExit(_proc, exitCode, signalCode) {
 			unregisterFault();
@@ -326,7 +392,14 @@ export function createWorkerSubprocess<Outbound>(options: {
 	// path calls `terminate()` explicitly. Bun's test runner starves IPC for
 	// unref'd subprocesses, so keep it referenced only under tests.
 	if (!isBunTestRuntime() && options.unref !== false) proc.unref();
-	return { proc, inbound, errors, intentionalExit, stderrDrained: stderrDrained.promise };
+	return {
+		proc,
+		inbound,
+		errors,
+		intentionalExit,
+		stderrDrained: stderrDrained.promise,
+		disconnected: disconnected.promise,
+	};
 }
 
 /**
@@ -382,7 +455,7 @@ interface StderrCapture {
 function createStderrCapture(exitLabel: string): StderrCapture {
 	try {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-worker-stderr-"));
-		const fd = openCloexecSync(
+		const fd = fs.openSync(
 			path.join(dir, "stderr.log"),
 			fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_TRUNC,
 		);

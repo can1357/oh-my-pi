@@ -256,7 +256,7 @@ describe("task renderer: nested live rendering", () => {
 		// Header and per-agent body rows are static; only the tool header owns live animation.
 		expect(header0).toBe(header1);
 		expect(body0).toBe(body1);
-		expect(Bun.stripANSI(body1)).toContain(`${theme.status.done} Probe: Investigate padding`);
+		expect(Bun.stripANSI(body1)).toContain(`${theme.status.running} Probe: Investigate padding`);
 	});
 
 	it("wraps the completed run summary in bracket glyphs, dropping the Total: label", async () => {

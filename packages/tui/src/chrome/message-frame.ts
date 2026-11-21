@@ -14,6 +14,7 @@ import { Markdown } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { type Component, Container } from "../tui";
+import type { CompactTranscriptBlock } from "./transcript-container";
 import { getMarkdownTheme, getThemeEpoch, type Theme, type ThemeColor, theme } from "../theme/index";
 import { card, col, md, span } from "../native/describe";
 import { type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
@@ -125,6 +126,12 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 	handleNativeEvent(event: NativeUiEvent): void {
 		const expanded = rootToggleExpanded(event);
 		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	/** Packs with neighboring compact blocks while the extension renderer's component reports compact rows. */
+	isTranscriptBlockCompact(): boolean {
+		const custom = this.#customComponent as (Component & CompactTranscriptBlock) | undefined;
+		return custom?.isTranscriptBlockCompact?.() === true;
 	}
 
 	#messageText(): string {

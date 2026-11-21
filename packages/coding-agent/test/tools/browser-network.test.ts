@@ -43,6 +43,8 @@ function createHost() {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
@@ -259,10 +261,16 @@ ${STALL_FETCH_DISABLE}
 return "done";`,
 		});
 		expect(valueOf(completed)).toBe("done");
-		expect(completed.content).toContainEqual({
-			type: "text",
-			text: "Browser request interception could not be reset after this run; the tab was reattached to a new worker. Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals), any open dialog was dismissed, and any page still loading was stopped.",
-		});
+		// The result arrives with the reattach and what it reset, not in place of them.
+		const notes = completed.content.flatMap(block => (block.type === "text" ? [block.text] : []));
+		expect(
+			notes.some(
+				note =>
+					note.includes("interception could not be reset after this run") &&
+					note.includes("reattached to a new worker") &&
+					note.includes("tab.route routes"),
+			),
+		).toBe(true);
 		const next = valueOf(
 			await invoke({
 				action: "run",

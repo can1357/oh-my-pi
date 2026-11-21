@@ -15,7 +15,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
 import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
-import type { Rule } from "../capability/rule";
+import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
 import {
 	judgeRules,
@@ -25,9 +25,11 @@ import {
 	type TtsrOutput,
 } from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
+import ttsrProseNoticeTemplate from "../prompts/system/ttsr-prose-notice.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
+import { escapeHarnessTags } from "./harness-tags";
 import type { SessionManager } from "./session-manager";
 import { TtsrToolInspector } from "./ttsr-outputs";
 
@@ -43,6 +45,8 @@ const JUDGED_SETTLE_TIMEOUT_MS = 5_000;
 /** Mid-stream checks may defer conditions that can span lines; the stream's end settles them. */
 const PARTIAL_CHECK: TtsrCheckOptions = { final: false };
 const FINAL_CHECK: TtsrCheckOptions = { final: true };
+/** Message end: the final check of non-interrupting rules on streams whose `*_end` never arrived. */
+const SETTLE_CHECK: TtsrCheckOptions = { final: true, deferredOnly: true };
 
 interface TtsrContinueOptions {
 	source: string;
@@ -76,6 +80,7 @@ export class TtsrCoordinator {
 	readonly #manager: TtsrManager | undefined;
 	readonly #inspector: TtsrToolInspector;
 	#pendingInjections: Rule[] = [];
+	#pendingExcerpts: Record<string, string> = {};
 	#perToolInjections = new Map<string, Rule[]>();
 	#deferredReservations = new Map<string, number>();
 	#nextDeferredDeliveryId = 0;
@@ -88,6 +93,8 @@ export class TtsrCoordinator {
 	#emittedTriggerRules = new Map<string, Set<string>>();
 	/** In-flight judged-rule checks, each already guarded against rejection. */
 	#pendingJudgments = new Set<Promise<void>>();
+	/** Content indices of the current response's tool calls that reached `toolcall_end`. */
+	#endedToolCalls = new Set<number>();
 
 	constructor(host: TtsrCoordinatorHost, manager: TtsrManager | undefined) {
 		this.#host = host;
@@ -127,9 +134,10 @@ export class TtsrCoordinator {
 	 */
 	onAssistantMessageStart(): void {
 		this.#manager?.resetBuffer();
+		this.#endedToolCalls.clear();
 	}
 
-	/** Advances repeat-after-gap tracking at turn end. */
+	/** Advances repeat-gap tracking at turn end. */
 	onTurnEnd(): void {
 		this.#manager?.incrementMessageCount();
 		this.#emittedTriggerRules.clear();
@@ -142,6 +150,7 @@ export class TtsrCoordinator {
 		// describe the discarded attempt and must not survive it.
 		if (assistantEvent.type === "start") {
 			this.#manager.resetBuffer();
+			this.#endedToolCalls.clear();
 			return false;
 		}
 		let matchContext: TtsrMatchContext | undefined;
@@ -156,9 +165,13 @@ export class TtsrCoordinator {
 			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "toolcall_delta") {
 			streamingToolCall = this.#getStreamingToolCallBlock(event.message, assistantEvent.contentIndex);
+			// Without a rule that can interrupt this call, its `toolcall_end` check is the only one
+			// that matters, so its partial arguments are neither inspected nor buffered.
+			if (!this.#manager.interruptsToolStream(streamingToolCall?.name ?? "")) return false;
 			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "toolcall_end") {
+			this.#endedToolCalls.add(assistantEvent.contentIndex);
 			streamingToolCall = assistantEvent.toolCall;
 			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = "";
@@ -175,7 +188,7 @@ export class TtsrCoordinator {
 		}
 		if (!matchContext || delta === undefined) return false;
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
-		const matches = this.#checkStream(delta, matchContext, streamingToolCall, isFinal);
+		const matches = this.#checkStream(delta, matchContext, streamingToolCall, isFinal ? FINAL_CHECK : PARTIAL_CHECK);
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
 		return false;
 	}
@@ -207,11 +220,13 @@ export class TtsrCoordinator {
 		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
 		const matchContext = this.#inspector.matchContext(toolCall, 0);
 		let matches: Rule[];
+		let matched: Record<string, string>;
 		try {
-			matches = [
-				...this.#checkStream("", matchContext, toolCall, true),
-				...(await this.#checkAstStream(matchContext, toolCall)),
-			].filter((rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index);
+			const regexMatches = this.#checkStream("", matchContext, toolCall, FINAL_CHECK);
+			matched = this.#matchedExcerpts(regexMatches, matchContext);
+			matches = [...regexMatches, ...(await this.#checkAstStream(matchContext, toolCall))].filter(
+				(rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index,
+			);
 		} finally {
 			if (matchContext.streamKey) this.#manager.clearStream(matchContext.streamKey);
 		}
@@ -228,6 +243,8 @@ export class TtsrCoordinator {
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
+					matched:
+						matched[rule.name] === undefined ? undefined : escapeHarnessTags(JSON.stringify(matched[rule.name])),
 					content: rule.content,
 				}),
 			)
@@ -240,8 +257,39 @@ export class TtsrCoordinator {
 	onAssistantMessageEnd(message: AssistantMessage): void {
 		// Gate on abortPending, not stopReason: unrelated aborts have no TTSR continuation.
 		if (!this.#abortPending) this.resolveResume();
+		this.#settleUnendedStreams(message);
 		this.#queueDeferredInjectionIfNeeded(message);
 		this.#judgeCompletedMessage(message);
+	}
+
+	/**
+	 * Partial checks skip rules that cannot interrupt, leaving them to the `*_end` checks; a provider
+	 * that omits an end event would lose them. Text and thinking buffers get that final check here
+	 * (a repeat after their end event is answered from the scan state), and tool calls that never
+	 * reached `toolcall_end` get it from their final arguments.
+	 */
+	#settleUnendedStreams(message: AssistantMessage): void {
+		if (
+			!this.#manager?.hasRules() ||
+			this.#abortPending ||
+			message.stopReason === "aborted" ||
+			message.stopReason === "error"
+		) {
+			return;
+		}
+		const streams: Array<{ context: TtsrMatchContext; toolCall?: ToolCall }> = [
+			{ context: { source: "text" } },
+			{ context: { source: "thinking" } },
+		];
+		for (const [index, block] of message.content.entries()) {
+			if (block.type === "toolCall" && !this.#endedToolCalls.has(index)) {
+				streams.push({ context: this.#inspector.matchContext(block, index), toolCall: block });
+			}
+		}
+		for (const { context, toolCall } of streams) {
+			const matches = this.#checkStream("", context, toolCall, SETTLE_CHECK);
+			if (matches.length > 0) this.#handleMatches(matches, context, message.timestamp);
+		}
 	}
 
 	/**
@@ -319,6 +367,7 @@ export class TtsrCoordinator {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
 					content: rule.content,
+					builtin: rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID,
 				}),
 			)
 			.join("\n\n");
@@ -347,20 +396,40 @@ export class TtsrCoordinator {
 		return `TTSR matched ${label}: ${rules.map(rule => rule.name).join(", ")}`;
 	}
 
-	#getInjectionContent(): { content: string; rules: Rule[] } | undefined {
+	/**
+	 * Renders the pending rules with `template`. The template must describe the
+	 * real lifecycle: the abort path interrupts the output, the deferred path
+	 * only reports a rule matched on output the rule did not interrupt.
+	 */
+	#getInjectionContent(
+		template: string,
+	): { content: string; rules: Rule[]; matched: Record<string, string> } | undefined {
 		if (this.#pendingInjections.length === 0) return undefined;
 		const rules = this.#pendingInjections;
+		const matched = this.#pendingExcerpts;
 		const content = rules
 			.map(rule =>
-				prompt.render(ttsrInterruptTemplate, {
+				prompt.render(template, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
+					matched:
+						matched[rule.name] === undefined ? undefined : escapeHarnessTags(JSON.stringify(matched[rule.name])),
 					content: rule.content,
 				}),
 			)
 			.join("\n\n");
 		this.#pendingInjections = [];
-		return { content, rules };
+		this.#pendingExcerpts = {};
+		return { content, rules, matched };
+	}
+
+	#matchedExcerpts(rules: Rule[], context: TtsrMatchContext): Record<string, string> {
+		const matched: Record<string, string> = {};
+		for (const rule of rules) {
+			const excerpt = this.#manager?.matchExcerpt(rule.name, context);
+			if (excerpt) matched[rule.name] = excerpt;
+		}
+		return matched;
 	}
 
 	#displayRulePath(rulePath: string): string {
@@ -377,11 +446,13 @@ export class TtsrCoordinator {
 		return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : null;
 	}
 
-	#addPendingInjections(rules: Rule[]): void {
+	#addPendingInjections(rules: Rule[], context: TtsrMatchContext): void {
 		const seen = new Set(this.#pendingInjections.map(rule => rule.name));
 		for (const rule of rules) {
 			if (seen.has(rule.name) || this.#deferredReservations.has(rule.name)) continue;
 			this.#pendingInjections.push(rule);
+			const excerpt = this.#manager?.matchExcerpt(rule.name, context);
+			if (excerpt !== undefined) this.#pendingExcerpts[rule.name] = excerpt;
 			seen.add(rule.name);
 		}
 	}
@@ -430,12 +501,12 @@ export class TtsrCoordinator {
 		if (markInjected && newlyAdded.length > 0) this.#manager?.markInjectedByNames(newlyAdded);
 	}
 
-	#markInjected(ruleNames: string[]): void {
+	#markInjected(ruleNames: string[], deliveryTurn?: number): void {
 		const uniqueRuleNames = Array.from(
 			new Set(ruleNames.map(ruleName => ruleName.trim()).filter(ruleName => ruleName.length > 0)),
 		);
 		if (uniqueRuleNames.length === 0) return;
-		this.#manager?.markInjectedByNames(uniqueRuleNames);
+		this.#manager?.markInjectedByNames(uniqueRuleNames, deliveryTurn);
 		this.#host.sessionManager.appendTtsrInjection(uniqueRuleNames);
 	}
 
@@ -471,17 +542,7 @@ export class TtsrCoordinator {
 	}
 
 	#shouldInterrupt(matches: Rule[], matchContext: TtsrMatchContext): boolean {
-		const globalMode = this.#manager?.getSettings().interruptMode ?? "always";
-		for (const rule of matches) {
-			const mode = rule.interruptMode ?? globalMode;
-			if (mode === "never") continue;
-			if (mode === "prose-only" && (matchContext.source === "text" || matchContext.source === "thinking")) {
-				return true;
-			}
-			if (mode === "tool-only" && matchContext.source === "tool") return true;
-			if (mode === "always") return true;
-		}
-		return false;
+		return matches.some(rule => this.#manager?.interrupts(rule, matchContext.source) === true);
 	}
 
 	#queueDeferredInjectionIfNeeded(message: AssistantMessage): void {
@@ -489,9 +550,14 @@ export class TtsrCoordinator {
 		if (this.#abortPending || this.#pendingInjections.length === 0) return;
 		if (message.stopReason === "aborted" || message.stopReason === "error") {
 			this.#pendingInjections = [];
+			this.#pendingExcerpts = {};
 			return;
 		}
-		const injection = this.#getInjectionContent();
+		// The message ended without an abort or error: the pending rules matched
+		// output the rule did not interrupt. The notice must claim neither that
+		// the output was interrupted nor that it completed — a `length` stop
+		// truncates it and a `toolUse` stop continues into tool calls.
+		const injection = this.#getInjectionContent(ttsrProseNoticeTemplate);
 		if (!injection) return;
 		const ruleNames = injection.rules.map(rule => rule.name);
 		const deliveryId = this.#reserveDeferredInjection(injection.rules);
@@ -501,7 +567,7 @@ export class TtsrCoordinator {
 				customType: "ttsr-injection",
 				content: injection.content,
 				display: false,
-				details: { rules: ruleNames, deliveryId },
+				details: { rules: ruleNames, matched: injection.matched, deliveryId },
 				attribution: "agent",
 				timestamp: Date.now(),
 			});
@@ -601,10 +667,9 @@ export class TtsrCoordinator {
 		delta: string,
 		matchContext: TtsrMatchContext,
 		toolCall: ToolCall | undefined,
-		isFinal = false,
+		options: TtsrCheckOptions,
 	): Rule[] {
 		if (!this.#manager) return [];
-		const options = isFinal ? FINAL_CHECK : PARTIAL_CHECK;
 		const entries = this.#inspector.entries(toolCall);
 		if (entries) {
 			const matches: Rule[] = [];
@@ -625,10 +690,10 @@ export class TtsrCoordinator {
 		// that emit toolcall_start -> toolcall_end with no intermediate deltas
 		// (Cursor exec synthesis, OpenAI lossy-proxy fallback) leave that buffer
 		// empty, so the finalized arguments must seed the snapshot themselves.
-		const finalArgs = isFinal ? toolCall?.arguments : undefined;
+		const finalArgs = options.final ? toolCall?.arguments : undefined;
 		if (finalArgs !== undefined && finalArgs !== null) {
 			const snapshot = typeof finalArgs === "string" ? finalArgs : JSON.stringify(finalArgs);
-			return this.#manager.checkSnapshot(snapshot, matchContext);
+			return this.#manager.checkSnapshot(snapshot, matchContext, options);
 		}
 		return this.#manager.checkDelta(delta, matchContext, options);
 	}
@@ -661,7 +726,7 @@ export class TtsrCoordinator {
 			this.#emitTriggerOnce(matchContext, matches);
 			return false;
 		}
-		this.#addPendingInjections(matches);
+		this.#addPendingInjections(matches, matchContext);
 		if (!shouldInterrupt) return false;
 
 		this.#abortPending = true;
@@ -679,16 +744,29 @@ export class TtsrCoordinator {
 		this.#emitTriggerOnce(matchContext, matches);
 		const retryToken = ++this.#retryToken;
 		const generation = this.#host.promptGeneration();
+		// The aborted turn has not ended yet; its reminder lands in the retry, one turn later. Recording that
+		// turn now keeps the retry exempt even when this task runs before the aborted turn's turn_end.
+		const retryTurn = (this.#manager?.getMessageCount() ?? 0) + 1;
 		this.#host.schedulePostPromptTask(
-			async () => {
+			async signal => {
+				// The abort only requests the stop: a run whose message already ended (`toolUse`) unwinds through
+				// tool execution and appends its aborted assistant later. Appending first would leave that
+				// assistant as the tail and the continuation would have nothing to resume from.
+				await this.#host.agent.waitForIdle();
 				if (this.#retryToken !== retryToken) {
 					this.resolveResume();
 					return;
 				}
 				const targetAssistantIndex = this.#findAssistantIndex(targetTimestamp);
-				if (!this.#abortPending || this.#host.promptGeneration() !== generation || targetAssistantIndex === -1) {
+				if (
+					signal.aborted ||
+					!this.#abortPending ||
+					this.#host.promptGeneration() !== generation ||
+					targetAssistantIndex === -1
+				) {
 					this.#abortPending = false;
 					this.#pendingInjections = [];
+					this.#pendingExcerpts = {};
 					this.#perToolInjections.clear();
 					this.resolveResume();
 					return;
@@ -698,9 +776,9 @@ export class TtsrCoordinator {
 				if (this.#manager?.getSettings().contextMode === "discard") {
 					this.#host.agent.replaceMessages(this.#host.agent.state.messages.slice(0, targetAssistantIndex));
 				}
-				const injection = this.#getInjectionContent();
+				const injection = this.#getInjectionContent(ttsrInterruptTemplate);
 				if (injection) {
-					const details = { rules: injection.rules.map(rule => rule.name) };
+					const details = { rules: injection.rules.map(rule => rule.name), matched: injection.matched };
 					this.#host.agent.appendMessage({
 						role: "custom",
 						customType: "ttsr-injection",
@@ -717,7 +795,7 @@ export class TtsrCoordinator {
 						details,
 						"agent",
 					);
-					this.#markInjected(details.rules);
+					this.#markInjected(details.rules, retryTurn);
 				}
 				this.#host.scheduleAgentContinue({
 					source: "ttsr-interrupt",

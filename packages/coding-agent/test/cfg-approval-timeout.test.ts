@@ -84,7 +84,6 @@ describe("cfg:// approval prompt wiring", () => {
 			"test",
 			undefined,
 			undefined,
-			undefined,
 			mcpManager,
 			undefined,
 			new Composer({ terminal: new VirtualTerminal(200, 60) }),
@@ -180,7 +179,7 @@ describe("cfg:// approval prompt wiring", () => {
 	}, 60_000);
 
 	it("runs the cfg://, auto-QA and MCP sign-in prompts as waits for the user", async () => {
-		const manager = new MCPManager(tmp, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		const manager = new MCPManager(tmp, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
 		const setAuthHandler = spyOn(manager, "setAuthHandler");
 		await startMode(undefined, manager);
 		const authHandler: MCPAuthHandler | undefined = setAuthHandler.mock.calls[0]?.[0];

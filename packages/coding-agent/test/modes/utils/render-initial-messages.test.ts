@@ -72,6 +72,7 @@ function makeCtx(): RenderInitialMessagesTestContext {
 
 	const ctx = {
 		chatContainer,
+		pendingShellContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
 		pendingMessagesContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
 		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
@@ -88,6 +89,7 @@ function makeCtx(): RenderInitialMessagesTestContext {
 				buildSessionContext: llmContextSpy,
 				getEntries: vi.fn(() => []),
 				getCwd: vi.fn(() => "/tmp"),
+				getConversationTip: () => undefined,
 			},
 		},
 		sessionManager: {
@@ -155,6 +157,7 @@ function makeRenderCtx(
 	chatContainer.setToolActivityVisible(!hideToolActivity);
 	const ctx = {
 		chatContainer,
+		pendingShellContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		updatePendingMessagesDisplay: () => helpers.updatePendingMessagesDisplay(),
 		compactionQueuedMessages: [],
@@ -198,6 +201,7 @@ function makeRenderCtx(
 			sessionManager: {
 				getEntries: vi.fn(() => []),
 				getCwd: vi.fn(() => "/tmp"),
+				getConversationTip: () => undefined,
 				putBlobSync: vi.fn(() => ({
 					hash: "hash",
 					path: "/tmp/hash",
@@ -232,6 +236,27 @@ function makeRenderCtx(
 }
 
 describe("UiHelpers.renderInitialMessages — transcript source", () => {
+	it("shows only the brief intent on a settled shell card restored from raw arguments", async () => {
+		const args = { command: "ls -la", i: "Listing files: Which files have changed?" };
+		const transcript = transcriptWith([
+			assistantToolCall("ls", "bash", args),
+			{
+				role: "toolResult",
+				toolCallId: "ls",
+				toolName: "bash",
+				content: [{ type: "text", text: "index.ts" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript);
+		await new UiHelpers(ctx).renderInitialMessages();
+		const rendered = Bun.stripANSI(chatContainer.render(100).join("\n"));
+		expect(rendered).toContain("Listing files");
+		expect(rendered).not.toContain("Which files have changed?");
+		expect(args.i).toBe("Listing files: Which files have changed?");
+	});
+
 	it("renders the collapsed live display transcript, never the LLM context", async () => {
 		await Settings.init({ inMemory: true });
 		const { ctx, transcriptSpy, llmContextSpy, renderSessionContextSpy } = makeCtx();

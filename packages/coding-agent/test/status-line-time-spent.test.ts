@@ -102,7 +102,7 @@ function makeSession(
 		isFastModeEnabled: () => false,
 		getGoalModeState: () => null,
 		getAsyncJobSnapshot: () => ({ running: [] }),
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionFile: overrides.sessionFile,
 		sessionManager: {
 			getSessionName: () => "time-spent test",

@@ -3,7 +3,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import { createLinuxSubreaperScript, exec, NonZeroExitError, spawn, TimeoutError } from "@oh-my-pi/pi-utils/ptree";
+import {
+	AbortError,
+	ChildProcess,
+	createLinuxSubreaperScript,
+	exec,
+	NonZeroExitError,
+	spawn,
+	TimeoutError,
+} from "@oh-my-pi/pi-utils/ptree";
 
 async function supportsLinuxMountNamespaces(): Promise<boolean> {
 	if (process.platform !== "linux") return false;
@@ -421,6 +429,34 @@ ${createLinuxSubreaperScript()}
 		}
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"applies the deadline when the root exited before the timeout was attached",
+		async () => {
+			// Under load Bun can reap the root before spawn() returns, so
+			// attachTimeout() sees `proc.killed`; the orphan still holds stdout and
+			// only the deadline's cutoff ends the read. Real subprocess timing: the
+			// cutoff races a live pipe, which fake timers cannot drive.
+			const proc = Bun.spawn(["sh", "-c", "sleep 30 & echo token $!"], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			await proc.exited;
+			expect(proc.killed).toBe(true);
+			let orphanPid: number | undefined;
+			try {
+				const child = new ChildProcess(proc, false);
+				child.attachTimeout(250);
+				const text = await child.nothrow().text();
+				const match = /^token (\d+)$/.exec(text.trim());
+				orphanPid = match ? Number.parseInt(match[1], 10) : undefined;
+				expect(match, `stdout was: ${text}`).not.toBeNull();
+			} finally {
+				if (orphanPid) Process.fromPid(orphanPid)?.killTree(9);
+			}
+		},
+	);
+
 	it.skipIf(process.platform === "win32")("completes when an orphan holds stderr past the root's exit", async () => {
 		let orphanPid: number | undefined;
 		try {
@@ -484,4 +520,187 @@ ${createLinuxSubreaperScript()}
 			expect(threw).toBeInstanceOf(TimeoutError);
 		},
 	);
+});
+
+describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
+	async function readPid(pidFile: string): Promise<number> {
+		// Polls a file a real process writes; returns as soon as it holds a pid.
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline) {
+			const pid = Number.parseInt(
+				await Bun.file(pidFile)
+					.text()
+					.catch(() => ""),
+				10,
+			);
+			if (pid > 0) return pid;
+			await Bun.sleep(10);
+		}
+		throw new Error("command never wrote its pid");
+	}
+
+	async function runningAfter(pid: number, ms: number): Promise<boolean> {
+		const deadline = Date.now() + ms;
+		let status = Process.fromPid(pid)?.status();
+		while (status === ProcessStatus.Running && Date.now() < deadline) {
+			await Bun.sleep(10);
+			status = Process.fromPid(pid)?.status();
+		}
+		return status === ProcessStatus.Running;
+	}
+
+	const stops = [
+		["an AbortSignal", (child: ChildProcess, controller: AbortController) => controller.abort()],
+		["dispose", (child: ChildProcess) => child[Symbol.dispose]()],
+		["a graceful kill", (child: ChildProcess) => child.kill(new AbortError(new Error("stop"), ""), 500)],
+		["a hard kill", (child: ChildProcess) => child.kill(new AbortError(new Error("stop"), ""), -1)],
+	] as const;
+
+	for (const [name, stop] of stops) {
+		it(`ends a descendant that ignores SIGTERM on ${name}`, async () => {
+			// The shell and its background child both ignore SIGTERM (an ignored
+			// disposition survives exec). Only the stop's SIGKILL can end them,
+			// and only while the subreaper still holds the orphaned child.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+			const pidFile = path.join(dir, "pid");
+			let orphanPid: number | undefined;
+			try {
+				const controller = new AbortController();
+				const child = spawn(["/bin/sh", "-c", `trap "" TERM; sleep 3600 & echo $! > '${pidFile}'; wait`], {
+					subreaper: true,
+					signal: controller.signal,
+				});
+				const outcome = child.wait().then(
+					() => new Error("run finished without the stop"),
+					(error: unknown) => error,
+				);
+				orphanPid = await readPid(pidFile);
+				const stoppedAt = Date.now();
+
+				stop(child, controller);
+
+				expect(await outcome).toBeInstanceOf(AbortError);
+				expect(await runningAfter(orphanPid, 2_000)).toBe(false);
+				expect(Date.now() - stoppedAt).toBeLessThan(10_000);
+			} finally {
+				if (orphanPid) Process.fromPid(orphanPid)?.killTree(9);
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
+
+	// Only a stop with a grace period can promise the handler runs: a zero grace
+	// sends SIGKILL right after SIGTERM, racing the trap.
+	for (const [name, stop] of [
+		["an AbortSignal", (_child: ChildProcess, controller: AbortController) => controller.abort()],
+	] as const) {
+		it(`gives the command its SIGTERM before the hard kill on ${name}`, async () => {
+			// A command that cleans up on SIGTERM must get the chance on a graceful
+			// stop, not only a SIGKILL.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+			const pidFile = path.join(dir, "pid");
+			const marker = path.join(dir, "cleaned");
+			try {
+				const controller = new AbortController();
+				const child = spawn(
+					[
+						"/bin/sh",
+						"-c",
+						`trap 'echo cleaned > "${marker}"; exit 0' TERM; echo $$ > '${pidFile}'; sleep 3600 & wait`,
+					],
+					{ subreaper: true, signal: controller.signal },
+				);
+				const outcome = child.wait().catch((error: unknown) => error);
+				await readPid(pidFile);
+
+				stop(child, controller);
+
+				expect(await outcome).toBeInstanceOf(AbortError);
+				expect(await Bun.file(marker).text()).toBe("cleaned\n");
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
+
+	for (const [name, start] of [
+		[
+			"its signal is already aborted",
+			(cmd: string[]) => spawn(cmd, { subreaper: true, signal: AbortSignal.abort() }),
+		],
+		[
+			"it is killed before the subreaper launches it",
+			(cmd: string[]) => {
+				const child = spawn(cmd, { subreaper: true });
+				child.kill(new AbortError(new Error("stop"), ""));
+				return child;
+			},
+		],
+	] as const) {
+		it(`never runs the command when ${name}`, async () => {
+			// The subreaper has no child yet, so there is nothing to warn: the
+			// stop must end the subreaper before it launches the cancelled command,
+			// not wait out a grace period during which the command starts.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+			const marker = path.join(dir, "ran");
+			try {
+				const child = start(["/bin/sh", "-c", `echo ran > '${marker}'; sleep 5`]);
+				expect(await child.wait().catch((error: unknown) => error)).toBeInstanceOf(AbortError);
+				// A command the subreaper launched in its last instant would be a real
+				// process outside our control; no event marks "it never wrote", so give
+				// such an escaped command real time to write before checking.
+				await Bun.sleep(100);
+				expect(await fs.exists(marker)).toBe(false);
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
+
+	for (const [name, escalate] of [
+		["the command exits on SIGTERM", false],
+		["a hard kill ends the grace period", true],
+	] as const) {
+		it(`lets the caller's process exit once the stop is over when ${name}`, async () => {
+			// The stop runs in a fresh Bun process with a 10 s grace period. Once
+			// wait() has settled, nothing of the stop may keep that process alive.
+			// For the hard kill, the command ignores SIGTERM, so only the hard kill
+			// ends the grace period.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+			const pidFile = path.join(dir, "pid");
+			const script = path.join(dir, "stop.ts");
+			const onTerm = escalate ? `trap "" TERM` : `trap 'exit 0' TERM`;
+			await Bun.write(
+				script,
+				`import { AbortError, spawn } from ${JSON.stringify(path.join(import.meta.dir, "../src/ptree.ts"))};
+const child = spawn(["/bin/sh", "-c", ${JSON.stringify(`${onTerm}; echo $$ > '${pidFile}'; sleep 3600 & wait`)}], { subreaper: true });
+const outcome = child.wait().catch(() => {});
+while (!(await Bun.file(${JSON.stringify(pidFile)}).text().catch(() => ""))) await Bun.sleep(10);
+child.kill(new AbortError(new Error("stop"), ""), 10_000);
+${escalate ? `await Bun.sleep(50); child.kill(new AbortError(new Error("stop"), ""), -1);` : ""}
+await outcome;
+console.log("settled");
+`,
+			);
+			try {
+				const caller = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "inherit" });
+				const reader = caller.stdout.getReader();
+				let output = "";
+				while (!output.includes("settled")) {
+					const chunk = await reader.read();
+					if (chunk.done) break;
+					output += new TextDecoder().decode(chunk.value);
+				}
+				const settledAt = Date.now();
+				reader.releaseLock();
+
+				expect(output).toContain("settled");
+				const exitCode = await caller.exited;
+				expect(exitCode).toBe(0);
+				expect(Date.now() - settledAt).toBeLessThan(3_000);
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 60_000);
+	}
 });

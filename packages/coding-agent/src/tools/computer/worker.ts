@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -19,16 +20,24 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopDragResult,
 	DesktopFocusReturn,
+	DesktopKeyboardReturn,
 	DesktopPoint,
 	DesktopScreenState,
 	DesktopSessionOptions,
+	DesktopTypeResult,
 	DesktopWindow,
 	OpenedApplication,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { expandTilde } from "@oh-my-pi/pi-utils/path";
+import { truncate } from "@oh-my-pi/pi-utils/format";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import backgroundMoveNote from "../../prompts/tools/computer-background-move.md" with { type: "text" };
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { cloneSafe, RunOutput } from "../browser/run-output";
 import {
@@ -40,23 +49,29 @@ import {
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { unknownOptionsMessage } from "./option-errors";
 import {
 	type ComputerEscapeScope,
 	type ComputerScreenshot,
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
+	type ControlVerdict,
+	COVERED_CAPTURE_NOTICE,
+	COVERED_TREE_NOTICE,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
-	SCREEN_LOCKED_CAPTURE_NOTE,
+	screenLockedCaptureNotice,
 	screenStateNotice,
 	type ToolReply,
 } from "./protocol";
-import { describeWindowMiss } from "./window-miss";
+import { describeWindowMiss, matchesWindowApp } from "./window-miss";
 
 /** A native input call; resolves to its takeover focus report when it took over. */
 type InputCall = Promise<DesktopFocusReturn | null | void>;
+/** A native typing call; resolves to whether its text was confirmed and its takeover focus report. */
+type TypeCall = Promise<DesktopTypeResult | null | void>;
 
 /** Native desktop operations consumed by the script runtime. */
 export interface NativeDesktopSession {
@@ -79,7 +94,7 @@ export interface NativeDesktopSession {
 	holdDisplayUntilReleased(): void;
 	/** Let a turn's hold go now (activity outside a turn keeps its grace); later activity gets the grace again. */
 	releaseDisplayAwake(): void;
-	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause. */
+	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause (macOS) or for a Wayland permission prompt. */
 	setRunDeadline(remainingMs: number): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
 	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
@@ -98,12 +113,12 @@ export interface NativeDesktopSession {
 	bringToCurrentSpace(windowId: string): Promise<void>;
 	click(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
 	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): InputCall;
-	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): InputCall;
+	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<DesktopDragResult | null | void>;
 	scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | null): InputCall;
-	typeText(target: string, text: string, opts?: PointerOptions | null): InputCall;
+	typeText(target: string, text: string, opts?: PointerOptions | null): TypeCall;
 	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
 	raiseWindow(windowId: string): Promise<void>;
-	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string }>;
+	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string; covered?: boolean }>;
 	axQuery(target: string, query: AxQuery): Promise<AxNode[]>;
 	axElementAt(target: string, x: number, y: number): Promise<AxNode | null | undefined>;
 	axFocused(): Promise<AxNode | null | undefined>;
@@ -116,7 +131,7 @@ export interface NativeDesktopSession {
 	axSelectText(ref: string, text: string, opts?: AxSelectTextOptions | null): Promise<AxTextSelection>;
 	axFocus(ref: string): Promise<void>;
 	axClick(ref: string, opts?: PointerOptions | null): InputCall;
-	axType(ref: string, text: string, opts?: PointerOptions | null): InputCall;
+	axType(ref: string, text: string, opts?: PointerOptions | null): TypeCall;
 	axKeyChord(ref: string, keys: string[], opts?: PointerOptions | null): InputCall;
 	close(): Promise<void>;
 }
@@ -126,22 +141,71 @@ export type NativeDesktopSessionFactory = (
 	options: DesktopSessionOptions,
 ) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
-type WindowFilter = { id?: string | number; app?: string; title?: string };
+type WindowFilter = { id?: string | number; app?: string; title?: string; wait?: number };
+const MAX_WINDOW_WAIT_MS = 10_000;
+const WINDOW_WAIT_INTERVAL_MS = 100;
 /** Window listings are session-transcript payload; `window()` lookups search the whole native list. */
 const MAX_LISTED_WINDOWS = 48;
+/**
+ * Run time a `control.acquire` confirmation leaves unspent, so an unanswered prompt closes while the script can
+ * still act on `{ active: false, reason: "unanswered" }` instead of the run timing out around it. A run shorter
+ * than four times this keeps a quarter of its timeout instead.
+ */
+const CONTROL_ANSWER_RESERVE_MS = 5_000;
 type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
 	ComputerScreenshot,
-	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked"
+	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked" | "covered"
 >;
 type MenuOptions = { menu?: string[] };
 type ClickOptions = InputOptions & MenuOptions & { button?: string; count?: number; modifiers?: string[] };
-type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
+type DragOptions = InputOptions & { button?: string; modifiers?: string[]; keys?: string[] };
 type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
 type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" | "takeover">;
+type ControlAcquireOptions = { reason: string };
+const inputOptionsKeys: Record<keyof InputOptions, true> = { takeover: true };
+const screenshotOptionsKeys: Record<keyof ScreenshotOptions, true> = { silent: true };
+const menuOptionsKeys: Record<keyof MenuOptions, true> = { menu: true };
+const clickOptionsKeys: Record<keyof ClickOptions, true> = {
+	takeover: true,
+	menu: true,
+	button: true,
+	count: true,
+	modifiers: true,
+};
+const dragOptionsKeys: Record<keyof DragOptions, true> = { takeover: true, button: true, modifiers: true, keys: true };
+const scrollOptionsKeys: Record<keyof ScrollOptions, true> = { takeover: true, dx: true, dy: true };
+const axOptionsKeys: Record<keyof AxOptions, true> = { all: true, maxDepth: true };
+const holdOptionsKeys: Record<keyof HoldOptions, true> = { duration: true, takeover: true };
+const holdMouseOptionsKeys: Record<keyof HoldMouseOptions, true> = {
+	duration: true,
+	button: true,
+	keys: true,
+	takeover: true,
+};
+const windowFilterKeys: Record<keyof WindowFilter, true> = { id: true, app: true, title: true, wait: true };
+const windowListFilterKeys: Record<keyof Omit<WindowFilter, "wait">, true> = { id: true, app: true, title: true };
+const applicationQueryKeys: Record<keyof ApplicationQuery, true> = { query: true, runningOnly: true };
+const applicationOpenOptionsKeys: Record<keyof ApplicationOpenOptions, true> = {
+	activate: true,
+	reveal: true,
+	app: true,
+};
+const axQueryKeys: Record<keyof AxQuery, true> = { role: true, title: true, value: true, limit: true };
+const axSelectTextOptionsKeys: Record<keyof AxSelectTextOptions, true> = { prefix: true, suffix: true, select: true };
+const doubleClickKeys: Record<keyof Omit<ClickOptions, "count">, true> = {
+	takeover: true,
+	menu: true,
+	button: true,
+	modifiers: true,
+};
+const observeKeys: Record<keyof (ScreenshotOptions & AxOptions), true> = { silent: true, all: true, maxDepth: true };
+const waitPredicateOptionsKeys: Record<keyof WaitPredicateOptions, true> = { timeout: true, interval: true };
+const controlAcquireOptionsKeys: Record<keyof ControlAcquireOptions, true> = { reason: true };
+
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
@@ -163,7 +227,9 @@ interface ComputerRunContext {
 	readOnly: boolean;
 	snapshot: ComputerSessionSnapshot;
 	output: RunOutput;
-	confirmControl(reason: string): Promise<boolean>;
+	/** Whether this run's output holds the background-move note, spent for the session only if the run succeeds. */
+	backgroundMoveNote: boolean;
+	confirmControl(reason: string): Promise<ControlVerdict>;
 	screenshots: ComputerScreenshot[];
 }
 
@@ -281,6 +347,33 @@ function validateString(value: unknown, call: string, options?: { nonEmpty?: boo
 	);
 }
 
+/**
+ * A value control (a slider) reads its value as a number, so a finite number is written as its decimal text.
+ * A whole number past 2^53 has already lost digits on its way here (a Python int crosses the eval bridge as
+ * a JavaScript number), and a number that prints with an exponent is not text a number control takes: both
+ * are refused before anything is sent.
+ */
+function valueText(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" && Number.isFinite(value)) {
+		const text = String(value);
+		if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+			throw new ToolError(
+				`setValue(value) got ${text}, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"`,
+			);
+		}
+		if (text.includes("e")) {
+			throw new ToolError(
+				`setValue(value) got ${text}, a number that prints with an exponent; pass it as text in digits, such as "0.0000001"`,
+			);
+		}
+		return text;
+	}
+	throw new ToolError(
+		`setValue(value) requires a string or a finite number, got ${typeof value === "number" ? String(value) : describeArgument(value)}`,
+	);
+}
+
 /** A menu path is one title, an array of titles, or the titles as separate arguments. */
 function menuPath(method: string, args: unknown[], options?: { allowEmpty?: boolean }): string[] {
 	const path: unknown[] = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
@@ -313,25 +406,24 @@ function validateHold(options: HoldOptions): void {
 }
 
 function strictObject(value: unknown, allowed: string[], label: string): asserts value is Record<string, unknown> {
-	if (
-		!value ||
-		typeof value !== "object" ||
-		Array.isArray(value) ||
-		Object.keys(value).some(key => !allowed.includes(key))
-	) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new ToolError(`${label} must be an object with only: ${allowed.join(", ")}`);
 	}
+	const message = unknownOptionsMessage(value, allowed, label);
+	if (message) throw new ToolError(message);
 }
 
-function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
-	if (!filter) return true;
-	const app = filter.app?.toLocaleLowerCase();
-	const title = filter.title?.toLocaleLowerCase();
-	return (
-		(filter.id === undefined || window.id === String(filter.id)) &&
-		(!app || window.app.toLocaleLowerCase().includes(app)) &&
-		(!title || window.title.toLocaleLowerCase().includes(title))
-	);
+function strictOptions(value: unknown, keys: object, label: string): void {
+	if (value != null) strictObject(value, Object.keys(keys), label);
+}
+
+function windowWait(wait: unknown): number {
+	if (wait === undefined) return 0;
+	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
+		const got = typeof wait === "number" ? String(wait) : describeArgument(wait);
+		throw new ToolError(`window({ wait }) takes milliseconds from 0 to ${MAX_WINDOW_WAIT_MS}; got ${got}`);
+	}
+	return wait;
 }
 
 function guardRun(context: ComputerRunContext, method: string): void {
@@ -345,8 +437,27 @@ const FALLBACK: Fallback = { takeover: true, returnFocus: true };
 const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
 /** A refusal's closing "nothing was sent", true of the refused background attempt only. */
 const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
-const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
+const RAISE_ROUTE =
+	"Background input and screenshots reach a covered window, so no raise is needed (on X11 its screenshot needs a compositing manager; win.ax() reads it either way).";
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
+/** JSON-escaped characters of a drag's selected text its output line quotes; the returned selection keeps it whole. */
+const DRAG_SELECTION_PREVIEW_CHARS = 24;
+
+/**
+ * The native action `perform(action)` runs, as the key the refusals check and the name macOS native
+ * is sent, so the two cannot disagree: native `native_action_name` trims Unicode White_Space (unlike
+ * JS `trim`, it drops U+0085 and keeps U+FEFF), maps `press`, `raise` and `showmenu`/`show_menu`
+ * to `AXPress`, `AXRaise` and `AXShowMenu`, prefixes `AX` to any other name without one, and runs
+ * whichever of the element's actions matches with only ASCII letters folded; on this key the
+ * steps before the match only uppercase the `AX` prefix.
+ */
+function nativeActionKey(action: string): string {
+	const name = action
+		.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "")
+		.replace(/[A-Z]/g, letter => letter.toLowerCase());
+	if (name === "show_menu") return "axshowmenu";
+	return name.startsWith("ax") ? name : `ax${name}`;
+}
 
 /**
  * Under `computer.backgroundFallback: "refuse"` the user's setting beats the
@@ -368,12 +479,62 @@ function refuseForeground(
 	);
 }
 
+/** A URL (`https:`, `x-apple.systempreferences:`, Windows `shell:`); never a drive letter. */
+const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
+
+/**
+ * `apps.open`'s target or `app` selector, against the session's folder
+ * `cwd` when it names a path there: one written as a relative path (`./a`,
+ * `a/b`), even if missing, or a bare name of an existing entry. `~` and a
+ * leading `~/` are the user's home ([`expandTilde`]); `~name` stays a name or
+ * ID, since application IDs and names can start with `~`. An exact
+ * application ID or native path (`listed`) keeps precedence over a same-named
+ * entry; absolute paths, URLs and other names pass through to native
+ * resolution.
+ */
+async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
+	if (value === "~" || value.startsWith("~/") || value.startsWith(`~${path.sep}`))
+		return path.resolve(expandTilde(value));
+	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
+	const local = path.resolve(cwd, value);
+	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);
+	if (!written && !(await entryExists(local))) return value;
+	return (await listed(value)) ? value : local;
+}
+
+/** Whether `local` names an entry (a link counts as itself), without blocking the worker. */
+async function entryExists(local: string): Promise<boolean> {
+	try {
+		await fs.lstat(local);
+		return true;
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+}
+
 const MENU_ROUTE =
 	"Use the window's menu bar with win.menu.select(...), or an element action such as press(), instead.";
+const MENU_TREE_LIMIT = 150;
+const MENU_TREE_SKIPPABLE = ["AxFailed:", BACKGROUND_UNAVAILABLE, "InvalidTarget:"];
 /** AX roles of the controls that open a menu when pressed, as native's `open_menu` reads them. */
 const MENU_CONTROL_ROLES = ["AXPopUpButton", "AXMenuButton"];
 const MENU_CONTROL_ROUTE =
 	"Its options are chosen only through that menu: use the window's menu bar with win.menu.select(...) if it has the same command, or tell the user the step needs their screen.";
+
+/**
+ * The note after a macOS background `move`, printed for the first one in a
+ * desktop session: eval sends each window call as its own run, so a per-run
+ * note would repeat once per move. A failed run delivers only its error, so
+ * the session counts as told only once a successful run carries the note.
+ * Measured in a macOS 26 guest on an `AppKit` tracking area and a Chrome
+ * `:hover` element: a background move gave neither any hover; a takeover
+ * move's hover ended when native warped the pointer back, before the call
+ * returned; a takeover click on the hidden control reached it every time.
+ * Under `refuse` both takeover routes are refused, so that ending names
+ * neither.
+ */
+const backgroundMoveNoted = new WeakSet<NativeDesktopSession>();
 
 /**
  * Under `refuse`, a macOS call that opens a menu is refused before anything is
@@ -471,8 +632,8 @@ async function appNames(session: NativeDesktopSession, signal: AbortSignal): Pro
 }
 
 /**
- * Says where focus ended after a fallback takeover, from native's
- * WindowServer reading taken when the takeover finished.
+ * Says where focus ended after a fallback takeover, from native's window
+ * server reading taken when the takeover finished (macOS and Windows).
  */
 async function focusReport(
 	session: NativeDesktopSession,
@@ -482,15 +643,64 @@ async function focusReport(
 ): Promise<string> {
 	if (!report || report.frontPid == null) return "focus was not confirmed afterwards";
 	const { frontPid, previousPid, handedBack } = report;
+	// macOS says what it did with the user's keyboard: nothing outside an app
+	// can see which of its windows is key, so it names what was sent, never a
+	// verified key window. Keep natives type-only so the worker's readiness
+	// handshake does not load the addon.
+	const keyboard: `${DesktopKeyboardReturn}` | undefined = report.keyboard;
 	const names = await appNames(session, signal);
 	const name = (pid: number) => names.get(pid) ?? `pid ${pid}`;
 	const front = name(frontPid);
 	if (previousPid == null) return `focus is on ${front}`;
-	if (frontPid === previousPid) return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	if (keyboard === "leftAsChosen") return `focus is on ${front}, left as the user chose`;
 	const user = name(previousPid);
+	if (frontPid === previousPid) {
+		switch (keyboard) {
+			case "handedBack":
+				return `handed the keyboard back to ${front}'s window`;
+			case "notSent":
+				return handedBack
+					? `handed the front back to ${front} but not its window's keyboard: macOS refused the hand-back or the user's last input was still being read`
+					: `focus is on ${front}; macOS refused the hand-back or the user's last input was still being read, so nothing was sent to its window`;
+			case "frontOnly":
+				return `handed the front back to ${front}, which shows no window`;
+			case "kept":
+				return `focus is on ${front}`;
+		}
+		return handedBack ? `focus returned to ${front}` : `focus is on ${front}`;
+	}
+	if (keyboard === "handedBack") return `handed the keyboard back to ${user}'s window, but ${front} is now front`;
 	if (handedBack) return `focus was handed back to ${user}, but ${front} is now front`;
 	if (frontPid === target) return `focus stayed on ${front}; it did not return to ${user}`;
 	return `focus is on ${front}; it did not return to ${user}`;
+}
+
+async function sendType(
+	session: NativeDesktopSession,
+	context: ComputerRunContext,
+	takeover: boolean | undefined,
+	send: (fallback?: Fallback) => TypeCall,
+	target?: number,
+): Promise<void> {
+	let unconfirmed: string | undefined;
+	await sendInput(
+		session,
+		context,
+		"type",
+		takeover,
+		async fallback => {
+			const result = await send(fallback);
+			unconfirmed = result?.unconfirmed;
+			return result?.focusReturn;
+		},
+		target,
+		() => !unconfirmed,
+	);
+	if (unconfirmed)
+		context.output.push({
+			type: "text",
+			text: `type sent the text but could not confirm it arrived: ${unconfirmed}`,
+		});
 }
 
 /**
@@ -501,7 +711,8 @@ async function focusReport(
  * which is never rerun), and the call did not set `takeover`, the setting
  * decides: `takeover` reruns that call in takeover, handing focus back
  * to the user's app, and reports it in the run output; `refuse` fails without
- * taking over.
+ * taking over. `confirmed` says whether the target was seen taking the
+ * input; one that was not is reported as sent rather than delivered.
  */
 async function sendInput(
 	session: NativeDesktopSession,
@@ -510,6 +721,7 @@ async function sendInput(
 	takeover: boolean | undefined,
 	send: (fallback?: Fallback) => InputCall,
 	target?: number,
+	confirmed: () => boolean = () => true,
 ): Promise<void> {
 	if (takeover === true) {
 		refuseForeground(
@@ -562,7 +774,7 @@ async function sendInput(
 		const focus = await focusReport(session, context.signal, report, target);
 		context.output.push({
 			type: "text",
-			text: `${method} ran in takeover because ${why}; the input was delivered, and ${focus}`,
+			text: `${method} ran in takeover because ${why}; the input was ${confirmed() ? "delivered" : "sent"}, and ${focus}`,
 		});
 	}
 }
@@ -574,6 +786,7 @@ async function captureScreenshot(
 	options?: ScreenshotOptions,
 	region?: CaptureRegion,
 ): Promise<ScreenshotResult> {
+	strictOptions(options, screenshotOptionsKeys, "screenshot");
 	const context = getContext();
 	const caps = {
 		maxWidth: context.snapshot.captureMaxWidth,
@@ -583,6 +796,12 @@ async function captureScreenshot(
 		region === undefined ? session.capture(target, caps) : session.captureRegion(target, region, caps),
 	);
 	return await emitScreenshot(context, frame, options);
+}
+
+/** A tree read's text, closed by the covered note when its window appeared fully covered around the read. */
+function treeText(snapshot: { text: string; covered?: boolean }): string {
+	if (!snapshot.covered) return snapshot.text;
+	return snapshot.text ? `${snapshot.text}\n${COVERED_TREE_NOTICE}` : COVERED_TREE_NOTICE;
 }
 
 async function emitScreenshot(
@@ -602,6 +821,7 @@ async function emitScreenshot(
 		...(frame.region ? { region: frame.region } : {}),
 	};
 	if (frame.screenLocked) result.screenLocked = true;
+	if (frame.covered) result.covered = true;
 	const scaled = frame.width !== frame.sourceWidth || frame.height !== frame.sourceHeight;
 	context.screenshots.push({
 		...result,
@@ -615,10 +835,11 @@ async function emitScreenshot(
 		const captured = frame.region
 			? `zoom ${frame.target} ${dimensions}; region=${JSON.stringify(frame.region)}; ${coordinates}; use the base full screenshot coordinates for input, not zoom pixels → ${destination}`
 			: `screenshot ${frame.target} ${dimensions}; ${coordinates} → ${destination}`;
-		context.output.push({
-			type: "text",
-			text: frame.screenLocked ? `${captured}\n${SCREEN_LOCKED_CAPTURE_NOTE}` : captured,
-		});
+		const notes = [
+			...(frame.screenLocked ? [screenLockedCaptureNotice()] : []),
+			...(frame.covered ? [COVERED_CAPTURE_NOTICE] : []),
+		];
+		context.output.push({ type: "text", text: [captured, ...notes].join("\n") });
 		context.output.push({
 			type: "image",
 			data: Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength).toString("base64"),
@@ -659,17 +880,18 @@ class El {
 		return (await nativeCall(signal, () => this.#session.axNode(this.ref))).value;
 	}
 
-	async setValue(value: string): Promise<void> {
+	async setValue(value: string | number): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "setValue");
-		validateString(value, "setValue(value)");
+		const text = valueText(value);
 		// Native chooses a popup's option by opening its menu and pressing the item.
 		if (this.nativeRole === "AXPopUpButton")
 			refuseControlMenu(this.#session, context, "setValue()", this.nativeRole, `element ${this.ref}`);
-		await nativeCall(context.signal, () => this.#session.axSetValue(this.ref, value));
+		await nativeCall(context.signal, () => this.#session.axSetValue(this.ref, text));
 	}
 
 	async selectText(text: string, options?: AxSelectTextOptions): Promise<AxTextSelection> {
+		strictOptions(options, axSelectTextOptionsKeys, "selectText");
 		const context = this.#getContext();
 		guardRun(context, "selectText");
 		validateString(text, "selectText(text)");
@@ -695,11 +917,12 @@ class El {
 	}
 
 	async perform(action: string, options?: MenuOptions): Promise<void> {
+		strictOptions(options, menuOptionsKeys, "perform");
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
-		// The names native `axPerform` runs as `AXRaise` (its `action_name` mapping).
-		if (action.trim().toLowerCase() === "raise" || action === "AXRaise") {
+		const native = nativeActionKey(action);
+		if (native === "axraise") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -708,11 +931,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		// The names native `axPerform` runs as `AXOpen` (`action_name` prefixes "AX"
-		// to any other name). On an item in Chrome's Open panel it brings the
-		// panel's application to the front, even when the action fails, and it
-		// stays there.
-		if (this.#session.capabilities.backend === "quartz" && (action === "AXOpen" || action === "Open")) {
+		// On an item in Chrome's Open panel `AXOpen` brings the panel's application to the front, even
+		// when the action fails, and it stays there.
+		if (this.#session.capabilities.backend === "quartz" && native === "axopen") {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
@@ -722,8 +943,8 @@ class El {
 			);
 		}
 		const menu = menuOption(options);
-		// The names native `axPerform` runs as `AXShowMenu`, which opens the element's context menu.
-		if (["showmenu", "show_menu"].includes(action.trim().toLowerCase()) || action === "AXShowMenu") {
+		// `AXShowMenu` opens the element's context menu.
+		if (native === "axshowmenu") {
 			refuseMenu(
 				this.#session,
 				context,
@@ -735,8 +956,7 @@ class El {
 		}
 		if (menu !== undefined)
 			refuseMenu(this.#session, context, "perform with menu", "a menu", MENU_ROUTE, `element ${this.ref}`);
-		// The names native `axPerform` runs as `AXPress`.
-		if (action.trim().toLowerCase() === "press" || action === "AXPress") {
+		if (native === "axpress") {
 			refuseControlMenu(
 				this.#session,
 				context,
@@ -745,7 +965,9 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
+		// macOS runs the key the refusals checked; UIA and AT-SPI match their own action names as given.
+		const sent = this.#session.capabilities.backend === "quartz" ? native : action;
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, sent, menu));
 	}
 
 	/**
@@ -753,6 +975,9 @@ class El {
 	 * with one, that chord typed into the element.
 	 */
 	async press(chord?: string | string[] | MenuOptions, options?: InputOptions): Promise<void> {
+		// Validate the overload being executed, not the union of its option types.
+		strictOptions(options, chord === undefined || isMenuOptions(chord) ? {} : inputOptionsKeys, "press");
+		if (isMenuOptions(chord)) strictOptions(chord, menuOptionsKeys, "press");
 		const context = this.#getContext();
 		guardRun(context, "press");
 		if (chord === undefined || isMenuOptions(chord)) {
@@ -771,16 +996,18 @@ class El {
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "type");
 		const context = this.#getContext();
 		guardRun(context, "type");
 		validateString(text, "type(text)");
 		const native = pointerOptions(options);
-		await sendInput(this.#session, context, "type", native.takeover, fallback =>
+		await sendType(this.#session, context, native.takeover, fallback =>
 			this.#session.axType(this.ref, text, { ...native, ...fallback }),
 		);
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
+		strictOptions(options, clickOptionsKeys, "click");
 		const context = this.#getContext();
 		guardRun(context, "click");
 		const native = pointerOptions(options);
@@ -792,6 +1019,7 @@ class El {
 	}
 
 	async doubleClick(options?: Omit<ClickOptions, "count">): Promise<void> {
+		strictOptions(options, doubleClickKeys, "doubleClick");
 		const context = this.#getContext();
 		guardRun(context, "doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
@@ -897,14 +1125,15 @@ class ElRef implements PromiseLike<El> {
 		return (await this.#resolve()).value();
 	}
 
-	async setValue(value: string): Promise<void> {
+	async setValue(value: string | number): Promise<void> {
 		// Reject a read-only run or a bad argument before the ref lookup reaches the native addon.
 		guardRun(this.#getContext(), "setValue");
-		validateString(value, "setValue(value)");
-		await (await this.#resolve()).setValue(value);
+		const text = valueText(value);
+		await (await this.#resolve()).setValue(text);
 	}
 
 	async selectText(text: string, options?: AxSelectTextOptions): Promise<AxTextSelection> {
+		strictOptions(options, axSelectTextOptionsKeys, "selectText");
 		guardRun(this.#getContext(), "selectText");
 		validateString(text, "selectText(text)");
 		return (await this.#resolve()).selectText(text, options);
@@ -923,28 +1152,34 @@ class ElRef implements PromiseLike<El> {
 	}
 
 	async perform(action: string, options?: MenuOptions): Promise<void> {
+		strictOptions(options, menuOptionsKeys, "perform");
 		guardRun(this.#getContext(), "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
 		await (await this.#resolve()).perform(action, options);
 	}
 
 	async press(chord?: string | string[] | MenuOptions, options?: InputOptions): Promise<void> {
+		strictOptions(options, chord === undefined || isMenuOptions(chord) ? {} : inputOptionsKeys, "press");
+		if (isMenuOptions(chord)) strictOptions(chord, menuOptionsKeys, "press");
 		guardRun(this.#getContext(), "press");
 		if (chord !== undefined && !isMenuOptions(chord)) chordKeys(chord);
 		await (await this.#resolve()).press(chord, options);
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "type");
 		guardRun(this.#getContext(), "type");
 		validateString(text, "type(text)");
 		await (await this.#resolve()).type(text, options);
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
+		strictOptions(options, clickOptionsKeys, "click");
 		await (await this.#resolve()).click(options);
 	}
 
 	async doubleClick(options?: Omit<ClickOptions, "count">): Promise<void> {
+		strictOptions(options, doubleClickKeys, "doubleClick");
 		await (await this.#resolve()).doubleClick(options);
 	}
 
@@ -961,8 +1196,86 @@ class ElRef implements PromiseLike<El> {
 	}
 }
 
-class Win {
+/** Methods whose native target is the exact window id, not the result of a new visible-window search. */
+class WindowAccess {
 	readonly id: string;
+	readonly #session: NativeDesktopSession;
+	readonly #getContext: RunContextAccessor;
+
+	constructor(session: NativeDesktopSession, getContext: RunContextAccessor, id: string) {
+		this.#session = session;
+		this.#getContext = getContext;
+		this.id = id;
+	}
+
+	get menu() {
+		return {
+			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
+				const context = this.#getContext();
+				// On macOS the read makes the window key first, so it is not inspection-only.
+				guardRun(context, "menu.items");
+				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
+				const segments =
+					path.length <= 1 && path[0] === undefined
+						? undefined
+						: menuPath("menu.items", path, { allowEmpty: true });
+				const items = await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+				return segments?.length ? await this.#menuTree(items, context.signal) : items;
+			},
+			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
+				const context = this.#getContext();
+				guardRun(context, "menu.select");
+				const segments = menuPath("menu.select", path);
+				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
+			},
+		};
+	}
+
+	async #menuTree(items: MenuItem[], signal: AbortSignal): Promise<MenuItem[]> {
+		const listed: MenuItem[] = [];
+		let budget = MENU_TREE_LIMIT - items.length;
+		const visit = async (level: MenuItem[]): Promise<void> => {
+			for (const item of level) {
+				listed.push(item);
+				if (!item.hasSubmenu || !item.enabled || budget <= 0) continue;
+				let children: MenuItem[];
+				try {
+					children = await nativeCall(signal, () => this.#session.menuItems(this.id, item.path));
+				} catch (error) {
+					// A refusal or AX timeout stops expansion, but keeps discovered paths available.
+					if (error instanceof ToolError && MENU_TREE_SKIPPABLE.some(code => error.message.startsWith(code))) {
+						budget = 0;
+						continue;
+					}
+					throw error;
+				}
+				if (children.length > budget) continue;
+				budget -= children.length;
+				await visit(children);
+			}
+		};
+		await visit(items);
+		return listed;
+	}
+
+	async ax(options?: AxOptions): Promise<string> {
+		strictOptions(options, axOptionsKeys, "ax");
+		const { signal } = this.#getContext();
+		return treeText(await nativeCall(signal, () => this.#session.axSnapshot(this.id, options)));
+	}
+
+	async find(query: AxQuery): Promise<El[]> {
+		strictOptions(query, axQueryKeys, "find");
+		const { signal } = this.#getContext();
+		return foundElements(
+			(await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
+				node => new El(this.#session, this.#getContext, node),
+			),
+		);
+	}
+}
+
+class Win extends WindowAccess {
 	readonly app: string;
 	readonly title: string;
 	readonly pid?: number;
@@ -972,9 +1285,9 @@ class Win {
 	readonly #getContext: RunContextAccessor;
 
 	constructor(session: NativeDesktopSession, getContext: RunContextAccessor, window: DesktopWindow) {
+		super(session, getContext, window.id);
 		this.#session = session;
 		this.#getContext = getContext;
-		this.id = window.id;
 		this.app = window.app;
 		this.title = window.title;
 		this.pid = window.pid;
@@ -987,6 +1300,7 @@ class Win {
 	}
 
 	zoom(region: CaptureRegion, options?: ScreenshotOptions): Promise<ScreenshotResult> {
+		strictOptions(options, screenshotOptionsKeys, "zoom");
 		if (!region || typeof region !== "object" || Array.isArray(region)) {
 			throw new ToolError("zoom requires a region { x, y, width, height } in the last full screenshot's pixels");
 		}
@@ -1012,6 +1326,7 @@ class Win {
 	}
 
 	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
+		strictOptions(options, clickOptionsKeys, "click");
 		const context = this.#guardInput("click");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "click", native, `window ${this.id}`);
@@ -1027,6 +1342,7 @@ class Win {
 	}
 
 	async doubleClick(x: number, y: number, options?: Omit<ClickOptions, "count">): Promise<void> {
+		strictOptions(options, doubleClickKeys, "doubleClick");
 		const context = this.#guardInput("doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
 		refusePointerMenu(this.#session, context, "doubleClick", native, `window ${this.id}`);
@@ -1042,39 +1358,69 @@ class Win {
 	}
 
 	async move(x: number, y: number, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "move");
 		const context = this.#guardInput("move");
 		const native = pointerOptions(options);
+		// A desktop or display move drives the user's own pointer whatever the options, so it is never background.
+		let background = native.takeover !== true && this.id !== "desktop" && !this.id.startsWith("display:");
 		await sendInput(
 			this.#session,
 			context,
 			"move",
 			native.takeover,
-			fallback => this.#session.moveMouse(this.id, x, y, { ...native, ...fallback }),
+			fallback => {
+				if (fallback) background = false;
+				return this.#session.moveMouse(this.id, x, y, { ...native, ...fallback });
+			},
 			this.pid,
 		);
+		if (
+			background &&
+			this.#session.capabilities.backend === "quartz" &&
+			!context.backgroundMoveNote &&
+			!backgroundMoveNoted.has(this.#session)
+		) {
+			context.backgroundMoveNote = true;
+			const refuse = context.snapshot.backgroundFallback === "refuse";
+			context.output.push({ type: "text", text: prompt.render(backgroundMoveNote, { refuse }).trim() });
+		}
 	}
 
-	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
+	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
+		strictOptions(options, dragOptionsKeys, "drag");
 		const context = this.#guardInput("drag");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "drag", native, `window ${this.id}`);
 		refuseMenuPress(this.#session, context, native);
+		let selection: AxTextSelection | undefined;
 		await sendInput(
 			this.#session,
 			context,
 			"drag",
 			native.takeover,
-			fallback =>
-				this.#session.drag(
+			async fallback => {
+				const result = await this.#session.drag(
 					this.id,
 					points.map(([x, y]) => ({ x, y })),
 					{ ...native, ...fallback },
-				),
+				);
+				selection = result?.selection;
+				return result?.focusReturn;
+			},
 			this.pid,
 		);
+		if (!selection) return undefined;
+		// The returned selection keeps the whole text; the output line quotes its start.
+		const quoted = truncate(JSON.stringify(selection.text).slice(1, -1), DRAG_SELECTION_PREVIEW_CHARS);
+		context.output.push({
+			type: "text",
+			text: `drag selected "${quoted}" through accessibility instead of dragging; no mouse input was sent`,
+		});
+		return selection;
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
+		strictOptions(options, scrollOptionsKeys, "scroll");
 		const context = this.#guardInput("scroll");
 		const dx = options.dx ?? 0;
 		const dy = options.dy ?? 0;
@@ -1090,13 +1436,13 @@ class Win {
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "type");
 		const context = this.#guardInput("type");
 		validateString(text, "type(text)");
 		const native = pointerOptions(options);
-		await sendInput(
+		await sendType(
 			this.#session,
 			context,
-			"type",
 			native.takeover,
 			fallback => this.#session.typeText(this.id, text, { ...native, ...fallback }),
 			this.pid,
@@ -1104,6 +1450,7 @@ class Win {
 	}
 
 	async press(chord: string | string[], options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "press");
 		const context = this.#guardInput("press");
 		const keys = chordKeys(chord);
 		const native = pointerOptions(options);
@@ -1118,6 +1465,7 @@ class Win {
 	}
 
 	async holdKeys(keys: string[], options: HoldOptions): Promise<void> {
+		strictOptions(options, holdOptionsKeys, "holdKeys");
 		const context = this.#guardInput("holdKeys");
 		// One read of each option, so the `refuse` check and the native call agree.
 		const { duration, takeover } = { ...options };
@@ -1134,6 +1482,7 @@ class Win {
 	}
 
 	async holdMouse(x: number, y: number, options: HoldMouseOptions): Promise<void> {
+		strictOptions(options, holdMouseOptionsKeys, "holdMouse");
 		const context = this.#guardInput("holdMouse");
 		const { duration, button, keys, takeover } = { ...options };
 		validateHold({ duration, takeover });
@@ -1152,6 +1501,7 @@ class Win {
 	}
 
 	async observe(options?: ScreenshotOptions & AxOptions): Promise<ObservationResult> {
+		strictOptions(options, observeKeys, "observe");
 		const context = this.#getContext();
 		const result = await nativeCall(context.signal, () =>
 			this.#session.observe(
@@ -1164,34 +1514,13 @@ class Win {
 			),
 		);
 		const screenshot = await emitScreenshot(context, result.capture, options);
-		if (!options?.silent) context.output.push({ type: "text", text: result.accessibility.text });
+		const ax = treeText(result.accessibility);
+		if (!options?.silent) context.output.push({ type: "text", text: ax });
 		return {
 			...screenshot,
-			ax: result.accessibility.text,
+			ax,
 			nodeCount: result.accessibility.nodeCount,
 			truncated: result.accessibility.truncated,
-		};
-	}
-
-	get menu() {
-		return {
-			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
-				const context = this.#getContext();
-				// On macOS the read makes the window key first, so it is not inspection-only.
-				guardRun(context, "menu.items");
-				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
-				const segments =
-					path.length <= 1 && path[0] === undefined
-						? undefined
-						: menuPath("menu.items", path, { allowEmpty: true });
-				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
-			},
-			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
-				const context = this.#getContext();
-				guardRun(context, "menu.select");
-				const segments = menuPath("menu.select", path);
-				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
-			},
 		};
 	}
 
@@ -1212,20 +1541,6 @@ class Win {
 			`window ${this.id}`,
 		);
 		await nativeCall(context.signal, () => this.#session.raiseWindow(this.id));
-	}
-
-	async ax(options?: AxOptions): Promise<string> {
-		const { signal } = this.#getContext();
-		return (await nativeCall(signal, () => this.#session.axSnapshot(this.id, options))).text;
-	}
-
-	async find(query: AxQuery): Promise<El[]> {
-		const { signal } = this.#getContext();
-		return foundElements(
-			(await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
-				node => new El(this.#session, this.#getContext, node),
-			),
-		);
 	}
 
 	ref(ref: string): ElRef {
@@ -1316,7 +1631,11 @@ export class ComputerWorkerCore {
 				// addon; normal CLI startup and selector pings never execute desktop code.
 				const createSession =
 					this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
-				const session = await createSession({ display: snapshot.display, escapeStopKey: escape.key });
+				const session = await createSession({
+					display: snapshot.display,
+					escapeStopKey: escape.key,
+					agentId: snapshot.agentId,
+				});
 				const guarded = this.#guard(session);
 				this.#session = session;
 				this.#guarded = guarded;
@@ -1394,8 +1713,10 @@ export class ComputerWorkerCore {
 			readOnly: message.session.readOnly,
 			snapshot: message.session,
 			output,
+			backgroundMoveNote: false,
 			screenshots,
-			confirmControl: reason => this.#confirmControl(active, reason),
+			confirmControl: reason =>
+				this.#confirmControl(active, reason, deadline - Math.min(CONTROL_ANSWER_RESERVE_MS, message.timeoutMs / 4)),
 		};
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
@@ -1422,6 +1743,7 @@ export class ComputerWorkerCore {
 					if (!condition) throw new ToolError(text ?? "Assertion failed");
 				},
 				wait: (msOrPredicate: number | (() => unknown), options?: WaitPredicateOptions): Promise<unknown> => {
+					strictOptions(options, typeof msOrPredicate === "number" ? {} : waitPredicateOptionsKeys, "wait");
 					const resolved =
 						typeof msOrPredicate === "number"
 							? undefined
@@ -1484,6 +1806,7 @@ export class ComputerWorkerCore {
 				id: message.id,
 				ok: false,
 				error: this.#withScreenState(errorPayload(failure.error)),
+				output: { displays: output.finish(), screenshots, returnValue: undefined },
 			});
 			return;
 		}
@@ -1497,9 +1820,11 @@ export class ComputerWorkerCore {
 					id: message.id,
 					ok: false,
 					error: errorPayload(nativeError(error)),
+					output: { displays: output.finish(), screenshots, returnValue: undefined },
 				});
 				return;
 			}
+			if (runContext.backgroundMoveNote && this.#guarded) backgroundMoveNoted.add(this.#guarded);
 			this.#transport.send({
 				type: "result",
 				id: message.id,
@@ -1623,13 +1948,15 @@ export class ComputerWorkerCore {
 		return await promise;
 	}
 
-	async #confirmControl(active: ActiveRun, reason: string): Promise<boolean> {
+	async #confirmControl(active: ActiveRun, reason: string, answerDeadline: number): Promise<ControlVerdict> {
 		throwIfAborted(active.signal);
 		const id = `computer-control-${active.id}-${crypto.randomUUID()}`;
 		const pending = Promise.withResolvers<unknown>();
 		active.pendingTools.set(id, pending);
-		this.#transport.send({ type: "control-request", id, runId: active.id, reason });
-		return (await pending.promise) === true;
+		const timeoutMs = Math.max(0, Math.floor(answerDeadline - performance.now()));
+		this.#transport.send({ type: "control-request", id, runId: active.id, reason, timeoutMs });
+		const verdict = await pending.promise;
+		return verdict === "approved" || verdict === "no-ui" || verdict === "unanswered" ? verdict : "denied";
 	}
 
 	#deliverToolReply(id: string, reply: ToolReply): void {
@@ -1652,6 +1979,44 @@ export class ComputerWorkerCore {
 		const getContext = this.#currentRunContext;
 		const makeWin = (window: DesktopWindow): Win => new Win(session, getContext, window);
 		const el = (node: AxNode): El => new El(session, getContext, node);
+		const listWindows = async (filter: WindowFilter | undefined, signal: AbortSignal) => {
+			const windows = await nativeCall(signal, () => session.listWindows());
+			let appPids: Set<number> | undefined;
+			const app = filter?.app?.toLocaleLowerCase();
+			// Decide before title/id filtering, so another app cannot substitute for the named app.
+			const exactApp = !!app && windows.some(window => window.app.toLocaleLowerCase() === app);
+			// An app filter that names no window's app is looked up as an application id or path.
+			if (
+				app &&
+				windows.some(window => window.pid !== undefined) &&
+				!windows.some(window => matchesWindowApp(window, app))
+			) {
+				const applications = await nativeCall(signal, () => session.listApplications({ runningOnly: true }));
+				appPids = new Set<number>();
+				for (const application of applications) {
+					if (
+						application.pid !== undefined &&
+						(application.id.toLocaleLowerCase() === app || application.path.toLocaleLowerCase() === app)
+					) {
+						appPids.add(application.pid);
+					}
+				}
+			}
+			const title = filter?.title?.toLocaleLowerCase();
+			return {
+				windows,
+				appPids,
+				matches: windows.filter(window => {
+					if (!filter) return true;
+					return (
+						(filter.id === undefined || window.id === String(filter.id)) &&
+						(!app ||
+							(exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
+						(!title || window.title.toLocaleLowerCase().includes(title))
+					);
+				}),
+			};
+		};
 		const desktopTarget = new Win(session, getContext, {
 			id: "desktop",
 			app: "desktop",
@@ -1663,6 +2028,13 @@ export class ComputerWorkerCore {
 			focused: false,
 		});
 		return {
+			// Direct helpers from both preludes already carry the id from a resolved handle.
+			windowAccess: (id: string): WindowAccess => {
+				validateString(id, "window id", { nonEmpty: true });
+				if (id.toLowerCase() === "desktop" || id.startsWith("display:"))
+					throw new ToolError("Expected a window id");
+				return new WindowAccess(session, getContext, id);
+			},
 			capabilities: (): DesktopCapabilities => {
 				const { signal } = getContext();
 				throwIfAborted(signal);
@@ -1712,6 +2084,7 @@ export class ComputerWorkerCore {
 			},
 			apps: {
 				list: async (options?: ApplicationQuery): Promise<Application[]> => {
+					strictOptions(options, applicationQueryKeys, "apps.list");
 					const { signal } = getContext();
 					return await nativeCall(signal, () => session.listApplications(options));
 				},
@@ -1719,6 +2092,7 @@ export class ComputerWorkerCore {
 					id: string,
 					options?: ApplicationOpenOptions,
 				): Promise<Application & { window: Win | null }> => {
+					strictOptions(options, applicationOpenOptionsKeys, "apps.open");
 					const context = getContext();
 					guardRun(context, "apps.open");
 					validateString(id, "apps.open(id)", { nonEmpty: true });
@@ -1732,14 +2106,32 @@ export class ComputerWorkerCore {
 							"Call apps.open without activate, which opens the application behind the user's.",
 						);
 					}
+					if (open.reveal === true) {
+						refuseForeground(
+							context,
+							"apps.open with reveal: true",
+							"bring Finder to the front",
+							"Open the containing folder with apps.open(folder) instead, which opens it behind the user's app.",
+						);
+					}
+					// A relative path names an item in the session's folder, not the omp process's.
+					const listed = async (value: string): Promise<boolean> =>
+						(await nativeCall(context.signal, () => session.listApplications())).some(
+							app => app.id === value || app.path === value,
+						);
+					const cwd = context.snapshot.cwd;
+					const target = await sessionPath(id, cwd, listed);
+					if (typeof open.app === "string") open.app = await sessionPath(open.app, cwd, listed);
 					const { window: shown, ...application } = await nativeCall(context.signal, () =>
-						session.openApplication(id, open),
+						session.openApplication(target, open),
 					);
 					return { ...application, window: shown ? makeWin(shown) : null };
 				},
 			},
 			control: {
-				acquire: async (options: { reason: string }): Promise<{ active: boolean }> => {
+				acquire: async (
+					options: ControlAcquireOptions,
+				): Promise<{ active: boolean; reason?: Exclude<ControlVerdict, "approved"> }> => {
 					const context = getContext();
 					guardRun(context, "control.acquire");
 					refuseForeground(
@@ -1748,13 +2140,13 @@ export class ComputerWorkerCore {
 						"hand the agent foreground control of the desktop",
 						"Window input needs no control; it runs in the background.",
 					);
-					strictObject(options, ["reason"], "control.acquire");
+					strictObject(options, Object.keys(controlAcquireOptionsKeys), "control.acquire");
 					if (typeof options.reason !== "string" || !options.reason.trim())
 						throw new ToolError("control.acquire requires a non-empty reason");
 					if (session.controlState().active) return { active: true };
-					const approved = await context.confirmControl(options.reason);
+					const verdict = await context.confirmControl(options.reason);
 					throwIfAborted(context.signal);
-					if (!approved) return { active: false };
+					if (verdict !== "approved") return { active: false, reason: verdict };
 					return await nativeCall(context.signal, () => session.acquireControl());
 				},
 				release: async (): Promise<void> => {
@@ -1767,25 +2159,43 @@ export class ComputerWorkerCore {
 					return session.controlState();
 				},
 			},
-			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
+			windows: async (filter?: Omit<WindowFilter, "wait">): Promise<DesktopWindow[]> => {
+				strictOptions(filter, windowListFilterKeys, "windows");
 				const { signal } = getContext();
-				return (await nativeCall(signal, () => session.listWindows()))
-					.filter(window => matchesFilter(window, filter))
-					.slice(0, MAX_LISTED_WINDOWS);
+				const { matches } = await listWindows(filter, signal);
+				return matches.slice(0, MAX_LISTED_WINDOWS);
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
+				if (typeof selector === "object") strictOptions(selector, windowFilterKeys, "window");
 				const { signal } = getContext();
-				const windows = await nativeCall(signal, () => session.listWindows());
-				const matches =
-					typeof selector === "string" || typeof selector === "number"
-						? windows.filter(window => window.id === String(selector))
-						: windows.filter(window => matchesFilter(window, selector));
+				const id = typeof selector === "string" || typeof selector === "number" ? String(selector) : undefined;
+				const wait = typeof selector === "object" && selector !== null ? windowWait(selector.wait) : 0;
+				// Monotonic, like the run deadline: a wall-clock step must not end or stretch the wait.
+				const deadline = performance.now() + wait;
+				let windows: DesktopWindow[];
+				let matches: DesktopWindow[];
+				let appPids: ReadonlySet<number> | undefined;
+				for (;;) {
+					const listed = await listWindows(id === undefined ? (selector as WindowFilter) : { id }, signal);
+					({ windows, matches, appPids } = listed);
+					// The last interval sleeps only what is left, so the final listing lands at the deadline.
+					const remaining = deadline - performance.now();
+					if (matches.length > 0 || remaining <= 0) break;
+					await waitForRun(Math.min(WINDOW_WAIT_INTERVAL_MS, remaining), signal);
+				}
+				// Untyped scripts may pass nothing or `null`, which `matchesFilter` accepts as no filter: a desktop with one
+				// window returns it, and otherwise the error names the missing selector.
+				const unfiltered =
+					selector == null
+						? "computer.window() without an id or { app, title } filter matches every open window"
+						: "";
 				if (matches.length === 0) {
-					// Untyped scripts may pass `null`, which `matchesFilter` accepts as no filter.
 					const app = typeof selector === "object" ? selector?.app : undefined;
-					throw new ToolError(
-						`no window matches ${JSON.stringify(selector)}\n${describeWindowMiss(windows, app)}`,
-					);
+					const route = session.capabilities.backend === "quartz" ? "shows-window" : "launches";
+					const lead = unfiltered
+						? `${unfiltered}, and none is open`
+						: `no window matches ${JSON.stringify(selector)}`;
+					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route, appPids)}`);
 				}
 				if (matches.length > 1) {
 					const candidates = matches
@@ -1794,7 +2204,10 @@ export class ComputerWorkerCore {
 						.join("\n");
 					const omitted = matches.length - MAX_LISTED_WINDOWS;
 					const more = omitted > 0 ? `\n… ${omitted} more` : "";
-					throw new ToolError(`multiple windows match ${JSON.stringify(selector)}:\n${candidates}${more}`);
+					const lead = unfiltered
+						? `${unfiltered}; pass a window id or filter to pick one`
+						: `multiple windows match ${JSON.stringify(selector)}`;
+					throw new ToolError(`${lead}:\n${candidates}${more}`);
 				}
 				return makeWin(matches[0]!);
 			},

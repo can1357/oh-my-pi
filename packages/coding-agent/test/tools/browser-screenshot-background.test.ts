@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { findFreeCdpPort, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { findFreeCdpPort, gracefulKillTreeOnce, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { ensureChromiumExecutable, RENDERER_PRIORITY_ARGS } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	acquireBrowser,
 	type PuppeteerBrowserHandle,
@@ -52,7 +52,7 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => {});
 });
 
-/** A headless Chromium on a CDP port, attached the way `app.cdp_url` attaches a user's browser. */
+/** A headless Chromium on a CDP port, attached the way an `app` CDP URL attaches a user's browser. */
 async function connectedBrowser(): Promise<PuppeteerBrowserHandle> {
 	const exe = await ensureChromiumExecutable();
 	if (!exe) throw new Error("Expected a Chromium executable");
@@ -68,13 +68,14 @@ async function connectedBrowser(): Promise<PuppeteerBrowserHandle> {
 			"--no-default-browser-check",
 			"--use-mock-keychain",
 			"--password-store=basic",
+			...RENDERER_PRIORITY_ARGS,
 			`--user-data-dir=${root}`,
 			`--remote-debugging-port=${port}`,
 		],
 		{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
 	);
 	cleanups.push(async () => {
-		child.kill();
+		await gracefulKillTreeOnce(child.pid);
 		await child.exited;
 		await fs.rm(root, { recursive: true, force: true });
 	});
@@ -99,10 +100,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser screenshots of background tabs", (
 			await releaseTab(name);
 		});
 		await acquireTab(name, handle, { target: "agent-tab", timeoutMs: 30_000 });
+		// Attaching emulates focus, which macOS Chromium reports as `visible` and Linux as `hidden`;
+		// either way the capture itself must leave it as it was.
+		const agentVisibility = await visibility(agentPage);
 
 		expect(await repaintAndCapture(name, "#00ff00")).toEqual([0, 255, 0]);
 		expect(await visibility(userPage)).toBe("visible");
-		expect(await visibility(agentPage)).toBe("hidden");
+		expect(await visibility(agentPage)).toBe(agentVisibility);
 	}, 45_000);
 
 	it("captures the adopted tab after the user switched away from it", async () => {

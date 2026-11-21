@@ -1,18 +1,22 @@
 import { Database } from "bun:sqlite";
+import * as os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as reportIssue from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import {
 	__awaitAutoQaRecordPipelineForTests,
 	__resetAutoQaConsentForTests,
 	__resetAutoQaFlushStateForTests,
-	dispatchReportIssueDevice,
+	isReportIssueToolCall,
 	flushGrievances,
 	isAutoQaEnabled,
-	reportIssueDeviceUsage,
 } from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { specialToolCommands } from "@oh-my-pi/pi-coding-agent/tools/resolve";
+import { REPORT_ISSUE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
 import { mockFetch } from "../helpers/fetch-mock";
 
 function openTempDb(): Database {
@@ -26,7 +30,8 @@ function openTempDb(): Database {
 			report TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			pushed INTEGER NOT NULL DEFAULT 0,
-			push_error TEXT
+			push_error TEXT,
+			source TEXT
 		);
 	`);
 	return db;
@@ -87,6 +92,12 @@ function restoreAutoQaEnv(): void {
 	Bun.env.PI_AUTO_QA = originalPiAutoQa;
 }
 
+/** Pin the home directory and login name the redaction reads. */
+function stubIdentity(home: string, username: string): void {
+	vi.spyOn(os, "homedir").mockReturnValue(home);
+	vi.spyOn(os, "userInfo").mockReturnValue({ username, uid: 501, gid: 20, shell: "/bin/zsh", homedir: home });
+}
+
 describe("flushGrievances", () => {
 	let db: Database;
 
@@ -107,13 +118,17 @@ describe("flushGrievances", () => {
 	it("lets PI_AUTO_QA=false disable auto QA when the setting is enabled", () => {
 		Bun.env.PI_AUTO_QA = "0";
 
-		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": true }))).toBe(false);
+		const settings = Settings.isolated();
+		cfgDevAutoqa.set(settings, true);
+		expect(isAutoQaEnabled(settings)).toBe(false);
 	});
 
 	it("lets PI_AUTO_QA=true enable auto QA when the setting is disabled", () => {
 		Bun.env.PI_AUTO_QA = "1";
 
-		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": false }))).toBe(true);
+		const settings = Settings.isolated();
+		cfgDevAutoqa.set(settings, false);
+		expect(isAutoQaEnabled(settings)).toBe(true);
 	});
 
 	it("enables auto QA by default with consent still unset", () => {
@@ -435,10 +450,46 @@ describe("flushGrievances", () => {
 		expect(selectPushedIds(db).length).toBe(firstBatch);
 		expect(selectUnpushedIds(db).length).toBe(secondBatch);
 	});
+
+	it("redacts the home directory from rows recorded before record-time redaction", async () => {
+		stubIdentity("/Users/jdoe", "jdoe");
+		insertGrievance(db, "read /Users/jdoe/notes.md", "selector dropped /Users/jdoe/notes.md:4");
+
+		let sentBody: unknown;
+		const fetchSpy = vi.fn(async (_input: string | URL | Request, init: RequestInit | undefined) => {
+			sentBody = JSON.parse(String(init?.body));
+			return new Response("", { status: 200 });
+		});
+
+		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
+
+		expect(result).toEqual({ pushed: 1, ok: true });
+		expect(sentBody).toMatchObject({
+			entries: [{ tool: "read ~/notes.md", report: "selector dropped ~/notes.md:4" }],
+		});
+	});
 });
 
-describe("dispatchReportIssueDevice", () => {
+/** Find the report_issue tool among the session's special tool commands. */
+function reportIssueTool(session: ToolSession): Tool {
+	const tool = specialToolCommands(session).find(command => command.name === REPORT_ISSUE_COMMAND_NAME);
+	if (!tool) throw new Error(`Missing ${REPORT_ISSUE_COMMAND_NAME} tool command`);
+	return tool;
+}
+
+/** Run the report_issue tool command and return its result. */
+async function runReportIssue(session: ToolSession, text: string) {
+	return reportIssueTool(session).execute("report-issue-call", { report: text });
+}
+
+describe("report_issue tool command", () => {
+	beforeEach(() => {
+		// Fixture words (`read`, `glob`, …) must not depend on the host's login name.
+		stubIdentity("/home/omp-test-user", "omp-test-user");
+	});
+
 	afterEach(() => {
+		vi.restoreAllMocks();
 		__resetAutoQaConsentForTests();
 	});
 
@@ -462,14 +513,10 @@ describe("dispatchReportIssueDevice", () => {
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			const session = { settings: consentedSettings() } as ToolSession;
-			const { result, xdev } = await dispatchReportIssueDevice(
-				session,
-				"read: selector parse dropped trailing line",
-			);
+			const result = await runReportIssue(session, "read: selector parse dropped trailing line");
 			const first = result.content[0];
 			expect(first?.type).toBe("text");
 			if (first?.type === "text") expect(first.text).toBe("Noted, thanks!");
-			expect(xdev.tool).toBe("report_issue");
 			await settlePipeline();
 			expect(selectIds(db)).toHaveLength(1);
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
@@ -486,7 +533,7 @@ describe("dispatchReportIssueDevice", () => {
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(session, "grep\nreported matches include a deleted file");
+			await runReportIssue(session, "grep\nreported matches include a deleted file");
 			await settlePipeline();
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
 			expect(row).toEqual({ tool: "grep", report: "reported matches include a deleted file" });
@@ -494,6 +541,47 @@ describe("dispatchReportIssueDevice", () => {
 			openSpy.mockRestore();
 			db.close();
 		}
+	});
+
+	it.each([
+		[
+			"help://read/sources: start fails because kitty-vt-wasm is missing",
+			"help://read/sources",
+			"start fails because kitty-vt-wasm is missing",
+		],
+		[
+			"write help://read/sources: start fails before executing bun",
+			"write help://read/sources",
+			"start fails before executing bun",
+		],
+		[
+			'write conflict://*: per-id content "2:\ttext" was read as a hashline prefix',
+			"write conflict://*",
+			'per-id content "2:\ttext" was read as a hashline prefix',
+		],
+	])("keeps the URI in the tool name of %p", async (text, tool, report) => {
+		Bun.env.PI_AUTO_QA = "1";
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await runReportIssue(session, text);
+			await settlePipeline();
+			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
+			expect(row).toEqual({ tool, report });
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	it.each([
+		"read agent://ReviewLifecycleLever returned an empty response",
+		"browser.open({name:'jio-terms',url:'https://www.jio.com/'}) navigated the attached relay tab",
+	])("rejects %p, which has no `: ` separator, instead of splitting inside it", async text => {
+		Bun.env.PI_AUTO_QA = "1";
+		const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
+		await expect(runReportIssue(session, text)).rejects.toThrow("Invalid report format");
 	});
 
 	it("clamps a prose first line so the stored tool stays within the collector limit", async () => {
@@ -504,13 +592,67 @@ describe("dispatchReportIssueDevice", () => {
 			const prose =
 				"eval içindeki tool.glob exact ve var olmayan yolu çağırınca beklenmedik şekilde RuntimeError fırlatıyor, sessizce boş dönmüyor";
 			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(session, `${prose}\nglob threw instead of returning empty`);
+			await runReportIssue(session, `${prose}\nglob threw instead of returning empty`);
 			await settlePipeline();
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
 			expect(Buffer.byteLength(row.tool, "utf8")).toBeLessThanOrEqual(128);
 			expect(prose.startsWith(row.tool)).toBe(true);
 			// The sentence is preserved in the report, not dropped on the floor.
 			expect(row.report).toBe(`${prose}\nglob threw instead of returning empty`);
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	/** Record `bash: <report>` as user `will` and return the stored report text. */
+	async function recordAsWill(report: string): Promise<string> {
+		Bun.env.PI_AUTO_QA = "1";
+		stubIdentity("/Users/will", "will");
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await runReportIssue(session, `bash: ${report}`);
+			await settlePipeline();
+			const row = db.prepare("SELECT report FROM grievances").get() as { report: string };
+			return row.report;
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	}
+
+	it.each([
+		[
+			"launchctl print gui/501/com.will.agent failed in /Users/will/code (not /Users/willa)",
+			"launchctl print gui/501/com.<user>.agent failed in ~/code (not /Users/willa)",
+		],
+		["see /Users/will. Then ssh will@build-host", "see ~. Then ssh <user>@build-host"],
+		[
+			"transcript -Users-will-codebases-app/x.jsonl and /c/Users/will/AppData",
+			"transcript -Users-<user>-codebases-app/x.jsonl and /c/Users/<user>/AppData",
+		],
+	])("redacts the user's identity from %p", async (report, expected) => {
+		expect(await recordAsWill(report)).toBe(expected);
+	});
+
+	it("leaves the login name alone where it is a word or an unrelated path segment", async () => {
+		const report = "Ask will. It will-do: will/max under ./will_modules/x and /srv/will/test";
+		expect(await recordAsWill(report)).toBe(report);
+	});
+
+	it("redacts a Windows home written in another case", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		stubIdentity("C:\\Users\\Will", "Will");
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await runReportIssue(session, "read: c:\\users\\will\\secret.txt and C:/USERS/WILL/x and -users-will-proj");
+			await settlePipeline();
+			const row = db.prepare("SELECT report FROM grievances").get() as { report: string };
+			expect(row.report).toBe("~\\secret.txt and ~/x and -users-<user>-proj");
 		} finally {
 			openSpy.mockRestore();
 			db.close();
@@ -526,7 +668,7 @@ describe("dispatchReportIssueDevice", () => {
 		try {
 			// Consent unset and no UI handler registered → resolves to false.
 			const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
-			const { result } = await dispatchReportIssueDevice(session, "read: selector parse dropped trailing line");
+			const result = await runReportIssue(session, "read: selector parse dropped trailing line");
 			const first = result.content[0];
 			if (first?.type === "text") expect(first.text).toBe("Noted, thanks!");
 			await settlePipeline();
@@ -539,10 +681,39 @@ describe("dispatchReportIssueDevice", () => {
 		}
 	});
 
+	it("tags MCP tools with their server", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = {
+				settings: consentedSettings(),
+				getToolByName: (name: string) =>
+					name === "mcp__linear__search" ? ({ name, mcpServerName: "linear" } as unknown as AgentTool) : undefined,
+			} as ToolSession;
+			await runReportIssue(session, "mcp__linear__search: returned stale issues");
+			await settlePipeline();
+			expect(db.prepare("SELECT source FROM grievances").get()).toEqual({ source: "mcp:linear" });
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
 	it("rejects malformed body text with a usage hint", async () => {
 		const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
-		await expect(dispatchReportIssueDevice(session, "just a vague sentence")).rejects.toThrow(
-			reportIssueDeviceUsage(),
+		await expect(runReportIssue(session, "just a vague sentence")).rejects.toThrow("Invalid report format");
+	});
+});
+
+describe("isReportIssueToolCall", () => {
+	it("detects direct and shell report_issue calls only", () => {
+		expect(isReportIssueToolCall({ name: "report_issue" })).toBe(true);
+		expect(isReportIssueToolCall({ name: "bash", arguments: { command: "report_issue something went wrong" } })).toBe(
+			true,
 		);
+		expect(isReportIssueToolCall({ name: "resolve" })).toBe(false);
+		expect(isReportIssueToolCall({ name: "bash", arguments: { command: "echo report_issue" } })).toBe(false);
+		expect(isReportIssueToolCall({ name: "bash" })).toBe(false);
 	});
 });

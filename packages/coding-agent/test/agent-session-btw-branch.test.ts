@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { loadAdvisorTranscriptCosts } from "@oh-my-pi/pi-coding-agent/advisor/transcript-recorder";
@@ -13,6 +13,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 
 function createBtwAssistant(): AssistantMessage {
@@ -77,8 +78,9 @@ describe("AgentSession.branchFromBtw", () => {
 		persisted?: boolean;
 		extensionRunner?: ExtensionRunner;
 		handler?: MockHandler;
+		model?: Model<Api>;
 	}) {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const model = options?.model ?? getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: options?.handler ?? (() => ({ content: ["unused"] })) });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -151,6 +153,36 @@ describe("AgentSession.branchFromBtw", () => {
 		expect(promoted?.role).toBe("assistant");
 		if (promoted?.role !== "assistant") throw new Error("Expected promoted assistant message");
 		expectSanitizedBtwAssistant(promoted);
+	});
+
+	it.each([
+		["a vision model", ["text", "image"]],
+		["a text-only model, with a vision description", ["text"]],
+	] as const)("keeps the images of the /btw question in the branch for %s", async (_label, input) => {
+		const describe = vi
+			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
+			.mockResolvedValue([{ type: "text", text: "A red square." }]);
+		const activeSession = await createSession({
+			model: { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, input: [...input] },
+		});
+		activeSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+		await activeSession.sessionManager.flush();
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+
+		await activeSession.branchFromBtw(
+			"what is wrong here? [Image #1]",
+			createBtwAssistant(),
+			requiredLeafId(activeSession),
+			activeSession.sessionManager.getSessionId(),
+			[screenshot],
+		);
+
+		expect(activeSession.messages.at(-2)).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "what is wrong here? [Image #1]" }, screenshot],
+		});
+		expect(JSON.stringify(activeSession.messages.at(-3)).includes("A red square.")).toBe(input.length === 1);
+		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 1 : 0);
 	});
 	it("does not record a late advisor turn into a /btw branch", async () => {
 		const activeSession = await createSession();

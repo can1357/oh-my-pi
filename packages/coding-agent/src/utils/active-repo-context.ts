@@ -126,6 +126,29 @@ function findSingleDirectChildRepoSync(cwd: string): ActiveRepoContext | null {
 	return context;
 }
 
+async function hasJjWorkspace(childPath: string): Promise<boolean> {
+	try {
+		if (!(await fsPromises.stat(path.join(childPath, ".jj"))).isDirectory()) return false;
+		const root = vcs.jj(childPath)?.root();
+		return root !== undefined && path.resolve(root) === childPath;
+	} catch {
+		return false;
+	}
+}
+
+/** Every direct child of a cwd outside any repository that is a git or jj checkout root (symlinks followed), by name. */
+export async function listDirectChildRepos(cwd: string): Promise<string[]> {
+	const resolvedCwd = path.resolve(cwd);
+	if (insideRepository(resolvedCwd)) return [];
+	const repos: string[] = [];
+	for (const entry of await readDirectChildren(resolvedCwd)) {
+		const childPath = await resolveDirectChildDirectory(resolvedCwd, entry);
+		if (childPath && ((await hasGitRepository(childPath)) || (await hasJjWorkspace(childPath))))
+			repos.push(childPath);
+	}
+	return repos;
+}
+
 export async function resolveActiveRepoContext(cwd: string): Promise<ActiveRepoContext | null> {
 	const resolvedCwd = path.resolve(cwd);
 	if (insideRepository(resolvedCwd)) return null;

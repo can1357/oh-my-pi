@@ -80,23 +80,25 @@ describe("editToolRenderer", () => {
 						.render(200)
 						.join("\n"),
 				);
+			// The card's bottom rule, where the preview label sits.
+			const bottomRule = (text: string): string =>
+				text.split("\n").findLast(line => line.includes(uiTheme.boxRound.bottomLeft)) ?? "";
 
 			const collapsed = renderPreview(makeDiff(20), false);
 			expect(collapsed).toContain("tail-line-20");
 			expect(collapsed).not.toContain("head-line-1");
 			expect(collapsed).toContain("content above");
-			expect(collapsed).toContain("(preview)");
+			expect(bottomRule(collapsed)).toContain(" preview ");
 
 			// Within the viewport window, expanded shows the whole diff.
 			const expanded = renderPreview(makeDiff(20), true);
 			expect(expanded).toContain("head-line-1");
 			expect(expanded).toContain("tail-line-20");
 			expect(expanded).not.toContain("content above");
-			expect(expanded).not.toContain("(preview)");
+			expect(bottomRule(expanded)).not.toContain("preview");
 
-			// Beyond it, expanded stays a viewport-sized tail window: an unbounded
-			// live preview scrolls above the native-scrollback commit boundary and
-			// freezes a stale snapshot that duplicates the block at finalize.
+			// Beyond it, expanded stays a viewport-sized tail window, so a long
+			// streaming edit keeps its header and newest lines on screen.
 			const expandedTall = renderPreview(makeDiff(40), true);
 			expect(expandedTall).toContain("tail-line-40");
 			expect(expandedTall).not.toContain("head-line-1");
@@ -215,7 +217,7 @@ describe("editToolRenderer", () => {
 			{
 				input: [
 					"*** Begin Patch",
-					"[crates/pi-natives/src/shell.rs]",
+					"[crates/natives/src/shell.rs]",
 					"PUT >$:",
 					"+pub fn streaming_preview() {",
 				].join("\n"),
@@ -226,7 +228,7 @@ describe("editToolRenderer", () => {
 		);
 
 		const rendered = Bun.stripANSI(component.render(160).join("\n"));
-		expect(rendered).toContain("crates/pi-natives/src/shell.rs");
+		expect(rendered).toContain("crates/natives/src/shell.rs");
 		expect(rendered).not.toContain("PUT >$:");
 		expect(rendered).not.toContain("+pub fn streaming_preview() {");
 		expect(rendered).not.toContain("*** Begin Patch");

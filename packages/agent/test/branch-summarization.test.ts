@@ -424,4 +424,38 @@ describe("branch summarization", () => {
 		expect(calls).toBe(1);
 		expect(result).toEqual({ aborted: true });
 	});
+
+	test("returns an error for a summary that hit the output limit, without another call", async () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "user-1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: { role: "user", content: "Summarize this branch.", timestamp: 0 },
+			},
+		];
+		let calls = 0;
+		const result = await generateBranchSummary(entries, {
+			model: MODEL,
+			apiKey: "test-api-key",
+			signal: new AbortController().signal,
+			completeImpl: async () => {
+				calls += 1;
+				return {
+					role: "assistant",
+					content: [{ type: "text", text: "The branch still needs" }],
+					api: MODEL.api,
+					provider: MODEL.provider,
+					model: MODEL.id,
+					usage: ZERO_USAGE,
+					stopReason: "length",
+					timestamp: 1,
+				};
+			},
+		});
+
+		expect(result).toEqual({ error: "Summarization failed: model output ended incomplete (stopReason: length)" });
+		expect(calls).toBe(1);
+	});
 });

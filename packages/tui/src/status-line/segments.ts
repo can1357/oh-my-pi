@@ -2,7 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
-import { SPINNER_ADVANCE_MS, TERMINAL } from "../index";
+import { sharedSpinnerFrame, TERMINAL } from "../index";
 import {
 	formatDuration,
 	formatNumber,
@@ -12,13 +12,14 @@ import {
 	relativePathWithinNormalizedRoot,
 } from "@oh-my-pi/pi-utils";
 import { type SymbolKey, type Theme, type ThemeColor, theme } from "../theme";
+import { SYMBOL_PRESETS } from "../theme/symbols";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { fileHyperlink } from "../render/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
-import { sanitizeStatusText } from "../chrome/shared";
+import { sanitizeInlineStatusText, sanitizeStatusText } from "../chrome/shared";
 import {
 	formatContextUsage,
 	getContextUsageLevel,
@@ -221,9 +222,11 @@ const piSegment: StatusLineSegment = {
 		// whole-unit turn timer (port of rust omp's status-band active brand).
 		// No trailing pad: the group renderer owns inter-segment spacing, so a
 		// trailing space here would double the gap at the first separator (#11103).
+		// Waiting on the user's answer to an ask, a question mark stands in for the spinner.
+		const glyph = ctx.awaitingAnswer ? theme.symbol("cmd.question") || "?" : brandSpinnerFrame(ctx.now?.getTime());
 		const content =
 			ctx.turnElapsedMs != null
-				? `${brandMark(brandSpinnerFrame(ctx.now?.getTime()), profile)} ${brandTimer(ctx.turnElapsedMs)}`
+				? `${brandMark(glyph, profile)} ${brandTimer(ctx.turnElapsedMs)}`
 				: brandMark(theme.icon.omp, profile);
 		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
@@ -244,10 +247,10 @@ function brandMark(glyph: string, profile: string | undefined): string {
 	if (!profile) return glyph;
 	return glyph ? `${glyph}-${profile}` : profile;
 }
-/** Current braille-spinner glyph on the shared clock, at the Loader's 80ms cadence. */
+/** Current braille-spinner glyph on the shared spinner clock (frame 0 when spinners are static). */
 function brandSpinnerFrame(nowMs = Date.now()): string {
 	const frames = theme.getSpinnerFrames("activity");
-	return frames[Math.floor(nowMs / SPINNER_ADVANCE_MS) % frames.length] ?? "";
+	return frames[sharedSpinnerFrame(frames.length, nowMs)] ?? "";
 }
 
 /** Turn timer in omp's brand format: whole seconds → minutes → hours (capped at 99h). */
@@ -261,14 +264,19 @@ function brandTimer(elapsedMs: number): string {
 const statusSegment: StatusLineSegment = {
 	id: "status",
 	render(ctx) {
+		// Plain statuses take the accent colour, a styled one keeps its own. The dot between
+		// statuses is dim like the segment separators; it sets its own colour, so what
+		// follows it (and a status that closed its styling) is re-opened in the accent.
+		const accent = sessionAccentAnsi(ctx) ?? theme.getFgAnsi("accent");
+		const separator = `${theme.getFgAnsi("dim")}${theme.sep.dot}${accent}`;
 		let text = "";
 		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
+			const sanitized = sanitizeInlineStatusText(status, { fg: accent, faint: Boolean(ctx.focusedAgentId) });
 			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+			text += text ? separator + sanitized : sanitized;
 		}
 		return {
-			content: text ? accentFg(ctx, "accent", text) : "",
+			content: text ? `${accent}${text}\x1b[39m` : "",
 			visible: text.length > 0,
 		};
 	},
@@ -803,7 +811,9 @@ function costSummary(ctx: SegmentContext): string | undefined {
 	const pricingPeriod = state.model?.cost
 		? getTimeBasedPricingPeriod(state.model.cost, ctx.now?.getTime())
 		: undefined;
-	const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
+	const usingSubscription = state.model
+		? (ctx.session.modelRegistry?.isUsingSubscription(state.model) ?? false)
+		: false;
 	// Resolve the advisor subscription flag lazily: with no active advisor
 	// it walks the whole model catalog (getAvailable → hasAuth per provider
 	// → credential-file reads), and the status line re-renders at the
@@ -1030,6 +1040,31 @@ const cacheHitSegment: StatusLineSegment = {
 	},
 };
 
+/**
+ * One glyph, no words: the cache icon dim while cached, the same icon struck
+ * through in the warning colour once the next message re-sends the prefix.
+ * Tern draws the Nerd Font pair whatever the symbol preset, as it draws named
+ * icons; its icon slot takes no tone in the composer facts, so the glyph rides
+ * as a span.
+ */
+const cacheSegment: StatusLineSegment = {
+	id: "cache",
+	render(ctx) {
+		const status = ctx.promptCache;
+		if (!status) return { content: "", visible: false };
+		const content =
+			status.state === "warm" ? theme.fg("dim", theme.icon.cacheWarm) : theme.fg("warning", theme.icon.cacheCold);
+		return { content, visible: true };
+	},
+	describe(ctx) {
+		const status = ctx.promptCache;
+		if (!status) return null;
+		return status.state === "warm"
+			? segView([span(SYMBOL_PRESETS.nerd["icon.cacheWarm"])])
+			: segView([span(SYMBOL_PRESETS.nerd["icon.cacheCold"], "warning")], undefined, "warning");
+	},
+};
+
 const sessionNameSegment: StatusLineSegment = {
 	id: "session_name",
 	render(ctx) {
@@ -1037,14 +1072,16 @@ const sessionNameSegment: StatusLineSegment = {
 		const name = sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
-		const content = sanitizeStatusText(name);
-		return { content: accentFg(ctx, "accent", content), visible: true };
+		const styledTitle = accentFg(ctx, "accent", sanitizeStatusText(name));
+		const content =
+			ctx.isPinned && theme.icon.pin ? `${theme.fg("accent", theme.icon.pin)} ${styledTitle}` : styledTitle;
+		return { content, visible: true };
 	},
 	describe(ctx) {
 		const name = ctx.session.sessionManager?.getSessionName() || ctx.previewTitle;
 		const content = name ? sanitizeStatusText(name) : "";
 		// Plain: the terminal styles the title by its role.
-		return content ? segView([span(content)]) : null;
+		return content ? segView([span(content)], ctx.isPinned ? "pin" : undefined) : null;
 	},
 };
 
@@ -1321,6 +1358,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_read: cacheReadSegment,
 	cache_write: cacheWriteSegment,
 	cache_hit: cacheHitSegment,
+	cache: cacheSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,

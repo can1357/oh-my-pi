@@ -1,7 +1,8 @@
 /**
- * Core SVG chart: categorical x slots, stacked or grouped bars, stacked areas
- * and lines, an optional right axis, a hover cursor and a floating tooltip.
- * Marks are crisp and unsmoothed — square bars, straight segments.
+ * Core SVG chart: categorical x slots, stacked or grouped bars, stacked areas,
+ * lines and dots, an optional right axis, a hover cursor and a floating tooltip.
+ * Marks are crisp and unsmoothed — square bars, straight segments. Negative
+ * values extend the axis below zero (bars hang down from the baseline).
  *
  * `TimeChart` wraps this for bucketed time series; use `Chart` directly for
  * categorical axes (hour of day, model names).
@@ -9,7 +10,7 @@
 
 import { Fragment, type ReactNode, useId, useMemo, useState } from "react";
 import { formatCompact } from "../data/formatters";
-import type { ChartKind, ChartSeries, ReferenceLine } from "./types";
+import type { ChartKind, ChartSeries, ReferenceLine, SlotMarker } from "./types";
 import { useWidth } from "./useWidth";
 
 export interface ChartProps {
@@ -39,6 +40,8 @@ export interface ChartProps {
 	/** Show a total row in the tooltip. Default: stacked with 2+ series. */
 	showTotal?: boolean;
 	references?: readonly ReferenceLine[];
+	/** Vertical guides at x slots, labelled along the top edge. */
+	markers?: readonly SlotMarker[];
 	onSelect?: (index: number) => void;
 	/** Shown over empty axes when every visible value is zero. */
 	emptyLabel?: ReactNode;
@@ -67,6 +70,7 @@ export function Chart({
 	hidden,
 	showTotal,
 	references,
+	markers,
 	onSelect,
 	emptyLabel = "No data in this range",
 	tooltipExtra,
@@ -80,31 +84,58 @@ export function Chart({
 	const layout = useMemo(() => {
 		const left = visible.filter(s => s.axis !== "right");
 		const right = visible.filter(s => s.axis === "right");
-		const stackable = (s: ChartSeries) => stacked && (s.kind ?? kind) !== "line";
+		const stackable = (s: ChartSeries) => {
+			const mark = s.kind ?? kind;
+			return stacked && (mark === "bars" || mark === "area");
+		};
 
 		// Per-slot stack bases for stacked left series, in series order (first = bottom).
+		// Positive and negative values stack away from zero separately.
 		const bases = new Map<string, number[]>();
 		const tops = Array.from({ length: slots }, () => 0);
+		const bottoms = Array.from({ length: slots }, () => 0);
 		let leftMax = 0;
+		let leftMin = 0;
 		for (const s of left) {
 			if (stackable(s)) {
-				const base = tops.slice();
+				const base = Array.from({ length: slots }, () => 0);
+				for (let i = 0; i < slots; i++) {
+					const v = s.values[i] ?? 0;
+					if (v < 0) {
+						base[i] = bottoms[i];
+						bottoms[i] += v;
+					} else {
+						base[i] = tops[i];
+						tops[i] += v;
+					}
+				}
 				bases.set(s.key, base);
-				for (let i = 0; i < slots; i++) tops[i] += s.values[i] ?? 0;
 			} else {
-				for (let i = 0; i < slots; i++) leftMax = Math.max(leftMax, s.values[i] ?? 0);
+				for (let i = 0; i < slots; i++) {
+					leftMax = Math.max(leftMax, s.values[i] ?? 0);
+					leftMin = Math.min(leftMin, s.values[i] ?? 0);
+				}
 			}
 		}
-		for (const top of tops) leftMax = Math.max(leftMax, top);
+		for (let i = 0; i < slots; i++) {
+			leftMax = Math.max(leftMax, tops[i]);
+			leftMin = Math.min(leftMin, bottoms[i]);
+		}
 		let rightMax = 0;
-		for (const s of right) for (let i = 0; i < slots; i++) rightMax = Math.max(rightMax, s.values[i] ?? 0);
+		let rightMin = 0;
+		for (const s of right) {
+			for (let i = 0; i < slots; i++) {
+				rightMax = Math.max(rightMax, s.values[i] ?? 0);
+				rightMin = Math.min(rightMin, s.values[i] ?? 0);
+			}
+		}
 		for (const r of references ?? []) {
 			if (r.axis === "right") rightMax = Math.max(rightMax, r.value);
 			else leftMax = Math.max(leftMax, r.value);
 		}
 
-		const leftScale = niceScale(yMax ?? leftMax);
-		const rightScale = right.length > 0 ? niceScale(yMaxRight ?? rightMax) : null;
+		const leftScale = niceScale(yMax ?? leftMax, leftMin);
+		const rightScale = right.length > 0 ? niceScale(yMaxRight ?? rightMax, rightMin) : null;
 		const empty = visible.every(s => s.values.every(v => !v));
 		return { left, right, bases, stackable, leftScale, rightScale, empty };
 	}, [visible, slots, stacked, kind, yMax, yMaxRight, references]);
@@ -116,8 +147,10 @@ export function Chart({
 	const plotW = Math.max(0, width - padLeft - padRight);
 	const plotH = height - PAD_TOP - PAD_BOTTOM;
 	const slotW = slots > 0 ? plotW / slots : 0;
-	const yLeft = (v: number) => PAD_TOP + plotH - (v / layout.leftScale.max) * plotH;
-	const yRight = (v: number) => PAD_TOP + plotH - (v / (layout.rightScale?.max ?? 1)) * plotH;
+	const project = (scale: AxisScale, v: number) =>
+		PAD_TOP + plotH - ((v - scale.min) / (scale.max - scale.min)) * plotH;
+	const yLeft = (v: number) => project(layout.leftScale, v);
+	const yRight = (v: number) => (layout.rightScale ? project(layout.rightScale, v) : yLeft(v));
 	const cx = (i: number) => padLeft + (i + 0.5) * slotW;
 
 	const barSeries = visible.filter(s => (s.kind ?? kind) === "bars");
@@ -212,7 +245,12 @@ export function Chart({
 							return (
 								<g key={s.key}>
 									<path d={`${line}${floor}Z`} fill={fill} fillOpacity={s.pattern ? 1 : 0.2} />
-									<path className="chart-line" d={line} stroke={s.color} />
+									<path
+										className="chart-line"
+										d={line}
+										stroke={s.color}
+										strokeDasharray={s.dashed ? "4 3" : undefined}
+									/>
 								</g>
 							);
 						})}
@@ -279,6 +317,38 @@ export function Chart({
 								</g>
 							);
 						})}
+
+					{visible
+						.filter(s => (s.kind ?? kind) === "dots")
+						.map(s => {
+							const y = s.axis === "right" ? yRight : yLeft;
+							return (
+								<g key={s.key} className="chart-dots" fill={s.color}>
+									{s.values.map((v, i) =>
+										v === null || v === undefined ? null : (
+											<circle key={i} cx={cx(i)} cy={y(v)} r={hover === i ? 3.5 : 2.5} />
+										),
+									)}
+								</g>
+							);
+						})}
+
+					{markers?.map(m =>
+						m.index >= 0 && m.index < slots ? (
+							<g key={`marker:${m.index}`} className="chart-marker">
+								<line x1={cx(m.index)} x2={cx(m.index)} y1={PAD_TOP} y2={PAD_TOP + plotH} />
+								{m.label && (
+									<text
+										x={cx(m.index) + (cx(m.index) > padLeft + plotW / 2 ? -5 : 5)}
+										y={PAD_TOP + 9}
+										textAnchor={cx(m.index) > padLeft + plotW / 2 ? "end" : "start"}
+									>
+										{m.label}
+									</text>
+								)}
+							</g>
+						) : null,
+					)}
 
 					{references?.map(r => {
 						const y = r.axis === "right" ? yRight(r.value) : yLeft(r.value);
@@ -351,16 +421,29 @@ export function Chart({
 	);
 }
 
-/** Round an axis maximum up to 1/2/2.5/5 × 10ⁿ and return evenly spaced ticks from 0. */
-export function niceScale(max: number): { max: number; ticks: number[] } {
-	if (!(max > 0)) return { max: 1, ticks: [0] };
-	const rough = max / Y_TICKS;
+export interface AxisScale {
+	min: number;
+	max: number;
+	ticks: number[];
+}
+
+/**
+ * Round an axis span out to 1/2/2.5/5 × 10ⁿ steps and return evenly spaced
+ * ticks. The span always includes zero; `min` (default 0) extends it below.
+ */
+export function niceScale(max: number, min = 0): AxisScale {
+	const hi = Math.max(0, max);
+	const lo = Math.min(0, min);
+	if (!(hi - lo > 0)) return { min: 0, max: 1, ticks: [0] };
+	const rough = (hi - lo) / Y_TICKS;
 	const magnitude = 10 ** Math.floor(Math.log10(rough));
 	const step = [1, 2, 2.5, 5, 10].map(m => m * magnitude).find(s => s >= rough) ?? 10 * magnitude;
-	const top = Math.ceil(max / step) * step;
+	const top = Math.ceil(hi / step) * step;
+	const bottom = Math.floor(lo / step) * step;
 	const ticks: number[] = [];
-	for (let t = 0; t <= top + step / 2; t += step) ticks.push(Number(t.toPrecision(12)));
-	return { max: top, ticks };
+	for (let t = bottom; t <= top + step / 2; t += step) ticks.push(Number(t.toPrecision(12)));
+	// An all-negative axis still needs a span above its lowest tick.
+	return { min: bottom, max: top > bottom ? top : bottom + step, ticks };
 }
 
 function labelWidth(labels: readonly string[]): number {

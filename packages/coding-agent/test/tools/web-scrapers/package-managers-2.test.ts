@@ -154,6 +154,16 @@ describe.skipIf(SKIP)("handleTerraform", () => {
 		expect(result?.contentType).toBe("text/markdown");
 	});
 
+	it("fetches one provider resource doc instead of the provider overview", async () => {
+		const result = await handleTerraform(
+			"https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group",
+			20,
+		);
+		expect(result?.method).toBe("terraform");
+		expect(result?.content).toContain("aws_cloudwatch_log_group");
+		expect(result?.content).not.toContain("required_providers");
+	});
+
 	it("fetches terraform-aws-modules/vpc/aws module", async () => {
 		const result = await handleTerraform("https://registry.terraform.io/modules/terraform-aws-modules/vpc/aws", 20);
 		expect(result).not.toBeNull();

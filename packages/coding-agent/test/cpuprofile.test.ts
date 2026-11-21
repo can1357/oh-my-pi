@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -123,7 +124,7 @@ describe("read tool .cpuprofile dispatch", () => {
 			getSessionSpawns: () => "*",
 			getArtifactsDir: () => path.join(cwd, "artifacts"),
 			allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ "edit.mode": "hashline" }),
 		};
 	}
 
@@ -143,9 +144,34 @@ describe("read tool .cpuprofile dispatch", () => {
 		expect(summary).toContain("V8 CPU profile");
 		expect(summary).toContain("layout (…/app/src/render.ts:6) [recursive ×2]");
 		expect(summary).not.toContain('"timeDeltas"');
+		// The summary is not the file's text, so it must not carry the file's snapshot header.
+		expect(summary).not.toMatch(/#[0-9A-F]{4}\]/);
 
 		const raw = textOutput(await tool.execute("read-cpuprofile-raw", { path: `${filePath}:raw` }));
 		expect(raw).toContain('"timeDeltas"');
+	});
+
+	it("reads line ranges and tails from the profile JSON itself, with a snapshot tag edits accept", async () => {
+		const filePath = path.join(tmpDir, "app.cpuprofile");
+		await fs.writeFile(filePath, JSON.stringify(FIXTURE_PROFILE, null, "\t"));
+		const session = createSession(tmpDir);
+
+		const range = textOutput(
+			await new ReadTool(session).execute("read-cpuprofile-range", { path: "app.cpuprofile:2-2" }),
+		);
+		expect(range).toContain('2:\t"nodes": [');
+		expect(range).not.toContain("V8 CPU profile");
+		const tail = textOutput(
+			await new ReadTool(session).execute("read-cpuprofile-tail", { path: "app.cpuprofile:-1" }),
+		);
+		expect(tail).toMatch(/^\d+:\}$/m);
+
+		const tag = /^\[app\.cpuprofile#([0-9A-F]{4})\]/.exec(range)?.[1];
+		expect(tag).toBeDefined();
+		await new EditTool(session).execute("edit-cpuprofile-range", {
+			input: `[app.cpuprofile#${tag}]\nPUT 2.=2:\n+\t"nodes" : [\n`,
+		});
+		expect((await fs.readFile(filePath, "utf8")).split("\n")[1]).toBe('\t"nodes" : [');
 	});
 
 	it("falls back to plain text when a .cpuprofile file is not a V8 profile", async () => {

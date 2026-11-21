@@ -2,6 +2,70 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Breaking Changes
+
+- The omp extension now uses a pinned Chrome extension ID and connects to the browser relay through its native host. Reinstall the extension using Chrome’s “Load unpacked” flow; the relay port and token options have been removed.
+
+### Added
+
+- Added an omp Chrome side panel with session model selection, role shortcuts, thinking controls, input shortcuts, message queuing, and run interruption controls.
+- Added browser interaction features including page overlays, image and element picking, Teach, scheduled shortcuts, and GIF export.
+
+### Changed
+
+- The Chrome side panel shows brief labels for tool steps with structured intents.
+- The extension now keeps registered installations up to date across omp upgrades and reloads when idle.
+- Browser relay ports are assigned automatically and discovered locally by terminal clients, while sidebar chats continue using their existing connection.
+- Side panel sessions now control the connected Chrome browser directly instead of opening a separate headless browser.
+
+### Fixed
+
+- Improved relay recovery so Chrome reconnects automatically when the native host is unavailable or a stale connection drops.
+
+## [19.0.1] - 2026-11-19
+
+### Fixed
+
+- The browser relay extension survives a browser whose loaded permission set predates the `downloads` permission: the service worker keeps working without download pairing instead of crashing before it ever connects ([#19659](https://github.com/can1357/oh-my-pi/pull/19659) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed an issue where the browser relay could fail to identify the page and title of a frame it emptied and hid in a tab.
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- The browser extension now requests Chrome’s downloads permission so relay tabs can report where downloads were saved to omp.
+
+## [18.18.1] - 2026-11-08
+
+### Changed
+
+- The extension now requests `scripting` and access to all sites (Chrome lists "Read and change all your data on all websites"); it uses them only to empty another extension's frames in a tab omp is driving, when Chrome refuses it the debugger there ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed a password manager's inline autofill menu locking omp out of a tab it drives: the extension empties and hides such frames in that tab and retries the attach or command Chrome refused ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.0] - 2026-10-26
+
+### Added
+
+- The extension reports the omp version that installed it, and reloads itself when the relay updates its files after an omp upgrade ([#15105](https://github.com/can1357/oh-my-pi/pull/15105) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.12.2] - 2026-10-18
+
 ### Fixed
 
 - Fixed a relay tab close failing when Chrome refuses it for a moment (a tab being dragged); the extension retries it ([#16119](https://github.com/can1357/oh-my-pi/pull/16119) by [@will-bogusz](https://github.com/will-bogusz))

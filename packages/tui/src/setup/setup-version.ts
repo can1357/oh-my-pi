@@ -8,4 +8,4 @@
  * the overlay component and their TUI deps. MUST equal `max(scene.minVersion)`
  * across `ALL_SCENES`; the setup scene selection tests guard this invariant.
  */
-export const CURRENT_SETUP_VERSION = 2;
+export const CURRENT_SETUP_VERSION = 3;

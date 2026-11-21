@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 
 // Regression: a recycled terminal pane (Muxy's "terminal offline" sweep, a
 // dropped ssh session) revokes the pty. stdin EOFs, the disconnect path runs,
@@ -78,6 +79,9 @@ describe("ProcessTerminal disconnect with a revoked pty", () => {
 
 		expect(() => process.stdin.emit("end")).not.toThrow();
 		expect(signals).toContain("SIGHUP");
+		// postmortem's SIGHUP handler skips the fd-2 report on this flag: the pty it
+		// would write to is the one that just died, and a full one blocks the write.
+		expect(postmortem.isTerminalDeclaredDead()).toBe(true);
 	});
 
 	it("treats an initial EIO enabling raw mode as a terminal disconnect", () => {

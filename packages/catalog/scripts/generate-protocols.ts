@@ -31,6 +31,8 @@ const DEVIN_MESSAGES = [
 	"exa.chat_pb.ChatToolDefinition",
 	"exa.codeium_common_pb.ClientModelConfig",
 	"exa.codeium_common_pb.CompletionConfiguration",
+	"exa.seat_management_pb.ExchangePKCEAuthorizationCodeRequest",
+	"exa.seat_management_pb.ExchangePKCEAuthorizationCodeResponse",
 	"exa.api_server_pb.GetChatMessageRequest",
 	"exa.api_server_pb.GetChatMessageResponse",
 	"exa.api_server_pb.GetCliModelConfigsRequest",

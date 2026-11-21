@@ -442,6 +442,49 @@ describe("StdinBuffer", () => {
 			expect(emittedPaste).toEqual(["pasted"]);
 		});
 
+		it("routes APC replies out of paste content before the paste finishes", () => {
+			const ack = '\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":988}\x1b\\';
+			const visible = '\x1b_tsp;e;{"ev":"visible","sf":"s:1","visible":false}\x1b\\';
+
+			processInput(`\x1b[200~hello ${ack}`);
+			expect(emittedSequences).toEqual([ack]);
+			expect(emittedPaste).toEqual([]);
+
+			processInput(`${visible}world\x1b[201~\r`);
+			expect(emittedSequences).toEqual([ack, visible]);
+			expect(emittedPaste).toEqual(["hello world"]);
+			expect(emittedPasteEnters).toEqual(["\r"]);
+		});
+
+		it("reassembles APC replies split at every byte inside a paste", () => {
+			const reply = '\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":989}\x1b\\';
+			processInput("\x1b[200~before");
+			for (const byte of reply) processInput(byte);
+			processInput("after\x1b[201~");
+
+			expect(emittedSequences).toEqual([reply]);
+			expect(emittedPaste).toEqual(["beforeafter"]);
+		});
+
+		it("routes ConPTY TSP reports with a split OSC prefix and BEL terminator", () => {
+			const reply = '\x1b]877;tsp;e;{"ev":"ack","sf":"s:1","s":990}\x07';
+			processInput("\x1b[200~before");
+			for (const byte of reply) processInput(byte);
+			processInput("after\x1b[201~");
+
+			expect(emittedSequences).toEqual([reply]);
+			expect(emittedPaste).toEqual(["beforeafter"]);
+		});
+
+		it("preserves non-APC pasted escapes and partial end markers", () => {
+			const content = "before\x1b[31mred\x1b[0m\x1b[201after\x1b";
+			processInput(`\x1b[200~${content}`);
+			processInput("\x1b[201~");
+
+			expect(emittedSequences).toEqual([]);
+			expect(emittedPaste).toEqual([content]);
+		});
+
 		it("should handle paste with newlines", () => {
 			processInput("\x1b[200~line1\nline2\nline3\x1b[201~");
 
@@ -660,6 +703,34 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual(["\x1b[A", "\r", "x"]);
 		});
 
+		describe("Enter batched after the burst (issue #17820)", () => {
+			let enters: (string | undefined)[];
+
+			beforeEach(() => {
+				enters = [];
+				buffer.on("paste", (_data: string, enter?: string) => {
+					enters.push(enter);
+				});
+			});
+
+			it("submits a CR that follows LF-delimited text instead of pasting it as a newline", () => {
+				// An automation write plus its Enter, drained in one read by a
+				// startup stall before bracketed paste is confirmed.
+				processInput("line1\nline2\n\n- bullet a\n- bullet b\r");
+				expect(emittedPaste).toEqual(["line1\nline2\n\n- bullet a\n- bullet b"]);
+				expect(enters).toEqual(["\r"]);
+				expect(emittedSequences).toEqual([]);
+			});
+
+			it("keeps the final break of a CR-delimited paste inside the paste", () => {
+				// Terminals send every pasted newline as CR; a paste ending in a
+				// newline must not submit itself.
+				processInput("line 1\rline 2\rline 3\r");
+				expect(emittedPaste).toEqual(["line 1\rline 2\rline 3\r"]);
+				expect(enters).toEqual([undefined]);
+			});
+		});
+
 		describe("stall probe (issues #12540, #13344)", () => {
 			it("replays a stall-batched burst split across same-tick reads as keys", () => {
 				// A stalled loop can drain the pty backlog as several reads before the
@@ -693,6 +764,44 @@ describe("StdinBuffer", () => {
 			// Input is alive again after recovery.
 			buffer.process("a");
 			expect(data).toEqual(["a"]);
+		});
+
+		it("does not let terminal acknowledgements keep a lost-marker paste alive", () => {
+			vi.useFakeTimers();
+			try {
+				const pastes: string[] = [];
+				const reply = '\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":988}\x1b\\';
+				buffer.on("paste", content => pastes.push(content));
+				processInput("\x1b[200~pasted");
+				for (let i = 0; i < 4; i++) {
+					vi.advanceTimersByTime(200);
+					processInput(reply);
+				}
+				vi.advanceTimersByTime(200);
+				processInput("x");
+
+				expect(pastes).toEqual(["pasted"]);
+				expect(emittedSequences).toEqual([reply, reply, reply, reply, "x"]);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("keeps an incomplete APC on the report path when paste recovery fires", () => {
+			vi.useFakeTimers();
+			try {
+				const pastes: string[] = [];
+				const reply = '\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":989}\x1b\\';
+				buffer.on("paste", content => pastes.push(content));
+				processInput(`\x1b[200~pasted${reply.slice(0, -1)}`);
+				vi.advanceTimersByTime(1000);
+				expect(pastes).toEqual(["pasted"]);
+
+				processInput("\\x");
+				expect(emittedSequences).toEqual([reply, "x"]);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
 		it("re-arms the watchdog while paste chunks keep arriving", async () => {

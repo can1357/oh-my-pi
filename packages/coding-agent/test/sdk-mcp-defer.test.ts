@@ -159,10 +159,35 @@ describe("createAgentSession MCP catalog handoff", () => {
 		"exposes the tool list after the server $change a tool while extensions loaded",
 		async ({ next, expected }) => {
 			let tools: MCPToolDefinition[] = [INITIAL_TOOL];
+			// The server announces a changed catalog on every notification stream,
+			// including one a client opens after the change.
+			const encoder = new TextEncoder();
+			const listChanged = encoder.encode(
+				`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" })}\n\n`,
+			);
+			const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+			let changed = false;
 			server = Bun.serve({
 				hostname: "127.0.0.1",
 				port: 0,
+				idleTimeout: 0,
 				async fetch(request) {
+					if (request.method === "GET") {
+						let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+						return new Response(
+							new ReadableStream<Uint8Array>({
+								start(controller) {
+									stream = controller;
+									streams.add(controller);
+									controller.enqueue(changed ? listChanged : encoder.encode(": open\n\n"));
+								},
+								cancel() {
+									if (stream) streams.delete(stream);
+								},
+							}),
+							{ headers: { "Content-Type": "text/event-stream" } },
+						);
+					}
 					if (request.method !== "POST") return new Response(null, { status: 405 });
 					const message = (await request.json()) as { id?: number | string; method: string };
 					if (message.id === undefined) return new Response(null, { status: 202 });
@@ -170,7 +195,7 @@ describe("createAgentSession MCP catalog handoff", () => {
 						message.method === "initialize"
 							? {
 									protocolVersion: "2025-11-25",
-									capabilities: { tools: {} },
+									capabilities: { tools: { listChanged: true } },
 									serverInfo: { name: "fund", version: "1" },
 								}
 							: { tools };
@@ -182,8 +207,21 @@ describe("createAgentSession MCP catalog handoff", () => {
 				JSON.stringify({ mcpServers: { [SERVER]: { type: "http", url: `${server.url}mcp` } } }),
 			);
 			const changeToolsDuringLoad: ExtensionFactory = async () => {
+				const manager = MCPManager.instance();
+				if (!(manager instanceof MCPManager)) throw new Error("MCP manager is not installed while extensions load");
+				const adopted = Promise.withResolvers<void>();
+				const check = () => {
+					const probe = manager.getTools().find(tool => tool.name === "mcp__fund_probe");
+					if (probe?.description === expected) adopted.resolve();
+				};
+				const unsubscribe = manager.addToolsChangedListener(check);
 				tools = next;
-				await MCPManager.instance()?.refreshServerTools(SERVER);
+				changed = true;
+				for (const stream of streams) stream.enqueue(listChanged);
+				// The factory returns once the manager holds the changed catalog, so the
+				// change lands inside the window this contract covers.
+				await adopted.promise;
+				unsubscribe();
 			};
 			const authStorage = createInMemoryAuthStorage();
 			const { session } = await createAgentSession({

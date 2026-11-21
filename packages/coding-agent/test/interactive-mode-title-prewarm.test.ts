@@ -66,7 +66,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", undefined, () => {}, [], undefined, undefined);
+		mode = new InteractiveMode(session, "test", () => {}, [], undefined, undefined);
 		// A real fs.watch on repo HEAD in a parallel Bun worker can trip a Bun
 		// SIGTRAP in the suite; this contract does not need branch watching.
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});

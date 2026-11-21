@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { type BtwHistoryRecord, BtwHistoryStore, getBtwCopyText } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { acquireFileLock, withFileLock } from "@oh-my-pi/pi-utils";
 
@@ -15,6 +16,7 @@ describe("BtwHistoryStore", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await fs.rm(directory, { recursive: true, force: true });
 	});
 
@@ -65,9 +67,12 @@ describe("BtwHistoryStore", () => {
 			createdAt: 4,
 			updatedAt: 4,
 		};
+		// The writer holds the live turn's lease throughout; skip the backoff between lock attempts.
+		const backoff = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		await expect(recovered.upsert({ ...recoveredView[0]!, followUps: [followUp] })).rejects.toThrow(
 			"Failed to acquire lock",
 		);
+		backoff.mockRestore();
 		expect(recovered.getRecords()).toBe(recoveredView);
 
 		const complete = { ...running, status: "complete" as const, answer: "Final answer", updatedAt: 3 };
@@ -81,7 +86,7 @@ describe("BtwHistoryStore", () => {
 		};
 		await reopened.upsert(finished);
 		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([finished]);
-	}, 10_000);
+	});
 
 	it("does not lose independent entries written by stores opened before either write", async () => {
 		const left = await BtwHistoryStore.open(artifactsDir);
@@ -175,6 +180,44 @@ describe("BtwHistoryStore", () => {
 		await expect(store.upsert({ ...saved, answer: "Resurrected" })).rejects.toThrow("BTW history conflict");
 		expect(store.getRecords()).toBe(oldView);
 		expect(await Bun.file(filePath).exists()).toBe(false);
+	});
+
+	it("keeps a titled topic's heading in a sidecar so the record JSON stays readable by older builds", async () => {
+		const store = await BtwHistoryStore.open(artifactsDir);
+		const titled = record("titled", { question: "Expanded /sitrep template", title: "/sitrep the migration" });
+		await store.upsert(titled);
+		await store.upsert({ ...titled, answer: "Revised answer", updatedAt: 3 });
+		const { title: _title, ...fields } = titled;
+
+		const historyDir = path.join(artifactsDir, "btw-history");
+		expect(await Bun.file(path.join(historyDir, "entry-titled.json")).json()).toEqual({
+			...fields,
+			answer: "Revised answer",
+			updatedAt: 3,
+		});
+		expect(await Bun.file(path.join(historyDir, "entry-titled.title")).text()).toBe("/sitrep the migration");
+		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([
+			{ ...titled, answer: "Revised answer", updatedAt: 3 },
+		]);
+	});
+
+	it("opens history beside orphaned and unreadable title sidecars", async () => {
+		const historyDir = path.join(artifactsDir, "btw-history");
+		await fs.mkdir(path.join(historyDir, "entry-unreadable.title"), { recursive: true });
+		await Bun.write(path.join(historyDir, "entry-unreadable.json"), JSON.stringify(record("unreadable")));
+		await Bun.write(path.join(historyDir, "entry-orphan.title"), "/orphan");
+
+		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([record("unreadable")]);
+	});
+
+	it("does not title a new topic with a vanished record's leftover sidecar", async () => {
+		const historyDir = path.join(artifactsDir, "btw-history");
+		await Bun.write(path.join(historyDir, "entry-reused.title"), "/stale");
+		const store = await BtwHistoryStore.open(artifactsDir);
+		await store.upsert(record("reused"));
+
+		expect(await Bun.file(path.join(historyDir, "entry-reused.title")).exists()).toBe(false);
+		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([record("reused")]);
 	});
 
 	it("captures streaming snapshots before queued writes and keeps old views stable", async () => {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -6,7 +6,7 @@ import {
 	type ModelLookupRegistry,
 	resolveModelOverrideWithAuthFallback,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 /**
  * Regression test for #985.
@@ -77,6 +77,21 @@ function createMockRegistry(options: MockRegistryOptions): ModelLookupRegistry &
 }
 
 describe("issue #985: subagent dispatch auth fallback", () => {
+	test("tries configured authenticated fallbacks before the parent model", async () => {
+		const registry = createMockRegistry({
+			models: [unauthedTaskModel, sharedModel, parentModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+		const selected = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+		expect(selected.model?.id).toBe("shared-id");
+		expect(selected.thinkingLevel?.toString()).toBe("high");
+		expect(selected.authFallbackUsed).toBe(false);
+	});
+
 	test("falls back to parent active model when resolved subagent model has no auth", async () => {
 		const registry = createMockRegistry({
 			models: [parentModel, unauthedTaskModel],
@@ -256,15 +271,8 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 });
 
 describe("issue #11709: disabled provider subagent model resolution", () => {
-	afterEach(() => {
-		resetSettingsForTest();
-	});
-
 	test("skips an authenticated model from a disabled provider", async () => {
-		const settings = await Settings.init({
-			inMemory: true,
-			overrides: { disabledProviders: ["opencode-zen"] },
-		});
+		const settings = Settings.isolated({ disabledProviders: ["opencode-zen"] });
 		const registry = createMockRegistry({
 			models: [unauthedTaskModel, parentModel],
 			authedProviders: new Set(["opencode-zen", "deepseek"]),

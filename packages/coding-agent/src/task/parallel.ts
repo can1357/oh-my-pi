@@ -132,7 +132,7 @@ export async function mapWithConcurrencyLimitAllSettled<T, R>(
  * immediately — matching `task.maxConcurrency = 0`'s "Unlimited" semantics in the
  * settings UI ([#3305](https://github.com/can1357/oh-my-pi/issues/3305)).
  */
-export function normalizeConcurrencyLimit(max: number): number {
+function normalizeConcurrencyLimit(max: number): number {
 	const normalizedMax = Number.isFinite(max) ? Math.trunc(max) : 0;
 	return normalizedMax > 0 ? normalizedMax : 0;
 }

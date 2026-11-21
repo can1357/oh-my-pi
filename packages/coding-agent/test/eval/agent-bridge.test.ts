@@ -35,10 +35,11 @@ function isEvalAgentResult(value: unknown): value is EvalAgentResult {
 async function runEvalAgentAndWait(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
 	let manager = options.session.asyncJobManager;
 	if (!manager) {
-		manager = new AsyncJobManager({});
-		Object.assign(options.session, { asyncJobManager: manager });
+		const created = new AsyncJobManager({});
+		Object.assign(options.session, { asyncJobManager: created });
+		jobManagers.add(created);
+		manager = created;
 	}
-	jobManagers.add(manager);
 	const handle = await runEvalAgent(args, options);
 	const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, options);
 	const snapshot = waited.items[0];

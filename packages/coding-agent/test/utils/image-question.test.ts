@@ -1,10 +1,17 @@
 import { describe, expect, it } from "bun:test";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { Api, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { resolveImageQuestionModel } from "@oh-my-pi/pi-coding-agent/utils/image-question";
+import { CostCapError, CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	askImageQuestion,
+	type ResolvedImageQuestionModel,
+	resolveImageQuestionModel,
+} from "@oh-my-pi/pi-coding-agent/utils/image-question";
+import { rejectionOf } from "../helpers/rejection";
 
 function makeProxyModel(id: string, compat?: ModelSpec["compat"]): Model<Api> {
 	return buildModel({
@@ -46,5 +53,96 @@ describe("resolveImageQuestionModel wire truth (#9697)", () => {
 		expect(() => resolveImageQuestionModel(makeSession(stripped, [stripped]))).toThrow(
 			"Resolved model myproxy/deepseek-v4-flash does not support image input.",
 		);
+	});
+});
+
+describe("askImageQuestion cost cap", () => {
+	it("sends no image question once the session is at its cost cap", async () => {
+		const model = makeProxyModel("vision");
+		const costGate = new CostGate(Settings.isolated({ "session.maxCost": 1 }), 1.2, () => {});
+		const base = makeSession(model, [model]);
+		const session = {
+			...base,
+			costGate,
+			modelRegistry: {
+				...base.modelRegistry,
+				getApiKey: async () => "test-key",
+				resolver: () => async () => "test-key",
+			},
+		} as unknown as ToolSession;
+		let calls = 0;
+		const completeImpl = (async () => {
+			calls++;
+			throw new Error("should not be called");
+		}) as unknown as typeof completeSimple;
+		const image = { resolvedPath: "/x.png", mimeType: "image/png", data: "AAAA", textNote: "", bytes: 3 };
+
+		const refused = await rejectionOf(
+			askImageQuestion(
+				session,
+				{ model, selectedPattern: "myproxy/vision" } as ResolvedImageQuestionModel,
+				image,
+				"what?",
+				undefined,
+				completeImpl,
+			),
+		);
+
+		expect(refused).toBeInstanceOf(CostCapError);
+		expect(calls).toBe(0);
+	});
+});
+
+describe("askImageQuestion usage journal", () => {
+	it("journals an answered question once as `image-question`, with the question and no image data", async () => {
+		const model = makeProxyModel("vision");
+		const sessionManager = SessionManager.inMemory();
+		const base = makeSession(model, [model]);
+		const session = {
+			...base,
+			sessionManager,
+			modelRegistry: {
+				...base.modelRegistry,
+				getApiKey: async () => "test-key",
+				resolver: () => async () => "test-key",
+			},
+		} as unknown as ToolSession;
+		const usage = {
+			input: 12,
+			output: 3,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 15,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.02 },
+		};
+		const completeImpl = (async () => ({
+			role: "assistant",
+			content: [{ type: "text", text: "A cat." }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage,
+			stopReason: "stop",
+			timestamp: Date.now(),
+		})) as unknown as typeof completeSimple;
+		const image = { resolvedPath: "/x.png", mimeType: "image/png", data: "AAAA", textNote: "", bytes: 3 };
+
+		await askImageQuestion(
+			session,
+			{ model, selectedPattern: "myproxy/vision" } as ResolvedImageQuestionModel,
+			image,
+			"what?",
+			undefined,
+			completeImpl,
+		);
+
+		const journaled = sessionManager.getEntries().filter(entry => entry.type === "model_usage");
+		expect(journaled).toHaveLength(1);
+		expect(journaled[0]).toMatchObject({
+			purpose: "image-question",
+			usage,
+			completion: { prompt: "what?", reply: "A cat." },
+		});
+		expect(sessionManager.getUsageStatistics().cost).toBe(0.02);
 	});
 });

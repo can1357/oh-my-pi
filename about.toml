@@ -1,3 +1,8 @@
+# Policy for the RUST CRATE LICENSES section of
+# packages/natives/THIRD-PARTY-NOTICES.txt. Dev-dependencies never ship in the
+# addon.
+ignore-dev-dependencies = true
+
 # cargo-about 0.8.2 resolves OR expressions in this priority order. The
 # generated notice therefore chooses a permissive branch where one exists,
 # while cargo-deny's clarifications retain every AND obligation.
@@ -12,6 +17,7 @@ accepted = [
     "Zlib",
     "0BSD",
     "BSL-1.0",
+    "bzip2-1.0.6",
     "CC0-1.0",
     "MIT-0",
 ]
@@ -22,3 +28,6 @@ accepted = ["CDDL-1.0"]
 
 [terminfo]
 accepted = ["WTFPL"]
+
+[uluru]
+accepted = ["MPL-2.0"]

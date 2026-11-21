@@ -1,8 +1,13 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import {
+	acquireTab,
+	getTabsMapForTest,
+	releaseTab,
+	runInTab,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { pickTernBlock, type TernBlockEntry } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/blocks";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
@@ -26,16 +31,25 @@ afterEach(async () => {
 });
 
 /**
- * A Tern window with {@link BLOCKS}; a PiP `open` makes block 9. `state`
- * reports `shown`; `release` answers `release` (an older Tern: `invalid`).
+ * A Tern window with {@link BLOCKS}; a PiP `open` makes block 9 (listed while
+ * open). `state` reports `shown`; `release` answers `release` (an older Tern:
+ * `invalid`). Once `closed` holds a block, every op on it answers `not_found`.
  */
-async function startWindow(opts: { shown: boolean; release?: FakeAnswer }): Promise<FakeDaemon> {
+async function startWindow(opts: { shown: boolean; release?: FakeAnswer; closed?: Set<number> }): Promise<FakeDaemon> {
 	let seq = 0;
+	let pip = false;
 	daemon = await startFakeDaemon((op): FakeAnswer => {
+		if (typeof op.block === "number" && opts.closed?.has(op.block)) {
+			return { error: { kind: "not_found", message: `no browser block ${op.block} in this window` } };
+		}
 		switch (op.op) {
-			case "blocks":
-				return { ok: { blocks: BLOCKS } };
+			case "blocks": {
+				const own = { block: 9, url: "about:blank", title: "", owner: PANE, shown: true, driven: true };
+				const blocks = pip ? [...BLOCKS, own] : BLOCKS;
+				return { ok: { blocks: blocks.filter(entry => !opts.closed?.has(entry.block)) } };
+			}
 			case "open":
+				pip = true;
 				return { ok: { block: 9, url: "about:blank" } };
 			case "events": {
 				// A PiP's initial about:blank load; an adopted block's old events are skipped by `next`.
@@ -138,6 +152,35 @@ describe("Tern block adoption", () => {
 		expect(opsFor(fake, 6)).not.toContain("close");
 	});
 
+	it("closes a tab whose block the window no longer has and says how to reopen it", async () => {
+		const closed = new Set<number>();
+		const fake = await startWindow({ shown: true, closed });
+		const browser = await ternBrowser(fake);
+		opened.push("pip-gone");
+		await acquireTab("pip-gone", browser, { timeoutMs: 5_000 });
+		closed.add(9);
+		const session: ToolSession = {
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			settings: Settings.isolated(),
+		};
+		const failure = await runInTab("pip-gone", {
+			code: "return await tab.title();",
+			timeoutMs: 5_000,
+			session,
+		}).catch((error: unknown) => error);
+		expect(String(failure)).toContain(
+			'Tab "pip-gone" is gone: its Tern browser block 9 is no longer in this Tern window',
+		);
+		expect(String(failure)).toContain('browser.targets({ app: "tern" })');
+		expect(getTabsMapForTest().has("pip-gone")).toBe(false);
+		await expect(runInTab("pip-gone", { code: "return 1;", timeoutMs: 5_000, session })).rejects.toThrow(
+			/Tab "pip-gone" was killed: its Tern browser block 9 is no longer in this Tern window/,
+		);
+	});
+
 	it("fails a target no block matches, listing the window's blocks, and touches none", async () => {
 		const fake = await startWindow({ shown: true });
 		const browser = await ternBrowser(fake);
@@ -153,27 +196,26 @@ describe("Tern block adoption", () => {
 });
 
 describe("Tern open result", () => {
-	const saved = {
-		socket: process.env.TERN_PANE_SOCKET,
-		pane: process.env.TERN_PANE,
-		flag: process.env.PI_BROWSER_TERN,
-	};
+	// PI_TERMINAL_OWNER_PID: a test run from an interactive omp's bash tool inherits that omp's claim on the pane.
+	const envKeys = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN", "PI_TERMINAL_OWNER_PID"];
+	let savedEnv: Map<string, string | undefined>;
+
+	beforeEach(() => {
+		savedEnv = new Map(envKeys.map(key => [key, process.env[key]]));
+	});
 
 	afterEach(() => {
-		for (const [key, value] of [
-			["TERN_PANE_SOCKET", saved.socket],
-			["TERN_PANE", saved.pane],
-			["PI_BROWSER_TERN", saved.flag],
-		] as const) {
+		for (const [key, value] of savedEnv) {
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
 	});
 
-	async function open(fake: FakeDaemon, name: string, app?: { target: string }): Promise<string> {
+	async function open(fake: FakeDaemon, name: string, target?: string): Promise<string> {
 		process.env.TERN_PANE_SOCKET = fake.socketPath;
 		process.env.TERN_PANE = String(PANE);
 		delete process.env.PI_BROWSER_TERN;
+		delete process.env.PI_TERMINAL_OWNER_PID;
 		const session: ToolSession = {
 			cwd: "/tmp",
 			hasUI: false,
@@ -183,7 +225,7 @@ describe("Tern open result", () => {
 		};
 		opened.push(name);
 		const result = await createBrowserPrelude(session).invoke(
-			{ action: "open", name, timeout: 5, ...(app ? { app } : {}) },
+			{ action: "open", name, timeout: 5, ...(target ? { target } : {}) },
 			{ session, toolCallId: "tern-open-result" },
 		);
 		return result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
@@ -197,7 +239,7 @@ describe("Tern open result", () => {
 	});
 
 	it("names the user's adopted block and that closing releases it", async () => {
-		const text = await open(await startWindow({ shown: true }), "adopted", { target: "Docs C" });
+		const text = await open(await startWindow({ shown: true }), "adopted", "Docs C");
 		expect(text).toStartWith('Opened tab "adopted" on the user\'s Tern browser block 7 (docked)');
 		expect(text).toContain("user's own Tern browser block 7");
 		expect(text).toContain("releases it");

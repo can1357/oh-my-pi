@@ -4,8 +4,6 @@ import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import { createUsageRowBlock } from "@oh-my-pi/pi-tui/overlays/usage-row";
-import { computeContextBreakdown, ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import { DEFAULT_COMPACTION_SETTINGS } from "@oh-my-pi/pi-agent-core/compaction";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
 const cx = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
@@ -93,6 +91,26 @@ describe("UsageDashboardComponent.describe", () => {
 		]);
 	});
 
+	it("labels an exhausted bar-less quota with no amount as Exhausted in the error tone", () => {
+		// Antigravity reports a spent quota as an unknown-unit limit with no
+		// measurable amount; without a label it would read as a red "No data".
+		const reports = [
+			report("google-antigravity", "a@test", [
+				{
+					id: "agy:quota",
+					label: "Gemini quota",
+					scope: { provider: "google-antigravity", windowId: "quota" },
+					amount: { remaining: 0, unit: "unknown" },
+					status: "exhausted",
+				},
+			]),
+		];
+		const amounts = findAll(dashboard(reports).describe(cx), n => n.p?.role === "omp.usage.amount").map(n =>
+			n.k === "text" ? n.p?.spans : undefined,
+		);
+		expect(amounts).toEqual([[{ t: "Exhausted", s: "error" }]]);
+	});
+
 	it("switches to the per-account detail table when the Details tab is selected", () => {
 		const component = dashboard([
 			report("anthropic", "a@test", [limit("anthropic", "5h", "Claude 5h", 0.25, "ok")]),
@@ -170,6 +188,30 @@ describe("UsageDashboardComponent.describe", () => {
 		expect(findAll(root, n => n.p?.role === "omp.usage.stats" || n.k === "chart")).toEqual([]);
 	});
 
+	it("keeps a failed sync visible instead of the empty state when the painted history is empty", async () => {
+		const settled = Promise.withResolvers<void>();
+		let renders = 0;
+		const component = new UsageDashboardComponent({
+			reports: [],
+			renderDetail: () => "",
+			loadActivity: async push => {
+				push([]);
+				throw new Error("database is locked");
+			},
+			// The push renders once; the settled load renders again.
+			requestRender: () => {
+				if (++renders === 2) settled.resolve();
+			},
+			onClose: () => {},
+		});
+		await settled.promise;
+		const root = component.describe(cx);
+		expect(findAll(root, n => n.p?.role === "omp.usage.empty")).toEqual([]);
+		expect(findAll(root, n => n.p?.role === "omp.usage.section.meta").map(plain)).toContain(
+			"not synced (database is locked)",
+		);
+	});
+
 	it("re-fetches reports from the Refresh button like the r key", async () => {
 		const fresh = [report("openai", "c@test", [limit("openai", "5h", "Codex 5h", 0.5, "ok")])];
 		let calls = 0;
@@ -220,7 +262,7 @@ describe("SessionInfoOverlay.describe", () => {
 	const dim = (key: string): string => theme.fg("dim", `${key}:`);
 	// Built per test: the theme initializes in `beforeAll`, after this block is collected.
 	const fullReport = (): string =>
-		`${dim("File")} /tmp/s.jsonl\n${dim("ID")} abc-123\n` +
+		`${dim("File")} /tmp/s.jsonl\n${dim("ID")} abc-123\n${dim("Local")} /tmp/s/local\n` +
 		`\n${theme.bold("Provider")}\n${dim("Model")} claude-sonnet-4-5\n` +
 		`\n${theme.bold("Messages")}\n${dim("User")} 6\n${dim("Tool Calls")} 23\n${dim("Total")} 29\n\n` +
 		`${dim("Append-Only")} ${theme.fg("success", "active")} (setting: auto)\n` +
@@ -232,13 +274,14 @@ describe("SessionInfoOverlay.describe", () => {
 	const kvItems = (root: NativeNode, role: string): unknown[] =>
 		findAll(root, n => n.p?.role === role).flatMap(n => (n.k === "kv" ? [n.p?.items] : []));
 
-	it("leads with the session id, then the file, each copying its own value", () => {
+	it("leads with the session id, then the file and local directory, each copying its own value", () => {
 		const overlay = new SessionInfoOverlay({ terminal: { rows: 20 } }, fullReport(), () => {});
 		const root = overlay.describe(cx);
 		const copies = findAll(root, n => n.p?.role === "omp.info.copy");
-		expect(copies.map(n => n.p?.title)).toEqual(["Copy session ID", "Copy /tmp/s.jsonl"]);
+		expect(copies.map(n => n.p?.title)).toEqual(["Copy session ID", "Copy /tmp/s.jsonl", "Copy /tmp/s/local"]);
 		expect(JSON.stringify(copies[0])).toContain("abc-123");
 		expect(JSON.stringify(copies[1])).toContain("/tmp/s.jsonl");
+		expect(JSON.stringify(copies[2])).toContain("/tmp/s/local");
 		expect(JSON.stringify(root)).not.toContain("\x1b");
 	});
 
@@ -314,104 +357,6 @@ describe("SessionInfoOverlay.describe", () => {
 	});
 });
 
-describe("ContextUsageView.describe", () => {
-	const breakdown = computeContextBreakdown(
-		{
-			model: { id: "demo", name: "Demo Model", contextWindow: 200_000 } as never,
-			agent: { tokenizer: {} as never },
-			getContextBreakdown: () => ({
-				messagesTokens: 12_000,
-				skillsTokens: 0,
-				systemToolsTokens: 3_900,
-				systemContextTokens: 112,
-				systemPromptTokens: 2_600,
-				usedTokens: 18_612,
-			}),
-		} as never,
-		{ compaction: { ...DEFAULT_COMPACTION_SETTINGS, thresholdPercent: 85 } },
-	);
-
-	it("stacks categories, then free space as the empty track, then the hatched buffer, marked at the threshold", () => {
-		const view = new ContextUsageView(breakdown, theme);
-		const bar = findAll(view.describe(cx), n => n.k === "meter" && n.p?.style === "bar")[0];
-		if (bar?.k !== "meter") throw new Error("no bar meter");
-		const parts = bar.p?.parts ?? [];
-		expect(parts.map(part => part.token)).toEqual([
-			"accent",
-			"warning",
-			"customMessageLabel",
-			"userMessageText",
-			"track",
-			"warning",
-		]);
-		expect(parts.at(-1)?.hatch).toBe(true);
-		expect(parts.reduce((sum, part) => sum + part.value, 0)).toBeCloseTo(1);
-		const threshold = bar.p?.marks?.[0]?.at ?? 0;
-		expect(threshold).toBeCloseTo(1 - (parts.at(-1)?.value ?? 0));
-	});
-
-	/** The text of every `text` node with `role` under `root`, spans joined. */
-	const texts = (root: NativeNode, role: string): string[] =>
-		findAll(root, n => n.k === "text" && n.p?.role === role).map(n =>
-			n.k === "text" ? (n.p?.text ?? (n.p?.spans ?? []).map(s => s.t).join("")) : "",
-		);
-
-	it("leads with the tokens used and the room before auto-compaction, then one bar and the breakdown in its order", () => {
-		const described = new ContextUsageView(breakdown, theme).describe(cx);
-		expect(texts(described, "omp.context.used")[0]).toMatch(/^19K of 200K tokens · 9%$/);
-		expect(texts(described, "omp.context.room")[0]).toMatch(/left before auto-compaction at 85%$/);
-		expect(findAll(described, n => n.k === "meter")).toHaveLength(1);
-		const rows = findAll(described, n => n.k === "row" && (n.p?.role ?? "").startsWith("omp.context.cat"));
-		expect(rows.map(row => row.p?.role)).toEqual([
-			...breakdown.categories.map(() => "omp.context.cat"),
-			"omp.context.cat.free",
-			"omp.context.cat.buffer",
-		]);
-		expect(texts(described, "omp.context.label").slice(0, 7)).toEqual([
-			"System prompt",
-			"System tools",
-			"System context",
-			"Skills",
-			"Messages",
-			"Free space",
-			"Autocompact buffer",
-		]);
-		expect(rows[4]?.p?.title).toBe("Messages · 12,000 tokens");
-		expect(findAll(described, n => n.p?.role === "omp.context.snap")).toEqual([]);
-	});
-
-	it("titles snapcompact's savings, or says why it is inactive", () => {
-		const withSnap = (snapcompact: NonNullable<typeof breakdown.snapcompact>) =>
-			new ContextUsageView({ ...breakdown, snapcompact }, theme).describe(cx);
-		const applied = withSnap({
-			visionCapable: true,
-			systemPrompt: {
-				applied: true,
-				scope: "agents-md",
-				textTokens: 7_284,
-				frames: 2,
-				imageTokens: 3_120,
-				savedTokens: 4_164,
-			},
-			toolResults: { total: 41, swapped: 0, textTokens: 0, frames: 0, imageTokens: 0, savedTokens: 0 },
-			savedTokens: 4_164,
-		});
-		const labels = texts(applied, "omp.context.label");
-		expect(labels.slice(-3)).toEqual(["System prompt · AGENTS.md", "Tool results", "Next request"]);
-		expect(texts(applied, "omp.context.detail")).toContain("None imaged · 41 in history");
-		expect(texts(applied, "omp.context.tokens").slice(-2)).toEqual(["−4.2K", "~14K"]);
-
-		const inactive = withSnap({ visionCapable: false, savedTokens: 0 });
-		expect(texts(inactive, "omp.context.snap.note")).toEqual(["Inactive: the model has no image input."]);
-	});
-
-	it("keeps the glyph grid on terminals without `meter`", () => {
-		const described = new ContextUsageView(breakdown, theme).describe(plainCx);
-		expect(findAll(described, n => n.k === "meter")).toEqual([]);
-		expect(findAll(described, n => n.p?.role === "omp.context.usage")).toHaveLength(1);
-	});
-});
-
 describe("createUsageRowBlock describe", () => {
 	it("declares throughput as a rate and omits it for sub-100ms requests", () => {
 		const usage = {
@@ -438,7 +383,8 @@ describe("createUsageRowBlock describe", () => {
 			totalTokens: 600,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
-		const block = createUsageRowBlock(usage, 2000, undefined, new Date(2026, 0, 1, 18, 5, 9).getTime());
+		const timestamp = new Date(2026, 0, 1, 18, 5, 9);
+		const block = createUsageRowBlock(usage, 2000, undefined, timestamp.getTime());
 		const shown = (hour12: boolean | undefined) => {
 			const described = block.describe?.({ ...cx, hour12 });
 			if (!described) throw new Error("usage row did not describe");
@@ -449,8 +395,15 @@ describe("createUsageRowBlock describe", () => {
 		expect(shown(undefined).line).toContain('"18:05 · ');
 		expect(shown(undefined).title).toBe("2026-01-01 18:05:09");
 		const twelve = shown(true);
-		expect(twelve.line).toMatch(/"0?6:05\s?pm · /i);
-		expect(twelve.title).toMatch(/^2026-01-01 0?6:05:09\s?pm$/i);
+		const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: true });
+		const clockWithSeconds = new Intl.DateTimeFormat(undefined, {
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit",
+			hour12: true,
+		});
+		expect(twelve.line).toContain(`"${clock.format(timestamp)} · `);
+		expect(twelve.title).toBe(`2026-01-01 ${clockWithSeconds.format(timestamp)}`);
 		const twentyFour = shown(false);
 		expect(twentyFour.line).toContain('"18:05 · ');
 		expect(twentyFour.title).toBe("2026-01-01 18:05:09");

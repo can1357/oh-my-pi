@@ -419,6 +419,20 @@ export class StreamingRevealController {
 		this.#syncTimer(total);
 	}
 
+	/**
+	 * Re-read whether smooth streaming applies; when it no longer does (e.g. extension text renderers
+	 * were just enabled), drop the typing reveal and draw the whole target now rather than leaving the
+	 * running tick to keep drawing partial prefixes until the next provider delta.
+	 */
+	resyncSmoothStreaming(): void {
+		this.#smoothStreaming = this.#getSmoothStreaming();
+		if (this.#smoothStreaming || !this.#target || !this.#component) return;
+		this.#stopTimer();
+		this.#targetDirty = false;
+		this.#revealed = this.#visibleUnits(this.#target);
+		this.#renderCurrent();
+	}
+
 	/** Total reveal units of `message`, memoized per block across ticks. */
 	#visibleUnits(message: AssistantMessage): number {
 		let total = 0;

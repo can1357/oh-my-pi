@@ -8,10 +8,12 @@ import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import commitSystemPrompt from "../prompts/system/commit-message-system.md" with { type: "text" };
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 
 const COMMIT_SYSTEM_PROMPT = prompt.render(commitSystemPrompt);
@@ -44,8 +46,11 @@ function filterDiffNoise(diff: string): string {
 function getSmolModelCandidates(
 	registry: ModelRegistry,
 	settings: Settings,
+	activeProvider?: string,
 ): Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> {
-	const availableModels = registry.getAvailable();
+	const availableModels = cfgOffline.get(settings)
+		? registry.getAvailable().filter(model => activeProvider !== undefined && model.provider === activeProvider)
+		: registry.getAvailable();
 	if (availableModels.length === 0) return [];
 
 	const candidates: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> = [];
@@ -78,14 +83,17 @@ function getSmolModelCandidates(
 /**
  * Generate a commit message from a unified diff.
  * Returns null if generation fails (caller should fall back to generic message).
+ * `usageLedger` journals each billed attempt as `commit:message` on the calling session.
  */
 export async function generateCommitMessage(
 	diff: string,
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
+	activeProvider?: string,
+	usageLedger?: Partial<ModelUsageLedger>,
 ): Promise<string | null> {
-	const candidates = getSmolModelCandidates(registry, settings);
+	const candidates = getSmolModelCandidates(registry, settings, activeProvider);
 	if (candidates.length === 0) {
 		logger.debug("commit-msg-generator: no smol model found");
 		return null;
@@ -106,9 +114,10 @@ export async function generateCommitMessage(
 
 		try {
 			const maxTokens = COMMIT_MAX_TOKENS;
+			const journal = journalCompletion(usageLedger, { purpose: "commit:message", role: "smol" });
 			const response = await retryTransientCompletion(
-				() =>
-					completeSimple(
+				async () => {
+					const attempt = await completeSimple(
 						candidate.model,
 						{
 							systemPrompt: [COMMIT_SYSTEM_PROMPT],
@@ -120,7 +129,11 @@ export async function generateCommitMessage(
 							maxTokens,
 							reasoning: toReasoningEffort(candidate.thinkingLevel),
 						},
-					),
+					);
+					// Reported per attempt: a transient retry was billed too and would otherwise be replaced.
+					journal?.(attempt, userMessage);
+					return attempt;
+				},
 				{ provider: candidate.model.provider },
 			);
 

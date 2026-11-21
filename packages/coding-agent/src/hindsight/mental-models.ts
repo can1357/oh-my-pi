@@ -42,7 +42,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BankScope } from "./bank";
 import type {
-	HindsightApi,
+	HindsightClientApi,
 	MentalModelListResponse,
 	MentalModelMode,
 	MentalModelSummary,
@@ -140,7 +140,7 @@ function dedupe<T>(items: T[]): T[] {
  * Existing models are NEVER modified. See module docstring.
  */
 export async function ensureMentalModels(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	seeds: MentalModelSeed[],
 	debug: boolean,
@@ -206,7 +206,7 @@ export type MentalModelsBlockLoadResult = { ok: true; block: string | undefined 
  * rendered snapshot when Hindsight is unavailable.
  */
 export async function tryLoadMentalModelsBlock(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	budgetChars: number = MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
 	visibleTags?: readonly string[],
@@ -245,7 +245,7 @@ export async function tryLoadMentalModelsBlock(
  * overflow leaves a `…` marker so the LLM can tell the snapshot is truncated.
  */
 export async function loadMentalModelsBlock(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	budgetChars: number = MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
 	visibleTags?: readonly string[],
@@ -262,6 +262,7 @@ function modelVisibleForTags(model: MentalModelSummary, visibleTags?: readonly s
 }
 
 const TRUNCATION_MARKER = "\n\n…[mental-model snapshot truncated at render budget]";
+const SECTION_SEPARATOR = "\n\n";
 
 /**
  * Format a sorted list of models into the final `<mental_models>` wrapper,
@@ -284,6 +285,14 @@ function minRenderBudgetChars(): number {
 	return cleanOverhead + MIN_CONTENT_ROOM_CHARS;
 }
 
+function sectionHeader(model: MentalModelSummary): string {
+	// Volatile `last_refreshed_at` is deliberately kept OUT of the model-facing
+	// heading: a background reflect that only bumps the timestamp would
+	// otherwise rewrite the cached prefix on identical content (#11961). The
+	// timestamp still surfaces in the user-facing `/memory mm list`/`show`.
+	return `# ${model.name}\n`;
+}
+
 export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChars: number): string {
 	if (models.length === 0) return "";
 
@@ -296,23 +305,23 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	const truncatedOverhead = `<mental_models>\n${TRUNCATION_MARKER}\n</mental_models>`.length;
 	const cleanOverhead = `<mental_models>\n\n</mental_models>`.length;
 	const innerBudget = Math.max(0, budgetChars - truncatedOverhead);
-	const perModelBudget = Math.max(120, Math.floor(innerBudget / Math.max(1, models.length)));
+	const headerCost = models.reduce((sum, m) => sum + sectionHeader(m).length, 0);
+	const separatorCost = SECTION_SEPARATOR.length * Math.max(0, models.length - 1);
+	const perModelBudget = Math.max(
+		120,
+		Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
+	);
 
 	const sections: string[] = [];
 	let consumed = 0;
 	let truncated = false;
 	for (const model of models) {
-		// Volatile `last_refreshed_at` is deliberately kept OUT of the model-facing
-		// heading: a background reflect that only bumps the timestamp would
-		// otherwise rewrite the cached prefix on identical content (#11961). The
-		// timestamp still surfaces in the user-facing `/memory mm list`/`show`.
-		const headerLine = `# ${model.name}`;
+		const header = sectionHeader(model);
 		const body = (model.content ?? "").trim();
 		const truncatedBody = truncateTo(body, perModelBudget);
 		if (truncatedBody.length < body.length) truncated = true;
-		const section = `${headerLine}\n${truncatedBody}`;
-		// +2 for the section separator (`\n\n`) when this is not the first.
-		const sectionCost = section.length + (sections.length > 0 ? 2 : 0);
+		const section = `${header}${truncatedBody}`;
+		const sectionCost = section.length + (sections.length > 0 ? SECTION_SEPARATOR.length : 0);
 		if (consumed + sectionCost > innerBudget && sections.length > 0) {
 			truncated = true;
 			break;
@@ -322,7 +331,7 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	}
 
 	const tail = truncated ? TRUNCATION_MARKER : "";
-	let assembled = `<mental_models>\n${sections.join("\n\n")}${tail}\n</mental_models>`;
+	let assembled = `<mental_models>\n${sections.join(SECTION_SEPARATOR)}${tail}\n</mental_models>`;
 
 	// Final hard-cap: if the careful per-model budgeting still slips past the
 	// requested ceiling (small budgets, long headings, etc.), brutally truncate
@@ -331,7 +340,7 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	if (assembled.length > budgetChars) {
 		const overhead = truncated ? truncatedOverhead : cleanOverhead;
 		const room = Math.max(0, budgetChars - overhead);
-		const body = sections.join("\n\n").slice(0, room).trimEnd();
+		const body = sections.join(SECTION_SEPARATOR).slice(0, room).trimEnd();
 		assembled = `<mental_models>\n${body}${TRUNCATION_MARKER}\n</mental_models>`;
 	}
 	return assembled;

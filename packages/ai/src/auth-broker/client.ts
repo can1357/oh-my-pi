@@ -103,6 +103,19 @@ export class AuthBrokerStreamUnsupportedError extends AuthBrokerError {
 	}
 }
 
+/**
+ * Read a response body. A connection that drops mid-body is a transport
+ * failure like a refused connection, so it carries no HTTP status (callers
+ * retry those) even though the status line arrived.
+ */
+async function readResponseBody(response: Response): Promise<string> {
+	try {
+		return await response.text();
+	} catch (cause) {
+		throw new AuthBrokerError("Auth broker response body was cut off", { cause });
+	}
+}
+
 export interface FetchSnapshotOptions {
 	ifGenerationGt?: number;
 	waitMs?: number;
@@ -162,7 +175,7 @@ export class AuthBrokerClient {
 		if (response.status === 304) {
 			return { status: 304, generation: etagGeneration ?? opts.ifGenerationGt ?? 0 };
 		}
-		const text = await response.text();
+		const text = await readResponseBody(response);
 		const raw = this.#parseJson(text, response.status);
 		const validated = snapshotResponseSchema(raw);
 		if (validated instanceof type.errors) {
@@ -259,10 +272,12 @@ export class AuthBrokerClient {
 	}
 
 	/**
-	 * Fetch aggregate broker usage with a timeout sized for serialized
-	 * same-provider account probes.
+	 * Fetch broker usage, optionally for one provider, with a timeout sized
+	 * for serialized same-provider account probes.
 	 */
-	fetchUsage(options: { signal?: AbortSignal; maxAccountsPerProvider?: number } = {}): Promise<UsageResponse> {
+	fetchUsage(
+		options: { signal?: AbortSignal; maxAccountsPerProvider?: number; provider?: string } = {},
+	): Promise<UsageResponse> {
 		const requestedAccountCount = options.maxAccountsPerProvider;
 		const accountCount =
 			typeof requestedAccountCount === "number" && Number.isFinite(requestedAccountCount)
@@ -270,7 +285,8 @@ export class AuthBrokerClient {
 				: 1;
 		const perAccountTimeoutMs = Math.max(DEFAULT_TIMEOUT_MS, this.#timeoutMs);
 		const timeoutMs = perAccountTimeoutMs * (accountCount + 1);
-		return this.#request<UsageResponse>("GET", "/v1/usage", {
+		const query = options.provider !== undefined ? `?${new URLSearchParams({ provider: options.provider })}` : "";
+		return this.#request<UsageResponse>("GET", `/v1/usage${query}`, {
 			schema: "usageResponseSchema",
 			signal: options.signal,
 			timeoutMs,
@@ -324,7 +340,7 @@ export class AuthBrokerClient {
 		signal?: AbortSignal,
 		reason?: OAuthRefreshReason,
 	): Promise<CredentialRefreshResponse> {
-		const suffix = reason === "auth-recovery" ? "?reason=auth-recovery" : "";
+		const suffix = reason ? `?reason=${reason}` : "";
 		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh${suffix}`, {
 			schema: "credentialRefreshResponseSchema",
 			signal,
@@ -418,7 +434,7 @@ export class AuthBrokerClient {
 		},
 	): Promise<t> {
 		const response = await this.#fetchRaw(method, path, opts);
-		const text = await response.text();
+		const text = await readResponseBody(response);
 		const raw = this.#parseJson(text, response.status);
 		const validated = RESPONSE_SCHEMAS[opts.schema](raw);
 		if (validated instanceof type.errors) {

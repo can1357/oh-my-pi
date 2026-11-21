@@ -13,8 +13,10 @@ const session: ToolSession = {
 	hasUI: false,
 	getSessionFile: () => null,
 	getSessionSpawns: () => "*",
-	getSessionId: () => OWNER_ID,
+	getEvalKernelOwnerId: () => OWNER_ID,
 	settings: Settings.isolated({
+		// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+		"browser.webkit": false,
 		"browser.enabled": true,
 		"browser.headless": true,
 		"browser.cmux": false,

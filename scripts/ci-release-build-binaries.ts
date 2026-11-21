@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 
 import * as fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { COMPILED_EXTERNAL_DEPENDENCIES, compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
 
@@ -16,16 +15,6 @@ interface BinaryTarget {
 const repoRoot = path.join(import.meta.dir, "..");
 const binariesDir = path.join(repoRoot, "packages", "coding-agent", "binaries");
 const entrypoint = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
-const transformersManifest: unknown = createRequire(import.meta.url)("@huggingface/transformers/package.json");
-if (
-	typeof transformersManifest !== "object" ||
-	transformersManifest === null ||
-	!("version" in transformersManifest) ||
-	typeof transformersManifest.version !== "string"
-) {
-	throw new Error("@huggingface/transformers package manifest has no string version");
-}
-const transformersVersion = transformersManifest.version;
 // Worker threads re-enter the binary's single CLI host entry.
 const isDryRun = process.argv.includes("--dry-run");
 const targets: BinaryTarget[] = [
@@ -135,7 +124,6 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 		repoRoot,
 		entrypoint,
 		outfile: path.join(repoRoot, target.outfile),
-		transformersVersion,
 		native: target,
 		target: target.target,
 		minifyIdentifiers: true,
@@ -161,11 +149,11 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 async function generateBundle(): Promise<void> {
 	if (isDryRun) {
 		console.log("DRY RUN bun run gen:stats");
-		console.log("DRY RUN bun --cwd=packages/collab-web run gen:tool-views");
+		console.log("DRY RUN bun --cwd=packages/collab-web run gen:export-viewer --check");
 		return;
 	}
 	await runCommand(["bun", "run", "gen:stats"], repoRoot);
-	await runCommand(["bun", "--cwd=packages/collab-web", "run", "gen:tool-views"], repoRoot);
+	await runCommand(["bun", "--cwd=packages/collab-web", "run", "gen:export-viewer", "--check"], repoRoot);
 }
 
 async function resetArtifacts(): Promise<void> {

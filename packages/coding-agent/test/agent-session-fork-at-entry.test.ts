@@ -11,7 +11,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { AgentSession, SessionBusyError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, spillUrl } from "@oh-my-pi/pi-utils";
 import { assistantMsg } from "./utilities";
 
 describe("AgentSession.fork(entryId)", () => {
@@ -34,7 +34,7 @@ describe("AgentSession.fork(entryId)", () => {
 		vi.restoreAllMocks();
 	});
 
-	/** A persisted session seeded with [user, assistant(artifact://<id>), user, assistant]; returns the assistant entry to fork at. */
+	/** A persisted session seeded with [user, assistant(spill URL), user, assistant]; returns the assistant entry to fork at. */
 	async function createSeededSession(extensionRunner?: ExtensionRunner) {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -56,15 +56,22 @@ describe("AgentSession.fork(entryId)", () => {
 			extensionRunner,
 		});
 		const manager = session.sessionManager;
-		const artifactId = await manager.saveArtifact("kept tool output", "bash");
+		const artifactId = await manager.saveArtifact("kept tool output");
 		if (artifactId === undefined) throw new Error("Expected a persisted artifact");
 		manager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
-		const forkAt = manager.appendMessage(assistantMsg(`Full output: artifact://${artifactId}`));
+		const forkAt = manager.appendMessage(assistantMsg(`Full output: ${spillUrl(artifactId)}`));
 		manager.appendMessage({ role: "user", content: "second", timestamp: Date.now() });
 		manager.appendMessage(assistantMsg("second reply"));
 		session.agent.replaceMessages(manager.buildSessionContext().messages);
 		await manager.flush();
 		return { session, artifactId, forkAt };
+	}
+
+	/** Starts user eval work on `target` that, like a real eval run, settles once `controller` aborts it. */
+	function startUserEval(target: AgentSession, controller: AbortController): void {
+		const run = Promise.withResolvers<void>();
+		controller.signal.addEventListener("abort", () => run.resolve(), { once: true });
+		void target.trackEvalExecution(run.promise, controller);
 	}
 
 	it("keeps cited artifacts resolvable and allocates fresh ids after the cut", async () => {
@@ -77,7 +84,7 @@ describe("AgentSession.fork(entryId)", () => {
 		const keptPath = await session.sessionManager.getArtifactPath(artifactId);
 		expect(keptPath).not.toBeNull();
 		expect(await Bun.file(keptPath!).text()).toBe("kept tool output");
-		const newId = await session.sessionManager.saveArtifact("fork output", "bash");
+		const newId = await session.sessionManager.saveArtifact("fork output");
 		expect(newId).not.toBe(artifactId);
 		expect(await Bun.file(keptPath!).text()).toBe("kept tool output");
 	});
@@ -125,7 +132,7 @@ describe("AgentSession.fork(entryId)", () => {
 		const extensionRunner = {
 			hasHandlers: (eventType: string) => eventType === "session_before_branch",
 			emit: async () => {
-				session!.trackEvalExecution(Promise.withResolvers<void>().promise, userEval).catch(() => undefined);
+				startUserEval(session!, userEval);
 				return undefined;
 			},
 		} as unknown as ExtensionRunner;
@@ -155,7 +162,7 @@ describe("AgentSession.fork(entryId)", () => {
 		const userEval = new AbortController();
 		const flush = seeded.sessionManager.flush.bind(seeded.sessionManager);
 		vi.spyOn(seeded.sessionManager, "flush").mockImplementation(async () => {
-			seeded.trackEvalExecution(Promise.withResolvers<void>().promise, userEval).catch(() => undefined);
+			startUserEval(seeded, userEval);
 			await flush();
 		});
 		expect(seeded.isBusyForSnapshot).toBe(false);
@@ -178,7 +185,7 @@ describe("AgentSession.fork(entryId)", () => {
 		const userEval = new AbortController();
 		const flush = seeded.sessionManager.flush.bind(seeded.sessionManager);
 		vi.spyOn(seeded.sessionManager, "flush").mockImplementation(async () => {
-			seeded.trackEvalExecution(Promise.withResolvers<void>().promise, userEval).catch(() => undefined);
+			startUserEval(seeded, userEval);
 			await flush();
 		});
 

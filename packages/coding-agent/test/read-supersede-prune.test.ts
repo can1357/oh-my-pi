@@ -37,6 +37,25 @@ beforeAll(async () => {
 		path.join(cwd, "huge.log"),
 		Array.from({ length: 200_000 }, (_, i) => `log line ${i + 1} ${"z".repeat(20)}`).join("\n"),
 	);
+	// A macOS `sample` report: a bare read shows a generated summary, a range reads the file.
+	await Bun.write(
+		path.join(cwd, "demo.sample.txt"),
+		[
+			"Analysis of sampling demo (pid 42) every 1 millisecond",
+			"Process:         demo [42]",
+			"----",
+			"",
+			"Call graph:",
+			"    100 Thread_1: main",
+			"    + 100 start  (in dyld) + 8  [0x100]",
+			"    +   100 run  (in demo) + 24  [0x200]",
+			"    +     70 layout  (in demo) + 8  [0x300]",
+			"    +     30 alloc  (in demo) + 8  [0x500]",
+			"",
+			"Binary Images:",
+			"",
+		].join("\n"),
+	);
 	const session: ToolSession = {
 		cwd,
 		hasUI: false,
@@ -112,6 +131,12 @@ describe("real read results through the supersede pass", () => {
 			summary: true,
 		},
 		{ name: "a complete bare read replaces an earlier range", older: "notes.txt:2-5", newer: "notes.txt", pruned: 1 },
+		{
+			name: "a profile summary keeps an earlier range of the report",
+			older: "demo.sample.txt:6-8",
+			newer: "demo.sample.txt",
+			pruned: 0,
+		},
 		{
 			name: "a line-limited bare page keeps an earlier range",
 			older: "long.txt:900-950",

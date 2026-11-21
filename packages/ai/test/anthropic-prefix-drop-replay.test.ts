@@ -126,7 +126,9 @@ describe("anthropic drop_block replay after reported thinking drops", () => {
 				return droppedResponse(reportedAt);
 			});
 			const warn = vi.spyOn(logger, "warn");
+			const debug = vi.spyOn(logger, "debug");
 			const dropWarning = "anthropic: dropped thinking block after conversation prefix changed";
+			const dropWarnings = () => warn.mock.calls.filter(([message]) => message === dropWarning);
 
 			const run = async () => {
 				const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test", providerSessionState });
@@ -139,14 +141,20 @@ describe("anthropic drop_block replay after reported thinking drops", () => {
 			const first = await run();
 			expect(first.stopReason).toBe("stop");
 			expect(first.inputTransformations).toEqual(droppedTransformations);
-			expect(warn.mock.calls.filter(([message]) => message === dropWarning)).toHaveLength(2);
+			// Both blocks dropped in one request warn once, with the count and the first path.
+			expect(dropWarnings()).toHaveLength(1);
+			expect(dropWarnings()[0]?.[1]).toMatchObject({ count: 2, path: "messages.1.content.0" });
+			expect(debug).toHaveBeenCalledWith("anthropic: dropped thinking block paths", {
+				model: model.id,
+				paths: ["messages.1.content.0", "messages.1.content.1"],
+			});
 
 			const second = await run();
 			expect(second.stopReason).toBe("stop");
 			expect(payloads).toHaveLength(2);
 			expect(second.inputTransformations).toEqual(droppedTransformations);
 			// The API reports the same drops on every replay; they were already warned about.
-			expect(warn.mock.calls.filter(([message]) => message === dropWarning)).toHaveLength(2);
+			expect(dropWarnings()).toHaveLength(1);
 
 			const [firstPayload, secondPayload] = payloads;
 			if (!firstPayload || !secondPayload) throw new Error("expected two captured requests");

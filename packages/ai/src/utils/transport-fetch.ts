@@ -14,15 +14,21 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * The one fetch every inference request goes through. Per call it applies, in
  * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
  * per-provider proxy, and `PI_REQ_DEBUG` request/response recording — then
- * calls `fetchImpl` (or the model's default fetch) exactly once. Providers
- * never layer transport concerns themselves.
+ * calls `fetchImpl` (or the model's default fetch) exactly once.
+ *
+ * `beforeDispatch` runs for every HTTP attempt, including retries, before
+ * dispatch bookkeeping; a thrown refusal prevents that attempt.
  *
  * Idempotent: the built fetch is stamped and returned as-is on later passes.
  * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
  * on auth retries, so without the stamp each entry point would add another
  * layer (three PI_REQ_DEBUG dumps for one request).
  */
-export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined): FetchImpl {
+export function transportFetch(
+	model: Model<Api>,
+	fetchImpl: FetchImpl | undefined,
+	beforeDispatch?: () => void,
+): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
@@ -30,6 +36,7 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
+		beforeDispatch?.();
 		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
 			recordDispatchOrigin(model, input);
 		}

@@ -18,7 +18,6 @@ import {
 	HighlightStream,
 	highlightCode,
 	htmlToMarkdown,
-	invalidateFsScanCache,
 	listWorkspace,
 	macOSCheckSpelling,
 	macOSSpellCheckerAvailable,
@@ -152,7 +151,7 @@ function textPdf(text: string): Uint8Array {
 	return Buffer.from(document);
 }
 
-describe("pi-natives", () => {
+describe("omp-natives", () => {
 	beforeAll(async () => {
 		await setupFixtures();
 		return async () => {
@@ -256,6 +255,27 @@ describe("pi-natives", () => {
 			expect(out).toContain("<k>function");
 			expect(out).toContain("<n>1");
 			expect(out).toContain("<c> add");
+		});
+
+		it("highlights Zig via the vendored syntax", () => {
+			expect(getSupportedLanguages()).toContain("Zig");
+			expect(supportsLanguage("zig")).toBe(true);
+			expect(supportsLanguage("zon")).toBe(true);
+
+			const out = highlightCode('const std = @import("std");\n// greet\n', "zig", {
+				comment: "<c>",
+				keyword: "<k>",
+				function: "<f>",
+				variable: "<v>",
+				string: "<s>",
+				number: "<n>",
+				type: "<t>",
+				operator: "<o>",
+				punctuation: "<p>",
+			});
+			expect(out).toContain("<k>const");
+			expect(out).toContain('<s>"std"');
+			expect(out).toContain("<c>// greet");
 		});
 	});
 
@@ -717,18 +737,6 @@ try {
 			expect(result.totalMatches).toBe(4);
 		});
 
-		it("should invalidate scan cache when invalidateFsScanCache receives a relative path", async () => {
-			await glob({ pattern: "*.ts", path: testDir, cache: true });
-			const newFile = path.join(testDir, "newly-added.ts");
-			await fs.writeFile(newFile, "export const newer = true;\n");
-
-			const relativePath = path.relative(process.cwd(), newFile);
-			invalidateFsScanCache(relativePath);
-
-			const result = await glob({ pattern: "newly-added.ts", path: testDir, cache: true });
-			expect(result.matches.some(match => match.path === "newly-added.ts")).toBe(true);
-		});
-
 		it("should avoid scan work when maxResults is zero", async () => {
 			const result = await glob({
 				pattern: "**/*",
@@ -788,19 +796,6 @@ try {
 			} finally {
 				await fs.rm(scopedDir, { recursive: true, force: true });
 			}
-		});
-
-		it("should fast-recheck empty cached results when threshold is reached", async () => {
-			const fileName = "cache-empty-recheck-target.txt";
-			const filePath = path.join(testDir, fileName);
-			await fs.rm(filePath, { force: true });
-			invalidateFsScanCache();
-			const first = await glob({ pattern: fileName, path: testDir, hidden: true, gitignore: true, cache: true });
-			expect(first.totalMatches).toBe(0);
-			await fs.writeFile(filePath, "created after empty cached query\n");
-			await Bun.sleep(250);
-			const second = await glob({ pattern: fileName, path: testDir, hidden: true, gitignore: true, cache: true });
-			expect(second.totalMatches).toBe(1);
 		});
 	});
 
@@ -1126,6 +1121,27 @@ try {
 			// Navigation/footer may or may not be removed depending on preprocessing
 		});
 
+		it("keeps collapsed sections only with hiddenContent reachable, never template content", async () => {
+			const html = `<main>
+<h2>Product information</h2>
+<button aria-expanded="false">Item details</button>
+<div style="display:none"><p>Country of Origin: India</p></div>
+<template><p>Template-only claim</p></template>
+</main>`;
+
+			const dropped = await htmlToMarkdown(html);
+			const reachable = await htmlToMarkdown(html, { hiddenContent: "reachable" });
+
+			expect(dropped).toContain("Product information");
+			expect(dropped).not.toContain("Country of Origin: India");
+			expect(reachable).toContain("Country of Origin: India");
+			expect(reachable).not.toContain("Template-only claim");
+		});
+
+		it("rejects an unknown hiddenContent value", async () => {
+			expect(() => htmlToMarkdown("<p>text</p>", { hiddenContent: "visible" })).toThrow(/hiddenContent/);
+		});
+
 		it("should reject depth-truncated HTML", async () => {
 			const html = `${"<div>".repeat(90)}<p>deep-content</p>${"</div>".repeat(90)}`;
 
@@ -1211,7 +1227,7 @@ console.log("ok");
 		it("should create a stoppable power assertion handle, or surface a descriptive bus/service failure where the host cannot provide one", () => {
 			let assertion: PowerAssertion | undefined;
 			try {
-				assertion = PowerAssertion.start({ reason: "pi-natives test" });
+				assertion = PowerAssertion.start({ reason: "omp-natives test" });
 			} catch (error) {
 				// A host with no bus must fail in the documented bus/service vocabulary,
 				// so a wrong export or a no-op stub fails on any other message.
@@ -1226,7 +1242,7 @@ console.log("ok");
 		it.skipIf(process.platform !== "linux" || !Bun.which("systemd-inhibit"))(
 			"registers a login1 inhibitor for the handle's lifetime",
 			() => {
-				const reason = `pi-natives ${crypto.randomUUID()}`;
+				const reason = `omp-natives ${crypto.randomUUID()}`;
 				const held = (): boolean =>
 					Bun.spawnSync(["systemd-inhibit", "--list", "--no-pager"]).stdout.toString().includes(reason);
 				let assertion: PowerAssertion;

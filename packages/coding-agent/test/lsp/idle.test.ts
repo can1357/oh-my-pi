@@ -31,6 +31,8 @@ function makeClient(): LspClient {
 		} as unknown as LspClient["proc"],
 		requestId: 0,
 		diagnostics: new Map(),
+		publishedDiagnostics: new Map(),
+		pulledDiagnostics: new Map(),
 		diagnosticsVersion: 0,
 		openFiles: new Map(),
 		pendingRequests: new Map(),

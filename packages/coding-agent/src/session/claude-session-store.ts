@@ -11,7 +11,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { isRecord, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { isRecord, parseJsonlLenient, sanitizeText } from "@oh-my-pi/pi-utils";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { collectForeignJsonRecords, type ForeignJsonRecord, readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
@@ -66,6 +66,18 @@ function isoTimestamp(value: unknown, fallback: number): string {
 function cleanPreview(value: string): string | undefined {
 	const cleaned = value.replace(/\s+/g, " ").trim();
 	return cleaned.length > 0 ? cleaned : undefined;
+}
+
+/** Claude stores the user's `/rename` title beside the transcript in <sessionId>/custom-title.json. */
+async function readTitleSidecar(transcript: string, sessionId: string): Promise<string | undefined> {
+	try {
+		const value: unknown = await Bun.file(path.join(path.dirname(transcript), sessionId, "custom-title.json")).json();
+		if (!isRecord(value)) return undefined;
+		const title = stringField(value, "customTitle");
+		return title ? cleanPreview(sanitizeText(title)) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 async function readHistoryIndex(file: string): Promise<Map<string, ClaudeHistoryMetadata>> {
@@ -379,6 +391,7 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 					id,
 					path: item.file,
 					cwd: indexed?.cwd ?? (await recordedCwd(item.file)) ?? item.cwd,
+					title: await readTitleSidecar(item.file, id),
 					created: new Date(createdMs),
 					modified: new Date(modifiedMs),
 					firstMessage: indexed?.firstMessage,
@@ -445,7 +458,7 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 			const timestamp = isoTimestamp(value.timestamp, stats.mtimeMs);
 			if (value.type === "assistant" && isRecord(value.message)) {
 				const model = stringField(value.message, "model");
-				if (model && model !== lastModel) {
+				if (model && model !== "<synthetic>" && model !== lastModel) {
 					const id = uniqueEntryId(`claude-${sourceUuid}-model`, usedIds);
 					const entry: ModelChangeEntry = {
 						type: "model_change",
@@ -469,8 +482,10 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 			if (parentId) sourceTails.set(sourceUuid, parentId);
 		}
 
-		const title = sourceTitle ?? aiTitle ?? info.title;
-		if (title) await manager.setSessionName(title, sourceTitle ? "user" : "auto");
+		// The sidecar (info.title) is rewritten on every /rename, so it outranks older transcript titles.
+		const userTitle = info.title ?? sourceTitle;
+		const title = userTitle ?? aiTitle;
+		if (title) await manager.setSessionName(title, userTitle ? "user" : "auto");
 		return manager;
 	}
 }

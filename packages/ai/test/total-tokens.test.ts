@@ -22,11 +22,10 @@ import { e2eApiKey, resolveApiKey } from "./oauth";
 const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
-	resolveApiKey("google-gemini-cli"),
 	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, geminiCliToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, antigravityToken, openaiCodexToken] = oauthTokens;
 
 // Generate a long system prompt to trigger caching (>2k bytes for most providers)
 const LONG_SYSTEM_PROMPT = `You are a helpful assistant. Be concise in your responses.
@@ -124,9 +123,9 @@ describe("totalTokens field", () => {
 
 	describe("Anthropic (OAuth)", () => {
 		it.skipIf(!anthropicOAuthToken)(
-			"claude-sonnet-4 - should return totalTokens equal to sum of components",
+			"claude-sonnet-4-5 - should return totalTokens equal to sum of components",
 			async () => {
-				const llm = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+				const llm = getBundledModel("anthropic", "claude-sonnet-4-5-20250929");
 
 				console.log(`\nAnthropic OAuth / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: anthropicOAuthToken });
@@ -334,9 +333,9 @@ describe("totalTokens field", () => {
 
 	describe.skipIf(!e2eApiKey("OPENROUTER_API_KEY"))("OpenRouter", () => {
 		it(
-			"anthropic/claude-sonnet-4 - should return totalTokens equal to sum of components",
+			"anthropic/claude-sonnet-4.6 - should return totalTokens equal to sum of components",
 			async () => {
-				const llm = getBundledModel("openrouter", "anthropic/claude-sonnet-4");
+				const llm = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6");
 
 				console.log(`\nOpenRouter / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: Bun.env.OPENROUTER_API_KEY });
@@ -385,9 +384,9 @@ describe("totalTokens field", () => {
 		);
 
 		it(
-			"google/gemini-2.0-flash-001 - should return totalTokens equal to sum of components",
+			"google/gemini-2.5-flash - should return totalTokens equal to sum of components",
 			async () => {
-				const llm = getBundledModel("openrouter", "google/gemini-2.0-flash-001");
+				const llm = getBundledModel("openrouter", "google/gemini-2.5-flash");
 
 				console.log(`\nOpenRouter / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: Bun.env.OPENROUTER_API_KEY });
@@ -448,29 +447,6 @@ describe("totalTokens field", () => {
 
 				console.log(`\nGitHub Copilot / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: githubCopilotToken });
-
-				logUsage("First request", first);
-				logUsage("Second request", second);
-
-				assertTotalTokensEqualsComponents(first);
-				assertTotalTokensEqualsComponents(second);
-			},
-			{ retry: 3, timeout: 60000 },
-		);
-	});
-
-	// =========================================================================
-	// Google Gemini CLI (OAuth)
-	// =========================================================================
-
-	describe("Google Gemini CLI (OAuth)", () => {
-		it.skipIf(!geminiCliToken)(
-			"gemini-2.5-flash - should return totalTokens equal to sum of components",
-			async () => {
-				const llm = getBundledModel("google-gemini-cli", "gemini-2.5-flash");
-
-				console.log(`\nGoogle Gemini CLI / ${llm.id}:`);
-				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: geminiCliToken });
 
 				logUsage("First request", first);
 				logUsage("Second request", second);

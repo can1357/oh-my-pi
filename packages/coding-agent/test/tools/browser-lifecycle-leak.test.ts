@@ -27,6 +27,35 @@ import {
 	releaseTabsForOwner,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+
+function makeSession(ownerId?: string): ToolSession {
+	return {
+		cwd: "/tmp",
+		hasUI: true,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		getEvalKernelOwnerId: ownerId ? () => ownerId : undefined,
+		settings: Settings.isolated({ "browser.enabled": true }),
+	};
+}
+
+function mockCmuxClient(): void {
+	spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
+	spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+	let openCount = 0;
+	spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+		async (method: string): Promise<Record<string, unknown>> => {
+			if (method === "browser.open_split") {
+				openCount++;
+				return { surface_id: `surface-${openCount}`, url: "about:blank" };
+			}
+			return {};
+		},
+	);
+}
 
 function makeKind(socketSuffix: string): CmuxKind {
 	return { kind: "cmux", socketPath: `/tmp/omp-test-${socketSuffix}.sock`, surface: `surface-${socketSuffix}` };
@@ -172,6 +201,58 @@ describe("browser lifecycle — session-scoped teardown reaps owned tabs", () =>
 		const releasedA = await releaseTabsForOwner("session-A", { kill: false });
 		expect(releasedA).toBe(1);
 		expect(getTabsMapForTest().has("reuse-tab")).toBe(false);
+	});
+
+	it("browser.close({ all: true }) releases only the calling agent's tabs (#15975)", async () => {
+		mockCmuxClient();
+
+		const kind = makeKind("subagent-close-all");
+		const browser = await acquireBrowser(kind, { cwd: "/tmp" });
+
+		await acquireTab("parent-tab", browser, {
+			timeoutMs: 1_000,
+			ownerSessionId: "agent-parent",
+			persist: true,
+		});
+		await acquireTab("subagent-tab", browser, {
+			timeoutMs: 1_000,
+			ownerSessionId: "agent-subagent",
+		});
+
+		const subagentSession = makeSession("agent-subagent");
+		const result = await createBrowserPrelude(subagentSession).invoke(
+			{ action: "close", all: true },
+			{ session: subagentSession, toolCallId: "test-subagent-close" },
+		);
+
+		expect(result.content).toEqual([{ type: "text", text: "Released 1 managed tab" }]);
+		expect(getTabsMapForTest().has("subagent-tab")).toBe(false);
+		expect(getTabsMapForTest().has("parent-tab")).toBe(true);
+	});
+
+	it("browser.close({ all: true }) from a caller with no owner id releases every tab", async () => {
+		mockCmuxClient();
+
+		const kind = makeKind("unowned-close-all");
+		const browser = await acquireBrowser(kind, { cwd: "/tmp" });
+
+		await acquireTab("tab-1", browser, {
+			timeoutMs: 1_000,
+			ownerSessionId: "session-1",
+		});
+		await acquireTab("tab-2", browser, {
+			timeoutMs: 1_000,
+			ownerSessionId: "session-2",
+		});
+
+		const unownedSession = makeSession();
+		const result = await createBrowserPrelude(unownedSession).invoke(
+			{ action: "close", all: true },
+			{ session: unownedSession, toolCallId: "test-unowned-close" },
+		);
+
+		expect(result.content).toEqual([{ type: "text", text: "Released 2 managed tabs" }]);
+		expect(getTabsMapForTest().size).toBe(0);
 	});
 });
 

@@ -66,7 +66,7 @@ interface StreamRetryOptions {
 /** Controls which replay-safe provider results may issue a fresh request. */
 export interface ReplaySafeStreamRetryPolicy {
 	/** Retry benign terminal stops that contain no visible output. */
-	retryEmptyCompletion?: boolean;
+	retryEmptyCompletion?: boolean | (() => boolean);
 	/** Retry transient provider errors before output is committed. */
 	retryProviderErrors?: boolean;
 	/** Maximum transient provider-error retries; empty completions keep their shared fixed budget. */
@@ -136,7 +136,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
 			const retryEmpty =
-				policy.retryEmptyCompletion === true &&
+				(typeof policy.retryEmptyCompletion === "function"
+					? policy.retryEmptyCompletion()
+					: policy.retryEmptyCompletion === true) &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
 				completedMessage !== undefined &&

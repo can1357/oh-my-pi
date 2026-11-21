@@ -11,15 +11,15 @@ Local observability dashboard for AI usage statistics.
 
 ## Metrics Tracked
 
-| Metric | Calculation |
-|--------|-------------|
-| Tokens/s | `output_tokens / (duration / 1000)` |
-| Cache Rate | `cache_read / (input + cache_read) * 100` |
-| Cache Savings | `(uncached prompt cost - actual prompt cost) / uncached prompt cost * 100` |
-| Error Rate | `count(stopReason=error) / total_calls * 100` |
-| API-equivalent estimate | Sum of token usage priced with the matching public API rate card |
-| Avg Latency | Mean of `duration` |
-| TTFT | Mean of `ttft` (time to first token) |
+| Metric                  | Calculation                                                                |
+| ----------------------- | -------------------------------------------------------------------------- |
+| Tokens/s                | `output_tokens / (duration / 1000)`                                        |
+| Cache Rate              | `cache_read / (input + cache_read) * 100`                                  |
+| Cache Savings           | `(uncached prompt cost - actual prompt cost) / uncached prompt cost * 100` |
+| Error Rate              | `count(stopReason=error) / total_calls * 100`                              |
+| API-equivalent estimate | Sum of token usage priced with the matching public API rate card           |
+| Avg Latency             | Mean of `duration`                                                         |
+| TTFT                    | Mean of `ttft` (time to first token)                                       |
 
 Subscription-backed models use matching public API prices when an exact public model exists; these values estimate API-equivalent usage rather than the user's bill. Subscription-only models without a public price are reported as N/A and excluded from dollar totals.
 
@@ -41,6 +41,12 @@ omp stats --summary
 omp stats --json
 ```
 
+The dashboard answers to its `--host` name, IP addresses, `localhost`, single-label names, and `.localhost`, `.local`, `.internal`, `.home.arpa`, `.lan`, `.home`, `.corp`, `.localdomain` and Tailscale `.ts.net` names. Any other host name (for example a reverse proxy's or tunnel's domain) is refused to block DNS rebinding unless listed in `OMP_STATS_ALLOWED_HOSTS`; a `*.` entry allows that domain's subdomains:
+
+```bash
+OMP_STATS_ALLOWED_HOSTS=stats.example.com,*.trycloudflare.com omp stats --host 0.0.0.0
+```
+
 ### Programmatic
 
 ```typescript
@@ -57,15 +63,15 @@ console.log(stats.byModel[0].avgTokensPerSecond);
 
 ## API Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/stats` | Overall stats with all breakdowns |
-| `GET /api/stats/models` | Per-model statistics |
-| `GET /api/stats/folders` | Per-folder/project statistics |
-| `GET /api/stats/timeseries` | Hourly time series data |
-| `GET /api/events` | Server-sent live status: sync progress, data version, rollup backlog |
-| `GET /api/status` | Current live status (same shape as the events) |
-| `POST /api/sync` | Start a background sync; progress arrives on `/api/events` |
+| Endpoint                    | Description                                                          |
+| --------------------------- | -------------------------------------------------------------------- |
+| `GET /api/stats`            | Overall stats with all breakdowns                                    |
+| `GET /api/stats/models`     | Per-model statistics                                                 |
+| `GET /api/stats/folders`    | Per-folder/project statistics                                        |
+| `GET /api/stats/timeseries` | Hourly time series data                                              |
+| `GET /api/events`           | Server-sent live status: sync progress, data version, rollup backlog |
+| `GET /api/status`           | Current live status (same shape as the events)                       |
+| `POST /api/sync`            | Start a background sync; progress arrives on `/api/events`           |
 
 ## Data Storage
 
@@ -80,7 +86,7 @@ Range queries read `message_rollup` / `tool_rollup` / `session_rollup`, maintain
 
 ## Dashboard
 
-Pages: Overview, Models, Providers, Costs, Requests, Errors, Traces, Tools, Frustration, Projects and Gain. `1`–`6` pick the time range; `g` then a letter jumps to a page. Every page revalidates when the live data version moves, so there is no refresh button.
+Pages: Overview, Models, Providers, Costs, Requests, Errors, Traces, Tools, Frustration, Projects and Gain. `1`–`8` pick the time range; `g` then a letter jumps to a page. Every page revalidates when the live data version moves, so there is no refresh button.
 
 ## License
 

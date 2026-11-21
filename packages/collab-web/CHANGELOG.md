@@ -2,6 +2,65 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Enhanced guest collaboration APIs: `GuestClient.sendPrompt` now supports sending images, while `sendResume`, `sendDeliverQueue`, and the `followUp` option enable continuing the host’s agent, interrupting it to deliver queued messages, or queueing a follow-up prompt.
+
+### Changed
+
+- Tool commands run inside a bash call render as nested cards under the bash card
+- Tool cards in shared sessions and HTML exports show brief intent labels instead of detailed ranking instructions.
+
+## [19.0.0] - 2026-11-18
+
+### Fixed
+
+- Fixed web search cards without a synthesized answer displaying raw numbered result lists; they now show a concise excerpt for each source instead.
+
+## [18.22.0] - 2026-11-16
+
+### Fixed
+
+- Improved streaming performance in the collab viewer, preventing long replies from becoming progressively slower as they are received.
+
+## [18.20.1] - 2026-11-14
+
+### Fixed
+
+- Fixed guests retaining stale agents, tool cards, and working state after a failed rejoin; guests now reliably restore the current session state when reconnecting.
+
+## [18.19.0] - 2026-11-12
+
+### Fixed
+
+- Fixed `task` tool cards so spawned tasks consistently display their name, assigned agent, and instructions, with `steps` spawns shown as numbered stages.
+
+## [18.18.8] - 2026-11-11
+
+### Changed
+
+- Ask result cards render saved notes beneath their matching selected answers ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+
+## [18.18.3] - 2026-11-09
+
+### Changed
+
+- `ask` tool cards show the HTML form's fieldset legends and field count while pending, and each question with its submitted answer (or "(no answer)") once answered, flagging submissions made by the timeout
+
+## [18.15.0] - 2026-11-01
+
+### Changed
+
+- `job` tool results name each background job by the purpose the model gave for it, falling back to its command ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed
