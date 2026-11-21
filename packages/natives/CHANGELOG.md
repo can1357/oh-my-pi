@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
