@@ -339,17 +339,29 @@ pub struct DestinationIdentity {
 
 /// A snapshot of operator-controlled execution configuration.
 pub struct ExecutionSettings {
+	/// The raw endpoint URL text from the operator setting.
 	endpoint_text:       Str,
+	/// The parsed endpoint.
 	endpoint:            Endpoint,
+	/// The container image reference.
 	image:               Str,
+	/// The credential source (environment variable or command).
 	credential_source:   Str,
+	/// The REAPI profile name.
 	profile:             Str,
+	/// The cache policy name.
 	cache:               Str,
+	/// The credential header name.
 	credential_header:   Str,
+	/// The architecture spelling.
 	arch_spelling:       Str,
+	/// Comma-separated fixed platform properties.
 	fixed_properties:    Str,
+	/// Whether to refuse GitHub Actions caching.
 	refuse_action_cache: bool,
+	/// Glob patterns for files to exclude from upload.
 	deny_globs:          Str,
+	/// Paths explicitly allowed for upload.
 	allow_paths:         Str,
 }
 
@@ -463,10 +475,12 @@ impl ExecutionSettings {
 		)
 	}
 
+	#[allow(dead_code)]
 	pub(crate) fn profile_name(&self) -> &str {
 		&self.profile
 	}
 
+	#[allow(dead_code)]
 	pub(crate) fn cache_name(&self) -> &str {
 		&self.cache
 	}
@@ -475,6 +489,7 @@ impl ExecutionSettings {
 		self.refuse_action_cache
 	}
 
+	#[allow(dead_code)]
 	pub(crate) fn endpoint_text(&self) -> &str {
 		&self.endpoint_text
 	}

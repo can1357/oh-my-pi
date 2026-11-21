@@ -511,6 +511,7 @@ fn finish_prompt(
 	Ok(DelegatedAnswer { text: final_text(&events), report })
 }
 
+#[cfg(test)]
 async fn prompt_on<E: DelegatedExecutor, R: PermissionResolver>(
 	executor: &E,
 	workdir: &Path,

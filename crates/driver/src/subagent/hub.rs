@@ -1718,6 +1718,8 @@ fn control_key(key: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+	use omp_core::sf;
+
 	use super::*;
 
 	fn params(value: serde_json::Value) -> Params {

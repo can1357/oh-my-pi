@@ -38,7 +38,7 @@ use omp_ai::{
 };
 use omp_catalog::{ProviderId, RouteId};
 use omp_contract::posture::ApprovalMode;
-use omp_core::Str;
+use omp_core::{Str, sf};
 use omp_driver::headless::kernel::{EnvToolExecutor, SettingsAdmission};
 use omp_envd::{
 	AttachOptions, ProjectEnvironment, RegistryBridges,

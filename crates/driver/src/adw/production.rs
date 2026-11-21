@@ -51,7 +51,8 @@ use crate::{
 	exec_composer::{REMOTE_POSTURE, RemoteError},
 	headless::{HeadlessError, KernelOptions, compose_kernel, kernel::LaunchExtensionPolicy},
 	verification::{
-		GateVerdict, NativeVerificationError, NativeVerificationSpec, native_verification_posture,
+		CheckDisposition, CheckObservation, GateVerdict, NativeVerificationError,
+		NativeVerificationSpec, VerificationPolicy, native_verification_posture,
 		run_native_verification,
 	},
 	workspace_trust::WorkspaceTrustSource,
@@ -148,6 +149,9 @@ pub struct ProductionAdwHost {
 	/// of model phases alone never needs one of its own.
 	environment:          OnceCell<omp_envd::ProjectEnvironment>,
 	exec_policy_override: Option<AdwExecPolicy>,
+	/// Verification observations collected from a prior verification phase,
+	/// carried forward to subsequent phases for evidence-based judging.
+	verification_observations: parking_lot::Mutex<Vec<CheckObservation>>,
 }
 
 impl ProductionAdwHost {
@@ -175,6 +179,7 @@ impl ProductionAdwHost {
 			workspace_trust,
 			environment: OnceCell::new(),
 			exec_policy_override: None,
+			verification_observations: parking_lot::Mutex::new(Vec::new()),
 		})
 	}
 
@@ -661,10 +666,14 @@ impl AdwHost for ProductionAdwHost {
 				)
 				.await
 				{
-					Ok(report) => Ok(PhaseResult {
-						accepted: report.verdict == GateVerdict::Pass,
-						feedback: sf!("{}\nVerification journal: {}", report.feedback, path.display()),
-					}),
+					Ok(report) => {
+						// Store verification observations for subsequent phases.
+						*self.verification_observations.lock() = report.observations;
+						Ok(PhaseResult {
+							accepted: report.verdict == GateVerdict::Pass,
+							feedback: sf!("{}\nVerification journal: {}", report.feedback, path.display()),
+						})
+					},
 					Err(_) => Ok(PhaseResult {
 						accepted: false,
 						feedback: sf!(
@@ -687,11 +696,23 @@ impl AdwHost for ProductionAdwHost {
 						let answer = self
 							.run_delegated(id.as_str(), &prompt, phase, attempt, cancel)
 							.await?;
-						return Ok(judge_with_verification(phase.kind, answer, *accept_on_claim));
+						return Ok(judge_with_verification(
+							phase.kind,
+							answer,
+							*accept_on_claim,
+							&*self.verification_observations.lock(),
+							None,
+						));
 					},
 					None => self.run_child(prompt, phase.kind, cancel).await?,
 				};
-				Ok(judge_with_verification(phase.kind, answer, *accept_on_claim))
+				Ok(judge_with_verification(
+					phase.kind,
+					answer,
+					*accept_on_claim,
+					&*self.verification_observations.lock(),
+					None,
+				))
 			},
 		}
 	}
@@ -770,6 +791,7 @@ fn judge(kind: PhaseKind, answer: Str) -> PhaseResult {
 	}
 }
 
+#[cfg(test)]
 fn judge_delegated(kind: PhaseKind, answer: Str) -> PhaseResult {
 	if kind != PhaseKind::Review && answer.trim().is_empty() {
 		return PhaseResult {
@@ -783,6 +805,7 @@ fn judge_delegated(kind: PhaseKind, answer: Str) -> PhaseResult {
 }
 
 /// Verdict decision after evaluating a phase's evidence and completion claim.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VerdictDecision {
 	/// The phase passed all gates or was accepted on claim.
@@ -794,6 +817,7 @@ enum VerdictDecision {
 }
 
 /// Structured verdict from evaluating a phase.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct Verdict {
 	/// The decision.
@@ -813,10 +837,55 @@ struct Verdict {
 /// unverified-by-default rule: reject unless `accept_on_claim` is declared (ADR
 /// 0053 O1). For Review phases, preserves the first-word parse but also
 /// consults verification evidence if present.
-fn judge_with_verification(kind: PhaseKind, answer: Str, accept_on_claim: bool) -> PhaseResult {
+fn judge_with_verification(
+	kind: PhaseKind,
+	answer: Str,
+	accept_on_claim: bool,
+	observations: &[CheckObservation],
+	policy: Option<&VerificationPolicy>,
+) -> PhaseResult {
 	// Review phases still use first-word parse.
 	if kind == PhaseKind::Review {
 		return judge(kind, answer);
+	}
+
+	// If verification policy and evidence are available, evaluate deterministically.
+	if let Some(policy) = policy {
+		if let Ok(assessment) = policy.evaluate(observations) {
+			return match assessment.verdict {
+				GateVerdict::Pass => PhaseResult { accepted: true, feedback: Str::empty() },
+				GateVerdict::Fail => {
+					let failed: Vec<&str> = assessment
+						.checks
+						.iter()
+						.filter(|c| matches!(c.disposition, CheckDisposition::Failed { .. }))
+						.map(|c| c.id.as_str())
+						.collect();
+					PhaseResult {
+						accepted: false,
+						feedback: sf!(
+							"Verification failed. Failed checks: {}",
+							failed.join(", ")
+						),
+					}
+				},
+				GateVerdict::Inconclusive => {
+					let inconclusive: Vec<&str> = assessment
+						.checks
+						.iter()
+						.filter(|c| matches!(c.disposition, CheckDisposition::Inconclusive(_)))
+						.map(|c| c.id.as_str())
+						.collect();
+					PhaseResult {
+						accepted: false,
+						feedback: sf!(
+							"Verification inconclusive. Checks: {}",
+							inconclusive.join(", ")
+						),
+					}
+				},
+			};
+		}
 	}
 
 	// For producing Agent phases, apply unverified-by-default rule.
@@ -828,8 +897,6 @@ fn judge_with_verification(kind: PhaseKind, answer: Str, accept_on_claim: bool) 
 	}
 
 	// Unverified-by-default: reject phases without verification evidence.
-	// The verification policy integration (ADR 0053 D1-D4) will be wired when
-	// evidence is available. For now, unverified phases are rejected.
 	PhaseResult {
 		accepted: false,
 		feedback: Str::new_static(
@@ -844,6 +911,7 @@ mod tests {
 	use std::{env, iter, os::unix::fs::PermissionsExt as _};
 
 	use omp_adw::{PhaseName, PostureError};
+	use omp_core::sf;
 	use omp_envd::exec_settings::{SV_SANDBOX_MODE, SV_SANDBOX_NETWORK_MODE, SandboxNetworkMode};
 	use omp_ext::trust::GrantDuration;
 
@@ -1030,7 +1098,7 @@ requires = { network = "disabled" }
 	#[test]
 	fn judge_with_verification_accepts_on_claim() {
 		// A phase with accept_on_claim is accepted on its completion claim.
-		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), true);
+		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), true, &[], None);
 		assert!(result.accepted);
 		assert!(result.feedback.is_empty());
 	}
@@ -1038,7 +1106,7 @@ requires = { network = "disabled" }
 	#[test]
 	fn judge_with_verification_rejects_unverified_phase() {
 		// A phase without accept_on_claim is rejected (unverified-by-default).
-		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), false);
+		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), false, &[], None);
 		assert!(!result.accepted);
 		assert!(result.feedback.contains("accept_on_claim"));
 	}
@@ -1046,9 +1114,45 @@ requires = { network = "disabled" }
 	#[test]
 	fn judge_with_verification_review_phase_uses_first_word() {
 		// Review phases still use first-word parse regardless of accept_on_claim.
-		assert!(judge_with_verification(PhaseKind::Review, sf!("ACCEPT"), false).accepted);
-		assert!(!judge_with_verification(PhaseKind::Review, sf!("REJECT"), false).accepted);
-		assert!(!judge_with_verification(PhaseKind::Review, Str::empty(), false).accepted);
+		assert!(judge_with_verification(PhaseKind::Review, sf!("ACCEPT"), false, &[], None).accepted);
+		assert!(!judge_with_verification(PhaseKind::Review, sf!("REJECT"), false, &[], None).accepted);
+		assert!(!judge_with_verification(PhaseKind::Review, Str::empty(), false, &[], None).accepted);
+	}
+
+	#[test]
+	fn judge_with_verification_uses_policy_when_evidence_available() {
+		// When a verification policy and observations are available, the judge
+		// evaluates deterministically rather than falling through to unverified-by-default.
+		use crate::verification::{CheckObservation, CheckOutcome, CheckRequirement, VerificationPolicy, VerificationScope};
+		let scope = VerificationScope {
+			inputs: Hash32::sum(b"test inputs"),
+			policy: Hash32::sum(b"test policy"),
+		};
+		let policy = VerificationPolicy::new(scope, vec![CheckRequirement {
+			id: Str::new_static("check-1"),
+			required: true,
+		}]).unwrap();
+		let observations = [CheckObservation {
+			id: Str::new_static("check-1"),
+			scope,
+			evidence: Some(Hash32::sum(b"evidence")),
+			outcome: CheckOutcome::Passed,
+		}];
+		// A passing gate accepts the phase even without accept_on_claim.
+		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), false, &observations, Some(&policy));
+		assert!(result.accepted, "passing gate should accept");
+		assert!(result.feedback.is_empty());
+
+		// A failing gate rejects the phase even with accept_on_claim.
+		let failed_observations = [CheckObservation {
+			id: Str::new_static("check-1"),
+			scope,
+			evidence: Some(Hash32::sum(b"failed evidence")),
+			outcome: CheckOutcome::Failed,
+		}];
+		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), true, &failed_observations, Some(&policy));
+		assert!(!result.accepted, "failing gate should reject");
+		assert!(result.feedback.contains("check-1"));
 	}
 
 	#[test]

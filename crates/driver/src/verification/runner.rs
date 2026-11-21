@@ -110,6 +110,8 @@ pub struct NativeVerificationReport {
 	pub publications: Vec<EvidencePublication>,
 	/// Complete policy assessment, when a captured scope was admitted.
 	pub assessment:   Option<GateAssessment>,
+	/// Raw check observations for downstream re-evaluation.
+	pub observations: Vec<CheckObservation>,
 }
 
 /// An attempt could not establish its deterministic contract.
@@ -597,6 +599,7 @@ async fn verify(
 		feedback,
 		publications,
 		assessment: Some(assessment),
+		observations,
 	})
 }
 
@@ -807,6 +810,8 @@ fn admit_config_value(
 
 #[cfg(test)]
 mod tests {
+	use omp_core::sf;
+
 	use super::*;
 
 	#[test]
