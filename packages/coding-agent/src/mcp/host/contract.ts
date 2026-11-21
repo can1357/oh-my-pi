@@ -23,6 +23,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { UnitPolicy } from "@oh-my-pi/pi-tui/tools/daemon";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+import type { SandboxNetworkMode } from "../../sandbox/types";
 import { MCPTransportError } from "../errors";
 import type { JsonRpcError, MCPRequestIdFormat } from "../types";
 
@@ -58,6 +59,11 @@ export interface McpStdioSpec extends McpSpecBase {
 	env: Record<string, string>;
 	/** Complete environment of the process: the session's own plus {@link env}. */
 	spawnEnv: Record<string, string>;
+	/**
+	 * Set when the server opted into the OS sandbox (`sandbox: true`): the network it gets there.
+	 * Such a server is hosted in the session's own process, the only one holding its sandbox runtime.
+	 */
+	sandboxNetwork?: SandboxNetworkMode;
 }
 
 /** A remote server with its request headers resolved, credentials included. */
@@ -145,7 +151,18 @@ export function mcpIdentity(spec: McpServerSpec): string {
 	for (const name in spec.spawnEnv) {
 		if (!Object.hasOwn(spec.env, name) && CREDENTIAL_ENV.test(name)) inherited[name] = spec.spawnEnv[name];
 	}
-	return sha256(["stdio", spec.command, spec.args, spec.cwd, spec.env, inherited, spec.requestIdFormat ?? ""]);
+	const identity: unknown[] = [
+		"stdio",
+		spec.command,
+		spec.args,
+		spec.cwd,
+		spec.env,
+		inherited,
+		spec.requestIdFormat ?? "",
+	];
+	// Appended only when set, so the identity of every server without the opt-in stays what it was.
+	if (spec.sandboxNetwork !== undefined) identity.push(spec.sandboxNetwork);
+	return sha256(identity);
 }
 
 /**

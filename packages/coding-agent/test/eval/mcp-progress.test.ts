@@ -7,6 +7,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import type { EvalStatusEvent, EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
 import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
@@ -27,6 +28,8 @@ afterEach(async () => {
 	await Promise.all(managers.splice(0).map(manager => manager.dispose()));
 	await disposeAllVmContexts();
 	restoreSettingsTestState(settingsState);
+	// The eval sandbox check opened <agentDir>/agent.db; Windows cannot delete an open file.
+	AgentStorage.close();
 	temp.removeSync();
 });
 

@@ -18,6 +18,9 @@ import { cfgBashPatterns } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 import type { InternalWriteResult } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
+import { SandboxRuntime } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
+import { cfgSandboxNetworkMode } from "@oh-my-pi/pi-coding-agent/sandbox/settings";
+import { SANDBOX_SUPPORTED } from "../helpers/sandbox-test-state";
 
 function sessionWith(settings: Settings, caller: Partial<ToolSession> = {}): ToolSession {
 	return { settings, hasUI: true, settingsApproval: true, taskDepth: 0, ...caller } as unknown as ToolSession;
@@ -31,7 +34,10 @@ const write = (url: string, content: string, settings: Settings, caller?: Partia
 const textOf = (result: InternalWriteResult) => (result.content[0]?.type === "text" ? result.content[0].text : "");
 
 describe("CfgProtocolHandler", () => {
-	afterEach(() => setCfgApprovalHost(null));
+	afterEach(() => {
+		setCfgApprovalHost(null);
+		SandboxRuntime.resetForTest();
+	});
 
 	it("lists a namespace relative to its prefix and a setting with its source", async () => {
 		const settings = Settings.isolated({ "advisor.syncBacklog": "3" });
@@ -136,6 +142,63 @@ describe("CfgProtocolHandler", () => {
 			["advisor.syncBacklog", true],
 			["advisor.syncBacklog", false],
 		]);
+	});
+
+	it("keeps asking for the sandbox's own settings while it is enabled, despite a session grant", async () => {
+		SandboxRuntime.resetForTest(SANDBOX_SUPPORTED);
+		const settings = Settings.isolated({ "sandbox.enabled": true });
+		const asked: string[] = [];
+		setCfgApprovalHost({
+			approve: async request => (asked.push(`${request.path}${request.save ? "/save" : ""}`), "session"),
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		const session = { getSessionId: () => "a" };
+
+		await write("cfg://advisor/enabled", "true", settings, session);
+		await write("cfg://advisor/syncBacklog", '"3"', settings, session);
+		await write("cfg://sandbox/network/mode", '"allow"', settings, session);
+		await write("cfg://sandbox/filesystem/readScope", '"workspace"', settings, session);
+		// A sandbox prompt answered "for this session" grants nothing for later sandbox writes.
+		await write("cfg://sandbox/network/mode", '"deny"', settings, session);
+		expect(asked).toEqual([
+			"advisor.enabled",
+			"sandbox.network.mode",
+			"sandbox.filesystem.readScope",
+			"sandbox.network.mode",
+		]);
+
+		// On a session whose sandbox is off, the grant from the advisor prompt covers sandbox settings again.
+		await write("cfg://sandbox/network/mode", '"allow"', Settings.isolated(), session);
+		expect(asked).toHaveLength(4);
+	});
+
+	it("refuses a sandbox network mode this host cannot enforce, with the reason and without asking", async () => {
+		SandboxRuntime.resetForTest({
+			supported: true,
+			backend: "bubblewrap",
+			proxy: false,
+			warnings: [],
+			networkMissing: ["slirp4netns"],
+		});
+		const settings = Settings.isolated();
+		const asked: string[] = [];
+		setCfgApprovalHost({
+			approve: async request => (asked.push(request.path), "once"),
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		const reason =
+			'Network mode "allow" is unavailable on this host: package slirp4netns is missing (command: slirp4netns). Install it to use this mode.';
+
+		await expect(write("cfg://sandbox/network/mode", '"allow"', settings)).rejects.toThrow(reason);
+		await expect(write("cfg://sandbox/network/mode/save", '"allow"', settings)).rejects.toThrow(reason);
+		expect(asked).toEqual([]);
+		expect(cfgSandboxNetworkMode.isConfigured(settings)).toBe(false);
+
+		await write("cfg://sandbox/network/mode", '"deny"', settings);
+		expect(asked).toEqual(["sandbox.network.mode"]);
+		expect(cfgSandboxNetworkMode.get(settings)).toBe("deny");
 	});
 
 	it("fails an unanswered write without changing anything and asks again next time", async () => {

@@ -1,5 +1,4 @@
 import type { WriteToolDetails } from "@oh-my-pi/pi-tui/tools/write";
-import { Database } from "bun:sqlite";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -17,7 +16,6 @@ import {
 	BINARY_SNIFF_BYTES,
 	isEnoent,
 	isProbablyBinaryHeader,
-	isRecord,
 	prompt,
 	untilAborted,
 	withFileLock,
@@ -27,10 +25,10 @@ import {
 	archiveFormatFromPath,
 	assertInMemorySize,
 	DEFAULT_ARCHIVE_LIMITS,
+	encodeArchive,
 	isWritableArchiveFormat,
 	parseArchivePathCandidates,
 	readArchiveEntries,
-	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
 import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/normalize";
 
@@ -43,6 +41,7 @@ import { getLspBatchRequest } from "../lsp/batch";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
+import { containedFileAccess, containToolExecute, mutateFile, openReadableByteSource } from "../sandbox/file-access";
 import type { ToolSession } from "../sdk";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
@@ -62,16 +61,7 @@ import { decodeUtf8Text } from "./read-format";
 import { routeReadThroughBridge } from "./read-summary";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
-import {
-	deleteRowByKey,
-	deleteRowByRowId,
-	insertRow,
-	isSqliteFile,
-	parseSqlitePathCandidates,
-	resolveTableRowLookup,
-	updateRowByKey,
-	updateRowByRowId,
-} from "./sqlite-reader";
+import { isSqliteFile, parseSqlitePathCandidates, writeSqliteRow } from "./sqlite-reader";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
@@ -376,7 +366,7 @@ async function maybeMarkExecutableForShebang(absolutePath: string, content: stri
 		const currentMode = stat.mode & 0o7777;
 		const newMode = currentMode | 0o111;
 		if (newMode === currentMode) return false;
-		await fs.chmod(absolutePath, newMode);
+		await mutateFile({ kind: "chmod", path: absolutePath, mode: newMode });
 		return ((await fs.stat(absolutePath)).mode & 0o111) === 0o111;
 	} catch {
 		return false;
@@ -656,7 +646,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
 		if (parentDir && parentDir !== ".") {
-			await fs.mkdir(parentDir, { recursive: true });
+			await mutateFile({ kind: "mkdir", path: parentDir });
 		}
 		// Canonicalize the parent when the archive is not yet present. Existing
 		// archive symlinks resolve to their target, so every spelling locks the
@@ -671,6 +661,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const format = inferredFormat ?? "tar";
 		if (!isWritableArchiveFormat(format)) {
 			throw new ToolError(`Writing entries inside ${format} archives is not supported (read-only format).`);
+		}
+		// `withFileLock` flocks `<archive>.lock` on Unix other than Linux, creating it in this
+		// process. Under the sandbox the contained host creates it first (an empty append never
+		// truncates a held lock file), so the OS decides that create like the archive's own.
+		if (containedFileAccess() && process.platform !== "linux" && process.platform !== "win32") {
+			await mutateFile({ kind: "append", path: `${finalPath}.lock`, data: new Uint8Array() });
 		}
 
 		return withFileLock(
@@ -693,8 +689,16 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					try {
 						// A plain tar indexes lazily, so nothing upstream bounds its size; the
 						// rewrite holds every member in memory, so reject before reading any.
-						if (format === "tar") assertInMemorySize((await fs.stat(finalPath)).size, DEFAULT_ARCHIVE_LIMITS);
-						const existing = await readArchiveEntries({ path: finalPath, format });
+						let existing: Map<string, Uint8Array>;
+						// Read through the (container-verified, when contained) handle: a path read here
+						// could be redirected to an archive the container denies after the realpath above.
+						const { source, close } = await openReadableByteSource(finalPath);
+						try {
+							if (format === "tar") assertInMemorySize(source.size, DEFAULT_ARCHIVE_LIMITS);
+							existing = await readArchiveEntries({ source, format });
+						} finally {
+							await close();
+						}
 						for (const [entryPath, data] of existing) {
 							entries.set(entryPath, data);
 						}
@@ -720,11 +724,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// path also avoids collisions with stale files left by prior runs.
 				const tmpPath = `${finalPath}.tmp-${process.pid}-${Bun.randomUUIDv7()}`;
 				try {
-					await writeArchive(tmpPath, format, entries);
+					await mutateFile({ kind: "write", path: tmpPath, data: await encodeArchive(format, entries) });
 					signal?.throwIfAborted();
-					await fs.rename(tmpPath, finalPath);
+					await mutateFile({ kind: "rename", from: tmpPath, to: finalPath });
 				} catch (error) {
-					await fs.rm(tmpPath, { force: true }).catch(() => {});
+					await mutateFile({ kind: "rm", path: tmpPath, recursive: false, force: true }).catch(() => {});
 					throw new ToolError(error instanceof Error ? error.message : String(error));
 				}
 
@@ -802,68 +806,16 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		content: string,
 		resolvedSqlitePath: ResolvedSqliteWritePath,
 	): Promise<AgentToolResult<WriteToolDetails>> {
-		let db: Database | null = null;
 		try {
 			if (!resolvedSqlitePath.exists) {
 				throw new ToolError(`SQLite database '${displayPath}' not found`);
 			}
-
-			db = new Database(resolvedSqlitePath.absolutePath, { create: false, strict: true });
-			db.run("PRAGMA busy_timeout = 3000");
-			// FK enforcement is per-connection and off by default; enable it so edits
-			// honor the schema's REFERENCES constraints and ON DELETE/UPDATE actions.
-			db.run("PRAGMA foreign_keys = ON");
-
-			const trimmedContent = content.trim();
-			let resultText: string;
-			if (trimmedContent.length === 0) {
-				if (!resolvedSqlitePath.key) {
-					throw new ToolError("SQLite deletes require a row key in the path");
-				}
-
-				const lookup = resolveTableRowLookup(db, resolvedSqlitePath.table);
-				const deleted =
-					lookup.kind === "pk"
-						? deleteRowByKey(db, resolvedSqlitePath.table, lookup, resolvedSqlitePath.key)
-						: deleteRowByRowId(db, resolvedSqlitePath.table, resolvedSqlitePath.key);
-				resultText =
-					deleted > 0
-						? `Deleted row '${resolvedSqlitePath.key}' from ${resolvedSqlitePath.table}`
-						: `No row deleted from ${resolvedSqlitePath.table} for key '${resolvedSqlitePath.key}'`;
-			} else {
-				let parsedContent: unknown;
-				try {
-					parsedContent = Bun.JSON5.parse(content);
-				} catch (error) {
-					throw new ToolError(
-						`SQLite write content must be valid JSON5: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
-
-				if (!isRecord(parsedContent)) {
-					throw new ToolError("SQLite write content must be a JSON object");
-				}
-
-				if (resolvedSqlitePath.key) {
-					const lookup = resolveTableRowLookup(db, resolvedSqlitePath.table);
-					const updated =
-						lookup.kind === "pk"
-							? updateRowByKey(db, resolvedSqlitePath.table, lookup, resolvedSqlitePath.key, parsedContent)
-							: updateRowByRowId(db, resolvedSqlitePath.table, resolvedSqlitePath.key, parsedContent);
-					resultText =
-						updated > 0
-							? `Updated row '${resolvedSqlitePath.key}' in ${resolvedSqlitePath.table}`
-							: `No row updated in ${resolvedSqlitePath.table} for key '${resolvedSqlitePath.key}'`;
-				} else {
-					insertRow(db, resolvedSqlitePath.table, parsedContent);
-					resultText = `Inserted row into ${resolvedSqlitePath.table}`;
-				}
-			}
-
-			return toolResult<WriteToolDetails>({ resolvedPath: resolvedSqlitePath.absolutePath })
-				.text(resultText)
-				.sourcePath(resolvedSqlitePath.absolutePath)
-				.done();
+			const { absolutePath: dbPath, table, key } = resolvedSqlitePath;
+			const contained = containedFileAccess();
+			const resultText = contained
+				? await contained.request({ op: "sqlite.write", write: { dbPath, table, key, content } })
+				: writeSqliteRow(dbPath, table, key, content);
+			return toolResult<WriteToolDetails>({ resolvedPath: dbPath }).text(resultText).sourcePath(dbPath).done();
 		} catch (error) {
 			if (isEnoent(error)) {
 				throw new ToolError(`SQLite database '${displayPath}' not found`);
@@ -872,9 +824,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				throw error;
 			}
 			throw new ToolError(error instanceof Error ? error.message : String(error));
-		} finally {
-			db?.close();
 		}
+	}
+
+	static {
+		containToolExecute(this, tool => tool.session);
 	}
 
 	async execute(

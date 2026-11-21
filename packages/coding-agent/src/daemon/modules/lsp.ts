@@ -14,7 +14,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, settleWithin } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import {
 	LSP_ACQUIRE_METHOD,
@@ -799,12 +799,7 @@ class LspServerUnit implements ModuleUnit {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#pending.set(id, { resolveInternal: resolve });
 		this.#writeServer({ jsonrpc: "2.0", id, method: "shutdown", params: null });
-		const timer = setTimeout(resolve, SHUTDOWN_BUDGET_MS);
-		try {
-			await Promise.race([promise, this.exited]);
-		} finally {
-			clearTimeout(timer);
-		}
+		await settleWithin(Promise.race([promise, this.exited]), SHUTDOWN_BUDGET_MS);
 		this.#writeServer({ jsonrpc: "2.0", method: "exit" });
 	}
 

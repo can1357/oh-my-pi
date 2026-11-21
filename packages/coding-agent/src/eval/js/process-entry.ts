@@ -1,7 +1,11 @@
 import { type RejectionInterceptor, WorkerCore } from "./worker-core";
 import type { WorkerInbound, WorkerOutbound } from "./worker-protocol";
 
-/** Start the JavaScript evaluator inside a subprocess IPC transport. */
+/**
+ * Start the JavaScript evaluator inside a subprocess transport: Bun IPC for the
+ * `__omp_worker_js_eval_process` selector, stdio frames for the sandbox-contained
+ * `__omp_worker_js_eval_stdio` selector.
+ */
 export function startJsEvalProcess(
 	transport: {
 		send(message: WorkerOutbound): void;
@@ -14,7 +18,7 @@ export function startJsEvalProcess(
 			send: message => transport.send(message),
 			onMessage: handler => transport.onMessage(handler),
 			// The parent owns process lifetime and kills the subprocess after the
-			// WorkerCore `closed` acknowledgement has crossed IPC.
+			// WorkerCore `closed` acknowledgement has crossed the transport.
 			close: () => {},
 		},
 		{

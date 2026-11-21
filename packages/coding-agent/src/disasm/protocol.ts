@@ -208,7 +208,7 @@ const workerStateSchema = type({
 	startedAt: "number | null",
 	endpoint: "string",
 	token: "string",
-	logPath: "string",
+	"logPath?": "string",
 	"aliasDir?": "string",
 	idbPath: "string",
 	info: infoSchema,

@@ -8,9 +8,11 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import { FileType } from "@oh-my-pi/pi-natives";
 import { isEnoent, isFsError, logger, prompt, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
+import { containedFileAccess, containedGlob, containToolExecute } from "../sandbox/file-access";
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
@@ -20,6 +22,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
+	assertSandboxWritable,
 	clearInitializationFailure,
 	ensureWorkspaceFolders,
 	getActiveClients,
@@ -149,22 +152,38 @@ async function enumerateRenamePairs(
 			exceeded: false,
 		};
 	}
-	const entries = await fs.promises.readdir(source, { recursive: true, withFileTypes: true });
-	const pairs: FileRenamePair[] = [];
-	for (const entry of entries) {
-		if (!entry.isFile()) continue;
-		if (pairs.length >= MAX_RENAME_PAIRS) {
-			return { pairs, directory: true, exceeded: true };
-		}
-		const parent = entry.parentPath ?? source;
-		const absOld = path.join(parent, entry.name);
-		const rel = path.relative(source, absOld);
-		pairs.push({
-			oldUri: fileToUri(absOld),
-			newUri: fileToUri(path.join(dest, rel)),
+	const relativeFiles: string[] = [];
+	let exceeded = false;
+	if (containedFileAccess()) {
+		// The container walks the tree: only the regular files it can list come back.
+		const { matches } = await containedGlob({
+			pattern: "**/*",
+			path: source,
+			fileType: FileType.File,
+			hidden: true,
+			gitignore: false,
+			includeNodeModules: true,
+			maxResults: MAX_RENAME_PAIRS + 1,
 		});
+		for (const match of matches) relativeFiles.push(match.path);
+		exceeded = relativeFiles.length > MAX_RENAME_PAIRS;
+		relativeFiles.length = Math.min(relativeFiles.length, MAX_RENAME_PAIRS);
+	} else {
+		const entries = await fs.promises.readdir(source, { recursive: true, withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile()) continue;
+			if (relativeFiles.length >= MAX_RENAME_PAIRS) {
+				exceeded = true;
+				break;
+			}
+			relativeFiles.push(path.relative(source, path.join(entry.parentPath ?? source, entry.name)));
+		}
 	}
-	return { pairs, directory: true, exceeded: false };
+	const pairs: FileRenamePair[] = relativeFiles.map(rel => ({
+		oldUri: fileToUri(path.join(source, rel)),
+		newUri: fileToUri(path.join(dest, rel)),
+	}));
+	return { pairs, directory: true, exceeded };
 }
 
 function formatRenameStatPath(filePath: string, cwd: string): string {
@@ -324,6 +343,26 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 		return lines;
 	};
+	/**
+	 * The paths a call names, for restricted folders and the sandbox's file policy: `file` (not the
+	 * workspace scope `*`) and a `rename_file` destination. Workspace edits a server computes are
+	 * checked again where they are applied ({@link applyWorkspaceEditWithLsp}, and
+	 * {@link assertSandboxWritable} for `rename_file`).
+	 */
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
+		const params = args as Partial<LspParams> | null | undefined;
+		const named = [params?.file, params?.action === "rename_file" ? params.new_name : undefined];
+		const paths: string[] = [];
+		for (const entry of named) {
+			if (typeof entry !== "string" || entry.length === 0 || entry === "*") continue;
+			try {
+				paths.push(resolveToCwd(entry, this.session.cwd));
+			} catch {
+				// Not a local path.
+			}
+		}
+		return paths;
+	};
 	readonly label = "LSP";
 	readonly loadMode = "discoverable";
 	readonly summary = "Query LSP (language server) for diagnostics, hover info, and references";
@@ -346,6 +385,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		return session.enableLsp === false ? null : new LspTool(session);
 	}
 
+	static {
+		containToolExecute(this, tool => tool.session);
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: LspParams,
@@ -354,6 +397,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<LspToolDetails>> {
 		const { action, file, line, symbol, query, new_name, apply, timeout } = params;
+		const requestTool = () => this.session.isToolActive?.("sandbox_request") === true;
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
 			throw new ToolError(`LSP action ${action} is disabled in this read-only session`);
 		}
@@ -1011,6 +1055,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					);
 				}
 			}
+
+			// The server picked the reference files and the move touches both ends: hold every
+			// path to the sandbox's write policy before anything is written, so a refused one
+			// cannot leave earlier reference files rewritten.
+			await assertSandboxWritable(
+				this.session.cwd,
+				[source, dest, ...referenceEdits.map(reference => reference.filePath)],
+				requestTool,
+			);
 
 			// Apply the reference edits and move as one unit: a failed move rolls
 			// the reference edits back so the source, destination, and every
@@ -1746,7 +1799,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: async edit =>
+								applyWorkspaceEditWithLsp(edit, this.session.cwd, signal, requestTool),
 							executeCommand: async commandItem => {
 								await sendRequest(
 									client,
@@ -1859,7 +1913,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					} else {
 						const shouldApply = apply !== false;
 						if (shouldApply) {
-							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
+							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal, requestTool);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 							// Whatever still names the old symbol was not renamed.
 							const leftover = symbolName

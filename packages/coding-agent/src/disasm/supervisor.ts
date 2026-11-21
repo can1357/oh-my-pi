@@ -1,6 +1,7 @@
 /**
  * Supervisor for one disassembler Python worker, run inside the daemon's `disasm` module
- * (`daemon/modules/disasm.ts`).
+ * (`daemon/modules/disasm.ts`), or, while the OS sandbox is active, inside the omp process, which
+ * then spawns the worker contained (`contained.ts`).
  *
  * Each backend keeps one analysis database per Python process, so each database gets its own
  * worker. The worker runs detached in its own session with output to the unit log, listens on
@@ -32,7 +33,8 @@ const STREAM_DRAIN_MS = 1_000;
 /** How long a starting or re-adopted worker may take to accept the protocol connection. */
 const CONNECT_TIMEOUT_MS = 30_000;
 const CONNECT_RETRY_MS = 100;
-const LOG_TAIL_BYTES = 64 * 1024;
+/** How much of the worker's latest output an exit error may quote (and a spawner keeping it must hold). */
+export const WORKER_OUTPUT_TAIL_BYTES = 64 * 1024;
 const LOG_TAIL_LINES = 20;
 /** Environment key carrying the token the worker requires as the first line of every connection. */
 const WORKER_TOKEN_ENV = "OMP_DISASM_WORKER_TOKEN";
@@ -68,7 +70,8 @@ export interface WorkerRequestOptions {
 export interface WorkerFiles {
 	/** Unix socket path; on Windows the file the worker writes its TCP port to. */
 	endpoint: string;
-	logPath: string;
+	/** Log file of the worker's output; omitted when the spawner keeps it ({@link WorkerLaunch.output}). */
+	logPath?: string;
 }
 
 interface OpenResult extends DatabaseInfo {
@@ -76,6 +79,88 @@ interface OpenResult extends DatabaseInfo {
 }
 
 type StatusResult = { open: false } | ({ open: true } & OpenResult);
+
+/** What a worker process is started for. */
+export interface WorkerSpawnSpec {
+	backend: DisasmBackend;
+	loc: DatabaseLocation;
+	runtime: WorkerRuntime;
+	/** The staged worker script. */
+	script: string;
+	/** Arguments after the script: where the worker listens. */
+	args: string[];
+	/** The Unix socket or Windows port file the worker creates. */
+	endpoint: string;
+	/** The worker's whole environment: the runtime's plus its connection token. */
+	env: Record<string, string>;
+	/** Where the worker's stdout and stderr go; omitted when the spawner keeps them itself. */
+	logPath?: string;
+}
+
+/** A started worker process. */
+export interface WorkerLaunch {
+	pid: number;
+	/** Process start time, to tell a reused pid apart; null when unknown. */
+	startedAt: number | null;
+	exited: Promise<number | null>;
+	/** Kill the worker; defaults to SIGKILL of its session. */
+	kill?: () => void;
+	/**
+	 * `frame`: interrupts go as `{"interrupt": id}` frames, for a worker signals cannot reach (behind a
+	 * sandbox wrapper). Default: SIGINT, frames on Windows and for frame backends.
+	 */
+	interrupt?: "frame";
+	/**
+	 * The tail of the worker's output, kept by a spawner that writes no log file; exit errors quote it
+	 * instead of reading the log.
+	 */
+	output?: () => string;
+}
+
+/** Start the worker process for `spec`. */
+export type WorkerSpawner = (spec: WorkerSpawnSpec) => Promise<WorkerLaunch>;
+
+/** Options for {@link DisasmWorker.spawn}; the daemon uses the defaults. */
+export interface WorkerSpawnOptions {
+	/** Defaults to {@link spawnDetachedWorker}. */
+	spawn?: WorkerSpawner;
+	/**
+	 * Where a backend's project alias (`DisasmBackend.projectAlias`) is created; defaults to the
+	 * system temp dir. A contained worker reaches only its sandbox's private temp dir.
+	 */
+	aliasRoot?: string;
+}
+
+/** The worker as a detached child of this process, its output appended to the log. */
+export async function spawnDetachedWorker({
+	runtime,
+	loc,
+	script,
+	args,
+	env,
+	logPath,
+}: WorkerSpawnSpec): Promise<WorkerLaunch> {
+	const log = logPath === undefined ? "ignore" : fs.openSync(logPath, "a");
+	try {
+		const proc = Bun.spawn([runtime.pythonPath, "-u", script, ...args], {
+			cwd: loc.dir,
+			env,
+			stdin: "ignore",
+			stdout: log,
+			stderr: log,
+			// Own session: the worker outlives a daemon crash and is re-adopted; the module
+			// saves and closes it with a `close` request instead of a group signal.
+			detached: true,
+			windowsHide: shouldHideKernelWindow({
+				platform: process.platform,
+				hostHasInheritableConsole: hostHasInheritableConsole(),
+			}),
+		});
+		return { pid: proc.pid, startedAt: Process.fromPid(proc.pid)?.startTime() ?? null, exited: proc.exited };
+	} finally {
+		if (log !== "ignore") fs.closeSync(log);
+	}
+}
 
 /** The request a worker is currently executing. */
 export interface RunningRequest {
@@ -131,17 +216,6 @@ async function dial(endpoint: string): Promise<IpcConnection | undefined> {
 	}
 }
 
-/** Last lines of the worker log, for exit errors. */
-async function logTail(logPath: string): Promise<string> {
-	try {
-		const file = Bun.file(logPath);
-		const text = await file.slice(Math.max(0, file.size - LOG_TAIL_BYTES)).text();
-		return text.trimEnd().split("\n").slice(-LOG_TAIL_LINES).join("\n");
-	} catch {
-		return "";
-	}
-}
-
 /** One open disassembler database backed by a dedicated, detached Python worker process. */
 export class DisasmWorker {
 	/** Registry key from `locateDatabase`. */
@@ -156,10 +230,16 @@ export class DisasmWorker {
 	readonly #startedAt: number | null;
 	readonly #endpoint: string;
 	readonly #token: string;
-	readonly #logPath: string;
+	readonly #logPath: string | undefined;
+	/** The spawner's tail of the worker's output ({@link WorkerLaunch.output}). */
+	readonly #output: (() => string) | undefined;
 	readonly #aliasDir: string | undefined;
 	readonly #lock: FileLockHandle;
 	readonly #exited: Promise<number | null>;
+	/** Custom kill of a spawner's worker ({@link WorkerLaunch.kill}). */
+	readonly #killChild: (() => void) | undefined;
+	/** Interrupts go as frames ({@link WorkerLaunch.interrupt}). */
+	readonly #frameInterrupts: boolean;
 	#idbPath: string;
 	#info: DatabaseInfo = { module: "", format: "", arch: "", bitness: 0 };
 	/** Resolves once a protocol connection is up; replaced while reconnecting. */
@@ -195,7 +275,7 @@ export class DisasmWorker {
 		backend: DisasmBackend,
 		loc: DatabaseLocation,
 		lock: FileLockHandle,
-		child: { pid: number; startedAt: number | null; exited: Promise<number | null> },
+		child: WorkerLaunch,
 		files: WorkerFiles & { token: string; aliasDir?: string },
 	) {
 		this.#backend = backend;
@@ -211,6 +291,10 @@ export class DisasmWorker {
 		this.#logPath = files.logPath;
 		this.#aliasDir = files.aliasDir;
 		this.#exited = child.exited;
+		this.#killChild = child.kill;
+		this.#output = child.output;
+		this.#frameInterrupts =
+			child.interrupt === "frame" || process.platform === "win32" || backend.interrupt === "frame";
 		this.#connection = this.#connect();
 		// Connection failures surface on the first request.
 		this.#connection.catch(() => undefined);
@@ -218,8 +302,9 @@ export class DisasmWorker {
 	}
 
 	/**
-	 * Spawn a detached worker for `loc` and connect to it; call {@link open} next. The caller
-	 * holds `lock` and has run `prepareStoreDir`; the worker releases the lock once it exits.
+	 * Spawn a worker for `loc` (by default detached, see {@link spawnDetachedWorker}) and connect to
+	 * it; call {@link open} next. The caller holds `lock` and has run `prepareStoreDir`; the worker
+	 * releases the lock once it exits.
 	 */
 	static async spawn(
 		backend: DisasmBackend,
@@ -227,19 +312,21 @@ export class DisasmWorker {
 		runtime: WorkerRuntime,
 		lock: FileLockHandle,
 		files: WorkerFiles,
+		options: WorkerSpawnOptions = {},
 	): Promise<DisasmWorker> {
 		const script = await stageRunnerScript(backend.workerStageDir, "py", backend.workerScript);
 		const token = crypto.randomUUID();
-		await fs.promises.mkdir(path.dirname(files.logPath), { recursive: true });
+		if (files.logPath !== undefined) await fs.promises.mkdir(path.dirname(files.logPath), { recursive: true });
 		// `ipcEndpoint` may fall back to `/tmp/omp-<euid>/` when the state dir is too long for `sun_path`.
 		await fs.promises.mkdir(path.dirname(files.endpoint), { recursive: true, mode: 0o700 });
 		await fs.promises.rm(files.endpoint, { force: true });
-		let pid: number;
-		let exited: Promise<number>;
-		const log = fs.openSync(files.logPath, "a");
+		let launch: WorkerLaunch;
 		let alias: TempDir | undefined;
 		try {
-			alias = backend.projectAlias ? await TempDir.create(`@omp-${backend.id}-project-`) : undefined;
+			const prefix = `omp-${backend.id}-project-`;
+			alias = backend.projectAlias
+				? await TempDir.create(options.aliasRoot ? path.join(options.aliasRoot, prefix) : `@${prefix}`)
+				: undefined;
 			if (alias) {
 				await fs.promises.symlink(
 					loc.dir,
@@ -248,36 +335,21 @@ export class DisasmWorker {
 				);
 			}
 			const listen = process.platform === "win32" ? "--port-file" : "--socket";
-			const proc = Bun.spawn([runtime.pythonPath, "-u", script, listen, files.endpoint], {
-				cwd: loc.dir,
+			launch = await (options.spawn ?? spawnDetachedWorker)({
+				backend,
+				loc,
+				runtime,
+				script,
+				args: [listen, files.endpoint],
+				endpoint: files.endpoint,
 				env: { ...runtime.env, [WORKER_TOKEN_ENV]: token },
-				stdin: "ignore",
-				stdout: log,
-				stderr: log,
-				// Own session: the worker outlives a daemon crash and is re-adopted; the module
-				// saves and closes it with a `close` request instead of a group signal.
-				detached: true,
-				windowsHide: shouldHideKernelWindow({
-					platform: process.platform,
-					hostHasInheritableConsole: hostHasInheritableConsole(),
-				}),
+				logPath: files.logPath,
 			});
-			pid = proc.pid;
-			exited = proc.exited;
 		} catch (error) {
 			await alias?.remove();
 			throw error;
-		} finally {
-			fs.closeSync(log);
 		}
-		const startedAt = Process.fromPid(pid)?.startTime() ?? null;
-		return new DisasmWorker(
-			backend,
-			loc,
-			lock,
-			{ pid, startedAt, exited },
-			{ ...files, token, aliasDir: alias?.path() },
-		);
+		return new DisasmWorker(backend, loc, lock, launch, { ...files, token, aliasDir: alias?.path() });
 	}
 
 	/**
@@ -589,8 +661,10 @@ export class DisasmWorker {
 			}
 			if (Date.now() > deadline) {
 				await this.kill();
+				const tail = this.#logPath === undefined ? await this.#outputTail() : "";
+				const hint = this.#logPath !== undefined ? `; see ${this.#logPath}` : tail ? `: ${tail}` : "";
 				throw new ToolError(
-					`${this.#backend.label} worker for ${this.id} did not accept a connection within ${CONNECT_TIMEOUT_MS / 1000}s; see ${this.#logPath}`,
+					`${this.#backend.label} worker for ${this.id} did not accept a connection within ${CONNECT_TIMEOUT_MS / 1000}s${hint}`,
 				);
 			}
 			await Bun.sleep(CONNECT_RETRY_MS);
@@ -661,8 +735,9 @@ export class DisasmWorker {
 			}
 
 			try {
-				if (process.platform === "win32" || this.#backend.interrupt === "frame") {
-					// Windows has no per-process SIGINT (kill terminates); the worker's reader thread handles this frame.
+				if (this.#frameInterrupts) {
+					// Windows has no per-process SIGINT (kill terminates), and a contained worker sits behind a
+					// sandbox wrapper; the worker's reader thread handles this frame.
 					await this.#writeFrame(JSON.stringify({ interrupt: id }));
 				} else {
 					process.kill(this.pid, "SIGINT");
@@ -730,7 +805,7 @@ export class DisasmWorker {
 		const drain = delay(STREAM_DRAIN_MS);
 		await Promise.race([this.#connectionClosed, drain.promise]);
 		drain.cancel();
-		this.#logTail = await logTail(this.#logPath);
+		this.#logTail = await this.#outputTail();
 		const error = this.#exitError();
 		for (const entry of this.#pending.values()) entry.reject(error);
 		this.#pending.clear();
@@ -746,27 +821,46 @@ export class DisasmWorker {
 		});
 	}
 
+	/** The last lines of the worker's output: its spawner's tail, else the end of the daemon's log file. */
+	async #outputTail(): Promise<string> {
+		let text = this.#output?.() ?? "";
+		if (!this.#output && this.#logPath !== undefined) {
+			try {
+				const file = Bun.file(this.#logPath);
+				text = await file.slice(Math.max(0, file.size - WORKER_OUTPUT_TAIL_BYTES)).text();
+			} catch {
+				// No log yet.
+			}
+		}
+		return text.trimEnd().split("\n").slice(-LOG_TAIL_LINES).join("\n");
+	}
+
 	#exitError(): ToolError {
 		const tail = this.#logTail;
 		const code = this.#exitCode === null ? "unknown code" : `code ${this.#exitCode}`;
 		return new ToolError(`${this.#backend.label} worker for ${this.id} exited (${code})${tail ? `: ${tail}` : ""}`);
 	}
 
-	/** SIGKILL the worker's session and wait for it to exit. */
+	/** SIGKILL the worker's session (or kill it the spawner's way) and wait for it to exit. */
 	async kill(): Promise<void> {
-		if (!this.#gone) {
-			try {
-				if (process.platform === "win32") process.kill(this.pid, "SIGKILL");
-				else process.kill(-this.pid, "SIGKILL");
-			} catch {
-				try {
-					process.kill(this.pid, "SIGKILL");
-				} catch {
-					// Already gone.
-				}
-			}
-		}
+		if (!this.#gone) killProcess(this.pid, this.#killChild);
 		await this.#exited;
+	}
+}
+
+/** SIGKILL `pid`'s session (or call `killChild`); a process already gone is ignored. */
+function killProcess(pid: number, killChild: (() => void) | undefined): void {
+	try {
+		if (killChild) killChild();
+		else if (process.platform === "win32") process.kill(pid, "SIGKILL");
+		else process.kill(-pid, "SIGKILL");
+	} catch {
+		if (killChild) return;
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Already gone.
+		}
 	}
 }
 

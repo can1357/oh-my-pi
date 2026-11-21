@@ -13,6 +13,13 @@ import { code, compact, keyed, md, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { plainText } from "../native/spans";
 import { resultText, runBox, runFoot, type RunFootInput, runInput, runOutput, type RunState } from "./native-view";
+import {
+	sandboxBadge,
+	sandboxFooterLines,
+	sandboxNoteLines,
+	sandboxNoteNodes,
+	type ToolSandboxMeta,
+} from "./sandbox-meta";
 import { renderAgentTreeRow } from "./agent-tree";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
@@ -140,6 +147,8 @@ export interface EvalToolDetails {
 		jobId: string;
 		type: "eval";
 	};
+	/** OS sandbox the cells ran in; absent when they ran uncontained. */
+	sandbox?: ToolSandboxMeta;
 }
 
 /** Default collapsed eval output preview height; kept as a named alias (consumed by chat/tool-execution). */
@@ -763,10 +772,13 @@ function evalToolHead(
 	cellCount: number,
 	details?: EvalToolDetails,
 ): NativeToolHead {
-	const badges: { text: string; title?: string }[] = [...new Set(languages)].map(language => ({ text: language }));
+	const badges: NonNullable<NativeToolHead["badges"]>[number][] = [...new Set(languages)].map(language => ({
+		text: language,
+	}));
 	if (details?.async?.state === "running") {
 		badges.push({ text: "background", title: `Backgrounded as job ${details.async.jobId}` });
 	}
+	if (details?.sandbox) badges.push(sandboxBadge(details.sandbox));
 	return {
 		title: (cellCount > 1 ? "" : plainText(title ?? "").trim()) || "Eval",
 		badges: badges.length > 0 ? badges : undefined,
@@ -1030,6 +1042,7 @@ export const evalToolRenderer = {
 			details?.async?.state === "running"
 				? uiTheme.fg("dim", wrapBrackets(`Backgrounded: ${details.async.jobId}`, uiTheme))
 				: undefined;
+		const sandboxLine = details?.sandbox ? uiTheme.fg("dim", wrapBrackets("sandboxed", uiTheme)) : undefined;
 
 		const cellResults = details?.cells;
 		if (cellResults && cellResults.length > 0) {
@@ -1151,6 +1164,8 @@ export const evalToolRenderer = {
 					if (warningLine) {
 						lines.push(warningLine);
 					}
+					if (sandboxLine) lines.push(sandboxLine);
+					lines.push(...sandboxNoteLines(details?.sandbox, uiTheme, width));
 					cached = { key, result: lines };
 					return lines;
 				},
@@ -1183,7 +1198,13 @@ export const evalToolRenderer = {
 		);
 
 		if (!output && statusLines.length === 0) {
-			const lines = [timeoutLine, noticeLine, asyncLine, warningLine].filter(Boolean) as string[];
+			const lines = [
+				timeoutLine,
+				noticeLine,
+				asyncLine,
+				warningLine,
+				...sandboxFooterLines(details?.sandbox, uiTheme),
+			].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
@@ -1195,6 +1216,7 @@ export const evalToolRenderer = {
 				noticeLine,
 				asyncLine,
 				warningLine,
+				...sandboxFooterLines(details?.sandbox, uiTheme),
 			].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
@@ -1211,6 +1233,7 @@ export const evalToolRenderer = {
 				noticeLine,
 				asyncLine,
 				warningLine,
+				...sandboxFooterLines(details?.sandbox, uiTheme),
 			].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
@@ -1268,6 +1291,7 @@ export const evalToolRenderer = {
 				if (warningLine) {
 					outputLines.push(truncateToWidth(warningLine, width));
 				}
+				outputLines.push(...sandboxFooterLines(details?.sandbox, uiTheme, width));
 				cachedWidth = width;
 				cachedPreviewLines = previewLines;
 				cachedRows = outputLines;
@@ -1345,7 +1369,7 @@ export const evalToolRenderer = {
 			});
 			return {
 				tool: evalToolHead(cellResults[0]!.title, languages, cellResults.length, details),
-				body: cells,
+				body: [...cells, ...sandboxNoteNodes(details?.sandbox)],
 				preview: "children",
 			};
 		}
@@ -1375,7 +1399,7 @@ export const evalToolRenderer = {
 				argCells.length,
 				details,
 			),
-			body: runs.map((run, i) => evalCellBox(run, i, runs.length)),
+			body: [...runs.map((run, i) => evalCellBox(run, i, runs.length)), ...sandboxNoteNodes(details?.sandbox)],
 			preview: "children",
 		};
 	},

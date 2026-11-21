@@ -40,6 +40,7 @@ import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
+import { sandboxCallDenial } from "./sandbox/gate";
 import {
 	approvalRestrictions,
 	resolveApproval,
@@ -419,14 +420,18 @@ function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
 }
 
 /**
- * Resolve the user's policy for a frame that mutates the filesystem directly.
+ * Resolve the user's policy and the sandbox gate for a frame that mutates the filesystem directly.
  *
  * The native `delete` and `read_mcp_resource` download frames both bypass the
  * registry, so no approval wrapper sits in front of them. `write` is the tier
- * a file creation or removal belongs to. Returns `null` when the call may
+ * a file creation or removal belongs to. Resolves `null` when the call may
  * proceed, or the refusal text to answer with.
  */
-function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string, pathArg: string): string | null {
+async function refuseByWritePolicy(
+	options: CursorExecBridgeOptions,
+	toolName: string,
+	pathArg: string,
+): Promise<string | null> {
 	const context = options.getToolContext?.();
 	const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
 	const approval = resolveApproval(
@@ -436,16 +441,25 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 		userPolicies,
 		getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
 	);
+	const cwd = options.getCwd?.() ?? options.cwd;
 	if (approval.policy === "allow") {
 		// The frame names its file only in `pathArg`, so the restriction check keys it here.
-		const cwd = options.getCwd?.() ?? options.cwd;
 		const target = approvalTargetKey(cwd, pathArg);
 		const restriction = restrictedFolderReason(
 			{ name: toolName, approvalCacheTargets: () => (target === undefined ? undefined : [target]) },
 			undefined,
 			approvalRestrictions(context?.settings, cwd),
 		);
-		if (restriction === undefined) return null;
+		if (restriction === undefined) {
+			const sandboxDenial = await sandboxCallDenial({
+				settings: context?.settings,
+				workspace: cwd,
+				name: toolName,
+				subjects: () => [{ kind: "write", target: resolveToCwd(pathArg, cwd) }],
+				requestTool: () => options.tools.has("sandbox_request"),
+			});
+			return sandboxDenial ?? null;
+		}
 	}
 	return approval.policy === "deny"
 		? `Tool "${toolName}" is blocked by user policy.`
@@ -464,7 +478,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	// `allowDirectFileMutation` answers "was a mutating tool granted", which is a
 	// different question from "does the user's policy allow this call" — without
 	// this, a configured `deny` or an `always-ask` session still lost the file.
-	const refusal = refuseByWritePolicy(options, toolName, pathArg);
+	const refusal = await refuseByWritePolicy(options, toolName, pathArg);
 	if (refusal) {
 		return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(refusal), true);
 	}
@@ -1020,7 +1034,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			if (!allowsDirectFileMutation(this.options)) {
 				throw new Error('Tool "write" not available: this session cannot download resources to disk.');
 			}
-			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);
+			const refusal = await refuseByWritePolicy(this.options, "write", downloadPath);
 			if (refusal) throw new Error(refusal);
 		}
 		const mcp = this.options.mcpResources;

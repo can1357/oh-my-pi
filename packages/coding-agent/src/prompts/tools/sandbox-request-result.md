@@ -1,0 +1,3 @@
+{{#when status "==" "granted"}}{{target}} is now {{access}} ({{#when scope "==" "always"}}always: saved to the global sandbox config{{else}}this session{{/when}}). Re-run the command or tool call.{{/when}}{{#when status "==" "already-allowed"}}{{target}} is already {{access}}; the sandbox did not cause the failure. Look for another cause.{{/when}}{{#when status "==" "denied"}}Denied by the user: {{target}}. Do not retry or work around it; continue with your alternative or tell the user what is blocked.{{/when}}{{#when status "==" "instructed"}}The user did not grant access to {{target}} and replied:
+{{instructions}}
+Follow these instructions.{{/when}}{{#when status "==" "refused"}}Request not sent to the user: {{reason}}{{/when}}

@@ -1,9 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDir, peekFile } from "@oh-my-pi/pi-utils";
+import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { DisasmBackend } from "./backend";
+import { containedFileAccess, copyReadableFile, peekReadableFile, withReadableFile } from "../sandbox/file-access";
 
 /** Number of leading bytes needed by {@link isExecutableHeader} (a full 64-byte DOS header for PE). */
 export const EXECUTABLE_SNIFF_BYTES = 64;
@@ -127,10 +128,7 @@ export function parseFatSlices(header: Uint8Array): MachOSlice[] | null {
 
 /** Slice table of a fat Mach-O on disk; null when the file is not one. */
 export async function readFatSlices(absPath: string): Promise<MachOSlice[] | null> {
-	const header = await Bun.file(absPath)
-		.slice(0, FAT_HEADER_SIZE + MAX_FAT_ARCHS * FAT_ARCH_64_SIZE)
-		.bytes();
-	return parseFatSlices(header);
+	return peekReadableFile(absPath, FAT_HEADER_SIZE + MAX_FAT_ARCHS * FAT_ARCH_64_SIZE, parseFatSlices);
 }
 
 /**
@@ -162,7 +160,7 @@ export function splitSliceRef(ref: string): { path: string; arch?: string } {
 /** Sniff the file header; false on any I/O error. */
 export async function isExecutableFile(absPath: string): Promise<boolean> {
 	try {
-		return await peekFile(absPath, EXECUTABLE_SNIFF_BYTES, isExecutableHeader);
+		return await peekReadableFile(absPath, EXECUTABLE_SNIFF_BYTES, isExecutableHeader);
 	} catch {
 		return false;
 	}
@@ -215,16 +213,19 @@ interface ContentHash {
 const contentHashes = new Map<string, ContentHash>();
 
 async function hashFileContent(absPath: string): Promise<string> {
-	const stat = await fs.promises.stat(absPath);
-	const cached = contentHashes.get(absPath);
-	if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.sha;
-	const hasher = new Bun.CryptoHasher("sha256");
-	for await (const chunk of Bun.file(absPath).stream()) {
-		hasher.update(chunk);
-	}
-	const sha = hasher.digest("hex");
-	contentHashes.set(absPath, { size: stat.size, mtimeMs: stat.mtimeMs, sha });
-	return sha;
+	// Opened first, so a sandbox refusal applies to a memoized digest too.
+	return withReadableFile(absPath, async handle => {
+		const stat = await handle.stat();
+		const cached = contentHashes.get(absPath);
+		if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.sha;
+		const hasher = new Bun.CryptoHasher("sha256");
+		for await (const chunk of handle.createReadStream({ autoClose: false })) {
+			hasher.update(chunk);
+		}
+		const sha = hasher.digest("hex");
+		contentHashes.set(absPath, { size: stat.size, mtimeMs: stat.mtimeMs, sha });
+		return sha;
+	});
 }
 
 /**
@@ -313,15 +314,20 @@ export async function prepareStoreDir(backend: DisasmBackend, loc: DatabaseLocat
 	const stagedName = path.basename(loc.stagedPath);
 	const staged = loc.stagedPath;
 	if (!(await Bun.file(staged).exists())) {
-		if (loc.fat) {
-			// Stage the selected thin Mach-O so every backend analyzes the requested slice.
-			const { arch, offset, size } = loc.fat.slice;
-			const source = Bun.file(loc.sourcePath);
-			if (offset + size > source.size) {
-				throw new ToolError(`${shortenPath(loc.sourcePath)}: ${arch} slice extends past end of file`);
+		if (containedFileAccess() || loc.fat) {
+			// Read through the handle the sandbox host verified (when contained). The fat case stages
+			// the selected thin Mach-O so every backend analyzes the requested slice.
+			const range = loc.fat ? { offset: loc.fat.slice.offset, size: loc.fat.slice.size } : undefined;
+			try {
+				await copyReadableFile(loc.sourcePath, staged, range);
+			} catch (error) {
+				if (loc.fat && error instanceof RangeError) {
+					throw new ToolError(
+						`${shortenPath(loc.sourcePath)}: ${loc.fat.slice.arch} slice extends past end of file`,
+					);
+				}
+				throw error;
 			}
-			// Materialize the bytes: `Bun.write` of a sliced BunFile copies the whole source file.
-			await Bun.write(staged, await source.slice(offset, offset + size).bytes());
 		} else {
 			await fs.promises.copyFile(loc.sourcePath, staged, fs.constants.COPYFILE_FICLONE);
 		}

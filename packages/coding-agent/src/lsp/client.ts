@@ -1,14 +1,34 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { glob } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	isEnoent,
+	logger,
+	postmortem,
+	ptree,
+	settleWithin,
+	stableStringifyJson,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import {
+	containedGlob,
+	outsideContainedFileAccess,
+	readFileText,
+	withContainedFileAccess,
+} from "../sandbox/file-access";
+import { spawnContainedCommand } from "../sandbox/command";
+import { Settings } from "../config/settings";
+import { sandboxCallDenial } from "../sandbox/gate";
+import { SandboxRuntime } from "../sandbox/runtime";
+import type { SandboxChild } from "../sandbox/types";
+import { StderrTail } from "../subprocess/worker-client";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
-import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
+import { applyWorkspaceEdit, type ExecutedWorkspaceChange, workspaceEditPaths } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { daemonClient } from "../daemon/client";
 import type { DaemonTunnel } from "../daemon/protocol";
@@ -85,8 +105,17 @@ interface PendingClient {
 	cwd: string;
 	config: ServerConfig;
 	token: symbol;
+	/** {@link clientContainment} of the client being started. */
+	containment: string;
 }
 const clientLocks = new Map<string, PendingClient>();
+/** Containment state of an uncontained server (sandbox off, or `fallback: warn` without a backend). */
+const UNCONTAINED = "uncontained";
+/**
+ * The containment each client's server was started under: its sandbox runtime's fingerprint, or
+ * {@link UNCONTAINED}. A client whose state differs from the current one is never reused.
+ */
+const clientContainment = new WeakMap<LspClient, string>();
 const invalidatedClientKeys = new Set<string>();
 const clientReloadBarriers = new Map<string, Promise<unknown>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
@@ -1026,7 +1055,10 @@ async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequ
 	}
 
 	try {
-		await applyWorkspaceEditWithLsp(params.edit, client.cwd);
+		// The server sends this outside any tool call: its file work still runs in the contained
+		// host under the OS sandbox. A call already contained (the lsp tool's own) keeps its host.
+		const { edit } = params;
+		await withContainedFileAccess({ cwd: client.cwd }, () => applyWorkspaceEditWithLsp(edit, client.cwd));
 		await sendResponse(client, message.id, { applied: true }, "workspace/applyEdit");
 	} catch (err) {
 		await sendResponse(client, message.id, { applied: false, failureReason: String(err) }, "workspace/applyEdit");
@@ -1104,6 +1136,27 @@ async function reconcileExecutedChanges(
 }
 
 /**
+ * Refuse, before anything is written, a set of paths a server's edit would write when the sandbox's
+ * write policy refuses any of them (outside the writable roots, or protected). A no-op when the
+ * sandbox is off. `requestTool` says whether the session has `sandbox_request`, asked only for a
+ * refusal; callers without a session leave the default, so the refusal tells the user.
+ */
+export async function assertSandboxWritable(
+	cwd: string,
+	paths: readonly string[],
+	requestTool: () => boolean = () => false,
+): Promise<void> {
+	const denial = await sandboxCallDenial({
+		settings: await Settings.init(),
+		workspace: cwd,
+		name: "lsp",
+		subjects: () => paths.map(target => ({ kind: "write" as const, target })),
+		requestTool,
+	});
+	if (denial !== undefined) throw new ToolError(denial);
+}
+
+/**
  * Apply a server-provided workspace edit and reconcile every affected open LSP document.
  * Runtime callers use this wrapper so later semantic requests observe the committed files.
  * Reconciliation is derived from the ops that actually ran — an op skipped via
@@ -1115,7 +1168,10 @@ export async function applyWorkspaceEditWithLsp(
 	edit: WorkspaceEdit,
 	cwd: string,
 	signal?: AbortSignal,
+	requestTool: () => boolean = () => false,
 ): Promise<string[]> {
+	// The server picks the files: hold them to the sandbox's write policy before anything changes.
+	await assertSandboxWritable(cwd, workspaceEditPaths(edit), requestTool);
 	const executed: ExecutedWorkspaceChange[] = [];
 	let applied: string[];
 	try {
@@ -1332,7 +1388,13 @@ function commandBasename(command: string): string {
  * can tell whether the crate set changed since initialize (gitignored dirs such as `target/` skipped).
  */
 export async function listCargoManifests(root: string, signal?: AbortSignal): Promise<string> {
-	const { matches } = await glob({ pattern: "**/Cargo.toml", path: root, gitignore: true, cache: false, signal });
+	const { matches } = await containedGlob({
+		pattern: "**/Cargo.toml",
+		path: root,
+		gitignore: true,
+		cache: false,
+		signal,
+	});
 	return matches
 		.map(match => match.path)
 		.sort()
@@ -1556,6 +1618,101 @@ export function clearInitializationFailure(config: ServerConfig, cwd: string): v
 }
 
 /**
+ * The containment `cwd`'s servers must run under now ({@link clientContainment}) and the runtime that
+ * contains them. Throws `SandboxUnavailableError` under `fallback: block` without a backend.
+ */
+async function lspContainment(cwd: string): Promise<{ sandbox: SandboxRuntime | undefined; containment: string }> {
+	const sandbox = await SandboxRuntime.forScope(cwd, "lsp");
+	return { sandbox, containment: sandbox ? sandbox.fingerprint() : UNCONTAINED };
+}
+
+/**
+ * In-flight shutdowns of servers found running under another containment than the current one, by
+ * client key. No server for that key starts until it settles.
+ */
+const staleClientShutdowns = new Map<string, Promise<boolean>>();
+
+/** Shuts `client` (running under a stale containment) down once, however many callers find it. */
+function shutdownStaleClient(key: string, client: LspClient): Promise<boolean> {
+	const inFlight = staleClientShutdowns.get(key);
+	if (inFlight) return inFlight;
+	const shutdown: Promise<boolean> = shutdownClientInstance(client).finally(() => {
+		if (staleClientShutdowns.get(key) === shutdown) staleClientShutdowns.delete(key);
+	});
+	staleClientShutdowns.set(key, shutdown);
+	return shutdown;
+}
+
+/**
+ * Waits for a stale server's shutdown. One that outlived it stays registered (and reachable for
+ * {@link shutdownAll}), so no replacement may start beside it: throws instead.
+ */
+async function awaitStaleShutdown(shutdown: Promise<boolean>, config: ServerConfig): Promise<void> {
+	if (!(await shutdown)) {
+		throw new Error(
+			`LSP server ${config.command} outlived its shutdown; it cannot be restarted under the current sandbox policy`,
+		);
+	}
+}
+
+/** Bytes of a contained server's stderr kept for exit messages, like `ptree`'s `peekStderr` tail. */
+const CONTAINED_STDERR_TAIL = 32 * 1024;
+
+/**
+ * Starts `command` contained by `sandbox`: the configured network mode, the environment without
+ * omp's own `.env` credentials, and read access to the command's directory (and its symlink
+ * target's), as contained MCP servers get.
+ */
+async function spawnContainedServer(
+	sandbox: SandboxRuntime,
+	command: string,
+	args: readonly string[],
+	cwd: string,
+): Promise<LspTransport> {
+	return containedTransport(
+		await spawnContainedCommand(sandbox, { argv: [command, ...args], cwd, what: "LSP server command" }),
+	);
+}
+
+/** {@link LspTransport} over a contained child, keeping its stderr tail for {@link LspTransport.peekStderr}. */
+function containedTransport(child: SandboxChild): LspTransport {
+	const stderrTail = new StderrTail(CONTAINED_STDERR_TAIL);
+	const stderrDone = (async () => {
+		try {
+			for await (const chunk of child.stderr) stderrTail.append(chunk);
+		} catch {}
+	})();
+	return {
+		stdin: {
+			write(data) {
+				child.stdin.write(data);
+				return typeof data === "string" ? Buffer.byteLength(data, "utf-8") : data.byteLength;
+			},
+			flush() {
+				child.stdin.flush();
+			},
+		},
+		stdout: child.stdout,
+		// A failed server's last words reach the exit message; a descendant holding stderr open
+		// must not delay the exit past a short grace.
+		exited: child.exited.then(async code => {
+			if (code !== 0) await settleWithin(stderrDone, READER_EXIT_GRACE_MS);
+			return code;
+		}),
+		get exitCode() {
+			return child.exitCode;
+		},
+		pid: child.pid,
+		kill() {
+			child.kill();
+		},
+		peekStderr() {
+			return stderrTail.text();
+		},
+	};
+}
+
+/**
  * Get or create an LSP client for the given server configuration and working directory.
  * @param config - Server configuration
  * @param cwd - Working directory
@@ -1572,43 +1729,58 @@ export async function getOrCreateClient(
 	signal?: AbortSignal,
 ): Promise<LspClient> {
 	const key = clientKey(config, cwd);
-	// Check if client already exists
-	const existingClient = clients.get(key);
-	if (existingClient && !invalidatedClientKeys.has(key)) {
-		existingClient.lastActivity = Date.now();
-		maybeStartIdleChecker(existingClient);
-		return existingClient;
-	}
+	let sandbox: SandboxRuntime | undefined;
+	let containment: string;
+	let reloadAwaited = false;
+	for (;;) {
+		// The containment a server for this call must run under, re-read after every wait so the
+		// checks below and the start use the current policy. `fallback: block` without a backend
+		// throws here: nothing is reused or started. Everything after it up to the start, or the next
+		// wait, runs synchronously.
+		({ sandbox, containment } = await lspContainment(cwd));
 
-	// Check if another coroutine is already creating this client
-	const existingLock = clientLocks.get(key);
-	if (existingLock) {
-		return existingLock.promise;
-	}
-	if (invalidatedClientKeys.has(key)) {
-		throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
-	}
+		// A server started under another containment is still stopping: never start beside it.
+		const stopping = staleClientShutdowns.get(key);
+		if (stopping) {
+			await awaitStaleShutdown(stopping, config);
+			continue;
+		}
 
-	// Do not start a fresh identity until superseded processes are confirmed stopped.
-	const reloadBarrier = clientReloadBarriers.get(path.resolve(cwd));
-	if (reloadBarrier) {
+		// Check if client already exists
+		const existingClient = clients.get(key);
+		if (existingClient && !invalidatedClientKeys.has(key)) {
+			if (clientContainment.get(existingClient) === containment) {
+				existingClient.lastActivity = Date.now();
+				maybeStartIdleChecker(existingClient);
+				return existingClient;
+			}
+			// Started before the sandbox applied, or under another policy: never reuse it.
+			await awaitStaleShutdown(shutdownStaleClient(key, existingClient), config);
+			continue;
+		}
+
+		// Check if another coroutine is already creating this client
+		const existingLock = clientLocks.get(key);
+		if (existingLock) {
+			if (existingLock.containment === containment) return existingLock.promise;
+			// Let the other start settle, then replace what it started.
+			await existingLock.promise.catch(() => {});
+			continue;
+		}
+		if (invalidatedClientKeys.has(key)) {
+			throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
+		}
+
+		// Do not start a fresh identity until superseded processes are confirmed stopped.
+		const reloadBarrier = reloadAwaited ? undefined : clientReloadBarriers.get(path.resolve(cwd));
+		if (!reloadBarrier) break;
 		try {
 			await untilAborted(signal, reloadBarrier);
 		} catch (error) {
 			throwIfAborted(signal);
 			throw error;
 		}
-		const clientAfterReload = clients.get(key);
-		if (clientAfterReload && !invalidatedClientKeys.has(key)) {
-			clientAfterReload.lastActivity = Date.now();
-			maybeStartIdleChecker(clientAfterReload);
-			return clientAfterReload;
-		}
-		const lockAfterReload = clientLocks.get(key);
-		if (lockAfterReload) return lockAfterReload.promise;
-		if (invalidatedClientKeys.has(key)) {
-			throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
-		}
+		reloadAwaited = true;
 	}
 
 	// Fail fast on a recent deterministic init failure instead of re-spawning
@@ -1634,23 +1806,29 @@ export async function getOrCreateClient(
 			? { clangdFileStatus: true, ...config.initOptions }
 			: (config.initOptions ?? {});
 
-		// Wrap with lspmux if available and supported
-		const { command, args, env } = isLspmuxSupported(baseCommand)
-			? await getLspmuxCommand(baseCommand, baseArgs)
-			: { command: baseCommand, args: baseArgs };
-
-		// Prefer the daemon-shared server unless an external lspmux wrapper is
-		// already multiplexing this command. Any shared-path failure falls back
-		// to a private spawn so LSP never regresses on daemon trouble.
+		// Under an applying sandbox every server runs contained, bypassing the shared daemon and
+		// the external lspmux wrapper (both would start it uncontained).
 		let proc: LspTransport | null = null;
-		if (isSharedLspEnabled() && command === baseCommand) {
-			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
+		if (sandbox) {
+			proc = await spawnContainedServer(sandbox, baseCommand, baseArgs, cwd);
+		} else {
+			// Wrap with lspmux if available and supported
+			const { command, args, env } = isLspmuxSupported(baseCommand)
+				? await getLspmuxCommand(baseCommand, baseArgs)
+				: { command: baseCommand, args: baseArgs };
+
+			// Prefer the daemon-shared server unless an external lspmux wrapper is
+			// already multiplexing this command. Any shared-path failure falls back
+			// to a private spawn so LSP never regresses on daemon trouble.
+			if (isSharedLspEnabled() && command === baseCommand) {
+				proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
+			}
+			proc ??= ptree.spawn([command, ...args], {
+				cwd,
+				stdin: "pipe",
+				env: env ? { ...Bun.env, ...env } : undefined,
+			});
 		}
-		proc ??= ptree.spawn([command, ...args], {
-			cwd,
-			stdin: "pipe",
-			env: env ? { ...Bun.env, ...env } : undefined,
-		});
 
 		const projectLoad = createProjectLoad();
 		const client: LspClient = {
@@ -1675,6 +1853,7 @@ export async function getOrCreateClient(
 			...projectLoad.signal,
 		};
 		projectLoadExtenders.set(client, projectLoad.extend);
+		clientContainment.set(client, containment);
 
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
@@ -1707,7 +1886,8 @@ export async function getOrCreateClient(
 
 		// Start background message reader. The client is shared by every session
 		// in the process, so its reader's records name none of them.
-		logger.withoutContext(() => startMessageReader(client));
+		// The pump outlives the call that started the client: it must not inherit that call's contained host.
+		logger.withoutContext(() => outsideContainedFileAccess(() => startMessageReader(client)));
 
 		try {
 			// Send initialize request
@@ -1773,25 +1953,41 @@ export async function getOrCreateClient(
 		}
 	})();
 
-	clientLocks.set(key, { promise: clientPromise, cwd, config, token: lockToken });
+	clientLocks.set(key, { promise: clientPromise, cwd, config, token: lockToken, containment });
+	// A start that failed before its process ran (a refused contained spawn, a throwing lspmux or
+	// spawn) must not leave its rejected lock behind for every later call.
+	clientPromise.catch(() => {
+		if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
+	});
 	return clientPromise;
 }
 
-/** Return an active or already-starting client without starting a language server. */
+/**
+ * Return an active or already-starting client without starting a language server. A client
+ * started under another containment than the current one is never returned: a running one is shut
+ * down, and while that shutdown is in flight there is no client.
+ */
 export async function getActiveOrPendingClient(
 	config: ServerConfig,
 	cwd: string,
 	signal?: AbortSignal,
 ): Promise<LspClient | undefined> {
 	throwIfAborted(signal);
-	const client = clients.get(clientKey(config, cwd));
+	const key = clientKey(config, cwd);
+	const { containment } = await lspContainment(cwd);
+	if (staleClientShutdowns.has(key)) return undefined;
+	const client = clients.get(key);
 	if (client) {
+		if (clientContainment.get(client) !== containment) {
+			await shutdownStaleClient(key, client);
+			return undefined;
+		}
 		client.lastActivity = Date.now();
 		return client;
 	}
 
-	const pending = clientLocks.get(clientKey(config, cwd));
-	if (!pending) return undefined;
+	const pending = clientLocks.get(key);
+	if (!pending || pending.containment !== containment) return undefined;
 	try {
 		return await untilAborted(signal, pending.promise);
 	} catch {
@@ -2240,7 +2436,7 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 	info.lastUsedAt = Date.now();
 
 	throwIfAborted(signal);
-	const text = saveIncludesText(client) ? await Bun.file(filePath).text() : undefined;
+	const text = saveIncludesText(client) ? await readFileText(filePath) : undefined;
 	throwIfAborted(signal);
 	await sendNotification(
 		client,

@@ -97,6 +97,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"GitHub",
 		"Output Limits",
 		"Execution",
+		"Sandbox",
 		"Discovery & MCP",
 		"Extensions",
 		"Developer",
@@ -110,6 +111,8 @@ export type SubmenuOption<V extends string = string> = {
 	value: V;
 	label: string;
 	description?: string;
+	/** Shown but not selectable; `description` should say why. */
+	disabled?: boolean;
 };
 
 export interface UiBase {

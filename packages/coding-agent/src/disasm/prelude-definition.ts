@@ -5,6 +5,7 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { HostEvalPreludeDefinition } from "../eval/preludes";
 import dsmDocumentation from "../prompts/tools/dsm.md" with { type: "text" };
 import dsmGuidance from "../prompts/tools/dsm-guidance.md" with { type: "text" };
+import { withContainedFileAccess } from "../sandbox/file-access";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { parseBinaryView } from "../tools/read-binary";
@@ -12,7 +13,14 @@ import { cfgToolsMaxTimeout } from "../tools/settings";
 import { clampTimeout } from "../tools/tool-timeouts";
 import { cfgDisasmBackend } from "./active";
 import { DISASM_BACKEND_IDS, DISASM_BACKENDS, type DisasmBackendId, databaseOwner } from "./backend";
-import { acquireDatabase, type DisasmDatabase, findDatabaseHandle, findOpenDatabase, listDatabases } from "./client";
+import {
+	acquireDatabase,
+	type DisasmDatabase,
+	findDatabaseHandle,
+	findOpenDatabase,
+	listDatabases,
+	reachesDatabase,
+} from "./client";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
 import dsmJavascript from "./prelude.js" with { type: "text" };
 import dsmPython from "./prelude.py" with { type: "text" };
@@ -169,9 +177,10 @@ export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinitio
 			return { ...describe(db, backend), lease: reference.lease, handle: reference.handle };
 		};
 		const openDatabases = async () => {
-			const databases = new Map((await listDatabases(backend)).map(db => [db.handle, db]));
+			const databases = new Map((await listDatabases(session, backend)).map(db => [db.handle, db]));
 			for (const entry of owner.references.values()) {
 				if (entry.backend !== backend || !entry.db.connected || databases.has(entry.db.handle)) continue;
+				if (!(await reachesDatabase(session, entry.db))) continue;
 				await entry.db.refresh();
 				if (entry.db.status.state === "open") databases.set(entry.db.handle, entry.db);
 			}
@@ -198,8 +207,8 @@ export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinitio
 						entry.db.connected &&
 						(entry.db.id === ref || entry.db.name === ref || entry.db.ref === ref),
 				);
-				if (owned) return remember(owned.db);
-				let db = await findOpenDatabase(backend, ref);
+				if (owned && (await reachesDatabase(session, owned.db))) return remember(owned.db);
+				let db = await findOpenDatabase(session, backend, ref);
 				active(backend);
 				if (!db) {
 					const { path, arch } = splitSliceRef(ref);
@@ -209,7 +218,7 @@ export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinitio
 					if (!stat?.isFile()) throw notOpen();
 					const loc = await locateDatabase(DISASM_BACKENDS[backend], absolutePath, { arch });
 					active(backend);
-					db = await findOpenDatabase(backend, loc.id);
+					db = await findOpenDatabase(session, backend, loc.id);
 				}
 				if (!db) throw notOpen();
 				return remember(db);
@@ -218,7 +227,7 @@ export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinitio
 				const portable = parseDatabaseHandle(params.path);
 				if (portable) {
 					active(portable.backend);
-					return remember(await findDatabaseHandle(portable), params.path);
+					return remember(await findDatabaseHandle(session, portable), params.path);
 				}
 				const { path, arch } = splitSliceRef(params.path);
 				const absolutePath = resolveToCwd(path, session.cwd);
@@ -239,6 +248,17 @@ export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinitio
 		active(params.backend);
 		const entry = owner.references.get(params.lease);
 		if (!entry || entry.backend !== backend || !entry.db.connected) throw notOpen();
+		if (!(await reachesDatabase(session, entry.db))) {
+			// Opened before the session's sandbox applied (or while it did): its worker runs where the
+			// session no longer reaches, as kernels and language servers are retired on such a change.
+			owner.references.delete(params.lease);
+			await entry.db.release(entry.reference.lease, { save: true }).catch(error => {
+				logger.warn("dsm reference release failed", { id: entry.db.id, error: String(error) });
+			});
+			throw new ToolError(
+				"The sandbox changed since this database was opened; reopen with dsm.open(path or handle).",
+			);
+		}
 		await entry.db.refresh();
 		active(params.backend);
 		if (
@@ -293,7 +313,8 @@ export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinitio
 		invoke: async (parameters, context) => {
 			const parsed = paramsSchema(parameters);
 			if (parsed instanceof type.errors) throw new ToolError(`dsm received invalid arguments: ${parsed.summary}`);
-			const pending = invoke(parsed, context.signal);
+			// Contained, locating and staging a binary read it through the sandbox host, like the file tools.
+			const pending = withContainedFileAccess(session, () => invoke(parsed, context.signal));
 			owner.pending.add(pending);
 			void pending.then(
 				() => {

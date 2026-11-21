@@ -408,6 +408,12 @@ export function sanitizeDisplayLines(text: string): string[] {
 	});
 }
 
+/** `rows` cut to `maxRows`: the last kept row takes a trailing ellipsis (clipped to `width`) when more remained. */
+export function capRows(rows: string[], width: number, maxRows: number): string[] {
+	if (rows.length <= maxRows) return rows;
+	return [...rows.slice(0, maxRows - 1), truncateToWidth(`${rows[maxRows - 1]}…`, width)];
+}
+
 /** Render a sanitized error message with its status icon. */
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {
 	return `${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${sanitizeErrorText(message)}`)}`;

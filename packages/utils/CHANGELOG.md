@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Operator-only names (`PI_CONFIG_FILES`, the agent/config directories, the profile, `XDG_DATA_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME`, the natives dir; `PI_`/`OMP_` forms) from a project directory's dotenv files are dropped before any directory or profile is resolved ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
+### Added
+
+- Added `stripOmpDotenvEnv` (drops variables from omp's own `.env` files), `readLines`' `maxLineBytes` option (`LineTooLongError`) and `handleByteSource` in `@oh-my-pi/pi-utils/ar` (archive byte source over an open file handle) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

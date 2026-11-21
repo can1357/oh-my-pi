@@ -8,6 +8,10 @@
  * reference closes the database (saving when any owner asked to); the core's idle policy and
  * `maxOpen` cap close unreferenced ones. Workers survive daemon re-execs and crashes and are
  * re-adopted in {@link disasmModule.restore}.
+ *
+ * While the OS sandbox is active the same unit runs inside the omp process instead
+ * ({@link openLocalDisasmUnit}), its worker spawned contained: the daemon has no access to the
+ * session's sandbox runtime.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -28,8 +32,8 @@ import {
 	parseDisasmUnitState,
 	parseHostRequest,
 } from "../../disasm/protocol";
-import { databaseRef, prepareStoreDir } from "../../disasm/store";
-import { DisasmWorker, type WorkerFiles } from "../../disasm/supervisor";
+import { type DatabaseLocation, databaseRef, prepareStoreDir } from "../../disasm/store";
+import { DisasmWorker, type WorkerFiles, type WorkerSpawnOptions } from "../../disasm/supervisor";
 import type { DaemonModule, ModuleContext, ModuleTunnel, ModuleUnit } from "../module";
 import { unitLogDir } from "../paths";
 import type { UnitPolicy } from "../protocol";
@@ -78,13 +82,13 @@ interface TunnelSession {
 }
 
 /** One open database: lock, worker, references. */
-class DisasmUnit implements ModuleUnit {
+export class DisasmUnit implements ModuleUnit {
 	readonly label: string;
 	/** Tunnels are accepted at once; requests wait for the open themselves. */
 	readonly ready = Promise.resolve();
 	readonly exited: Promise<{ exitCode?: number; reason?: string }>;
 	readonly #exit = Promise.withResolvers<{ exitCode?: number; reason?: string }>();
-	readonly #context: ModuleContext;
+	readonly #context: Pick<ModuleContext, "changed">;
 	readonly #unitId: string;
 	readonly #params: DisasmUnitParams;
 	readonly #backend: DisasmBackend;
@@ -103,12 +107,13 @@ class DisasmUnit implements ModuleUnit {
 	#stopping: Promise<void> | undefined;
 
 	constructor(
-		context: ModuleContext,
+		context: Pick<ModuleContext, "changed">,
 		unitId: string,
 		params: DisasmUnitParams,
 		instance: string,
 		startedAt: number,
 		start: (unit: DisasmUnit) => Promise<DisasmWorker>,
+		openFailedLingerMs = OPEN_FAILED_LINGER_MS,
 	) {
 		this.#context = context;
 		this.#unitId = unitId;
@@ -129,7 +134,7 @@ class DisasmUnit implements ModuleUnit {
 				const reason = errorMessage(error);
 				logger.warn(`${this.#backend.label} open failed`, { id: params.loc.id, error: reason });
 				this.#context.changed(this.#unitId);
-				await Bun.sleep(OPEN_FAILED_LINGER_MS);
+				if (openFailedLingerMs > 0) await Bun.sleep(openFailedLingerMs);
 				await this.#finish(1, reason);
 			},
 		);
@@ -149,6 +154,16 @@ class DisasmUnit implements ModuleUnit {
 	/** `stop` was called; a start still in progress must not spawn or keep a worker. */
 	get stopRequested(): boolean {
 		return this.#stopping !== undefined;
+	}
+
+	/** Stopping or closing: takes no new work; a fresh unit replaces it once it exited. */
+	get ending(): boolean {
+		return this.#stopping !== undefined || this.#closing !== undefined;
+	}
+
+	/** Settles once the database opened; rejects with the open failure. */
+	async opened(): Promise<void> {
+		await this.#opening;
 	}
 
 	/** Opening, running requests, or retained: never idle-closed or evicted. */
@@ -181,6 +196,11 @@ class DisasmUnit implements ModuleUnit {
 	stop(reason: string): Promise<void> {
 		this.#stopping ??= this.#stop(reason);
 		return this.#stopping;
+	}
+
+	/** Kill the worker without saving, for a stop that must not wait for its save. */
+	async kill(): Promise<void> {
+		await this.#worker?.kill();
 	}
 
 	async #stop(reason: string): Promise<void> {
@@ -390,16 +410,29 @@ class DisasmUnit implements ModuleUnit {
 	}
 }
 
+/** How a unit's worker is placed and started; the daemon passes only {@link WorkerSetup.files}. */
+export interface WorkerSetup {
+	/** Where the worker listens and logs. */
+	files(): Promise<WorkerFiles>;
+	/** Spawner and project-alias root; defaults to a detached child. */
+	spawn?: WorkerSpawnOptions;
+	/** Settle `loc` before the worker opens it; defaults to `prepareStoreDir`. */
+	prepare?: (backend: DisasmBackend, loc: DatabaseLocation) => Promise<void>;
+	/** Refusal of taking an in-place database's lock, or undefined when allowed; omitted = not checked. */
+	lockDenial?: (dir: string) => Promise<string | undefined>;
+}
+
 /** Lock, prepare, spawn, and open a new database. */
-async function startWorker(
-	context: ModuleContext,
-	unitId: string,
-	params: DisasmUnitParams,
-	unit: DisasmUnit,
-): Promise<DisasmWorker> {
+async function startWorker(params: DisasmUnitParams, unit: DisasmUnit, setup: WorkerSetup): Promise<DisasmWorker> {
 	const { backend, loc, runtime } = params;
 	const label = DISASM_BACKENDS[backend].label;
 	if (loc.kind === "store") await fs.mkdir(loc.dir, { recursive: true });
+	else {
+		// Refused before the lock file exists. The directory is what must be writable: IDA unpacks
+		// `<stem>.id0…` next to the database, and the lock sits there too.
+		const denial = await setup.lockDenial?.(loc.dir);
+		if (denial !== undefined) throw new ToolError(denial);
+	}
 	const lock: FileLockHandle = await acquireFileLock(loc.lockTarget, { retries: 1 }).catch(() => {
 		throw new ToolError(`${label} database ${loc.id} is in use by another process`);
 	});
@@ -407,15 +440,9 @@ async function startWorker(
 	let worker: DisasmWorker;
 	try {
 		if (unit.stopRequested) throw stopped();
-		await prepareStoreDir(DISASM_BACKENDS[backend], loc);
+		await (setup.prepare ?? prepareStoreDir)(DISASM_BACKENDS[backend], loc);
 		if (unit.stopRequested) throw stopped();
-		worker = await DisasmWorker.spawn(
-			DISASM_BACKENDS[backend],
-			loc,
-			runtime,
-			lock,
-			await workerFiles(context, unitId),
-		);
+		worker = await DisasmWorker.spawn(DISASM_BACKENDS[backend], loc, runtime, lock, await setup.files(), setup.spawn);
 	} catch (error) {
 		lock.release();
 		throw error;
@@ -428,6 +455,29 @@ async function startWorker(
 	unit.adoptWorker(worker);
 	await worker.open(loc);
 	return worker;
+}
+
+/**
+ * An in-process unit for a sandbox-contained database (`disasm/client.ts`): its worker is started
+ * through `setup` (contained), it reports to no board, only its activity to `changed` (as the
+ * daemon's units do, for idle close and eviction), and an open that failed (typically a refused
+ * access) ends at once, so a retry after the user granted it starts afresh.
+ */
+export function openLocalDisasmUnit(
+	unitId: string,
+	params: DisasmUnitParams,
+	setup: WorkerSetup,
+	changed: () => void,
+): DisasmUnit {
+	return new DisasmUnit(
+		{ changed },
+		unitId,
+		params,
+		crypto.randomUUID(),
+		Date.now(),
+		unit => startWorker(params, unit, setup),
+		0,
+	);
 }
 
 export const disasmModule: DaemonModule = {
@@ -459,7 +509,7 @@ export const disasmModule: DaemonModule = {
 	open(context, request) {
 		const params = parseDisasmUnitParams(request.params);
 		return new DisasmUnit(context, request.unitId, params, crypto.randomUUID(), Date.now(), unit =>
-			startWorker(context, request.unitId, params, unit),
+			startWorker(params, unit, { files: () => workerFiles(context, request.unitId) }),
 		);
 	},
 

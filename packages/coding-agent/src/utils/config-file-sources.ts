@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getConfigDirPaths } from "../config";
+import { currentSandboxCreated, sandboxCreatedSkip } from "../sandbox/ledger";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
 
 /** Turns raw file content (from `filePath`) into a config, or `null` to skip the file. */
@@ -34,9 +35,10 @@ export interface ConfigFileSourcesOptions<T> {
 
 /**
  * Config sources for base name `base` — `"lsp"` covers `lsp.json`/`.lsp.json`/`lsp.yaml`/`.lsp.yaml`/
- * `lsp.yml`/`.lsp.yml` — in priority order: cwd files, project config dirs, user config dirs,
- * plugin roots (plus {@link ConfigFileSourcesOptions.pluginRootSource} per root), then home-directory
- * files. Lowest priority comes last, so callers merge over a reversed list.
+ * `lsp.yml`/`.lsp.yml` — in priority order: cwd files and project config dirs (minus those a sandboxed
+ * command created or replaced, skipped until trusted), user config dirs, plugin roots (plus
+ * {@link ConfigFileSourcesOptions.pluginRootSource} per root), then home-directory files. Lowest
+ * priority comes last, so callers merge over a reversed list.
  */
 export function configFileSources<T>(
 	base: string,
@@ -46,15 +48,18 @@ export function configFileSources<T>(
 ): ConfigFileSource<T>[] {
 	const filenames = [`${base}.json`, `.${base}.json`, `${base}.yaml`, `.${base}.yaml`, `${base}.yml`, `.${base}.yml`];
 	const sources: ConfigFileSource<T>[] = [];
-	const addDir = (dir: string): void => {
+	const addDir = (dir: string, skip?: (file: string) => boolean): void => {
 		for (const filename of filenames) {
-			sources.push({ read: () => readConfigFile(path.join(dir, filename), adapt) });
+			const file = path.join(dir, filename);
+			if (!skip?.(file)) sources.push({ read: () => readConfigFile(file, adapt) });
 		}
 	};
 
-	addDir(cwd);
+	const ledger = currentSandboxCreated();
+	const created = (file: string): boolean => sandboxCreatedSkip(file, cwd, ledger) !== undefined;
+	addDir(cwd, created);
 
-	for (const dir of getConfigDirPaths("", { user: false, project: true, cwd })) addDir(dir);
+	for (const dir of getConfigDirPaths("", { user: false, project: true, cwd })) addDir(dir, created);
 
 	for (const dir of getConfigDirPaths("", { user: true, project: false })) addDir(dir);
 

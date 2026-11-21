@@ -24,6 +24,7 @@ import type {
 } from "./types";
 
 import { cfgDisabledExtensions } from "../extensibility/settings";
+import { currentSandboxCreated, sandboxCreatedSkip } from "../sandbox/ledger";
 import { cfgDisabledProviders, cfgEnabledProviders } from "../config/model-settings";
 
 // =============================================================================
@@ -206,6 +207,8 @@ async function loadImpl<T>(
 	const disabledExtensionIds = new Set<string>(
 		options.disabledExtensions ?? (settings ? cfgDisabledExtensions.get(settings) : undefined) ?? [],
 	);
+	// Read once per load, after a contained command's new protected paths are ledgered.
+	const ledger = currentSandboxCreated();
 
 	const results = await Promise.all(
 		providers.map(async provider => {
@@ -242,6 +245,16 @@ async function loadImpl<T>(
 			const itemWithSource = item as T & { _source: SourceMeta };
 			if (!itemWithSource._source) {
 				allWarnings.push(`[${provider.displayName}] Item missing _source metadata, skipping`);
+				continue;
+			}
+
+			// Project config a sandboxed command created or replaced is never loaded until trusted.
+			const skipped =
+				itemWithSource._source.level === "project"
+					? sandboxCreatedSkip(itemWithSource._source.path, ctx.cwd, ledger)
+					: undefined;
+			if (skipped) {
+				allWarnings.push(`[${provider.displayName}] ${skipped}`);
 				continue;
 			}
 

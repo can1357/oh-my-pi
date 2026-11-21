@@ -97,9 +97,12 @@ class DaemonMcpAccess implements McpHostAccess {
 
 /**
  * The host this process's MCP links attach to right now. Never fails: any
- * problem reaching a daemon that serves MCP means the in-process host.
+ * problem reaching a daemon that serves MCP means the in-process host. A
+ * server that opted into the OS sandbox always runs in-process: the daemon
+ * holds no session's sandbox runtime, so it could only start it uncontained.
  */
-export async function mcpHostAccess(): Promise<McpHostAccess> {
+export async function mcpHostAccess(spec: McpServerSpec): Promise<McpHostAccess> {
+	if (spec.transport === "stdio" && spec.sandboxNetwork !== undefined) return localMcpHost();
 	if (sharedMcpHolds.at(-1)?.enabled) {
 		try {
 			const daemon = await daemonClient();

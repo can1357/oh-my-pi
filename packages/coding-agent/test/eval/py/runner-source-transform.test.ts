@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { $which } from "@oh-my-pi/pi-utils";
+import { TEST_PYTHON } from "../../helpers/python";
 
-const pythonPath = Bun.env.PYTHON ?? $which("python3") ?? $which("python");
+const pythonPath = TEST_PYTHON;
 const runnerPath = path.resolve(import.meta.dir, "../../../src/eval/py/runner.py");
 
 interface RunnerFrame {

@@ -2,7 +2,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { Settings } from "../config/settings";
 import type { ClaudePluginRoot } from "../discovery/helpers";
+import { sandboxEnabled } from "../sandbox/policy";
 import {
 	type ConfigFileAdapter,
 	type ConfigFileSource,
@@ -345,15 +347,32 @@ function typescriptPackageDir(tscPath: string): string | null {
 }
 
 /**
+ * Whether the sandbox is on (the effective `sandbox.enabled` containment decides on), read
+ * synchronously from the global settings; uninitialized settings count as off.
+ */
+function sandboxOn(): boolean {
+	let settings: Settings;
+	try {
+		settings = Settings.instance;
+	} catch {
+		return false;
+	}
+	return sandboxEnabled(settings);
+}
+
+/**
  * Whether the `tsc` at `tscPath` speaks LSP itself. TypeScript 7 dropped the JS
  * `lib/tsserver.js` that typescript-language-server wraps and exposes
  * `tsc --lsp --stdio` instead; older releases reject the flag with TS5023.
  * Outside an npm layout (e.g. nixpkgs) ask the compiler for its version, run in
- * `cwd` so version-manager shims resolve the project's pinned TypeScript.
+ * `cwd` so version-manager shims resolve the project's pinned TypeScript. While
+ * the sandbox is on that probe would run a possibly workspace-provided `tsc`
+ * uncontained at config load, so it is skipped and the version stays unknown.
  */
 function typescriptSpeaksLsp(tscPath: string, cwd: string): boolean {
 	const packageDir = typescriptPackageDir(tscPath);
 	if (packageDir !== null) return !fs.existsSync(path.join(packageDir, "lib", "tsserver.js"));
+	if (sandboxOn()) return false;
 	try {
 		const { stdout } = Bun.spawnSync([tscPath, "--version"], { cwd, stderr: "ignore", timeout: 3_000 });
 		const major = /^Version (\d+)\./.exec(stdout.toString())?.[1];

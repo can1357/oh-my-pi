@@ -155,6 +155,8 @@ export function createComputerPrelude(
 		exports: ["computer"],
 		guidance: computerUsePrompt,
 		approval: computerApproval,
+		// Computer use drives the user's desktop from omp, outside the sandbox, whatever the action.
+		sandboxSubjects: () => [{ kind: "exec", target: "computer" }],
 		enabled: () => cfgComputerEnabled.get(session.settings) === true,
 		invoke: async (parameters, context) => {
 			const parsed = getComputerParamsSchema()(parameters);

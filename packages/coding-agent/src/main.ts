@@ -65,6 +65,8 @@ import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { all, combine, type ProtocolHost } from "./config/registry";
 import { Settings, settings } from "./config/settings";
+import { sandboxEnabled } from "./sandbox/policy";
+import { SandboxRuntime } from "./sandbox/runtime";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -1080,6 +1082,25 @@ function notifyResumeCwdFallback(
 	const notice = `Could not switch to resumed project ${resumedProject.chdirFailed}; staying in ${cwd}.`;
 	if (notifs) notifs.push({ kind: "warn", message: notice });
 	else writeStartupNotice(parsedArgs, `${chalk.yellow(notice)}\n`);
+}
+
+/**
+ * The startup notice for a sandbox that is enabled but has no usable backend on this host; undefined
+ * when the sandbox is off or available. Probing only happens when the sandbox is enabled.
+ */
+async function sandboxUnavailableNotice(settingsInstance: Settings, workspace: string): Promise<string | undefined> {
+	if (!sandboxEnabled(settingsInstance)) return undefined;
+	try {
+		const status = (await SandboxRuntime.for(workspace)).status();
+		if (status.state !== "unavailable") return undefined;
+		const reason = sanitizeDisplayWarnings([status.reason])[0];
+		return status.fallback === "block"
+			? `Sandbox unavailable: ${reason}. Contained tools fail until a backend is available or /sandbox off.`
+			: `Sandbox unavailable: ${reason}. Commands run unsandboxed.`;
+	} catch (error) {
+		logger.warn("Sandbox status probe failed", { error: String(error) });
+		return undefined;
+	}
 }
 
 /**
@@ -2396,6 +2417,13 @@ export async function runRootCommand(
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });
 			else writeStartupWarning(warning);
 		};
+		// The runtime's one "enabled but unavailable, running unsandboxed" warning: interactive mode
+		// raises it as a startup notification (below), anything else on stderr when it first applies.
+		if (!isInteractive) {
+			SandboxRuntime.setWarningSink(message =>
+				writeStartupWarning(sanitizeDisplayWarnings([message])[0] ?? message),
+			);
+		}
 		// The CLI moved SQLite onto OFD locks before any store opened; without them a
 		// read of a live store elsewhere in this process can corrupt it (issue #15586).
 		if (process.platform === "linux" && !ensureSqliteLockShim()) {
@@ -2428,6 +2456,10 @@ export async function runRootCommand(
 			options.onPrewalkWarning = startupWarning;
 			return options;
 		};
+		// Who answers `sandbox_request`: interactive mode, or the RPC client (requests are refused until it opts in); elsewhere it is not offered.
+		SandboxRuntime.setAccessPromptHost(
+			isInteractive ? "interactive" : mode === "rpc" || mode === "rpc-ui" ? "rpc" : undefined,
+		);
 		let sessionOptions = await buildStartupSessionOptions(sessionManager);
 		const marketplaceAutoUpdateOptions: MarketplaceAutoUpdateOptions = {
 			autoUpdate: cfgMarketplaceAutoUpdate.get(settingsInstance),
@@ -2890,6 +2922,9 @@ export async function runRootCommand(
 				if (pythonEvalWarning) {
 					notifs.push({ kind: "warn", message: pythonEvalWarning });
 				}
+
+				const sandboxNotice = await sandboxUnavailableNotice(settingsInstance, session.sessionManager.getCwd());
+				if (sandboxNotice) notifs.push({ kind: "warn", message: sandboxNotice });
 
 				if ($env.PI_TIMING) {
 					logger.printTimings();

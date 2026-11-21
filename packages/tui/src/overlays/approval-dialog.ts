@@ -33,8 +33,8 @@ import {
 	matchesSelectUp,
 } from "../keybinding-matchers";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { col, item, node, span } from "../native/describe";
-import { leafKey, type NativeNode, type NativeScroll, type NativeUiEvent } from "../native/node";
+import { col, node, span } from "../native/describe";
+import type { NativeNode, NativeScroll, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { PREVIEW_LIMITS, sanitizeDisplayLines } from "../render/render-utils";
 import { theme } from "../theme/theme";
@@ -99,11 +99,51 @@ interface ApprovalDialogOptions {
 	onGrant?(grant: ApprovalDialogGrant, always: boolean): void;
 }
 
+/** Drops trailing blank rows from `lines`, in place. */
+export function dropTrailingBlankLines(lines: string[]): string[] {
+	while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop();
+	return lines;
+}
+
 /** A prompt's detail rows: every line after the title, trailing blanks dropped. */
 function promptDetails(lines: string[]): string[] {
-	const details = lines.slice(1);
-	while (details.length > 0 && details[details.length - 1]!.trim() === "") details.pop();
-	return details;
+	return dropTrailingBlankLines(lines.slice(1));
+}
+
+/** The framed panel the choice dialogs share: body rows, the choice rows, then a one-row key hint under a divider. */
+export class ChoicePanel extends OverlayPanel {
+	readonly body = new PanelRows();
+	readonly choiceRows = new PanelRows();
+	readonly footer = new PanelRows();
+
+	constructor(title: string, role: string) {
+		super(title, role);
+		this.footer.setHeight(1);
+		this.addChild(this.body);
+		this.addChild(this.choiceRows);
+		this.addChild(new PanelDivider());
+		this.addChild(this.footer);
+	}
+}
+
+/** A choice's row in the list; `error` tones it as the refusal. */
+export interface ChoiceRow {
+	readonly label: string;
+	readonly error: boolean;
+}
+
+/** `index` moved by `delta` through `count` choices, wrapping at both ends. */
+export function wrapChoice(index: number, delta: number, count: number): number {
+	return (index + delta + count) % count;
+}
+
+/** One row per choice, clipped to `width`: the `shown` one bold behind the cursor (error tone on a refusal, else accent). */
+export function choiceRowLines(choices: readonly ChoiceRow[], shown: number, width: number): string[] {
+	return choices.map((choice, index) => {
+		if (index !== shown) return truncateToWidth(`  ${choice.label}`, width, Ellipsis.Unicode);
+		const row = truncateToWidth(`${theme.nav.cursor} ${choice.label}`, width, Ellipsis.Unicode);
+		return theme.bold(theme.fg(choice.error ? "error" : "accent", row));
+	});
 }
 
 const ALLOWED_SEGMENT_RE = /^(\s*)✓(\s+)(.+)(\s+\((?:allowed: .*|\d+ allowed segments?)\))$/u;
@@ -166,10 +206,7 @@ export class ApprovalDialogComponent implements Component {
 	readonly #summary: readonly string[];
 	readonly #full: readonly string[] | undefined;
 	#expanded = false;
-	readonly #panel: OverlayPanel;
-	readonly #body = new PanelRows();
-	readonly #choiceRows = new PanelRows();
-	readonly #footer = new PanelRows();
+	readonly #panel: ChoicePanel;
 	#scrollOffset = 0;
 	#bodyRows = MAX_DETAIL_ROWS;
 	/** In list order: the remember toggle and grants (when offered), Approve (highlighted on mount), the session row, Deny last. */
@@ -179,8 +216,6 @@ export class ApprovalDialogComponent implements Component {
 	#rememberAlways = false;
 	#closed = false;
 	#native: NativeNode | undefined;
-	/** Whether a draft held the keys when {@link #native} was described: it moves the highlight. */
-	#nativeDrafting = false;
 	/** Page Up/Down forwarded to the terminal's details scroller: bumped per key press. */
 	#nativeScroll: NativeScroll = { by: "start", n: 0 };
 	/** The summary's first prompted compound-bash segment row when it opens past {@link MAX_DETAIL_ROWS}. */
@@ -210,12 +245,7 @@ export class ApprovalDialogComponent implements Component {
 		}
 		this.#choices = this.#buildChoices();
 		this.#choice = this.#choices.findIndex(choice => choice.answer === "once");
-		this.#panel = new OverlayPanel(title, "omp.overlay.approval");
-		this.#footer.setHeight(1);
-		this.#panel.addChild(this.#body);
-		this.#panel.addChild(this.#choiceRows);
-		this.#panel.addChild(new PanelDivider());
-		this.#panel.addChild(this.#footer);
+		this.#panel = new ChoicePanel(title, "omp.overlay.approval");
 		if (options.timeout && options.timeout > 0) {
 			options.onTimeoutStart?.();
 			this.#countdown = new CountdownTimer(
@@ -308,9 +338,7 @@ export class ApprovalDialogComponent implements Component {
 	}
 
 	#moveChoice(delta: number): void {
-		const count = this.#choices.length;
-		this.#choice = (this.#choice + delta + count) % count;
-		this.#native = undefined;
+		this.#choice = wrapChoice(this.#choice, delta, this.#choices.length);
 		this.options.tui?.requestRender();
 	}
 
@@ -367,49 +395,59 @@ export class ApprovalDialogComponent implements Component {
 				theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
 			});
 			view.setScrollOffset(this.#scrollOffset);
-			this.#body.setLines(view.render(innerWidth));
+			this.#panel.body.setLines(view.render(innerWidth));
 		} else {
-			this.#body.setLines(lines);
+			this.#panel.body.setLines(lines);
 		}
-		this.#body.setHeight(rows);
+		this.#panel.body.setHeight(rows);
 		const drafting = this.options.draft?.hasDraft() ?? false;
 		// While a draft holds Enter the highlight sits on Deny (sending the draft denies), else on the arrows' choice.
 		const shown = drafting ? this.#choices.length - 1 : this.#choice;
-		this.#choiceRows.setLines(
-			this.#choices.map((choice, index) => {
-				const label = drafting && choice.answer === "deny" ? DENY_AND_SEND_LABEL : choice.label;
-				if (index !== shown) return truncateToWidth(`  ${label}`, innerWidth, Ellipsis.Unicode);
-				const color = choice.answer === "deny" ? "error" : "accent";
-				const row = truncateToWidth(`${theme.nav.cursor} ${label}`, innerWidth, Ellipsis.Unicode);
-				return theme.bold(theme.fg(color, row));
-			}),
+		this.#panel.choiceRows.setLines(
+			choiceRowLines(
+				this.#choices.map(choice => ({
+					label: drafting && choice.answer === "deny" ? DENY_AND_SEND_LABEL : choice.label,
+					error: choice.answer === "deny",
+				})),
+				shown,
+				innerWidth,
+			),
 		);
-		this.#footer.setLines([theme.fg("dim", this.#footerHint(overflows, drafting))]);
+		this.#panel.footer.setLines([theme.fg("dim", this.#footerHint(overflows, drafting))]);
 		return this.#panel.render(width);
 	}
 
 	/**
 	 * In the dock, in the composer's place and framed as the composer is (an
 	 * `omp.editor.*` root role), like the ask dialog, rather than a card over
-	 * the transcript: the title, the details, the choices with the keyboard's
-	 * highlight (a click takes one), then Details (with a full prompt), Deny,
-	 * and the primary Approve, whose keys show in their tooltips.
+	 * the transcript: the title, the details, then every choice as a button —
+	 * the remember toggle and grants on their own row when offered, then Details
+	 * (with a full prompt), the session choice, Deny, and the primary Approve,
+	 * whose keys show in their tooltips. No selectable list beside the buttons:
+	 * in a pointer UI the keyboard's highlighted row read as a second copy of them.
 	 */
 	describe(): NativeNode {
-		const drafting = this.options.draft?.hasDraft() ?? false;
-		if (this.#native && this.#nativeDrafting === drafting) return this.#native;
+		if (this.#native) return this.#native;
 		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
 		const approveKey = appApproveKeys()[0];
+		const grants = this.options.grants ?? [];
 		const deny = actionButton("Deny", "deny", {
 			...(cancelKey ? { keys: cancelKey } : {}),
 			tone: "error",
 			title: `Deny this call${cancelKey ? `  ${formatTooltipKey(cancelKey)}` : ""}`,
 		});
-		const approve = actionButton(this.options.grants?.length ? "Approve Once" : "Approve", "approve", {
+		const approve = actionButton(grants.length > 0 ? "Approve Once" : "Approve", "approve", {
 			...(approveKey ? { keys: approveKey } : {}),
 			tone: "accent",
 			title: `Approve this call${approveKey ? `  ${formatTooltipKey(approveKey)}` : ""}`,
 		});
+		const session = this.options.session
+			? [
+					actionButton(this.options.session.label, "session", {
+						title: "Approve this and like calls until the session ends",
+					}),
+				]
+			: [];
 		const expandKey = appToolsExpandKey();
 		const expand = this.#full
 			? [
@@ -449,37 +487,51 @@ export class ApprovalDialogComponent implements Component {
 				),
 			);
 		}
-		const choices = this.#choices.map(choice =>
-			item(choice.answer, {
-				label: choice.label,
-				role: "omp.approval.choice",
-				tone: choice.answer === "deny" ? "error" : "accent",
-			}),
-		);
-		const selected = drafting ? "deny" : this.#choices[this.#choice]!.answer;
-		children.push(node("list", { selected, role: "omp.approval.choices" }, choices, "choices"));
+		if (grants.length > 0) {
+			const glyph = this.#rememberAlways ? theme.checkbox.checked : theme.checkbox.unchecked;
+			children.push(
+				actionBar(
+					[
+						actionButton(`${glyph} Remember across sessions`, "remember", {
+							title: "Keep the grants beside it across sessions",
+						}),
+						...grants.map((grant, index) =>
+							actionButton(this.#rememberAlways ? grant.alwaysLabel : grant.label, `grant${index}`),
+						),
+					],
+					"grants",
+				),
+			);
+		}
 		// The countdown, when one runs, leads the bar like the ask dialog's.
 		children.push(
-			actionBar([...(this.#countdown ? [this.#countdown.describe()] : []), null, ...expand, deny, approve]),
+			actionBar([
+				...(this.#countdown ? [this.#countdown.describe()] : []),
+				null,
+				...expand,
+				...session,
+				deny,
+				approve,
+			]),
 		);
 		// Under the `omp.editor.ask` prefix: Tern's console layout sizes an ask's rows to the
 		// composer column by that prefix, where a bare `omp.editor.*` role spans the whole dock.
-		this.#native = col(children, { role: "omp.editor.ask.approval", gap: "md" });
-		this.#nativeDrafting = drafting;
+		this.#native = col(children, {
+			role: "omp.editor.ask.approval",
+			gap: "md",
+		});
 		return this.#native;
 	}
 
-	/** Deny, Approve, and Details run exactly what Esc, the approve key, and the expand key run; a click on a choice takes it. */
+	/** Each button runs exactly what its key or choice runs: Deny, Approve, Details, the session choice, a grant, the remember toggle. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (this.#closed) return;
-		if (event.type === "action") {
-			if (event.act === "approve") this.#finish("once");
-			else if (event.act === "deny") this.#finish("deny");
-			else if (event.act === "expand") this.toggleDetails();
+		if (this.#closed || event.type !== "action") return;
+		if (event.act === "expand") {
+			this.toggleDetails();
 			return;
 		}
-		if ((event.type !== "select" && event.type !== "activate") || leafKey(event.key) !== "choices") return;
-		const choice = this.#choices.find(candidate => candidate.answer === event.item);
+		const answer = event.act === "approve" ? "once" : event.act;
+		const choice = this.#choices.find(candidate => candidate.answer === answer);
 		if (choice) this.#take(choice.answer);
 	}
 

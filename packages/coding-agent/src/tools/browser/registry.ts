@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { isCompiledBinary, logger, untilAborted, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
+import { Settings } from "../../config/settings";
 import { ToolAbortError } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, resolveSpawnArgs, waitForCdp } from "./attach";
@@ -9,6 +10,7 @@ import { type CmuxKind, CmuxUnavailableError } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
 	BROWSER_PROTOCOL_TIMEOUT_MS,
+	type ChromiumSandbox,
 	closeLaunchedBrowser,
 	connectPuppeteer,
 	DEFAULT_VIEWPORT,
@@ -20,6 +22,7 @@ import {
 import { reapOrphanSharedTargets, type SharedTargetScope } from "./orphan-registry";
 import type { RelayKind } from "./relay/kind";
 import { requestRelayRestart, UPDATE_RELAY_EXTENSION, waitForRelayExtension } from "./relay/probe";
+import { containChromium } from "./sandbox";
 import { ensureSharedBrowser } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
@@ -33,6 +36,8 @@ export type PuppeteerBrowserKind =
 			headless: boolean;
 			/** Process-local launch flag; shared browsers use the tab-scoped CDP override instead. */
 			insecure?: boolean;
+			/** Set while the OS sandbox is active: a process-local Chromium contained by it, never the shared one. */
+			sandbox?: ChromiumSandbox;
 	  }
 	| { kind: "spawned"; path: string; args?: string[] }
 	| { kind: "connected"; cdpUrl: string }
@@ -115,8 +120,13 @@ const pendingOpens = new Map<string, { settled: Promise<void> }>();
 
 export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
-		case "headless":
-			return `headless:${kind.headless ? "1" : "0"}:${kind.insecure ? "tls" : ""}`;
+		case "headless": {
+			const { sandbox } = kind;
+			const contained = sandbox
+				? `:sandbox:${sandbox.network}:${sandbox.proxyServer ?? ""}:${sandbox.workspace}`
+				: "";
+			return `headless:${kind.headless ? "1" : "0"}:${kind.insecure ? "tls" : ""}${contained}`;
+		}
 		case "spawned":
 			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
@@ -138,6 +148,8 @@ export interface AcquireBrowserOptions {
 	signal?: AbortSignal;
 	/** Ask a relay served by an older omp to restart from the installed one. Default true. */
 	restartRelay?: boolean;
+	/** Settings a sandboxed Chromium's `file:` loads are checked under; the process settings when omitted. */
+	settings?: Settings;
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
@@ -266,15 +278,26 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		// worker host) MUST go through the project-shared daemon-supervised Chromium:
 		// per-process launches are what produced launch storms and orphaned
 		// process trees. The process-local launch survives only for hosts that
-		// cannot spawn the omp daemon (bun test, SDK embedding without a CLI entry).
-		if (isCompiledBinary() || workerHostEntry() !== null) {
+		// cannot spawn the omp daemon (bun test, SDK embedding without a CLI entry),
+		// and for a Chromium the OS sandbox contains: its flags are per session.
+		if (!kind.sandbox && (isCompiledBinary() || workerHostEntry() !== null)) {
 			return await openSharedHeadlessHandle(kind, opts);
 		}
 		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({
 			headless: kind.headless,
 			viewport: opts.viewport,
 			insecure: kind.insecure,
+			sandbox: kind.sandbox,
 		});
+		if (kind.sandbox) {
+			try {
+				await containChromium(browser, kind.sandbox, opts.settings ?? (await Settings.init()));
+			} catch (error) {
+				await closeLaunchedBrowser({ browser, userDataDir });
+				if (userDataDir) await removeUserDataDir(userDataDir);
+				throw error;
+			}
+		}
 		return {
 			key: browserKey(kind),
 			kind,

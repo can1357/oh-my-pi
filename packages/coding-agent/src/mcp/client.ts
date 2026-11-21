@@ -87,6 +87,7 @@ export function buildServerSpec(config: MCPServerConfig, cwd?: string): McpServe
 				spawnEnv: workerEnvFromParent(env),
 				requestIdFormat,
 				timeoutMs,
+				...(config.sandbox === true ? { sandboxNetwork: config.sandboxNetwork ?? "allow" } : {}),
 			};
 		}
 		case "http":
