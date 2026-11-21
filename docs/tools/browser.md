@@ -21,7 +21,7 @@ The Eval `browser` facade opens, reuses, scripts, and closes named Chromium, Ele
 The prelude exists only while Eval and `browser.enabled` are enabled (`browser.enabled` defaults to `true`). It is not an AgentTool.
 All browser host operations request exec-tier approval, including inspection helpers.
 
-After a conversation first calls the browser prelude, the session sends a short core of the browser guide as a hidden typed message at its next delivery point: after the tool batch or alongside a background job's result. The `firstCallDocumentation` property supplies the core; the Eval description keeps its one-line browser entry, and the full guide stays readable at `xd://eval/browser`. Every helper, option and parameter the core names must also appear in the full guide (`packages/coding-agent/test/tools/browser-prelude-documentation.test.ts`).
+After a conversation first calls the browser prelude, the session sends a short core of the browser guide as a hidden typed message at its next delivery point: after the tool batch or alongside a background job's result. The `firstCallDocumentation` property supplies the core; the Eval description keeps its one-line browser entry, and the full guide stays readable at `help://eval/browser`. Every helper, option and parameter the core names must also appear in the full guide (`packages/coding-agent/test/tools/browser-prelude-documentation.test.ts`).
 
 Only typed guide messages count as delivery. A compaction, rewind or shake that drops or shortens the guide sends it again at the next delivery point; a resumed session retaining the whole guide does not repeat it. A new conversation starts with no guide owed until it calls the prelude.
 

@@ -1390,20 +1390,20 @@ describe("agentLoop with AgentMessage", () => {
 	it("routes unadvertised tool calls through resolveFallbackTool", async () => {
 		const executedParams: Array<{ value: string }> = [];
 		const toolSchema = type({ value: "string" });
-		const deviceTool: AgentTool<typeof toolSchema, { value: string }> = {
+		const mountedTool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "browser",
 			label: "Browser",
-			description: "Mounted device tool",
+			description: "Mounted tool command",
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				executedParams.push(params);
 				return {
-					content: [{ type: "text", text: `device: ${params.value}` }],
+					content: [{ type: "text", text: `mounted: ${params.value}` }],
 					details: { value: params.value },
 				};
 			},
 		};
-		// The device is NOT in the advertised tool set.
+		// The mounted tool is NOT in the advertised tool set.
 		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
 		const mock = createMockModel({
 			responses: [
@@ -1419,11 +1419,11 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
-			resolveFallbackTool: name => (name === "browser" ? deviceTool : undefined),
+			resolveFallbackTool: name => (name === "browser" ? mountedTool : undefined),
 		};
 
 		const messages = await agentLoop(
-			[createUserMessage("use the device")],
+			[createUserMessage("use the mounted tool")],
 			context,
 			config,
 			undefined,
@@ -1432,9 +1432,9 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(executedParams).toEqual([{ value: "open" }]);
 		const results = messages.filter((m): m is ToolResultMessage => m.role === "toolResult");
-		const deviceResult = results.find(r => r.toolCallId === "tool-1");
-		expect(deviceResult?.isError).toBeFalsy();
-		expect(deviceResult?.content).toContainEqual({ type: "text", text: "device: open" });
+		const mountedResult = results.find(r => r.toolCallId === "tool-1");
+		expect(mountedResult?.isError).toBeFalsy();
+		expect(mountedResult?.content).toContainEqual({ type: "text", text: "mounted: open" });
 		// Names the resolver does not know keep the "not found" failure.
 		const missingResult = results.find(r => r.toolCallId === "tool-2");
 		expect(missingResult?.isError).toBe(true);
@@ -1444,13 +1444,13 @@ describe("agentLoop with AgentMessage", () => {
 	});
 
 	it("records fallback-resolved alias calls under the resolved tool's name", async () => {
-		// Providers reject `xd://recall` as a replayed function-call name, so the
-		// alias must not reach history, persistence, or the next request.
+		// An MCP-spelled alias must not reach history, persistence, or the next
+		// request: the loop records the resolved tool's own name.
 		const toolSchema = type({ value: "string" });
-		const deviceTool: AgentTool<typeof toolSchema, { value: string }> = {
+		const recallTool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "recall",
 			label: "Recall",
-			description: "Mounted device tool",
+			description: "Mounted tool command",
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				return { content: [{ type: "text", text: `recall: ${params.value}` }], details: params };
@@ -1459,14 +1459,14 @@ describe("agentLoop with AgentMessage", () => {
 		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
 		const mock = createMockModel({
 			responses: [
-				{ content: [{ type: "toolCall", id: "tool-1", name: "xd://recall", arguments: { value: "x" } }] },
+				{ content: [{ type: "toolCall", id: "tool-1", name: "mcp__pi_agent__recall", arguments: { value: "x" } }] },
 				{ content: ["done"] },
 			],
 		});
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
-			resolveFallbackTool: name => (name === "xd://recall" || name === "recall" ? deviceTool : undefined),
+			resolveFallbackTool: name => (name === "mcp__pi_agent__recall" || name === "recall" ? recallTool : undefined),
 		};
 
 		const messages = await agentLoop([createUserMessage("recall")], context, config, undefined, mock.stream).result();
@@ -1585,9 +1585,9 @@ describe("agentLoop with AgentMessage", () => {
 		expect(textOf("tool-3")).not.toContain("Did you mean");
 	});
 
-	it("suggests a mounted device the advertised set does not contain", async () => {
-		// Observed in a real transcript: the session mounts `github` as an
-		// `xd://` device, the model emitted `mcp__<ns>__<id>_github`, and the miss
+	it("suggests a mounted tool command the advertised set does not contain", async () => {
+		// Observed in a real transcript: the session mounts `github` as a tool
+		// command, the model emitted `mcp__<ns>__<id>_github`, and the miss
 		// produced a bare `not found`. That is the one unrecoverable shape — the
 		// capability is live, but it appears in no advertised name, so matching
 		// only the advertised set had nothing to offer.
@@ -1619,7 +1619,7 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
-			// Devices are routable by `resolveFallbackTool` but never advertised.
+			// Mounted tool commands are routable by `resolveFallbackTool` but never advertised.
 			suggestFallbackToolNames: () => ["github", "lsp"],
 		};
 
@@ -1631,7 +1631,7 @@ describe("agentLoop with AgentMessage", () => {
 			.join("\n");
 
 		expect(text).toContain("Did you mean github?");
-		// Advisory only: naming the device must not dispatch it. No
+		// Advisory only: naming the mounted tool must not dispatch it. No
 		// `resolveFallbackTool` is installed here, so the call still fails.
 		expect(result?.isError).toBe(true);
 	});

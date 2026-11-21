@@ -1,47 +1,31 @@
-import {
-	RESOLVE_DEVICE_NAME,
-	REJECT_DEVICE_NAME,
-	PROPOSE_DEVICE_NAME,
-	type ResolutionDeviceName,
-	type ResolveAction,
-	type ResolveDetails,
-	type ResolveInvocation,
-} from "@oh-my-pi/pi-tui/tools/resolve";
 /**
- * Resolution devices: staged work is finalized through plain-text writes to
- * always-available `xd://` URLs — no tool schema, no JSON protocol.
+ * Staged-action commands: one string argument each, runnable as a bash
+ * command (`resolve "<reason>"`) or, without the bash tool, as a top-level tool.
  *
- *   write xd://resolve   reason text  → APPLY the pending staged preview
- *   write xd://reject    reason text  → DISCARD the pending staged preview
- *   write xd://propose   plan <slug>  → submit the plan for approval (plan mode)
+ *   resolve <reason>  → APPLY the pending staged preview
+ *   reject <reason>   → DISCARD the pending staged preview
+ *   propose <title>   → submit the plan for approval (plan mode)
  *
  * Nothing rides the system prompt: the flows that stage work teach the call
  * shape at the moment it becomes relevant (the preview reminder for
  * resolve/reject, the plan-mode prompt for propose).
- *
- * Rendering rides the write tool's xd:// delegation: renderers.ts keys the
- * resolve renderer under `resolve` and `reject` so device writes and legacy
- * `resolve` tool transcripts draw the same block.
  */
-import type { AgentToolResult, CustomMessage } from "@oh-my-pi/pi-agent-core";
-
-import { prompt } from "@oh-my-pi/pi-utils";
-
-import { parseXdUrl, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
-import { splitUrlScheme } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
-
-import resolveReminderPrompt from "../prompts/system/resolve-device-reminder.md" with { type: "text" };
-
-import type { ToolSession } from ".";
-
+import { type } from "@oh-my-pi/omptype";
+import type { AgentTool, AgentToolResult, CustomMessage } from "@oh-my-pi/pi-agent-core";
+import {
+	PROPOSE_COMMAND_NAME,
+	REJECT_COMMAND_NAME,
+	RESOLVE_COMMAND_NAME,
+	type ResolveAction,
+	type ResolveDetails,
+	type ResolveInvocation,
+} from "@oh-my-pi/pi-tui/tools/resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { unwrapHashlineHeaderPath } from "./hashline-header-path";
-import type { XdevDispatch } from "./xdev";
-
-/** The plain-text resolution device URLs (`xd://resolve`, …). */
-export const RESOLVE_DEVICE_PATH = `${XD_URL_PREFIX}${RESOLVE_DEVICE_NAME}`;
-export const REJECT_DEVICE_PATH = `${XD_URL_PREFIX}${REJECT_DEVICE_NAME}`;
-export const PROPOSE_DEVICE_PATH = `${XD_URL_PREFIX}${PROPOSE_DEVICE_NAME}`;
+import { prompt } from "@oh-my-pi/pi-utils";
+import resolveReminderPrompt from "../prompts/system/resolve-reminder.md" with { type: "text" };
+import type { Tool, ToolSession } from ".";
+import { createReportIssueTool, isAutoQaEnabled } from "./report-tool-issue";
+import { toolCommandCallName, toolCommandDispatches } from "./tool-commands";
 
 /**
  * Model-visible banner prepended to a staged preview's tool result text. The
@@ -49,110 +33,119 @@ export const PROPOSE_DEVICE_PATH = `${XD_URL_PREFIX}${PROPOSE_DEVICE_NAME}`;
  * byte-identical to applied-edit output — without this line the model reads
  * the result as an already-applied change.
  */
-export const PREVIEW_PENDING_NOTICE = `Staged as a proposal — files NOT modified yet. To apply: write a one-sentence reason to ${RESOLVE_DEVICE_PATH}. To discard: write to ${REJECT_DEVICE_PATH}. Send that write alone; every other call in the same response is refused.`;
+export const PREVIEW_PENDING_NOTICE =
+	"Staged as a proposal — files NOT modified yet. To apply: `resolve <one-sentence reason>`. To discard: `reject <one-sentence reason>`. Send that call alone; every other call in the same response is refused.";
 
-/** One-line usage string returned by `read xd://<device>` — the only "docs" these devices carry. */
-export function resolutionDeviceUsage(device: ResolutionDeviceName): string {
-	switch (device) {
-		case RESOLVE_DEVICE_NAME:
-			return `Write a one-sentence reason as plain text to ${RESOLVE_DEVICE_PATH} to APPLY the pending staged action (e.g. a tool preview).`;
-		case REJECT_DEVICE_NAME:
-			return `Write a one-sentence reason as plain text to ${REJECT_DEVICE_PATH} to DISCARD the pending staged action (e.g. a tool preview).`;
-		case PROPOSE_DEVICE_NAME:
-			return `Write your plan's <slug> (matching local://<slug>-plan.md) as plain text to ${PROPOSE_DEVICE_PATH} to submit the plan for approval. Valid only while plan mode is active.`;
-	}
-}
-
-/** Path of a (possibly partial) write tool call, or undefined. */
-function toolCallWritePath(toolCall: { name: string; arguments?: Record<string, unknown> }): string | undefined {
-	if (toolCall.name !== "write") return undefined;
-	const args = toolCall.arguments;
-	return typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : undefined;
-}
-
-/**
- * Whether an assistant tool call is a `write` targeting `xd://resolve` or
- * `xd://reject`. Used as the SoftToolRequirement compliance check while a
- * preview is pending — a plain `write` elsewhere resolves nothing.
- */
-export function isPreviewResolutionToolCall(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
-	const path = toolCallWritePath(toolCall);
-	if (path === undefined) return false;
-	const device = parseXdUrl(path)?.name;
-	return device === RESOLVE_DEVICE_NAME || device === REJECT_DEVICE_NAME;
-}
-
-/** Whether an assistant tool call is a `write` targeting `xd://propose` (plan-mode decision detection). */
-export function isProposeToolCall(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
-	const path = toolCallWritePath(toolCall);
-	return path !== undefined && parseXdUrl(path)?.name === PROPOSE_DEVICE_NAME;
-}
-
-/** Exposes dispatched device names so loop exemptions need not exempt every write. */
-export function writeDeviceName(toolCall: { name: string; arguments?: Record<string, unknown> }): string | undefined {
-	const path = toolCallWritePath(toolCall);
-	if (path === undefined) return undefined;
-	const target = unwrapHashlineHeaderPath(path);
-	return splitUrlScheme(target)?.scheme === "xd" ? (parseXdUrl(target)?.name ?? undefined) : undefined;
-}
-
-/**
- * The XdevDispatch metadata carried on a completed `write` execution result, or
- * `undefined` when the execution was not a device dispatch. Consumers check
- * `.tool` (e.g. `PROPOSE_DEVICE_NAME` for plan-mode decision tracking and the
- * event-controller's plan-approval hook).
- */
-export function writeDeviceDispatch(toolName: string, result: unknown): XdevDispatch | undefined {
-	if (toolName !== "write") return undefined;
-	if (!result || typeof result !== "object" || !("details" in result)) return undefined;
-	const details = result.details;
-	if (!details || typeof details !== "object" || !("xdev" in details)) return undefined;
-	const xdev = details.xdev;
-	if (!xdev || typeof xdev !== "object" || !("tool" in xdev) || !("mode" in xdev)) return undefined;
-	// Envelope verified above; the write tool stored a real XdevDispatch here.
-	return xdev as XdevDispatch;
-}
-
-/** Handler installed by plan mode; `xd://propose` dispatches the written plan title to it. */
+/** Handler installed by plan mode; `propose` hands the plan title to it. */
 export type PlanProposalHandler = (title: string) => Promise<AgentToolResult<unknown>>;
 
-/** Parse a completed `write` dispatch targeting `xd://resolve` or `xd://reject`. */
-export function resolveDispatchDetails(toolName: string, result: unknown): ResolveDetails | undefined {
-	const dispatch = writeDeviceDispatch(toolName, result);
-	if (!dispatch || (dispatch.tool !== RESOLVE_DEVICE_NAME && dispatch.tool !== REJECT_DEVICE_NAME)) return undefined;
-	const inner = dispatch.inner;
-	if (!inner || typeof inner !== "object") return undefined;
-	const action = "action" in inner ? inner.action : undefined;
-	const reason = "reason" in inner ? inner.reason : undefined;
+/** A (possibly partial) assistant tool call. */
+type ToolCallLike = { name: string; arguments?: Record<string, unknown> };
+
+/** Command a tool call runs: its own name for a direct call, the leading command word of a `bash` call. */
+function invokedCommandName(toolCall: ToolCallLike): string {
+	return toolCommandCallName(toolCall) ?? toolCall.name;
+}
+
+/**
+ * Whether an assistant tool call runs `resolve` or `reject`, directly or as a
+ * `bash` command. Used as the SoftToolRequirement compliance check while a
+ * preview is pending — any other call resolves nothing.
+ */
+export function isPreviewResolutionToolCall(toolCall: ToolCallLike): boolean {
+	const name = invokedCommandName(toolCall);
+	return name === RESOLVE_COMMAND_NAME || name === REJECT_COMMAND_NAME;
+}
+
+/** Whether an assistant tool call runs `propose`, directly or as a `bash` command (plan-mode decision detection). */
+export function isProposeToolCall(toolCall: ToolCallLike): boolean {
+	return invokedCommandName(toolCall) === PROPOSE_COMMAND_NAME;
+}
+
+/** Parse resolve/reject details out of an arbitrary details value. */
+function parseResolveDetails(value: unknown): ResolveDetails | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const action = "action" in value ? value.action : undefined;
+	const reason = "reason" in value ? value.reason : undefined;
 	if ((action !== "apply" && action !== "discard") || typeof reason !== "string") return undefined;
 	return {
 		action,
 		reason,
-		...("sourceToolName" in inner && typeof inner.sourceToolName === "string"
-			? { sourceToolName: inner.sourceToolName }
+		...("sourceToolName" in value && typeof value.sourceToolName === "string"
+			? { sourceToolName: value.sourceToolName }
 			: {}),
-		...("label" in inner && typeof inner.label === "string" ? { label: inner.label } : {}),
-		...("sourceResultDetails" in inner ? { sourceResultDetails: inner.sourceResultDetails } : {}),
+		...("label" in value && typeof value.label === "string" ? { label: value.label } : {}),
+		...("sourceResultDetails" in value ? { sourceResultDetails: value.sourceResultDetails } : {}),
 	};
+}
+
+/**
+ * Resolution details of a completed `resolve`/`reject`: read from a direct
+ * tool result, or from the last `resolve`/`reject` dispatch recorded on a
+ * `bash` result.
+ */
+export function resolveDispatchDetails(toolName: string, result: unknown): ResolveDetails | undefined {
+	if (toolName === RESOLVE_COMMAND_NAME || toolName === REJECT_COMMAND_NAME) {
+		if (!result || typeof result !== "object" || !("details" in result)) return undefined;
+		return parseResolveDetails(result.details);
+	}
+	for (const dispatch of toolCommandDispatches(toolName, result).toReversed()) {
+		if (dispatch.mode !== "execute") continue;
+		if (dispatch.tool !== RESOLVE_COMMAND_NAME && dispatch.tool !== REJECT_COMMAND_NAME) continue;
+		const details = parseResolveDetails(dispatch.inner);
+		if (details) return details;
+	}
+	return undefined;
+}
+
+/**
+ * Details of a plan submission: the result details of a direct successful
+ * `propose` call, or the `inner` details of the last successful `propose`
+ * execution recorded on a `bash` result; `undefined` when the result submitted
+ * no plan.
+ */
+export function proposeDispatchDetails(toolName: string, result: unknown): unknown {
+	if (toolName === PROPOSE_COMMAND_NAME) {
+		if (!result || typeof result !== "object" || !("details" in result)) return undefined;
+		if ("isError" in result && result.isError === true) return undefined;
+		return result.details;
+	}
+	for (const dispatch of toolCommandDispatches(toolName, result).toReversed()) {
+		if (dispatch.tool === PROPOSE_COMMAND_NAME && dispatch.mode === "execute" && dispatch.exitCode === 0) {
+			return dispatch.inner;
+		}
+	}
+	return undefined;
 }
 
 /** Monotonic suffix making each staged preview's pending-invoker id UNIQUE, so
  *  stacked previews never clobber one another by label. */
 let pendingPreviewSeq = 0;
 
+/** Whether a queued invoker input is a resolve/reject invocation. */
+function isResolveInvocation(input: unknown): input is ResolveInvocation {
+	if (!input || typeof input !== "object") return false;
+	const action = "action" in input ? input.action : undefined;
+	return (action === "apply" || action === "discard") && "reason" in input && typeof input.reason === "string";
+}
+
+/** Whether a pending invoker produced a tool result. */
+function isAgentToolResult(value: unknown): value is AgentToolResult<unknown> {
+	return !!value && typeof value === "object" && "content" in value && Array.isArray(value.content);
+}
+
 /**
  * Register a non-forcing resolve-protocol handler for a staged preview. Wraps the
  * caller's apply/reject into an onInvoked closure and stores it on the tool-choice
- * queue's pending-invoker registry under a UNIQUE id. A `write` to `xd://resolve`
- * or `xd://reject` dispatches to it; the agent-loop's SoftToolRequirement
- * lifecycle injects the preview reminder and escalates to a forced `write` only
- * if the model declines — so a compliant turn pays ZERO tool_choice change (no
- * prompt-cache messages-cache invalidation).
+ * queue's pending-invoker registry under a UNIQUE id. `resolve` or `reject`
+ * dispatches to it; the agent-loop's SoftToolRequirement lifecycle injects the
+ * preview reminder and escalates to a forced call only if the model declines —
+ * so a compliant turn pays ZERO tool_choice change (no prompt-cache
+ * messages-cache invalidation).
  *
  * This is the canonical entry point for any tool that wants preview/apply
  * semantics. No session-level abstraction is needed: callers pass their
- * apply/reject functions directly. Resolution requires the `write` tool to be
- * active — the session's soft requirement names it.
+ * apply/reject functions directly.
  */
 export function queueResolveHandler(
 	session: ToolSession,
@@ -170,7 +163,8 @@ export function queueResolveHandler(
 	const id = `pending-action:${options.sourceToolName}:${pendingPreviewSeq++}`;
 
 	const onInvoked = async (input: unknown): Promise<AgentToolResult<unknown>> => {
-		const result = await runResolveInvocation(input as ResolveInvocation, {
+		if (!isResolveInvocation(input)) throw new ToolError("Invalid resolution: expected an action and a reason.");
+		const result = await runResolveInvocation(input, {
 			sourceToolName: options.sourceToolName,
 			label: options.label,
 			apply: options.apply,
@@ -187,9 +181,9 @@ export function queueResolveHandler(
 		return result;
 	};
 
-	// NON-FORCING: register so a resolution-device write can dispatch here WITHOUT
+	// NON-FORCING: register so `resolve`/`reject` can dispatch here WITHOUT
 	// changing tool_choice. The agent-loop injects the reminder (from the
-	// SoftToolRequirement the session builds) and forces a `write` turn only on
+	// SoftToolRequirement the session builds) and forces a call only on
 	// non-compliance.
 	queue.registerPendingInvoker(id, options.sourceToolName, onInvoked);
 }
@@ -200,11 +194,20 @@ export function queueResolveHandler(
  * once per pending-preview head) instead of a host-side steer, so it lands as a
  * stable mid-history append and never churns the cached prefix.
  */
-export function buildResolveReminderMessage(sourceToolName: string): CustomMessage {
+export function buildResolveReminderMessage(
+	session: Pick<ToolSession, "toolCommands">,
+	sourceToolName: string,
+): CustomMessage {
 	return {
 		role: "custom",
 		customType: "resolve-reminder",
-		content: prompt.render(resolveReminderPrompt, { toolName: sourceToolName }).trim(),
+		content: prompt
+			.render(resolveReminderPrompt, {
+				toolName: sourceToolName,
+				isCommand: session.toolCommands !== undefined,
+				bashToolName: "bash",
+			})
+			.trim(),
 		display: false,
 		details: { toolName: sourceToolName },
 		attribution: "agent",
@@ -279,55 +282,120 @@ async function runResolveInvocation(
 }
 
 /**
- * Execute a resolution-device write. `text` is the raw plain-text body:
- * - `xd://resolve` / `xd://reject` → the reason; dispatches to the pending
- *   preview invoker (in-flight queue directive first).
- * - `xd://propose` → the plan title; dispatches to the plan-proposal handler
- *   installed by plan mode.
+ * Apply or discard the pending staged action (in-flight queue directive first).
+ * Discarding with nothing pending succeeds: the "no staged change" end-state
+ * already holds. Applying with nothing pending fails.
  */
-export async function dispatchResolutionDevice(
+async function resolvePendingAction(
 	session: ToolSession,
-	device: ResolutionDeviceName,
-	text: string,
-): Promise<{ result: AgentToolResult<unknown>; xdev: XdevDispatch }> {
-	const body = text.trim();
-	if (device === PROPOSE_DEVICE_NAME) {
-		const handler = session.peekPlanProposalHandler?.();
-		if (!handler) {
-			throw new ToolError(
-				`No plan is awaiting approval — ${PROPOSE_DEVICE_PATH} only accepts a plan title while plan mode is active.`,
-			);
-		}
-		const result = await handler(body);
-		return { result, xdev: { tool: device, mode: "execute", args: { title: body }, inner: result.details } };
-	}
-
-	const action: ResolveAction = device === RESOLVE_DEVICE_NAME ? "apply" : "discard";
-	const xdevBase: XdevDispatch = { tool: device, mode: "execute", args: { reason: body } };
+	action: ResolveAction,
+	rawReason: string,
+): Promise<AgentToolResult<unknown>> {
+	const reason = rawReason.trim();
 	const invoker = session.peekQueueInvoker?.() ?? session.peekPendingInvoker?.();
 	if (!invoker) {
 		session.clearPendingInvokers?.();
 		const proposeHint = session.peekPlanProposalHandler?.()
-			? ` To submit the plan for approval, write its title to ${PROPOSE_DEVICE_PATH} instead.`
+			? ` To submit the plan for approval, use \`${PROPOSE_COMMAND_NAME}\` with its title instead.`
 			: "";
-		// Rejecting is a request to reach the "no staged change" end-state, which
-		// already holds when nothing is pending — honor it as a successful
-		// cancellation instead of surfacing a hard error. Apply still errors.
 		if (action === "discard") {
-			const details: ResolveDetails = { action, reason: body };
+			const details: ResolveDetails = { action, reason };
 			return {
-				result: {
-					content: [{ type: "text", text: `Nothing to reject; no pending action remains.${proposeHint}` }],
-					details,
-				},
-				xdev: { ...xdevBase, inner: details },
+				content: [{ type: "text", text: `Nothing to reject; no pending action remains.${proposeHint}` }],
+				details,
 			};
 		}
 		throw new ToolError(
-			`No pending action to apply — ${RESOLVE_DEVICE_PATH} is only valid while a staged preview is pending.${proposeHint}`,
+			`No pending action to apply — \`${RESOLVE_COMMAND_NAME}\` is only valid while a staged preview is pending.${proposeHint}`,
 		);
 	}
-	const invocation: ResolveInvocation = { action, reason: body };
-	const result = (await invoker(invocation)) as AgentToolResult<ResolveDetails>;
-	return { result, xdev: { ...xdevBase, inner: result.details } };
+	const invocation: ResolveInvocation = { action, reason };
+	const result = await invoker(invocation);
+	if (!isAgentToolResult(result)) throw new ToolError("The pending action returned no result.");
+	return result;
+}
+
+const resolveSchema = type({
+	reason: type("string").describe("One-sentence reason for applying the pending staged action."),
+	"+": "reject",
+});
+
+const rejectSchema = type({
+	reason: type("string").describe("One-sentence reason for discarding the pending staged action."),
+	"+": "reject",
+});
+
+const proposeSchema = type({
+	title: type("string").describe("Plan slug matching local://<slug>-plan.md."),
+	"+": "reject",
+});
+
+/** `resolve <reason>`: apply the pending staged action. */
+function createResolveTool(session: ToolSession): AgentTool<typeof resolveSchema> {
+	return {
+		name: RESOLVE_COMMAND_NAME,
+		label: "Resolve",
+		summary: "Apply the pending staged action",
+		description: "Apply the pending staged action (e.g. a tool preview), giving a one-sentence reason.",
+		parameters: resolveSchema,
+		strict: true,
+		intent: "omit",
+		approval: "read",
+		async execute(_toolCallId, params) {
+			return resolvePendingAction(session, "apply", params.reason);
+		},
+	};
+}
+
+/** `reject <reason>`: discard the pending staged action. */
+function createRejectTool(session: ToolSession): AgentTool<typeof rejectSchema> {
+	return {
+		name: REJECT_COMMAND_NAME,
+		label: "Reject",
+		summary: "Discard the pending staged action",
+		description: "Discard the pending staged action (e.g. a tool preview), giving a one-sentence reason.",
+		parameters: rejectSchema,
+		strict: true,
+		intent: "omit",
+		approval: "read",
+		async execute(_toolCallId, params) {
+			return resolvePendingAction(session, "discard", params.reason);
+		},
+	};
+}
+
+/** `propose <title>`: submit the plan for approval while plan mode is active. */
+function createProposeTool(session: ToolSession): AgentTool<typeof proposeSchema> {
+	return {
+		name: PROPOSE_COMMAND_NAME,
+		label: "Propose",
+		summary: "Submit the plan for approval",
+		description:
+			"Submit the plan for approval by its <slug> (matching local://<slug>-plan.md). Valid only while plan mode is active.",
+		parameters: proposeSchema,
+		strict: true,
+		intent: "omit",
+		approval: "read",
+		async execute(_toolCallId, params) {
+			const handler = session.peekPlanProposalHandler?.();
+			if (!handler) {
+				throw new ToolError(
+					`No plan is awaiting approval — \`${PROPOSE_COMMAND_NAME}\` only accepts a plan title while plan mode is active.`,
+				);
+			}
+			return handler(params.title.trim());
+		},
+	};
+}
+
+/**
+ * Tools behind the plain-text special commands this session supports: `resolve`,
+ * `reject`, `propose`, and `report_issue` (when Auto-QA is enabled). Each has one
+ * required string field, so the CLI form is `resolve "<reason>"`. The set is stable
+ * for the session; a command with nothing to act on fails with a message.
+ */
+export function specialToolCommands(session: ToolSession): Tool[] {
+	const tools: Tool[] = [createResolveTool(session), createRejectTool(session), createProposeTool(session)];
+	if (isAutoQaEnabled(session.settings)) tools.push(createReportIssueTool(session));
+	return tools;
 }

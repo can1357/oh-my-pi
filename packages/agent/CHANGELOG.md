@@ -10,6 +10,13 @@
  ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed the refusal of an `xd://resolve` or `xd://reject` write sent with other tool calls, which now says that the other calls caused it ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
  ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added standby tools support through `Agent.setStandbyTools()` and `AgentContext.standbyTools`, allowing tools to remain inactive until a request explicitly enables tool use.
+
 ## [19.0.0] - 2026-11-18
  ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
 ### Added

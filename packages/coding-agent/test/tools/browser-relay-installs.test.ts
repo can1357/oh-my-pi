@@ -14,7 +14,7 @@ import { findFreeCdpPort } from "../../src/tools/browser/attach";
 import {
 	extensionIdForPath,
 	installedRelayExtensionVersion,
-	RELAY_EXTENSION_BUILD,
+	loadRelayExtension,
 	writeRelayExtension,
 } from "../../src/tools/browser/relay/extension-files";
 import {
@@ -24,10 +24,7 @@ import {
 	syncRelayInstalls,
 } from "../../src/tools/browser/relay/installs";
 import { writeRelayNativeHost } from "../../src/tools/browser/relay/native-host-manifest";
-import {
-	type RelayServer,
-	startRelayServer,
-} from "../../src/tools/browser/relay/server";
+import { type RelayServer, startRelayServer } from "../../src/tools/browser/relay/server";
 
 const OLD = "1.2.3";
 const NEWER = "999.0.0";
@@ -73,11 +70,7 @@ describe("browser relay install registry", () => {
 		const customDir = home.join("custom extension");
 		const alias = home.join("alias");
 		await fs.mkdir(customDir);
-		await fs.symlink(
-			customDir,
-			alias,
-			process.platform === "win32" ? "junction" : "dir",
-		);
+		await fs.symlink(customDir, alias, process.platform === "win32" ? "junction" : "dir");
 		const options = { registryFile, defaultDir };
 
 		const canonical = await installRelayExtension(alias, options);
@@ -116,15 +109,13 @@ describe("browser relay install registry", () => {
 		expect(await installedRelayExtensionVersion(installed)).toBe(VERSION);
 		expect(await fs.stat(missing).catch(() => undefined)).toBeUndefined();
 		expect(await readRelayInstallRegistry(registryFile)).toMatchObject({
-			lastSynced: `${VERSION}+${RELAY_EXTENSION_BUILD}`,
+			lastSynced: `${VERSION}+${(await loadRelayExtension()).build}`,
 		});
 		expect(await readRelayInstalls({ registryFile })).toEqual([
 			{ dir: installed, version: VERSION, missing: false },
 			{ dir: missing, version: VERSION, missing: true },
 		]);
-		expect(await syncRelayInstalls({ registryFile, mode: "startup" })).toEqual(
-			[],
-		);
+		expect(await syncRelayInstalls({ registryFile, mode: "startup" })).toEqual([]);
 		expect(await syncRelayInstalls({ registryFile })).toEqual([
 			{ dir: installed, status: "up to date", ompVersion: VERSION },
 			{ dir: missing, status: "missing" },
@@ -144,7 +135,7 @@ async function connectExtension(
 	const opened = Promise.withResolvers<void>();
 	const reload = Promise.withResolvers<void>();
 	ws.addEventListener("open", () => opened.resolve(), { once: true });
-	ws.addEventListener("message", (message) => {
+	ws.addEventListener("message", message => {
 		if (typeof message.data !== "string") return;
 		const parsed: unknown = JSON.parse(message.data);
 		if (isRecord(parsed) && parsed.t === "reload") reload.resolve();
@@ -188,10 +179,7 @@ describe("outdated extension reload", () => {
 			installRegistryFile: registryFile,
 		});
 
-		const { reloaded } = await connectExtension(
-			port,
-			extensionIdForPath(second),
-		);
+		const { reloaded } = await connectExtension(port, extensionIdForPath(second));
 		await reloaded;
 		expect(await installedRelayExtensionVersion(first)).toBe(VERSION);
 		expect(await installedRelayExtensionVersion(second)).toBe(VERSION);
@@ -216,10 +204,7 @@ describe("outdated extension reload", () => {
 			},
 		});
 
-		await connectExtension(
-			port,
-			extensionIdForPath(home.join("someone else's folder")),
-		);
+		await connectExtension(port, extensionIdForPath(home.join("someone else's folder")));
 		await stopped.promise;
 		expect(logs).not.toContain("extension reloading into update");
 		expect(await installedRelayExtensionVersion(dir)).toBe(OLD);
@@ -258,10 +243,7 @@ describe("Chrome native host install", () => {
 				"Google/Chrome Canary",
 				"Chromium",
 				"BraveSoftware/Brave-Browser",
-			].map(
-				(browser) =>
-					`Library/Application Support/${browser}/NativeMessagingHosts`,
-			),
+			].map(browser => `Library/Application Support/${browser}/NativeMessagingHosts`),
 		},
 		{
 			platform: "linux",
@@ -272,7 +254,7 @@ describe("Chrome native host install", () => {
 				"google-chrome-canary",
 				"chromium",
 				"BraveSoftware/Brave-Browser",
-			].map((browser) => `.config/${browser}/NativeMessagingHosts`),
+			].map(browser => `.config/${browser}/NativeMessagingHosts`),
 		},
 		{ platform: "win32", roots: [".omp/browser-relay"] },
 	];
@@ -290,15 +272,12 @@ describe("Chrome native host install", () => {
 				dir,
 				command: [process.execPath],
 			});
-			expect(targets).toEqual(roots.map((root) => home.join(root, MANIFEST)));
+			expect(targets).toEqual(roots.map(root => home.join(root, MANIFEST)));
 			for (const target of targets) {
 				expect(await Bun.file(target).json()).toEqual({
 					name: "sh.omp.browser",
 					description: "omp browser native messaging host",
-					path: path.join(
-						dir,
-						platform === "win32" ? "native-host.cmd" : "native-host",
-					),
+					path: path.join(dir, platform === "win32" ? "native-host.cmd" : "native-host"),
 					type: "stdio",
 					allowed_origins: [
 						"chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
@@ -314,24 +293,15 @@ describe("Chrome native host install", () => {
 		async () => {
 			const dir = home.join("relay");
 			const source = home.join("omp's launcher.ts");
-			await Bun.write(
-				source,
-				"process.stdout.write(JSON.stringify(process.argv.slice(2)));\n",
-			);
+			await Bun.write(source, "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n");
 			await writeRelayNativeHost([], {
 				platform: "linux",
 				home: home.path(),
 				dir,
 				command: [process.execPath, source],
 			});
-			const launcher = Bun.spawn(
-				[path.join(dir, "native-host"), "chrome-extension://unused/"],
-				{ stdout: "pipe" },
-			);
-			expect(await new Response(launcher.stdout).json()).toEqual([
-				"browser-relay",
-				"native-host",
-			]);
+			const launcher = Bun.spawn([path.join(dir, "native-host"), "chrome-extension://unused/"], { stdout: "pipe" });
+			expect(await new Response(launcher.stdout).json()).toEqual(["browser-relay", "native-host"]);
 			expect(await launcher.exited).toBe(0);
 		},
 	);
@@ -341,14 +311,9 @@ it.skipIf(process.platform === "win32")(
 	"invokes the verified new executable to sync and does not fail the update on a nonzero sync exit",
 	async () => {
 		const launcher = home.join("new omp launcher");
-		await Bun.write(
-			launcher,
-			'#!/bin/sh\nprintf "%s\\n" "$@" > "$0.args"\nexit 7\n',
-		);
+		await Bun.write(launcher, '#!/bin/sh\nprintf "%s\\n" "$@" > "$0.args"\nexit 7\n');
 		await fs.chmod(launcher, 0o700);
 		await syncRelayAfterVerifiedUpdate(launcher);
-		expect(await Bun.file(`${launcher}.args`).text()).toBe(
-			"browser-relay\nsync\n",
-		);
+		expect(await Bun.file(`${launcher}.args`).text()).toBe("browser-relay\nsync\n");
 	},
 );
