@@ -217,8 +217,8 @@ async function runPrintModeCore(
 	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
 	// human can review the plan before it executes. Headless print mode has no
 	// surface to review, approve, or exit a plan from, and the turn carries no
-	// deterministic way out of plan mode — the model must voluntarily emit a valid
-	// `xd://propose` execute-dispatch, and when it does not the run strands until
+	// deterministic way out of plan mode — the model must voluntarily submit a
+	// valid plan with `propose`, and when it does not the run strands until
 	// the deadline (issue #8272). So do not honor the startup default here; the
 	// supported headless plan flow is `--plan-yolo` (auto-approve → implement),
 	// which is wired independently through the prewalk coordinator.

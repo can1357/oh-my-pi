@@ -478,7 +478,6 @@ function buildCompactionV2Headers(
 		}
 		applyCodexResidencyHeader(headers, apiKey);
 		if (routingSessionId) {
-			headers[OPENAI_HEADERS.CONVERSATION_ID] = routingSessionId;
 			headers[OPENAI_HEADERS.SESSION_ID] = routingSessionId;
 			headers["x-client-request-id"] = routingSessionId;
 		}
