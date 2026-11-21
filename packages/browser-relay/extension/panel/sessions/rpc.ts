@@ -26,6 +26,7 @@ import type {
 	WireMessage,
 } from "@oh-my-pi/pi-wire";
 import type {
+	AbortAndRestoreQueueResult,
 	AgentEndEvent,
 	AgentStartEvent,
 	AutoCompactionEndEvent,
@@ -56,7 +57,7 @@ import type {
 	ToolExecutionUpdateEvent,
 } from "../../../../coding-agent/src/modes/rpc/wire/rpc-wire.generated";
 import type { RpcSessionInfo } from "../../messages";
-import type { PanelModel, PanelSession, PanelSnapshot, PanelThinking, PanelWorker } from "../session";
+import type { PanelModel, PanelSession, PanelSnapshot, PanelThinking, PanelWorker, QueuedDraft } from "../session";
 
 const MAX_NOTICES = 50;
 /** Coalescing window for high-rate events: about one display frame. */
@@ -86,7 +87,21 @@ type RpcOk =
 	| {
 			type: "response";
 			id?: string;
-			command: "prompt" | "abort" | "set_model" | "set_thinking_level" | "compact" | "set_subagent_subscription";
+			command: "abort_and_restore_queue";
+			success: true;
+			data: AbortAndRestoreQueueResult;
+	  }
+	| {
+			type: "response";
+			id?: string;
+			command:
+				| "prompt"
+				| "abort_and_deliver_queue"
+				| "resume"
+				| "set_model"
+				| "set_thinking_level"
+				| "compact"
+				| "set_subagent_subscription";
 			success: true;
 			data?: unknown;
 	  };
@@ -137,8 +152,10 @@ type RpcCommand =
 	| { type: "get_state" }
 	| { type: "get_entries"; since?: string }
 	| { type: "get_available_models" }
-	| { type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior: "steer" }
-	| { type: "abort" }
+	| { type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior: "steer" | "followUp" }
+	| { type: "abort_and_restore_queue" }
+	| { type: "abort_and_deliver_queue" }
+	| { type: "resume" }
 	| { type: "get_model_picker"; query: string }
 	| { type: "set_model"; provider: string; modelId: string; thinkingLevel?: ConfiguredThinkingLevel; role?: string }
 	| { type: "set_thinking_level"; level: ConfiguredThinkingLevel }
@@ -270,25 +287,47 @@ export class RpcPanelSession implements PanelSession {
 		return this.#snapshot;
 	}
 
-	prompt(text: string, images: readonly ImageContent[]): void {
-		this.#call({
-			type: "prompt",
-			message: text,
-			...(images.length > 0 ? { images: [...images] } : {}),
-			streamingBehavior: "steer",
-		}).catch(error => {
-			this.#pushNotice("error", `prompt failed: ${errorMessage(error)}`);
+	prompt(text: string, images: readonly ImageContent[], options: { followUp?: boolean } = {}): void {
+		this.#send(
+			{
+				type: "prompt",
+				message: text,
+				...(images.length > 0 ? { images: [...images] } : {}),
+				streamingBehavior: options.followUp ? "followUp" : "steer",
+			},
+			"prompt failed",
+		);
+	}
+
+	resume(): void {
+		this.#send({ type: "resume" }, "couldn’t continue");
+	}
+
+	deliverQueue(): void {
+		this.#send({ type: "abort_and_deliver_queue" }, "couldn’t interrupt");
+	}
+
+	/** Fire-and-forget `command`; a failure becomes an error notice led by `failure`. */
+	#send(command: RpcCommand, failure: string): void {
+		this.#call(command).catch(error => {
+			this.#pushNotice("error", `${failure}: ${errorMessage(error)}`);
 			this.#commit();
 		});
 	}
 
-	async abort(): Promise<void> {
+	async abort(): Promise<readonly QueuedDraft[]> {
 		if (this.#phase === "ended") throw new Error(this.#endedReason ?? "the session has ended");
 		this.#aborting = true;
 		this.#rebuildState();
 		this.#commit();
 		try {
-			await this.#call({ type: "abort" });
+			const response = await this.#call({ type: "abort_and_restore_queue" });
+			if (response.command !== "abort_and_restore_queue")
+				throw new Error("unexpected response to abort_and_restore_queue");
+			const { steering, followUp, imagesDropped, truncated } = response.data;
+			if (truncated) this.#pushNotice("warning", "some queued messages were too large to hand back");
+			else if (imagesDropped) this.#pushNotice("warning", "queued images were too large to hand back");
+			return [...steering, ...followUp].map(message => ({ text: message.text, images: message.images ?? [] }));
 		} finally {
 			this.#aborting = false;
 			this.#rebuildState();

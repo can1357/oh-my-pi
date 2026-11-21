@@ -46,9 +46,9 @@ import { NotAnImageError, prepareImage, prepareWireImage } from "./images";
 import { Lightbox, type LightboxImage } from "./media";
 import { levelLabel, ModelPicker, ThinkingMenu } from "./model-picker";
 import { scheduleCaption } from "./schedule";
-import type { PanelSession, PanelSnapshot, PanelWorker } from "./session";
+import type { PanelSession, PanelSnapshot, PanelWorker, QueuedDraft } from "./session";
 import { sortShortcuts } from "./storage";
-import { hostOf } from "./tab-context";
+import { hostOf, parsePrompt } from "./tab-context";
 import { imageSrc } from "./timeline";
 import { Favicon, IconButton, Menu, type MenuEntry, type MenuHandle } from "./ui";
 
@@ -69,6 +69,8 @@ export interface Outgoing {
 	images: ImageContent[];
 	tabs: TabContext[];
 	shortcutIds: string[];
+	/** Sent with Ctrl+Enter: a running turn takes it once it finishes instead of as steering. */
+	followUp: boolean;
 }
 
 /** Things the slash menu and Actions menu ask the app to do. */
@@ -92,6 +94,8 @@ export interface ComposerHandle {
 	addFiles(files: readonly File[]): void;
 	/** Put a message that could not be sent back: its text and its images. */
 	restore(outgoing: Outgoing): void;
+	/** Put messages a stop took off the queue back before the draft, without their tab context. */
+	restoreQueued(drafts: readonly QueuedDraft[]): void;
 }
 
 interface Attachment {
@@ -104,6 +108,9 @@ interface Attachment {
 }
 
 type TabMode = { kind: "follow" } | { kind: "pinned"; tab: TabContext } | { kind: "none" };
+
+/** Messages that mean "continue", as in omp's composer. */
+const CONTINUE: ReadonlySet<string> = new Set([".", "c"]);
 
 /** What the composer needs from the app. */
 export interface ComposerProps {
@@ -121,6 +128,10 @@ export interface ComposerProps {
 	strip: Strip | null;
 	onDismissStrip(): void;
 	onSend(outgoing: Outgoing): void;
+	/** `.` or `c` sent alone: omp's continue shortcut. */
+	onResume(): void;
+	/** Enter in an empty composer while queued input waits on a running turn: interrupt and send it. */
+	onDeliverQueue(): void;
 	onStop(): void;
 	onCommand(command: ComposerCommand): void;
 	onNotify(level: "info" | "error", message: string): void;
@@ -353,6 +364,20 @@ export function Composer(props: ComposerProps): ReactNode {
 			editorRef.current?.setText(outgoing.display);
 			setAttachments(outgoing.images.map(image => ({ id: ++nextId.current, status: "ready", image })));
 		},
+		restoreQueued(drafts) {
+			const text = drafts
+				// omp lists a message of images alone as `[Image]`; its images come back as attachments.
+				.map(draft => (draft.images.length > 0 && draft.text === "[Image]" ? "" : parsePrompt(draft.text).text))
+				.filter(part => part !== "")
+				.join("\n\n");
+			if (text !== "") editorRef.current?.prepend(text);
+			const images = drafts.flatMap(draft => draft.images);
+			if (images.length > 0)
+				setAttachments(list => [
+					...list,
+					...images.map((image): Attachment => ({ id: ++nextId.current, status: "ready", image })),
+				]);
+		},
 	}));
 
 	// ---- tabs ----
@@ -455,12 +480,28 @@ export function Composer(props: ComposerProps): ReactNode {
 	}, [windowTabs, tabMode, activeTab, primaryTab, extraTabs, props.hasTabGroup, props.onCommand]);
 
 	// ---- sending ----
-	const send = (): void => {
+	const send = (options: { followUp: boolean } = { followUp: false }): void => {
 		const editor = editorRef.current;
-		if (editor === null || !canSend) return;
+		if (editor === null) return;
+		// omp's empty Enter: a running turn with queued input stops and continues with that input.
+		if (empty && attachments.length === 0) {
+			if (canPrompt && working && queued > 0) props.onDeliverQueue();
+			return;
+		}
+		if (!canSend) return;
 		const byId = new Map(props.shortcuts.map(shortcut => [shortcut.id, shortcut]));
 		const content = editor.read(id => byId.get(id)?.prompt);
 		const ready = attachments.filter(attachment => attachment.status === "ready" && attachment.image !== undefined);
+		if (
+			!options.followUp &&
+			ready.length === 0 &&
+			content.shortcutIds.length === 0 &&
+			CONTINUE.has(content.display)
+		) {
+			props.onResume();
+			editor.clear();
+			return;
+		}
 		const captions = ready
 			.map((attachment, index) =>
 				attachment.caption === undefined
@@ -478,6 +519,7 @@ export function Composer(props: ComposerProps): ReactNode {
 			images: ready.flatMap(attachment => (attachment.image === undefined ? [] : [attachment.image])),
 			tabs,
 			shortcutIds: content.shortcutIds,
+			followUp: options.followUp,
 		});
 		editor.clear();
 		setAttachments([]);
@@ -821,7 +863,15 @@ export function Composer(props: ComposerProps): ReactNode {
 							/>
 						)}
 					</span>
-					{queued > 0 && <span className="sh-queued pn-queued">queued ×{queued}</span>}
+					{queued > 0 && (
+						<span
+							className="sh-queued pn-queued"
+							data-tip={working ? "Enter with an empty message sends it now; Esc stops and returns it" : undefined}
+							data-tip-side="above"
+						>
+							queued ×{queued}
+						</span>
+					)}
 					<span className="pn-footer-spacer" />
 					{canSetThinking && (
 						<span className="pn-pop-anchor">
@@ -901,7 +951,7 @@ export function Composer(props: ComposerProps): ReactNode {
 							className="pn-send"
 							aria-label={working ? "Queue message" : "Send"}
 							disabled={!canSend}
-							onClick={send}
+							onClick={() => send()}
 						>
 							{uploading ? <span className="pn-send-wait" /> : <ArrowUp size={16} strokeWidth={2.2} />}
 						</button>

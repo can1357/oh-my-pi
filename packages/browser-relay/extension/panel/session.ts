@@ -58,6 +58,12 @@ export interface PanelModel {
 	name: string;
 }
 
+/** A queued message {@link PanelSession.abort} took back, as the host had queued it. */
+export interface QueuedDraft {
+	text: string;
+	images: readonly ImageContent[];
+}
+
 export interface PanelSession {
 	readonly kind: "collab" | "rpc";
 	/** Collab instance id or rpc session key; stable for the session's life. */
@@ -67,10 +73,18 @@ export interface PanelSession {
 	/** `useSyncExternalStore` pair: snapshots are immutable and change identity on every update. */
 	subscribe(listener: () => void): () => void;
 	getSnapshot(): PanelSnapshot;
-	/** Send a user prompt; queued by the host when a turn is running. */
-	prompt(text: string, images: readonly ImageContent[]): void;
-	/** Stop the running turn. Resolves when the host acknowledged it, rejects when it can't reach the host. */
-	abort(): Promise<void>;
+	/** Send a user prompt. A running turn takes it as steering, or once it finishes with `followUp` (omp's Ctrl+Enter). */
+	prompt(text: string, images: readonly ImageContent[], options?: { followUp?: boolean }): void;
+	/** omp's `.`/`c` continue shortcut: resume the agent, interrupting a running turn first. Failures become notices. */
+	resume(): void;
+	/** omp's empty Enter: interrupt a running turn that has queued input and continue it with that input. */
+	deliverQueue(): void;
+	/**
+	 * Stop the running turn, as omp's Esc: queued messages come back, oldest first, instead of running later. Resolves
+	 * once the host acknowledged, rejects when it can't reach the host. A collab host keeps its queue (it may hold the
+	 * host's own messages), so collab sessions resolve with none.
+	 */
+	abort(): Promise<readonly QueuedDraft[]>;
 	/** Answer the pending `uiRequest`; `undefined` cancels it. */
 	answer(reqId: number, value: CollabUiResponseValue): void;
 	/**

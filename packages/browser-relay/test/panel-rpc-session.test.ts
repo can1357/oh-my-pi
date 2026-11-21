@@ -251,14 +251,22 @@ describe("rpc panel session", () => {
 			cancelled: true,
 		});
 
+		// Stop is omp's Esc: the queue comes back, steering before follow-ups, instead of running later.
 		let stopped = false;
-		const stop = session.abort().then(() => {
+		const stop = session.abort().then(drafts => {
 			stopped = true;
+			return drafts;
 		});
 		expect(session.getSnapshot().state?.isAborting).toBe(true);
 		expect(stopped).toBe(false);
-		worker.respond("abort");
-		await stop;
+		worker.respond("abort_and_restore_queue", {
+			steering: [{ text: "fix the header" }],
+			followUp: [{ text: "then deploy", images: [image] }],
+		});
+		expect(await stop).toEqual([
+			{ text: "fix the header", images: [] },
+			{ text: "then deploy", images: [image] },
+		]);
 		expect(session.getSnapshot().state?.isAborting).toBeUndefined();
 	});
 
@@ -295,7 +303,7 @@ describe("rpc panel session", () => {
 		expect(session.getSnapshot()).toBe(before);
 		expect(published).toBe(0);
 		expect(worker.closed).toEqual([]);
-		expect(worker.sent.some(command => command.type === "abort")).toBe(false);
+		expect(worker.sent.some(command => command.type === "abort_and_restore_queue")).toBe(false);
 	});
 
 	it("ends when the worker reports the process exited, failing pending calls", async () => {

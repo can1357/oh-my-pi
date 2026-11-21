@@ -5,6 +5,7 @@
 ### Added
 
 - The side panel's model switcher is omp's session model picker: Recent block, the same search ranking as the TUI, role chips, `@` quick roles and a thinking slider; a thinking chip sits beside it.
+- The side panel's composer takes omp's input shortcuts: `.` or `c` alone continues the agent, Enter in an empty composer interrupts a run to send the queued messages, Ctrl+Enter queues a message until the run finishes, and Esc (or Stop) puts queued messages back in the composer instead of leaving them to run later.
 
 ### Fixed
 
