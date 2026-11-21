@@ -3,7 +3,7 @@
  * evaluation stays cached in a module registry, and the worker keeps module state). It loads the stubs, then the
  * worker, links the native port it opened, runs one scenario through the worker's own listeners, and prints what the
  * host, the relay, the panel and the tabs saw. Scenario from the environment: `PROBE_DOWNLOADS`, `PROBE_FIND_DOWNLOAD`,
- * `PROBE_SCENARIO` (`panel`, `overlay`, `epoch`, `chunk`, `reconnect`).
+ * `PROBE_SCENARIO` (`panel`, `overlay`, `epoch`, `chunk`, `reconnect`, `refused`).
  */
 import { FakePort, probe } from "./browser-relay-background-stubs";
 
@@ -33,6 +33,30 @@ function host() {
 
 function relaySays(message: Record<string, unknown>): void {
 	host().hostSays({ t: "relay", line: JSON.stringify(message) });
+}
+
+/** Hold the worker's reconnect timers for the probe to fire, in the order set; other timers run as usual. */
+function holdReconnects(): Array<{ delay: number; run: () => void }> {
+	const timers: Array<{ delay: number; run: () => void }> = [];
+	const realSetTimeout = globalThis.setTimeout;
+	const hold = (run: () => void, delay?: number): unknown => {
+		if (delay !== undefined && delay >= 1_000 && delay <= 10_000) {
+			timers.push({ delay, run });
+			return 0;
+		}
+		return realSetTimeout(run, delay);
+	};
+	globalThis.setTimeout = hold as unknown as typeof setTimeout;
+	return timers;
+}
+
+/** A side panel connected to the worker, which hears its relay status from now on. */
+async function openPanel(): Promise<FakePort> {
+	const panel = new FakePort("omp-panel");
+	fire("runtimeOnConnect", panel);
+	panel.deliver({ kind: "hello", windowId: 1 });
+	await settle();
+	return panel;
 }
 
 await settle();
@@ -113,21 +137,8 @@ switch (Bun.env.PROBE_SCENARIO) {
 		break;
 	}
 	case "reconnect": {
-		// Hold reconnect timers for the probe to fire; anything else runs as usual.
-		const timers: Array<{ delay: number; run: () => void }> = [];
-		const realSetTimeout = globalThis.setTimeout;
-		const holdReconnects = (run: () => void, delay?: number): ReturnType<typeof setTimeout> => {
-			if (delay !== undefined && delay >= 1_000 && delay <= 10_000) {
-				timers.push({ delay, run });
-				return 0 as unknown as ReturnType<typeof setTimeout>;
-			}
-			return realSetTimeout(run, delay);
-		};
-		globalThis.setTimeout = holdReconnects as unknown as typeof setTimeout;
-		const panel = new FakePort("omp-panel");
-		fire("runtimeOnConnect", panel);
-		panel.deliver({ kind: "hello", windowId: 1 });
-		await settle();
+		const timers = holdReconnects();
+		const panel = await openPanel();
 		// The host exits six times in a row without linking, then links once and exits again.
 		for (let exit = 0; exit < 7; exit++) {
 			if (exit === 6) {
@@ -144,6 +155,23 @@ switch (Bun.env.PROBE_SCENARIO) {
 		await settle();
 		report.reconnectDelays = timers.map(timer => timer.delay);
 		report.portsBeforeAlarm = portsBeforeAlarm;
+		report.panelReceived = panel.received;
+		break;
+	}
+	case "refused": {
+		const timers = holdReconnects();
+		const panel = await openPanel();
+		// The host exits without a reason, then the browser refuses to start it twice, then a host links.
+		host().hostExits();
+		await settle();
+		for (let refusal = 0; refusal < 2; refusal++) {
+			timers.at(-1)?.run();
+			host().hostExits("Access to the native messaging host was disabled by the system administrator.");
+			await settle();
+		}
+		timers.at(-1)?.run();
+		host().hostSays({ t: "linked" });
+		await settle();
 		report.panelReceived = panel.received;
 		break;
 	}
