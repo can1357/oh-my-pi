@@ -642,22 +642,27 @@ describe("todo backend", () => {
 		});
 
 		it("an edit that lands while the backend decides fails the call, keeps the edit and reaches the backend", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension], "tracker");
-			const gate = Promise.withResolvers<void>();
-			backend.hold = gate.promise;
+			for (const unmirrored of [false, true]) {
+				const backend = tracker("tracker", true);
+				const { session } = await open([backend.extension], "tracker");
+				const gate = Promise.withResolvers<void>();
+				backend.hold = gate.promise;
 
-			const deciding = backend.entered();
-			const call = todo(session, { op: "init", items: ["from the model"] });
-			await deciding;
-			session.commitTodoPhases(list("from the user"));
-			gate.resolve();
-			const result = await call;
-			await settled(session);
+				const deciding = backend.entered();
+				const call = todo(session, { op: "init", items: ["from the model"] });
+				await deciding;
+				// Made while no backend was selected for a moment, the edit queues no list of its own.
+				if (unmirrored) cfgTodoBackend.override(session.settings, "native");
+				session.commitTodoPhases(list("from the user"));
+				if (unmirrored) cfgTodoBackend.override(session.settings, "tracker");
+				gate.resolve();
+				const result = await call;
+				await settled(session);
 
-			expect(result.isError).toBe(true);
-			expect(session.getTodoPhases()).toEqual(list("from the user"));
-			expect(tasksOf(backend)).toEqual([["from the user"]]);
+				expect(result.isError).toBe(true);
+				expect(session.getTodoPhases()).toEqual(list("from the user"));
+				expect(tasksOf(backend)).toEqual([["from the user"]]);
+			}
 		});
 
 		it("a call computed before a newer list reached the backend fails without asking it", async () => {
@@ -855,37 +860,49 @@ describe("todo backend", () => {
 			}
 		});
 
-		it("a late acceptance by a backend selected again takes the place of a list waiting for another backend", async () => {
-			const backend = tracker("tracker", true);
-			const other = tracker("other");
-			const { session } = await open([backend.extension, other.extension], "tracker");
-			session.commitTodoPhases(list("a"));
-			await settled(session);
-			const late = Promise.withResolvers<void>();
-			backend.applyHold = late.promise;
-			const deciding = backend.entered();
-			const abort = new AbortController();
-			const call = todo(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
-			await deciding;
-			abort.abort();
-			await expect(call).rejects.toThrow();
+		it("a late acceptance by a backend selected again is followed by the list as it is then, in place of whatever waits", async () => {
+			// What waits: a list for another backend, or an older one for this backend (an edit made
+			// while no backend was selected queued none).
+			for (const via of ["other", "native"]) {
+				const backend = tracker("tracker", true);
+				const other = tracker("other");
+				const { session } = await open([backend.extension, other.extension], "tracker");
+				session.commitTodoPhases(list("a"));
+				await settled(session);
+				const late = Promise.withResolvers<void>();
+				backend.applyHold = late.promise;
+				const deciding = backend.entered();
+				const abort = new AbortController();
+				const call = todo(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
+				await deciding;
+				abort.abort();
+				await expect(call).rejects.toThrow();
 
-			cfgTodoBackend.override(session.settings, "other");
-			const slow = Promise.withResolvers<void>();
-			other.hold = slow.promise;
-			const delivering = other.entered();
-			session.commitTodoPhases(list("a", "c"));
-			await delivering;
-			session.commitTodoPhases(list("a", "d"));
-			cfgTodoBackend.override(session.settings, "tracker");
-			late.resolve();
-			// The backend's late answer is handled in a continuation of its own promise.
-			await Bun.sleep(0);
-			slow.resolve();
-			await settled(session);
+				const busy = via === "other" ? other : backend;
+				if (via === "other") cfgTodoBackend.override(session.settings, "other");
+				const slow = Promise.withResolvers<void>();
+				busy.hold = slow.promise;
+				const delivering = busy.entered();
+				session.commitTodoPhases(list("a", "c"));
+				await delivering;
+				session.commitTodoPhases(list("a", "d"));
+				if (via === "native") {
+					cfgTodoBackend.override(session.settings, "native");
+					session.commitTodoPhases(list("a", "e"));
+				}
+				cfgTodoBackend.override(session.settings, "tracker");
+				late.resolve();
+				// The backend's late answer is handled in a continuation of its own promise.
+				await Bun.sleep(0);
+				slow.resolve();
+				await settled(session);
 
-			expect(tasksOf(backend)).toEqual([["a"], ["a", "d"]]);
-			expect(tasksOf(other)).toEqual([["a", "c"]]);
+				expect({ via, tracker: tasksOf(backend), other: tasksOf(other) }).toEqual(
+					via === "other"
+						? { via, tracker: [["a"], ["a", "d"]], other: [["a", "c"]] }
+						: { via, tracker: [["a"], ["a", "c"], ["a", "e"]], other: [] },
+				);
+			}
 		});
 
 		it("as the session closes, a todo call fails without asking and a late acceptance is sent nothing", async () => {

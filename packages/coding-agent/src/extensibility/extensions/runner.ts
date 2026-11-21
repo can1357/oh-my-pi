@@ -1817,17 +1817,17 @@ export class ExtensionRunner {
 			const refused = (why: string) =>
 				`Todo backend "${backend}" did not accept this change: ${sanitizeDisplayLine(why) || "no reason given"}`;
 			if (!Bun.deepEquals(current(), change.previous)) return TODO_LIST_CHANGED_ERROR;
-			// The backend holds a change omp did not commit: omp's list follows, also when it equals
-			// the last one sent. Not as the session closes, nor once it has changed: the backend
-			// keeps that change for a session omp is no longer in. Nor once it is no longer selected,
-			// or its extension no longer holds the id: omp has stopped mirroring changes to it. A list
-			// waiting for another backend gives way, as it would to a commit: that one is not selected.
+			// The backend holds a change omp did not commit: omp's list as it is then follows, also when
+			// it equals the last one sent, in place of whatever waits (an older list for this backend, or
+			// one for a backend that is no longer selected). Not as the session closes, nor once it has
+			// changed: the backend keeps that change for a session omp is no longer in. Nor once it is no
+			// longer selected, or its extension no longer holds the id: omp has stopped mirroring to it.
 			const owns = () => this.getTodoBackends().get(backend)?.extension === extension;
 			const resync = () => {
 				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
 				if (!owns()) return;
 				this.#todoStale = true;
-				if (this.#todoPending?.backend !== backend) this.#todoPending = { backend, sessionId, phases: current() };
+				this.#todoPending = { backend, sessionId, phases: current() };
 				this.#queueTodoBackendCall();
 			};
 			let waiting = true;
@@ -1861,12 +1861,13 @@ export class ExtensionRunner {
 			if (verdict === true) {
 				// Accepted for a session omp has left: its record of what the backend holds stays unknown.
 				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
-				// A list waiting for this backend (a late acceptance's correction, or a client setting the
-				// list it had) would go out before the tool commits `next` and take the change back. The
-				// backend holds `next`, which the tool commits; when the list changed, what waits goes out,
-				// as it does when the id went to another extension meanwhile.
-				if (this.#todoPending?.backend === backend && owns() && Bun.deepEquals(current(), change.previous))
-					this.#todoPending = undefined;
+				// The list changed while the backend decided: the tool commits nothing, so `next` is such
+				// a change, also when the edit queued no list (made while no backend was selected).
+				if (!Bun.deepEquals(current(), change.previous)) resync();
+				// Otherwise a list waiting for this backend (a late acceptance's correction, or a client
+				// setting the list it had) would go out before the tool commits `next` and take the change
+				// back. Not when the id went to another extension meanwhile: the list is that one's to get.
+				else if (this.#todoPending?.backend === backend && owns()) this.#todoPending = undefined;
 				// `next` is recorded as held only when this backend held `previous`. After a failed call,
 				// or when it was selected or took the id over since, the commit's list still goes out.
 				const held =
