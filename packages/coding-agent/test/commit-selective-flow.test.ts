@@ -904,6 +904,57 @@ describe("selective commit flow", () => {
 		);
 	});
 
+	it("refuses a bare path that would include pre-existing lines in another session's commit", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "src/a.txt";
+		await Bun.write(path.join(root, file), "original\nmiddle\noriginal end\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await Bun.write(path.join(root, file), "other session\nmiddle\noriginal end\n");
+		await write("Main", undefined, file, "other session\nmiddle\nmy change\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const selected = draft.diff();
+		expect(draft.summary()).toContain("◐ src/a.txt");
+		expect(selected).not.toContain("+other session");
+		for (const target of [file, "a.txt"]) {
+			expect(() => draft.take({ path: target })).toThrow(/src\/a\.txt:.*1a \(pre-existing\)/);
+			expect(draft.diff()).toBe(selected);
+		}
+
+		const explicit = await createDraft({ cwd: root, journal, caller: "Main" });
+		explicit.take({ path: file, units: ["1a"] });
+		expect(explicit.diff()).toContain("+other session");
+
+		await commitSelection(draft, { subject: "fix: kept my change" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["show", "HEAD:src/a.txt"])).toBe("original\nmiddle\nmy change\n");
+		expect(await Bun.file(path.join(root, file)).text()).toBe("other session\nmiddle\nmy change\n");
+	});
+
+	it("requires explicit selection of another agent's lines while keeping grep and globs available", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "src/a.txt";
+		await Bun.write(path.join(root, file), "original\nmiddle\noriginal end\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await write("Main", undefined, file, "my change\nmiddle\noriginal end\n");
+		await write("Other", undefined, file, "my change\nmiddle\nother change\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const selected = draft.diff();
+		expect(selected).not.toContain("+other change");
+		expect(() => draft.take({ path: file })).toThrow(/src\/a\.txt:.*2a \(Other\)/);
+		expect(draft.diff()).toBe(selected);
+		draft.take({ path: file, grep: "other change" });
+		expect(draft.diff()).toContain("+other change");
+
+		const byGlob = await createDraft({ cwd: root, journal, caller: "Main" });
+		byGlob.take({ path: "src/*.txt" });
+		expect(byGlob.diff()).toContain("+other change");
+	});
+
 	it("rejects an unknown hunk unit id without changing the selection", async () => {
 		const { root, journal, write } = await emptyRepo();
 		await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");

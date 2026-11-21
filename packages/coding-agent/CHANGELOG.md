@@ -51,6 +51,7 @@
 
 ### Fixed
 
+- Bare `commit.take(path)` now refuses to include pre-existing or out-of-scope agents' lines without explicit unit or grep selection.
 - A tool card left unfinished by a stream that never completed no longer keeps the rest of the transcript out of scrollback and squeezed to one-line rows; it is closed when the next reply starts
 - Spotlight keeps short relevant passages from multiple large function bodies together with their signatures, even when a code outline is cut again.
 - A usage-limit reset inside `retry.maxDelayMs` is now waited out even without a `Retry-After` header.

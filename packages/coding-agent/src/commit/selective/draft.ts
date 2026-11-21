@@ -688,6 +688,31 @@ export class Draft {
 		const pattern = target.grep === undefined ? undefined : new RegExp(target.grep);
 		// Plan every file before changing any: a unit missing from one file rejects the whole request.
 		const plans = files.map(file => ({ file, ops: this.#targetOps(file, target.units, pattern) }));
+		if (
+			take &&
+			target.path !== undefined &&
+			!target.units?.length &&
+			target.grep === undefined &&
+			(files[0]?.path === target.path || !/[*?[{]/.test(target.path))
+		) {
+			for (const { file, ops } of plans) {
+				if (ops === "whole" || !file.attribution) continue;
+				const foreign: string[] = [];
+				file.attribution.hunks.forEach((hunk, hunkIndex) => {
+					[...hunkUnits(hunk)].forEach(([actor, unitOps], unitIndex) => {
+						if (actor !== PRE && (isPseudoActor(actor) || this.scope.has(actor))) return;
+						if (unitOps.some(op => !file.selected.has(op.id))) {
+							foreign.push(`${hunkIndex + 1}${unitLetter(unitIndex)} (${actorName(actor)})`);
+						}
+					});
+				});
+				if (foreign.length > 0) {
+					throw new Error(
+						`${file.path}: take() without units would add lines that are not yours: ${foreign.join(", ")}. Check them with show("${file.path}"), then name the units you mean to take.`,
+					);
+				}
+			}
+		}
 		let touched = 0;
 		for (const { file, ops } of plans) {
 			if (ops === "whole") {
