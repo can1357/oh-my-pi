@@ -20,7 +20,6 @@ import type { DaemonReadySpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";
-import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { TextTap } from "../job-widgets/text-tap";
 import { resolveDaemonSpawnOptions } from "../launch/spawn-options";
 import { renderTerminalOutput } from "../launch/terminal-output";
@@ -67,10 +66,7 @@ const INHERITED_FDS_META = "inherited_fds";
 const LOG_FILE = "output.log";
 const PREVIOUS_LOG_FILE = "output.previous.log";
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
-const DAEMON_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
-	platform: process.platform,
-	hostHasInheritableConsole: hostHasInheritableConsole(),
-});
+const DAEMON_SPAWN_OPTIONS = resolveDaemonSpawnOptions({ platform: process.platform });
 
 const SIGNAL_NUMBER: Record<DaemonSignal, number> = {
 	SIGINT: os.constants.signals.SIGINT,
