@@ -72,7 +72,7 @@ class "gemini" {
 	// google-level transports emit `thinkingLevel` on the wire, so the tier is
 	// dropped there; budget (anthropic-messages) and reasoning_effort resellers
 	// never send the rejected value and keep the four-tier ladder. The collapsed
-	// google-antigravity / google-gemini-cli variants remap minimal -> LOW and
+	// google-antigravity variants remap minimal -> LOW and
 	// carry their own explicit ladder, so they are unaffected.
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
 	// https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
@@ -218,7 +218,7 @@ class "gemini" {
 			requires-skip-thought-signature-on-first-function-call #true
 		}
 	}
-	on "google-antigravity" "google-gemini-cli" {
+	on "google-antigravity" {
 		family "flash" {
 			stream-first-event-timeout-ms 60000
 			flash-stream-leak-workaround #true
