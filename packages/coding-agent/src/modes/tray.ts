@@ -417,8 +417,9 @@ function agentDoing(
 }
 
 /**
- * `sonnet-5.5 · low`: the model and thinking level an agent with a live session runs on now, as its
- * composer names them (a `/switch` shows at once), else the model that produced its work.
+ * `sonnet-5.5 · low`: what a queued or running agent with a live session runs on now, as its
+ * composer names it (a `/switch` shows at once), else the model that produced its work. Settled
+ * cards name {@link servedModel}.
  */
 function agentModel(session: ObservableSession | undefined, ref: AgentRecordLike | undefined): string {
 	const live = ref?.session && liveModelChip(ref.session);
@@ -575,7 +576,7 @@ function agentItem(
 		tool: doing.tool,
 		text: doing.text,
 		type,
-		model: agentModel(session, ref),
+		model: isLive(status) ? agentModel(session, ref) : servedModel(session, ref),
 		tools,
 		stats: agentStats(session?.progress),
 		start: remembered.start,
@@ -664,7 +665,7 @@ function finishedAgentItem(
 		tool: "",
 		text,
 		type,
-		model: agentModel(session, ref),
+		model: servedModel(session, ref),
 		tools,
 		stats,
 		start: acted - (duration ?? 0),

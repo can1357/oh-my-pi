@@ -63,7 +63,7 @@
 
 - Tern's tray cards follow an agent as its model streams: the call it is writing (such as `write · tests/test_norm.py`), the line it is writing, or Thinking, instead of its previous call until the new one starts
 - A tray card shows the model a `/switch` picked for the agent you are viewing at once, instead of the old model until the new one has answered
-- The tray's done card lists the model and thinking level each finished agent ran on, even after its model was switched
+- Finished agents' tray cards and the done card's list name the model and thinking level each agent ran on, even after its model was switched
 - The running subagents' live preview (`display.subagentLivePreview`) shows the call an agent is still writing, instead of its previous call until the new one starts
 - Sessions started from the omp extension's side panel drive only your Chrome: Eval's `browser.open` no longer launches omp's own browser there (`app` other than `"relay"` is refused), so every tab it opens shows up in your window
 - In Tern, answers keep their turn footer and its Copy button after a resume, a compaction or any other transcript rebuild; previously every answer drawn before the rebuild lost them

@@ -469,6 +469,31 @@ describe("tray items", () => {
 		]);
 	});
 
+	it("names the model a settled agent ran on, and a running one's current model, after a switch", () => {
+		const f = fixture();
+		const switched = {
+			model: { id: "gpt-5.5", thinking: true },
+			thinkingLevel: "low",
+		} as unknown as AgentRecordLike["session"];
+		const ran = { resolvedModel: "anthropic/claude-opus-4-5", resolvedThinkingLevel: ThinkingLevel.High };
+		f.sessions.push(observed("Running", "active", ran), observed("Settled", "completed", ran));
+		f.refs.push(
+			{ ...ref("Running", "running"), session: switched },
+			{ ...ref("Settled", "idle"), session: switched },
+		);
+		f.agentJobs.set("Settled", job("Settled", { type: "task", agentId: "Settled", status: "completed" }));
+		const models = () =>
+			buildTrayItems(input(f), new TrayMemory()).items.map(item => (item.item === "agent" ? item.model : ""));
+		// A job's undelivered result keeps the settled card beside the running one.
+		expect(models()).toEqual(["gpt-5.5 · low", "claude-opus-4-5 · high"]);
+		// Nothing runs: the settled agent's own card in a quiet tray.
+		f.sessions.splice(0, 1);
+		f.refs.splice(0, 1);
+		f.agentJobs.clear();
+		f.jobs.push(job("bg_1", { status: "completed", endTime: 2_000 }));
+		expect(models().filter(Boolean)).toEqual(["claude-opus-4-5 · high"]);
+	});
+
 	it("hides agent cards and the done card under display.pinnedAgents off, keeping the jobs", () => {
 		const f = fixture();
 		f.sessions.push(observed("Running", "active"));
