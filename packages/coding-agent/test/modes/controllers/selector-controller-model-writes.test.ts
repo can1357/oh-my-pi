@@ -9,6 +9,7 @@ import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/set
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -49,13 +50,18 @@ describe("SelectorController model selector writes", () => {
 		tempDir.removeSync();
 	});
 
-	function start(settings: Settings, initial: Model): { controller: SelectorController; showError: () => unknown } {
+	function start(
+		settings: Settings,
+		initial: Model,
+		scope?: Pick<AgentSessionConfig, "scopedModels" | "scopedModelsFromSettings">,
+	): { controller: SelectorController; showError: () => unknown } {
 		const live = new AgentSession({
 			agent: new Agent({ initialState: { model: initial, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
 			obfuscator: new SecretObfuscator([]),
+			...scope,
 		});
 		session = live;
 		const showError = vi.fn();
@@ -184,6 +190,24 @@ describe("SelectorController model selector writes", () => {
 		const { controller, showError } = start(settings, model("claude-sonnet-4-5"));
 
 		// The hub shows the project default as assigned, so picking it sends unassign.
+		await openModelHub(controller).onUnassign("default");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(session?.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("ignores a stale settings-derived scope when falling back to the persisted default", async () => {
+		await Bun.write(
+			tempDir.join(".omp", "config.yml"),
+			YAML.stringify({ modelRoles: { default: "anthropic/claude-opus-4-5" } }),
+		);
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const sonnet = model("claude-sonnet-4-5");
+		const { controller, showError } = start(settings, sonnet, {
+			scopedModels: [{ model: sonnet }],
+			scopedModelsFromSettings: true,
+		});
+
 		await openModelHub(controller).onUnassign("default");
 
 		expect(showError).not.toHaveBeenCalled();
