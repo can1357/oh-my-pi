@@ -93,7 +93,7 @@ export function renderComposerShapePreview(
 
 	const lines: string[] = [];
 	const top = style.renderTop(ctx);
-	if (top !== undefined) lines.push(top);
+	if (top !== undefined) lines.push(...(typeof top === "string" ? [top] : top));
 	lines.push(
 		...style.renderRow({
 			...ctx,
