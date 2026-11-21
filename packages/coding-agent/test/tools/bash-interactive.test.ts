@@ -78,8 +78,8 @@ describe("runInteractiveBashPty", () => {
 
 			expect(output).toContain("probe=from-session term=xterm-256color");
 			expect(output).toContain("tty=yes");
-			// The PTY writer can echo a final newline on teardown. Compare the probe's line.
-			expect(output.replace(/\n+$/u, "")).toBe(launch.replace(/\n+$/u, ""));
+			// The guards never reach the program: it sees the launch values, whatever they are.
+			expect(output).toBe(launch);
 		},
 	);
 

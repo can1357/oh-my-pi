@@ -5,7 +5,7 @@ import { relayExtensionFiles } from "@oh-my-pi/pi-coding-agent/tools/browser/rel
 import { installRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/installs";
 import { serveRelayLink } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/native-relay";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { relayExtensionNotice, waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
+import { relayExtensionNotice } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import type { FromNativeHost, ToNativeHost } from "../../../browser-relay/extension/messages";
 
@@ -170,12 +170,23 @@ describe("omp browser-relay install", () => {
 	it("reports the omp that installed the running script when Chrome restarts onto a newer manifest", async () => {
 		// After reinstalling, a Chrome restart re-reads manifest.json but keeps running the old service worker.
 		const port = await findFreeCdpPort();
-		relay = startRelayServer({ port, group: false, installRegistryFile: dir.join("installs.json") });
+		const settled = Promise.withResolvers<void>();
+		relay = startRelayServer({
+			port,
+			group: false,
+			installRegistryFile: dir.join("installs.json"),
+			log: message => {
+				// The relay hides an outdated extension's version while it checks whether it may rewrite its files;
+				// this worker is no registered install, so the check ends with the update stopped.
+				if (message === "extension update stopped") settled.resolve();
+			},
+		});
 		const runningScript = (await relayExtensionFiles("18.6.1"))["background.js"]!;
 		const manifestOnDisk = JSON.parse((await relayExtensionFiles(VERSION))["manifest.json"]!);
 		stopWorker = runExtensionWorker(runningScript, port, manifestOnDisk);
-		const cdpUrl = `http://127.0.0.1:${port}`;
-		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
-		expect(await relayExtensionNotice(cdpUrl)).toContain(`installed by omp 18.6.1; this is omp ${VERSION}`);
+		await settled.promise;
+		expect(await relayExtensionNotice(`http://127.0.0.1:${port}`)).toContain(
+			`installed by omp 18.6.1; this is omp ${VERSION}`,
+		);
 	});
 });

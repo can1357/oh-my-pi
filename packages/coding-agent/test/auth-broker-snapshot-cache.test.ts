@@ -284,8 +284,6 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		const hang = Promise.withResolvers<Response>();
 		const server = Bun.serve({
 			port: 0,
-			// Let the client deadline cancel the request.
-			idleTimeout: 0,
 			fetch: () => {
 				reached.resolve();
 				return hang.promise;
