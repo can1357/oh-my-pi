@@ -492,6 +492,7 @@ export type CalledToolShaper = (call: CalledToolResult) => Promise<AgentToolResu
  */
 export async function shapeCalledTool(session: ToolSession, call: CalledToolResult): Promise<AgentToolResult> {
 	const { tool, toolCallId, own, result } = call;
+	// Thrown tool errors already bypass this hook in wrappedExecute; keep returned error results verbatim too (still spill-capped).
 	if (result.isError === true) return result;
 	const experiment = shapingExperiment(session);
 	if (!experiment) return result;

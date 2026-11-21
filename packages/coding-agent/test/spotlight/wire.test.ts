@@ -1061,6 +1061,18 @@ describe("spotlight shaping of any tool", () => {
 		expect(spotlightDetails(result.details)).toBeUndefined();
 	});
 
+	it("keeps a non-edit tool's error result whole without journaling a Spotlight entry", async () => {
+		const run = await experimentSession(ranked());
+		await agentCall(fakeTool("board", BOARD.join("\n")), run, "t1");
+
+		const err = await agentCall(fakeTool("board", NEXT_BOARD, true), run, "t2");
+
+		expect(err.isError).toBe(true);
+		expect(resultText(err)).toBe(NEXT_BOARD);
+		expect(spotlightDetails(err.details)).toBeUndefined();
+		expect(entries(run.manager, SPOTLIGHT_ENTRY.shape).map(e => e.toolCallId)).toEqual(["t1"]);
+	});
+
 	it.each([10, 50])("keeps all %i numbered lines in an edit result when their text appeared earlier", async count => {
 		const run = await experimentSession(ranked());
 		const text = [
