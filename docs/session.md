@@ -495,7 +495,7 @@ rather than guessing from the historical-display `resolvedModel`. These fields
 are preserved in anonymized exports under the same flag, model-identity and
 effort rules as other session metadata.
 `isolated: true` marks an isolation-worktree child that cannot be cold-revived.
-`mountedTools` names the entries of `tools` presented as `xd://` devices rather than top-level
+`mountedTools` names the entries of `tools` presented as tool commands rather than top-level
 tools; cold revival mounts them again, so the revived session sends the same tool list and tool
 inventory. Files without it revive every name in `tools` top-level. Anonymized exports treat it like
 `tools`.

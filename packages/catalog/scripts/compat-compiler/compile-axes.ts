@@ -4,32 +4,20 @@
  * vocabulary in `src/compat/axes.ts` and emits its value keyed by resolved
  * camelCase field.
  */
-import { AXES, type AxisDef } from "../../src/compat/axes";
+import { AXES, type AxisDef, axisAcceptsValue, axisPayloadKey, type RuleAxes } from "../../src/compat/axes";
 import { CompatCompileError, type KdlNodeView, type KdlScalar, malformed } from "./kdl-reader";
-
-/** Axis assignments of one rule block, split by namespace. */
-export interface RuleAxes {
-	wire: Record<string, unknown>;
-	thinking: Record<string, unknown>;
-	catalog: Record<string, unknown>;
-}
 
 function scalarValue(node: KdlNodeView, value: KdlScalar): unknown {
 	if (value === null) malformed(node);
 	return value;
 }
 
-/**
- * Object-payload child name → resolved JSON key. Authored names are
- * kebab-case; an axis-directive spelling maps to its resolved axis key
- * (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else
- * converts mechanically (`input-threshold` → `inputThreshold`).
- */
+/** Object-payload child name → resolved JSON key (see {@link axisPayloadKey}); authored names must be kebab-case. */
 function payloadKey(child: KdlNodeView): string {
 	if (/[A-Z]/.test(child.name)) {
 		throw new CompatCompileError(child.file, child.line, `object payload key \`${child.name}\` must be kebab-case`);
 	}
-	return AXES[child.name]?.key ?? child.name.replace(/-([a-z0-9])/g, (_, first: string) => first.toUpperCase());
+	return axisPayloadKey(child.name);
 }
 
 /**
@@ -55,13 +43,11 @@ function objectValue(children: KdlNodeView[], verbatim: boolean): Record<string,
 }
 
 function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
-	const allowed = (value: unknown): value is string | boolean =>
-		(typeof value === "string" || typeof value === "boolean") && (axis.values?.includes(value) ?? false);
 	switch (axis.shape) {
 		case "scalar": {
 			if (node.args.length !== 1 || node.children) malformed(node);
 			const value = scalarValue(node, node.args[0]);
-			if (axis.values && !allowed(value)) {
+			if (!axisAcceptsValue(axis, value)) {
 				throw new CompatCompileError(node.file, node.line, `axis \`${node.name}\` rejects value \`${value}\``);
 			}
 			if (axis.key === "editRevision" && (typeof value !== "string" || !value.trim())) malformed(node);
@@ -71,7 +57,7 @@ function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
 			if ((node.args.length === 0 && axis.emptyArray !== true) || node.children) malformed(node);
 			return node.args.map(raw => {
 				const value = scalarValue(node, raw);
-				if (axis.values && !allowed(value)) {
+				if (!axisAcceptsValue(axis, value)) {
 					throw new CompatCompileError(node.file, node.line, `axis \`${node.name}\` rejects value \`${value}\``);
 				}
 				return value;
