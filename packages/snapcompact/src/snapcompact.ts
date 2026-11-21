@@ -2134,6 +2134,29 @@ function denseCompanion(high: Shape, api: Api | undefined): Shape {
 	return geometry(low).capacity > geometry(high).capacity ? low : high;
 }
 
+/**
+ * Whether every frame of `archive` is laid out as {@link compact} lays one out
+ * in `shape` for `reader`: the grid, font, ink and detail hint of `shape` or
+ * of its dense companion for the foveated middle. Frames without shape
+ * metadata (older renderers) are the legacy `5x8` sentence-ink grid.
+ */
+export function archiveInShape(archive: Archive, shape: Shape, reader: ShapeTarget | undefined): boolean {
+	const tiers = [shape, denseCompanion(shape, reader?.api)].map(tier => ({ tier, ...geometry(tier) }));
+	return archive.frames.every(frame =>
+		tiers.some(
+			({ tier, cols, rows }) =>
+				frame.cols === cols &&
+				frame.rows === rows &&
+				(frame.font ?? "5x8") === tier.font &&
+				(frame.variant ?? "sent") === tier.variant &&
+				(frame.lineRepeat ?? 1) === tier.lineRepeat &&
+				(frame.columns ?? 1) === (tier.columns ?? 1) &&
+				(frame.stopwordDim ?? false) === (tier.stopwordDim ?? false) &&
+				frame.detail === tier.imageDetail,
+		),
+	);
+}
+
 /** One planned frame: the source slice and the shape (quality tier) to render. */
 interface PlanFrame {
 	text: string;

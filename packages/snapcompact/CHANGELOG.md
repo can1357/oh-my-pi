@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `archiveInShape()`, which tells whether an archive's frames are drawn in a given shape ([#19620](https://github.com/can1357/oh-my-pi/pull/19620) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.0.1] - 2026-11-19
 
 ### Added

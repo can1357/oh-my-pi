@@ -7,6 +7,8 @@
  *   request) must send the archive's no-reasoning view.
  * - A model without image input reads frames as image-omitted placeholders, so
  *   it must get the archive's kept text in place of the frames.
+ * - Frames are drawn in the shape the compacting model reads best, so a model
+ *   that reads another shape best must get them re-rendered in its own.
  * The original stays intact for other readers.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
@@ -39,6 +41,7 @@ function bundled(provider: GeneratedProvider, modelId: string): Model {
 
 const gpt = bundled("openai", "gpt-5.4");
 const claude = bundled("anthropic", "claude-opus-5-5");
+const gemini = bundled("google", "gemini-3.5-flash");
 // Takes no image input.
 const deepseek = bundled("fireworks", "deepseek-v4-flash");
 
@@ -118,6 +121,7 @@ describe("snapcompact archive read by another model", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
 		authStorage.keys.setRuntime("fireworks", "test-key");
+		authStorage.keys.setRuntime("google", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -132,12 +136,16 @@ describe("snapcompact archive read by another model", () => {
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 
-	/** Appends an archive rendered under GPT (reasoning included) and a kept reply; `withoutMethod`
-	 *  records it as a legacy or extension-provided entry would, with no method, and `summary`
-	 *  stands in for one an extension wrote over the archive. */
+	/** Appends an archive rendered under `model` (GPT by default, reasoning included) and a kept reply;
+	 *  `withoutMethod` records it as a legacy or extension-provided entry would, with no method, and
+	 *  `summary` stands in for one an extension wrote over the archive. */
 	async function seedArchive(
 		sessionManager: SessionManager,
-		{ withoutMethod = false, summary }: { withoutMethod?: boolean; summary?: string } = {},
+		{
+			withoutMethod = false,
+			summary,
+			model = gpt,
+		}: { withoutMethod?: boolean; summary?: string; model?: Model } = {},
 	): Promise<snapcompact.CompactionResult> {
 		const keptId = sessionManager.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
 		const rendered = await snapcompact.compact(
@@ -148,10 +156,10 @@ describe("snapcompact archive read by another model", () => {
 				tokensBefore: 100_000,
 				fileOps: snapcompact.createFileOps(),
 			},
-			{ model: gpt },
+			{ model, includeThinking: snapcompact.readerIncludesThinking(model) },
 		);
 		expect(snapcompact.getPreservedArchive(rendered.preserveData)?.frames.length).toBeGreaterThan(0);
-		expect(rendered.summary).toContain("¶think:");
+		expect(rendered.summary.includes("¶think:")).toBe(snapcompact.readerIncludesThinking(model));
 		const archive = summary === undefined ? rendered : { ...rendered, summary };
 		sessionManager.appendCompaction(archive.summary, archive.shortSummary, keptId, archive.tokensBefore, {
 			details: archive.details,
@@ -365,6 +373,60 @@ describe("snapcompact archive read by another model", () => {
 		expect(vision.images).toEqual(archive.frames.map(frame => frame.data));
 		expect(vision.text).toContain(FRAME_LEGEND);
 		expect(vision.text).not.toContain(marker);
+	});
+
+	it("sends a model that reads another frame shape the archive drawn in its shape, and the original frames after a switch back", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager, { model: claude });
+		const frames = snapcompact.getPreservedArchive(original.preserveData)!.frames.map(frame => frame.data);
+		const geminiEdge = snapcompact.resolveShape(gemini).frameSize;
+		expect(geminiEdge).not.toBe(snapcompact.resolveShape(claude).frameSize);
+		const { session, mock } = startSession(sessionManager, claude);
+
+		await session.setModel(gemini);
+		await session.prompt("Continue.");
+		const { text, images: forGemini } = requestContent(mock.calls[0]?.context.messages);
+		expect(forGemini.length).toBeGreaterThan(0);
+		// Claude compacted without reasoning, so the legend declares no `¶think:` scope.
+		expect(text).not.toContain("¶think:");
+		// PNG IHDR width: frames are square.
+		expect(forGemini.map(data => Buffer.from(data, "base64").readUInt32BE(16))).toEqual(
+			forGemini.map(() => geminiEdge),
+		);
+
+		await session.setModel(claude);
+		await session.prompt("Continue again.");
+		expect(requestContent(mock.calls[1]?.context.messages).images).toEqual(frames);
+		expectOriginalIntact(latestCompaction(sessionManager), original);
+	});
+
+	it("re-renders the archive in a reader's configured snapcompactShape, and sends the original to the same model unconfigured", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager, { model: claude });
+		const frames = snapcompact.getPreservedArchive(original.preserveData)!.frames.map(frame => frame.data);
+		// The same model id, configured (models.yml / modelOverrides) to read another shape.
+		const configured: Model = { ...claude, snapcompactShape: { variant: "8on22-bw", frameSize: 1024 } };
+		expect(snapcompact.resolveShape(claude).frameSize).not.toBe(1024);
+		const { session, mock } = startSession(sessionManager, claude);
+		const widths = (images: string[]) => images.map(data => Buffer.from(data, "base64").readUInt32BE(16));
+
+		// The unconfigured model reads the original frames, and its scan of the context is cached.
+		await session.prompt("Continue.");
+		expect(requestContent(mock.calls[0]?.context.messages).images).toEqual(frames);
+
+		// The switch itself swaps the re-rendered frames into the live context, before any call.
+		await session.setModel(configured);
+		const live = requestContent(convertToLlm(session.agent.state.messages)).images;
+		expect(live.length).toBeGreaterThan(0);
+		expect(widths(live)).toEqual(live.map(() => 1024));
+		await session.prompt("Continue again.");
+		const forConfigured = requestContent(mock.calls[1]?.context.messages).images;
+		expect(widths(forConfigured)).toEqual(forConfigured.map(() => 1024));
+
+		await session.setModel(claude);
+		await session.prompt("Continue once more.");
+		expect(requestContent(mock.calls[2]?.context.messages).images).toEqual(frames);
+		expectOriginalIntact(latestCompaction(sessionManager), original);
 	});
 
 	it("keeps both ends of an archive's text that would crowd a small window, and all of it in a large one", async () => {
