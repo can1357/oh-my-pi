@@ -133,6 +133,7 @@
 ### Fixed
 
 - Fixed MCP servers that return unformatted single-line JSON having their tool results cut to `tools.outputMaxColumns`; a bash run that invokes a tool command now keeps one-line output whole within the output byte budget ([#20053](https://github.com/can1357/oh-my-pi/pull/20053) by [@apoc](https://github.com/apoc))
+- Fixed `OutputSink` reordering output when a multibyte character left spare head-window room and later output filled it ([#20053](https://github.com/can1357/oh-my-pi/pull/20053) by [@apoc](https://github.com/apoc))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
