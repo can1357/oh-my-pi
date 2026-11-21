@@ -7,7 +7,7 @@
 import * as path from "node:path";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as AIError from "../error";
-import type { Context, Model, StreamFunction, StreamOptions } from "../types";
+import type { Context, Model, StreamFunction, StreamOptions, ToolChoice } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { agyGeminiDir } from "./antigravity-cli/binary";
 import { agyCredentialKey, agyCredentialVersion, stageAgyCredentials } from "./antigravity-cli/credentials";
@@ -16,6 +16,8 @@ import { StepWriter } from "./antigravity-cli/step-writer";
 
 /** Per-request settings supported by the ACP transport. */
 export interface AntigravityCliOptions extends StreamOptions {
+	/** Disables the ACP tool bridge for text-only turns. */
+	toolChoice?: ToolChoice;
 	/** Selected model's native `thought_level`. */
 	reasoning?: Effort;
 }
@@ -64,6 +66,7 @@ async function runStep(
 	const stepOptions = {
 		cwd: options.cwd,
 		reasoning: options.reasoning,
+		toolChoice: options.toolChoice,
 		signal: options.signal,
 		credentialVersion: agyCredentialVersion(options.apiKey),
 	};

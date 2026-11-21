@@ -668,6 +668,53 @@ describe("AgyHost stateful steps", () => {
 		await expect(next.done).rejects.toThrow("exited with code 24");
 	});
 
+	it("disables tools for a text-only step and restores them on the next step", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("Report without tools")], {}, undefined, { toolChoice: "none" });
+		const textOnly = await state.started.next();
+		const prompt = await textOnly.prompts.next();
+		expect(textOnly.options.tools).toEqual([]);
+		textOnly.text("Final report.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		expect(first.writer.output.content).toEqual([{ type: "text", text: "Final report." }]);
+
+		const second = step(state.host, [user("Report without tools"), first.writer.output, user("Read now")]);
+		const withTools = await state.started.next();
+		await withTools.prompts.next();
+		const toolResult = withTools.call();
+		await second.done;
+		expect(second.writer.output.content.some(block => block.type === "toolCall")).toBe(true);
+		state.host.close();
+		await toolResult;
+	});
+
+	it("drops an existing tool bridge for the wrap-up turn", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("Work with tools")]);
+		const original = await state.started.next();
+		const initialPrompt = await original.prompts.next();
+		original.text("Work complete.");
+		initialPrompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+
+		const final = step(
+			state.host,
+			[user("Work with tools"), first.writer.output, user("Tools disabled. Report now.")],
+			{},
+			undefined,
+			{ toolChoice: "none" },
+		);
+		const textOnly = await state.started.next();
+		const prompt = await textOnly.prompts.next();
+		expect(original.closed).toBe(true);
+		expect(textOnly.options.tools).toEqual([]);
+		textOnly.text("Final report.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await final.done;
+		expect(final.writer.output.content).toEqual([{ type: "text", text: "Final report." }]);
+	});
+
 	it("never emits unknown, foreign or unannounced tool calls", async () => {
 		for (const kind of ["unknown", "foreign", "unannounced"] as const) {
 			const state = await fixture();

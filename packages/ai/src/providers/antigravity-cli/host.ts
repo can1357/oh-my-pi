@@ -23,6 +23,7 @@ import type {
 	Model,
 	ProviderSessionState,
 	Tool,
+	ToolChoice,
 	ToolResultMessage,
 } from "../../types";
 import { normalizeSchemaForMCP, toolWireSchema } from "../../utils/schema";
@@ -56,6 +57,8 @@ const NOTICE_ATTEMPT = /^\d*$|^\d+\)(?::.*)?$/;
 
 /** Per-step request settings. */
 export interface AgyStepOptions {
+	/** Only "none" changes the ACP tool bridge; other choices keep the advertised tool set. */
+	toolChoice?: ToolChoice;
 	cwd?: string;
 	reasoning?: string;
 	signal?: AbortSignal;
@@ -233,7 +236,7 @@ export class AgyHost implements ProviderSessionState {
 			if (options.signal?.aborted) onAbort();
 			step.controller.signal.throwIfAborted();
 			const cwd = options.cwd ?? process.cwd();
-			const tools = (context.tools ?? []).map(toMcpTool);
+			const tools = options.toolChoice === "none" ? [] : (context.tools ?? []).map(toMcpTool);
 			const toolsKey = stableStringifyJson(tools);
 			const system = (context.systemPrompt ?? []).join("\n\n");
 			const systemKey = system;
