@@ -976,6 +976,8 @@ export class Editor implements Component, Focusable {
 	#vimClipboardRead: Promise<void> | null = null;
 	/** `/` through prompt history: the query, its matches newest first, the one loaded (-1: the draft), and that draft. */
 	#vimHistory: { query: string; matches: string[]; at: number; draft: string } | null = null;
+	/** The draft `k` stepped away from into history; `j` back past the newest prompt restores it. */
+	#vimHistoryDraft: string | null = null;
 	/** Set by `gj`/`gk` within a key, so the screen column they keep survives it. */
 	#vimScreenMoved = false;
 	/** Bumped by every store into `"+`/`"*`, so a clipboard read started before it cannot overwrite it. */
@@ -1173,33 +1175,47 @@ export class Editor implements Component, Focusable {
 		this.#imeSafeCursorLayout = enabled;
 	}
 
-	/** Enable Vim-style modal editing. Toggling always drops back to Insert mode so the editor is
-	 *  never left in a state where ordinary typing does nothing. */
+	/** Mode each Vim prompt starts in: when Vim mode is turned on, after a submit, and on {@link resetVimMode}. */
+	vimStartMode: "insert" | "normal" = "insert";
+
+	/** Enable Vim-style modal editing, starting in {@link vimStartMode}. */
 	setVimMode(enabled: boolean): void {
 		if (enabled === (this.#vim !== null)) return;
-		this.#startVim(enabled ? new VimState() : null);
-	}
-
-	/** Start Vim mode over in Insert mode with nothing pending, as a freshly enabled editor (a reopened note). No-op when off. */
-	resetVimMode(): void {
-		const previous = this.#vim;
-		if (previous === null) return;
-		this.#startVim(new VimState());
-		if (previous.mode !== "insert") this.onVimModeChange?.("insert");
-	}
-
-	#startVim(vim: VimState | null): void {
 		this.#vimSession = null;
 		this.#pinnedUndo = null;
+		if (!enabled) {
+			this.#vim = null;
+			this.invalidate();
+			return;
+		}
+		const vim = new VimState();
+		vim.screenMove = count => this.#vimScreenMove(count);
 		this.#vim = vim;
-		if (vim) {
-			vim.screenMove = count => this.#vimScreenMove(count);
-			vim.mode = "insert";
+		this.#beginVimPrompt();
+	}
+
+	/** Start Vim over in {@link vimStartMode} with nothing pending, as a fresh prompt (a reopened note). No-op when off. */
+	resetVimMode(): void {
+		this.#beginVimPrompt();
+	}
+
+	/** Put Vim in the start mode for a fresh prompt; starting in Insert opens its session, as `i` would. */
+	#beginVimPrompt(): void {
+		const vim = this.#vim;
+		if (vim === null) return;
+		const before = vim.mode;
+		this.#vimSession = null;
+		this.#pinnedUndo = null;
+		vim.begin(this.vimStartMode);
+		if (vim.mode === "insert") {
 			const mark = this.#undoMark();
 			this.#pinnedUndo = mark;
 			this.#startVimSession(mark, false);
+		} else {
+			this.#clampVimCursor();
 		}
 		this.invalidate();
+		if (vim.mode !== before) this.onVimModeChange?.(vim.mode);
 	}
 
 	/** Current modal state; always `"insert"` when Vim mode is off. */
@@ -2939,6 +2955,9 @@ export class Editor implements Component, Focusable {
 				case "history":
 					this.#searchVimHistory(command.query, command.older, command.count);
 					break;
+				case "historyStep":
+					this.#stepVimHistory(command.older, command.count);
+					break;
 				case "undo":
 					for (let i = 0; i < command.count && this.#undoStack.length > 0; i++) this.#applyUndo();
 					break;
@@ -3021,6 +3040,30 @@ export class Editor implements Component, Focusable {
 			this.requestRender?.();
 		});
 		return true;
+	}
+
+	/**
+	 * `k`/`j` past the first or last line: `count` prompts older or newer, as zsh's vi mode. An older
+	 * prompt opens on its last line and a newer one on its first, so further `k`/`j` walk through it;
+	 * stepping newer past the newest prompt brings back the draft the first `k` left.
+	 */
+	#stepVimHistory(older: boolean, count: number): void {
+		const start = this.#historyIndex;
+		const draft = start === -1 && older ? this.#state.lines.join("\n") : null;
+		for (let n = 0; n < count; n++) {
+			const index = this.#historyIndex;
+			this.#navigateHistory(older ? -1 : 1);
+			if (this.#historyIndex === index) break;
+		}
+		if (this.#historyIndex === start) return;
+		if (draft !== null) this.#vimHistoryDraft = draft;
+		if (this.#historyIndex === -1 && this.#vimHistoryDraft !== null) {
+			this.#setTextInternal(this.#vimHistoryDraft);
+			this.#vimHistoryDraft = null;
+		}
+		const line = older ? this.#state.lines.length - 1 : 0;
+		this.#state.cursorLine = line;
+		this.#setCursorCol(firstNonBlank(this.#state.lines[line] ?? ""));
 	}
 
 	/**
@@ -3937,6 +3980,7 @@ export class Editor implements Component, Focusable {
 	/** Replace the buffer; the caret lands at the end unless `cursor: "start"` (multi-row text only). */
 	setText(text: string, options: { cursor?: "start" | "end" } = {}): void {
 		this.#historyIndex = -1; // Exit history browsing mode
+		this.#vimHistoryDraft = null;
 		this.#resetKillSequence();
 		this.#setTextInternal(text, options.cursor);
 	}
@@ -4461,15 +4505,13 @@ export class Editor implements Component, Focusable {
 		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.clearPasteState();
 		this.#historyIndex = -1;
+		this.#vimHistoryDraft = null;
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
 		this.#redoStack.length = 0;
 
-		if (this.#vim !== null && (this.#vim.mode === "insert" || this.#vim.mode === "replace")) {
-			const mark = this.#undoMark();
-			this.#pinnedUndo = mark;
-			this.#startVimSession(mark, this.#vim.mode === "replace");
-		}
+		// The next prompt starts over in the Vim start mode, as zsh's vi mode starts each line.
+		this.#beginVimPrompt();
 		this.#notifyChange("");
 		if (this.onSubmit) this.onSubmit(result);
 	}

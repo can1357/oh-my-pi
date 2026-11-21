@@ -73,7 +73,9 @@ export type VimCommand =
 	 * `/text`, `?text`, `n`, `N`: load the `count`th prompt-history entry containing `query`, older
 	 * than the current one (`older`) or newer, as a shell's vi mode does.
 	 */
-	| { kind: "history"; query: string; older: boolean; count: number };
+	| { kind: "history"; query: string; older: boolean; count: number }
+	/** `k`/`j` (and `-`/`+`) with no line left above or below: step `count` prompts through history, as zsh's vi mode. */
+	| { kind: "historyStep"; older: boolean; count: number };
 
 /** What an Insert/Replace session typed, relative to where it started; `.` replays it. */
 export interface VimInsertRecord {
@@ -828,6 +830,17 @@ export class VimState {
 
 	get visual(): boolean {
 		return this.mode === "visual" || this.mode === "visual-line";
+	}
+
+	/** Start a fresh prompt in `mode`: no selection, nothing half-typed. `.`, registers, finds, and searches carry over. */
+	begin(mode: "insert" | "normal"): void {
+		this.mode = mode;
+		this.anchor = null;
+		this.#desiredCol = null;
+		this.#clearPending();
+		this.#cmdKeys = [];
+		this.#cmdCount = "";
+		this.#insertRepeat = 1;
 	}
 
 	reset(): void {
@@ -1854,6 +1867,18 @@ export class VimState {
 				}
 				this.#search = { older: key === "/", text: "", count: this.#takeCount() };
 				return [];
+			case "j":
+			case "k":
+			case "-":
+			case "+": {
+				// Reached only when the motion had no line to go to. Like zsh's vi mode, the line past the
+				// first or last is the neighbouring prompt in history; under an operator it just fails.
+				if (this.#operator !== null) {
+					this.#clearPending();
+					return [];
+				}
+				return [{ kind: "historyStep", older: key === "k" || key === "-", count: this.#takeCount() }];
+			}
 			case "n":
 			case "N": {
 				const last = this.#lastSearch;

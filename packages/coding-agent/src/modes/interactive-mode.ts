@@ -479,6 +479,7 @@ import {
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
+	cfgTuiVimStartMode,
 	cfgTuiVimYankToClipboard,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
@@ -520,6 +521,7 @@ const cfgLiveUiSettings = combine({
 	"composer.shape": cfgComposerShape,
 	"tui.vimMode": cfgTuiVimMode,
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
+	"tui.vimStartMode": cfgTuiVimStartMode,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
 	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
 	"compaction.idleEnabled": cfgCompactionIdleEnabled,
@@ -4473,7 +4475,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.updateEditorBorderColor();
 		}
 		if (any("composer.shape")) this.syncComposerShape();
-		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
+		if (any("tui.vimMode", "tui.vimModeDisplay", "tui.vimStartMode")) this.#applyVimModeSetting();
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
 		if (any("display.subagentLivePreview")) {
 			this.#renderSubagentList();
@@ -6803,8 +6805,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** Apply the `tui.vimMode` setting to the composer and route its clipboard registers. */
+	/** Apply the `tui.vimMode` settings to the composer and route its clipboard registers. */
 	#applyVimMode(editor: CustomEditor): void {
+		editor.vimStartMode = cfgTuiVimStartMode.get(settings);
 		editor.setVimMode(cfgTuiVimMode.get(settings));
 		this.#wireVimClipboard(editor);
 		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
@@ -6828,6 +6831,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	configureDialogEditor(editor: Editor): void {
 		this.#wireVimClipboard(editor);
+		editor.vimStartMode = cfgTuiVimStartMode.get(settings);
 		// Dialogs have no status line of their own; the cursor shape is what shows the mode.
 		editor.onVimModeChange = mode => this.ui.terminal.setCursorShape?.(mode === "insert" ? "bar" : "block");
 	}

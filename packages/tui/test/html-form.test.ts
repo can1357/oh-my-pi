@@ -1213,6 +1213,22 @@ describe("html form", () => {
 			expect(text.data()).toEqual({ name: "j" });
 		});
 
+		it("text boxes starting in Normal mode: j/k on the box's edge line step to the next or previous field", () => {
+			const { form } = dialog(
+				`<form><label>First <input type="text" name="a"></label><label>Second <input type="text" name="b"></label></form>`,
+				{ vimMode: true, configureEditor: editor => (editor.vimStartMode = "normal") },
+			);
+			// Normal mode: the letters are commands, so nothing is typed, and `j` leaves the one-line box.
+			form.handleInput("j");
+			form.handleInput("i");
+			form.handleInput("two");
+			form.handleInput(ESC);
+			form.handleInput("k");
+			form.handleInput("a");
+			form.handleInput("one");
+			expect(form.data()).toEqual({ a: "one", b: "two" });
+		});
+
 		it("rows: no footer in the panel; keyHints() gives the focused stop's keys for the host to draw", () => {
 			const { form } = dialog(DB_FORM);
 			const rows = plain(form);

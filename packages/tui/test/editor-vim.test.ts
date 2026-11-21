@@ -176,24 +176,37 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe(">one\ntwo\nthree!");
 		});
 
-		it("k on the first line moves the cursor instead of loading prompt history", () => {
+		it("k past the first line steps back through prompt history, and j past the last returns to the draft", () => {
 			const editor = new Editor(defaultEditorTheme);
-			editor.addToHistory("an older prompt");
+			editor.addToHistory("older one\nolder two");
+			editor.addToHistory("newest");
 			editor.setVimMode(true);
 			editor.setText("current draft");
 			editor.handleInput(ESC);
 			editor.handleInput("k");
+			expect(editor.getText()).toBe("newest");
+			// The older entry opens on its last line, so the next k walks up through it first.
 			editor.handleInput("k");
+			expect(editor.getText()).toBe("older one\nolder two");
+			expect(cursor(editor).line).toBe(1);
+			editor.handleInput("k");
+			expect(cursor(editor).line).toBe(0);
+			expect(editor.getText()).toBe("older one\nolder two");
+			editor.handleInput("jjj");
+			expect(editor.getText()).toBe("current draft");
+			// An operator with no line to reach fails as in Vim instead of loading history.
+			editor.handleInput("dk");
 			expect(editor.getText()).toBe("current draft");
 		});
 
-		it("arrow keys act as motions in normal mode and never browse history", () => {
+		it("arrow keys in normal mode are k and j, history steps included", () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.addToHistory("an older prompt");
 			editor.setVimMode(true);
 			editor.setText("current draft");
 			editor.handleInput(ESC);
 			editor.handleInput(UP);
+			expect(editor.getText()).toBe("an older prompt");
 			editor.handleInput(DOWN);
 			expect(editor.getText()).toBe("current draft");
 		});
@@ -1835,6 +1848,21 @@ describe("Editor vim mode", () => {
 			editor.handleInput("i");
 			editor.focused = true;
 			expect(modes).toEqual(["normal", "insert", "insert"]);
+		});
+
+		it("starts every prompt in the start mode: on enabling and again after each submit", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.vimStartMode = "normal";
+			editor.setVimMode(true);
+			expect(editor.vimMode).toBe("normal");
+			editor.handleInput("ihello");
+			editor.submit();
+			expect(editor.vimMode).toBe("normal");
+			// With the Insert default, a prompt sent from Normal mode still opens the next one in Insert.
+			const insertFirst = vimEditor("draft");
+			expect(insertFirst.vimMode).toBe("normal");
+			insertFirst.submit();
+			expect(insertFirst.vimMode).toBe("insert");
 		});
 	});
 });
