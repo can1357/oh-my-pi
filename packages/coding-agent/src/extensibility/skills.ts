@@ -933,13 +933,15 @@ async function claudeSkillToolMappings(
 	return names.map(claude => ({ claude, omp: CLAUDE_CODE_TOOL_NAMES.get(claude.toLowerCase()) }));
 }
 
+const renderClaudeCodeToolNote = prompt.compile(claudeCodeToolNoteTemplate.trimEnd());
+
 /**
  * The note appended to a Claude-dialect skill body that names Claude Code tools, mapping each to
  * the omp tool that covers it; undefined when the skill is not Claude-dialect or names none.
  */
 export async function claudeCodeToolNote(skill: SkillFile, body: string): Promise<string | undefined> {
 	const tools = await claudeSkillToolMappings(skill, body);
-	return tools ? prompt.render(claudeCodeToolNoteTemplate, { tools }).trim() : undefined;
+	return tools ? renderClaudeCodeToolNote({ tools }) : undefined;
 }
 
 /** `content` with {@link claudeCodeToolNote} appended when `scanBody` names Claude Code tools. */
@@ -949,7 +951,7 @@ export async function withClaudeCodeToolNote(
 	scanBody: string = content,
 ): Promise<string> {
 	const tools = await claudeSkillToolMappings(skill, scanBody);
-	return tools ? prompt.render(claudeCodeToolNoteTemplate, { body: content, tools }).trimEnd() : content;
+	return tools ? renderClaudeCodeToolNote({ body: content, tools }) : content;
 }
 
 /** Read a skill's instruction body before rendering user-provided arguments. */

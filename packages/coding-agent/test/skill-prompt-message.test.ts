@@ -199,6 +199,20 @@ describe("buildSkillPromptMessage", () => {
 			}
 		});
 
+		test("preserves raw formatting and trailing newlines when SkillProtocolHandler appends the note", async () => {
+			const raw = "---\nname: reviewer\ndescription: Review code\n---\n\nFirst paragraph.\n\n\nUse TodoWrite.\n";
+			const { dir, skill } = await createSkillFromRaw(raw);
+			const claudeSkill = { ...skill, _source: sourceFor("claude", dir) };
+			try {
+				const resolved = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://reviewer"), {
+					skills: [claudeSkill],
+				});
+				expect(resolved.content).toBe(`${raw}\n\n${NOTE} TodoWrite → todo.`);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
 		test("never annotates skills from other providers", async () => {
 			const { dir, skill } = await createSkill("Track work with TodoWrite.");
 			try {
