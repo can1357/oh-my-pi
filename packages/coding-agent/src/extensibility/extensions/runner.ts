@@ -687,6 +687,8 @@ export class ExtensionRunner {
 	#todoClosed = false;
 	/** Set when a backend accepted a change omp did not commit: the next list goes out even if it equals {@link #todoSent}. */
 	#todoStale = false;
+	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
+	#todoGivenUp = new AbortController();
 	/** `todo.backend` ids already reported as unregistered. */
 	#reportedTodoBackends = new Set<string>();
 	/** Todo backend ids already warned about as registered by several extensions. */
@@ -1768,12 +1770,15 @@ export class ExtensionRunner {
 
 	/**
 	 * Take no more lists for the todo backend, then wait as {@link todoBackendSettled} does. A list
-	 * still waiting when that wait ends is dropped, so no call starts once `session_shutdown` is out.
+	 * still waiting when that wait ends is dropped, so no call starts once `session_shutdown` is out,
+	 * and a call still running is given up: the handler timeout it was raced against would keep a
+	 * host's process alive long after the session is gone.
 	 */
 	async closeTodoBackend(): Promise<void> {
 		this.#todoClosed = true;
 		await this.todoBackendSettled();
 		this.#todoPending = undefined;
+		this.#todoGivenUp.abort();
 	}
 
 	/**
@@ -1936,6 +1941,8 @@ export class ExtensionRunner {
 			this.createContext(),
 			extension,
 			extensionHandlerTimeoutMs,
+			undefined,
+			this.#todoGivenUp.signal,
 		);
 		if (taken) this.#todoSent = { list: pending, definition };
 	}
