@@ -350,9 +350,9 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-- **What.** The whole list after every committed change to the main session's list, never an operation; tasks carry `content` and `status` only. While a call runs, later lists collapse into the newest, and a list the backend already took is not sent again.
-- **Sessions.** Key your store by `ctx.sessionManager.getSessionId()`, read before the first `await`. `/new` sends an empty list under the new id. Calls are not ordered against `session_*` events, and there is no per-session instance: release state on `session_shutdown`.
-- **Failure.** A backend cannot refuse a change and gets no abort signal. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed and the next change sends the whole list again. On exit omp waits for a call still running for as long as a `session_shutdown` handler may take.
+- **What.** The whole list after every committed change to the main session's list, never an operation; tasks carry `content` and `status` only. While a call runs, later lists collapse into the newest, and a list the backend already took for that session is not sent again.
+- **Sessions.** Key your store by `ctx.sessionManager.getSessionId()`, read before the first `await`. After `/new` the id is new, and an empty list follows under it once the backend has been called. Calls are not ordered against `session_*` events, and there is no per-session instance: release state on `session_shutdown`.
+- **Failure.** A backend cannot refuse a change and gets no abort signal. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed and the next change sends the whole list again. After a timeout that next call can start while the old one still runs: a late write must not overwrite a newer list. On exit omp waits for a call still running for as long as a `session_shutdown` handler may take.
 - **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). When several extensions register an id, the first one loaded keeps it. An id no enabled extension registers is reported once as an extension error, and todos work as with `native`. A backend selected mid-session gets the list with the next change.
 - **Scope.** Main session only: subagents and `/tan` clones are not mirrored.
 
