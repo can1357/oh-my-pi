@@ -301,7 +301,8 @@ describe("JobsSheet", () => {
 
 	it("leads a job with its intent and caption over the command, and drops a widget with nothing beyond its title", async () => {
 		await initTheme();
-		const intent = "Waiting for stock watch to finish";
+		const label = "Waiting for stock watch";
+		const intent = `[${label}]: Report when the service stops`;
 		const command = "ssh pc-worker 'while systemctl --user is-active -q watch; do sleep 60; done'";
 		const caption = "Checks pc-worker every 60s until the watch service stops";
 		const job: JobsPanelJob = {
@@ -325,16 +326,19 @@ describe("JobsSheet", () => {
 			close: vi.fn(),
 		});
 		const root = sheet.describe(CX);
-		expect(texts(list(root)!)).toContain(intent);
+		expect(texts(list(root)!)).toContain(label);
+		expect(texts(list(root)!)).not.toContain("Report when");
 		expect(texts(list(root)!)).not.toContain("systemctl");
-		expect(prop(byRole(root, "omp.jobs.title")[0], "text")).toBe(intent);
+		expect(prop(byRole(root, "omp.jobs.title")[0], "text")).toBe(label);
+		expect(prop(byRole(root, "omp.jobs.title")[0], "title")).toBe(intent);
 		expect(texts(byRole(root, "omp.jobs.caption")[0]!)).toContain(caption);
 		expect(prop(byRole(root, "omp.jobs.command")[0], "text")).toBe(command);
 		expect(byRole(root, "omp.jobs.widget")).toHaveLength(0);
 
 		const lines = sheet.render(160).map(line => Bun.stripANSI(line));
-		expect(lines.find(line => line.includes("bg_27") || line.includes("running  bash"))).toContain(intent);
-		expect(lines.filter(line => line.includes(intent))).toHaveLength(1);
+		expect(lines.find(line => line.includes("bg_27") || line.includes("running  bash"))).toContain(label);
+		expect(lines.filter(line => line.includes(label))).toHaveLength(1);
+		expect(lines.join("\n")).not.toContain("Report when");
 		expect(lines.some(line => line.includes(caption))).toBe(true);
 	});
 

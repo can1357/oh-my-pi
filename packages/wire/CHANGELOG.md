@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `toolIntentLabel` for displaying the brief prefix of a structured tool-call intent.
 - Added clickable shell-command steps with output selection and visual highlighting of the currently displayed step.
 - Added a terminal `features` event for notifying clients when terminal settings change.
 - Added collaboration guest support for resuming sessions and delivering queued messages, plus `followUp` prompts.

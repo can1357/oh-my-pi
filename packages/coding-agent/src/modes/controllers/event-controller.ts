@@ -4,7 +4,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -174,6 +174,10 @@ function normalizeIntent(intent: unknown): string | undefined {
 			.replace(/\s*\.+$/, "")
 			.trim() || undefined
 	);
+}
+
+function workingIntentLabel(intent: unknown): string | undefined {
+	return typeof intent === "string" ? normalizeIntent(toolIntentLabel(intent)) : undefined;
 }
 
 /** Ids per kind the awaiting working row lists before collapsing the rest to `+N`. */
@@ -892,9 +896,8 @@ export class EventController {
 		return component;
 	}
 
-	#updateWorkingMessageFromIntent(intent: unknown): void {
+	#updateWorkingMessageFromIntent(trimmed: string | undefined): void {
 		if (this.ctx.session.isAborting) return;
-		const trimmed = normalizeIntent(intent);
 		if (!trimmed || trimmed === this.#lastIntent) return;
 		this.#lastIntent = trimmed;
 		this.ctx.setWorkingMessage(trimmed);
@@ -1839,7 +1842,7 @@ export class EventController {
 				if (!args || typeof args !== "object") continue;
 				let intent: string | undefined;
 				if (INTENT_FIELD in args) {
-					intent = normalizeIntent(args[INTENT_FIELD]);
+					intent = workingIntentLabel(args[INTENT_FIELD]);
 				} else {
 					const tool = this.ctx.viewSession.getToolByName(block.name);
 					if (typeof tool?.intent !== "function") continue;
@@ -2073,7 +2076,9 @@ export class EventController {
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
 		if (this.#retractedToolCallIds.has(event.toolCallId)) return;
 		this.#ensureWorkingLoaderWhileStreaming();
-		this.#updateWorkingMessageFromIntent(event.intent);
+		this.#updateWorkingMessageFromIntent(
+			workingIntentLabel(event.intent ?? (isRecord(event.args) ? event.args[INTENT_FIELD] : undefined)),
+		);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
 		this.#resolveDisplaceablePoll(renderToolName);

@@ -62,7 +62,14 @@ import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
 import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode } from "@oh-my-pi/pi-wire";
+import {
+	type TspChecklistItem,
+	type TspChecklistPhase,
+	type TspSpan,
+	type TspText,
+	type TspTreeNode,
+	toolIntentLabel,
+} from "@oh-my-pi/pi-wire";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
@@ -1261,7 +1268,7 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	// A model-written intent is prose, so home paths inside it are shortened as they stand. An argument is
 	// shortened by its key, so a literal search pattern that names a home path still shows what was searched.
 	const detail = intent
-		? shortenEmbeddedPaths(replaceTabs(intent))
+		? shortenEmbeddedPaths(replaceTabs(toolIntentLabel(intent)))
 		: args
 			? shortenToolArgumentPaths(replaceTabs(args), argsKey)
 			: undefined;

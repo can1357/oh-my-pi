@@ -27,7 +27,13 @@ import type {
 	RenderResultOptions,
 	ToolRenderer,
 } from "./renderer";
-import { INTENT_FIELD, type ShellTrace, type ShellVizPresentation, type TspTone } from "@oh-my-pi/pi-wire";
+import {
+	INTENT_FIELD,
+	type ShellTrace,
+	type ShellVizPresentation,
+	toolIntentLabel,
+	type TspTone,
+} from "@oh-my-pi/pi-wire";
 import type { SpotlightDetails } from "../chat/spotlight";
 import { plainText } from "../native/spans";
 import {
@@ -464,7 +470,7 @@ function callIntent(args: unknown): string | undefined {
 	if (!args || typeof args !== "object" || !(INTENT_FIELD in args)) return undefined;
 	const value = args[INTENT_FIELD];
 	if (typeof value !== "string") return undefined;
-	return plainText(value).trim() || undefined;
+	return plainText(toolIntentLabel(value)).trim() || undefined;
 }
 
 /** The run foot's facts under shell output: background job, service state and the full-output artifact. */
@@ -578,6 +584,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 	return {
 		renderCall(args: TArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 			const renderArgs = toBashRenderArgs(args, config);
+			const intent = callIntent(args);
 			// Highlighting the whole (possibly still-streaming) command is the
 			// expensive part: defer it to the first paint, once per component,
 			// so a rebuild that is replaced before painting never pays for it.
@@ -594,12 +601,13 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						: (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme));
 					const header =
 						config.showHeader === false
-							? undefined
+							? intent && renderStatusLine({ title: intent, titleColor: "muted" }, uiTheme)
 							: renderStatusLine(
 									{
 										icon: options.spinnerFrame !== undefined ? "running" : "pending",
 										spinnerFrame: options.spinnerFrame,
 										title: config.resolveTitle(args, options),
+										description: intent,
 									},
 									uiTheme,
 								);
@@ -629,6 +637,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			args?: TArgs,
 		): Component {
 			const renderArgs = toBashRenderArgs(args, config);
+			const intent = callIntent(args);
 			let cmdLines: string[] | undefined;
 			const isError = result.isError === true;
 			const isPartial = options.isPartial === true;
@@ -637,16 +646,18 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const isTimeout = details?.timedOut === true;
 			const header =
 				config.showHeader === false
-					? undefined
+					? intent && renderStatusLine({ title: intent, titleColor: "muted" }, uiTheme)
 					: renderStatusLine(
 							success
 								? {
 										iconOverride: uiTheme.styledSymbol("tool.bash", "accent"),
 										title: config.resolveTitle(args, options),
+										description: intent,
 									}
 								: {
 										icon: isPartial ? "pending" : isTimeout ? "warning" : "error",
 										title: config.resolveTitle(args, options),
+										description: intent,
 									},
 							uiTheme,
 						);

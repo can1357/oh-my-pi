@@ -448,9 +448,13 @@ describe("tray items", () => {
 		};
 		expect(doing({})).toEqual(["edit", "src/norm.py"]);
 		expect(doing({ streaming: writing })).toEqual(["write", "tests/test_norm.py"]);
-		expect(doing({ streaming: { ...writing, intent: "Write the norm test" } })).toEqual([
+		expect(doing({ streaming: { ...writing, intent: "[Writing the norm test]: Cover the zero vector" } })).toEqual([
 			"write",
-			"Write the norm test",
+			"Writing the norm test",
+		]);
+		expect(doing({ currentTool: "bash", currentToolArgs: "[ -f norm.ts ]: echo found" })).toEqual([
+			"bash",
+			"[ -f norm.ts ]: echo found",
 		]);
 		expect(
 			doing({ streaming: { kind: "text" }, recentOutput: ["**Next**, the norm test", "Fixed the edit"] }),

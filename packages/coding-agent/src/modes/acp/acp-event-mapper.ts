@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -583,9 +584,10 @@ function buildToolTitle(toolName: string, args: unknown, intent: string | undefi
 		const evalText = buildEvalStartText(args);
 		if (evalText) return evalText;
 	}
-	const trimmedIntent = intent?.trim();
+	const trimmedIntent =
+		intent?.trim() || extractStringProperty<Record<typeof INTENT_FIELD, string>>(args, INTENT_FIELD)?.trim();
 	if (trimmedIntent) {
-		return trimmedIntent;
+		return toolIntentLabel(trimmedIntent);
 	}
 
 	const subject =

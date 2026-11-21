@@ -16,6 +16,7 @@
 
 ### Changed
 
+- Tool activity and job titles show the brief label of a structured intent; the Spotlight inspector still exposes the full request.
 - Improved transcript layout around docked reports, waiting asks, completion lists, dialogs, todo lists, subagent panels, queued messages, and other lower-screen chrome so visible content and reclaimed rows behave more predictably.
 - Native chat and web search cards now present tool results and sources more clearly, including expandable page excerpts, multi-line titles, and a unified sources grid.
 - Windows console VT input and AltGr handling now use the native terminal integration.

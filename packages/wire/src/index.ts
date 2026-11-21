@@ -411,6 +411,12 @@ export const COLLAB_PROTO = 3;
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";
 
+/** The UI label of a `[brief]: detail` tool intent; unstructured intents display unchanged. */
+export function toolIntentLabel(intent: string): string {
+	const label = /^\s*\[([^\]\r\n]+)\]:/.exec(intent)?.[1].trim();
+	return label || intent;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Envelope & link constants
 // ═══════════════════════════════════════════════════════════════════════════

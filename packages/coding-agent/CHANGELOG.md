@@ -30,6 +30,7 @@
 
 ### Changed
 
+- Spotlight tool calls now show a short activity label while keeping their detailed intent for output ranking.
 - Improved regex performance for TTSR and secret-redaction scans, including SIMD acceleration and faster candidate matching, without changing matching semantics.
 - Improved performance when listing sessions across all projects, especially with thousands of project directories.
 - Interactive `wait` now waits up to four minutes on its first call for background jobs instead of returning after five seconds.

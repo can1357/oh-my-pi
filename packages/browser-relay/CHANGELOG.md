@@ -13,6 +13,7 @@
 
 ### Changed
 
+- The Chrome side panel shows brief labels for tool steps with structured intents.
 - The extension now keeps registered installations up to date across omp upgrades and reloads when idle.
 - Browser relay ports are assigned automatically and discovered locally by terminal clients, while sidebar chats continue using their existing connection.
 - Side panel sessions now control the connected Chrome browser directly instead of opening a separate headless browser.

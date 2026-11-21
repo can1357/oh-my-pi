@@ -455,6 +455,30 @@ describe("job renderer task-result preview", () => {
 			expect(JSON.stringify(tiles[0])).toContain("profiling the decode loop");
 		});
 
+		it("renders the headline of a sealed fallback widget without rewriting its saved title", () => {
+			const intent = "[Checking timing]: Compare the retry delay with the deadline";
+			const widget = {
+				title: `${intent.slice(0, 47)}…`,
+				blocks: [],
+				state: "fallback" as const,
+				updatedAt: 0,
+			};
+			const job = {
+				id: "bg_4",
+				type: "bash" as const,
+				status: "completed" as const,
+				durationMs: 100,
+				label: "sleep 1",
+				intent,
+				widget,
+			};
+			const result = { content: [], details: { op: "wait" as const, jobs: [job] } };
+			const view = waitToolRenderer.describeResult!(result, { expanded: true, isPartial: false });
+			const [strip] = view!.body! as NativeNode[];
+			expect(byRole(strip, "omp.job.tile.title")?.p).toMatchObject({ spans: [{ t: "Checking timing" }] });
+			expect(widget.title).toContain("Compare the retry delay");
+		});
+
 		it("re-describes a memoized result when a widget's data moves", () => {
 			const result = widgetResult();
 			const first = waitToolRenderer.describeResult!(result, { expanded: true, isPartial: true });
