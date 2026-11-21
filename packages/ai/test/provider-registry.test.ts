@@ -79,7 +79,6 @@ describe("provider registry auth surface", () => {
 				"gitlab-duo",
 				"gitlab-duo-agent",
 				"google-antigravity",
-				"google-gemini-cli",
 				"openai-codex",
 				"openrouter",
 				"snowflake",

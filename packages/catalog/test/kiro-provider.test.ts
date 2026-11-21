@@ -35,6 +35,12 @@ describe("Kiro model discovery", () => {
 			max_tokens: { type: "integer", minimum: 1024, maximum: 128_000 },
 		});
 		const gpt = object({ reasoning: object({ effort: strings(["high", "none", "low"], { default: "none" }) }) });
+		// No advertised off value: omitted fields would apply the schema default, so thinking is mandatory.
+		const anthropicAlwaysOn = object({
+			thinking: object({ type: strings(["adaptive"]) }),
+			output_config: object({ effort: strings(["low", "high"], { default: "high" }) }),
+		});
+		const gptAlwaysOn = object({ reasoning: object({ effort: strings(["low", "high"], { default: "high" }) }) });
 		const models = await discover(
 			catalog(
 				model("claude", { additionalModelRequestFieldsSchema: anthropic, rateMultiplier: 1.5, rateUnit: "Credit" }),
@@ -42,6 +48,8 @@ describe("Kiro model discovery", () => {
 				model("odd", { additionalModelRequestFieldsSchema: object({ surprise: strings(["x"]) }) }),
 				model("no-limits", { tokenLimits: { maxInputTokens: 0 } }),
 				{ modelName: "no id" },
+				model("claude-always-on", { additionalModelRequestFieldsSchema: anthropicAlwaysOn }),
+				model("gpt-always-on", { additionalModelRequestFieldsSchema: gptAlwaysOn }),
 			),
 		);
 		expect(models).toEqual([
@@ -58,6 +66,7 @@ describe("Kiro model discovery", () => {
 					defaultLevel: Effort.High,
 					effortMap: { [Effort.Minimal]: Effort.Low },
 					supportsDisplay: true,
+					suppressWhenOff: true,
 				},
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -73,13 +82,21 @@ describe("Kiro model discovery", () => {
 					efforts: [Effort.Minimal, Effort.Low, Effort.High],
 					defaultLevel: Effort.Minimal,
 					effortMap: { [Effort.Minimal]: "none" },
+					suppressWhenOff: true,
 				},
 				input: ["text", "image"],
 				maxTokens: 8_192,
 			}),
 			expect.objectContaining({ id: "odd", reasoning: false, maxTokens: 8_192 }),
+			expect.objectContaining({
+				id: "claude-always-on",
+				thinking: expect.objectContaining({ requiresEffort: true }),
+			}),
+			expect.objectContaining({ id: "gpt-always-on", thinking: expect.objectContaining({ requiresEffort: true }) }),
 		]);
 		expect(models?.[2]).not.toHaveProperty("thinking");
+		expect(models?.[3]?.thinking).not.toHaveProperty("suppressWhenOff");
+		expect(models?.[4]?.thinking).not.toHaveProperty("suppressWhenOff");
 	});
 
 	test("follows nextToken with the login's profile ARN and returns null when discovery fails", async () => {

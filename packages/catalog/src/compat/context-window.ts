@@ -1,5 +1,6 @@
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model } from "../types";
+import { onCascadeRulesChange } from "./cascade";
 import { resolveCatalogAxes } from "./resolve";
 
 /**
@@ -11,6 +12,10 @@ import { resolveCatalogAxes } from "./resolve";
 const ruleMaximumCache = new Map<string, number | null>();
 const clampOverrideCache = new Map<string, boolean>();
 const RULE_POLICY_CACHE_MAX = 8192;
+onCascadeRulesChange(() => {
+	ruleMaximumCache.clear();
+	clampOverrideCache.clear();
+});
 
 /**
  * Extended-context capacity. Curated maxima correct stale lower discovery

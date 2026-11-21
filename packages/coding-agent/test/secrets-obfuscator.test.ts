@@ -75,6 +75,17 @@ describe("compileSecretRegex", () => {
 	});
 });
 
+it("redacts from a slash-delimited Unicode set without changing excluded characters", () => {
+	const obfuscator = new SecretObfuscator([{ type: "regex", content: String.raw`/[[\p{L}]--[a-z]]+/v` }]);
+	const secret = "帳戶密碼測試資料";
+	const input = `public ${secret} reserved`;
+	const output = obfuscator.obfuscate(input);
+	expect(output).toStartWith("public ");
+	expect(output).toEndWith(" reserved");
+	expect(output).not.toContain(secret);
+	expect(obfuscator.deobfuscate(output)).toBe(input);
+});
+
 describe("Unicode empty regex matches", () => {
 	// A broken scan loops synchronously forever, so bound the real RegExp calls
 	// and surface the lack of progress as a failure instead of hanging the suite.
@@ -3850,6 +3861,61 @@ describe("assistant replay thought signatures", () => {
 		// Fixed point: the second obfuscation pass (convertToLlm then
 		// transformProviderContext) rewrites nothing and clears nothing further.
 		expect(obfuscateMessages(obfuscator, [obfuscated])).toEqual([obfuscated]);
+	});
+
+	// A chat-completions turn keeps its received `reasoning_details` on the first
+	// thinking block. The entries hold every thinking block's raw text and each
+	// call's encrypted signature, so they cannot replay once any of it changed.
+	it("drops the turn's reasoning_details envelope when obfuscation rewrites any thinking or arguments", () => {
+		const secret = "REPLAY_DETAILS_SECRET_1234";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const encrypted = { type: "reasoning.encrypted", id: "call_1", data: "blob-1", index: 1 };
+		const envelope = JSON.stringify({
+			reasoningDetails: [{ type: "reasoning.text", text: `Plan.Use ${secret} now.`, index: 0 }, encrypted],
+			field: "reasoning",
+		});
+		const assistant = (content: AssistantMessage["content"]): Message => ({
+			role: "assistant",
+			content,
+			api: "openai-completions",
+			provider: "openrouter",
+			model: "google/gemini-3-pro-preview",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		});
+		const laterThinking = assistant([
+			{ type: "thinking", thinking: "Plan.", thinkingSignature: envelope },
+			{ type: "text", text: "Working." },
+			{ type: "thinking", thinking: `Use ${secret} now.`, thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call_1", name: "get_weather", arguments: { city: "Paris" } },
+		]);
+		const rewrittenArguments = assistant([
+			{ type: "thinking", thinking: "Write the file.", thinkingSignature: envelope.replaceAll(secret, "x") },
+			{
+				type: "toolCall",
+				id: "call_1",
+				name: "write",
+				arguments: { content: `TOKEN=${secret}` },
+				thoughtSignature: JSON.stringify({ perCall: encrypted }),
+			},
+		]);
+
+		for (const message of [laterThinking, rewrittenArguments]) {
+			const [obfuscated] = obfuscateMessages(obfuscator, [message]);
+			const blocks = obfuscated.role === "assistant" ? obfuscated.content : [];
+			expect(JSON.stringify(blocks)).not.toContain(secret);
+			expect(JSON.stringify(blocks)).not.toContain("blob-1");
+			// The first block keeps its field marker, so the reasoning text still replays.
+			expect(blocks[0]).toMatchObject({ type: "thinking", thinkingSignature: "reasoning" });
+		}
 	});
 });
 
