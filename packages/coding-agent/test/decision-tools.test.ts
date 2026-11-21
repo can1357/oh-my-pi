@@ -136,6 +136,17 @@ describe("tool preflight", () => {
 		expect(toolPreflightMessages(result, messages, 64 * 1024)).toEqual([]);
 	});
 
+	it("names each candidate in its own relevance question, not only by its list position", async () => {
+		const bodies = serveJudge({});
+		await preflight(automatic, "query cpu metrics for the node, then restart the deployed application");
+		const names = bodies[0]!.state.candidates.map(candidate => candidate.name);
+		expect(names.length).toBeGreaterThan(1);
+		for (const [index, name] of names.entries()) {
+			const question = JSON.stringify(bodies[0]!.questions[`r${index}`]);
+			expect(names.filter(other => question.includes(other))).toEqual([name]);
+		}
+	});
+
 	it("selects nothing when the judge doubts the shortlist covers the task", async () => {
 		serveJudge({ [METRICS]: 0.95 }, 0.2);
 		const { result, records } = await preflight(automatic, "query cpu metrics for the web node");

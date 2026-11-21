@@ -158,8 +158,8 @@ export async function prepareToolPreflight(input: ToolPreflightInput): Promise<T
 			needsTools: QUESTIONS.needsTools,
 			sufficient: QUESTIONS.sufficient,
 		};
-		candidates.forEach((_, index) => {
-			questions[`r${index}`] = renderQuestion(QUESTIONS.relevance, { index });
+		candidates.forEach((candidate, index) => {
+			questions[`r${index}`] = renderQuestion(QUESTIONS.relevance, { index, name: candidate.name });
 		});
 		const judged = await askDecisionJudge(
 			"decision-tools",
