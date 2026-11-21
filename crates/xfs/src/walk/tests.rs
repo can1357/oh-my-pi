@@ -367,43 +367,26 @@ async fn walks_end_when_a_waiting_worker_misses_a_wakeup() {
 /// other workers' waits.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_visitor_ends_the_walk_on_every_worker() {
-	let owned: Vec<String> = (0..24)
-		.flat_map(|d| (0..4).map(move |s| format!("d{d:02}/s{s}/f")))
+	let paths: Vec<String> = (0..24)
+		.flat_map(|d| (0..4).map(move |s| format!("mem://visitor-panics/dir/d{d:02}/s{s}/f")))
 		.collect();
-	let specs: Vec<&str> = owned.iter().map(String::as_str).collect();
-	let tmp = make_tree("visitor-panics", &specs);
+	let files: Vec<(&str, &str)> = paths.iter().map(|path| (path.as_str(), "")).collect();
+	let (_mem, blocking) = MemFs::with_files(&files);
+	let fs = Fs::Provider(blocking);
 	let opts = Options { workers: Some(8), ..Default::default() };
-	let (mut panicked, mut skipped) = (0, 0);
-	for round in 0..2_000 {
-		let (root, opts) = (tmp.path().to_path_buf(), opts.clone());
-		let run = tokio::spawn(async move {
-			drain(&Fs::native(), &root, &opts, |_, entry, out: &mut Vec<()>| {
-				assert_ne!(entry.path, b"d11/s2", "visitor boom");
-				out.push(());
-				Action::Continue
-			})
-			.await
-		});
-		let joined = tokio::time::timeout(Duration::from_secs(30), run)
-			.await
-			.unwrap_or_else(|_| panic!("walk {round} did not end after a visitor panic"));
-		match joined {
-			Err(error) => {
-				assert!(error.is_panic(), "walk {round}: {error:?}");
-				panicked += 1;
-			},
-			// The walk could not open its root or `d11` (past the open-file
-			// limit), so its visitor never reached the panicking entry.
-			Ok(Err(WalkError::Root { .. })) => skipped += 1,
-			Ok(Ok((_, errors))) if !errors.is_empty() => skipped += 1,
-			Ok(Ok(_)) => panic!("walk {round}: the visitor panic did not resume in the consumer"),
-		}
-	}
-	assert!(
-		panicked >= 1_000,
-		"{panicked} of 2,000 walks reached the visitor panic; {skipped} could not open their root \
-		 or a directory"
-	);
+	let run = tokio::spawn(async move {
+		drain(&fs, Path::new("mem://visitor-panics/dir"), &opts, |_, entry, out: &mut Vec<()>| {
+			assert_ne!(entry.path, b"d11/s2", "visitor boom");
+			out.push(());
+			Action::Continue
+		})
+		.await
+	});
+	let joined = tokio::time::timeout(Duration::from_secs(30), run)
+		.await
+		.expect("the walk did not end after a visitor panic");
+	let error = joined.expect_err("the visitor panic did not resume in the consumer");
+	assert!(error.is_panic(), "the walk task ended without the visitor's panic: {error:?}");
 }
 
 /// Stopping a walk closes its job queue, so every worker still waiting on it
