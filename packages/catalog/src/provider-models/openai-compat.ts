@@ -14,7 +14,7 @@ import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
-import { providerEntries, seedModels } from "../compat/providers";
+import { providerEntries, providerEntry, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
@@ -6902,7 +6902,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	return {
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
-		dynamicModelsAuthoritative: true,
+		dynamicModelsAuthoritative: providerEntry("github-copilot")?.dynamicModelsAuthoritative === true,
 		// Copilot discovery pre-applies the correct image fallback for omitted
 		// `supports.vision`; the live row's modality is authoritative.
 		dynamicInputAuthoritative: true,

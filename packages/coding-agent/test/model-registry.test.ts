@@ -2555,6 +2555,7 @@ describe("ModelRegistry", () => {
 					data: [
 						{ id: "gpt-4o", capabilities: { type: "chat" }, policy: { state: "enabled" } },
 						{ id: "claude-haiku-5.5", capabilities: { type: "chat" }, policy: { state: "disabled" } },
+						{ id: "claude-sonnet-4.5", capabilities: { type: "chat" }, policy: { state: "unconfigured" } },
 						{ id: "gpt-4o-mini", capabilities: { type: "chat" }, model_picker_enabled: false },
 					],
 				});
@@ -2567,7 +2568,7 @@ describe("ModelRegistry", () => {
 					.getAvailable()
 					.filter(model => model.provider === "github-copilot")
 					.map(model => model.id),
-			).toEqual(["gpt-4o", "gpt-4o-mini"]);
+			).toEqual(["claude-sonnet-4.5", "gpt-4o", "gpt-4o-mini"]);
 
 			const restarted = new ModelRegistry(authStorage, modelsJsonPath, { cacheDbPath });
 			await restarted.refreshProvider("github-copilot", "online-if-uncached");
@@ -2576,7 +2577,7 @@ describe("ModelRegistry", () => {
 					.getAvailable()
 					.filter(model => model.provider === "github-copilot")
 					.map(model => model.id),
-			).toEqual(["gpt-4o", "gpt-4o-mini"]);
+			).toEqual(["claude-sonnet-4.5", "gpt-4o", "gpt-4o-mini"]);
 		});
 	});
 
