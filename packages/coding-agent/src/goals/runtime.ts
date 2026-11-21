@@ -492,6 +492,9 @@ export class GoalRuntime {
 			if (state.goal.status === "dropped") {
 				throw new Error("cannot complete a dropped goal");
 			}
+			if (!state.enabled && state.goal.status === "paused") {
+				throw new Error("cannot complete a paused goal: resume it first");
+			}
 			state.enabled = false;
 			state.goal.status = "complete";
 			state.goal.updatedAt = this.#now();
