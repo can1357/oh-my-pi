@@ -160,3 +160,70 @@ async fn a_closed_descriptor_stays_closed_in_a_script_the_kernel_refused() {
 	}])
 	.await;
 }
+
+/// What a [`omp_vfs::ChangeSink`] is told, as `name: before -> after` (`-`
+/// for no file).
+#[derive(Default)]
+struct ChangeLog(parking_lot::Mutex<Vec<String>>);
+
+impl omp_vfs::ChangeSink for ChangeLog {
+	fn wants(&self, _path: &std::path::Path) -> bool {
+		true
+	}
+
+	fn changed(&self, path: std::path::PathBuf, before: Option<Vec<u8>>, after: Option<Vec<u8>>) {
+		let text = |side: Option<Vec<u8>>| {
+			side.map_or_else(
+				|| "-".to_owned(),
+				|bytes| format!("{:?}", String::from_utf8_lossy(&bytes)),
+			)
+		};
+		let name = path
+			.file_name()
+			.expect("file name")
+			.to_string_lossy()
+			.into_owned();
+		self
+			.0
+			.lock()
+			.push(format!("{name}: {} -> {}", text(before), text(after)));
+	}
+}
+
+/// The run filesystem's change sink hears of every file a command's builtins
+/// and redirections changed, once the command is done: a temporary file
+/// `sed -i` renames into place is one change of its target, and a
+/// redirection's file is read after the program writing through it exits.
+/// A file that program opens itself is not the shell's change.
+#[tokio::test(flavor = "multi_thread")]
+async fn builtin_and_redirection_changes_reach_the_change_sink() {
+	let dir = tempfile::tempdir().expect("temp dir");
+	std::fs::write(dir.path().join("a.txt"), "a = 1\n").expect("seed");
+	let log = std::sync::Arc::new(ChangeLog::default());
+	let script = "sed -i 's/1/2/' a.txt\nmv a.txt b.txt\necho more >> b.txt\n/bin/sh -c 'sleep \
+	              0.1; echo late' > late.txt\n/bin/sh -c 'echo own > external.txt'\nrm late.txt";
+	let result = Shell::new(None)
+		.run(
+			ShellRunOptions {
+				command: script.to_owned(),
+				cwd: Some(dir.path().to_string_lossy().into_owned()),
+				filesystem: Some(omp_vfs::Fs::native().with_change_sink(log.clone())),
+				..Default::default()
+			},
+			None,
+			CancelToken::new(Some(10_000)),
+		)
+		.await
+		.expect("run");
+
+	assert_eq!(result.exit_code, Some(0));
+	assert!(dir.path().join("external.txt").exists());
+	assert_eq!(*log.0.lock(), [
+		r#"a.txt: "a = 1\n" -> "a = 2\n""#,
+		r#"a.txt: "a = 2\n" -> -"#,
+		r#"b.txt: - -> "a = 2\n""#,
+		r#"b.txt: "a = 2\n" -> "a = 2\nmore\n""#,
+		r#"late.txt: - -> "late\n""#,
+		r#"late.txt: "late\n" -> -"#,
+	]);
+}

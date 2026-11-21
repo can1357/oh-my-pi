@@ -35,7 +35,7 @@ The OpenAI Chat Completions provider implements HTTP POST JSON body streaming ov
 ### Stream behavior
 
 - **SSE Delta Decoding & Normalization**: `postOpenAIStream` (`packages/ai/src/utils/openai-http.ts`) uses `readSseJson` to decode raw SSE `data:` payloads into `ChatCompletionChunk` objects. `normalizeStreamingContentText` (`packages/ai/src/providers/openai-completions.ts`) normalizes `delta.content` whether received as a string or an array of content parts (`[{ type: "text", text: "..." }]`, e.g., Mistral Medium 3.5), preventing `[object Object]` string coercions.
-- **Reasoning Fields & Encrypted Signatures**: `streamOpenAICompletionsOnce` inspects `delta.reasoning_content` (llama.cpp/vLLM), `delta.reasoning`, and `delta.reasoning_text`, using the first non-empty field per chunk to prevent duplicate reasoning text. Encrypted reasoning signatures in `delta.reasoning_details` (`reasoning.encrypted`) are attached to corresponding `toolCall.thoughtSignature`.
+- **Reasoning Fields & `reasoning_details`**: `streamOpenAICompletionsOnce` inspects `delta.reasoning_content` (llama.cpp/vLLM), `delta.reasoning`, and `delta.reasoning_text`, using the first non-empty field per chunk to prevent duplicate reasoning text. `delta.reasoning_details` entries are kept as received (streamed `reasoning.text` / `reasoning.summary` fragments of one entry concatenated) in the turn's first thinking block, whose `thinkingSignature` becomes a JSON envelope of the entries plus the reasoning field marker (`parseReasoningDetailsSignature` in `packages/ai/src/utils/reasoning-source.ts`); a turn with only encrypted entries gets an empty thinking block to hold them. OpenRouter mirrors its `reasoning` string into `reasoning.text` entries, so whichever of the two streams first in the turn renders as thinking and the other does not render again. `convertMessages` replays the entries verbatim as `reasoning_details`, except that a request which drops the model's own thinking leaves out `reasoning.text` / `reasoning.summary` entries without a `signature` or `data`. The entries cover the whole turn, so when secret obfuscation, credential redaction, or DSML cleanup rewrites any thinking block or tool call arguments of the turn, `dropReasoningDetailsEnvelopes` reduces every envelope to its field marker; share export does the same and also drops the encrypted entry kept on `toolCall.thoughtSignature`. A `reasoning.encrypted` entry with an `id` (blob in `data`, or in `signature`) is also attached to the matching `toolCall.thoughtSignature`, which replays it once the envelope is gone (or the turn predates it); a call whose arguments were rewritten loses that signature too.
 - **Partial JSON Throttling**: `parseStreamingJsonThrottled` (from `@oh-my-pi/pi-utils`) throttles incremental JSON parsing during tool argument streaming in `streamOpenAICompletionsOnce` to avoid high CPU overhead.
 - **Stream Markup Healing**: `StreamMarkupHealing` (`packages/ai/src/utils/stream-markup-healing.ts`) is activated when `policy.stream.markupHealingPattern` is configured. It inspects streamed text for XML/markdown-wrapped tool calls (e.g. DSML leaks), parses completed tool calls, emits `toolcall_start`/`toolcall_delta`/`toolcall_end` events, and promotes `stop` finish reasons to `toolUse`.
 - **Demoted Thinking & Cumulative Reasoning**: `renderDemotedThinking` (`packages/ai/src/dialect/demotion.ts`) handles demoted thinking blocks (`isDemotedThinking`). `lastCumulativeReasoningBySignature` tracks cumulative reasoning streams (e.g., MiniMax-M3) across text block transitions to prevent re-emitting thinking text as duplicate blocks after visible text has started.
@@ -241,7 +241,6 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/goog
 ### Auth & usage
 
 - **Credential source**: Directly authenticates via `x-goog-api-key: apiKey` header (or `GEMINI_API_KEY` environment variable retrieved via `getEnvApiKey(model.provider)` in `packages/ai/src/providers/google.ts`).
-- **Usage tracker**: `googleGeminiCliUsageProvider` in `packages/ai/src/usage/gemini.ts` monitors OAuth-backed Cloud Code Assist usage by calling `POST /v1internal:loadCodeAssist` (for project resolution) and `POST /v1internal:retrieveUserQuota`. Quota buckets are mapped to tiers (`Flash`, `Pro`, `3-Flash`) with remaining fraction usage percentages and reset windows (`parseWindow`).
 
 ### Catalog model handling
 
@@ -285,15 +284,11 @@ The Google Vertex AI provider enables streaming generation for Gemini models hos
 * **Catalog API Resolution**: `resolveGoogleVertexApi` in `packages/catalog/src/provider-models/openai-compat.ts` routes `@ai-sdk/google-vertex/anthropic` npm package models to `api: "anthropic-messages"` with `GOOGLE_VERTEX_ANTHROPIC_BASE_URL` (`https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/{model}:streamRawPredict`). Models with slash IDs or `@ai-sdk/openai-compatible` route to `api: "openai-completions"`. All other models route to `api: "google-vertex"` with `GOOGLE_VERTEX_BASE_URL` (`https://{location}-aiplatform.googleapis.com`).
 * **Registry Credentials Guard**: Declared in `packages/catalog/src/compat/rules/auth/google-vertex.kdl` via `env hook="google-vertex-adc"` (`packages/ai/src/registry/hooks/env.ts`). Returns `$env.GOOGLE_CLOUD_API_KEY` if set, or `AUTHENTICATED_SENTINEL` (`"<authenticated>"`) if ADC credentials exist (`hasVertexAdcCredentials()`) AND project env (`GOOGLE_CLOUD_PROJECT`/`GCP_PROJECT`/`GCLOUD_PROJECT`) AND location env (`GOOGLE_VERTEX_LOCATION`/`GOOGLE_CLOUD_LOCATION`/`VERTEX_LOCATION`) are present. Returns `undefined` otherwise, preventing models from appearing in catalog listings without proper auth.
 
-## Google Gemini CLI / Antigravity
+## Cloud Code Assist transport
 
-Google Cloud Code Assist (CCA) transport wrapper accessing Gemini and Claude models over `/v1internal:streamGenerateContent` SSE endpoints. Implementation spans `packages/ai/src/providers/google-gemini-cli.ts` (shared execution engine, request construction, stream parsing, and planning leak filters), `packages/catalog/src/compat/rules/auth/google-gemini-cli.kdl` & `packages/catalog/src/compat/rules/auth/google-antigravity.kdl` (auth policy declarations), `packages/ai/src/registry/oauth/google-gemini-cli.ts` & `google-antigravity.ts` (OAuth hooks, project discovery, and onboarding), `packages/ai/src/usage/google-antigravity.ts` & `packages/ai/src/usage/gemini.ts` (quota tracking and credential ranking), and `packages/catalog/src/discovery/antigravity.ts` (model catalog discovery).
+Google Antigravity uses the Cloud Code Assist SSE transport in `packages/ai/src/providers/google-gemini-cli.ts`. The API identifier remains `google-gemini-cli` for Antigravity and custom providers.
 
 ### Special casings
-
-Provider-specific overrides in `packages/catalog/src/compat/rules/providers/google-gemini-cli.kdl` (more-specific selectors override provider defaults):
-
-- For class gemini; revision >=3.0.0: `requiresSkipThoughtSignatureOnFirstFunctionCall=true`.
 
 Provider-specific overrides in `packages/catalog/src/compat/rules/providers/google-antigravity.kdl` (more-specific selectors override provider defaults):
 
@@ -328,25 +323,22 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/goog
 ### Auth & usage
 
 - **Credential Model & Token Expiry**: Credentials stored as JSON (`parseGeminiCliCredentials`): `{ token, projectId, refreshToken, expiresAt, email }`. AuthStorage is the sole refresh authority. `shouldRefreshGeminiCliCredentials` checks token expiry with a 60s skew (`ANTIGRAVITY_REFRESH_SKEW_MS` / `GOOGLE_GEMINI_REFRESH_SKEW_MS`). Stale tokens fail fast before making HTTP requests.
-- **OAuth Installed-App Flow**: Callback ports are `8085` (`google-gemini-cli`, `/oauth2callback`) and `51121` (`google-antigravity`, `/oauth-callback`). Supports paste code flow (`pasteCodeFlow: true`). Authorizes via Google OAuth 2.0 (`accounts.google.com/o/oauth2/v2/auth`); `google-antigravity` sends S256 PKCE like the native client. Antigravity scopes are `cloud-platform`, `userinfo.email`, `userinfo.profile`, `cclog`, `experimentsandconfigs`, and `aicode`.
+- **OAuth Installed-App Flow**: The Antigravity callback is `/oauth-callback` on port `51121`. Supports paste code flow (`pasteCodeFlow: true`). Authorizes via Google OAuth 2.0 (`accounts.google.com/o/oauth2/v2/auth`); `google-antigravity` sends S256 PKCE like the native client. Antigravity scopes are `cloud-platform`, `userinfo.email`, `userinfo.profile`, `cclog`, `experimentsandconfigs`, and `aicode`.
 - **Project Discovery & Onboarding**:
-   - `google-gemini-cli` (`packages/catalog/src/compat/rules/auth/google-gemini-cli.kdl`, hook in `packages/ai/src/registry/oauth/google-gemini-cli.ts`): calls `POST /v1internal:loadCodeAssist` with `$GOOGLE_CLOUD_PROJECT` fallback. If project absent, calls `POST /v1internal:onboardUser` with `tierId` (`free-tier`, `legacy-tier`, `standard-tier`) and polls `LongRunningOperationResponse` via `pollOperation` (up to `POLL_MAX_ATTEMPTS = 24` at 5s intervals). Detects VPC-SC restriction (`SECURITY_POLICY_VIOLATED`).
    - `google-antigravity` (`packages/catalog/src/compat/rules/auth/google-antigravity.kdl`, hook in `packages/ai/src/registry/oauth/google-antigravity.ts`): mirrors the native `antigravity/hub` flow against `https://daily-cloudcode-pa.googleapis.com`: `loadCodeAssist` requests carry `{ metadata: { ideType: "ANTIGRAVITY" } }`, repeat with `cloudaicompanionProject` when the response lacks `paidTier`, and refresh after resolving the account state. Accounts without `currentTier` are provisioned once with `onboardUser` and `tierId: "free-tier"`; its long-running operation is polled with `GET /v1internal/{operation.name}` every second under one 30-second deadline.
 - **Usage & Quota Tracking (`google-antigravity`)**: `antigravityUsageProvider` (`packages/ai/src/usage/google-antigravity.ts`) queries `POST /v1internal:fetchAvailableModels`. Normalizes quota buckets into daily (24h) and weekly (7d) windows. Deduplicates quotas into backend counter keys (`Anthropic`, `Google`, `OpenAI`). `antigravityRankingStrategy` scopes ranking by requested model family (`getAntigravityCounterKeyForModel`: `claude-` → Anthropic, `gemini-`/`gemma-` → Google, `gpt-`/`openai/` → OpenAI), selecting stored OAuth credentials with available quota headroom.
-- **Usage & Quota Tracking (`google-gemini-cli`)**: `googleGeminiCliUsageProvider` (`packages/ai/src/usage/gemini.ts`) queries `loadCodeAssist` and `retrieveUserQuota`, surfacing quota percentages per model tier (`3-Flash`, `Flash`, `Pro`).
 
 ### Catalog model handling
 
-- **Provider entry (`google-gemini-cli`)**: `packages/catalog/src/compat/rules/providers/google-gemini-cli.kdl` declares default model `gemini-3.1-pro-preview`.
 - **Provider entry (`google-antigravity`)**: `packages/catalog/src/compat/rules/providers/google-antigravity.kdl` declares default model `gemini-3.1-pro`.
 - **Authored seeds**: `gemini-3-pro-image`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
-- **Model Resolution & Discovery**: `googleAntigravityModelManagerOptions` & `googleGeminiCliModelManagerOptions` (`packages/catalog/src/provider-models/google.ts`) invoke `fetchAntigravityDiscoveryModels` (`packages/catalog/src/discovery/antigravity.ts`), which posts `{ project }` to `fetchAvailableModels` when the account's project is known (`{}` otherwise), as the native client does.
+- **Model Resolution & Discovery**: `googleAntigravityModelManagerOptions` (`packages/catalog/src/provider-models/google.ts`) invokes `fetchAntigravityDiscoveryModels` (`packages/catalog/src/discovery/antigravity.ts`), which posts `{ project }` to `fetchAvailableModels` when the account's project is known (`{}` otherwise), as the native client does.
 - **Variant Collapsing**: Effort-tier variants are collapsed into logical specs at discovery (`packages/catalog/src/compat/collapse.ts`):
-   - `gemini-3.5-flash`: collapses `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, `gemini-3-flash-agent`. Antigravity budget mode maps Minimal/Low → `extra-low` (1000 tokens), Medium → `low` (4000 tokens), High → `agent` (10000 tokens). Gemini CLI maps to level transport. Alias: `gemini-3-flash`. Antigravity retired these wire ids while its roster still lists them, so `exclude-models` drops `gemini-3.5-flash` and `gemini-3-flash` from that provider's discovery and bundle.
+   - `gemini-3.5-flash`: collapses `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, `gemini-3-flash-agent`. Antigravity budget mode maps Minimal/Low → `extra-low` (1000 tokens), Medium → `low` (4000 tokens), High → `agent` (10000 tokens). Alias: `gemini-3-flash`. Antigravity retired these wire ids while its roster still lists them, so `exclude-models` drops `gemini-3.5-flash` and `gemini-3-flash` from that provider's discovery and bundle.
    - `gemini-3.6-flash`: collapses `gemini-3.6-flash-low`, `-medium`, `-high`, `-tiered` into `gemini-3.6-flash` with `google-level` mode.
    - `gemini-3.1-pro`: collapses `gemini-3.1-pro-low`, `gemini-pro-agent`, `gemini-3.1-pro-high`. High effort routes to `gemini-pro-agent` because upstream `gemini-3.1-pro-high` deployment returns INVALID_ARGUMENT on streamGenerateContent.
    - `claude-*`: bare and `-thinking` pairs collapse into `claude-*` using reviewed thinking-pair collapse (`preserveAbsentEffortRoutes: true`).
-- **Catalog Generator Integration**: `fetchAntigravityModels` (`packages/catalog/scripts/generate-models.ts`) fetches models via discovery token (falling back from `google-antigravity` to `google-gemini-cli` OAuth credentials) and fixes `baseUrl` to `https://daily-cloudcode-pa.googleapis.com`.
+- **Catalog Generator Integration**: `fetchAntigravityModels` (`packages/catalog/scripts/generate-models.ts`) fetches models via discovery token and fixes `baseUrl` to `https://daily-cloudcode-pa.googleapis.com`.
 
 ## Amazon Bedrock
 
@@ -561,7 +553,7 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
 - **Native Tools & `SoftToolRequirement` Interplay**:
    - Native tools (`CURSOR_NATIVE_TOOL_NAMES`: `bash`, `read`, `write`, `delete`, `ls`, `grep`, `todo`) are omitted when building `requestContext` MCP tool definitions.
    - **External executor (auth-gateway)**: every context tool, native names included, is advertised as MCP, and the run is sent `x-cursor-agent-allowed-tools: mcp_tool_call,get_mcp_tools_tool_call`. Cursor's built-in tools (file, shell, edit, todo, web fetch, SCM) are therefore unavailable through the gateway; the client's own tools stand in for them.
-   - **Exception**: `write` is explicitly re-included in `buildMcpToolDefinitions` whenever pi-agent tools are advertised. `write` acts as the `xd://` transport for staged previews (e.g. `ast_edit`). Without `write`, staged previews cannot be resolved and `SoftToolRequirement('write')` escalation aborts the turn.
+   - **Exception**: `bash` is explicitly re-included in `buildMcpToolDefinitions` whenever pi-agent tools are advertised, although it is a native Cursor tool name. Staged previews (e.g. `ast_edit`) are finalized by the `resolve` or `reject` command run through `bash`; Cursor's native catalog may expose no shell path, so without the re-included `bash` a staged preview can never be resolved and the `SoftToolRequirement('bash')` escalation aborts the turn.
 - **`rootPromptMessagesJson` & Blob Store**:
    - `buildGrpcRequest` passes conversation history as SHA-256 binary blob IDs (`blobStore`) in `rootPromptMessagesJson` and `turns`.
    - System prompts are stored as individual JSON blobs (`buildCursorSystemPromptJsons`), allowing independent server-side prefix blob caching hits when only downstream prompts change.
@@ -675,12 +667,14 @@ The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the K
 
 - **Request identity**: Every request (chat, model and profile discovery, AWS sign-in, Google/GitHub sign-in) uses the same headers and service targets as the official Kiro CLI 3.2.0. The one intentional difference is `x-amzn-codewhisperer-optout: true`: OMP opts out of content sharing, where the CLI opts in by default.
 - **Tool-result byte budgets**: Each tool result is capped at 800,000 UTF-8 bytes (Kiro's service limit) and ends with a marker stating how much was omitted. The request budget is 850,000 bytes per 200,000 tokens of context window. Over budget, historical tool results are shrunk to 25,000 bytes oldest first, then current-turn results (never below 25,000 bytes). A request still over budget is reported as a context overflow so OMP compacts.
+- **Thinking off**: Kiro applies a model's schema default effort when `additionalModelRequestFields` is omitted, so thinking off (including `disableReasoning` and `forceReasoningOff`) sends the advertised off value: `thinking.type: "disabled"` for adaptive Claude schemas, `reasoning.effort: "none"` for GPT schemas. Discovery marks such models `suppressWhenOff`; a schema without an off value is `requiresEffort`, so thinking off runs at its lowest effort.
 
 ### Stream behavior
 
 - **Transient retry**: A request is retried at most once, with an identical body and a fresh request id, and only before any output, for a `ThrottlingError` with reason `INSUFFICIENT_MODEL_CAPACITY` (over HTTP or as an in-stream exception) and for HTTP 400 `ValidationException: Invalid tool use format.`. A billed request is never replayed; every other failure is terminal.
 - **Stop reasons**: `MAX_TOKENS` maps to `length` and a tool call whose arguments were cut off is dropped. `CONTENT_FILTERED` is reported as a refusal with the service's category and explanation and is not retried.
 - **Context size**: `contextUsageEvent` percentages are reported as context size, scaled to the model's context window.
+- **Context overflow**: HTTP 413, Kiro's `CONTENT_LENGTH_EXCEEDS_THRESHOLD` error reason, and any error body containing `Input is too long.` (including HTTP 429) are reported as context overflow so OMP can compact the conversation.
 
 ### Auth & usage
 
@@ -910,6 +904,7 @@ Bifrost is a self-hosted open-source AI gateway that serves every configured ups
 - **Judge retries and fallbacks**: omp sends no `fallbacks` to `/decisions`, but Bifrost can still retry (provider `network_config.max_retries`) and fall back (routing-rule `fallbacks`) on its side. Each native judge candidate also gets up to 3 HTTP attempts within `judgment.attemptTimeoutMs`, then the next `retry.fallbackChains.judge` entry, so the two layers multiply upstream calls during an outage, and omp can give up at its deadline while Bifrost keeps retrying. Keep one fallback layer: either omp's judge chain (Bifrost judge routes with `max_retries` 0 and no rule fallbacks), or Bifrost's (one omp judge candidate with `judgment.attemptTimeoutMs` above the gateway's worst case, and `judgment.hedgeAfterMs` off).
 - **Non-chat rows**: rows whose `architecture.output_modalities` contain neither `text` nor `decisions` are dropped in the mapper; metadata-less embedding, speech, transcription, image, and moderation ids are dropped by `exclude-models provider="bifrost"` in `runtime/behavior.kdl`.
 - **Proxy, not local server**: `bifrost` is in `PROXY_OPENAI_COMPAT_PROVIDERS` (`packages/catalog/src/compat/resolve.ts`), so a loopback base URL does not turn on the local-runtime request shaping (grammar tool schemas, reasoning-content replay, output clamping) meant for llama.cpp, vLLM, and similar servers.
+- **Gemini reasoning**: Bifrost streams Gemini thinking only as `delta.reasoning_details`, with no `reasoning` string: `reasoning.text` entries, and a `reasoning.encrypted` entry whose blob is in `signature` rather than OpenRouter's `data` (Gemini 3 adds an `id` such as `tool_call_call_1`). The entries render as thinking; Bifrost drops the model's own thinking, so only the encrypted entry replays on the next turn (see [Stream behavior](#stream-behavior)).
 
 ### Auth & usage
 
@@ -1226,30 +1221,6 @@ The Google Antigravity provider (`google-antigravity`) routes requests to Google
 - **Provider entry (`google-antigravity`)**: `packages/catalog/src/compat/rules/providers/google-antigravity.kdl` declares default model `gemini-3.1-pro`.
 - **Authored seeds**: `gemini-3-pro-image`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - **Claude & GPT-OSS Model Availability**: Exposes Anthropic Claude models (`claude-opus-4-5`, `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-sonnet-4-6`) and `gpt-oss-120b` alongside Gemini 3.x/2.5 models in `models.json` (`packages/catalog/src/models.json`).
-
-## Google Gemini CLI (`google-gemini-cli`)
-
-Google Cloud Code Assist (Gemini CLI) (`google-gemini-cli`) is Google's OAuth-authenticated developer free and workspace tier providing direct access to Gemini models over the Cloud Code Assist API endpoint (`https://cloudcode-pa.googleapis.com`). Rides the shared **Google Gemini CLI / Antigravity** transport section (`packages/ai/src/providers/google-gemini-cli.ts`).
-
-### Special casings
-
-Provider-specific overrides in `packages/catalog/src/compat/rules/providers/google-gemini-cli.kdl` (more-specific selectors override provider defaults):
-
-- For class gemini; revision >=3.0.0: `requiresSkipThoughtSignatureOnFirstFunctionCall=true`.
-
-- **Default Endpoint & Headers**: Dispatches requests to `https://cloudcode-pa.googleapis.com` and emits headers via `getGeminiCliHeaders()` (`GeminiCLI/0.46.0/<modelId> ...` in `packages/catalog/src/wire/gemini-headers.ts`).
-- Standard request pipeline: Nothing beyond the Google Gemini CLI / Antigravity transport pipeline.
-
-### Auth & usage
-
-- **OAuth Installed-App Flow**: Authorizes via Google PKCE OAuth 2.0 declared in `packages/catalog/src/compat/rules/auth/google-gemini-cli.kdl` (`login "oauth-code"`, engine `packages/ai/src/registry/engine/oauth-code.ts`) on callback port `8085` (`/oauth2callback`) requesting Google Cloud scopes (`cloud-platform`, `userinfo.email`, `userinfo.profile`). Refresh is declared under `refresh` (`packages/ai/src/registry/engine/refresh.ts`) with project hook in `packages/ai/src/registry/oauth/google-gemini-cli.ts`.
-- **Project Discovery & Onboarding**: `discoverProject` (`packages/ai/src/registry/oauth/google-gemini-cli.ts`) checks existing projects via `POST /v1internal:loadCodeAssist` with `$GOOGLE_CLOUD_PROJECT` / `$GOOGLE_CLOUD_PROJECT_ID` fallback. Non-free tiers (`legacy-tier`, `standard-tier`) or new accounts call `POST /v1internal:onboardUser` with `tierId` (`free-tier`, `legacy-tier`, `standard-tier`) and poll `pollOperation` (up to `POLL_MAX_ATTEMPTS = 24` at 5s intervals). Detects VPC-SC restrictions (`isVpcScAffectedUser` checking `SECURITY_POLICY_VIOLATED`).
-- **Quota & Usage Provider**: `googleGeminiCliUsageProvider` (`packages/ai/src/usage/gemini.ts`) posts to `loadCodeAssist` and `retrieveUserQuota` (`/v1internal:retrieveUserQuota`), mapping remaining bucket fractions into usage percentages grouped by model tier (`3-Flash`, `Flash`, `Pro` via `getModelTier`).
-
-### Catalog model handling
-
-- **Provider entry (`google-gemini-cli`)**: `packages/catalog/src/compat/rules/providers/google-gemini-cli.kdl` declares default model `gemini-3.1-pro-preview`.
-- **Generator Integration & Priority**: Serves as fallback OAuth token provider in `fetchAntigravityModels` (`packages/catalog/scripts/generate-models.ts`) if `google-antigravity` access is unavailable. Ranked second in provider priority (`packages/catalog/src/identity/priority.ts`).
 
 ## Groq (`groq`)
 

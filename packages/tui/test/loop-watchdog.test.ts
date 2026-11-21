@@ -339,7 +339,7 @@ describe("LoopWatchdog", () => {
 			callbacks.push(cb);
 			return {};
 		};
-		const wd = new LoopWatchdog({ now: () => nowValue, schedule });
+		const wd = new LoopWatchdog({ now: () => nowValue, schedule, sampler: null });
 
 		wd.start(); // arms callbacks[0] under generation 0
 		const stale = callbacks[callbacks.length - 1]!;
@@ -363,7 +363,7 @@ describe("LoopWatchdog", () => {
 			cb = c;
 			return { unref };
 		};
-		const wd = new LoopWatchdog({ now: () => nowValue, schedule });
+		const wd = new LoopWatchdog({ now: () => nowValue, schedule, sampler: null });
 
 		wd.start();
 		expect(unref).toHaveBeenCalledTimes(1); // armed on start
@@ -465,6 +465,7 @@ describe("LoopWatchdog long-block classification", () => {
 				scheduled = cb;
 				return {};
 			},
+			sampler: null,
 			...options,
 		});
 		return {
@@ -553,6 +554,7 @@ function fakeSampler() {
 		start() {
 			starts++;
 		},
+		stop() {},
 		drain() {
 			drains++;
 			const out = pending;
@@ -715,6 +717,61 @@ describe("LoopWatchdog with the JSC sampler", () => {
 		const named = [ctx.cause ?? "", ...(ctx.top ?? [])].join("\n");
 		expect(named).toContain("blockLoopInSamplerProbe");
 	});
+
+	test.skipIf(createJscLoopSampler() === null)(
+		"pauses the profiler once the last running watchdog stops",
+		async () => {
+			// The profiler and the count of running samplers are process-wide, and a watchdog
+			// another test file left running would keep it sampling: run in a fresh process.
+			const watchdogModule = Bun.resolveSync("@oh-my-pi/pi-tui/loop-watchdog", import.meta.dir);
+			const script = [
+				'import { samplingProfilerStackTraces } from "bun:jsc";',
+				`import { LoopWatchdog } from ${JSON.stringify(watchdogModule)};`,
+				blockLoopInSamplerProbe.toString(),
+				// Bounded, so a profiler that never records fails the test instead of hanging the child.
+				"function recordsWhileBlocking() {",
+				"	for (let i = 0; i < 100; i++) {",
+				"		blockLoopInSamplerProbe(10);",
+				"		if (samplingProfilerStackTraces().traces.length > 0) return true;",
+				"	}",
+				"	return false;",
+				"}",
+				"const schedule = () => ({});",
+				"const first = new LoopWatchdog({ schedule });",
+				"const second = new LoopWatchdog({ schedule });",
+				"first.start();",
+				"second.start();",
+				"first.stop();",
+				"const recordsWhileSecondRuns = recordsWhileBlocking();",
+				"second.stop();",
+				// A sample left in the buffer keeps the functions on its stack from being collected.
+				"blockLoopInSamplerProbe(50);",
+				"const samplesAfterLastStop = samplingProfilerStackTraces().traces.length;",
+				"first.start();",
+				"const recordsAfterRestart = recordsWhileBlocking();",
+				"first.stop();",
+				"process.stdout.write(JSON.stringify({ recordsWhileSecondRuns, samplesAfterLastStop, recordsAfterRestart }));",
+			].join("\n");
+			const proc = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "--eval", script], {
+				stdout: "pipe",
+				stderr: "pipe",
+				timeout: 4_000,
+				killSignal: "SIGKILL",
+			});
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+				proc.exited,
+			]);
+
+			expect(exitCode, stderr).toBe(0);
+			expect(JSON.parse(stdout)).toEqual({
+				recordsWhileSecondRuns: true,
+				samplesAfterLastStop: 0,
+				recordsAfterRestart: true,
+			});
+		},
+	);
 });
 
 describe("summarizeBlock", () => {

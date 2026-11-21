@@ -116,10 +116,13 @@ export type SymbolKey =
 	| "icon.throughput"
 	| "icon.intelligence"
 	| "icon.host"
+	| "icon.server"
 	| "icon.session"
+	| "icon.pid"
 	| "icon.package"
 	| "icon.warning"
 	| "icon.rewind"
+	| "icon.minimize"
 	| "icon.auto"
 	| "icon.fast"
 	| "icon.extensionSkill"
@@ -506,10 +509,13 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.throughput": "⚡",
 	"icon.intelligence": "🧠",
 	"icon.host": "🖥",
+	"icon.server": "🗄",
 	"icon.session": "🆔",
+	"icon.pid": "#",
 	"icon.package": "📦",
 	"icon.warning": "⚠",
 	"icon.rewind": "↶",
+	"icon.minimize": "⇲",
 	"icon.auto": "⟲",
 	"icon.fast": "⚡",
 	"icon.extensionSkill": "✦",
@@ -909,14 +915,17 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.intelligence": "\uee9c",
 	// pick:  | alt:  
 	"icon.host": "\uf109",
+	"icon.server": "\uf233",
 	// pick: 󰁑 (nf-md-arrow_left_bold_hexagon_outline) | alt:  
 	"icon.session": "\u{f0051}",
+	"icon.pid": "\uf292",
 	// pick:  | alt: 
 	"icon.package": "\uf487",
 	// pick:  | alt:  
 	"icon.warning": "\uf071",
 	// pick:  | alt:  ↺
 	"icon.rewind": "\uf0e2",
+	"icon.minimize": "\u{f0aa6}",
 	// pick: 󰁨 | alt:   
 	"icon.auto": "\u{f0068}",
 	"icon.fast": "\uf0e7",
@@ -1309,10 +1318,13 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.cacheCold": "!cache",
 	"icon.input": "in:",
 	"icon.host": "host",
+	"icon.server": "srv",
 	"icon.session": "id",
+	"icon.pid": "#",
 	"icon.package": "[P]",
 	"icon.warning": "[!]",
 	"icon.rewind": "<-",
+	"icon.minimize": "min",
 	"icon.auto": "[A]",
 	"icon.fast": ">>",
 	"icon.extensionSkill": "SK",

@@ -46,13 +46,13 @@ export interface EvalPreludeDefinition {
 	summary?: string;
 	/**
 	 * Render `documentation` in the eval tool description instead of linking it
-	 * as an `xd://eval/<name>` topic, so the first call needs no `read`.
+	 * as an `help://eval/<name>` topic, so the first call needs no `read`.
 	 */
 	inlineDocumentation?: boolean;
 	/**
 	 * Short guide the session sends as a hidden message after the tool batch
 	 * holding this prelude's first call, so the model can start without reading
-	 * the `xd://eval/<name>` topic (which keeps `documentation`) while the
+	 * the `help://eval/<name>` topic (which keeps `documentation`) while the
 	 * always-on tool description keeps one line. Sent again once the context no
 	 * longer holds it. Sessions that cannot send it list the prelude as read-first.
 	 */

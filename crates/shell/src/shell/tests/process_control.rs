@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use tokio::process::Command;
 
 use super::*;
