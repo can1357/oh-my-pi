@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `gitBranch` to session headers: the Git branch of the session working directory, recorded for new, forked, and branched session files and re-resolved when a session moves. It is omitted outside a Git checkout, on a detached `HEAD`, and in pure Jujutsu workspaces, and is redacted in shared exports ([#19924](https://github.com/can1357/oh-my-pi/pull/19924) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))

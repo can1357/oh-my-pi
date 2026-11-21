@@ -71,6 +71,13 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	/**
+	 * Branch of `cwd`'s checkout when the session file was created, re-resolved
+	 * when the session moves to another directory. Absent outside a checkout, on
+	 * a detached HEAD, in a pure-jj workspace, and on sessions written before
+	 * this field existed. Mid-session checkouts are not tracked.
+	 */
+	gitBranch?: string;
+	/**
 	 * Set when another client started the session ({@link SessionOrigin}); only that client lists it, so the
 	 * terminal's resume picker, `--continue`, recent sessions and ACP listings skip it. An explicit
 	 * `--resume <id|path>` still opens it.
