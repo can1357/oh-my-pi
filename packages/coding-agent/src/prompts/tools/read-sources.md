@@ -12,7 +12,7 @@
   - Explicit analysis: :overview function list; :<func|0xaddr> pseudocode; :<func>:asm; :imports; :exports; :strings; :xrefs:<func|0xaddr>.
   - These selectors open the selected disassembler and may provision Ghidra on first analysis.
   - Line ranges apply after the view (bin:main:10-40); bin:@x86_64:main analyzes a chosen universal slice.
-  - For edits and Python scripting, use eval's `dsm` namespace → xd://eval/dsm.
+  - For edits and Python scripting, use eval's `dsm` namespace → help://eval/dsm.
 {{/if}}
 - Video requires ffmpeg/ffprobe: bare preview grid+metadata, :412 frame, :1h5m42s/:90s/:01:23 time.
 - SVG/SVGZ default text; :img rasterizes an SVG/SVGZ into an image, :raw original.
