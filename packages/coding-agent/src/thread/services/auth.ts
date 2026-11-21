@@ -267,6 +267,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		},
 		"sessions.permits": (storage, provider, sessionId, credentialId) =>
 			storage.sessions.permits(provider, sessionId, credentialId),
+		"sessions.isExplicit": (storage, provider, sessionId) => storage.sessions.isExplicit(provider, sessionId),
 		"sessions.release": (storage, provider, sessionId) => storage.sessions.release(provider, sessionId),
 
 		"usage.reports": (storage, options) =>

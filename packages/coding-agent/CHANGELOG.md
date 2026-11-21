@@ -233,6 +233,7 @@
 
 ### Fixed
 
+- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Recovery stays within each session's allowed account pool. Overlapping non-quota cooldowns keep their deadlines. Explicit model choices remain intact during recovery, and cancellation restores the previous model without persisting a retry-driven switch ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren))
 - Fixed the UI freezing briefly when a prompt is submitted: prompt history is now written to disk in the background (within 100 ms, and on exit) instead of on the Enter keystroke
 - Fixed the UI freezing while discovered models from large provider catalogs are merged: the merge now runs in slices that yield to the event loop
 - Fixed closing omp's headless browser taking about 7 s when Chromium never finishes a graceful shutdown (seen with Chrome for Testing 150 on macOS 27): a browser on an omp-created profile is now killed at once
@@ -1118,7 +1119,9 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
-## [18.16.0] - 2026-11-02
+### Fixed
+
+
 
 ### Added
 
