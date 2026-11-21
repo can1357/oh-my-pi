@@ -6,8 +6,13 @@
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 
+### Changed
+
+- A mermaid diagram in a streaming answer shows one `drawing diagram…` row until its fence closes, then draws in full, so a diagram taller than the screen no longer loses its top rows while it streams ([#18529](https://github.com/can1357/oh-my-pi/pull/18529) by [@farnoy](https://github.com/farnoy))
+
 ### Fixed
 
+- Rows of a streaming answer that scroll above the screen go to scrollback as they leave it, including the prose after a table chart or a mermaid diagram; they no longer vanish until the answer finishes ([#18529](https://github.com/can1357/oh-my-pi/pull/18529) by [@farnoy](https://github.com/farnoy))
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.0] - 2026-11-21

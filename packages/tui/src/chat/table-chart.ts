@@ -247,6 +247,14 @@ export class TableChartFigure implements Component {
 		);
 	}
 
+	/**
+	 * Whether a chart is drawn and final. A table whose lookup settled on no
+	 * chart does not count: the next text update merges its prose back into one run.
+	 */
+	get settled(): boolean {
+		return typeof this.#chart === "string" && this.#figure.settled;
+	}
+
 	render(width: number): readonly string[] {
 		if (this.#figureRows() === 0) return [];
 		if (this.#chart === undefined && !this.#waiting) this.#resolve();

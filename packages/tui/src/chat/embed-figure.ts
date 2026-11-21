@@ -94,6 +94,11 @@ export class EmbedFigure implements Component {
 		return load?.state !== "failed";
 	}
 
+	/** Whether the embed is shown and no picture is still on its way: its rows no longer change at this width. */
+	get settled(): boolean {
+		return this.#embed !== undefined && !this.pending;
+	}
+
 	render(width: number): readonly string[] {
 		const embed = this.#embed;
 		if (!embed || this.#maxRows() === 0) return NO_ROWS;

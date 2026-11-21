@@ -639,6 +639,38 @@ describe("TranscriptContainer", () => {
 		expect(suffix.rows).toEqual(["final", ""]);
 	});
 
+	it("retires a stable prefix taller than the overflow once its first row leaves the screen", () => {
+		// One published prefix renders as a seven-row table. Waiting for the
+		// whole prefix to fit in the overflow would leave the rows above the
+		// viewport shown nowhere.
+		const table = ["intro", "t1", "t2", "t3", "t4", "t5", "t6"];
+		const block = new AppendBlock([...table, "streaming"], []);
+		block.publishStable([{ key: "table" }], table);
+		block.renderTranscriptStableRows = count => (count > 0 ? table : []);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(block);
+
+		const first = transcript.peekFinalizedBatch(80, 5)!;
+		expect(first.rows).toEqual(table);
+		transcript.acknowledgeFinalizedBatch(first.id);
+		expect(transcript.peekFinalizedBatch(80, 5)).toBeUndefined();
+
+		// A replay at the same width rewrites exactly what history held.
+		transcript.beginReplay();
+		const replay = transcript.peekReplayBatch(80)!;
+		expect(replay.rows).toEqual(table);
+		transcript.acknowledgeFinalizedBatch(replay.id);
+
+		// Finalizing retires each remaining row once.
+		block.finalize([...table, "streaming", "more", "rows"]);
+		const rest: string[] = [];
+		for (let batch = transcript.peekFinalizedBatch(80, 0); batch; batch = transcript.peekFinalizedBatch(80, 0)) {
+			rest.push(...batch.rows);
+			transcript.acknowledgeFinalizedBatch(batch.id);
+		}
+		expect(rest).toEqual(["streaming", "more", "rows", ""]);
+	});
+
 	it("drops emitted stable rows on reset so a replay honors a hidden presentation (#10177)", () => {
 		const transcript = new TranscriptContainer();
 		// A thinking block whose reasoning prefix streams into scrollback ahead of
