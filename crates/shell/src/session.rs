@@ -81,6 +81,7 @@ use crate::{
 		Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
 		store::{BlobSlot, Key, MiscKey, Record, Table},
 	},
+	commands::SessionCommands,
 	host::{PiHost, SpawnObserver, TERM_GRACE},
 	sys::{OutputDecoding, Sessions},
 	tools::{ToolCalls, ToolConfig},
@@ -146,6 +147,11 @@ pub struct RunOptions {
 	/// The application's speech synthesizer, which `say` speaks through;
 	/// `None` leaves `say` to the system's.
 	pub speech:         Option<Arc<dyn SpeechHost>>,
+	/// Commands the host provides for this command only
+	/// ([`crate::commands`]): resolved after the shell's builtins, pi's tools
+	/// and extras, and before shell functions, aliases and `PATH` while it
+	/// runs; unknown afterwards.
+	pub commands:       Option<SessionCommands>,
 	/// The command's stdout and stderr are one pipe whose reader takes its
 	/// bytes as shell text: what externals write there is decoded per
 	/// program by the host's output decoding
@@ -171,6 +177,7 @@ impl RunOptions {
 			pipe_tap:       None,
 			reported_error: None,
 			speech:         None,
+			commands:       None,
 			text_capture:   false,
 			events:         None,
 		}
@@ -186,6 +193,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("pipe_tap", &self.pipe_tap.is_some())
 			.field("reported_error", &self.reported_error)
 			.field("speech", &self.speech)
+			.field("commands", &self.commands)
 			.field("events", &self.events.is_some())
 			.finish()
 	}
@@ -868,10 +876,20 @@ impl Driver {
 	/// Run one job to completion and send its outcome.
 	async fn run(&mut self, job: Job) {
 		let Job { options, stdio, cancel, reply } = job;
-		let RunOptions { command, env, cwd, pipe_tap, reported_error, speech, text_capture, events } =
-			options;
+		let RunOptions {
+			command,
+			env,
+			cwd,
+			pipe_tap,
+			reported_error,
+			speech,
+			commands,
+			text_capture,
+			events,
+		} = options;
 		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
+		self.host.set_commands(commands);
 		// A command owns its observer generation, even when successive
 		// observers request identical event masks.
 		self
@@ -944,6 +962,7 @@ impl Driver {
 		self.host.set_event_sink(None);
 		self.shell.set_event_mask(EventMask::NONE);
 		self.host.set_reported_error(None);
+		self.host.set_commands(None);
 		self.restore_overlay(saved);
 		self.image.publish(&mut self.store);
 		let cwd = store_cwd(&self.store);

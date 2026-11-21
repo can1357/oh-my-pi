@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`
+
 ### Fixed
 
 - Fixed grouped `sed` scripts such as `1{h;d};2{G}` being rejected when no semicolon precedes a closing brace.
