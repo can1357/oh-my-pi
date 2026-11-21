@@ -5,6 +5,7 @@
 ### Added
 
 - Added `ShellRunResult.endedByExit` to report when `exit` or a failure under `set -e` cuts an embedded shell run short. A trailing `exit` alone does not set the flag ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+
 ### Fixed
 
 - Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
