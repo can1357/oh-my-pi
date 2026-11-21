@@ -343,6 +343,15 @@ const SCHEMA_COMPILE_PATTERN = /compil/i;
 const INVALID_REQUEST_PATTERN = /invalid_request_error/i;
 const STRUCTURED_OUTPUTS_PATTERN = /structured[_ -]?outputs?/i;
 const FEATURE_NOT_SUPPORTED_PATTERN = /not (?:supported|available|enabled)|unsupported|does(?: not|n'?t) support/i;
+// Claude on Vertex AI: a GCP organization policy
+// (`constraints/vertexai.allowedPartnerModelFeatures`) denies the partner
+// feature `structured_outputs` by default, so a request carrying `strict` tools
+// fails with `400 FAILED_PRECONDITION: ... attempting to use a disallowed
+// feature structured_outputs for Partner model ...`. The wording is a denial,
+// not "unsupported", so it never reaches FEATURE_NOT_SUPPORTED_PATTERN. Anchored
+// on the adjacent `disallowed feature structured_outputs` phrase so a 400 that
+// only mentions both words apart stays terminal.
+const VERTEX_STRUCTURED_OUTPUTS_POLICY_PATTERN = /\bdisallowed feature\s+structured[_ -]?outputs?\b/i;
 const ANTHROPIC_STRICT_FIELD_PATTERN = /\btools\.\d+\.custom\.strict\b/i;
 const EXTRA_INPUTS_NOT_PERMITTED_PATTERN = /extra inputs? (?:are|is) not permitted/i;
 // Upstream strict-schema validation surfaced through a translating gateway.
@@ -430,6 +439,7 @@ function matchesStrictToolsRejection(message: string, errorStatus: number | unde
 		return true;
 	}
 	if (STRUCTURED_OUTPUTS_PATTERN.test(message) && FEATURE_NOT_SUPPORTED_PATTERN.test(message)) return true;
+	if (VERTEX_STRUCTURED_OUTPUTS_POLICY_PATTERN.test(message)) return true;
 	if (STRICT_TOOL_SCHEMA_REJECTION_PATTERN.test(message)) return true;
 	if (!INVALID_REQUEST_PATTERN.test(message)) return false;
 	const grammarTooLarge = GRAMMAR_TOO_LARGE_PATTERN.test(message) && GRAMMAR_TOO_LARGE_DETAIL_PATTERN.test(message);
@@ -1219,7 +1229,7 @@ export function isTransientStreamParseError(error: unknown): boolean {
  * non-terminal status treat it as transient (#11805).
  */
 const STREAM_DROP_PATTERN =
-	/stream disconnected before completion|(?:stream|websocket) closed before response\.completed|stream was interrupted|stream ended before (?:terminal (?:chunk|completion event)|message_(?:start|delta|stop))|socket disconnected before secure tls connection/i;
+	/stream disconnected before completion|(?:stream|websocket) closed before response\.completed|stream (?:was )?interrupted|stream ended before (?:terminal (?:chunk|completion event)|message_(?:start|delta|stop))|socket disconnected before secure tls connection/i;
 
 /**
  * Transport stream-drop diagnostic (see {@link STREAM_DROP_PATTERN}). Unlike

@@ -350,6 +350,43 @@ describe("html form", () => {
 			form.dispose();
 		});
 
+		it("submits on one Enter when the form asks one question; with more, Enter on the last moves to Submit", () => {
+			const radio = dialog(`<form><p>Which store?</p>
+<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+<label><input type="radio" name="db" value="pg"> Postgres</label></form>`);
+			radio.form.handleInput(DOWN);
+			radio.form.handleInput(ENTER);
+			expect(radio.onSubmit).toHaveBeenCalledWith({ db: "pg" }, []);
+			radio.form.dispose();
+
+			const other = dialog(`<form><p>Which store?</p>
+<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+<label><input type="radio" name="db" value="pg"> Postgres</label></form>`);
+			other.form.handleInput(DOWN);
+			other.form.handleInput(DOWN);
+			other.form.handleInput("duckdb");
+			other.form.handleInput(ENTER);
+			expect(other.onSubmit).toHaveBeenCalledWith({ db: "duckdb" }, []);
+			other.form.dispose();
+
+			const text = dialog(`<form><label>Name <input name="name" required></label></form>`);
+			text.form.handleInput(ENTER);
+			expect(text.onSubmit).not.toHaveBeenCalled();
+			text.form.handleInput("ada");
+			text.form.handleInput(ENTER);
+			expect(text.onSubmit).toHaveBeenCalledWith({ name: "ada" }, []);
+			text.form.dispose();
+
+			const two = dialog(
+				`<form><label>Name <input name="name"></label><label>Team <input name="team"></label></form>`,
+			);
+			two.form.handleInput(ENTER);
+			two.form.handleInput(ENTER);
+			expect(two.onSubmit).not.toHaveBeenCalled();
+			expect(two.form.debugState().focus).toBe("submit");
+			two.form.dispose();
+		});
+
 		it("keeps checkbox drafts across navigation and projects only finally selected options", () => {
 			const { form } = dialog(DB_FORM);
 			form.handleInput("n");
@@ -689,6 +726,13 @@ describe("html form", () => {
 				{ name: "workers", question: "Workers", answer: "2" },
 				{ name: "notes", question: "Notes", answer: "" },
 			]);
+		});
+
+		it("keeps a control named __proto__ as an ordinary key of the defaults", () => {
+			const form = parseHtmlForm(`<form><input type="hidden" name="__proto__" value="x">
+				<label>Target <input name="target" value="prod"></label></form>`);
+			// The model reads the data as JSON, so the key must survive serialization.
+			expect(JSON.stringify(defaultFormData(form))).toBe('{"__proto__":"x","target":"prod"}');
 		});
 
 		it("validates required, numeric bounds and anchored patterns; ignores an invalid pattern", () => {

@@ -145,14 +145,15 @@ describe("Kiro request transformation", () => {
 		expect(results.map(result => result.toolUseId)).toEqual(uses.map(use => use.toolUseId));
 	});
 
-	test("maps adaptive effort with the output cap, GPT reasoning effort, and omits both when disabled", () => {
+	test("maps adaptive effort with the output cap, GPT reasoning effort, and thinking off to the advertised off value", () => {
 		const context: Context = { messages: [user("Think")] };
 		const adaptive = createModel({
 			thinking: {
 				mode: "anthropic-adaptive",
 				efforts: [Effort.Low, Effort.High],
-				defaultLevel: Effort.Low,
+				defaultLevel: Effort.High,
 				supportsDisplay: true,
+				suppressWhenOff: true,
 			},
 		});
 		expect(
@@ -167,15 +168,26 @@ describe("Kiro request transformation", () => {
 			max_tokens: 4_096,
 		});
 		const gpt = createModel({
-			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High], defaultLevel: Effort.Medium },
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.High],
+				defaultLevel: Effort.High,
+				effortMap: { [Effort.Minimal]: "none" },
+				suppressWhenOff: true,
+			},
 		});
-		expect(transformKiroRequest(gpt, context, { reasoning: Effort.High }).additionalModelRequestFields).toEqual({
-			reasoning: { mode: "standard", effort: "high" },
+		expect(transformKiroRequest(gpt, context, { reasoning: Effort.Low }).additionalModelRequestFields).toEqual({
+			reasoning: { mode: "standard", effort: "low" },
 		});
-		expect(
-			transformKiroRequest(adaptive, context, { reasoning: Effort.High, disableReasoning: true })
-				.additionalModelRequestFields,
-		).toBeUndefined();
+		// Omitted fields make Kiro apply the schema default (`high` here), so off must be sent explicitly.
+		for (const off of [{}, { reasoning: Effort.High, disableReasoning: true }]) {
+			expect(transformKiroRequest(adaptive, context, off).additionalModelRequestFields).toEqual({
+				thinking: { type: "disabled" },
+			});
+			expect(transformKiroRequest(gpt, context, off).additionalModelRequestFields).toEqual({
+				reasoning: { mode: "standard", effort: "none" },
+			});
+		}
 	});
 
 	test("cuts a tool result over the 800 KB service limit with an omitted-bytes marker", () => {

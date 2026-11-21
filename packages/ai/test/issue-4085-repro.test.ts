@@ -1,6 +1,5 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { POLL_MAX_ATTEMPTS, pollOperation } from "@oh-my-pi/pi-ai/registry/oauth/google-gemini-cli";
 import { oauthFetch } from "@oh-my-pi/pi-ai/registry/oauth/google-oauth-shared";
 
 /**
@@ -18,7 +17,7 @@ describe("issue #4085 — Google OAuth provisioning honors cancel/timeout", () =
 		const ctrl = new AbortController();
 		ctrl.abort(new Error("user pressed ESC"));
 		await expect(
-			oauthFetch("http://127.0.0.1:1/never", {}, { provider: "google-gemini-cli", signal: ctrl.signal }),
+			oauthFetch("http://127.0.0.1:1/never", {}, { provider: "google-antigravity", signal: ctrl.signal }),
 		).rejects.toBeInstanceOf(AIError.LoginCancelledError);
 	});
 
@@ -29,7 +28,7 @@ describe("issue #4085 — Google OAuth provisioning honors cancel/timeout", () =
 			const pending = oauthFetch(
 				`http://127.0.0.1:${server.port}/`,
 				{},
-				{ provider: "google-gemini-cli", signal: ctrl.signal },
+				{ provider: "google-antigravity", signal: ctrl.signal },
 			);
 			// Yield one microtask so oauthFetch reaches its awaited `fetch`, then
 			// abort the in-flight request — no wall-clock timer. Without the signal
@@ -49,43 +48,12 @@ describe("issue #4085 — Google OAuth provisioning honors cancel/timeout", () =
 			const err = await oauthFetch(
 				`http://127.0.0.1:${server.port}/`,
 				{},
-				{ provider: "google-gemini-cli", timeoutMs: 50 },
+				{ provider: "google-antigravity", timeoutMs: 50 },
 			).catch((e: unknown) => e);
 			expect(err).toBeInstanceOf(AIError.OAuthError);
 			expect((err as AIError.OAuthError).kind).toBe("timeout");
 		} finally {
 			server.stop(true);
-		}
-	});
-
-	it("pollOperation is bounded: a never-done operation fails after POLL_MAX_ATTEMPTS", async () => {
-		const sleepSpy = spyOn(Bun, "sleep").mockImplementation((() => Promise.resolve()) as typeof Bun.sleep);
-		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-			(async () =>
-				new Response(JSON.stringify({ done: false }), { status: 200 })) as unknown as typeof globalThis.fetch,
-		);
-		try {
-			const err = await pollOperation("operations/abc", {}, undefined).catch((e: unknown) => e);
-			expect(err).toBeInstanceOf(AIError.OAuthError);
-			expect((err as AIError.OAuthError).kind).toBe("timeout");
-			expect(fetchSpy).toHaveBeenCalledTimes(POLL_MAX_ATTEMPTS);
-		} finally {
-			fetchSpy.mockRestore();
-			sleepSpy.mockRestore();
-		}
-	});
-
-	it("pollOperation aborts before polling when the signal is already cancelled", async () => {
-		const fetchSpy = spyOn(globalThis, "fetch");
-		try {
-			const ctrl = new AbortController();
-			ctrl.abort(new Error("cancelled"));
-			await expect(pollOperation("operations/abc", {}, ctrl.signal)).rejects.toBeInstanceOf(
-				AIError.LoginCancelledError,
-			);
-			expect(fetchSpy).not.toHaveBeenCalled();
-		} finally {
-			fetchSpy.mockRestore();
 		}
 	});
 });

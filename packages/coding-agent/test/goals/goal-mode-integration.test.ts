@@ -525,6 +525,26 @@ describe("InteractiveMode goal mode integration", () => {
 		await waiter.inputPromise;
 	});
 
+	it("holds goal continuations while the run is paused awaiting background work", async () => {
+		// A turn that yields on background subagents/jobs pauses the open run
+		// (`agent_pause`): nothing streams, yet the result the goal needs has not
+		// arrived. The continuation belongs after the run's terminal `agent_end`.
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		Object.defineProperty(harness.session, "isRunActive", { configurable: true, get: () => true });
+
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+
+		expect(waiter.getResolvedInput()).toBeUndefined();
+
+		Reflect.deleteProperty(harness.session, "isRunActive");
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		await waiter.inputPromise;
+	});
+
 	it("stops repeated goal continuations when identical tool evidence adds no new signal", async () => {
 		vi.spyOn(vcs, "repo").mockReturnValue(null);
 		vi.spyOn(vcs, "git").mockReturnValue(null);

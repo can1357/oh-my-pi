@@ -34,10 +34,11 @@ import {
 	openAuthCredentialStore,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { setProviderCooldownMs } from "@oh-my-pi/pi-ai/auth/provider-cooldown";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
-import { getAgentDir, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { combine, effectsSettings, type ScopeLike } from "../config/registry";
 import { resolveConfigValue } from "../config/resolve-config-value";
@@ -132,6 +133,22 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
 		}
 	});
 	return promise;
+}
+
+/**
+ * Where `provider`'s (credential-store id) logins are stored, for the "Credentials saved to …" /
+ * "Credential removed from …" lines after login and logout: the auth broker, or this machine's
+ * agent.db without a broker or for a provider the broker would not serve (see `HybridAuthCredentialStore`).
+ */
+export async function credentialStoreLabel(provider: string): Promise<string> {
+	const broker = await resolveAuthBrokerConfig();
+	if (!broker) return getAgentDbPath();
+	const local = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	try {
+		return local.listBrokerLocalProviders().includes(provider) ? getAgentDbPath() : `auth broker ${broker.url}`;
+	} finally {
+		local.close();
+	}
 }
 
 /** Settings a long-lived auth storage follows (see {@link createAuthStorageSettingsSync}). */

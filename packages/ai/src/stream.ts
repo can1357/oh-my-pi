@@ -46,6 +46,7 @@ import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factor
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
+import { perturbContext } from "./prompts/perturbation";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
@@ -72,7 +73,9 @@ import {
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
+import { getProviderHooks } from "./provider-hooks";
 import { getProviderDefinition } from "./registry";
+import type { PreparedProviderRequest } from "./registry/types";
 import type {
 	Api,
 	AssistantMessage,
@@ -889,6 +892,13 @@ export function stream<TApi extends Api>(
 	);
 }
 
+/** Applies the provider's own model normalization and request shaping ahead of its api adapter. */
+function prepareProviderRequest(model: Model<Api>, options: StreamOptions): PreparedProviderRequest {
+	const definition = getProviderDefinition(model.provider);
+	const requestModel = definition?.prepareModel?.(model) ?? model;
+	return definition?.prepareRequest?.(requestModel, options) ?? { model: requestModel, options };
+}
+
 function streamDispatch<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -896,12 +906,24 @@ function streamDispatch<TApi extends Api>(
 	limited: boolean,
 ): AssistantMessageEventStream {
 	// A provider turned off in its auth rules is never called, even with a key passed in directly.
+	context = perturbContext(model, context);
 	assertProviderEnabled(model.provider);
 	const requestOptions = withSupportedSamplingParams(
 		model,
 		withTransportFetch(model, (options || {}) as StreamOptions),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
+
+	// A provider hook owns every request to the provider, ahead of api-level dispatch.
+	const hooks = getProviderHooks(model.provider);
+	if (hooks?.stream) {
+		const prepared = prepareProviderRequest(model, requestOptions as StreamOptions);
+		return hooks.stream(prepared.model, context, {
+			...prepared.options,
+			apiKey: prepared.options.apiKey || getEnvApiKey(prepared.model.provider),
+			waitForTerminalDrain: limited,
+		});
+	}
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
@@ -946,11 +968,10 @@ function streamDispatch<TApi extends Api>(
 		});
 	}
 
-	const providerDefinition = getProviderDefinition(model.provider);
-	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
-	const prepared = providerDefinition?.prepareRequest?.(requestModel, requestOptions as StreamOptions);
-	const providerModel = prepared?.model ?? requestModel;
-	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
+	const { model: providerModel, options: preparedOptions } = prepareProviderRequest(
+		model,
+		requestOptions as StreamOptions,
+	);
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
 	if (!apiKey) {
 		throw new AIError.MissingApiKeyError(providerModel.provider);
@@ -1469,6 +1490,13 @@ function streamSimpleDispatch<TApi extends Api>(
 				return streamPiNative(model, context, nativeOptions);
 			}),
 		);
+	}
+
+	// A hooked provider keeps its api's option mapping; stream() then hands the request to the hook.
+	if (getProviderHooks(model.provider)?.stream) {
+		const providerModel = getProviderDefinition(model.provider)?.prepareModel?.(model) ?? model;
+		const apiKey = typeof requestOptions.apiKey === "string" ? requestOptions.apiKey : getEnvApiKey(model.provider);
+		return stream(providerModel, context, mapOptionsForApi(providerModel, requestOptions, apiKey));
 	}
 
 	// Check custom API registry (extension-provided APIs)
@@ -2371,7 +2399,7 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"kiro-api">({
 				...base,
 				reasoning: options?.reasoning,
-				disableReasoning: options?.disableReasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				hideThinkingSummary: options?.hideThinkingSummary,
 			});
 

@@ -130,7 +130,7 @@ export function unregisterOAuthProviders(sourceId: string): void {
  * Refresh a built-in OAuth grant, cancelling provider work when refresh ownership ends.
  */
 export async function refreshOAuthToken(
-	provider: OAuthProvider,
+	provider: OAuthProviderId,
 	credentials: OAuthCredentials,
 	signal?: AbortSignal,
 	reason?: OAuthRefreshReason,
@@ -153,6 +153,28 @@ export async function refreshOAuthToken(
 	// Providers without a real refresher (static bearer tokens / API keys that
 	// don't expire) return the credentials unchanged.
 	return def.refreshToken ? def.refreshToken(credentials, signal, reason) : credentials;
+}
+
+/**
+ * Refresh `credentials` through the login that owns `provider`: an extension's registered
+ * OAuth provider, else the built-in one ({@link refreshOAuthToken}). This is the local token
+ * exchange AuthStorage runs when no store or caller refresh hook owns the credential.
+ */
+export async function refreshProviderOAuthToken(
+	provider: OAuthProviderId,
+	credentials: OAuthCredentials,
+	signal?: AbortSignal,
+	reason?: OAuthRefreshReason,
+): Promise<OAuthCredentials> {
+	const custom = customOAuthProviders.get(provider);
+	if (!custom) return refreshOAuthToken(provider, credentials, signal, reason);
+	if (!custom.refreshToken) {
+		throw new AIError.OAuthError(`OAuth provider "${provider}" does not support token refresh`, {
+			kind: "configuration",
+			provider,
+		});
+	}
+	return custom.refreshToken(credentials, signal, reason);
 }
 const JWT_EXPIRY_SKEW_MS = 5 * 60_000;
 export function normalizeOAuthCredentialExpiry<T extends OAuthCredentials>(provider: string, credentials: T): T {

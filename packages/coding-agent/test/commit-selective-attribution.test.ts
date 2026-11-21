@@ -13,24 +13,22 @@ interface Edit {
 	actor: string;
 	before: string | null;
 	after: string | null;
-	gapHint?: string;
 }
 
 /** Content committed when only `scope`'s preselected ops are applied, plus the per-op verdicts. */
-function commitFor(head: string | null, edits: Edit[], work: string | null, scope: string[], tailHint?: string) {
+function commitFor(head: string | null, edits: Edit[], work: string | null, scope: string[], headMoved = false) {
 	const recorded: RecordedEdit[] = edits.map(edit => ({
 		actor: edit.actor,
 		before: toLines(edit.before),
 		after: toLines(edit.after),
-		gapHint: edit.gapHint,
 	}));
 	const headLines = toLines(head);
 	const workLines = toLines(work);
-	const attribution = attribute(headLines, historySteps(headLines, recorded, workLines, tailHint), workLines);
-	const { status } = classify(attribution, new Set(scope));
+	const attribution = attribute(headLines, historySteps(headLines, recorded, workLines), workLines, headMoved);
+	const { status, reasons } = classify(attribution, new Set(scope));
 	const selected = new Set(attribution.ops.filter(op => status[op.id] === "own").map(op => op.id));
 	const verdicts = attribution.ops.map(op => `${status[op.id]} ${op.kind}${op.text}`);
-	return { content: fromLines(buildContent(attribution, selected)), verdicts };
+	return { content: fromLines(buildContent(attribution, selected)), verdicts, reasons };
 }
 
 const CHANGELOG = "# Changelog\n## [Unreleased]\n### Fixed\n- old entry\n";
@@ -45,6 +43,79 @@ describe("selective commit attribution", () => {
 		const { content } = commitFor(CHANGELOG, [{ actor: "Main", before: foreignFirst, after: own }], work, ["Main"]);
 
 		expect(content).toBe(CHANGELOG.replace("### Fixed\n", "### Fixed\n- Fixed /commit picking foreign hunks\n"));
+	});
+
+	for (const [side, workBody, selectedBody] of [
+		["before", "check\nshared\nnew", "check\nshared\nold\nshared"],
+		["after", "new\ncheck\nshared", "old\nshared\ncheck\nshared"],
+	]) {
+		it(`keeps an insertion ${side} a replacement when the replacement is not selected`, () => {
+			const head = "begin\nold\nshared\nend";
+			const before = "begin\nnew\nend";
+			// Identical text in the old body does not make our new line a restoration of it.
+			const work = `begin\n${workBody}\nend`;
+			const edits = [
+				{ actor: "Other", before: head, after: before },
+				{ actor: "Main", before, after: work },
+			];
+
+			const committed = commitFor(head, edits, work, ["Main"]).content;
+			expect(committed).toBe(`begin\n${selectedBody}\nend`);
+			// A replacement made before recording also keeps the repeated text on its own side.
+			expect(commitFor(head, edits.slice(1), work, ["Main"]).content).toBe(committed);
+			expect(commitFor(head, edits, work, ["Other"]).content).toBe(before);
+			expect(commitFor(head, edits, work, ["Main", "Other"]).content).toBe(work);
+			expect(commitFor(head, edits, work, []).content).toBe(head);
+
+			const replay = commitFor(committed, edits, work, ["Main"]);
+			expect(replay.verdicts).toEqual(["other -old", "other -shared", "other +new"]);
+			expect(replay.content).toBe(committed);
+			const remaining = commitFor(committed, edits, work, ["Other"]);
+			expect(remaining.verdicts).toEqual(["own -old", "own -shared", "own +new"]);
+			expect(remaining.content).toBe(work);
+		});
+	}
+
+	it("places the rest of an insertion around a line already committed at the boundary", () => {
+		const original = "begin\nold\nend";
+		const before = "begin\nnew\nend";
+		const work = "begin\nfirst\ncheck\nlast\nnew\nend";
+		const committed = "begin\ncheck\nold\nend";
+		const edits = [
+			// The gap after this snapshot hides the committed check until Main re-adds it.
+			{ actor: "Earlier", before: null, after: committed },
+			{ actor: "Other", before: original, after: before },
+			{ actor: "Main", before, after: work },
+		];
+		const replay = commitFor(committed, edits, work, ["Main"]);
+		expect(replay.content).toBe("begin\nfirst\ncheck\nlast\nold\nend");
+		expect(replay.verdicts).toEqual(["own +first", "own +last", "other -old", "other +new"]);
+	});
+
+	it("reviews an entire insertion between lines of someone else's replacement", () => {
+		const head = "begin\nold\nshared\nend";
+		const before = "begin\nfirst\nsecond\nend";
+		const work = "begin\nfirst\ncheck\nshared\nsecond\nend";
+		const edits = [
+			{ actor: "Other", before: head, after: before },
+			{ actor: "Main", before, after: work },
+		];
+
+		const { content, verdicts, reasons } = commitFor(head, edits, work, ["Main"]);
+		expect(content).toBe(head);
+		expect(verdicts).toContain("review +check");
+		expect(verdicts).toContain("review +shared");
+		expect([...reasons.values()]).toContainEqual({ kind: "placement", with: ["Other"] });
+		expect(commitFor(head, edits, work, ["Other"]).content).toBe(before);
+		expect(commitFor(head, edits, work, ["Main", "Other"]).content).toBe(work);
+	});
+
+	it("does not infer authorship from the position of an unrecorded insertion", () => {
+		const head = "old";
+		const after = "first\nsecond";
+		const work = "first\ninserted\nsecond";
+		const { content } = commitFor(head, [{ actor: "Main", before: head, after }], work, ["Main"]);
+		expect(content).toBe(after);
 	});
 
 	it("leaves a foreign edit between the agent's edits out and holds back own lines rewritten later", () => {
@@ -67,15 +138,6 @@ describe("selective commit attribution", () => {
 		expect(verdicts).toContain("review -    return 1");
 		expect(verdicts).toContain("review +    return 10 ");
 		expect(content).toBe(CODE.replace("def b():\n    return 2", "def b():\n    log()\n    return 2"));
-	});
-
-	it("counts an unrecorded rewrite of the agent's lines as its own when its shell call explains it", () => {
-		const after = CODE.replace("return 1", "return  10");
-		const work = CODE.replace("return 1", "return 10");
-
-		const { content } = commitFor(CODE, [{ actor: "Main", before: CODE, after }], work, ["Main"], "Main");
-
-		expect(content).toBe(work);
 	});
 
 	describe("history that predates HEAD", () => {
@@ -171,6 +233,84 @@ describe("selective commit attribution", () => {
 		const { content } = commitFor("x\n", [{ actor: "Main", before: "x\n", after: null }], null, ["Main"]);
 
 		expect(content).toBeNull();
+	});
+
+	// HEAD advanced on its own, then writers reordered lines. Each case once preselected an
+	// insertion whose matching deletion went elsewhere, committing a second `A`.
+	for (const [head, steps] of [
+		["x B x D A", ["B x x A", "Main: B A x x C", "Other: A x x C D B", "Main: A x C D B x"]],
+		["D B x x A", ["A B x x", "Main: B A x x", "Other: B A D x x", "Main: B D A x"]],
+	] as const) {
+		it(`never preselects a line the net change would then hold twice (HEAD ${head})`, () => {
+			const lines = (text: string) => text.split(" ").join("\n");
+			const edits: Edit[] = [];
+			let before = lines(steps[0]);
+			for (const step of steps.slice(1)) {
+				const [actor, after] = step.split(": ");
+				edits.push({ actor, before, after: lines(after) });
+				before = lines(after);
+			}
+			const tally = (text: string | null) => {
+				const counts = new Map<string, number>();
+				for (const line of toLines(text)) counts.set(line, (counts.get(line) ?? 0) + 1);
+				return counts;
+			};
+			const headCounts = tally(lines(head));
+			const workCounts = tally(before);
+
+			const committed = tally(commitFor(lines(head), edits, before, ["Main"], true).content);
+
+			for (const [line, count] of committed) {
+				expect(count).toBeLessThanOrEqual(Math.max(headCounts.get(line) ?? 0, workCounts.get(line) ?? 0));
+			}
+		});
+	}
+
+	it("keeps an unrelated insertion preselected when only a reviewed reorder also adds its text", () => {
+		const lines = (text: string) => text.split(" ").join("\n");
+		const snapshots = [
+			"B x x A q q q q",
+			"Main: B A x x C q q q q",
+			"Other: A x x C D B q q q q",
+			"Main: A x C D B x q q q q",
+			// Unrelated to the reorder, though the reviewed hunks add a `C` as well.
+			"Main: A x C D B x q q C q q",
+		];
+		const edits: Edit[] = [];
+		let before = lines(snapshots[0]);
+		for (const step of snapshots.slice(1)) {
+			const [actor, after] = step.split(": ");
+			edits.push({ actor, before, after: lines(after) });
+			before = lines(after);
+		}
+
+		const { verdicts } = commitFor(lines("x B x D A q q q q"), edits, before, ["Main"], true);
+
+		expect(verdicts.at(-1)).toBe("own +C");
+		expect(verdicts.slice(0, -1).every(verdict => verdict.startsWith("review"))).toBe(true);
+	});
+
+	it("keeps the agent's lines selectable in a file that was only dirty before recording began", () => {
+		// The user dropped `}` and added `u` before any record; Main then added a `}` of its own.
+		const head = "\nc\n}";
+		const before = "\nc\nu";
+		const work = "\n}\nc\nu";
+		const edits = [{ actor: "Main", before, after: work }];
+
+		const { verdicts, content } = commitFor(head, edits, work, ["Main"]);
+
+		expect(verdicts).toEqual(["own +}", "other -}", "other +u"]);
+		expect(content).toBe("\n}\nc\n}");
+	});
+
+	it("never preselects a line already committed when its twin shares one hunk", () => {
+		// Main wrote `B`; a commit took it after recording began; Other then rewrote the rest.
+		const edits = [
+			{ actor: "Main", before: "A", after: "A\nB" },
+			{ actor: "Other", before: "A\nB", after: "B\nx" },
+		];
+
+		expect(commitFor("B", edits, "B\nx", ["Main"], true).content).toBe("B");
 	});
 
 	describe("subagents", () => {

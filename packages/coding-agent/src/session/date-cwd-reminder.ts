@@ -215,8 +215,9 @@ const MAX_ROOTS = 8;
  * The first value is attached to the first user turn. A changed value attaches
  * to a newly appended user turn or a persistent developer turn, leaving every
  * previously sent message byte-identical. Neither is ever a per-call message
- * (one a context hook or side request builds for a single provider call): the
- * next request can leave it out or move it, and the reminder would go with it.
+ * (one a context hook or side request builds for a single provider call) unless
+ * the request has no other user turn: the next request can leave it out or move
+ * it, and the reminder would go with it.
  *
  * Turns are recognised by a key, not by object identity: context hooks, secret
  * obfuscation and conversion-cache resets hand the injector equal but newly
@@ -564,7 +565,11 @@ export class DateCwdReminderInjector {
 	}
 
 	#inject(messages: Message[], reminder: string): Message[] {
-		const firstIndex = messages.findIndex(message => message.role === "user");
+		// The root is the first persistent user turn: a per-call one (a context hook's bootstrap) need
+		// not come back, and the turn after it would then take a second first reminder. A request of
+		// per-call turns only (a side question on an empty history) still gets the reminder.
+		let firstIndex = messages.findIndex(message => message.role === "user" && !isPerCallContextMessage(message));
+		if (firstIndex === -1) firstIndex = messages.findIndex(message => message.role === "user");
 		if (firstIndex === -1) return messages;
 		const firstUser = messages[firstIndex] as UserMessage;
 		const { keys, counts } = this.#keysOf(messages);

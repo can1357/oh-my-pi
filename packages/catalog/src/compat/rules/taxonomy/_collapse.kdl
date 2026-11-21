@@ -71,12 +71,27 @@ collapse {
 	// Gemini 4 Hydrogen adds an `-xhigh` SKU for the XHIGH level Google
 	// documents for it (LOW, MEDIUM, HIGH, XHIGH; no minimal).
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+	// The roster also lists `-tiered-high`/`-tiered-xhigh` SKUs under the same
+	// display names; they fold into this row unrouted, so the levels keep the
+	// plain SKUs (like the Flash `-tiered` alias).
 	variant-family "google-antigravity" "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
-		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" "gemini-4-hydrogen-xhigh"
+		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" "gemini-4-hydrogen-xhigh" "gemini-4-hydrogen-tiered-high" "gemini-4-hydrogen-tiered-xhigh"
 		route "low" "gemini-4-hydrogen-low"
 		route "medium" "gemini-4-hydrogen-medium"
 		route "high" "gemini-4-hydrogen-high"
 		route "xhigh" "gemini-4-hydrogen-xhigh"
+		mode "google-level"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+	}
+	// Gemini 4 Neon (released 2026-11-18) is served as four thinking-level
+	// SKUs, one per level Hydrogen has: low, medium, high, xhigh (no minimal).
+	variant-family "google-antigravity" "gemini-4-neon" name="Gemini 4 Neon" {
+		members "gemini-4-neon-low" "gemini-4-neon-medium" "gemini-4-neon-high" "gemini-4-neon-xhigh"
+		route "low" "gemini-4-neon-low"
+		route "medium" "gemini-4-neon-medium"
+		route "high" "gemini-4-neon-high"
+		route "xhigh" "gemini-4-neon-xhigh"
 		mode "google-level"
 		efforts "low" "medium" "high" "xhigh"
 		requires-effort #true
@@ -176,132 +191,6 @@ collapse {
 		preserve-absent-effort-routes #true
 	}
 	variant-family "google-antigravity" "gemini-2.5-flash" name="Gemini 2.5 Flash" {
-		members "gemini-2.5-flash" "gemini-2.5-flash-thinking"
-		route "off" "gemini-2.5-flash"
-		route "minimal" "gemini-2.5-flash-thinking"
-		route "low" "gemini-2.5-flash-thinking"
-		route "medium" "gemini-2.5-flash-thinking"
-		route "high" "gemini-2.5-flash-thinking"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		preserve-absent-effort-routes #true
-	}
-	variant-family "google-gemini-cli" "gemini-{rev}-flash" name="Gemini {rev} Flash" revision=">=3.6" {
-		members "gemini-{rev}-flash-low" "gemini-{rev}-flash-medium" "gemini-{rev}-flash-high" "gemini-{rev}-flash-tiered"
-		route "minimal" "gemini-{rev}-flash-low"
-		route "low" "gemini-{rev}-flash-low"
-		route "medium" "gemini-{rev}-flash-medium"
-		route "high" "gemini-{rev}-flash-high"
-		mode "google-level"
-		efforts "minimal" "low" "medium" "high"
-		requires-effort #true
-	}
-	// Gemini 4 Argon ships as `-low`/`-medium`/`-high` thinking-level SKUs,
-	// matching the three levels Google documents for the model (no minimal).
-	variant-family "google-gemini-cli" "gemini-4-argon" name="Gemini 4 Argon" {
-		members "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high"
-		route "low" "gemini-4-argon-low"
-		route "medium" "gemini-4-argon-medium"
-		route "high" "gemini-4-argon-high"
-		mode "google-level"
-		efforts "low" "medium" "high"
-		requires-effort #true
-	}
-	// Gemini 4 Carbon ships the same `-low`/`-medium`/`-high` SKU split; Gemini 4
-	// models reject `minimal`.
-	variant-family "google-gemini-cli" "gemini-4-carbon" name="Gemini 4 Carbon" {
-		members "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high"
-		route "low" "gemini-4-carbon-low"
-		route "medium" "gemini-4-carbon-medium"
-		route "high" "gemini-4-carbon-high"
-		mode "google-level"
-		efforts "low" "medium" "high"
-		requires-effort #true
-	}
-	// Gemini 4 Hydrogen adds an `-xhigh` SKU for the XHIGH level Google
-	// documents for it (LOW, MEDIUM, HIGH, XHIGH; no minimal).
-	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
-	variant-family "google-gemini-cli" "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
-		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" "gemini-4-hydrogen-xhigh"
-		route "low" "gemini-4-hydrogen-low"
-		route "medium" "gemini-4-hydrogen-medium"
-		route "high" "gemini-4-hydrogen-high"
-		route "xhigh" "gemini-4-hydrogen-xhigh"
-		mode "google-level"
-		efforts "low" "medium" "high" "xhigh"
-		requires-effort #true
-	}
-	variant-family "google-gemini-cli" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
-		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
-		route "off" "gemini-3.5-flash-extra-low"
-		route "minimal" "gemini-3-flash-agent"
-		route "low" "gemini-3.5-flash-extra-low"
-		route "medium" "gemini-3.5-flash-extra-low"
-		route "high" "gemini-3.5-flash-low"
-		mode "google-level"
-		efforts "minimal" "low" "medium" "high"
-		aliases "gemini-3-flash"
-		suppress-when-off #true
-	}
-	variant-family "google-gemini-cli" "gemini-3.1-pro" name="Gemini 3.1 Pro" {
-		members "gemini-3.1-pro-low" "gemini-pro-agent" "gemini-3.1-pro-high"
-		route "off" "gemini-3.1-pro-low"
-		route "low" "gemini-3.1-pro-low"
-		route "high" "gemini-pro-agent"
-		mode "google-level"
-		efforts "low" "high"
-		retired "gemini-3.1-pro-high"
-		suppress-when-off #true
-	}
-	variant-family "google-gemini-cli" "gemini-3-pro" name="Gemini 3 Pro" {
-		members "gemini-3-pro-low" "gemini-3-pro-high"
-		route "off" "gemini-3-pro-low"
-		route "low" "gemini-3-pro-low"
-		route "high" "gemini-3-pro-high"
-		mode "google-level"
-		efforts "low" "high"
-		suppress-when-off #true
-	}
-	variant-family "google-gemini-cli" "gpt-oss-120b" name="GPT-OSS 120B" {
-		members "gpt-oss-120b-medium"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-	}
-	variant-family "google-gemini-cli" "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
-		members "claude-sonnet-4-6" "claude-sonnet-4-6-thinking"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		retired "claude-sonnet-4-6-thinking"
-	}
-	variant-family "google-gemini-cli" "claude-opus-4-6" name="Claude Opus 4.6" {
-		members "claude-opus-4-6-thinking" "claude-opus-4-6"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		retired "claude-opus-4-6"
-	}
-	variant-family "google-gemini-cli" "claude-sonnet-4-5" name="Claude Sonnet 4.5" {
-		members "claude-sonnet-4-5" "claude-sonnet-4-5-thinking"
-		route "off" "claude-sonnet-4-5"
-		route "minimal" "claude-sonnet-4-5-thinking"
-		route "low" "claude-sonnet-4-5-thinking"
-		route "medium" "claude-sonnet-4-5-thinking"
-		route "high" "claude-sonnet-4-5-thinking"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		preserve-absent-effort-routes #true
-	}
-	variant-family "google-gemini-cli" "claude-opus-4-5" name="Claude Opus 4.5" {
-		members "claude-opus-4-5" "claude-opus-4-5-thinking"
-		route "off" "claude-opus-4-5"
-		route "minimal" "claude-opus-4-5-thinking"
-		route "low" "claude-opus-4-5-thinking"
-		route "medium" "claude-opus-4-5-thinking"
-		route "high" "claude-opus-4-5-thinking"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		preserve-absent-effort-routes #true
-	}
-	variant-family "google-gemini-cli" "gemini-2.5-flash" name="Gemini 2.5 Flash" {
 		members "gemini-2.5-flash" "gemini-2.5-flash-thinking"
 		route "off" "gemini-2.5-flash"
 		route "minimal" "gemini-2.5-flash-thinking"

@@ -48,6 +48,9 @@ const PREPAID_BALANCE_EXHAUSTED_PATTERN =
 // "Your project has exceeded its monthly spending cap" (#13090). The `\b` after
 // `cap` keeps "spending capacity" — a throttle, not a billing ceiling — out.
 const SPEND_LIMIT_PATTERN = /spend(?:ing)?[\s_-]?(?:limit|cap)\b/i;
+// LiteLLM rejects a spent virtual key with HTTP 422 and either "Budget
+// Exceeded" or "Budget has been exceeded!", not a quota/usage-limit phrase.
+const BUDGET_EXCEEDED_PATTERN = /\bbudget(?:[\s_-]+has[\s_-]+been)?[\s_-]+exceeded\b/i;
 const SUBSCRIPTION_CAP_PATTERN =
 	/\b(?:subscription|plan|membership)\b[^\n]{0,80}\b(?:rate.?limits?|quota|cap)\b|\b(?:rate.?limits?|quota|cap)\b[^\n]{0,80}\b(?:subscription|plan|membership)\b/i;
 const TRANSIENT_INTERVAL_RATE_LIMIT_PATTERN = /\bper\s+(?:second|minute)\b/i;
@@ -426,6 +429,10 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 		return "QUOTA_EXHAUSTED";
 	}
 
+	if (BUDGET_EXCEEDED_PATTERN.test(errorMessage)) {
+		return "QUOTA_EXHAUSTED";
+	}
+
 	if (matchesSubscriptionCapText(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
 	}
@@ -558,10 +565,12 @@ const OUT_OF_CREDIT_PATTERN = /\bout of credit|\badd (?:more )?credit|\btop ?up\
  */
 export function isBillingCapUsageLimit(status: number | undefined, message: string | undefined): boolean {
 	if (message === undefined) return false;
-	if (isConcurrencyCapExclusion(status, message)) return false;
+	const reason = parseRateLimitReason(message);
+	if (reason === "CONCURRENT_LIMIT" && status !== 402) return false;
 	if (isDashScopeTokenLimitText(message)) return false;
 	if (status === 402) return is402BillingCapBody(message);
 	return (
+		reason === "INSUFFICIENT_G1_CREDITS_BALANCE" ||
 		OUT_OF_CREDIT_PATTERN.test(message) ||
 		INSUFFICIENT_BALANCE_PATTERN.test(message) ||
 		CREDITS_EXHAUSTED_PATTERN.test(message) ||
@@ -665,6 +674,7 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 		PREPAID_BALANCE_EXHAUSTED_PATTERN.test(errorMessage) ||
 		CREDITS_EXHAUSTED_PATTERN.test(errorMessage) ||
 		(CN_QUOTA_EXHAUSTED_PATTERN.test(errorMessage) && !CN_TRANSIENT_CAP_PATTERN.test(errorMessage)) ||
+		BUDGET_EXCEEDED_PATTERN.test(errorMessage) ||
 		SPEND_LIMIT_PATTERN.test(errorMessage) ||
 		ACCOUNT_RATE_LIMIT_PATTERN.test(errorMessage) ||
 		matchesSubscriptionCapText(errorMessage) ||

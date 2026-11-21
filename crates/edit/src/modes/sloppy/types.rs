@@ -67,9 +67,21 @@ pub enum OperationRewrite {
 	Inline {
 		replacements: Vec<String>,
 	},
+	/// `*** Cut`: the matched lines are the block a later
+	/// [`OperationRewrite::Paste`] moves. Plans no edit itself, so a move
+	/// whose paste fails leaves the block in place.
+	Cut,
+	/// `*** Paste Before`/`*** Paste After`: remove the lines the source cut
+	/// matches and insert them beside this operation's match, as one edit.
+	Paste {
+		/// Operation number of the source cut, including its selector.
+		cut: usize,
+		at:  Placement,
+	},
 }
 
-/// Side of the matched lines an [`OperationRewrite::Insert`] lands on.
+/// Side of the matched lines an [`OperationRewrite::Insert`] or
+/// [`OperationRewrite::Paste`] lands on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
 	/// `*** Insert Before`: ahead of the first matched line.
@@ -86,11 +98,22 @@ impl Placement {
 			Self::After => "*** Insert After",
 		}
 	}
+
+	/// Taught header pasting a cut block at this placement.
+	pub const fn paste_header(self) -> &'static str {
+		match self {
+			Self::Before => "*** Paste Before",
+			Self::After => "*** Paste After",
+		}
+	}
 }
 
 /// One compiled `«` … `»` … operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Operation {
+	/// Structural operator: select the complete syntax block at this literal
+	/// opener.
+	pub block:               bool,
 	pub pattern_text:        String,
 	pub source_pattern_text: String,
 	pub rewrite:             OperationRewrite,
@@ -111,8 +134,28 @@ pub struct Operation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatternToken {
-	Literal { text: String, normalized: String },
-	Gap { capture_index: usize, line_bounded: bool },
+	Literal {
+		text:       String,
+		normalized: String,
+	},
+	Gap {
+		capture_index: usize,
+		line_bounded:  bool,
+		/// Set for a `…` alone on its line between two lines: the gap elides
+		/// the middle of a block quoted by its first and last line.
+		block:         Option<BlockGap>,
+	},
+}
+
+/// Authored indentation around a block-range `…` (first line, `…`, last
+/// line), which tells the block's own closing line from a nested or
+/// continued one such as `} else {`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockGap {
+	/// Leading whitespace width of the line before the `…` line.
+	pub opener_indent: usize,
+	/// Leading whitespace width of the line after the `…` line.
+	pub closer_indent: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

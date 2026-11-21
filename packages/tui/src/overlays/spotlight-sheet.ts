@@ -13,7 +13,14 @@
  * backdrop click closes it; nothing enters the transcript.
  */
 import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
-import type { TspCodeFold, TspCodeMark, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import {
+	toolIntentLabel,
+	type TspCodeFold,
+	type TspCodeMark,
+	type TspPropNode,
+	type TspSpan,
+	type TspTone,
+} from "@oh-my-pi/pi-wire";
 import {
 	SPOTLIGHT_VIEW_LINES,
 	type SpotlightDetails,
@@ -107,17 +114,18 @@ function nonBlankParams(params: SpotlightRequestParams): Param[] {
 }
 
 /**
- * One parameter's row (role `omp.spotlight.param`): its name, then its non-blank values on one run of spaces and at
- * most `lines` lines, whole in the tooltip; `end` (the toggle) last.
+ * One parameter's row (role `omp.spotlight.param`): label the collapsed intent, show whole values
+ * in tooltips, and place the toggle last.
  */
-function paramRow(param: Param, lines: number, end?: NativeNode): NativeNode {
+function paramRow(param: Param, expanded: boolean, end?: NativeNode): NativeNode {
 	const whole = param.values.map(value => sanitizeText(value).trim()).filter(Boolean);
 	const spans = whole.flatMap((value, i) => {
-		const part = span(value.replace(/\s+/g, " "), param.style);
+		const label = param.name === "intent" && !expanded ? toolIntentLabel(value) : value;
+		const part = span(label.replace(/\s+/g, " "), param.style);
 		// The separator takes the values' face: Geist spaces between mono runs read as none.
 		return i === 0 ? [part] : [span(" · ", param.style ? `dim ${param.style}` : "dim"), part];
 	});
-	const shown = text(spans, { lines, truncate: "end", title: whole.join("\n") });
+	const shown = text(spans, { lines: expanded ? 2 : 1, truncate: "end", title: whole.join("\n") });
 	return row(compact([text(param.name), shown, end]), { gap: "md", align: "baseline", role: "omp.spotlight.param" });
 }
 
@@ -137,7 +145,7 @@ function requestParams(params: SpotlightRequestParams, expanded: boolean): Nativ
 				})
 			: undefined;
 	const rows = (expanded ? named : named.slice(0, 1)).map((param, i) =>
-		paramRow(param, expanded ? 2 : 1, i === 0 ? toggle : undefined),
+		paramRow(param, expanded, i === 0 ? toggle : undefined),
 	);
 	return col(rows, { gap: "xs", role: "omp.spotlight.params" });
 }

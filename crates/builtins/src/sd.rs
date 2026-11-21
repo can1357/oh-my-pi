@@ -14,6 +14,8 @@
 //!   mode.
 //! - `\xNN` and `\uNNNN` no longer swallow the character that follows them.
 //! - Files without a change are left untouched rather than rewritten.
+//! - `--expect N` guards each input's match count before applying `-n`.
+//!   `-U N` reports the changes actually written with N lines of context.
 //! - `-A`/`--across` is accepted: newer upstream processes line by line unless
 //!   given it, and this port always processes inputs whole.
 //! - Diagnostics carry the `sd: ` prefix of the other builtins instead of
@@ -21,12 +23,14 @@
 
 use std::{
 	borrow::Cow,
-	ffi::OsString,
+	collections::HashSet,
+	ffi::{OsStr, OsString},
 	io::{self, Read, Write},
 	path::PathBuf,
 };
 
 use clap::Parser;
+use omp_diff::{HunkLine, diff_line_tokens, line_tokens_str, structured_patch_hunk_rows};
 use regex::bytes::{NoExpand, Regex, RegexBuilder};
 
 use crate::{
@@ -62,6 +66,15 @@ pub(crate) struct Sd {
 	/// unlimited replacements.
 	#[arg(short = 'n', long = "max-replacements", value_name = "LIMIT", default_value_t)]
 	max_replacements: usize,
+
+	/// Require exactly N matches per input before applying -n. A mismatch leaves all files untouched.
+	#[arg(long, value_name = "N")]
+	expect: Option<usize>,
+
+	/// After writing each changed file, print its unified diff with N context lines.
+	/// Binary (NUL-containing or non-UTF-8) changes are summarized instead.
+	#[arg(short = 'U', long, value_name = "N", requires = "files", conflicts_with = "preview")]
+	unified: Option<u32>,
 
 	/// Regex flags. May be combined (like `-f mc`).
 	///
@@ -116,7 +129,7 @@ impl Utility for Sd {
 		} else if self.preview {
 			preview_files(&replacer, &self.files, host)
 		} else {
-			edit_files(&replacer, &self.files, host)
+			edit_files(&replacer, &self.files, self.unified, host)
 		}
 	}
 }
@@ -129,6 +142,7 @@ struct Replacer {
 	literal:     bool,
 	/// Replacements per input; 0 is unlimited.
 	limit:       usize,
+	expect:      Option<usize>,
 }
 
 impl Replacer {
@@ -145,17 +159,33 @@ impl Replacer {
 		};
 		let regex = build_regex(&pattern, cli.flags.as_deref().unwrap_or_default())
 			.map_err(|err| err.to_string())?;
-		Ok(Self { regex, replacement, literal: cli.literal, limit: cli.max_replacements })
+		Ok(Self {
+			regex,
+			replacement,
+			literal: cli.literal,
+			limit: cli.max_replacements,
+			expect: cli.expect,
+		})
 	}
 
 	/// `input` with up to `limit` matches replaced; borrowed when nothing
-	/// matched.
-	fn replace<'a>(&self, input: &'a [u8]) -> Cow<'a, [u8]> {
-		if self.literal {
+	/// matched. A count mismatch is diagnosed without performing replacement.
+	fn replace<'a>(&self, input: &'a [u8], name: &OsStr, host: &mut Host) -> Option<Cow<'a, [u8]>> {
+		if let Some(expected) = self.expect {
+			let actual = self.regex.find_iter(input).count();
+			if actual != expected {
+				host.error(format_args!("{}: expected {expected} matches, found {actual}", name.display()), 1);
+				return None;
+			}
+			if actual == 0 {
+				return Some(Cow::Borrowed(input));
+			}
+		}
+		Some(if self.literal {
 			self.regex.replacen(input, self.limit, NoExpand(&self.replacement))
 		} else {
 			self.regex.replacen(input, self.limit, self.replacement.as_slice())
-		}
+		})
 	}
 }
 
@@ -306,7 +336,9 @@ fn filter_stdin(replacer: &Replacer, host: &mut Host) -> i32 {
 		host.error(format_args!("stdin: {}", strip_errno(&err)), 1);
 		return 1;
 	}
-	let output = replacer.replace(&input);
+	let Some(output) = replacer.replace(&input, OsStr::new("stdin"), host) else {
+		return 1;
+	};
 	match host.stdout.write_all(&output).and_then(|()| host.stdout.flush()) {
 		Ok(()) => 0,
 		Err(err) => stdout_failed(host, &err),
@@ -318,6 +350,15 @@ fn filter_stdin(replacer: &Replacer, host: &mut Host) -> i32 {
 /// file is reported and skipped.
 fn preview_files(replacer: &Replacer, files: &[OsString], host: &mut Host) -> i32 {
 	let mut out = host.stdout_writer();
+	let mut emit = |file: &OsStr, contents: &[u8]| -> io::Result<()> {
+		if files.len() > 1 {
+			writeln!(out, "----- FILE {} -----", file.display())?;
+		}
+		out.write_all(contents)
+	};
+	// An unguarded preview streams; a guarded one must not print a partial
+	// result if a later operand fails its check.
+	let mut pending = Vec::new();
 	for file in files {
 		if host.is_cancelled() {
 			return 130;
@@ -326,15 +367,27 @@ fn preview_files(replacer: &Replacer, files: &[OsString], host: &mut Host) -> i3
 			Ok(input) => input,
 			Err(err) => {
 				host.error(format_args!("{}: {}", file.display(), strip_errno(&err)), 1);
+				if replacer.expect.is_some() {
+					return 1;
+				}
 				continue;
 			},
 		};
-		let header = if files.len() > 1 {
-			writeln!(out, "----- FILE {} -----", file.display())
-		} else {
-			Ok(())
+		let Some(output) = replacer.replace(&input, file, host) else {
+			return 1;
 		};
-		if let Err(err) = header.and_then(|()| out.write_all(&replacer.replace(&input))) {
+		if replacer.expect.is_some() && files.len() > 1 {
+			let bytes = match output {
+				Cow::Borrowed(_) => input,
+				Cow::Owned(bytes) => bytes,
+			};
+			pending.push((file, bytes));
+		} else if let Err(err) = emit(file, &output) {
+			return stdout_failed(host, &err);
+		}
+	}
+	for (file, contents) in pending {
+		if let Err(err) = emit(file, &contents) {
 			return stdout_failed(host, &err);
 		}
 	}
@@ -344,11 +397,19 @@ fn preview_files(replacer: &Replacer, files: &[OsString], host: &mut Host) -> i3
 	host.exit_code()
 }
 
+struct FileEdit<'a> {
+	file:   &'a OsStr,
+	path:   PathBuf,
+	after:  Vec<u8>,
+	/// Retain the preimage only when reporting patches.
+	before: Option<Vec<u8>>,
+}
+
 /// Rewrites each file whose contents change, in place. Every file is read
 /// and replaced before any is written, so an unreadable operand leaves all of
 /// them untouched. A symlink operand has its target edited and stays a link.
-fn edit_files(replacer: &Replacer, files: &[OsString], host: &mut Host) -> i32 {
-	let mut edits: Vec<(&OsString, PathBuf, Vec<u8>)> = Vec::new();
+fn edit_files(replacer: &Replacer, files: &[OsString], unified: Option<u32>, host: &mut Host) -> i32 {
+	let mut edits = Vec::new();
 	for file in files {
 		if host.is_cancelled() {
 			return 130;
@@ -356,31 +417,132 @@ fn edit_files(replacer: &Replacer, files: &[OsString], host: &mut Host) -> i32 {
 		let path = host.resolve(file);
 		match host.fs().read(&path) {
 			Ok(input) => {
-				if let Cow::Owned(output) = replacer.replace(&input)
-					&& output != input
+				let Some(output) = replacer.replace(&input, file, host) else {
+					return 1;
+				};
+				if let Cow::Owned(after) = output
+					&& after != input
 				{
-					edits.push((file, path, output));
+					edits.push(FileEdit { file, path, after, before: unified.map(|_| input) });
 				}
 			},
 			Err(err) => host.error(format_args!("{}: {}", file.display(), strip_errno(&err)), 1),
 		}
 	}
-	if host.exit_code() != 0 {
+	if host.exit_code() != 0 || edits.is_empty() {
 		return host.exit_code();
 	}
-	for (file, path, output) in edits {
+	let mut patches = unified.map(|context| (context, host.stdout_writer()));
+	// Duplicate operands (including symlink aliases) describe the same
+	// preimage; a second copy of the patch would not be an applied change.
+	let mut written = (patches.is_some() && edits.len() > 1).then(HashSet::new);
+	for FileEdit { file, path, after, before } in edits {
 		if host.is_cancelled() {
 			return 130;
 		}
 		let fs = host.fs();
-		let written = fs
-			.canonicalize(&path)
-			.and_then(|target| atomic_write::replace(fs, &target, &output, Sd::NAME));
-		if let Err(err) = written {
+		let target = match fs.canonicalize(&path) {
+			Ok(target) => target,
+			Err(err) => {
+				host.error(format_args!("{}: {}", file.display(), strip_errno(&err)), 1);
+				continue;
+			},
+		};
+		if written.as_ref().is_some_and(|set| set.contains(&target)) {
+			continue;
+		}
+		if let Err(err) = atomic_write::replace(fs, &target, &after, Sd::NAME) {
 			host.error(format_args!("{}: {}", file.display(), strip_errno(&err)), 1);
+			continue;
+		}
+		if let (Some((context, out)), Some(before)) = (&mut patches, before) {
+			if let Some(written) = &mut written {
+				written.insert(target);
+			}
+			if let Err(err) = write_patch(out, file, &before, &after, *context) {
+				return stdout_failed(host, &err);
+			}
 		}
 	}
+	if let Some((_, mut out)) = patches
+		&& let Err(err) = out.flush()
+	{
+		return stdout_failed(host, &err);
+	}
 	host.exit_code()
+}
+
+fn write_patch(
+	out: &mut impl Write,
+	file: &OsStr,
+	before: &[u8],
+	after: &[u8],
+	context: u32,
+) -> io::Result<()> {
+	fn text(bytes: &[u8]) -> Option<&str> {
+		if bytes.contains(&0) { None } else { std::str::from_utf8(bytes).ok() }
+	}
+	let label = patch_label(file);
+	let (Some(old), Some(new)) = (text(before), text(after)) else {
+		return writeln!(out, "Binary file {label} changed");
+	};
+	let old = line_tokens_str(old);
+	let new = line_tokens_str(new);
+	let runs = diff_line_tokens(&old, &new);
+	// The shared hunk builder uses twice the context for joining hunks;
+	// limit it to the available lines even on 32-bit targets.
+	let available = u32::try_from(old.len().max(new.len())).unwrap_or(u32::MAX);
+	let context = context.min(available);
+	writeln!(out, "--- {label}\n+++ {label}")?;
+	for hunk in structured_patch_hunk_rows(Some(context), &old, &new, &runs) {
+		write!(out, "@@ -")?;
+		write_range(out, hunk.old_start, hunk.old_lines)?;
+		write!(out, " +")?;
+		write_range(out, hunk.new_start, hunk.new_lines)?;
+		writeln!(out, " @@")?;
+		for row in hunk.lines {
+			match row {
+				HunkLine::Context(line) => writeln!(out, " {line}")?,
+				HunkLine::Removed(line) => writeln!(out, "-{line}")?,
+				HunkLine::Added(line) => writeln!(out, "+{line}")?,
+				HunkLine::NoNewlineAtEof => writeln!(out, "\\ No newline at end of file")?,
+			}
+		}
+	}
+	Ok(())
+}
+
+fn write_range(out: &mut impl Write, start: u32, count: u32) -> io::Result<()> {
+	match count {
+		0 => write!(out, "{},0", start - 1),
+		1 => write!(out, "{start}"),
+		_ => write!(out, "{start},{count}"),
+	}
+}
+
+/// Git-style quoted labels keep spaces, newlines and arbitrary path bytes
+/// unambiguous; ordinary filenames need no allocation.
+fn patch_label(file: &OsStr) -> Cow<'_, str> {
+	use std::fmt::Write;
+
+	if let Some(name) = file.to_str()
+		&& !name.bytes().any(|b| b.is_ascii_control() || matches!(b, b' ' | b'"' | b'\\'))
+	{
+		return Cow::Borrowed(name);
+	}
+	let mut label = String::from("\"");
+	for &b in file.as_encoded_bytes() {
+		match b {
+			b'\\' | b'"' => {
+				label.push('\\');
+				label.push(char::from(b));
+			},
+			b' '..=b'~' => label.push(char::from(b)),
+			_ => write!(label, "\\{b:03o}").unwrap(),
+		}
+	}
+	label.push('"');
+	Cow::Owned(label)
 }
 
 /// Reports a failed stdout write, unless a closed reader already ended the
@@ -452,6 +614,112 @@ mod tests {
 		assert_eq!((code, capture.err()), (0, String::new()));
 		for name in ["a", "b"] {
 			assert_eq!(fs::read_to_string(dir.path().join(name)).unwrap(), "bar bar foo");
+		}
+	}
+
+	#[test]
+	fn expect_counts_matches_before_limiting_replacement() {
+		assert_eq!(
+			filter(&["--expect", "3", "-n", "1", r"x(\d)", "$1"], "x1 x2 x3"),
+			(0, "1 x2 x3".into(), String::new())
+		);
+		assert_eq!(
+			filter(&["--expect", "0", "-F", ".", "$1"], "abc"),
+			(0, "abc".into(), String::new())
+		);
+		// An identical replacement still counts, and zero is a real guard.
+		assert_eq!(
+			filter(&["--expect", "0", "-F", ".", "."], "a.b"),
+			(1, String::new(), "sd: stdin: expected 0 matches, found 1\n".into())
+		);
+	}
+
+	#[test]
+	fn late_count_mismatch_aborts_edits_and_preview_before_output() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::write(dir.path().join("a"), "x").unwrap();
+		fs::write(dir.path().join("b"), "x x").unwrap();
+
+		for mode in [&["--unified", "0"][..], &["--preview"]] {
+			let mut args = mode.to_vec();
+			args.extend(["--expect", "1", "-n", "1", "x", "y", "a", "b"]);
+			let (code, capture) = run_util::<Sd>(&args, "", dir.path());
+			assert_eq!(code, 1);
+			assert_eq!(capture.err(), "sd: b: expected 1 matches, found 2\n");
+			assert_eq!(capture.out(), "");
+			assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"x");
+			assert_eq!(fs::read(dir.path().join("b")).unwrap(), b"x x");
+		}
+	}
+
+	#[test]
+	fn unified_reports_only_applied_changes_with_requested_context() {
+		let dir = tempfile::tempdir().unwrap();
+		let old = "cut\r\nbefore\r\nx1\r\nafter\r\ncut\r\ncut\r\ncut\r\nx2";
+		let name = "a file";
+		fs::write(dir.path().join(name), old).unwrap();
+		fs::write(dir.path().join("miss"), "no hits").unwrap();
+
+		let args = ["-U", "1", r"x(\d)", "y$1", name, "miss", name];
+		let (code, capture) = run_util::<Sd>(&args, "", dir.path());
+		assert_eq!((code, capture.err()), (0, String::new()));
+		assert_eq!(fs::read_to_string(dir.path().join(name)).unwrap(), old.replace('x', "y"));
+		assert_eq!(fs::read(dir.path().join("miss")).unwrap(), b"no hits");
+		assert_eq!(
+			capture.out(),
+			concat!(
+				"--- \"a file\"\n+++ \"a file\"\n",
+				"@@ -2,3 +2,3 @@\n before\r\n-x1\r\n+y1\r\n after\r\n",
+				"@@ -7,2 +7,2 @@\n cut\r\n",
+				"-x2\n\\ No newline at end of file\n+y2\n\\ No newline at end of file\n",
+			)
+		);
+
+		let args = ["-U", "0", "--expect", "2", r"(y\d)", "$1", name];
+		let (code, capture) = run_util::<Sd>(&args, "", dir.path());
+		assert_eq!((code, capture.err(), capture.out()), (0, String::new(), String::new()));
+	}
+
+	#[test]
+	fn unified_handles_empty_ranges_and_final_newline_changes() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("f");
+		fs::write(&path, "").unwrap();
+		for (find, replacement, expected, body) in [
+			("^", r"x\n", "x\n", "@@ -0,0 +1 @@\n+x\n"),
+			(r"\n", "", "x", "@@ -1 +1 @@\n-x\n+x\n\\ No newline at end of file\n"),
+			("x", "", "", "@@ -1 +0,0 @@\n-x\n\\ No newline at end of file\n"),
+		] {
+			let (code, capture) = run_util::<Sd>(
+				&["--unified", "0", "--expect", "1", find, replacement, "f"],
+				"",
+				dir.path(),
+			);
+			assert_eq!((code, capture.err()), (0, String::new()));
+			assert_eq!(capture.out(), format!("--- f\n+++ f\n{body}"));
+			assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+		}
+	}
+
+	#[test]
+	fn binary_changes_report_only_the_filename_and_preserve_bytes() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::write(dir.path().join("nul"), b"x\0").unwrap();
+		fs::write(dir.path().join("invalid"), b"\xffx").unwrap();
+		let args = ["-F", "-U", "0", "--expect", "1", "x", "$0", "nul", "invalid"];
+		let (code, capture) = run_util::<Sd>(&args, "", dir.path());
+		assert_eq!((code, capture.err()), (0, String::new()));
+		assert_eq!(capture.out(), "Binary file nul changed\nBinary file invalid changed\n");
+		assert_eq!(fs::read(dir.path().join("nul")).unwrap(), b"$0\0");
+		assert_eq!(fs::read(dir.path().join("invalid")).unwrap(), b"\xff$0");
+	}
+
+	#[test]
+	fn unified_requires_in_place_operands() {
+		for args in [&["-U", "0", "a", "b"][..], &["-p", "-U", "0", "a", "b", "file"]] {
+			let (code, out, err) = filter(args, "a");
+			assert_eq!((code, out.as_str()), (2, ""));
+			assert!(!err.is_empty());
 		}
 	}
 

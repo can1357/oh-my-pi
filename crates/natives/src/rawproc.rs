@@ -422,6 +422,7 @@ struct FdIo(Arc<std::fs::File>);
 
 #[cfg(windows)]
 impl FdIo {
+	#[allow(clippy::unnecessary_wraps, reason = "mirrors the fallible unix constructor")]
 	fn new(fd: i64) -> io::Result<Self> {
 		use std::os::windows::io::FromRawHandle;
 		// SAFETY: the caller hands over ownership of the handle.
