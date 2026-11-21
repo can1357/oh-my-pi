@@ -205,6 +205,11 @@ export class AgyHost implements ProviderSessionState {
 		return this.#conversation?.id;
 	}
 
+	/** True while this host is executing a request, rather than only holding a parked tool. */
+	get hasActiveStep(): boolean {
+		return this.#step !== undefined;
+	}
+
 	/** True while inference or an unresolved tool result still belongs to this host. */
 	get hasPendingTurn(): boolean {
 		return this.#turn !== undefined || this.#pending !== undefined || this.#step !== undefined;
