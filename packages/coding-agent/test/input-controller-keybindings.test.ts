@@ -1567,6 +1567,28 @@ describe("InputController global editor actions", () => {
 		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
 
+	it("leaves Ctrl+R to a Vim-mode dialog text box in Normal mode, as redo, and opens history search from Insert", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const form = new HtmlFormDialog(
+			parseHtmlForm(`<form><label>Notes<textarea name="notes"></textarea></label></form>`),
+			{
+				onSubmit: () => {},
+				onCancel: () => {},
+				vimMode: true,
+			},
+		);
+		context.setFocused(form);
+
+		expect(dispatchInput(listeners, CTRL_R)).toEqual({ consume: true });
+		expect(context.ctx.showHistorySearch).toHaveBeenCalledTimes(1);
+		form.handleInput("\x1b");
+		expect(dispatchInput(listeners, CTRL_R)).toBeUndefined();
+		expect(context.ctx.showHistorySearch).toHaveBeenCalledTimes(1);
+	});
+
 	it("still routes transcript actions when the main editor holds focus", async () => {
 		const context = await createContext();
 		const controller = new context.InputController(context.ctx);

@@ -5,10 +5,30 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Added Vim `W`, `B`, and `E` motions for navigating whitespace-delimited WORDs ([#13099](https://github.com/can1357/oh-my-pi/pull/13099) by [@Scott-Simmons](https://github.com/Scott-Simmons)).
+- Added Vim `s`/`S` (substitute characters / lines, Visual `S` changes whole lines) and the linewise line motions `-`, `+`, and `_` ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim redo (`Ctrl+R`) and counted undo (`3u`); undo and redo return the cursor to where the change began, as in Vim ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim registers: named `"a`–`"z` (uppercase appends), `"0` for yanks, `"1`–`"9` and `"-` for deletes, and the `"_` black hole ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim `X`, `Y`, `~`, the case operators `g~`/`gu`/`gU` (with `g~~`/`guu`/`gUU`), `gJ`, `ge`/`gE`, `gp`/`gP`, `gv`, and `gi` ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim counted inserts (`3ix`, `2ofoo`), Visual `p`/`P`/`r`/`u`/`U`/`~`, and Visual `X`/`D`/`Y`/`C`/`R` on whole lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim `gj`/`gk` to move by screen row through wrapped lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim `/`, `?`, `n`, and `N` to search prompt history, like a shell's vi mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim `"+p`/`"*p` to put the system clipboard; `Editor.onYank` now also gets the register name ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added `vimMode` and `configureEditor` options to `HtmlFormDialog` and `HookEditorComponent`: with `vimMode` their text boxes are Vim-mode editors (a form's one-line fields and "Other" answers too; passwords stay plain), `j`/`k` step between a form's option rows, and `Escape` leaves Insert mode before it closes or cancels anything ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+
+### Changed
+
+- `Editor` re-announces its Vim mode through `onVimModeChange` when it gains focus, so a host's cursor shape follows the editor holding the keys ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Fixed Vim `.` not retyping the inserted text when the keys arrived in one burst (e.g. `ccfoo` typed quickly) ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Fixed Vim `w`, `b`, and `e` stopping at the end of the line; they now cross lines like Vim's, and `dw`, `d}`, and `2D` follow Vim's rules for multi-line and end-of-line spans ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Fixed Vim `gg`, `G`, `dd`, and linewise puts landing in column 0 instead of the first non-blank; `dk` on the first line no longer deletes it; `D`/`C` no longer leave `j`/`k` stuck at line end ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Fixed Vim `v$` not selecting through the line break and `g`-commands (`gg`, `gU`) doing nothing in Visual mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Fixed Vim `cc`, `cj`, and other linewise changes keeping the start of the line when the cursor was mid-line, and storing the old text so `p` spliced it into a line instead of putting it back as whole lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Fixed Vim `di(`, `ci{`, and other bracket objects doing nothing when the cursor is before the brackets; like Vim 9.2 they now use the next pair ahead ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 
 ## [19.1.0] - 2026-11-21
 

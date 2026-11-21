@@ -1367,4 +1367,474 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("");
 		});
 	});
+
+	describe("WORD motions", () => {
+		it("treats punctuation as part of a WORD", () => {
+			const editor = vimEditor("foo-bar baz.qux");
+			editor.handleInput("W");
+			expect(cursor(editor)).toEqual({ line: 0, col: 8 });
+
+			editor.handleInput("0E");
+			expect(cursor(editor)).toEqual({ line: 0, col: 6 });
+
+			editor.handleInput("$B");
+			expect(cursor(editor)).toEqual({ line: 0, col: 8 });
+		});
+
+		it("counts WORDs across newlines and blank lines", () => {
+			const editor = vimEditor("foo-bar baz.qux\n\nlast:item end");
+			editor.handleInput("2W");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+			editor.handleInput("W");
+			expect(cursor(editor)).toEqual({ line: 2, col: 0 });
+			editor.handleInput("B");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+			editor.handleInput("2B");
+			expect(cursor(editor)).toEqual({ line: 0, col: 0 });
+			editor.handleInput("3E");
+			expect(cursor(editor)).toEqual({ line: 2, col: 8 });
+		});
+
+		it("cW preserves the separator while replacing a punctuation-containing WORD", () => {
+			const editor = vimEditor("foo-bar baz.qux tail");
+			editor.handleInput("cW");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("fresh");
+			expect(editor.getText()).toBe("fresh baz.qux tail");
+
+			const single = vimEditor("x next.word");
+			single.handleInput("cWnew");
+			expect(single.getText()).toBe("new next.word");
+		});
+
+		it("applies WORD motion counts to operators", () => {
+			const editor = vimEditor("a-b c.d e:f g/h keep");
+			editor.handleInput("d4W");
+			expect(editor.getText()).toBe("keep");
+		});
+
+		it("dB excludes the current WORD when deleting backward across a newline", () => {
+			const editor = vimEditor("foo-bar\nbaz.qux");
+			editor.handleInput("WdB");
+			expect(editor.getText()).toBe("baz.qux");
+		});
+
+		it("stops a W operator at the end of its line like Vim's fwd_word(eol)", () => {
+			// Vim 9.2 and Neovim: `dW` on a line's last WORD keeps the line break; `yW` yanks charwise.
+			const deleted = vimEditor("foo\nbar");
+			deleted.handleInput("dW");
+			expect(deleted.getText()).toBe("\nbar");
+
+			const yanked = vimEditor("foo\nbar");
+			yanked.handleInput("yWjP");
+			expect(yanked.getText()).toBe("foo\nfoobar");
+		});
+
+		it("deletes a leading empty line linewise before a whitespace-only one", () => {
+			const editor = vimEditor("\n   \nfoo");
+			editor.handleInput("dW");
+			expect(editor.getText()).toBe("   \nfoo");
+		});
+
+		it("preserves trailing whitespace when W has no following WORD", () => {
+			const editor = vimEditor("\n   ");
+			editor.handleInput("dW");
+			expect(editor.getText()).toBe("   ");
+		});
+
+		it("includes the final grapheme of a Visual E selection", () => {
+			const editor = vimEditor("foo-bar baz");
+			editor.handleInput("vEd");
+			expect(editor.getText()).toBe(" baz");
+			expect(editor.vimMode).toBe("normal");
+		});
+	});
+
+	describe("linewise changes and line motions", () => {
+		it("cc keeps the changed line in the register as a whole line", () => {
+			const editor = vimEditor("alpha\nbeta");
+			editor.handleInput("cc");
+			editor.handleInput(ESC);
+			editor.handleInput("jp");
+			expect(editor.getText()).toBe("\nbeta\nalpha");
+		});
+
+		it("cj clears both lines entirely even from mid-line", () => {
+			const editor = vimEditor("  abc\ndef\nghi");
+			editor.handleInput("lllcj");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("x\nghi");
+		});
+
+		it("S is cc, including its count and dot repeat", () => {
+			const editor = vimEditor("a\nb\nc\nd\ne");
+			editor.handleInput("2S");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("x");
+			editor.handleInput(ESC);
+			expect(editor.getText()).toBe("x\nc\nd\ne");
+			editor.handleInput("j.");
+			expect(editor.getText()).toBe("x\nx\ne");
+		});
+
+		it("s substitutes count characters without touching the line", () => {
+			const editor = vimEditor("abcd\nnext");
+			editor.handleInput("2s");
+			editor.handleInput("X");
+			expect(editor.getText()).toBe("Xcd\nnext");
+		});
+
+		it("an operator before S is cancelled", () => {
+			const editor = vimEditor("abc\ndef");
+			editor.handleInput("dS");
+			expect(editor.getText()).toBe("abc\ndef");
+			expect(editor.vimMode).toBe("normal");
+		});
+
+		it("Visual S changes whole lines from a charwise selection", () => {
+			const editor = vimEditor("alpha beta\ngamma\ndelta");
+			editor.handleInput("wvjS");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("x\ndelta");
+		});
+
+		it("- and + move by lines onto the first non-blank", () => {
+			const editor = vimEditor("  one\n    two\nthree");
+			editor.handleInput("+");
+			expect(cursor(editor)).toEqual({ line: 1, col: 4 });
+			editor.handleInput("+");
+			expect(cursor(editor)).toEqual({ line: 2, col: 0 });
+			editor.handleInput("2-");
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+		});
+
+		it("-, + and _ are linewise under an operator", () => {
+			const up = vimEditor("one\ntwo\nthree");
+			up.handleInput("jld-");
+			expect(up.getText()).toBe("three");
+			const down = vimEditor("one\ntwo\nthree");
+			down.handleInput("lld+");
+			expect(down.getText()).toBe("three");
+			const line = vimEditor("one\ntwo\nthree");
+			line.handleInput("l2d_");
+			expect(line.getText()).toBe("three");
+		});
+	});
+
+	// Expected results below were taken from Vim 9.2 (`vim -Nu NONE`) for the same keys and text.
+	describe("undo, redo, and dot repeat", () => {
+		it("repeats text typed in the same input chunk as the change that opened it", () => {
+			// Terminals batch fast keystrokes: `ccQ` can arrive as one read.
+			const editor = vimEditor("aa\nbb");
+			editor.handleInput("ccQ");
+			editor.handleInput(ESC);
+			editor.handleInput("j.");
+			expect(editor.getText()).toBe("Q\nQ");
+		});
+
+		it("takes a count for u and redoes with Ctrl-R until the next edit", () => {
+			const editor = vimEditor("one two three four");
+			editor.handleInput("dwdwdw");
+			editor.handleInput("2u");
+			expect(editor.getText()).toBe("two three four");
+			editor.handleInput("\x12");
+			expect(editor.getText()).toBe("three four");
+			editor.handleInput("x");
+			editor.handleInput("\x12");
+			expect(editor.getText()).toBe("hree four");
+		});
+
+		it("puts the cursor back where the undone change began", () => {
+			const visual = vimEditor("alpha beta\ngamma");
+			visual.handleInput("vjdu");
+			expect(cursor(visual)).toEqual({ line: 0, col: 0 });
+			const put = vimEditor("alpha beta\ngamma");
+			put.handleInput("wyyPu");
+			expect(cursor(put)).toEqual({ line: 0, col: 6 });
+		});
+
+		it("repeats a counted insert on Escape as one undo step", () => {
+			const editor = vimEditor("ab\ncd");
+			editor.handleInput("3ix");
+			editor.handleInput(ESC);
+			expect(editor.getText()).toBe("xxxab\ncd");
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+			editor.handleInput("j0.");
+			expect(editor.getText()).toBe("xxxab\nxxxcd");
+			editor.handleInput("u");
+			expect(editor.getText()).toBe("xxxab\ncd");
+			const lines = vimEditor("a");
+			lines.handleInput("2ofoo");
+			lines.handleInput(ESC);
+			expect(lines.getText()).toBe("a\nfoo\nfoo");
+		});
+	});
+
+	describe("Vim word motions across lines", () => {
+		it("w, b, e, and ge cross line breaks and skip indent", () => {
+			const editor = vimEditor("foo bar\n  baz qux");
+			editor.handleInput("2w");
+			expect(cursor(editor)).toEqual({ line: 1, col: 2 });
+			editor.handleInput("b");
+			expect(cursor(editor)).toEqual({ line: 0, col: 4 });
+			editor.handleInput("2e");
+			expect(cursor(editor)).toEqual({ line: 1, col: 4 });
+			editor.handleInput("ge");
+			expect(cursor(editor)).toEqual({ line: 0, col: 6 });
+		});
+
+		it("stops dw at the end of the line and keeps the line break", () => {
+			const editor = vimEditor("a b\nc");
+			editor.handleInput("wdw");
+			expect(editor.getText()).toBe("a \nc");
+		});
+
+		it("makes a multi-line delete from the indent linewise (2D, d2w)", () => {
+			const dollar = vimEditor("alpha\n  beta\ngamma");
+			dollar.handleInput("2D");
+			expect(dollar.getText()).toBe("gamma");
+			const words = vimEditor("alpha beta\ndelta\nzeta");
+			words.handleInput("3dw");
+			expect(words.getText()).toBe("zeta");
+		});
+
+		it("cancels dk on the first line instead of deleting it", () => {
+			const editor = vimEditor("one\ntwo");
+			editor.handleInput("dk");
+			expect(editor.getText()).toBe("one\ntwo");
+		});
+	});
+
+	describe("Vim editing commands", () => {
+		it("X, Y, and ~ act like dh, yy, and a stepping case toggle", () => {
+			const editor = vimEditor("abcd\nnext");
+			editor.handleInput("$2X");
+			expect(editor.getText()).toBe("ad\nnext");
+			editor.handleInput("Yp");
+			expect(editor.getText()).toBe("ad\nad\nnext");
+			editor.handleInput("0~~");
+			expect(editor.getText()).toBe("ad\nAD\nnext");
+		});
+
+		it("applies gU, gu, and g~ over motions, lines, and Visual selections", () => {
+			const editor = vimEditor("alpha beta\nGamma Delta");
+			editor.handleInput("gUiw");
+			expect(editor.getText()).toBe("ALPHA beta\nGamma Delta");
+			editor.handleInput("jguu");
+			expect(editor.getText()).toBe("ALPHA beta\ngamma delta");
+			editor.handleInput("kg~~");
+			expect(editor.getText()).toBe("alpha BETA\ngamma delta");
+			editor.handleInput("jveU");
+			expect(editor.getText()).toBe("alpha BETA\nGAMMA delta");
+		});
+
+		it("joins without touching whitespace on gJ, in Normal and Visual mode", () => {
+			const normal = vimEditor("a\n  b");
+			normal.handleInput("gJ");
+			expect(normal.getText()).toBe("a  b");
+			const visual = vimEditor("a\n  b\nc");
+			visual.handleInput("VjgJ");
+			expect(visual.getText()).toBe("a  b\nc");
+		});
+
+		it("selects the line break with v$ and replaces a selection with Visual p", () => {
+			const joined = vimEditor("ab\ncd");
+			joined.handleInput("v$d");
+			expect(joined.getText()).toBe("cd");
+			const swapped = vimEditor("alpha beta");
+			swapped.handleInput("yiwwviwp");
+			expect(swapped.getText()).toBe("alpha alpha");
+			// `p` leaves the replaced word in the register.
+			swapped.handleInput("0P");
+			expect(swapped.getText()).toBe("betaalpha alpha");
+		});
+
+		it("puts with gp and leaves the cursor after the text", () => {
+			const editor = vimEditor("one\ntwo");
+			editor.handleInput("yyjgp");
+			expect(editor.getText()).toBe("one\ntwo\none");
+			expect(cursor(editor)).toEqual({ line: 2, col: 0 });
+		});
+
+		it("reselects with gv and reinserts with gi", () => {
+			const editor = vimEditor("alpha beta");
+			editor.handleInput("vl");
+			editor.handleInput(ESC);
+			editor.handleInput("$gvd");
+			expect(editor.getText()).toBe("pha beta");
+			editor.handleInput("wiX");
+			editor.handleInput(ESC);
+			editor.handleInput("0giY");
+			expect(editor.getText()).toBe("pha XYbeta");
+		});
+	});
+
+	describe("Vim registers", () => {
+		it("keeps named, yank, and black-hole registers apart from the unnamed one", () => {
+			const editor = vimEditor("alpha\nbeta\ngamma");
+			editor.handleInput('"ayy');
+			editor.handleInput("jdd");
+			editor.handleInput('"ap');
+			expect(editor.getText()).toBe("alpha\ngamma\nalpha");
+			editor.handleInput('"_ddp');
+			expect(editor.getText()).toBe("alpha\ngamma\nbeta");
+			// Only an unnamed yank fills `"0`; it survives the delete that follows.
+			const yank = vimEditor("alpha\nbeta\ngamma");
+			yank.handleInput('yyjdd"0p');
+			expect(yank.getText()).toBe("alpha\ngamma\nalpha");
+		});
+
+		it("appends with an uppercase register and shifts deletes through 1-9", () => {
+			const editor = vimEditor("one\ntwo\nthree");
+			editor.handleInput('"ayiwj"Ayiw');
+			editor.handleInput('G"ap');
+			expect(editor.getText()).toBe("one\ntwo\ntonetwohree");
+			const shifted = vimEditor("one\ntwo\nthree");
+			shifted.handleInput('dddd"2p');
+			expect(shifted.getText()).toBe("three\none");
+		});
+
+		it('reports which register a yank named, and "+p puts the clipboard', async () => {
+			const yanked: Array<string | undefined> = [];
+			const editor = vimEditor("alpha beta");
+			editor.onYank = (_text, register) => yanked.push(register);
+			editor.handleInput('yw"+yw"adw');
+			// A plain yank, then `"+`; the delete into `"a` is no clipboard write.
+			expect(yanked).toEqual([undefined, "+"]);
+			// Clipboard text ending in a newline puts as a whole line, as Vim does.
+			editor.readClipboard = async () => "from clipboard\n";
+			const rendered = Promise.withResolvers<void>();
+			editor.requestRender = () => rendered.resolve();
+			editor.handleInput('"+p');
+			// The read is still in flight when `p` arrives; the put lands with it and asks for a repaint.
+			await rendered.promise;
+			expect(editor.getText()).toBe("beta\nfrom clipboard");
+		});
+
+		it('keeps the last "+y when the clipboard reads empty, and . repeats a put that waited on the clipboard', async () => {
+			// No clipboard tool (SSH, headless): the read comes back empty and the yanked text stays.
+			const editor = vimEditor("alpha beta");
+			editor.handleInput('"+yw');
+			editor.readClipboard = async () => "";
+			const rendered = Promise.withResolvers<void>();
+			editor.requestRender = () => rendered.resolve();
+			editor.handleInput('$"+p');
+			await rendered.promise;
+			expect(editor.getText()).toBe("alpha betaalpha ");
+
+			const repeat = vimEditor("ab");
+			repeat.readClipboard = async () => "Z";
+			const landed = Promise.withResolvers<void>();
+			repeat.requestRender = () => landed.resolve();
+			repeat.handleInput('x"+p');
+			await landed.promise;
+			expect(repeat.getText()).toBe("bZ");
+			// `.` is the put, not the `x` before it.
+			repeat.handleInput(".");
+			expect(repeat.getText()).toBe("bZZ");
+		});
+
+		it("a counted redo keeps each step undoable on its own", () => {
+			const editor = vimEditor("one two three four");
+			editor.handleInput("dwdwdw");
+			editor.handleInput("3u");
+			editor.handleInput("3");
+			editor.handleInput("\x12");
+			expect(editor.getText()).toBe("four");
+			editor.handleInput("u");
+			expect(editor.getText()).toBe("three four");
+		});
+	});
+
+	describe("Vim screen rows, text objects ahead, history search", () => {
+		it("gj/gk move by wrapped rows and keep the screen column; j/k stay on lines", () => {
+			const editor = vimEditor("aaaa bbbb cccc dddd eeee ffff gggg hhhh\nxyz");
+			editor.render(20);
+			editor.handleInput("llgj");
+			expect(cursor(editor)).toEqual({ line: 0, col: 17 });
+			editor.handleInput("gjgk");
+			expect(cursor(editor)).toEqual({ line: 0, col: 17 });
+			editor.handleInput("j");
+			expect(cursor(editor)).toEqual({ line: 1, col: 2 });
+		});
+
+		it("brackets ahead of the cursor are the object when none encloses it, as in Vim 9.2", () => {
+			const editor = vimEditor("foo (bar) baz");
+			editor.handleInput("di(");
+			expect(editor.getText()).toBe("foo () baz");
+			const nextLine = vimEditor("foo\n(bar)");
+			nextLine.handleInput("ci(X");
+			expect(nextLine.getText()).toBe("foo\n(X)");
+			// A stray closer ahead of the opener cancels it out, so nothing is selected.
+			const unbalanced = vimEditor("foo) (bar)");
+			unbalanced.handleInput("di(");
+			expect(unbalanced.getText()).toBe("foo) (bar)");
+		});
+
+		it("/ walks older prompts that match, n/N step through them, and N past the newest restores the draft", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			for (const prompt of ["fix the parser bug", "write docs", "parser tests please"]) editor.addToHistory(prompt);
+			editor.setText("my draft");
+			editor.handleInput(ESC);
+			editor.handleInput("/parser");
+			expect(editor.vimPending).toBe("/parser");
+			editor.handleInput("\r");
+			expect(editor.getText()).toBe("parser tests please");
+			editor.handleInput("n");
+			expect(editor.getText()).toBe("fix the parser bug");
+			expect(cursor(editor)).toEqual({ line: 0, col: 8 });
+			// No older match: the entry stays.
+			editor.handleInput("n");
+			expect(editor.getText()).toBe("fix the parser bug");
+			editor.handleInput("NN");
+			expect(editor.getText()).toBe("my draft");
+			expect(editor.vimMode).toBe("normal");
+		});
+
+		it("Escape and Backspace on an empty search line cancel it without touching the buffer", () => {
+			const editor = vimEditor("draft");
+			editor.addToHistory("draft two");
+			editor.handleInput("/dr");
+			editor.handleInput(ESC);
+			expect(editor.vimPending).toBe("");
+			editor.handleInput("/d");
+			editor.handleInput(BACKSPACE);
+			editor.handleInput(BACKSPACE);
+			expect(editor.vimPending).toBe("");
+			// Back in Normal mode, `x` is a command again rather than search text.
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("raft");
+		});
+
+		it("searches the persistent history when the editor has one", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({
+				add: async () => {},
+				getRecent: () => [],
+				search: query => (query === "deploy" ? [{ prompt: "deploy to eu" }, { prompt: "deploy to us" }] : []),
+			});
+			editor.setVimMode(true);
+			editor.handleInput(ESC);
+			editor.handleInput("2/deploy");
+			editor.handleInput("\r");
+			expect(editor.getText()).toBe("deploy to us");
+		});
+	});
+
+	describe("Vim mode chrome", () => {
+		it("re-announces the mode when the editor gains focus, so a shared cursor shape follows the keys", () => {
+			const editor = vimEditor("text");
+			const modes: string[] = [];
+			editor.onVimModeChange = mode => modes.push(mode);
+			editor.focused = true;
+			editor.focused = true;
+			editor.focused = false;
+			editor.handleInput("i");
+			editor.focused = true;
+			expect(modes).toEqual(["normal", "insert", "insert"]);
+		});
+	});
 });

@@ -989,6 +989,20 @@ export const cfgTuiVimModeDisplay = register({
 	},
 });
 
+export const cfgTuiVimYankToClipboard = register({
+	id: "tui.vimYankToClipboard",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Yanks Copy to Clipboard",
+		description:
+			'Every Vim yank also copies to the system clipboard. Off: only "+y and "*y do, as in Vim without clipboard=unnamed',
+		condition: "vimModeEnabled",
+	},
+});
+
 export const cfgLoopMode = register({
 	id: "loop.mode",
 	type: "enum",

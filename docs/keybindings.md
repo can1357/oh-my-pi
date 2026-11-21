@@ -38,7 +38,7 @@ app.history.search: []
 | `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Show or hide tool activity                                                                                                                             |
 | `app.links.hint`             | `Alt+O`                                                               | Tag each [extension link](./extensions.md#extension-link-schemes) on screen; type a tag to pick it, `Esc` cancels; again or `Page Up` browses all      |
 | `app.ask.hide`               | `Alt+H`                                                               | Hide a pending `ask` question to one line (the Hide button in Tern); the same key, `Enter`, or Show brings it back                                     |
-| `app.ask.note`               | `N`, `Alt+N`                                                          | Add or edit a note on the highlighted `ask` option; dropdowns use the first key that does not type text, since letters jump to options                  |
+| `app.ask.note`               | `N`, `Alt+N`                                                          | Add or edit a note on the highlighted `ask` option; dropdowns use the first key that does not type text, since letters jump to options                 |
 | `app.approval.approve`       | `Ctrl+Enter`, `Ctrl+Q`                                                | Approve a pending tool call outright (the Approve button in Tern); `Esc` denies, and `Enter` takes the Approve/Deny choice highlighted with the arrows |
 | `app.thinking.toggle`        | `Ctrl+T`                                                              | Toggle thinking-block visibility                                                                                                                       |
 | `app.thinking.cycle`         | `Shift+Tab`                                                           | Cycle thinking level                                                                                                                                   |
@@ -57,7 +57,7 @@ app.history.search: []
 | `app.stt.toggle`             | Unbound                                                               | Start or stop speech-to-text recording with each press; independent of push-to-talk.                                                                   |
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                        |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                   |
-| `app.session.delete`         | `Backspace`, `Delete`                                                 | Ask to delete the selected session in the resume picker; a key that also deletes backward edits a typed search query instead                         |
+| `app.session.delete`         | `Backspace`, `Delete`                                                 | Ask to delete the selected session in the resume picker; a key that also deletes backward edits a typed search query instead                           |
 | `app.session.pin`            | `Alt+K`                                                               | Pin the selected session in the resume picker; pinned sessions stay on top, including in search results                                                |
 | `app.session.unpin`          | `Alt+Shift+K`                                                         | Unpin the selected session in the resume picker                                                                                                        |
 | `app.tree.previousBranch`    | Unbound                                                               | Jump to the previous visible branch in `/tree` ([details](./tree.md))                                                                                  |
@@ -108,6 +108,8 @@ The prompt starts in Insert mode. `Escape` switches to Normal mode; the prompt b
 
 The status line also shows the mode, pending command, and multi-line Visual selection size. **Vim Mode Indicator** (`tui.vimModeDisplay`) selects `text` (default), `icon`, or `none` (hides the whole Vim status segment).
 
+Text boxes in dialogs use the same Vim mode: ask-form textareas, one-line text fields, "Other" answers, and option notes, and the ask tool's typed answers and extension text prompts. There `Escape` first leaves Insert mode, and only a second `Escape` closes the note, hands the keys back to the composer, or cancels the prompt. Password fields stay plain. The terminal cursor shape follows whichever box has the keys. On an ask form's option rows, dropdowns, and Submit, `j` and `k` move down and up like the arrow keys.
+
 | Mode        | Enter with              | Leave with                             |
 | ----------- | ----------------------- | -------------------------------------- |
 | Insert      | `i` `a` `I` `A` `o` `O` | `Escape`                               |
@@ -117,29 +119,40 @@ The status line also shows the mode, pending command, and multi-line Visual sele
 
 ### Normal mode
 
-| Keys                      | Meaning                                                                                                                                                                           |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `h` `j` `k` `l`           | Move by character and line (arrow keys work too)                                                                                                                                  |
-| `0` `^` `$`               | Line start / first non-blank / line end                                                                                                                                           |
-| `w` `b` `e`               | Next word, previous word, end of word                                                                                                                                             |
-| `f` `F` `t` `T` + char    | Find / till that character on the line (`;` repeats, `,` reverses)                                                                                                                |
-| `gg` `G`                  | First line, last line (`5gg` and `5G` jump to line 5)                                                                                                                             |
-| `1`–`9` prefix            | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`                                                                                                                               |
-| `i` `a` `I` `A`           | Insert before / after cursor, at line start / line end                                                                                                                            |
-| `o` `O`                   | Open a line below / above and insert                                                                                                                                              |
-| `x` `D` `C`               | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise)                                                                               |
-| `r` + char                | Replace the character under the cursor (`3rx` replaces three)                                                                                                                     |
-| `R`                       | Replace mode: typed characters overwrite until Escape                                                                                                                             |
-| `%`                       | Jump to the matching `()` `[]` `{}` `"` `'` on or after the cursor. Quotes stay on the line; brackets can cross lines. With a count, `50%` goes to that percentage of the buffer. |
-| `{` `}`                   | Previous / next paragraph (blank-line boundary)                                                                                                                                   |
-| `J`                       | Join lines, dropping the indent of the following line (an empty line joins without a space)                                                                                       |
-| `>>` `<<`                 | Indent / outdent by two spaces (`3>>` shifts three lines; `>}` shifts a motion). Empty lines are left alone.                                                                      |
-| `d` `y` `c` + motion      | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`                                                                                                                                |
-| `dd` `yy` `cc`            | Linewise delete / yank / change                                                                                                                                                   |
-| `d` `y` `c` + text object | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`                                                                                                                       |
-| `p` `P`                   | Put the last yank or delete after / before the cursor                                                                                                                             |
-| `u`                       | Undo (a whole Insert session, or a whole `.`, undoes in one step)                                                                                                                 |
-| `.`                       | Repeat the last change, including text typed in the Insert session it opened; a count replaces the original one (`3.`)                                                            |
+| Keys                                | Meaning                                                                                                                                                                           |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `h` `j` `k` `l`                     | Move by character and line (arrow keys work too)                                                                                                                                  |
+| `gj` `gk`                           | Move by screen row through a wrapped line, keeping the screen column (`j`/`k` move by whole lines, as in Vim)                                                                     |
+| `0` `^` `$`                         | Line start / first non-blank / line end                                                                                                                                           |
+| `-` `+` `_`                         | Previous / next / current line, on its first non-blank; linewise under an operator (`d-`, `c+`, `2d_`)                                                                            |
+| `w` `b` `e` `ge` / `W` `B` `E` `gE` | Move by word / whitespace-delimited WORD, across lines like Vim (an empty line counts as a word)                                                                                  |
+| `f` `F` `t` `T` + char              | Find / till that character on the line (`;` repeats, `,` reverses)                                                                                                                |
+| `gg` `G`                            | First line, last line, on its first non-blank (`5gg` and `5G` jump to line 5)                                                                                                     |
+| `1`–`9` prefix                      | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`                                                                                                                               |
+| `i` `a` `I` `A`                     | Insert before / after cursor, at line start / line end; a count repeats the typed text (`3ix` types `xxx`)                                                                        |
+| `o` `O`                             | Open a line below / above and insert (`2ofoo` opens two)                                                                                                                          |
+| `gi`                                | Insert where Insert mode was last left                                                                                                                                            |
+| `x` `X`                             | Delete the character under / before the cursor                                                                                                                                    |
+| `D` `C` `Y`                         | `d$`, `c$`, and `yy` (`2D` deletes to the end of the next line)                                                                                                                   |
+| `s` `S`                             | Substitute: `s` is `cl` (`3s` changes three characters), `S` is `cc` (`2S` changes two lines)                                                                                     |
+| `r` + char                          | Replace the character under the cursor (`3rx` replaces three)                                                                                                                     |
+| `R`                                 | Replace mode: typed characters overwrite until Escape                                                                                                                             |
+| `~`                                 | Toggle the case of the character under the cursor and move right (`3~` toggles three)                                                                                             |
+| `%`                                 | Jump to the matching `()` `[]` `{}` `"` `'` on or after the cursor. Quotes stay on the line; brackets can cross lines. With a count, `50%` goes to that percentage of the buffer. |
+| `{` `}`                             | Previous / next paragraph (blank-line boundary)                                                                                                                                   |
+| `J` `gJ`                            | Join lines; `J` drops the indent of the following line (an empty line joins without a space), `gJ` keeps all whitespace                                                           |
+| `>>` `<<`                           | Indent / outdent by two spaces (`3>>` shifts three lines; `>}` shifts a motion). Empty lines are left alone.                                                                      |
+| `d` `y` `c` + motion                | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`; a multi-line delete that starts in the indent becomes linewise, as in Vim                                                     |
+| `g~` `gu` `gU` + motion             | Toggle / lower / upper case over a motion or text object (`gUiw`); doubled (`gUU`, `guu`, `g~~`) for whole lines                                                                  |
+| `dd` `yy` `cc`                      | Linewise delete / yank / change; `cc` keeps one empty line and stores the old lines whole, so `p` puts them back as lines                                                         |
+| `d` `y` `c` + text object           | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`                                                                                                                       |
+| `p` `P` / `gp` `gP`                 | Put after / before the cursor; `gp` and `gP` leave the cursor just past the put text                                                                                              |
+| `"x` prefix                         | Use register `x` for the next yank, delete, or put (see [Registers](#registers))                                                                                                  |
+| `u` `Ctrl+R`                        | Undo / redo, with counts (`3u`); a whole Insert session, or a whole `.`, is one step, and the cursor returns to where the change began                                            |
+| `/` `?` + text, `Enter`             | Search prompt history, like a shell's vi mode: `/` loads the newest older prompt containing the text, `?` the next newer one (see [History search](#history-search))             |
+| `n` `N`                             | Repeat the last history search in the same / opposite direction                                                                                                                   |
+| `.`                                 | Repeat the last change, including text typed in the Insert session it opened; a count replaces the original one (`3.`)                                                            |
+| `gv`                                | Reselect the last Visual selection                                                                                                                                                |
 
 ### Text objects
 
@@ -150,15 +163,36 @@ A text object follows an operator (`diw`) or extends a Visual selection (`viw`).
 | `iw` `aw`           | Word; `aw` also takes the adjoining whitespace                         |
 | `iW` `aW`           | Whitespace-delimited WORD                                              |
 | `i"` `i'` `` i` ``  | Inside the quotes on the current line (`a"` takes the quotes too)      |
-| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines     |
+| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines; with none around the cursor, the next pair ahead, as in Vim 9.2 |
 | `a(` `a[` `a{` `a<` | The same pair including its delimiters (`b` and `B` alias `(` and `{`) |
 | `ip` `ap`           | Paragraph — the run of non-blank (or blank) lines, linewise            |
 
 ### Visual mode
 
-`v` starts a character-wise selection and `V` a line-wise one; motions move the free end. `y` copies the selection to the system clipboard (and to the internal register, so `p` puts it back), `d` deletes it, and `c` deletes it and drops into Insert mode. `x` deletes like `d`, and `s` changes like `c`. `o` jumps to the other end of the selection. `Escape` cancels.
+`v` starts a character-wise selection and `V` a line-wise one; motions move the free end, and `$` extends through the line break. `y` copies the selection to the register, so `p` puts it back (and to the system clipboard, see [Registers](#registers)), `d` deletes it, and `c` deletes it and drops into Insert mode. `x` deletes like `d`, `s` changes like `c`, `r` + char replaces every character, `u` / `U` / `~` lower / upper / toggle its case, and `J` / `gJ` join its lines. `X`, `D`, `Y`, `C`, `S`, and `R` act on every line the selection touches, even a character-wise one. `p` and `P` replace the selection with the register (`p` then keeps the replaced text in the register; `P` leaves the register alone). `o` jumps to the other end of the selection. `Escape` cancels.
+
+### Registers
+
+Yanks and deletes fill registers the way Vim's do. An unnamed `p` puts the latest one; `"x` picks another:
+
+| Register  | Holds                                                                                                     |
+| --------- | --------------------------------------------------------------------------------------------------------- |
+| `"a`–`"z` | Named registers; `"A`–`"Z` append to them                                                                 |
+| `"0`      | The last yank made without a register name                                                                |
+| `"1`–`"9` | Deletes of whole lines or several lines, newest in `"1`                                                   |
+| `"-`      | The last delete within a line                                                                             |
+| `"_`      | Black hole: the delete is not stored anywhere                                                             |
+| `"+` `"*` | The system clipboard: `"+y` copies to it and `"+p` puts it (text ending in a newline puts as whole lines) |
+
+Text killed in Insert mode (`Ctrl+K`, `Ctrl+W`) is what an unnamed `p` puts until Vim stores something newer, and Vim's yanks and deletes stay on the kill ring for `Ctrl+Y`.
+
+Every yank also copies to the system clipboard unless **Vim Yanks Copy to Clipboard** is turned off (`tui.vimYankToClipboard: false`); then only `"+y` and `"*y` do, as in Vim without `clipboard=unnamed`. Deletes reach the clipboard only through `"+` / `"*`.
 
 A selection that would cut through an attachment placeholder such as `[Image #1, 800x600]` or `[Paste #2, +30 lines]` takes the whole placeholder with it, so a delete can never leave a corrupt fragment behind.
+
+### History search
+
+`/` and `?` search prompt history, the same prompts `Ctrl+R` searches, not the draft. Type the text after `/`, then `Enter`; `Escape`, or `Backspace` on an empty line, cancels. Every space-separated word must appear in the prompt. The match replaces the draft with the cursor on the first word, still in Normal mode. `n` steps to the next older match and `N` to the next newer one; stepping newer past the newest match brings back the draft you started from. A count picks the nth match (`2/deploy`, `3n`). An empty search repeats the last text. `*` and `#` are not supported.
 
 ### Escape
 
@@ -169,4 +203,6 @@ A selection that would cut through an attachment placeholder such as `[Image #1,
 - **Replace mode** (`R`) → switch to Normal mode, stepping back onto the last overwritten character.
 - **Normal mode with nothing pending** → falls through to app behavior: dismiss autocomplete, abort active work, or run the configured double-Escape action with an empty editor. An idle main-session draft is preserved; bash/python and focused-agent views have their own Escape behavior.
 
-Vim keys never shadow app chords: `Ctrl`-combinations, `Enter`, and `Tab` keep their normal behavior in every mode, so `Enter` still submits from Normal mode. Such a key also cancels a half-typed command (`d`, `r`, `f`) first, so the command never carries over into the next prompt. Prompt history stays on `Up`/`Down` in Insert mode only — in Normal mode those keys are `k` and `j`, so navigating a multi-line draft never loads a previous prompt.
+Vim keys never shadow app chords: `Ctrl`-combinations, `Enter`, and `Tab` keep their normal behavior in every mode, so `Enter` still submits from Normal mode. The one exception is `Ctrl+R`, which is Vim's redo in Normal mode; history search stays on it in Insert mode. Such a key also cancels a half-typed command (`d`, `r`, `f`) first, so the command never carries over into the next prompt. Prompt history stays on `Up`/`Down` in Insert mode only — in Normal mode those keys are `k` and `j`, so navigating a multi-line draft never loads a previous prompt.
+
+Not supported: marks (`m`, `'`, `` ` ``), searching the draft (`/` and `?` search history), `*` and `#`, macros (`q`, `@`), `Ctrl+A` / `Ctrl+X`, line undo (`U`), and Ex commands (`:`).
