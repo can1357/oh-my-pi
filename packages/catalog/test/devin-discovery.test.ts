@@ -1069,19 +1069,26 @@ describe("devin catalog pricing", () => {
 		});
 	});
 
-	it("tiers the standard GPT-5.6 lanes but not their undocumented Fast lanes", () => {
-		const standard = buildModel(spec("gpt-5-6-sol-high", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
-		expect(standard.cost.longContext).toEqual({
+	it("tiers GPT-5.6 lanes, Fast included, at Devin's published long-context rates", () => {
+		const fast = buildModel(
+			spec("gpt-5-6-terra-high-priority", { input: 4, output: 24, cacheRead: 0.4, cacheWrite: 0 }),
+		);
+		expect(fast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 36,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+		// Sol's published tier did not follow its standard-context price rise.
+		const sol = buildModel(spec("gpt-5-6-sol-high", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(sol.cost.longContext).toEqual({
 			inputThreshold: 272_000,
 			input: 8,
 			output: 30,
 			cacheRead: 0.8,
 			cacheWrite: 10,
 		});
-		const fast = buildModel(
-			spec("gpt-5-6-sol-high-priority", { input: 8, output: 40, cacheRead: 0.8, cacheWrite: 0 }),
-		);
-		expect(fast.cost.longContext).toBeUndefined();
 	});
 
 	it("doubles every Grok leg but raises Gemini Pro output only 1.5x above 200K", () => {
@@ -1117,7 +1124,15 @@ describe("devin catalog pricing", () => {
 	});
 
 	it("leaves models Devin publishes no tier for untiered", () => {
-		for (const id of ["gpt-7-sol", "gpt-6-mini", "gpt-6-nano", "gemini-3-pro", "gemini-4-pro", "grok-5"]) {
+		for (const id of [
+			"gpt-7-sol",
+			"gpt-6-mini",
+			"gpt-6-nano",
+			"gpt-5-5-high-priority",
+			"gemini-3-pro",
+			"gemini-4-pro",
+			"grok-5",
+		]) {
 			const model = buildModel(spec(id, { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
 			expect(model.cost.longContext).toBeUndefined();
 		}
