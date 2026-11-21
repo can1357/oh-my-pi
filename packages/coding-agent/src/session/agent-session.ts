@@ -475,7 +475,7 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
-import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
+import { checkCodexBalance, logResetSpend, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorCatchupOptions,
@@ -15918,11 +15918,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * credential. Never throws for business outcomes — inspect `code`.
 	 */
 	async redeemResetCredit(target: ResetCreditTarget, signal?: AbortSignal): Promise<ResetCreditRedeemOutcome> {
-		return this.#modelRegistry.authStorage.resets.redeem({
+		let outcome: ResetCreditRedeemOutcome;
+		try {
+			outcome = await this.#modelRegistry.authStorage.resets.redeem({
+				target,
+				baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
+				signal,
+			});
+		} catch (error) {
+			logResetSpend({ trigger: "manual", target, code: "error", error: String(error) });
+			throw error;
+		}
+		logResetSpend({
+			trigger: "manual",
 			target,
-			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
-			signal,
+			code: outcome.code,
+			creditId: outcome.creditId,
+			cleared: outcome.cleared,
 		});
+		return outcome;
 	}
 
 	/**
@@ -16023,16 +16037,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Spend what each governing window allows outright, then ask about the unset ones. */
 	async #redeemConsentedResets(
 		provider: "openai-codex" | "anthropic",
+		trigger: CodexResetTrigger,
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
 		const modes = resetWindowModes(provider, this.settings);
 		const approved = actions.filter(action => resetWindowMode(modes, action.window) === "yes");
-		const spent = await this.#executeResetActions(provider, approved, coordinator);
+		const spent = await this.#executeResetActions(provider, trigger, approved, coordinator);
 		const unset = actions.filter(action => resetWindowMode(modes, action.window) === "unset");
 		const confirmed = await this.#confirmAutoRedeem(provider, unset, coordinator);
 		if (confirmed.length === 0) return spent;
-		const consented = await this.#executeResetActions(provider, confirmed, coordinator);
+		const consented = await this.#executeResetActions(provider, trigger, confirmed, coordinator);
 		return {
 			restoredCredentialIds: [...spent.restoredCredentialIds, ...consented.restoredCredentialIds],
 			poolLimited: spent.poolLimited || consented.poolLimited,
@@ -16148,6 +16163,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async #executeResetActions(
 		provider: "openai-codex" | "anthropic",
+		trigger: CodexResetTrigger,
 		actions: readonly (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
@@ -16167,9 +16183,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const previousAttemptAt = coordinator.lastAttemptAtByAccount.get(action.accountKey);
 			coordinator.attemptedKeys.add(action.attemptKey);
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
+			const attempt = { trigger, target: action.target, reason: action.reason, window: action.window };
 			let outcome: ResetCreditRedeemOutcome | undefined;
 			let sharedReset = false;
 			let leftPool = false;
+			let fencedBy: string | undefined;
 			try {
 				const redeemOptions = {
 					target: action.target,
@@ -16188,6 +16206,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					outcome = await withResetFence<ResetCreditRedeemOutcome | undefined>(
 						resetLockPath(lockKey, coordinator.resetLockPath),
 						async marker => {
+							fencedBy = marker.state;
 							sharedReset = this.#adoptResetMarker(lockKey, marker);
 							if (sharedReset) await authStorage.credentials.revalidate();
 							return undefined;
@@ -16222,9 +16241,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					account: action.accountKey,
 					error: String(error),
 				});
+				logResetSpend({ ...attempt, code: "error", error: String(error) });
 				continue;
 			}
 			if (!outcome) {
+				logResetSpend({
+					...attempt,
+					code: leftPool ? "left_pool" : fencedBy !== undefined ? "fenced" : "balance_spent",
+					marker: fencedBy,
+				});
 				if (sharedReset) restored.push(action.target.credentialId);
 				if (leftPool) {
 					// Never attempted: the episode and cooldown stay free if the pool allows it again.
@@ -16238,6 +16263,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 				continue;
 			}
+			logResetSpend({ ...attempt, code: outcome.code, creditId: outcome.creditId, cleared: outcome.cleared });
 			if (!isTerminalRedeemOutcome(outcome.code)) {
 				coordinator.attemptedKeys.delete(action.attemptKey);
 				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
@@ -16359,7 +16385,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 				return { restored: false, retryAfterMs, poolLimited };
 			}
-			const executed = await this.#redeemConsentedResets(provider, plan.actions, coordinator);
+			const executed = await this.#redeemConsentedResets(provider, "blocked", plan.actions, coordinator);
 			return {
 				restored: executed.restoredCredentialIds.length > 0,
 				restoredCredentialIds: executed.restoredCredentialIds,
@@ -16404,7 +16430,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const effectiveReports = overlayLiveResetCredits(reports, statuses);
 					const identity = this.#modelRegistry.authStorage.oauth.identity("openai-codex", this.sessionId);
 					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
-					await this.#redeemConsentedResets("openai-codex", plan.actions, coordinator);
+					await this.#redeemConsentedResets("openai-codex", "sweep", plan.actions, coordinator);
 				} catch (error) {
 					logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 				}
@@ -16428,7 +16454,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 								)
 							: candidates;
 					if (plan.actions.length > 0) {
-						await this.#redeemConsentedResets("anthropic", plan.actions, coordinator);
+						await this.#redeemConsentedResets("anthropic", "sweep", plan.actions, coordinator);
 					}
 				} catch (error) {
 					logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });

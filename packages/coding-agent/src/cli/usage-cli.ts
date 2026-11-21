@@ -35,7 +35,13 @@ import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { resetAccountLockKey } from "../session/codex-auto-reset";
-import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
+import {
+	checkCodexBalance,
+	logResetSpend,
+	type ResetMarker,
+	resetLockPath,
+	withResetFence,
+} from "../session/reset-fence";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { reportMatchesStatus } from "../session/claude-auto-reset";
 import {
@@ -1486,6 +1492,8 @@ async function runUsageResetCommand(
 		);
 		return;
 	}
+	// The record's code where it differs from the outcome the command reports.
+	let recorded: { code: "balance_spent" } | { code: "error"; error: string } | undefined;
 	// The fence a session's automatic spend takes: neither spends while the
 	// other's attempt is in flight or within a minute of it.
 	const result = await withResetFence<ResetCreditRedeemOutcome | ResetMarker>(
@@ -1499,7 +1507,11 @@ async function runUsageResetCommand(
 					signal: AbortSignal.timeout(10_000),
 				});
 				const balance = checkCodexBalance(live, target.credentialId, availableCount);
-				if (balance) return { ok: false, code: balance === "spent" ? "offer_changed" : balance, provider };
+				if (balance === "spent") {
+					recorded = { code: "balance_spent" };
+					return { ok: false, code: "offer_changed", provider };
+				}
+				if (balance) return { ok: false, code: balance, provider };
 			}
 			const { outcome } = await markedRedeem(async () => {
 				try {
@@ -1507,13 +1519,19 @@ async function runUsageResetCommand(
 					return await authStorage.resets.redeem({ target, baseUrlResolver, signal: AbortSignal.timeout(15_000) });
 				} catch (error) {
 					// A transport failure can land after the provider applied the reset.
+					recorded = { code: "error", error: String(error) };
 					return { ok: false, code: "network_error", provider, reason: errorMessage(error) };
 				}
 			});
 			return outcome;
 		},
-	);
+	).catch(error => {
+		// The marker write after a spend can fail too; the attempt still gets its record.
+		logResetSpend({ trigger: "manual", target, code: "error", error: String(error) });
+		throw error;
+	});
 	if ("state" in result) {
+		logResetSpend({ trigger: "manual", target, code: "fenced", marker: result.state });
 		const ago = formatDuration(Date.now() - result.atMs);
 		failUsageReset(
 			result.state === "reset"
@@ -1522,6 +1540,14 @@ async function runUsageResetCommand(
 		);
 		return;
 	}
+	logResetSpend({
+		trigger: "manual",
+		target,
+		code: result.code,
+		creditId: result.creditId,
+		cleared: result.cleared,
+		...recorded,
+	});
 	const message = oneLine(describeRedeemOutcome({ ...result, reason: maskOptionalText(result.reason) }, label));
 	if (result.ok) {
 		process.stdout.write(`${message}\n`);

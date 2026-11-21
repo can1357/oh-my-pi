@@ -6,8 +6,8 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDbPath, isEnoent, withFileLock } from "@oh-my-pi/pi-utils";
-import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "./auth-storage";
+import { getAgentDbPath, isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
+import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTarget } from "./auth-storage";
 import { ATTEMPT_COOLDOWN_MS } from "./codex-auto-reset";
 
 /** An account's last recorded attempt: `pending` (sent, unconfirmed) or `reset`, and when it started. */
@@ -24,6 +24,43 @@ export type MarkedRedeem = (
 /** Lock file for one `resetAccountLockKey`, beside the agent database unless `root` replaces it. */
 export function resetLockPath(lockKey: string, root = getAgentDbPath()): string {
 	return `${root}.reset-${Bun.hash(lockKey).toString(16)}`;
+}
+
+/** One saved-reset spend attempt and how it ended. */
+export interface ResetSpendAttempt {
+	/** A session's blocked-account pass or salvage sweep, or a user's `/usage reset` / `omp usage reset`. */
+	trigger: "blocked" | "sweep" | "manual";
+	target: ResetCreditTarget;
+	/**
+	 * The redeem's code; `error` when it threw (it may still have reached the
+	 * provider); or, when nothing was sent: `fenced` (another process attempted
+	 * within the cooldown), `balance_spent` (the live Codex balance already
+	 * fell), `left_pool` (the session may no longer use the account).
+	 */
+	code: string;
+	/** Planner rule behind an automatic spend. */
+	reason?: "blocked-account" | "expiring-credit";
+	/** Window whose consent governed an automatic spend. */
+	window?: string;
+	creditId?: string;
+	cleared?: readonly string[];
+	/** State of the other process's marker, for `fenced`. */
+	marker?: string;
+	error?: string;
+}
+
+/**
+ * Log every saved-reset spend attempt at info, so the log names who spent an account's reset and why.
+ * The account is named by its credential id, never its email: `/debug` report bundles copy the log.
+ */
+export function logResetSpend(attempt: ResetSpendAttempt): void {
+	const { target, creditId, ...rest } = attempt;
+	logger.info("reset spend", {
+		provider: target.provider,
+		credentialId: target.credentialId,
+		creditId: creditId ?? target.creditId,
+		...rest,
+	});
 }
 
 export async function readResetMarker(lockPath: string): Promise<ResetMarker> {
