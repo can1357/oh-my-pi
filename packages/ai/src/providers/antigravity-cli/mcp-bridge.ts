@@ -114,6 +114,15 @@ export class McpBridge {
 	}
 }
 
+function writeFrame(socket: Socket<Connection>, frame: Record<string, unknown>): void {
+	if (socket.data.closed) return;
+	try {
+		socket.write(`${JSON.stringify({ jsonrpc: "2.0", ...frame })}\n`);
+	} catch {
+		socket.terminate();
+	}
+}
+
 function handleLine(
 	socket: Socket<Connection>,
 	line: string,
@@ -125,18 +134,14 @@ function handleLine(
 	try {
 		request = JSON.parse(line);
 	} catch {
+		writeFrame(socket, { id: null, error: { code: -32700, message: "Parse error" } });
 		return;
 	}
 	if (!isRecord(request) || request.jsonrpc !== "2.0") return;
 	const id = request.id;
 	if (typeof id !== "string" && !(typeof id === "number" && Number.isSafeInteger(id))) return;
 	const reply = (body: { result: unknown } | { error: { code: number; message: string } }) => {
-		if (socket.data.closed) return;
-		try {
-			socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, ...body })}\n`);
-		} catch {
-			socket.terminate();
-		}
+		writeFrame(socket, { id, ...body });
 	};
 	const params = isRecord(request.params) ? request.params : {};
 	switch (request.method) {
