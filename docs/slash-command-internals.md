@@ -188,6 +188,7 @@ Slash command state is refreshed:
 - when the editor component is swapped
 - by explicit plugin reload flows such as `/reload-plugins`
 - when session command-metadata notifications arrive, including live settings changes, skill management, and MCP prompt updates (autocomplete rebuilds from current session state)
+- after `/wt` ran a new worktree's `post-checkout` hook (linked git worktree or ovnfs checkout): once the move and `worktree.cleanSource` are done and reported, `/wt` runs the hook with the arguments `git worktree add` gives it (`vcs.runPostCheckoutHook`, the helper behind `omp worktree add`) and then refreshes session skills/commands, so they include what the hook added. A failing hook keeps the worktree and shows a warning; the hook cannot be cancelled. An ovnfs checkout has its own git dir without `hooks/`: only a hook found through `core.hooksPath` runs there, not one in the source repo's `.git/hooks`
 
 There is no continuous file watcher for command directories.
 

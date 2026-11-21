@@ -14,6 +14,7 @@ import { isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ChildExit, ChildSpawn, ManagedChild, ManagedChildState } from "../../daemon/module";
 import { createMCPJsonRpcError, MCPTransportError, normalizeMCPTransportError } from "../errors";
 import { routeProgressNotification, withProgressToken } from "../progress";
+import { resolveMCPShutdownStepMs } from "../timeout";
 import type { JsonRpcError, MCPRequestOptions, MCPTransport } from "../types";
 import { toJsonRpcError } from "../types";
 import {
@@ -232,9 +233,6 @@ interface PendingRequest {
 	reject(error: Error): void;
 	onProgress?: MCPRequestOptions["onProgress"];
 }
-
-/** How long each shutdown step (stdin closed, then SIGTERM) gets before the next one. */
-const SHUTDOWN_STEP_MS = 1_000;
 
 function abortReason(signal: AbortSignal): Error {
 	return signal.reason instanceof Error ? signal.reason : new Error("Aborted");
@@ -552,8 +550,9 @@ export class StdioUpstream implements MCPTransport {
 			for (const pending of this.#pending.values()) pending.reject(error);
 			child.closeInput();
 		}
-		const terminate = setTimeout(() => child.kill(), SHUTDOWN_STEP_MS);
-		const escalate = setTimeout(() => child.kill("SIGKILL"), 2 * SHUTDOWN_STEP_MS);
+		const stepMs = resolveMCPShutdownStepMs();
+		const terminate = setTimeout(() => child.kill(), stepMs);
+		const escalate = setTimeout(() => child.kill("SIGKILL"), 2 * stepMs);
 		try {
 			await this.#exit.promise;
 		} finally {

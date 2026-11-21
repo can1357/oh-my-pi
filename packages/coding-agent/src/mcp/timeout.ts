@@ -7,6 +7,8 @@ const DEFAULT_MCP_TOOL_CALL_MAX_TOTAL_MS = 3_600_000;
 const MCP_TIMEOUT_ENV = "OMP_MCP_TIMEOUT_MS";
 const DEFAULT_MCP_STARTUP_TIMEOUT_MS = 250;
 const MCP_STARTUP_TIMEOUT_ENV = "OMP_MCP_STARTUP_TIMEOUT_MS";
+const DEFAULT_MCP_SHUTDOWN_STEP_MS = 1_000;
+const MCP_SHUTDOWN_STEP_ENV = "OMP_MCP_SHUTDOWN_STEP_MS";
 
 let neverAbortController: AbortController | undefined;
 
@@ -89,6 +91,22 @@ export function resolveMCPStartupTimeoutMs(configTimeout?: number): number {
 		});
 	}
 	return configTimeout ?? DEFAULT_MCP_STARTUP_TIMEOUT_MS;
+}
+
+/**
+ * How long each step of a stdio server's shutdown (stdin closed, then SIGTERM)
+ * gets before the next: `OMP_MCP_SHUTDOWN_STEP_MS`, else one second.
+ */
+export function resolveMCPShutdownStepMs(): number {
+	const raw = Bun.env[MCP_SHUTDOWN_STEP_ENV]?.trim();
+	if (raw) {
+		const value = Number(raw);
+		if (Number.isFinite(value) && value >= 0) return value;
+		logger.warn("Ignoring invalid OMP_MCP_SHUTDOWN_STEP_MS env value; expected a non-negative number", {
+			value: raw,
+		});
+	}
+	return DEFAULT_MCP_SHUTDOWN_STEP_MS;
 }
 
 export function isMCPTimeoutEnabled(timeoutMs: number): boolean {
