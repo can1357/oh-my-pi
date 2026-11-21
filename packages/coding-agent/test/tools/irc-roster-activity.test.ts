@@ -45,6 +45,14 @@ describe("IRC roster activity", () => {
 		expect(registry.get("Stopped")?.activity).toBeUndefined();
 	});
 
+	it("ignores a late heartbeat from a previous run whose id was reused", () => {
+		const old = registry.register({ id: "Reused", displayName: "task", kind: "sub", session: null });
+		const current = registry.register({ id: "Reused", displayName: "task", kind: "sub", session: null });
+		registry.setActivity("Reused", "compiling", current);
+		registry.setActivity("Reused", "reading", old);
+		expect(registry.get("Reused")?.activity).toBe("compiling");
+	});
+
 	it("normalizes a multi-line activity gist to one bounded line", () => {
 		// A model-authored intent with newlines/tabs must remain one bounded line.
 		registry.register({ id: "Noisy", displayName: "task", kind: "sub", session: null, status: "running" });

@@ -1,16 +1,21 @@
 /**
- * The composer's model switcher: a searchable popover over the session's model catalog, which can run to thousands of
- * models across dozens of providers. Without a query it lists the current model, the rest of its provider, then every
- * other provider in turn; a query ranks every model by fuzzy match, the current provider winning ties. Either view
- * shows at most {@link MAX_ROWS} rows.
+ * The composer's model switcher and thinking menu.
+ *
+ * The switcher is omp's session model picker (alt+p) in a popover: the session orders and ranks its rows
+ * (`get_model_picker`), so browsing shows the Recent block (role-held and recently used models) ahead of everything
+ * else, a query ranks matches the way the TUI does (`provider/` limits them to a provider), and `@` lists the ctrl+p
+ * quick roles. Rows chip the roles a model holds. A thinking slider under the rows follows the highlighted model; picking
+ * a model after moving it runs the model at that level, ←/→ step it.
  */
-import { FuzzyCorpus } from "@oh-my-pi/pi-tui/fuzzy";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { Brain } from "lucide-react";
+import { type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useState } from "react";
+import type {
+	ConfiguredThinkingLevel,
+	ModelPickerResult,
+	ModelPickerRow,
+} from "../../../coding-agent/src/modes/rpc/wire/rpc-wire.generated";
 import type { PanelModel, PanelSession } from "./session";
 import { Menu, type MenuEntry } from "./ui";
-
-/** Rows rendered at once; typing reaches the rest. */
-const MAX_ROWS = 100;
 
 /** A session's model catalog as a view sees it. */
 export type ModelList =
@@ -19,11 +24,10 @@ export type ModelList =
 	| { status: "failed"; error: string };
 
 const LOADING: ModelList = { status: "loading" };
-const NO_MODELS: readonly PanelModel[] = [];
 
 /**
  * `session`'s model catalog, fetched the first time `wanted` holds; after a failure, turning `wanted` on again retries.
- * Used by the composer's picker and the shortcut editor.
+ * Used by the shortcut editor.
  */
 export function useModelList(session: PanelSession | null, wanted: boolean): ModelList {
 	const [loaded, setLoaded] = useState<{ session: PanelSession; list: ModelList } | null>(null);
@@ -50,98 +54,224 @@ export function useModelList(session: PanelSession | null, wanted: boolean): Mod
 	return loaded?.session === session ? loaded.list : LOADING;
 }
 
-function same(a: PanelModel, b: PanelModel | null): boolean {
-	return b !== null && a.provider === b.provider && a.id === b.id;
+/** Labels of thinking selectors, as omp's picker slider and thinking selector name them. */
+const LEVEL_LABELS: Readonly<Record<string, string>> = {
+	auto: "Auto",
+	off: "Off",
+	minimal: "Min",
+	low: "Low",
+	medium: "Med",
+	high: "High",
+	xhigh: "XHigh",
+	max: "Max",
+};
+/** What each selector does, for the thinking menu. */
+const LEVEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
+	auto: "omp picks the effort each turn",
+	off: "No reasoning",
+	minimal: "Very brief reasoning",
+	low: "Light reasoning",
+	medium: "Moderate reasoning",
+	high: "Deep reasoning",
+	xhigh: "Extended reasoning",
+	max: "Maximum reasoning the model supports",
+};
+/** Efforts low to high, for showing a pending level on a model whose ladder lacks it. */
+const EFFORTS: readonly string[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** A selector's short label. */
+export function levelLabel(level: string): string {
+	return LEVEL_LABELS[level] ?? level;
 }
 
-/** The current model, the rest of its provider, then the other providers alphabetically; catalog order within each. */
-function browseOrder(models: readonly PanelModel[], current: PanelModel | null): PanelModel[] {
-	const home = current?.provider;
-	return models.toSorted(
-		(a, b) =>
-			Number(same(b, current)) - Number(same(a, current)) ||
-			Number(b.provider === home) - Number(a.provider === home) ||
-			a.provider.localeCompare(b.provider),
-	);
+/**
+ * `level` as one of `steps`: kept when the model offers it, an effort lowered to the nearest one it has (else its
+ * lowest), anything else as off. The session clamps again on the switch; this keeps the slider honest meanwhile.
+ */
+function onLadder(level: ConfiguredThinkingLevel, steps: readonly ConfiguredThinkingLevel[]): ConfiguredThinkingLevel {
+	if (steps.includes(level)) return level;
+	const wanted = EFFORTS.indexOf(level);
+	const efforts = steps.filter(step => EFFORTS.includes(step));
+	if (wanted === -1 || efforts.length === 0) return "off";
+	return efforts.findLast(step => EFFORTS.indexOf(step) <= wanted) ?? efforts[0]!;
 }
 
-/** Fuzzy matches best first; near-equal scores prefer the current provider. */
-function searchOrder(corpus: FuzzyCorpus<PanelModel>, query: string, current: PanelModel | null): PanelModel[] {
-	const home = current?.provider;
-	return corpus
-		.rank(query)
-		.sort(
-			(a, b) =>
-				Math.round(a.score / 10) - Math.round(b.score / 10) ||
-				Number(b.item.provider === home) - Number(a.item.provider === home) ||
-				a.score - b.score,
-		)
-		.map(result => result.item);
+function rowId(row: ModelPickerRow): string {
+	return row.role === undefined ? `${row.provider}/${row.id}` : `@${row.role}`;
 }
 
-/** Popover above the model chip; picking a row hands its model to `onPick` and closes. */
+type PickerState =
+	| { status: "loading" }
+	| { status: "ready"; query: string; result: ModelPickerResult }
+	| { status: "failed"; error: string };
+
+/** Popover above the model chip; picking a row hands its model (and the slider's level) to `onPick` and closes. */
 export function ModelPicker(props: {
-	list: ModelList;
-	current: PanelModel | null;
-	onPick(model: PanelModel): void;
+	session: PanelSession;
+	onPick(model: PanelModel, options: { thinkingLevel?: ConfiguredThinkingLevel; role?: string }): void;
 	onClose(): void;
 }): ReactNode {
-	const { list, current } = props;
+	const { session } = props;
 	const [query, setQuery] = useState("");
-	const models = list.status === "ready" ? list.models : NO_MODELS;
-	const corpus = useMemo(() => new FuzzyCorpus(models, model => `${model.name} ${model.provider}/${model.id}`), [models]);
-	const trimmed = query.trim();
-	const browsing = trimmed === "";
-	const ordered = useMemo(
-		() => (browsing ? browseOrder(models, current) : searchOrder(corpus, trimmed, current)),
-		[browsing, models, corpus, trimmed, current],
-	);
+	const [state, setState] = useState<PickerState>({ status: "loading" });
+	const [activeId, setActiveId] = useState<string | null>(null);
+	/** The slider's level once moved; untouched, each model shows the level the session would run it at. */
+	const [pending, setPending] = useState<ConfiguredThinkingLevel | null>(null);
 
+	useEffect(() => {
+		if (session.pickModels === undefined) return;
+		let alive = true;
+		session.pickModels(query).then(
+			result => {
+				if (alive) setState({ status: "ready", query, result });
+			},
+			(error: unknown) => {
+				if (alive) setState({ status: "failed", error: error instanceof Error ? error.message : String(error) });
+			},
+		);
+		return () => {
+			alive = false;
+		};
+	}, [session, query]);
+
+	const result = state.status === "ready" ? state.result : null;
+	const rows = result?.rows ?? [];
+	const roleMode = query.startsWith("@");
 	const entries: MenuEntry[] = [];
-	let group: string | null = null;
-	for (const model of ordered.slice(0, MAX_ROWS)) {
-		// Browsing groups rows under provider captions; search results carry their provider on the row.
-		if (browsing && model.provider !== group) {
-			group = model.provider;
-			entries.push({ kind: "caption", id: `provider-${group}`, label: group });
-		}
+	rows.forEach((row, index) => {
+		if (result !== null && result.recent > 0 && (index === 0 || index === result.recent))
+			entries.push({
+				kind: "caption",
+				id: index === 0 ? "recent" : "rest",
+				label: index === 0 ? "Recent" : query.trim() ? "Matches" : "All",
+			});
+		const id = rowId(row);
 		entries.push({
 			kind: "item",
-			id: `${model.provider}/${model.id}`,
-			label: model.name || model.id,
-			// Names repeat within a provider (dated snapshots, aliases); the id tells the rows apart.
-			description: browsing ? model.id : `${model.provider}/${model.id}`,
-			checked: same(model, current),
-			onSelect: () => props.onPick(model),
+			id,
+			label: row.role === undefined ? row.name || row.id : `@${row.role}`,
+			description: `${row.provider}/${row.id}${row.overContext ? " · context too large, compacts" : ""}`,
+			meta:
+				row.role === undefined
+					? row.roles?.map(role => role.label).join(" · ")
+					: row.thinkingLevel === undefined
+						? undefined
+						: levelLabel(row.thinkingLevel),
+			checked: row.current === true,
+			onSelect: () => {
+				const model = { provider: row.provider, id: row.id, name: row.name };
+				if (row.role !== undefined) {
+					props.onPick(model, {
+						role: row.role,
+						...(row.thinkingLevel === undefined ? {} : { thinkingLevel: row.thinkingLevel }),
+					});
+					return;
+				}
+				const level = pending !== null && row.thinking !== undefined ? onLadder(pending, row.thinking) : undefined;
+				props.onPick(model, level === undefined ? {} : { thinkingLevel: level });
+			},
 		});
-	}
-	const hidden = ordered.length - MAX_ROWS;
+	});
+	const hidden = (result?.total ?? 0) - rows.length;
 	if (hidden > 0)
 		entries.push({
 			kind: "caption",
 			id: "more",
-			label: browsing
-				? `Type to search ${hidden.toLocaleString()} more`
-				: `${hidden.toLocaleString()} more matches, keep typing`,
+			label: query.trim() ? `${hidden.toLocaleString()} more matches, keep typing` : `Type to search ${hidden.toLocaleString()} more`,
 		});
 
+	const highlighted = roleMode ? undefined : (rows.find(row => rowId(row) === activeId) ?? rows[0]);
+	const steps = highlighted?.thinking;
+	const shown =
+		highlighted === undefined || steps === undefined
+			? undefined
+			: pending !== null
+				? onLadder(pending, steps)
+				: (highlighted.thinkingLevel ?? "off");
+	const step = (delta: -1 | 1): boolean => {
+		if (steps === undefined || shown === undefined) return false;
+		const next = steps[Math.max(0, Math.min(steps.length - 1, steps.indexOf(shown) + delta))];
+		if (next !== undefined) setPending(next);
+		return true;
+	};
+	const onKey = (event: ReactKeyboardEvent): boolean => {
+		if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return false;
+		if (event.key === "ArrowLeft") return step(-1);
+		if (event.key === "ArrowRight") return step(1);
+		return false;
+	};
+	const footer =
+		highlighted === undefined ? null : (
+			<div className="pn-thinking-slider" role="radiogroup" aria-label="Thinking level">
+				<Brain size={13} />
+				{steps === undefined || shown === undefined ? (
+					<span className="pn-thinking-none">no thinking</span>
+				) : (
+					steps.map(level => (
+						<button
+							key={level}
+							type="button"
+							role="radio"
+							aria-checked={level === shown}
+							className="pn-thinking-step"
+							onClick={() => setPending(level)}
+						>
+							{levelLabel(level)}
+						</button>
+					))
+				)}
+			</div>
+		);
+
 	const empty =
-		list.status === "loading"
+		state.status === "loading"
 			? "Loading models…"
-			: list.status === "failed"
-				? `Couldn’t load models: ${list.error}`
-				: browsing
-					? "No models available"
-					: `No models match “${trimmed}”`;
+			: state.status === "failed"
+				? `Couldn’t load models: ${state.error}`
+				: roleMode
+					? "No quick roles in the ctrl+p cycle"
+					: query.trim()
+						? `No models match “${query.trim()}”`
+						: "No models available";
 	return (
 		<Menu
 			entries={entries}
 			className="pn-pop pn-pop--above-right pn-model-menu"
-			width={300}
+			width={320}
 			dense
 			autoFocus
 			empty={empty}
-			search={{ value: query, placeholder: "Search models", onChange: setQuery }}
+			search={{ value: query, placeholder: "Search, @ for roles…", onChange: setQuery }}
+			footer={footer}
+			onActiveChange={setActiveId}
+			onKey={onKey}
+			onClose={props.onClose}
+		/>
+	);
+}
+
+/** Popover above the thinking chip: the selectors the session's model accepts. */
+export function ThinkingMenu(props: {
+	level: ConfiguredThinkingLevel;
+	levels: readonly ConfiguredThinkingLevel[];
+	onPick(level: ConfiguredThinkingLevel): void;
+	onClose(): void;
+}): ReactNode {
+	const entries: MenuEntry[] = props.levels.map(level => ({
+		kind: "item",
+		id: level,
+		label: levelLabel(level),
+		description: LEVEL_DESCRIPTIONS[level],
+		checked: level === props.level,
+		onSelect: () => props.onPick(level),
+	}));
+	return (
+		<Menu
+			entries={entries}
+			className="pn-pop pn-pop--above-right"
+			width={240}
+			dense
+			autoFocus
 			onClose={props.onClose}
 		/>
 	);

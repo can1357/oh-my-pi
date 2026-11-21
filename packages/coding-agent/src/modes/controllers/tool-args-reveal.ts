@@ -13,8 +13,6 @@ type ToolArgsRevealComponent = Component & {
 // STREAMING_JSON_PARSE_MIN_GROWTH bytes at a time. Nested-array modes (edit
 // patch/replace `edits[].diff`) still fall through to the throttled parse.
 const STREAMING_STRING_KEYS_BY_TOOL: Record<string, readonly string[]> = {
-	// write.content also carries xd:// device args (a JSON string) — the same
-	// incremental decode feeds the delegated tool renderer live inner args.
 	write: ["content"],
 	edit: ["input", "_input"],
 	eval: ["code"],

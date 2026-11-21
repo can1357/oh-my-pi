@@ -358,9 +358,8 @@ describe("Spotlight edits", () => {
 		call(b, "write", { path: "src/other.ts", content: "x" });
 		call(b, "bash", { command: "cargo test -p tern" });
 		const second = shortenedRead(b);
-		// An edit of another file (ast_edit through `write xd://ast_edit`) excuses nothing; a write to an internal
-		// URL edits no file.
-		call(b, "write", { path: "xd://ast_edit", content: JSON.stringify({ paths: ["src/b.ts"], ops: [] }) });
+		// An `ast_edit` of another file excuses nothing; a write to an internal URL edits no file.
+		call(b, "ast_edit", { paths: ["src/b.ts"] });
 		call(b, "write", { path: "proc://job/kill" });
 		const reread = call(b, "read", { path: "src/a.ts:150-160" });
 		await write("edits.jsonl", b);

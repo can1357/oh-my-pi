@@ -580,7 +580,7 @@ export function mcpToolNameParts(serverName: string, toolName: string): { server
  * Mint the name {@link createMCPToolName} produced before digits were kept in
  * sanitized parts (`[^a-z_]+` collapsed to `_`). Digit-bearing servers/tools
  * were renamed by that fix, so user config keys written against the old form
- * (`tools.approval`, `tools.xdevInlineDevices`) would no longer match.
+ * (`tools.approval`, `tools.commandInline`) would no longer match.
  * Approval resolution consults this legacy key as a fail-closed fallback.
  * Returns `undefined` when minting is unchanged (no digits involved).
  */
@@ -699,7 +699,7 @@ export function canonicalMCPToolNameCandidates(name: string): string[] {
  * main-session tool it was never offered. Naming the source at every call site
  * makes that mistake unrepresentable.
  *
- * A caller whose tools span several presentation sets (mounted `xd://` devices
+ * A caller whose tools span several presentation sets (mounted tool commands
  * plus advertised top-level tools) MUST pass one lookup covering the union.
  * Checking each set with its own call and taking the first hit would let set
  * order silently break the uniqueness rule below.
