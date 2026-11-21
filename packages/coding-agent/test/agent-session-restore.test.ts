@@ -8,6 +8,9 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	createInterruptedToolResults,
@@ -16,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 const zeroUsage = {
@@ -129,6 +133,8 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
 			modelRegistry,
 			evalToolSession,
+			ownedAsyncJobManager:
+				evalToolSession?.asyncJobManager instanceof AsyncJobManager ? evalToolSession.asyncJobManager : undefined,
 		});
 		session.subscribe(() => {});
 		return { session, mock };
@@ -159,6 +165,141 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		expect(mock.calls.length).toBe(1);
 		const last = session.agent.state.messages.at(-1);
 		expect(last?.role === "assistant" && last.content).toContainEqual({ type: "text", text: "done after restore" });
+	});
+
+	it("reports a background bash job lost on process exit to wait and proc", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const manager = new AsyncJobManager({});
+		const toolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings: Settings.isolated({ "launch.enabled": false }),
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			asyncJobManager: manager,
+		};
+		let replayedWaitText: string | undefined;
+		const waitTool = new WaitTool(toolSession);
+		const executeWait = waitTool.execute.bind(waitTool);
+		waitTool.execute = async (toolCallId, params, signal, onUpdate) => {
+			const result = await executeWait(toolCallId, params, signal, onUpdate);
+			replayedWaitText = result.content.find(block => block.type === "text")?.text;
+			return result;
+		};
+		const { session } = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run a command and wait", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: "sleep 60" } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[waitTool as AgentTool],
+			[{ content: ["done after restore"], stopReason: "stop" }],
+			toolSession,
+		);
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(replayedWaitText).toContain("bg_1");
+		expect(replayedWaitText).toContain("previous OMP process exited");
+		expect(replayedWaitText).not.toContain("Nothing to wait for");
+
+		const proc = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://bg_1"), { session: toolSession });
+		expect(proc.content).toContain("bg_1 [bash] — failed");
+		expect(proc.content).toContain("previous OMP process exited");
+
+		manager.evictCompletedJobs();
+		const nextId = manager.register("bash", "next command", async () => "done");
+		expect(nextId).toBe("bg_2");
+		await manager.getJob(nextId)?.promise;
+	});
+
+	it("does not turn an already delivered bash result into a process-exit failure", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "run a command and wait", timestamp: Date.now() });
+		sessionManager.appendMessage(
+			assistant(model, {
+				content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: "sleep 1" } }],
+				stopReason: "toolUse",
+			}),
+		);
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call_bash",
+			toolName: "bash",
+			content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+			isError: false,
+			details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCustomMessageEntry("async-result", "Background job bg_1 completed", true, {
+			jobs: [{ jobId: "bg_1", type: "bash", status: "completed", label: "sleep 1" }],
+		});
+		sessionManager.appendMessage(
+			assistant(model, {
+				content: [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }],
+				stopReason: "toolUse",
+			}),
+		);
+		const branch = sessionManager.getBranch();
+		const abort = createInterruptedTurnAbortMessage(
+			branch,
+			{ api: model.api, provider: model.provider, model: model.id },
+			{ assumeExit: true },
+		);
+		if (!abort) throw new Error("Expected an unfinished turn to close");
+		for (const result of createInterruptedToolResults(branch)) sessionManager.appendMessage(result);
+		sessionManager.appendMessage(abort);
+
+		const manager = new AsyncJobManager({});
+		const toolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings: Settings.isolated({ "launch.enabled": false }),
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			asyncJobManager: manager,
+		};
+		let replayedWaitText: string | undefined;
+		const waitTool = new WaitTool(toolSession);
+		const executeWait = waitTool.execute.bind(waitTool);
+		waitTool.execute = async (toolCallId, params, signal, onUpdate) => {
+			const result = await executeWait(toolCallId, params, signal, onUpdate);
+			replayedWaitText = result.content.find(block => block.type === "text")?.text;
+			return result;
+		};
+		const { session } = open(
+			model,
+			sessionManager,
+			[waitTool as AgentTool],
+			[{ content: ["done after restore"], stopReason: "stop" }],
+			toolSession,
+		);
+
+		await expect(session.restoreInterruptedTurn()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(replayedWaitText).toContain("Nothing to wait for");
+		expect(manager.getJob("bg_1")).toBeUndefined();
 	});
 
 	it("goes on with a turn exit recovery closed when the eval state snapshot follows it (#16195)", async () => {

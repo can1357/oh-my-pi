@@ -409,6 +409,7 @@ import {
 	createInterruptedTurnAbortMessage,
 	hasRestorableTurn,
 	INTERRUPTED_TURN_ERROR,
+	restoreTerminatedBashJobs,
 	SESSION_EXIT_CUSTOM_TYPE,
 	type SessionExitData,
 	summarizeToolArguments,
@@ -14009,6 +14010,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async restoreInterruptedTurn(): Promise<boolean> {
 		const branch = this.sessionManager.getBranch();
 		if (this.isStreaming || !hasRestorableTurn(branch)) return false;
+		if (this.#asyncJobManager) restoreTerminatedBashJobs(branch, this.#asyncJobManager, this.getAgentId());
 		const model = this.model;
 		if (!model) return false;
 		const abort = createInterruptedTurnAbortMessage(

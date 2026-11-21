@@ -1,5 +1,6 @@
 import { createSyntheticToolResultMessage, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { SessionEntry } from "./session-entries";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
@@ -439,4 +440,101 @@ export function describePendingToolCalls(entries: readonly SessionEntry[]): stri
 	const formatted = pending.map(formatPendingToolCall).join(", ");
 	const noun = pending.length === 1 ? "tool call" : "tool calls";
 	return `Previous session ended while ${pending.length} ${noun} remained pending: ${formatted}. The prior OMP process exited before recording tool result(s).`;
+}
+
+interface InterruptedBashJob {
+	id: string;
+	label: string;
+}
+
+function isSettledJobStatus(status: unknown): boolean {
+	return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function forgetSettledJob(value: unknown, running: Map<string, InterruptedBashJob>, delivered = false): void {
+	if (!isObject(value)) return;
+	const id = typeof value.id === "string" ? value.id : typeof value.jobId === "string" ? value.jobId : undefined;
+	if (id && (delivered || isSettledJobStatus(value.status))) running.delete(id);
+}
+
+/** Remove jobs whose persisted delivery/snapshot already established a terminal outcome. */
+function forgetSettledJobDetails(details: unknown, running: Map<string, InterruptedBashJob>, delivered = false): void {
+	if (!isObject(details)) return;
+	if (Array.isArray(details.jobs)) {
+		for (const job of details.jobs) forgetSettledJob(job, running, delivered);
+	}
+	if (delivered) forgetSettledJob(details, running, true);
+	if (!isObject(details.proc)) return;
+	if (Array.isArray(details.proc.jobs)) {
+		for (const job of details.proc.jobs) forgetSettledJob(job, running);
+	}
+	forgetSettledJob(details.proc.job, running);
+}
+
+/**
+ * Recreate terminal rows for background bash jobs the previous process left
+ * without a persisted outcome. Its shell children cannot survive the process,
+ * so leaving these ids absent makes a replayed `wait` and `proc://` falsely
+ * report that the jobs never existed. Ordinary async-result, wait/cancel and
+ * proc snapshots settle their rows and prevent a false process-exit failure.
+ */
+export function restoreTerminatedBashJobs(
+	entries: readonly SessionEntry[],
+	manager: AsyncJobManagerApi,
+	ownerId: string | undefined,
+): string[] {
+	const commands = new Map<string, string>();
+	const running = new Map<string, InterruptedBashJob>();
+	for (const entry of entries) {
+		if (entry.type === "custom_message") {
+			if (entry.customType === "async-result") forgetSettledJobDetails(entry.details, running, true);
+			continue;
+		}
+		if (entry.type !== "message") continue;
+		const message = entry.message;
+		if (message.role === "assistant") {
+			const content = Array.isArray(message.content) ? message.content : [];
+			for (const call of content) {
+				if (call.type !== "toolCall" || call.name !== "bash" || !isObject(call.arguments)) continue;
+				if (typeof call.arguments.command === "string" && call.arguments.command.length > 0) {
+					commands.set(call.id, call.arguments.command);
+				}
+			}
+			continue;
+		}
+		if (message.role === "toolResult") {
+			const details = message.details;
+			if (message.toolName === "bash" && isObject(details) && isObject(details.async)) {
+				const async = details.async;
+				if (async.type === "bash" && typeof async.jobId === "string") {
+					if (async.state === "running") {
+						running.set(async.jobId, {
+							id: async.jobId,
+							label: commands.get(message.toolCallId) ?? async.jobId,
+						});
+					} else if (isSettledJobStatus(async.state)) {
+						running.delete(async.jobId);
+					}
+				}
+			}
+			forgetSettledJobDetails(details, running);
+			continue;
+		}
+		if (message.role === "custom" && message.customType === "async-result") {
+			forgetSettledJobDetails(message.details, running, true);
+		}
+	}
+
+	const restored: string[] = [];
+	for (const job of running.values()) {
+		if (manager.getJob(job.id)) continue;
+		manager.publishFailed(
+			"bash",
+			job.label,
+			`Background job ${job.id} terminated when the previous OMP process exited before delivering its final result.`,
+			{ id: job.id, ownerId },
+		);
+		restored.push(job.id);
+	}
+	return restored;
 }
