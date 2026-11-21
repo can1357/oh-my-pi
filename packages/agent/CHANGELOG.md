@@ -8,6 +8,10 @@
 
 - Added standby tools support through `Agent.setStandbyTools()` and `AgentContext.standbyTools`, allowing tools to remain inactive until a request explicitly enables tool use.
 
+### Fixed
+
+- Fixed rejected provider streams dropping `errorStatus` and `errorId` on assistant replies so failed turns keep their HTTP status and retry classification and cancelled turns keep their cancellation marker ([#20061](https://github.com/can1357/oh-my-pi/pull/20061) by [@eggpeat](https://github.com/eggpeat))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
