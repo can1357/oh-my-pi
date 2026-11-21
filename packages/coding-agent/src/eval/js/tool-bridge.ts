@@ -6,7 +6,6 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { fuzzyRank } from "@oh-my-pi/pi-tui";
-import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
@@ -57,6 +56,7 @@ export type { JsStatusEvent } from "./shared/types";
 
 export interface ToolBridgeOptions {
 	session: ToolSession;
+	parentToolCallId?: string;
 	signal?: AbortSignal;
 	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
 	cellTimeoutMs?: number;
@@ -103,10 +103,9 @@ function getTool(session: ToolSession, name: string): AgentTool {
 		throw new ToolError(`Tool is registered but not available in this session: ${name} (disabled or excluded)`);
 	}
 	// Suggestions are advisory only: never resolve or execute a fuzzy match.
-	const query = stripXdUrlPrefix(name);
 	const suggestions =
-		query.length >= 2
-			? fuzzyRank(session.getAdvertisedEvalToolNames?.() ?? [], query, candidate => candidate)
+		name.length >= 2
+			? fuzzyRank(session.getAdvertisedEvalToolNames?.() ?? [], name, candidate => candidate)
 					.slice(0, 3)
 					.map(match => match.item)
 			: [];
@@ -245,7 +244,7 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 }
 
 export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
-	return withEvalBridgeToolCall(options.session.xdev, () => dispatchSessionTool(name, args, options));
+	return withEvalBridgeToolCall(options.session.toolCommands, () => dispatchSessionTool(name, args, options));
 }
 
 async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
@@ -416,7 +415,7 @@ async function runSessionTool(
 					validatedArgs,
 					options.signal,
 					onUpdate,
-					context && { ...context, programmatic: true },
+					context && { ...context, programmatic: true, parentToolCallId: options.parentToolCallId },
 				);
 			} finally {
 				settled = true;

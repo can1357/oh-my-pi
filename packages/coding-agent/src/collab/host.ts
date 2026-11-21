@@ -12,7 +12,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabUiRequest,
@@ -124,6 +124,16 @@ function isWireAgentEvent(event: AgentSessionEvent): event is AgentSessionEvent 
 
 function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEntry & WireSessionEntry {
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
+}
+
+/**
+ * The queue key one subagent's progress frames share: its agent id, which is unique where index and parent tool
+ * call are not (eval `agent()` and workpool spawns all report index 0 with no parent call). Undefined for an
+ * unkeyable payload, which then goes out unsuperseded.
+ */
+function progressKey(data: unknown): string | undefined {
+	if (!isRecord(data) || !isRecord(data.progress) || typeof data.progress.id !== "string") return undefined;
+	return `bus-progress:${data.progress.id}`;
 }
 const CONNECT_TIMEOUT_MS = 15_000;
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
@@ -551,7 +561,13 @@ export class CollabHost {
 			for (const channel of COLLAB_BUS_CHANNELS) {
 				this.#busUnsubscribers.push(
 					observabilityBus.on(channel, data => {
-						if (this.#broadcastAllowed()) this.#send({ t: "bus", channel, data });
+						if (!this.#broadcastAllowed()) return;
+						// A progress frame is the subagent's whole progress so far, so a newer one
+						// supersedes any still queued for the same subagent (as message_update does):
+						// a busy host's subagents can't fill the queue behind a slow welcome.
+						const key = channel === TASK_SUBAGENT_PROGRESS_CHANNEL ? progressKey(data) : undefined;
+						if (key) this.#socket?.sendLatest(key, { t: "bus", channel, data });
+						else this.#send({ t: "bus", channel, data });
 					}),
 				);
 			}
@@ -838,11 +854,19 @@ export class CollabHost {
 				break;
 			case "prompt":
 				if (this.#rejectWhileStarting("prompting", fromPeer)) break;
-				this.#handlePrompt(frame.text, frame.images, fromPeer);
+				this.#handlePrompt(frame.text, frame.images, frame.followUp === true, fromPeer);
 				break;
 			case "abort":
 				if (this.#rejectWhileStarting("interrupting", fromPeer)) break;
 				this.#handleAbort(fromPeer);
+				break;
+			case "resume":
+				if (this.#rejectWhileStarting("resuming", fromPeer)) break;
+				this.#handleResume(fromPeer);
+				break;
+			case "deliver-queue":
+				if (this.#rejectWhileStarting("interrupting", fromPeer)) break;
+				this.#handleDeliverQueue(fromPeer);
 				break;
 			case "agent-cmd":
 				if (this.#rejectWhileStarting("agent control", fromPeer)) break;
@@ -1128,7 +1152,7 @@ export class CollabHost {
 		}
 	}
 
-	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
+	#handlePrompt(text: string, images: ImageContent[] | undefined, followUp: boolean, fromPeer: number): void {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("prompting", fromPeer);
@@ -1152,7 +1176,7 @@ export class CollabHost {
 					details,
 					attribution: "user",
 				},
-				{ streamingBehavior: "steer", queueChipText: text },
+				{ streamingBehavior: followUp ? "followUp" : "steer", queueChipText: text },
 			)
 			.then(dispatched => {
 				if (dispatched === false) return this.#notifyPromptDropped(fromPeer);
@@ -1194,6 +1218,40 @@ export class CollabHost {
 				this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab");
 			})
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
+	}
+
+	/** A guest's `.`/`c`: continue the agent as the host's own continue shortcut would. */
+	#handleResume(fromPeer: number): void {
+		const peer = this.#peers.get(fromPeer);
+		if (!peer?.canWrite) {
+			this.#rejectReadOnly("resuming", fromPeer);
+			return;
+		}
+		this.#ctx.session.resume().catch(err => {
+			if (!this.#guestTrafficAllowed()) return;
+			this.#send({ t: "error", message: err instanceof Error ? err.message : String(err) }, fromPeer);
+		});
+	}
+
+	/** A guest's empty Enter: interrupt a run that has queued input and continue it with that input. */
+	#handleDeliverQueue(fromPeer: number): void {
+		const peer = this.#peers.get(fromPeer);
+		if (!peer?.canWrite) {
+			this.#rejectReadOnly("interrupting", fromPeer);
+			return;
+		}
+		const session = this.#ctx.session;
+		if (!session.isStreaming || !session.hasInterruptibleInput) return;
+		const name = peer.name;
+		void session
+			.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true })
+			.then(() => {
+				if (!this.#guestTrafficAllowed()) return;
+				this.#ctx.updatePendingMessagesDisplay();
+				this.#ctx.ui.requestRender();
+				session.emitNotice("info", `${name} interrupted`, "collab");
+			})
+			.catch(err => logger.warn("collab guest interrupt failed", { error: String(err) }));
 	}
 
 	/**

@@ -59,7 +59,7 @@ An armed prewalk injects a planning nudge. When the `todo` tool is active, any s
 
 OMP switches at the completed assistant-turn boundary containing the first eligible `edit` or `write` result, after persisting that turn's assistant message and tool results. Unlike the todo gate, the edit/write trigger does not require a successful result.
 
-Calls to other tools do not trigger the handoff. Neither do `write` calls that change no files: messages to `agent://` peers, replies, and `proc://` stdin, mode, or kill writes. An `xd://` device request routed through `write` counts only when the device operation is classified as a workspace write; read-only requests such as LSP navigation, and execution-tier requests such as a test runner or remote command, do not, just as calling `bash` directly does not.
+Calls to other tools do not trigger the handoff. Neither do `write` calls that change no files: messages to `agent://` peers, replies, and `proc://` stdin, mode, or kill writes. A `bash` call that ran tool commands counts only when its dispatch records classify the run as a workspace write; a read-only dispatch such as LSP navigation or a `<tool> --help` lookup does not arm the handoff, and neither does an execution-tier dispatch such as a test runner or remote command.
 
 The switch is one-shot: after the handoff, prewalk disarms itself, removes the planning nudge, and steers the target with an implementation checklist. It changes the session's active model and optional thinking level without rewriting model-role assignments. A same-model handoff can still change thinking; when the model and effective thinking configuration already match, prewalk disarms without switching.
 

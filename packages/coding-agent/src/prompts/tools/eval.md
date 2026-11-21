@@ -56,7 +56,7 @@ await sh(command, { cwd?, timeout? })  await sh`cmd ${arg}` — embedded bash en
 {{/if}}
 {{/ifAll}}
 {{#if toolNames}}Session tool names: {{#each toolNames}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}.{{/if}}
-Registered discoverable tools and MCP tools need not be activated or mounted first: call `await tool.<canonical_name>(args)` or `await tool["xd://<name>"](args)` in either language.
+Registered discoverable tools and MCP tools need not be activated or mounted first: call `await tool.<canonical_name>(args)` in either language.
 Session tool restrictions and approvals still apply; `checkpoint` and `rewind` must be called directly.
 The names above list enabled tools, not an exhaustive allowlist.
 </prelude>
@@ -66,18 +66,18 @@ The names above list enabled tools, not an exhaustive allowlist.
 {{else}}
 <namespaces>
 More globals; `read` the linked docs before first use:
-- `judge`, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, `completion`: classification, bulk judgment, model calls → xd://eval/judge
-- `%load`{{#if py}}, `%pip`{{/if}}{{#if js}}, `%bun add`{{/if}}, `budget`{{#if evalTools}}, `@tool`/`tool(fn)`{{/if}}: setup, installs, utilities → xd://eval/helpers
+- `judge`, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, `completion`: classification, bulk judgment, model calls → help://eval/judge
+- `%load`{{#if py}}, `%pip`{{/if}}{{#if js}}, `%bun add`{{/if}}, `budget`{{#if evalTools}}, `@tool`/`tool(fn)`{{/if}}: setup, installs, utilities → help://eval/helpers
 {{#if spawns}}
-- `agent`, `workpool`: background subagents, DAG waves → xd://eval/agents
+- `agent`, `workpool`: background subagents, DAG waves → help://eval/agents
 {{/if}}
 {{#each preludes}}
-- `{{name}}`{{#if summary}}: {{summary}}{{/if}} → xd://eval/{{name}}
+- `{{name}}`{{#if summary}}: {{summary}}{{/if}} → help://eval/{{name}}
 {{/each}}
 {{#if firstCallPreludes}}
 No `read` needed before first use; the guide follows the first call's result (full reference linked):
 {{#each firstCallPreludes}}
-- `{{name}}`{{#if summary}}: {{summary}}{{/if}} → `xd://eval/{{name}}`
+- `{{name}}`{{#if summary}}: {{summary}}{{/if}} → `help://eval/{{name}}`
 {{/each}}
 {{/if}}
 </namespaces>

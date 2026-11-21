@@ -2,6 +2,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } 
 import type { ToolConversationState } from "./tool-state";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { NotifyBatch } from "../async/notify";
 import type { Rule } from "../capability/rule";
@@ -73,15 +74,17 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
-import type { PlanProposalHandler } from "./resolve";
+import { type PlanProposalHandler, specialToolCommands } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
-import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
+import { isMountableAsToolCommand, resolveToolCommand, type ToolCommandState } from "./tool-commands";
 import { YieldTool } from "./yield";
+import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME, RESOLVE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import { REPORT_ISSUE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
 
 import {
 	cfgAskEnabled,
@@ -96,7 +99,7 @@ import {
 	cfgLaunchEnabled,
 	cfgSecurityEnabled,
 	cfgTodoEnabled,
-	cfgToolsXdev,
+	cfgToolsCommands,
 	cfgWebSearchEnabled,
 } from "./settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
@@ -167,7 +170,7 @@ export * from "./vibe";
 export * from "./wait";
 export type { VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
 export * from "./write";
-export * from "./xdev";
+export * from "./tool-commands";
 export * from "./yield";
 
 /** Tool type (AgentTool from pi-ai) */
@@ -215,11 +218,10 @@ export interface DeferredDiagnosticsEntry {
 export interface FileChangeReport {
 	/** Absolute path. */
 	path: string;
-	/** Reporting tool (`edit`, `write`, `ast_edit`, `task`). */
+	/** Reporting tool (`edit`, `write`, `ast_edit`, `task`, `bash`, `eval`). */
 	tool: string;
 	before: string | null;
 	after: string | null;
-	beforeMtimeMs?: number;
 	/** Agent whose work this is, when not the reporting session's own (isolated subagent merge-back). */
 	agent?: { agent: string; parent?: string };
 }
@@ -368,7 +370,12 @@ export interface ToolSession {
 	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
 	 */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
-		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage">>;
+		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir">>;
+	/**
+	 * Session-owned raw SSE capture, shared with the `/debug` report. Optional:
+	 * helper and standalone contexts without one simply forgo `/debug` capture.
+	 */
+	rawSseDebugBuffer?: RawSseDebugBuffer;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */
@@ -411,23 +418,8 @@ export interface ToolSession {
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Canonical map containing every registered tool exactly once. */
 	toolRegistry?: Map<string, Tool>;
-	/** `xd://` presentation state backed by {@link toolRegistry}. */
-	xdev?: XdevState;
-	/**
-	 * Set when this session's `write` tool was granted only as the `xd://`
-	 * transport: `write xd://<tool>` dispatches mounted devices and `local://`
-	 * scratch stays writable, but other filesystem writes are rejected. Granted
-	 * by {@link createTools} to sessions whose explicit tool list includes `read`
-	 * but omits `write`, so xd:// mounting can engage without granting
-	 * working-tree writes.
-	 */
-	deviceOnlyWrite?: boolean;
-	/**
-	 * Prompt-only preview used while a full-write activation rebuilds. It changes
-	 * the advertised schema without relaxing {@link deviceOnlyWrite}; execution
-	 * remains restricted until the activation commits.
-	 */
-	pendingFullWriteDescription?: boolean;
+	/** Tool command presentation state backed by {@link toolRegistry}: which tools run as bash commands. */
+	toolCommands?: ToolCommandState;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistryApi;
 	/** Idle→parked→revive lifecycle owner; lets explicit cancellation stop a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
@@ -544,16 +536,16 @@ export interface ToolSession {
 	/** Steer a hidden custom message into the conversation (e.g. a preview reminder). */
 	steer?(message: { customType: string; content: string; details?: unknown }): void;
 	/** Peek the currently in-flight tool-choice queue directive's invocation handler. Used by
-	 *  the `xd://resolve` and `xd://reject` dispatch to reach the pending action. */
+	 *  `resolve` and `reject` to reach the pending action. */
 	peekQueueInvoker?(): ((input: unknown) => Promise<unknown> | unknown) | undefined;
-	/** Peek the most-recently registered non-forcing pending preview invoker. A `write` to
-	 *  `xd://resolve` or `xd://reject` dispatches to it so a staged preview resolves
+	/** Peek the most-recently registered non-forcing pending preview invoker. `resolve` and
+	 *  `reject` dispatch to it so a staged preview resolves
 	 *  WITHOUT forcing tool_choice — the agent-loop's SoftToolRequirement lifecycle owns
 	 *  reminder injection and escalation. */
 	peekPendingInvoker?(): ((input: unknown) => Promise<unknown> | unknown) | undefined;
 	/** Clear stale pending preview markers when a resolution dispatch cannot run them. */
 	clearPendingInvokers?(): void;
-	/** Peek the plan-proposal handler installed by plan mode. `xd://propose` dispatches the
+	/** Peek the plan-proposal handler installed by plan mode. `propose` dispatches the
 	 *  written plan title to it. */
 	peekPlanProposalHandler?(): PlanProposalHandler | undefined;
 	/** Register or clear the plan-proposal handler. Passing `null` clears it. */
@@ -605,7 +597,7 @@ export interface ToolSession {
 	/**
 	 * Journal a file write made by this agent's edit tools (full contents; `null` = file absent),
 	 * so selective commits (`/commit`, the eval `commit` namespace) can attribute its lines.
-	 * `beforeMtimeMs` is the file's mtime before the write. Never throws.
+	 * Never throws.
 	 */
 	recordFileChange?(change: FileChangeReport): void;
 	/** Get the active OpenTelemetry config so subagent dispatch can forward
@@ -877,21 +869,21 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 	return { requestedTools, names, isAllowed: isToolAllowed };
 }
 
-/** Allocates `xd://` presentation state over the session's canonical tool map. */
-export function createXdevState(
+/** Allocates tool command presentation state over the session's canonical tool map. */
+export function createToolCommandState(
 	session: ToolSession,
 	tools: Map<string, Tool>,
 	builtInNames: Set<string>,
 	mountedNames: Set<string> = new Set(),
-): XdevState {
-	const state: XdevState = {
+): ToolCommandState {
+	const state: ToolCommandState = {
 		tools,
 		mountedNames,
 		builtInNames,
 		isActive: name => session.isToolActive?.(name) === true,
-		// Card rendering reads the same predicate as execution: mounted devices
-		// plus active top-level tools, which the `write` transport also accepts.
-		resolve: name => resolveXdevTool(state, name),
+		// Card rendering reads the same predicate as execution: mounted commands
+		// plus active top-level tools.
+		resolve: name => resolveToolCommand(state, name),
 	};
 	return state;
 }
@@ -902,13 +894,6 @@ export function createXdevState(
 export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
 	const restrictToolNames = session.restrictToolNames === true;
 	const { requestedTools, names } = await resolveBuiltinToolPlan(session, toolNames);
-	// createTools may be called more than once for the same ToolSession. A later
-	// explicit (or full-set) write request is a real grant and must upgrade any
-	// device-only transport left by an earlier read-only call.
-	if (requestedTools === undefined || requestedTools.includes("write")) {
-		session.deviceOnlyWrite = undefined;
-		session.pendingFullWriteDescription = undefined;
-	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const baseEntries = names.map(name => [name, allTools[name]] as const);
 
@@ -931,84 +916,68 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const builtInNames = new Set(tools.map(tool => tool.name));
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
 
-	const xdevRequested = !restrictToolNames && cfgToolsXdev.get(session.settings);
-	// xd:// mounting rides the write tool as its execution transport, so a
-	// session whose explicit tool list grants `read` but omits `write` would
-	// allocate no xd:// state and expose every later-registered MCP/extension
-	// tool top-level with its full schema on every request — the opposite of
-	// the intended restriction, and enough to overflow narrow provider context
-	// windows on MCP-heavy sessions. Grant a device-only `write` instead:
-	// `write xd://<tool>` dispatches mounted devices while filesystem writes
-	// outside the local:// session scratch stay rejected (enforced by WriteTool
-	// via `session.deviceOnlyWrite`). Mounted tools gain no capability: without
-	// mounting, they were already presented — and callable — top-level.
-	if (
-		xdevRequested &&
-		requestedTools !== undefined &&
-		!tools.some(tool => tool.name === "write") &&
-		tools.some(tool => tool.name === "read")
-	) {
-		session.deviceOnlyWrite = true;
-		const writeTool = await logger.time("createTools:write:xdev-transport", BUILTIN_TOOLS.write, session);
-		if (writeTool) {
-			const wrapped = wrapToolWithMetaNotice(writeTool);
-			tools.push(wrapped);
-			toolRegistry.set(wrapped.name, wrapped);
-			builtInNames.add(wrapped.name);
-		} else {
-			session.deviceOnlyWrite = undefined;
-		}
-	}
-
-	// Ordinary sessions use xd:// for discoverable built-ins, custom tools, and
-	// MCP tools. Structured children must expose only their host-provided names,
-	// so never allocate a registry that later SDK assembly could populate.
-	// Explicitly requested built-ins retain their top-level presentation.
-	const xdevEnabled = xdevRequested && tools.some(tool => tool.name === "write");
-	const mountBuiltinTools = requestedTools === undefined;
-	if (xdevEnabled) {
+	// Tool commands run inside the `bash` tool. Structured children must expose
+	// only their host-provided names, so they never allocate command state that
+	// later SDK assembly could populate. Explicitly requested built-ins keep
+	// their top-level presentation.
+	const toolCommandsEnabled =
+		!restrictToolNames && cfgToolsCommands.get(session.settings) && tools.some(tool => tool.name === "bash");
+	let presentedSpecialTool = false;
+	if (toolCommandsEnabled) {
+		const mountBuiltinTools = requestedTools === undefined;
 		const mountedNames = new Set<string>();
 		const kept: Tool[] = [];
 		for (const tool of tools) {
-			const mountable = mountBuiltinTools && isMountableUnderXdev(tool) && tool.name in BUILTIN_TOOLS;
+			const mountable = mountBuiltinTools && isMountableAsToolCommand(tool) && tool.name in BUILTIN_TOOLS;
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}
-		session.xdev = createXdevState(session, toolRegistry, builtInNames, mountedNames);
+		session.toolCommands = createToolCommandState(session, toolRegistry, builtInNames, mountedNames);
 		tools = kept;
 	}
-	// Staged previews from deferrable tools (e.g. ast_edit) resolve through a
-	// `write` to xd://resolve/reject, so retain write whenever one can stage.
-	const xdevMounted = (session.xdev?.mountedNames.size ?? 0) > 0;
-	if (
-		!restrictToolNames &&
-		tools.some(tool => tool.deferrable === true) &&
-		!tools.some(tool => tool.name === "write")
-	) {
-		const writeTool = await logger.time("createTools:write", BUILTIN_TOOLS.write, session);
-		if (writeTool) {
-			const wrapped = wrapToolWithMetaNotice(writeTool);
-			tools.push(wrapped);
+	if (!restrictToolNames) {
+		// Special tools stay registered so the session can present them top-level
+		// whenever `bash` is off; while it is on they run as commands.
+		const planModeEnabled = session.getPlanModeState?.()?.enabled === true;
+		for (const special of specialToolCommands(session)) {
+			const wrapped = wrapToolWithMetaNotice(special);
 			toolRegistry.set(wrapped.name, wrapped);
-			builtInNames.add(wrapped.name);
+			if (toolCommandsEnabled || !specialToolApplies(wrapped.name, { tools, planModeEnabled })) continue;
+			tools.push(wrapped);
+			presentedSpecialTool = true;
 		}
 	}
-	if (!restrictToolNames && xdevMounted && !tools.some(tool => tool.name === "read")) {
-		const readTool = await logger.time("createTools:read", BUILTIN_TOOLS.read, session);
-		if (readTool) {
-			const wrapped = wrapToolWithMetaNotice(readTool);
-			tools.push(wrapped);
-			toolRegistry.set(wrapped.name, wrapped);
-			builtInNames.add(wrapped.name);
-		}
-	}
-	if (xdevEnabled) {
+	if (toolCommandsEnabled || presentedSpecialTool) {
 		const finalActiveNames = new Set(tools.map(tool => tool.name));
 		if (session.setActiveToolNames) session.setActiveToolNames(finalActiveNames);
 		else session.isToolActive = name => finalActiveNames.has(name);
 	}
 
 	return tools;
+}
+
+/** Names of the special tools: run as commands while `bash` is enabled, presented top-level otherwise. */
+export const SPECIAL_TOOL_NAMES: ReadonlySet<string> = new Set([
+	RESOLVE_COMMAND_NAME,
+	REJECT_COMMAND_NAME,
+	PROPOSE_COMMAND_NAME,
+	REPORT_ISSUE_COMMAND_NAME,
+]);
+
+/** Whether the special tool `name` has something to act on beside the top-level `tools`. */
+export function specialToolApplies(
+	name: string,
+	context: { tools: readonly AgentTool[]; planModeEnabled: boolean },
+): boolean {
+	switch (name) {
+		case RESOLVE_COMMAND_NAME:
+		case REJECT_COMMAND_NAME:
+			return context.tools.some(tool => tool.deferrable === true);
+		case PROPOSE_COMMAND_NAME:
+			return context.planModeEnabled;
+		default:
+			return true;
+	}
 }
 
 export type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
@@ -1026,7 +995,7 @@ export type {
 	CollapsedTodoSelection,
 } from "@oh-my-pi/pi-tui/tools/todo";
 export type { ThinkRenderArgs } from "@oh-my-pi/pi-tui/tools/think";
-export type { ResolutionDeviceName, ResolveDetails } from "@oh-my-pi/pi-tui/tools/resolve";
+export type { ResolutionCommandName, ResolveDetails } from "@oh-my-pi/pi-tui/tools/resolve";
 export type {
 	GhToolDetails,
 	GhPrCheckoutSummary,

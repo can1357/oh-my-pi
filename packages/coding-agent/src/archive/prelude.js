@@ -16,7 +16,7 @@
 		sessions: options => call("sessions", "sessions", options),
 		session: (id, options) => call("session", "session", options, { id }),
 		prompts: options => call("prompts", "prompts", options),
-		search: (query, options) => call("search", "prompts", options, { query }),
+		search: (query, options) => call("search", "search", options, { query }),
 		recaps: options => call("recaps", "recaps", options),
 	});
 }
