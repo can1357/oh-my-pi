@@ -1,8 +1,10 @@
 import * as path from "node:path";
-import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getLastChangelogVersionPath, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
+import changelogReviewTemplate from "../prompts/changelog-review.md" with { type: "text" };
+import { getChangelogPath } from "../config";
 import type { SettingValueOf } from "../config/registry";
 
 import type { cfgStartupChangelogMode } from "../modes/settings";
@@ -22,8 +24,25 @@ export const STARTUP_CHANGELOG_MAX_BYTES = 64 * 1024;
 export const STARTUP_CHANGELOG_FULL_HINT = "Use `/changelog full` to view the complete changelog.";
 /** Releases shown by `/changelog last` when no count is given. */
 export const DEFAULT_LAST_CHANGELOG_COUNT = 1;
-/** Usage line printed when `/changelog` arguments are not `full` or `last [N]`. */
-export const CHANGELOG_COMMAND_USAGE = "Usage: /changelog [full|last [N]]";
+/** Usage line printed when `/changelog` arguments are not recognized. */
+export const CHANGELOG_COMMAND_USAGE = "Usage: /changelog [summary [full|last [N]] | full | last [N]]";
+/** Maximum Markdown source bytes inlined into a `/changelog summary` review prompt. */
+export const CHANGELOG_SUMMARY_MAX_BYTES = 64 * 1024;
+/** Hint appended when the summary prompt is truncated by the size cap. */
+export const CHANGELOG_SUMMARY_TRUNCATION_HINT = "Use `/changelog summary last 1` to review fewer releases.";
+
+/**
+ * Byte cap for the changelog inlined into a summary prompt, scaled to the
+ * session model's context window: the residual prompt shares the window with
+ * the system prompt, tool definitions and history, so a fixed cap can overflow
+ * a small-context model before it renders a digest. A third of the window at
+ * ~4 bytes/token, floored so even narrow windows still inline something;
+ * an unknown window keeps the default cap.
+ */
+export function changelogSummaryMaxBytes(contextWindowTokens: number | undefined | null): number {
+	if (!contextWindowTokens || contextWindowTokens <= 0) return CHANGELOG_SUMMARY_MAX_BYTES;
+	return Math.max(Math.min(CHANGELOG_SUMMARY_MAX_BYTES, Math.floor((contextWindowTokens / 3) * 4)), 4096);
+}
 
 /**
  * Parsed `/changelog` view. `recent` is the bare default; `last` is an explicit count.
@@ -48,6 +67,41 @@ export function parseChangelogView(args: string): ChangelogView | { error: strin
 /** Newest-first slice for a parsed view. `full` returns a copy of every entry. */
 export function selectChangelogEntries(entries: readonly ChangelogEntry[], view: ChangelogView): ChangelogEntry[] {
 	return view.kind === "full" ? [...entries] : entries.slice(0, view.count);
+}
+
+/** Human-readable view scope embedded into the summary prompt template. */
+function describeChangelogView(view: ChangelogView): string {
+	if (view.kind === "full") return "the complete changelog";
+	if (view.kind === "recent") return `the ${view.count} most recent releases`;
+	return view.count === 1 ? "the latest release" : `the last ${view.count} releases`;
+}
+
+/**
+ * Build the user prompt behind `/changelog summary`: rendered changelog entries
+ * inlined into the review template for the model to digest. Returns
+ * `{ error }` (usage), `{ empty: true }` (nothing to review), or the message.
+ */
+export async function buildChangelogSummaryPrompt(
+	rangeArgs: string,
+	maxBytes: number = CHANGELOG_SUMMARY_MAX_BYTES,
+): Promise<{ error: string } | { empty: true } | { message: string }> {
+	const view = parseChangelogView(rangeArgs);
+	if ("error" in view) return { error: CHANGELOG_COMMAND_USAGE };
+	const entries = selectChangelogEntries(await parseChangelog(getChangelogPath()), view);
+	if (entries.length === 0) return { empty: true };
+	// Newest-first truncation: when the rendered changelog overflows the cap,
+	// the oldest rows drop and the releases the user is most likely reviewing
+	// — the current one — stay in the prompt.
+	const rendered = renderChangelogEntries(entries, {
+		maxBytes,
+		truncationHint: CHANGELOG_SUMMARY_TRUNCATION_HINT,
+	});
+	return {
+		message: prompt.render(changelogReviewTemplate, {
+			scope: describeChangelogView(view),
+			changelog: rendered.markdown,
+		}),
+	};
 }
 
 /** Markdown generated from selected changelog entries and whether it hit a size cap. */
@@ -473,8 +527,7 @@ export async function resolveStartupChangelogForDisplay(options: {
 	return startupChangelog.markdown ? startupChangelog : undefined;
 }
 
-// Re-export getChangelogPath from paths.ts for convenience
-export { getChangelogPath } from "../config";
+export { getChangelogPath };
 
 /**
  * Last omp version whose changelog the user has seen. Stored as a plain-text
