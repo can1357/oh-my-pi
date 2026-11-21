@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `opencode-client-identity` compat axis and the `wire/opencode` client identity (pinned User-Agent with `PI_AI_OPENCODE_VERSION` overrides, `ses_` session-token derivation), set on free OpenCode Zen models by `opencode-zen.kdl` ([#19112](https://github.com/can1357/oh-my-pi/pull/19112) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
