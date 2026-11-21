@@ -4,7 +4,7 @@
 
 ### Added
 
-- Extensions can take over a built-in provider through `registerProvider`: `stream` replaces its request adapter, `generateImage` its image generation, and `webSearch` its grounded search request. `rules` sets KDL rule directives (such as `prompt-perturbation`) for its models.
+- Extensions can take over a built-in provider through `registerProvider`: `stream` replaces its request adapter, `generateImage` its image generation, and `webSearch` its grounded search request, and `discoverModels` its model discovery request. `rules` sets KDL rule directives (such as `prompt-perturbation`) for its models.
 
 ### Fixed
 

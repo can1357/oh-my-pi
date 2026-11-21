@@ -304,7 +304,7 @@ export type MainStreamSimple = (
  */
 export interface WireProviderConfig extends Omit<
 	ProviderConfigInput,
-	"streamSimple" | "stream" | "generateImage" | "webSearch" | "usage"
+	"streamSimple" | "stream" | "generateImage" | "webSearch" | "discoverModels" | "usage"
 > {
 	streamOnMain?: MainStreamSimple;
 	/** The provider `stream` hook, run on main like {@link streamOnMain}. */

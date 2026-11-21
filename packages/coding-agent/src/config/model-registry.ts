@@ -125,6 +125,7 @@ import {
 	isAuthenticated,
 	isDiscoveryBearerApiKey,
 	kNoAuth,
+	type OAuthDiscoveryAccount,
 	type ProviderDiscoveryState,
 	RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS,
 	resolveOAuthDiscoveryAccounts,
@@ -137,6 +138,7 @@ export { mergeDiscoveredModel } from "./model-patch";
 export {
 	isAuthenticated,
 	kNoAuth,
+	type OAuthDiscoveryAccount,
 	type ProviderDiscoveryState,
 	type ProviderDiscoveryStatus,
 } from "./model-provider-discovery";
@@ -555,6 +557,8 @@ export class ModelRegistry {
 	#lastModelModifierWarnings: Map<string, string> = new Map();
 	/** Extension web searches by provider ({@link ProviderConfigInput.webSearch}). */
 	#runtimeWebSearches = new Map<string, NonNullable<ProviderConfigInput["webSearch"]>>();
+	/** Extension discovery by built-in provider ({@link ProviderConfigInput.discoverModels}). */
+	#runtimeDiscoveries = new Map<string, NonNullable<ProviderConfigInput["discoverModels"]>>();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
@@ -3228,7 +3232,10 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+				const managerOptions = this.#withRuntimeDiscovery(
+					descriptor.createModelManagerOptions(preparedConfig),
+					apiKey,
+				);
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
@@ -3242,7 +3249,7 @@ export class ModelRegistry {
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(descriptor.createOptions(key, specialKeys[i]));
+			options.push(this.#withRuntimeDiscovery(descriptor.createOptions(key, specialKeys[i]), key));
 		}
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
@@ -3276,6 +3283,31 @@ export class ModelRegistry {
 			}
 		}
 		return options;
+	}
+
+	/**
+	 * A built-in provider's discovery with an extension's `discoverModels` in place of its
+	 * roster fetch; caching, merging, and authority stay the built-in manager's.
+	 */
+	#withRuntimeDiscovery(options: ModelManagerOptions<Api>, apiKey: string | undefined): ModelManagerOptions<Api> {
+		const discover = this.#runtimeDiscoveries.get(options.providerId);
+		if (!discover) return options;
+		const providerId = options.providerId;
+		return {
+			...options,
+			fetchDynamicModels: async () => {
+				const accounts = isAuthenticated(apiKey)
+					? await resolveOAuthDiscoveryAccounts(this.authStorage, providerId, apiKey)
+					: [];
+				if (!accounts) return null;
+				const models = await discover({
+					accounts,
+					baseUrl: this.#descriptorBaseUrl(providerId),
+					fetch: this.#fetch,
+				});
+				return models && [...models];
+			},
+		};
 	}
 
 	async #discoverWithModelManager(
@@ -4259,6 +4291,7 @@ export class ModelRegistry {
 		// Hooks and rules are per-thread module state: a mirror drops its own copies too.
 		setProviderHooks(providerName, undefined);
 		this.#runtimeWebSearches.delete(providerName);
+		this.#runtimeDiscoveries.delete(providerName);
 		setRuntimeProviderRule(providerName, undefined);
 		if (this.#owner) return;
 		this.authStorage.keys.removeConfig(providerName);
@@ -4410,6 +4443,7 @@ export class ModelRegistry {
 			setProviderHooks(providerName, hooks);
 		}
 		if (config.webSearch) this.#runtimeWebSearches.set(providerName, config.webSearch);
+		if (config.discoverModels) this.#runtimeDiscoveries.set(providerName, config.discoverModels);
 		// Rules change how every model of the provider builds; the rebuild below re-resolves them.
 		if (config.rules) setRuntimeProviderRule(providerName, config.rules);
 
@@ -4788,6 +4822,15 @@ function sameDiscoveredRows(a: readonly Model<Api>[], b: readonly Model<Api>[]):
 	);
 }
 
+/** What an extension's {@link ProviderConfigInput.discoverModels} receives. */
+export interface ProviderDiscoveryContext {
+	/** Signed-in accounts for the provider; a configured key appears as one account. */
+	accounts: OAuthDiscoveryAccount[];
+	/** Base URL configured for the provider, if any. */
+	baseUrl?: string;
+	fetch: FetchImpl;
+}
+
 /**
  * Input type for registerProvider API (from extensions).
  */
@@ -4812,6 +4855,12 @@ export interface ProviderConfigInput {
 		request: ImageGenerationRequest,
 		options: ImageGenerationOptions,
 	): Promise<ImageGenerationResult>;
+	/**
+	 * Fetches a built-in provider's model roster in place of its own discovery request, for every
+	 * signed-in account (or the configured key as one account). Resolves `null` to keep the cached
+	 * catalog. The built-in manager still caches, merges, and applies policy to the rows.
+	 */
+	discoverModels?(context: ProviderDiscoveryContext): Promise<readonly ModelSpec<Api>[] | null>;
 	/** Runs grounded web searches for this provider's models in place of their grounding backend's request. */
 	webSearch?(params: SearchParams): Promise<SearchResponse>;
 	/** Rule directives for every model of this provider, as a KDL `provider` block sets them (`{ "prompt-perturbation": true }`). */

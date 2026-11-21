@@ -2291,12 +2291,15 @@ export interface ExtensionAPI {
 /**
  * Configuration for registering a provider via pi.registerProvider().
  *
- * `stream`, `generateImage`, `webSearch`, and `rules` take over a built-in
- * provider without redefining its models: they replace its request adapter,
- * image generation, grounded web search request, and set KDL rule directives
- * for its models. Removed again when the extension unloads.
+ * `stream`, `generateImage`, `webSearch`, `discoverModels`, and `rules` take
+ * over a built-in provider without redefining its models: they replace its
+ * request adapter, image generation, grounded web search request, and roster
+ * fetch, and set KDL rule directives for its models. Removed again when the extension unloads.
  */
-export interface ProviderConfig extends Pick<ProviderConfigInput, "stream" | "generateImage" | "webSearch" | "rules"> {
+export interface ProviderConfig extends Pick<
+	ProviderConfigInput,
+	"stream" | "generateImage" | "webSearch" | "discoverModels" | "rules"
+> {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
 	/**

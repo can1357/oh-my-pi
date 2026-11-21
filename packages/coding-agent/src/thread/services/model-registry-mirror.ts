@@ -161,7 +161,17 @@ function webSearchOnMain(webSearch: ProviderSearch, registry: ModelRegistry): Ma
 }
 
 function toWireProviderConfig(config: ProviderConfigInput, registry: ModelRegistry): WireProviderConfig {
-	const { streamSimple, stream, generateImage, webSearch, usage: _usage, oauth, ...rest } = config;
+	// Discovery runs on main, so `discoverModels` stays there with `usage`.
+	const {
+		streamSimple,
+		stream,
+		generateImage,
+		webSearch,
+		discoverModels: _discover,
+		usage: _usage,
+		oauth,
+		...rest
+	} = config;
 	const wire: WireProviderConfig = rest;
 	if (oauth) wire.oauth = oauthOnMain(oauth);
 	if (streamSimple) wire.streamOnMain = streamOnMain(streamSimple);
