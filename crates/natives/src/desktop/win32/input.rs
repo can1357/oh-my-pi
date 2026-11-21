@@ -136,9 +136,8 @@ const WHEEL_DELTA: i32 = 120;
 /// Both background routes accept only wheel steps that fit one posted message.
 pub(super) fn background_wheel(steps: i32) -> CoreResult<i16> {
 	let wheel = steps.saturating_mul(WHEEL_DELTA);
-	i16::try_from(wheel).map_err(|_| {
-		DesktopError::input_failed(format!("scroll delta {wheel} exceeds Win32 range"))
-	})
+	i16::try_from(wheel)
+		.map_err(|_| DesktopError::input_failed(format!("scroll delta {wheel} exceeds Win32 range")))
 }
 
 fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
