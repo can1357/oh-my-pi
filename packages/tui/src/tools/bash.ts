@@ -355,49 +355,82 @@ function stripBashNotices(
 			: stripTrailingNotice(withoutExit, formatWallTimeNotice(details.wallTimeMs));
 	return stripRawOutputArtifactNotice(withoutWall);
 }
-/** `Wall: 1.20s`, `Timeout: 30s`, … metadata parts shown under bash output. */
+/** Glyph for a supervised service's free-form lifecycle state (`starting`, `ready`, `stopped`, `failed`, …). */
+function serviceStateSymbol(state: string, uiTheme: Theme): string {
+	const value = state.toLowerCase();
+	if (/(fail|error|crash|dead)/.test(value)) return uiTheme.status.error;
+	if (/(stop|exit|cancel|kill)/.test(value)) return uiTheme.status.aborted;
+	if (/(start|pending|wait|init|restart)/.test(value)) return uiTheme.status.pending;
+	if (/(run|ready|up|alive|active)/.test(value)) return uiTheme.status.success;
+	return uiTheme.status.info;
+}
+/** The footer stats under shell output: `⏱ 1.2s/5m`, `✘ 1`, … Styled dim, except the exit code's tint. */
 function bashStatsParts(
+	uiTheme: Theme,
 	details: BashToolDetails | undefined,
 	contextTimeout: number | undefined,
 	artifactId: string | undefined,
 	isError: boolean,
 ): string[] {
+	const { status } = uiTheme;
+	const dim = (text: string) => uiTheme.fg("dim", text);
 	const timeoutDisabled = details?.timeoutDisabled === true || contextTimeout === 0;
 	const timeoutSeconds = timeoutDisabled ? undefined : (details?.timeoutSeconds ?? contextTimeout);
 	const requestedTimeoutSeconds = details?.requestedTimeoutSeconds;
 	const wallTimeMs = details?.wallTimeMs;
 	const statsParts: string[] = [];
 	if (details?.async?.state === "running") {
-		statsParts.push(`Backgrounded: ${details.async.jobId}`);
+		statsParts.push(dim(`${uiTheme.icon.job} ${details.async.jobId}`));
 	}
 	if (details?.service) {
 		const service = details.service;
-		statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
-		statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
-		if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
+		statsParts.push(dim(`${uiTheme.icon.server} ${service.name}`));
+		statsParts.push(dim(`${serviceStateSymbol(service.state, uiTheme)} ${service.state}`));
+		statsParts.push(
+			dim(
+				service.ready
+					? `${status.success} ready`
+					: service.timedOut
+						? `${status.warning} ready timed out`
+						: `${status.error} not ready`,
+			),
+		);
+		if (service.pid !== undefined) statsParts.push(dim(`${uiTheme.icon.pid}${service.pid}`));
+	}
+	// Elapsed and budget share one chip (`⏱ 1.2s/5m`): the two numbers read as a
+	// pair, and a lone hourglass stands in before the command reports its wall
+	// time. The icon carries the `Wall:`/`Timeout:` words, so they are dropped.
+	let timeoutLabel: string | undefined;
+	if (timeoutDisabled) {
+		timeoutLabel = "disabled";
+	} else if (typeof timeoutSeconds === "number") {
+		timeoutLabel = formatDuration(timeoutSeconds * 1000);
+		if (requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds) {
+			timeoutLabel += ` (requested ${formatDuration(requestedTimeoutSeconds * 1000)} clamped)`;
+		}
 	}
 	if (wallTimeMs !== undefined) {
-		statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
-	}
-	if (timeoutDisabled) {
-		statsParts.push("Timeout: disabled");
-	}
-	if (typeof timeoutSeconds === "number") {
+		const elapsed = formatDuration(wallTimeMs);
 		statsParts.push(
-			requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds
-				? `Timeout: ${timeoutSeconds}s (requested ${requestedTimeoutSeconds}s clamped)`
-				: `Timeout: ${timeoutSeconds}s`,
+			dim(`${uiTheme.icon.time} ${timeoutLabel === undefined ? elapsed : `${elapsed}/${timeoutLabel}`}`),
 		);
+	} else if (timeoutDisabled) {
+		statsParts.push(dim(`${status.disabled} disabled`));
+	} else if (timeoutLabel !== undefined) {
+		statsParts.push(dim(`${status.pending} ${timeoutLabel}`));
 	}
 	if (artifactId) {
-		statsParts.push(`Full output: ${spillUrl(artifactId)}`);
+		statsParts.push(dim(`${uiTheme.icon.output} ${spillUrl(artifactId)}`));
 	}
 	const minimized = details?.meta?.minimized;
 	if (minimized) {
-		statsParts.push(`Minimized: ${formatMinimizedMeta(minimized)}`);
+		statsParts.push(dim(`${uiTheme.icon.minimize} ${formatMinimizedMeta(minimized)}`));
 	}
 	if (isError && typeof details?.exitCode === "number") {
-		statsParts.push(`Exit: ${details.exitCode}`);
+		const failed = details.exitCode !== 0;
+		statsParts.push(
+			uiTheme.fg(failed ? "error" : "success", `${failed ? status.error : status.success} ${details.exitCode}`),
+		);
 	}
 	return statsParts;
 }
@@ -708,16 +741,17 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const showingFullOutput = expanded && renderContext?.isFullOutput === true;
 
 					const statsParts = bashStatsParts(
+						uiTheme,
 						details,
 						renderContext?.timeout,
 						rawOutputArtifact.artifactId,
 						isError,
 					);
 					if (elapsedSecond !== undefined && elapsedSecond > 0) {
-						statsParts.unshift(`elapsed ${formatDuration(elapsedSecond * 1000)}`);
+						statsParts.unshift(uiTheme.fg("dim", `${uiTheme.icon.time} ${formatDuration(elapsedSecond * 1000)}`));
 					}
 					const footerMeta =
-						statsParts.length > 0 ? uiTheme.fg("dim", statsParts.join(uiTheme.sep.dot)) : undefined;
+						statsParts.length > 0 ? statsParts.join(uiTheme.fg("dim", uiTheme.sep.dot)) : undefined;
 					let warningLine: string | undefined;
 					if (details?.meta?.artifactError || (details?.meta?.truncation && !showingFullOutput)) {
 						warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;

@@ -22,6 +22,7 @@
 - The background jobs sheet reads a job's output from where its command sends it: it follows whatever the command writes now (its own output, a pipe it feeds `| tail`, a file it redirects into `> log`) and highlights that step in the command; clicking a step of the command shows that step's output until you click it again or choose Follow live, and a source menu lists every stream, instead of "No output yet" until it ends
 - Clicking a step of a running bash command in the transcript shows the output that step writes (its pipe, its redirected file, or its own slice of the output) in place of the run's output, and while the run writes a stream the card follows it
 - The background jobs sheet draws a job's command as its live shell visualization with the running step in view, and fits what the job is for, its caption and its facts in fewer lines
+- Bash command footers replace the `Wall:` and `Timeout:` labels with icons and one compact chip (`⏱ 1.2s/5m · ✘ 1`), and prefix the job, service, PID, artifact and minimizer parts with theme glyphs
 
 ### Fixed
 
