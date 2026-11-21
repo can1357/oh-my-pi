@@ -6,7 +6,9 @@
 //! lists a directory, visits its entries, queues all but the first
 //! subdirectory it finds and continues with that first subdirectory itself,
 //! awaiting only filesystem calls and, in a streaming walk, room in the
-//! bounded output channel. The walk is over once no job is queued or running.
+//! bounded output channel. The walk is over once no job is queued or running:
+//! the worker that finishes the last job closes the queue, which ends every
+//! other worker's wait.
 //!
 //! A [`Sink`] may also settle each directory's visited items on the worker
 //! that listed it, before they are sent ([`Sink::settle`]): a search reads
@@ -33,7 +35,7 @@ use std::{
 	},
 };
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::{
 	sync::{Notify, mpsc},
 	task::AbortHandle,
@@ -467,9 +469,8 @@ struct Ctx<K: Sink> {
 	/// Network mounts not descended into.
 	fences:    Fences,
 	retained:  Arc<AtomicUsize>,
-	/// Job queue; `None` tells a worker the walk is over.
-	jobs:      flume::Sender<Option<Job>>,
-	workers:   usize,
+	/// Job queue, taken and dropped (closing it) once the walk is over.
+	jobs:      RwLock<Option<flume::Sender<Job>>>,
 	/// Jobs queued or running; a job's continuation counts as part of it.
 	pending:   AtomicUsize,
 	/// Scratch of workers that ended; every arena is in here or owned by a
@@ -609,8 +610,7 @@ pub(super) async fn start<K: Sink>(
 			root_dev,
 			fences,
 			retained: Arc::new(AtomicUsize::new(0)),
-			jobs,
-			workers,
+			jobs: RwLock::new(Some(jobs)),
 			pending: AtomicUsize::new(0),
 			scratches: Mutex::new(Vec::new()),
 			shared,
@@ -721,27 +721,34 @@ impl<K: Sink> Ctx<K> {
 	/// Queues `job` for any worker.
 	fn enqueue(&self, job: Job) {
 		self.pending.fetch_add(1, Ordering::Relaxed);
-		// The queue is unbounded and a send fails only once every worker is gone.
-		let _ = self.jobs.send(Some(job));
+		// The queue is unbounded: a send fails only once every worker is gone.
+		// A closed queue (a panicking visitor stopped the walk) takes no job.
+		if let Some(jobs) = &*self.jobs.read() {
+			let _ = jobs.send(job);
+		}
 	}
 
-	/// Tells every worker the walk is over.
+	/// Tells every worker the walk is over by closing the queue: a worker's
+	/// wait ends once the queue is empty and closed. A close also reaches a
+	/// worker whose wakeup for a queued message was lost, as one stop message
+	/// per worker would not: flume 0.12's `recv_async`, re-registering after
+	/// another worker took the message it was woken for, misses a message
+	/// sent meanwhile (zesterer/flume#177), but rechecks for a closed queue.
 	fn stop(&self) {
-		for _ in 0..self.workers {
-			let _ = self.jobs.send(None);
-		}
+		let jobs = self.jobs.write().take();
+		drop(jobs);
 	}
 
 	/// One worker: settles the already listed `root` if it has one (counted
 	/// as a job), runs `first`, then jobs from `queue`, until the walk's last
-	/// job has finished. `_done` disconnects when the worker ends, after its
-	/// scratch is handed back.
+	/// job has finished and the queue is closed. `_done` disconnects when the
+	/// worker ends, after its scratch is handed back.
 	async fn work(
 		self: Arc<Self>,
 		scratch: Owned<K>,
 		first: Option<Job>,
 		root: Option<Listed<K>>,
-		queue: flume::Receiver<Option<Job>>,
+		queue: flume::Receiver<Job>,
 		_done: flume::Sender<()>,
 	) {
 		// A body local drops before the parameters, so the scratch is handed
@@ -759,8 +766,8 @@ impl<K: Sink> Ctx<K> {
 			let job = match next.take() {
 				Some(job) => job,
 				None => match queue.recv_async().await {
-					Ok(Some(job)) => job,
-					Ok(None) | Err(_) => break,
+					Ok(job) => job,
+					Err(_) => break,
 				},
 			};
 			self.chain(&mut scratch, job).await;
