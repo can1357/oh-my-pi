@@ -6,8 +6,8 @@
 
 ### Fixed
 
-- Fixed a failing embedding provider (`embeddings.provider` or `setEmbeddingProvider`) leaving no trace: when its `embed()` or `available()` throws, the failure is now logged with the error, at debug level or at warn with runtime debug on, like local model failures; embedding still falls back to `null` as before ([#19979](https://github.com/can1357/oh-my-pi/pull/19979) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed gist participants leaving out names used mid-sentence when sentence openers like `The` or `It` filled the five slots first ([#16725](https://github.com/can1357/oh-my-pi/issues/16725)) ([#19979](https://github.com/can1357/oh-my-pi/pull/19979) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed a failing embedding provider (`embeddings.provider` or `setEmbeddingProvider`) leaving no trace: when its `embed()` or `available()` throws, the failure is now logged with the error, at debug level or at warn with runtime debug on, like local model failures; embedding still falls back to `null` as before
+- Fixed gist participants leaving out names used mid-sentence when sentence openers like `The` or `It` filled the five slots first ([#16725](https://github.com/can1357/oh-my-pi/issues/16725))
 - Improved diagnostics when a configured embedding provider fails, making provider errors visible in logs while preserving the existing fallback behavior.
 
 ## [18.22.1] - 2026-11-17
