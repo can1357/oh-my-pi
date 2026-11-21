@@ -799,10 +799,15 @@ function parseConnectEndStream(data: Uint8Array): Error | null {
 	}
 }
 
+interface CursorAdditionalContext {
+	content: string;
+	onDelivered?: () => void;
+}
+
 interface CursorMessageWriter {
-	write(frame: Uint8Array): void;
+	write(frame: Uint8Array, onDelivered?: () => void): void;
 	/** Context the host wants the model to read with the next tool result that accepts it. */
-	takeAdditionalContext?(): string | undefined;
+	takeAdditionalContext?(): CursorAdditionalContext | undefined;
 }
 
 interface CursorRunTransport extends CursorMessageWriter {
@@ -832,8 +837,11 @@ function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTrans
 		get writable() {
 			return !request.writableEnded && !request.closed;
 		},
-		write(frame) {
-			if (!request.writableEnded) request.write(frame);
+		write(frame, onDelivered) {
+			if (!request.writableEnded && !request.closed) {
+				request.write(frame);
+				onDelivered?.();
+			}
 		},
 		close() {
 			request.close();
@@ -869,6 +877,7 @@ interface CursorHttp1RunTransportOptions {
 interface CursorPendingAppend {
 	seqno: bigint;
 	data: Uint8Array;
+	onDelivered?: () => void;
 }
 
 const CURSOR_HTTP1_APPEND_CONCURRENCY = 16;
@@ -932,6 +941,7 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
 		});
 		if (response.ok) {
+			append.onDelivered?.();
 			await response.body?.cancel();
 			return;
 		}
@@ -995,11 +1005,12 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		get closed() {
 			return closed;
 		},
-		write(frame) {
+		write(frame, onDelivered) {
 			if (closed || ended) return;
 			pendingAppends.push({
 				seqno: appendSeqno++,
 				data: readConnectFrameMessage(frame),
+				onDelivered,
 			});
 			pumpAppends();
 		},
@@ -1620,20 +1631,27 @@ function streamCursorWithWireMode(
 			// call and runs the handler twice. KV blob replies bypass this writer —
 			// they are idempotent and the server re-requests them on resume.
 			// Heartbeats and the run request write the transport directly.
+			let wrapUpDelivered = false;
 			const resultTransport = runTransport;
 			const resultWriter: CursorMessageWriter = {
-				write(frame) {
+				write(frame, onDelivered) {
 					progressVersion++;
 					checkpointCoversTurn = false;
-					resultTransport.write(frame);
+					resultTransport.write(frame, onDelivered);
 				},
 				takeAdditionalContext: () => {
 					// A result written after the server's end is dropped; the notice
 					// would never reach the model, so it stays pending.
 					if (!resultTransport.writable) return undefined;
 					const notice = contextBudget?.takeNotice(output.usage.contextTokens);
-					if (notice !== undefined) output.contextBudgetWrapUp = true;
-					return notice;
+					if (notice === undefined) return undefined;
+					return {
+						content: notice,
+						onDelivered: () => {
+							wrapUpDelivered = true;
+							output.contextBudgetWrapUp = true;
+						},
+					};
 				},
 			};
 
@@ -1918,7 +1936,7 @@ function streamCursorWithWireMode(
 						return false;
 					}
 					const latestContextTokens = output.usage.contextTokens;
-					const wrappedForBudget = output.contextBudgetWrapUp === true;
+					const wrappedForBudget = wrapUpDelivered || output.contextBudgetWrapUp === true;
 					({ context, options, stream } = resumption);
 					output = createCursorOutput(model, Date.now());
 					if (latestContextTokens !== undefined) output.usage.contextTokens = latestContextTokens;
@@ -4030,10 +4048,11 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
 	value: Extract<ExecClientMessage["message"], { case: TCase }>["value"],
 ): void {
 	// Stream deltas are not results: a shell's context rides on its final `shellResult`.
-	const additionalContext =
+	const additional =
 		execMsg.acceptHookAdditionalContexts && messageCase !== "shellStream"
 			? runTransport.takeAdditionalContext?.()
 			: undefined;
+	const additionalContext = additional?.content;
 	const execClientMessage = create(ExecClientMessageSchema, {
 		id: execMsg.id,
 		execId: execMsg.execId,
@@ -4047,7 +4066,7 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
 	});
 
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	runTransport.write(frameConnectMessage(responseBytes));
+	runTransport.write(frameConnectMessage(responseBytes), additional?.onDelivered);
 
 	log("execClientMessage", messageCase, value);
 }

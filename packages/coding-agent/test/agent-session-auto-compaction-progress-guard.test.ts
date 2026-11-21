@@ -1303,12 +1303,12 @@ describe("AgentSession auto-compaction progress guard", () => {
 		cfgCompactionThresholdTokens.set(session.settings, 140_000);
 
 		expect(session.compactionSpeculation).toBe("running");
-		expect(session.cursorContextBudgetTokens(cursor)).toBe(140_000);
+		expect(await session.cursorContextBudgetTokens(cursor)).toBe(140_000);
 
 		handoffResult.resolve("summary");
 		while (session.compactionSpeculation === "running") await scheduler.yield();
 
-		expect(session.cursorContextBudgetTokens(cursor)).toBeUndefined();
+		expect(await session.cursorContextBudgetTokens(cursor)).toBeUndefined();
 	});
 
 	it("preserves the Cursor budget when a pre-prompt deferral's speculation settles before dispatch", async () => {
@@ -1357,22 +1357,35 @@ describe("AgentSession auto-compaction progress guard", () => {
 			handoffResult.resolve("summary");
 			while (session.compactionSpeculation === "running") await scheduler.yield();
 			expect(session.compactionSpeculation).not.toBe("running");
-			budgetAtDispatch = session.cursorContextBudgetTokens(cursor);
+			budgetAtDispatch = await session.cursorContextBudgetTokens(cursor);
 		});
 
 		await session.prompt("next step");
 		expect(budgetAtDispatch).toBe(140_000);
 	});
 
-	it("omits the Cursor budget when fixed non-message context exceeds the recovery band without promotion", () => {
+	it("omits the Cursor budget when fixed non-message context exceeds the recovery band without an authenticated promotion target", async () => {
 		const cursor = getBundledModel("cursor", "composer-2.5");
+		const largerModel = { ...getBundledModel("anthropic", "claude-sonnet-4-6"), contextWindow: 1_000_000 };
+		const promotableCursor = {
+			...cursor,
+			contextWindow: 100_000,
+			contextPromotionTarget: `${largerModel.provider}/${largerModel.id}`,
+		};
 		cfgCompactionEnabled.set(session.settings, true);
 		cfgCompactionThresholdTokens.set(session.settings, 10_000);
-		cfgContextPromotionEnabled.set(session.settings, false);
+		cfgContextPromotionEnabled.set(session.settings, true);
+		vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([promotableCursor, largerModel]);
 
 		// ~8,500 tokens in the system prompt alone: below the 10k threshold, but above the 8k (80%) recovery band.
 		session.agent.setSystemPrompt("x".repeat(36_000));
-		expect(session.cursorContextBudgetTokens(cursor)).toBeUndefined();
+		// Even when promotion is enabled and a larger target is listed, an unauthenticated target cannot promote.
+		const getApiKeySpy = vi.spyOn(session.modelRegistry, "getApiKey").mockResolvedValue(undefined);
+		expect(await session.cursorContextBudgetTokens(promotableCursor)).toBeUndefined();
+
+		// When the larger promotion target actually resolves credentials, budgeting stays active.
+		getApiKeySpy.mockResolvedValue("valid-key");
+		expect(await session.cursorContextBudgetTokens(promotableCursor)).toBe(10_000);
 	});
 
 	it("settles an overlapping successful stop but resumes a thinking-only length stop", async () => {
