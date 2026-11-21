@@ -8,6 +8,7 @@ import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
+import { Settings } from "../../../src/config/settings";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
@@ -88,6 +89,7 @@ function makeHarness() {
 		showStatus: vi.fn(),
 		closeLinkBrowser: vi.fn(),
 		configureDialogEditor: vi.fn(),
+		settings: Settings.isolated(),
 		updateEditorBorderColor: vi.fn(),
 		statusLine: { setAwaitingAnswer: vi.fn() },
 		keybindings: KeybindingsManager.inMemory(),

@@ -1128,7 +1128,7 @@ describe("html form", () => {
 			const releaseKeys = vi.fn();
 			const { form } = dialog(`<form><label>Notes<textarea name="notes"></textarea></label></form>`, {
 				releaseKeys,
-				configureEditor: editor => editor.setVimMode(true),
+				vimMode: true,
 			});
 			form.handleInput("draft");
 			form.handleInput(ESC);
@@ -1140,7 +1140,7 @@ describe("html form", () => {
 		});
 
 		it("in Vim mode Esc in an option note leaves Insert, so Enter still saves it; a reopened note types again", () => {
-			const { form } = dialog(DB_FORM, { configureEditor: editor => editor.setVimMode(true) });
+			const { form } = dialog(DB_FORM, { vimMode: true });
 			form.handleInput(DOWN);
 			form.handleInput("n");
 			form.handleInput("why postgres");
@@ -1161,7 +1161,7 @@ describe("html form", () => {
 			const releaseKeys = vi.fn();
 			const { form } = dialog(
 				`<form><fieldset><legend>Pick</legend><label><input type="radio" name="db" value="a" checked> A</label><label><input type="radio" name="db" value="b"> B</label></fieldset></form>`,
-				{ releaseKeys, configureEditor: editor => editor.setVimMode(true) },
+				{ releaseKeys, vimMode: true },
 			);
 			form.handleInput(DOWN);
 			form.handleInput(DOWN);
@@ -1178,7 +1178,7 @@ describe("html form", () => {
 			const releaseKeys = vi.fn();
 			const { form } = dialog(
 				`<form><label>Name <input type="text" name="name"></label><label>Secret <input type="password" name="pw"></label></form>`,
-				{ releaseKeys, configureEditor: editor => editor.setVimMode(true) },
+				{ releaseKeys, vimMode: true },
 			);
 			form.handleInput("hello world");
 			form.handleInput(ESC);
@@ -1191,6 +1191,26 @@ describe("html form", () => {
 			form.handleInput(ESC);
 			expect(releaseKeys).toHaveBeenCalledTimes(1);
 			expect(form.data()).toMatchObject({ pw: "abc" });
+		});
+
+		it("in Vim mode j/k step between option rows like ↓/↑, while text boxes keep the letters", () => {
+			const { form } = dialog(DB_FORM, { vimMode: true });
+			const start = form.debugState().focus;
+			form.handleInput("j");
+			const next = form.debugState().focus;
+			expect(next).not.toBe(start);
+			form.handleInput("k");
+			expect(form.debugState().focus).toBe(start);
+			// Without Vim mode `j` is no row key.
+			const plainForm = dialog(DB_FORM).form;
+			plainForm.handleInput("j");
+			expect(plainForm.debugState().focus).toBe(start);
+			// In a text box `j` is text again.
+			const text = dialog(`<form><label>Name <input type="text" name="name"></label></form>`, {
+				vimMode: true,
+			}).form;
+			text.handleInput("j");
+			expect(text.data()).toEqual({ name: "j" });
 		});
 
 		it("rows: no footer in the panel; keyHints() gives the focused stop's keys for the host to draw", () => {
