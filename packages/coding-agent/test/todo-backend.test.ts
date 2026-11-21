@@ -585,20 +585,26 @@ describe("todo backend", () => {
 			expect(tasksOf(fresh)).toEqual([["a", "b"]]);
 		});
 
-		it("a refusal by a backend omp never sent a list leaves it holding the list the call was built on", async () => {
-			// Selected once the session had a list: omp knows nothing it holds, so an emptied list reaches it.
-			const late = tracker("tracker", true);
-			const selected = await open([late.extension]);
-			selected.session.commitTodoPhases(list("a"));
-			cfgTodoBackend.override(selected.session.settings, "tracker");
-			late.error = new Error("not now");
-			const refused = await todo(selected.session, { op: "append", phase: "Work", items: ["b"] });
-			late.error = undefined;
-			selected.session.commitTodoPhases([]);
-			await settled(selected.session);
+		it("after a refusal by a backend omp never sent a list, the next list reaches it, emptied or not; one that started empty is not sent an accepted retry twice", async () => {
+			// Selected once the session had a list: omp knows nothing it holds, so the next list goes
+			// out whether it is empty or the one the backend refused to change.
+			for (const next of [[], list("a")]) {
+				const late = tracker("tracker", true);
+				const { session } = await open([late.extension]);
+				session.commitTodoPhases(list("a"));
+				cfgTodoBackend.override(session.settings, "tracker");
+				late.error = new Error("not now");
+				const refused = await todo(session, { op: "append", phase: "Work", items: ["b"] });
+				late.error = undefined;
+				session.commitTodoPhases(next);
+				await settled(session);
 
-			// Selected from the start: the refused call showed it the empty list, so the retry it accepts
-			// is not sent to it a second time.
+				expect(refused.isError).toBe(true);
+				expect(late.calls.map(call => call.phases)).toEqual([next]);
+			}
+
+			// Selected from the start: the refused call was built on the empty list it holds, so the
+			// retry it accepts is not sent to it a second time.
 			const fresh = tracker("tracker", true);
 			const { session } = await open([fresh.extension], "tracker");
 			fresh.error = new Error("not now");
@@ -607,8 +613,6 @@ describe("todo backend", () => {
 			await todo(session, { op: "init", items: ["a"] });
 			await settled(session);
 
-			expect(refused.isError).toBe(true);
-			expect(tasksOf(late)).toEqual([[]]);
 			expect(committed(session)).toEqual(["a"]);
 			expect(tasksOf(fresh)).toEqual([]);
 		});
