@@ -623,6 +623,45 @@ describe("usage JSON policy", () => {
 		expect(text).toContain("policy: priority 5 · reserve 2% (override) · reclaim above 40% · exhausted · 0.5% left");
 	});
 
+	it("judges the account by its shared windows and lists a model row inside its own reserve", () => {
+		const report = makeReport("anthropic", "fable@example.test", [
+			makeLimit({ id: "anthropic:7d", usedFraction: 0.6, windowId: "7d", shared: true }),
+			makeLimit({ id: "anthropic:7d:fable", label: "Claude 7 Day (Fable)", usedFraction: 0.75, tier: "fable" }),
+		]);
+		const policyWith = (reservePctByLimit: Record<string, number>): UsagePolicyDiagnosticsOptions => ({
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({
+				provider: "anthropic",
+				account: { email: identity.email },
+				reservePct: 2,
+				reservePctByLimit,
+			}),
+		});
+		const options = policyWith({ "anthropic:7d:fable": 30 });
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toEqual({
+			priority: 0,
+			reservePct: 2,
+			reserveSource: "override",
+			reservePctByLimit: { "anthropic:7d:fable": 30 },
+			scopedInsideReserve: ["anthropic:7d:fable"],
+			state: "eligible",
+			remainingPct: 40,
+		});
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], report.fetchedAt, undefined, [], options),
+		);
+		expect(text).toContain(
+			"policy: priority 0 · reserve 2% (override) · anthropic:7d:fable reserve 30% · eligible · 40.0% left · Claude 7 Day (Fable) inside reserve",
+		);
+		// A per-limit reserve on a shared window still decides the account's state.
+		const [shared] = annotateUsagePolicy([report], [], [], policyWith({ "anthropic:7d": 50 })).reports.map(
+			entry => entry.policy,
+		);
+		expect(shared).toMatchObject({ state: "inside-reserve", remainingPct: 40 });
+		expect(shared?.scopedInsideReserve).toBeUndefined();
+	});
+
 	it("rounds remainingPct the way the text line prints it", () => {
 		// (1 - 0.0195) * 100 is 98.0499… in binary: toFixed(1) prints 98.0, while rounding ×1000 gives 98.1.
 		const report = makeReport("openai-codex", "boundary@example.test", [

@@ -187,6 +187,17 @@ export function isWithinUsageReserve(remainingFraction: number, reserveFraction:
 	return remainingFraction <= reserveFraction + RESERVE_BOUNDARY_EPSILON;
 }
 
+/** Whether any limit's remaining quota is at or below its own reserve; limits without a used fraction are skipped. */
+export function isAnyUsageLimitWithinReserve(
+	limits: readonly UsageLimit[],
+	reserveFraction: (limit: UsageLimit) => number,
+): boolean {
+	return limits.some(limit => {
+		const usedFraction = resolveUsedFraction(limit);
+		return usedFraction !== undefined && isWithinUsageReserve(Math.max(0, 1 - usedFraction), reserveFraction(limit));
+	});
+}
+
 /**
  * One recorded usage-limit snapshot: a single limit window of one account at
  * a point in time. The usage cache itself is latest-snapshot-only; history

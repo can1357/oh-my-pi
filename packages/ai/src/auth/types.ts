@@ -63,12 +63,31 @@ export interface AuthAccountPolicy {
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
+	/**
+	 * Protected remaining quota percentage per usage limit, keyed by the limit id usage reports
+	 * carry (`anthropic:7d:fable`); limits without an entry use `reservePct`.
+	 */
+	readonly reservePctByLimit?: Readonly<Record<string, number>>;
 	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
 	readonly reclaimAbovePct?: number;
 }
 
 /** Read-only set of per-account routing policies. */
 export type AuthAccountPolicies = readonly AuthAccountPolicy[];
+
+/**
+ * Reserve (0..1) protecting one usage limit of an account: the policy's `reservePctByLimit`
+ * entry for `limitId`, else its `reservePct`, else `defaultFraction`.
+ */
+export function usageLimitReserveFraction(
+	policy: AuthAccountPolicy | undefined,
+	limitId: string,
+	defaultFraction: number,
+): number {
+	const byLimit = policy?.reservePctByLimit;
+	const pct = byLimit !== undefined && Object.hasOwn(byLimit, limitId) ? byLimit[limitId] : policy?.reservePct;
+	return pct === undefined ? defaultFraction : Math.max(0, Math.min(1, pct / 100));
+}
 
 /**
  * Cascade leg that supplies a provider's active credential, highest precedence
