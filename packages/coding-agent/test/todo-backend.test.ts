@@ -156,28 +156,17 @@ describe("todo backend", () => {
 	const textOf = (result: AgentToolResult): string =>
 		result.content.map(part => (part.type === "text" ? part.text : "")).join("");
 
-	/**
-	 * The `todo` tool wired to `session` as omp wires it, without the wrappers that defer its first
-	 * step. `landed` runs between the backend's answer and the tool's next step.
-	 */
-	const directTodo = (session: AgentSession, landed?: () => Promise<unknown>) =>
+	/** The `todo` tool wired to `session` as omp wires it, without the wrappers that defer its first step. */
+	const directTodo = (session: AgentSession) =>
 		new TodoTool({
 			cwd: dir.path(),
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			settings: session.settings,
-			getSessionId: () => session.sessionManager.getSessionId(),
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
-			applyTodoBackend: (change, signal, id) => {
-				const answer = session.applyTodoBackend(change, signal, id);
-				if (!landed) return answer;
-				return answer?.then(async why => {
-					await landed();
-					return why;
-				});
-			},
+			applyTodoBackend: (change, signal, id) => session.applyTodoBackend(change, signal, id),
 		});
 
 	const settled = (session: AgentSession) => session.extensionRunner?.todoBackendSettled();
@@ -796,26 +785,19 @@ describe("todo backend", () => {
 			expect(committed(forked.session)).toEqual(["a"]);
 		});
 
-		it("a session change between the backend's answer and the tool's commit fails the call, and the new session's list follows", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension], "tracker");
-
-			// Both sessions' lists are empty: only the session id tells them apart.
-			const tool = directTodo(session, () => session.newSession());
-			const result = await tool.execute("call", { op: "init", items: ["a"] });
-			await settled(session);
-
-			expect(result.isError).toBe(true);
-			expect(session.getTodoPhases()).toEqual([]);
-			expect(backend.calls).toEqual([{ phases: [], sessionId: session.sessionManager.getSessionId() }]);
-		});
-
-		it("a call waiting its turn is not put to a backend that was disabled or deselected meanwhile", async () => {
-			const meanwhile: Array<(session: AgentSession) => void> = [
-				session => void session.extensionRunner?.setSuspendedExtensions(() => true),
-				session => cfgTodoBackend.override(session.settings, "native"),
+		it("a call waiting its turn is not put to a backend that was disabled or deselected meanwhile, and commits unless the list changed too", async () => {
+			const meanwhile: Array<{ leave: (session: AgentSession) => void; ends: string[] }> = [
+				{ leave: session => void session.extensionRunner?.setSuspendedExtensions(() => true), ends: ["a", "b"] },
+				{ leave: session => cfgTodoBackend.override(session.settings, "native"), ends: ["a", "b"] },
+				{
+					leave: session => {
+						cfgTodoBackend.override(session.settings, "native");
+						session.setTodoPhases(list("edit"));
+					},
+					ends: ["edit"],
+				},
 			];
-			for (const leave of meanwhile) {
+			for (const { leave, ends } of meanwhile) {
 				const backend = tracker("tracker", true);
 				const { session } = await open([backend.extension], "tracker");
 				const gate = Promise.withResolvers<void>();
@@ -830,9 +812,9 @@ describe("todo backend", () => {
 				gate.resolve();
 				const result = await call;
 
-				expect(result.isError).not.toBe(true);
+				expect(result.isError === true).toBe(!ends.includes("b"));
 				expect(backend.asked).toEqual([]);
-				expect(committed(session)).toEqual(["a", "b"]);
+				expect(committed(session)).toEqual(ends);
 			}
 		});
 
@@ -1050,40 +1032,63 @@ describe("todo backend", () => {
 			expect(session.getTodoPhases()).toEqual([]);
 		});
 
-		it("a todo call aborted as the backend accepts leaves the backend with omp's list, wherever the abort lands", async () => {
-			const outcomes = new Set<string>();
-			// The abort lands some microtasks after the backend's answer: before omp has read the
-			// answer, between reading it and the tool's commit, or after the commit.
-			for (let steps = 0; steps < 24; steps++) {
-				const backend = tracker("tracker", true);
-				const { session } = await open([backend.extension], "tracker");
-				session.commitTodoPhases(list("a"));
-				await settled(session);
-				const gate = Promise.withResolvers<void>();
-				backend.applyHold = gate.promise;
-				const deciding = backend.entered();
-				const abort = new AbortController();
-				const call = todo(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
-				await deciding;
-				void gate.promise.then(async () => {
-					for (let step = 0; step < steps; step++) await null;
-					abort.abort();
-				});
-				gate.resolve();
-				outcomes.add(
-					await call.then(
+		it("whatever lands as the backend accepts, the change is committed in its own session or not at all, and the backend ends with omp's list", async () => {
+			// `ends` is what omp may hold afterwards, `outcomes` how the call may end.
+			const cases: Array<{
+				land: (session: AgentSession, abort: AbortController) => unknown;
+				ends: string[][];
+				outcomes: string[];
+			}> = [
+				{ land: (_session, abort) => abort.abort(), ends: [["a"], ["a", "b"]], outcomes: ["aborted", "committed"] },
+				{ land: session => session.newSession(), ends: [[]], outcomes: ["committed", "failed"] },
+				{
+					land: session => session.setTodoPhases(list("edit")),
+					ends: [["edit"]],
+					outcomes: ["committed", "failed"],
+				},
+				// A client that sets the list omp already has.
+				{ land: session => session.setTodoPhases(list("a")), ends: [["a"], ["a", "b"]], outcomes: ["committed"] },
+			];
+			for (const { land, ends, outcomes } of cases) {
+				const seen = { ends: new Set<string>(), outcomes: new Set<string>() };
+				// It lands while the backend still decides (`steps` below zero), or some microtasks after
+				// its answer: before omp has read the answer, or after the commit. Both sides are seen
+				// within these bounds; `ends` and `outcomes` below fail if they no longer are.
+				for (let steps = -1; steps < 16; steps++) {
+					const backend = tracker("tracker", true);
+					const { session } = await open([backend.extension], "tracker");
+					session.commitTodoPhases(list("a"));
+					await settled(session);
+					const gate = Promise.withResolvers<void>();
+					backend.applyHold = gate.promise;
+					const deciding = backend.entered();
+					const abort = new AbortController();
+					const call = todo(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
+					await deciding;
+					if (steps < 0) await land(session, abort);
+					const landed = gate.promise.then(async () => {
+						for (let step = 0; step < steps; step++) await null;
+						if (steps >= 0) await land(session, abort);
+					});
+					gate.resolve();
+					const outcome = await call.then(
 						result => (result.isError ? "failed" : "committed"),
 						() => "aborted",
-					),
-				);
-				// The backend's answer to a call omp gave up is handled in a continuation of its own promise.
-				await Bun.sleep(0);
-				await settled(session);
+					);
+					await landed;
+					// The backend's answer to a call omp gave up is handled in a continuation of its own promise.
+					await Bun.sleep(0);
+					await settled(session);
 
-				const holds = backend.calls.length > 1 ? tasksOf(backend).at(-1) : ["a", "b"];
-				expect({ steps, holds }).toEqual({ steps, holds: committed(session) });
+					const held = backend.calls.length > 1 ? tasksOf(backend).at(-1) : ["a", "b"];
+					expect({ steps, held }).toEqual({ steps, held: committed(session) });
+					if (outcome !== "committed") expect(committed(session)).not.toContain("b");
+					seen.ends.add(JSON.stringify(committed(session)));
+					seen.outcomes.add(outcome);
+				}
+				expect([...seen.ends].sort()).toEqual(ends.map(end => JSON.stringify(end)).sort());
+				expect([...seen.outcomes].sort()).toEqual(outcomes);
 			}
-			expect(outcomes).toEqual(new Set(["aborted", "committed"]));
 		});
 
 		it("an abort ends the call at once, also behind a held call; the backend is not asked and is sent nothing more", async () => {

@@ -1785,20 +1785,22 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Ask the backend `todo.backend` selects to accept a `todo` call's change before it is
-	 * committed. `selected` reads that selection; it is read again when the call's turn comes.
-	 * Returns `undefined` at once when no backend decides: none is selected or registered under
-	 * that id, it has no `apply`, or `session_start` has not gone out. Otherwise resolves to why
-	 * the change is not accepted, or to `undefined` once the backend accepted it or when, by the
-	 * call's turn, no backend decides any more; it rejects as soon as `signal` aborts. Takes its
-	 * turn among the `replace` calls; `current` reads the session's list as it is when called. The
-	 * change belongs to the session the call was made in: once that is no longer the live one, the
-	 * call is not accepted, whatever the live session's list holds.
+	 * Ask the backend `todo.backend` selects to accept a `todo` call's change, then commit it.
+	 * `selected` reads that selection; it is read again when the call's turn comes. Returns
+	 * `undefined` at once when no backend decides, leaving the commit to the caller: none is
+	 * selected or registered under that id, it has no `apply`, or `session_start` has not gone out.
+	 * Otherwise resolves to why the change is not committed, or to `undefined` once `commit` ran
+	 * (the backend accepted, or by the call's turn none decides any more), and rejects as soon as
+	 * `signal` aborts before that. `commit` runs in the step that checks the session, the list
+	 * (`current` reads it) and `signal`, so nothing lands in between. Takes its turn among the
+	 * `replace` calls. The change belongs to the session the call was made in: once that is no
+	 * longer the live one, it is not committed, whatever the live session's list holds.
 	 */
 	applyTodoBackend(
 		selected: () => string | undefined,
 		change: TodoBackendChange,
 		current: () => TodoPhase[],
+		commit: () => void,
 		signal?: AbortSignal,
 	): Promise<string | undefined> | undefined {
 		const decider = () => {
@@ -1809,8 +1811,7 @@ export class ExtensionRunner {
 		if (!this.#sessionStartEvent || !decider()) return undefined;
 		const sessionId = this.sessionManager.getSessionId();
 		const closing = "The session is closing; nothing was saved.";
-		// Set once the backend accepted in time: run if the tool's wait is aborted before it reads that.
-		let uncommitted: (() => void) | undefined;
+		let committed = false;
 		const asked = this.#todoCalls.then(async () => {
 			// Not put to a backend: a call whose turn comes as the session closes, one aborted while
 			// it waited, one whose session or list changed meanwhile (the backend would hold a list
@@ -1822,7 +1823,12 @@ export class ExtensionRunner {
 			// once the session changed, since two empty lists are equal.
 			if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
 			const decides = decider();
-			if (!decides) return undefined;
+			if (!decides) {
+				if (!Bun.deepEquals(current(), change.previous)) return TODO_LIST_CHANGED_ERROR;
+				commit();
+				committed = true;
+				return undefined;
+			}
 			const { backend, extension, definition } = decides;
 			// Extension text, also when omp reports a failure of the handler: one clean line for the tool result.
 			const refused = (why: string) =>
@@ -1833,10 +1839,9 @@ export class ExtensionRunner {
 			// one for a backend that is no longer selected). Not as the session closes, nor once it has
 			// changed: the backend keeps that change for a session omp is no longer in. Nor once it is no
 			// longer selected, or its extension no longer holds the id: omp has stopped mirroring to it.
-			const owns = () => this.getTodoBackends().get(backend)?.extension === extension;
 			const resync = () => {
 				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
-				if (!owns()) return;
+				if (this.getTodoBackends().get(backend)?.extension !== extension) return;
 				this.#todoStale = true;
 				this.#todoPending = { backend, sessionId, phases: current() };
 				this.#queueTodoBackendCall();
@@ -1876,15 +1881,15 @@ export class ExtensionRunner {
 				// Accepted for a session omp has left: its record of what the backend holds stays unknown.
 				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
 				// The list changed while the backend decided (an edit made with no backend selected queues
-				// none), or the call was aborted as it answered: the tool commits nothing, omp's list follows.
-				if (signal?.aborted || !Bun.deepEquals(current(), change.previous)) resync();
-				else {
-					// A list waiting for this backend (a late acceptance's correction, or a client setting
-					// the list it had) would go out before the tool commits `next` and take the change back.
-					// Not when the id went to another extension meanwhile: the list is that one's to get.
-					if (this.#todoPending?.backend === backend && owns()) this.#todoPending = undefined;
-					uncommitted = resync;
+				// none), or the call was aborted as it answered: nothing is committed, omp's list follows.
+				if (signal?.aborted || !Bun.deepEquals(current(), change.previous)) {
+					resync();
+					return TODO_LIST_CHANGED_ERROR;
 				}
+				// The commit's own list takes the place of one still waiting (a late acceptance's
+				// correction, or a client setting the list it had), so nothing older goes out after it.
+				commit();
+				committed = true;
 				// `next` is recorded as held only when this backend held `previous`. After a failed call,
 				// or when it was selected or took the id over since, the commit's list still goes out.
 				const held =
@@ -1904,9 +1909,10 @@ export class ExtensionRunner {
 			() => {},
 			() => {},
 		);
-		// An abort ends the wait at once, also while an earlier call still holds the line.
+		// An abort ends the wait at once, also while an earlier call still holds the line. One that
+		// lands after the commit and before the caller reads the answer does not undo it.
 		return untilAborted(signal, asked).catch((error: unknown) => {
-			uncommitted?.();
+			if (committed) return undefined;
 			throw error;
 		});
 	}

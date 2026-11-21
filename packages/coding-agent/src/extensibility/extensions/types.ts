@@ -1882,7 +1882,7 @@ export interface TodoBackendDefinition {
 	 * failed, its last `apply` timed out or was aborted, or a list was committed while it was not
 	 * selected or did not hold the id), the committed list follows. When `apply` accepts a change
 	 * omp does not commit (after omp stopped waiting: a timeout or an abort; or in time, when the
-	 * list changed or the call was aborted before the commit), omp's list is sent through `replace`
+	 * list changed while it decided), omp's list is sent through `replace`
 	 * once more, unless by then the session has changed or is closing, or this backend is no longer
 	 * selected or its extension no longer holds the id. A call still running when the session is
 	 * disposed is given up after the `session_shutdown` handler timeout, without an extension

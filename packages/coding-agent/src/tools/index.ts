@@ -510,12 +510,13 @@ export interface ToolSession {
 	 */
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
 	/**
-	 * Ask the selected todo backend to accept a `todo` call's change before it is committed.
-	 * Returns `undefined` at once when no backend decides (native todos); otherwise resolves to
-	 * the reason the change is not accepted, or to `undefined` once it is accepted or when no
-	 * backend decides any more by the call's turn, and rejects when `signal` aborts. `toolCallId`
-	 * names the call: one that is aborted, or not accepted for a reason other than a changed list
-	 * or session, gets no reminder to retry it.
+	 * Ask the selected todo backend to accept a `todo` call's change, and commit the change once
+	 * it does. Returns `undefined` at once when no backend decides (native todos), leaving the
+	 * commit to the tool; otherwise resolves to the reason the change is not committed, or to
+	 * `undefined` once it is (the backend accepted, or no backend decides any more by the call's
+	 * turn), and rejects when `signal` aborts before that. `toolCallId` names the call: one that
+	 * is aborted, or not committed for a reason other than a changed list or session, gets no
+	 * reminder to retry it.
 	 */
 	applyTodoBackend?: (
 		change: TodoBackendChange,

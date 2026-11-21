@@ -17,7 +17,6 @@ import type { ToolSession } from "../sdk";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
-import { TODO_LIST_CHANGED_ERROR } from "./settings";
 
 /** Whether an unknown value is a persisted todo phase. */
 export function isTodoPhase(value: unknown): value is TodoPhase {
@@ -725,22 +724,19 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const { phases: updated, errors } = readOnly
 			? { phases: previousPhases, errors: [] as string[] }
 			: applyParams(clonePhases(previousPhases), entry);
-		// A selected todo backend with `apply` decides before anything is committed. Awaited only
-		// when one takes part: native todos commit in the same tick, as before.
+		// A selected todo backend with `apply` decides first, and the session commits in the step
+		// that reads its answer. Awaited only when one takes part: native todos commit in the same
+		// tick, as before.
 		let current = previousPhases;
 		const deciding =
 			readOnly || errors.length > 0
 				? undefined
 				: this.session.applyTodoBackend?.({ op, previous: previousPhases, next: updated }, signal, toolCallId);
-		if (deciding) {
-			const sessionId = this.session.getSessionId?.();
-			const refusal = await deciding;
+		const refusal = deciding && (await deciding);
+		if (refusal !== undefined) {
+			// Refused, or the list or the session changed under the call: `updated` was not committed.
+			errors.push(refusal);
 			current = clonePhases(this.session.getTodoPhases?.() ?? []);
-			if (refusal !== undefined) errors.push(refusal);
-			// A `/todo` edit or a session change landed while the backend decided or since it answered:
-			// `updated` was built on a list that is gone. Two empty lists are equal, so the id is compared too.
-			else if (this.session.getSessionId?.() !== sessionId || !Bun.deepEquals(current, previousPhases))
-				errors.push(TODO_LIST_CHANGED_ERROR);
 		}
 		// A batch with any error is discarded wholesale: persisting a
 		// half-applied batch makes the natural retry hit "already exists" for
@@ -748,7 +744,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const failed = errors.length > 0;
 		const effective = failed ? current : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
-		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
+		if (!readOnly && !failed && !deciding) this.session.setTodoPhases?.(updated);
 		const details: TodoToolDetails = { op, phases: effective, storage };
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 

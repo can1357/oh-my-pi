@@ -12148,6 +12148,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			() => this.#todoBackend(),
 			change,
 			() => this.#todo.phases,
+			() => this.setTodoPhases(change.next),
 			signal,
 		);
 		if (!deciding || toolCallId === undefined) return deciding;
