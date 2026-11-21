@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- A turn that keeps stopping without an answer now shows `Retry failed after N attempts` with the reason once the retry cap is hit, instead of ending silently with the session looking frozen ([#10614](https://github.com/can1357/oh-my-pi/issues/10614))
+- A turn that keeps stopping without an answer now shows `Retry failed after N attempts` with the reason once the retry cap is hit, instead of ending silently with the session looking frozen ([#10614](https://github.com/can1357/oh-my-pi/issues/10614), [#19955](https://github.com/can1357/oh-my-pi/pull/19955) by [@JamieJ5926](https://github.com/JamieJ5926))
 - The shell's `rg` builtin prints paths under an explicit `.` as `./path` like ripgrep, so names starting with `-` (session directories such as `--work-pi--`) can be passed back to `rg` and other commands
 - The shell's `fd` builtin prints paths like fd: `./path` under an explicit `.`, with `-0`, or when a name starts with `-`; directories end in the path separator; `--strip-cwd-prefix` takes effect, `--format`'s `{//}` is the printed path's parent instead of an absolute one, and `--absolute-path` no longer prints `/./`
 - Sloppy edits reject incomplete Find/action pairs without writing, preserve numeric `||` expressions, and no longer mistake a nested or partial closing line for the end of a block range
