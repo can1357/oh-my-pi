@@ -12,6 +12,7 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	Model,
 	ToolCall,
 } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -230,6 +231,41 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		});
 	});
 
+	it("replays a client's function-level Gemini signature in the form each transport sends", () => {
+		const context = parseRequest({
+			model: "gemini",
+			messages: [
+				{ role: "user", content: "hi" },
+				{
+					role: "assistant",
+					content: null,
+					tool_calls: [
+						{
+							id: "call_1",
+							type: "function",
+							function: { name: "lookup", arguments: "{}", thought_signature: "sig-fn" },
+						},
+					],
+				},
+				{ role: "tool", tool_call_id: "call_1", content: "ok" },
+			],
+		}).context;
+		const replayedSignature = (model: Model) => {
+			const adopted = structuredClone(context);
+			adoptReplayedGeminiSignatures(adopted, model);
+			const assistant = transformMessages(adopted.messages, model).find(message => message.role === "assistant");
+			const call =
+				assistant?.role === "assistant" ? assistant.content.find(part => part.type === "toolCall") : undefined;
+			return call?.type === "toolCall" ? call.thoughtSignature : undefined;
+		};
+
+		const native = getBundledModel("google", "gemini-2.5-pro");
+		const compatible = getBundledModel("kilo", "google/gemini-2.5-pro");
+		if (!native || !compatible) throw new Error("expected bundled Gemini models");
+		expect(replayedSignature(native)).toBe("sig-fn");
+		expect(JSON.parse(replayedSignature(compatible) ?? "null")).toEqual({ function: "sig-fn" });
+	});
+
 	it("coerces content:null to empty content for non-function roles (Codex #10956)", () => {
 		const parsed = parseRequest({
 			model: "gpt-5.2",
@@ -444,6 +480,33 @@ describe("auth-gateway openai-chat: encodeResponse", () => {
 				type: "function",
 				function: { name: "check", arguments: '{"value":"test"}' },
 				extra_content: { google: { thought_signature: "sig-google" } },
+			},
+		]);
+	});
+
+	it("emits a stored function-level Gemini signature on the tool call's function", () => {
+		const message: AssistantMessage = {
+			...emptyAssistant(),
+			content: [
+				{
+					type: "toolCall",
+					id: "call_portkey",
+					name: "check",
+					arguments: { value: "test" },
+					thoughtSignature: JSON.stringify({ function: "sig-fn" }),
+				},
+			],
+			stopReason: "toolUse",
+		};
+		const out = encodeResponse(message, "gemini-test");
+		const choices = out.choices as Array<{
+			message: { tool_calls?: Array<Record<string, unknown>> };
+		}>;
+		expect(choices[0].message.tool_calls).toEqual([
+			{
+				id: "call_portkey",
+				type: "function",
+				function: { name: "check", arguments: '{"value":"test"}', thought_signature: "sig-fn" },
 			},
 		]);
 	});

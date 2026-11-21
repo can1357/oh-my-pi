@@ -37,6 +37,7 @@ import {
 import { decodeDataUri } from "./openai-data-uri";
 import {
 	geminiToolCallExtraContent,
+	geminiToolCallFunctionSignature,
 	rawGeminiToolCallSignature,
 	storeGeminiToolCallSignature,
 } from "./openai-completions";
@@ -287,7 +288,7 @@ function buildAssistantMessage(
 				}
 			}
 			// A Gemini tool call replays the signature its response carried; store it as this API's transport does.
-			const thoughtSignature = storeGeminiToolCallSignature(Reflect.get(raw, "extra_content"));
+			const thoughtSignature = storeGeminiToolCallSignature(raw);
 			const call: ToolCall = {
 				type: "toolCall",
 				id: raw.id,
@@ -456,10 +457,15 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 	if (toolCalls.length > 0) {
 		responseMessage.tool_calls = toolCalls.map(tc => {
 			const extraContent = geminiToolCallExtraContent(tc.thoughtSignature);
+			const functionSignature = geminiToolCallFunctionSignature(tc.thoughtSignature);
 			return {
 				id: tc.id,
 				type: "function",
-				function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
+				function: {
+					name: tc.name,
+					arguments: stringifyArgs(tc.arguments),
+					...(functionSignature ? { thought_signature: functionSignature } : {}),
+				},
 				...(extraContent ? { extra_content: extraContent } : {}),
 			};
 		});
@@ -682,6 +688,7 @@ export function encodeStream(
 								signed: Boolean(call?.thoughtSignature),
 							});
 							const extraContent = geminiToolCallExtraContent(call?.thoughtSignature);
+							const functionSignature = geminiToolCallFunctionSignature(call?.thoughtSignature);
 							writeSse(
 								controller,
 								baseChunk(
@@ -691,7 +698,11 @@ export function encodeStream(
 												index: idx,
 												id: call?.id ?? "",
 												type: "function",
-												function: { name: call?.name ?? "", arguments: "" },
+												function: {
+													name: call?.name ?? "",
+													arguments: "",
+													...(functionSignature ? { thought_signature: functionSignature } : {}),
+												},
 												...(extraContent ? { extra_content: extraContent } : {}),
 											},
 										],
@@ -732,11 +743,15 @@ export function encodeStream(
 							const extraContent = sent.signed
 								? undefined
 								: geminiToolCallExtraContent(event.toolCall.thoughtSignature);
+							const functionSignature = sent.signed
+								? undefined
+								: geminiToolCallFunctionSignature(event.toolCall.thoughtSignature);
 							if (
 								correctId !== undefined ||
 								correctName !== undefined ||
 								correctArguments !== undefined ||
-								extraContent !== undefined
+								extraContent !== undefined ||
+								functionSignature !== undefined
 							) {
 								writeSse(
 									controller,
@@ -747,12 +762,17 @@ export function encodeStream(
 													index: idx,
 													...(extraContent ? { extra_content: extraContent } : {}),
 													...(correctId !== undefined ? { id: correctId } : {}),
-													...(correctName !== undefined || correctArguments !== undefined
+													...(correctName !== undefined ||
+													correctArguments !== undefined ||
+													functionSignature !== undefined
 														? {
 																function: {
 																	...(correctName !== undefined ? { name: correctName } : {}),
 																	...(correctArguments !== undefined
 																		? { arguments: correctArguments }
+																		: {}),
+																	...(functionSignature !== undefined
+																		? { thought_signature: functionSignature }
 																		: {}),
 																},
 															}
