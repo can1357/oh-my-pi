@@ -2,6 +2,7 @@ import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { getProviderHooks, type ProviderHooks, setProviderHooks } from "@oh-my-pi/pi-ai/provider-hooks";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
@@ -15,11 +16,18 @@ import type {
 	ModelSpec,
 	RemoteCompactionConfig,
 	SimpleStreamOptions,
+	StreamOptions,
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
+import type {
+	ImageGenerationOptions,
+	ImageGenerationRequest,
+	ImageGenerationResult,
+} from "@oh-my-pi/pi-ai/images/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
+import { setRuntimeProviderRule } from "@oh-my-pi/pi-catalog/compat/cascade";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	clampCodexContextWindow,
@@ -55,6 +63,8 @@ import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
 import { redactUrlForLog } from "../utils/redact-url";
+import type { SearchParams } from "../web/search/providers/base";
+import type { SearchResponse } from "../web/search/types";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
@@ -543,6 +553,8 @@ export class ModelRegistry {
 	// would silently revert the provider to its unprojected catalog.
 	#runtimeModelModifiers: Map<string, ModifyModelsHook> = new Map();
 	#lastModelModifierWarnings: Map<string, string> = new Map();
+	/** Extension web searches by provider ({@link ProviderConfigInput.webSearch}). */
+	#runtimeWebSearches = new Map<string, NonNullable<ProviderConfigInput["webSearch"]>>();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
@@ -4205,6 +4217,11 @@ export class ModelRegistry {
 		return this.authStorage.keys.peek(provider, options);
 	}
 
+	/** The extension web search registered for `provider`'s models, which the web search tool runs in place of their grounding backend. */
+	getProviderWebSearch(provider: string): ProviderConfigInput["webSearch"] {
+		return this.#runtimeWebSearches.get(provider);
+	}
+
 	/** Whether a model uses OAuth credentials. Kept separate from subscription billing for cache-tier decisions. */
 	isUsingOAuth(model: Model<Api>): boolean {
 		return this.authStorage.credentials.hasOAuth(model.provider);
@@ -4239,6 +4256,10 @@ export class ModelRegistry {
 		}
 		this.#invalidateProviderModelCache(providerName);
 		this.#runtimeRegistrations = this.#runtimeRegistrations.filter(change => change.name !== providerName);
+		// Hooks and rules are per-thread module state: a mirror drops its own copies too.
+		setProviderHooks(providerName, undefined);
+		this.#runtimeWebSearches.delete(providerName);
+		setRuntimeProviderRule(providerName, undefined);
 		if (this.#owner) return;
 		this.authStorage.keys.removeConfig(providerName);
 		this.authStorage.usage.removeProvider(providerName);
@@ -4382,6 +4403,16 @@ export class ModelRegistry {
 			});
 		}
 
+		if (config.stream || config.generateImage) {
+			const hooks: ProviderHooks = { ...getProviderHooks(providerName) };
+			if (config.stream) hooks.stream = config.stream;
+			if (config.generateImage) hooks.generateImage = config.generateImage;
+			setProviderHooks(providerName, hooks);
+		}
+		if (config.webSearch) this.#runtimeWebSearches.set(providerName, config.webSearch);
+		// Rules change how every model of the provider builds; the rebuild below re-resolves them.
+		if (config.rules) setRuntimeProviderRule(providerName, config.rules);
+
 		let sourceHandoff = false;
 		if (sourceId) {
 			this.#registeredProviderSources.add(sourceId);
@@ -4400,7 +4431,7 @@ export class ModelRegistry {
 			this.#runtimeProvidersBySource.set(sourceId, sourceProviders);
 			this.#runtimeProviderSourceByName.set(providerName, sourceId);
 		}
-		if (sourceHandoff) {
+		if (sourceHandoff || config.rules) {
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 		}
 
@@ -4773,6 +4804,18 @@ export interface ProviderConfigInput {
 	transport?: Model<Api>["transport"];
 	/** Optional normalized usage fetcher; takes precedence over built-in usage providers. */
 	usage?: UsageProvider;
+	/** Streams every request to this provider's models in place of their api's adapter ({@link ProviderHooks.stream}). */
+	stream?(model: Model<Api>, context: Context, options: StreamOptions): AssistantMessageEventStream;
+	/** Generates images with this provider's image models ({@link ProviderHooks.generateImage}). */
+	generateImage?(
+		model: Model<Api>,
+		request: ImageGenerationRequest,
+		options: ImageGenerationOptions,
+	): Promise<ImageGenerationResult>;
+	/** Runs grounded web searches for this provider's models in place of their grounding backend's request. */
+	webSearch?(params: SearchParams): Promise<SearchResponse>;
+	/** Rule directives for every model of this provider, as a KDL `provider` block sets them (`{ "prompt-perturbation": true }`). */
+	rules?: Readonly<Record<string, unknown>>;
 	oauth?: {
 		name: string;
 		login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials | string>;

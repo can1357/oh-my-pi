@@ -6,8 +6,10 @@
  * (`ModelRegistry.subscribeMirror`) into wire form. Runtime provider configs
  * keep their functions as remote callables; the ones a worker calls
  * synchronously (OAuth `getApiKey`, `modifyModels`) are `rpcSync`; a custom
- * `streamSimple` stays on main behind a {@link MainStreamSimple}; `usage` stays
- * on main, whose `AuthStorage` already serves it.
+ * `streamSimple` and a provider `stream` hook stay on main behind a
+ * {@link MainStreamSimple}; `generateImage` and `webSearch` hooks run on main
+ * (search against main's `AuthStorage` and registry); `usage` stays on main,
+ * whose `AuthStorage` already serves it.
  *
  * Worker side: {@link fromWireMirrorBatch} rebuilds the configs (a custom API
  * streams through main via {@link proxyStreamSimple}; a `fetch` override in its
@@ -21,6 +23,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
 import { type FetchImpl, logger } from "@oh-my-pi/pi-utils";
 import type {
+	ModelRegistry,
 	ModelRegistryMirrorBatch,
 	ModelRegistryMirrorChange,
 	ModelRegistryOwner,
@@ -30,12 +33,16 @@ import type {
 import { declaredTools } from "../../utils/tool-declarations";
 import { type RemoteObject, registerRpcError, rpcSync } from "../rpc";
 import type {
+	MainGenerateImage,
 	MainStreamSimple,
+	MainWebSearch,
 	ModelRegistryProtocol,
 	WireFetchResponse,
+	WireImageOptions,
 	WireMirrorBatch,
 	WireMirrorChange,
 	WireProviderConfig,
+	WireSearchParams,
 	WireStreamOptions,
 	WorkerFetch,
 } from "./auth-protocol";
@@ -46,6 +53,9 @@ registerRpcError("TypeError", message => new TypeError(message));
 
 type StreamSimple = NonNullable<ProviderConfigInput["streamSimple"]>;
 type ProviderOAuth = NonNullable<ProviderConfigInput["oauth"]>;
+type ProviderStream = NonNullable<ProviderConfigInput["stream"]>;
+type ProviderImage = NonNullable<ProviderConfigInput["generateImage"]>;
+type ProviderSearch = NonNullable<ProviderConfigInput["webSearch"]>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main side
@@ -133,21 +143,48 @@ function oauthOnMain(oauth: ProviderOAuth): ProviderOAuth {
 	return view;
 }
 
-function toWireProviderConfig(config: ProviderConfigInput): WireProviderConfig {
-	const { streamSimple, usage: _usage, oauth, ...rest } = config;
+/** Run a provider `generateImage` hook here for a worker, over the worker's `fetch`. */
+function generateImageOnMain(generateImage: ProviderImage): MainGenerateImage {
+	return (model, request, { fetchOnWorker, ...options }) =>
+		generateImage(model, request, fetchOnWorker ? { ...options, fetch: fetchThroughWorker(fetchOnWorker) } : options);
+}
+
+/** Run a provider `webSearch` hook here for a worker, against this thread's `AuthStorage` and `registry`. */
+function webSearchOnMain(webSearch: ProviderSearch, registry: ModelRegistry): MainWebSearch {
+	return ({ fetchOnWorker, ...params }) =>
+		webSearch({
+			...params,
+			authStorage: registry.authStorage,
+			modelRegistry: registry,
+			fetch: fetchOnWorker ? fetchThroughWorker(fetchOnWorker) : undefined,
+		});
+}
+
+function toWireProviderConfig(config: ProviderConfigInput, registry: ModelRegistry): WireProviderConfig {
+	const { streamSimple, stream, generateImage, webSearch, usage: _usage, oauth, ...rest } = config;
 	const wire: WireProviderConfig = rest;
 	if (oauth) wire.oauth = oauthOnMain(oauth);
 	if (streamSimple) wire.streamOnMain = streamOnMain(streamSimple);
+	if (stream) {
+		// A hook receives the request's resolved key (see `ProviderHooks.stream`), never a resolver.
+		wire.streamHookOnMain = streamOnMain((model, context, options) => {
+			const { apiKey, ...rest } = options ?? {};
+			return stream(model, context, { ...rest, apiKey: typeof apiKey === "string" ? apiKey : undefined });
+		});
+	}
+	if (generateImage) wire.generateImageOnMain = generateImageOnMain(generateImage);
+	if (webSearch) wire.webSearchOnMain = webSearchOnMain(webSearch, registry);
 	return wire;
 }
 
-function toWireChange(change: ModelRegistryMirrorChange): WireMirrorChange {
-	return change.kind === "register" ? { ...change, config: toWireProviderConfig(change.config) } : change;
-}
-
-/** Main side: a registry change batch in the form a worker mirror receives. */
-export function toWireMirrorBatch(batch: ModelRegistryMirrorBatch): WireMirrorBatch {
-	return { ...batch, changes: batch.changes.map(toWireChange) };
+/** Main side: a change batch of `registry` in the form a worker mirror receives. */
+export function toWireMirrorBatch(batch: ModelRegistryMirrorBatch, registry: ModelRegistry): WireMirrorBatch {
+	return {
+		...batch,
+		changes: batch.changes.map(change =>
+			change.kind === "register" ? { ...change, config: toWireProviderConfig(change.config, registry) } : change,
+		),
+	};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,9 +284,33 @@ export function proxyStreamSimple(streamOnMain: MainStreamSimple): StreamSimple 
 	};
 }
 
+/** Worker side: a provider `generateImage` hook that runs on main; this thread's `fetch` is bridged. */
+function proxyGenerateImage(onMain: MainGenerateImage): ProviderImage {
+	return (model, request, { fetch, ...options }) => {
+		const wire: WireImageOptions = fetch ? { ...options, fetchOnWorker: workerFetch(fetch) } : options;
+		return onMain(model, request, wire);
+	};
+}
+
+/** Worker side: a provider `webSearch` hook that runs on main; thread-bound services stay here. */
+function proxyWebSearch(onMain: MainWebSearch): ProviderSearch {
+	return ({ authStorage: _authStorage, modelRegistry: _modelRegistry, fetch, ...params }) => {
+		const wire: WireSearchParams = fetch ? { ...params, fetchOnWorker: workerFetch(fetch) } : params;
+		return onMain(wire);
+	};
+}
+
 function fromWireProviderConfig(wire: WireProviderConfig): ProviderConfigInput {
-	const { streamOnMain, ...config } = wire;
-	return streamOnMain ? { ...config, streamSimple: proxyStreamSimple(streamOnMain) } : config;
+	const { streamOnMain, streamHookOnMain, generateImageOnMain, webSearchOnMain, ...rest } = wire;
+	const config: ProviderConfigInput = rest;
+	if (streamOnMain) config.streamSimple = proxyStreamSimple(streamOnMain);
+	if (streamHookOnMain) {
+		const stream: ProviderStream = proxyStreamSimple(streamHookOnMain);
+		config.stream = stream;
+	}
+	if (generateImageOnMain) config.generateImage = proxyGenerateImage(generateImageOnMain);
+	if (webSearchOnMain) config.webSearch = proxyWebSearch(webSearchOnMain);
+	return config;
 }
 
 function fromWireChange(change: WireMirrorChange): ModelRegistryMirrorChange {

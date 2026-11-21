@@ -235,6 +235,25 @@ usage provider's `cacheVersion`, normalized base URL, and credential identity. W
 distinct from the built-in one so processes without the extension (older sessions,
 `--no-extensions` runs, SDK scripts) never serve their reports to yours, or yours to them.
 
+#### Taking over a built-in provider
+
+Four fields let an extension replace parts of an existing provider without redefining its models. The models keep their `api`, so option mapping, credentials, and catalog policy behave as before:
+
+- `stream(model, context, options)`: handles every request to the provider's models instead of the built-in adapter for their api. `options` are already mapped for that api (for example `GoogleGeminiCliOptions`) and carry the provider's key.
+- `generateImage(model, request, options)`: handles image generation for the provider's image models.
+- `webSearch(params)`: runs the grounded search request for the provider's models. Availability checks and labels still come from the model's grounding backend.
+- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "prompt-perturbation": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
+
+```ts
+pi.registerProvider("google-generative-ai", {
+	stream: myGeminiStream,
+	generateImage: myImageGenerator,
+	rules: { "prompt-perturbation": true },
+});
+```
+
+These overrides last only while the registration is active. Unregistering the provider or unloading the extension restores the built-in behavior. Subagents in worker threads run these hooks on the main thread. Thread-local stream state, such as `providerSessionState`, stays in the worker.
+
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 
 A provider's `apiKey` (a literal key or an environment variable name) normally overrides any stored OAuth or `/login` credential for that provider. When the registration also supplies `oauth`, `apiKey` becomes a fallback instead: the key the user saved with `/login` wins, and `apiKey` is used only when no stored login credential exists. This keeps an unset env-var name from being sent as the literal key. Registering a built-in provider id with both `oauth` and a gateway `apiKey` therefore lets a stored upstream credential take precedence over the gateway key.
