@@ -72,10 +72,21 @@ export interface OutputSummary {
 	artifactError?: OutputArtifactError;
 }
 
+/**
+ * Claims a spill file (`local://<id>.log`). An empty result means no spill can
+ * be saved (e.g. the owning session was released); the sink then keeps only
+ * its inline view.
+ */
+export type ArtifactAllocator = () => Promise<{ id?: string; path?: string }>;
+
 /** Inline capture, artifact storage, and streaming callback options. */
 export interface OutputSinkOptions {
-	artifactPath?: string;
-	artifactId?: string;
+	/**
+	 * Called at most once, when output first stops fitting the inline view
+	 * (overflow, column cap, or `inline` substitution). Output that fits never
+	 * claims a spill file.
+	 */
+	allocateArtifact?: ArtifactAllocator;
 	/**
 	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
 	 * window and rolling tail window share this budget, so a composed
@@ -954,15 +965,15 @@ export class OutputSink {
 	/** Set once a cut line's number may not match the artifact; the range is then withheld. */
 	#columnCutLinesUnmapped = false;
 	#file?: {
-		path: string;
-		artifactId?: string;
+		artifactId: string;
 		sink: Bun.FileSink;
 	};
 
-	// Queue of chunks waiting for the file sink to be created.
+	/** Set by the first chunk that needs the artifact; every later chunk is mirrored too. */
+	#spilling = false;
+	/** Capped artifact bytes held while the spill file is claimed and opened. */
 	#pendingFileWrites?: string[];
-	#fileReady = false;
-	/** In-flight sink creation, awaited by finalize/dispose so a fd opened by a late chunk is still released. */
+	/** In-flight claim and open, awaited by finalize/dispose so a fd opened by a late chunk is still released. */
 	#fileCreation?: Promise<void>;
 	/** Set once the spill file has been closed; guards double-close and post-finalize resurrection. */
 	#finalized = false;
@@ -970,8 +981,8 @@ export class OutputSink {
 	#artifactError?: OutputArtifactError;
 	#pendingArtifactWrites?: Set<Promise<void>>;
 
-	readonly #artifactPath?: string;
-	readonly #artifactId?: string;
+	/** Cleared when a claim comes back empty, so later chunks stop mirroring. */
+	#allocateArtifact?: ArtifactAllocator;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string) => void;
@@ -998,8 +1009,7 @@ export class OutputSink {
 	#artifactElidedBytes = 0;
 	constructor(options?: OutputSinkOptions) {
 		const {
-			artifactPath,
-			artifactId,
+			allocateArtifact,
 			spillThreshold = DEFAULT_MAX_BYTES,
 			headBytes = 0,
 			maxColumns = 0,
@@ -1008,8 +1018,7 @@ export class OutputSink {
 			artifactMaxBytes = ARTIFACT_DEFAULT_MAX_BYTES,
 			artifactHeadBytes,
 		} = options ?? {};
-		this.#artifactPath = artifactPath;
-		this.#artifactId = artifactId;
+		this.#allocateArtifact = allocateArtifact;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
@@ -1116,10 +1125,10 @@ export class OutputSink {
 
 		// Mirror the complete chunk to the artifact file whenever the inline
 		// representation differs, overflows memory, hits the column cap, or a
-		// prior chunk already opened the artifact.
+		// prior chunk already started the spill.
 		if (
-			this.#artifactPath &&
-			(this.#file != null || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
+			this.#allocateArtifact &&
+			(this.#spilling || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
 		) {
 			this.#writeToFile(chunk);
 		}
@@ -1298,27 +1307,23 @@ export class OutputSink {
 	}
 
 	/**
-	 * Write a chunk to the artifact file. Handles the async file sink creation
-	 * by queuing writes until the sink is ready, then draining synchronously.
-	 * Once the sink is up, every byte flows through {@link #emitToSink} which
-	 * owns the head + tail cap so artifacts cannot grow beyond
-	 * `#artifactMaxBytes` on disk.
+	 * Write a chunk to the artifact file. The first call claims the file
+	 * asynchronously; every byte flows through {@link #emitToSink}, which owns
+	 * the head + tail cap, so artifacts cannot grow beyond `#artifactMaxBytes`
+	 * on disk and bytes queued during the claim stay bounded the same way.
 	 */
 	#writeToFile(chunk: string): void {
 		if (this.#artifactError) return;
-		if (this.#fileReady && this.#file) {
-			this.#emitToSink(chunk);
-			return;
+		if (!this.#spilling && this.#allocateArtifact) {
+			this.#spilling = true;
+			this.#pendingFileWrites = [];
+			// Nothing was cut before the first spill, so the inline windows still
+			// hold every earlier byte verbatim; they lead the artifact.
+			this.#emitToSink(this.#head);
+			this.#emitToSink(this.#buffer);
+			this.#fileCreation = this.#createFileSink(this.#allocateArtifact);
 		}
-		// File sink not yet created — queue this chunk and kick off creation.
-		// The queue is bounded only by how many chunks arrive before the open
-		// resolves (typically <2). The cap is enforced on drain.
-		if (!this.#pendingFileWrites) {
-			this.#pendingFileWrites = [chunk];
-			this.#fileCreation = this.#createFileSink();
-		} else {
-			this.#pendingFileWrites.push(chunk);
-		}
+		this.#emitToSink(chunk);
 	}
 
 	/**
@@ -1333,7 +1338,7 @@ export class OutputSink {
 	 * contract.
 	 */
 	#emitToSink(chunk: string): void {
-		if (!this.#file || this.#artifactError || chunk.length === 0) return;
+		if (this.#artifactError || chunk.length === 0) return;
 		if (this.#artifactMaxBytes === 0) {
 			this.#writeArtifact(chunk);
 			return;
@@ -1400,7 +1405,12 @@ export class OutputSink {
 	}
 
 	#writeArtifact(chunk: string, operation: OutputArtifactError = "write"): void {
-		if (!this.#file || this.#artifactError) return;
+		if (this.#artifactError) return;
+		if (!this.#file) {
+			// Still claiming the spill file; dropped if the claim comes back empty.
+			this.#pendingFileWrites?.push(chunk);
+			return;
+		}
 		try {
 			const written = this.#file.sink.write(chunk);
 			if (typeof written !== "number") {
@@ -1421,36 +1431,23 @@ export class OutputSink {
 		}
 	}
 
-	async #createFileSink(): Promise<void> {
-		if (!this.#artifactPath || this.#fileReady || this.#artifactError) return;
+	/** Claim and open the spill file, then drain the bytes queued meanwhile. An empty claim stops mirroring. */
+	async #createFileSink(allocate: ArtifactAllocator): Promise<void> {
 		try {
+			const { id, path } = await allocate();
+			if (!id || !path) {
+				this.#allocateArtifact = undefined;
+				this.#pendingFileWrites = undefined;
+				return;
+			}
 			// Bun's Windows FileSink defers the open: an unopenable target (e.g. a
 			// directory) only fails on the first write, misreported as a write
 			// failure. Probe the open eagerly so it stays classified — and terminal.
-			if (process.platform === "win32") fs.closeSync(fs.openSync(this.#artifactPath, "w"));
-			const sink = Bun.file(this.#artifactPath).writer();
-			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };
-			this.#fileReady = true;
-
-			// Head-retained bytes precede the rolling tail buffer in the capture.
-			// Route through #emitToSink so they count against the artifact head
-			// budget — a direct sink.write would let them escape the cap.
-			if (this.#head.length > 0) {
-				this.#emitToSink(this.#head);
-			}
-
-			// Flush existing buffer to file BEFORE it gets trimmed further.
-			if (this.#buffer.length > 0) {
-				this.#emitToSink(this.#buffer);
-			}
-
-			// Drain any chunks that arrived while the sink was being created.
-			if (this.#pendingFileWrites) {
-				for (const pending of this.#pendingFileWrites) {
-					this.#emitToSink(pending);
-				}
-				this.#pendingFileWrites = undefined;
-			}
+			if (process.platform === "win32") fs.closeSync(fs.openSync(path, "w"));
+			this.#file = { artifactId: id, sink: Bun.file(path).writer() };
+			const queued = this.#pendingFileWrites ?? [];
+			this.#pendingFileWrites = undefined;
+			for (const chunk of queued) this.#writeArtifact(chunk);
 		} catch {
 			this.#recordArtifactError("open");
 		}

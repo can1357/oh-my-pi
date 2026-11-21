@@ -170,7 +170,7 @@ function liveSessionHeaders(
 		"x-session-id": realtimeSessionId,
 		[OPENAI_HEADERS.ORIGINATOR]: LIVE_ORIGINATOR,
 		[OPENAI_HEADERS.VERSION]: getCodexClientVersion(),
-		[OPENAI_HEADERS.SCOPED_SESSION_ID]: sessionId,
+		[OPENAI_HEADERS.SESSION_ID]: sessionId,
 		[OPENAI_HEADERS.THREAD_ID]: sessionId,
 	};
 	const accountId = access.accountId ?? getCodexAccountId(access.accessToken);

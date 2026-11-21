@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { Settings } from "../config/settings";
 import { DisasmUnavailableError, type WorkerRuntime } from "../disasm/backend";
+import { memoizeWorkerRuntime } from "../disasm/python-runtime";
 import { filterEnv, resolveExplicitPythonRuntime } from "../eval/py/runtime";
 import type { ToolSession } from "../tools";
 import { ensureGhidraInstall, ensureJdk, ensurePyGhidraVenv } from "./install";
@@ -18,7 +19,6 @@ interface PendingInstallation {
 	promise: Promise<GhidraInstallation>;
 }
 
-const runtimes = new Map<string, Promise<WorkerRuntime>>();
 let installation: PendingInstallation | undefined;
 
 /**
@@ -29,15 +29,9 @@ let installation: PendingInstallation | undefined;
 export function resolveGhidraRuntime(session: ToolSession): Promise<WorkerRuntime> {
 	const python = cfgGhidraPython.get(session.settings)?.trim() || undefined;
 	const configured = cfgGhidraInstallDir.get(session.settings)?.trim() || undefined;
-	const key = `${python ?? ""}\0${configured ?? ""}\0${session.cwd}`;
-	const cached = runtimes.get(key);
-	if (cached) return cached;
-	const promise = resolveRuntime(python, configured, session.cwd);
-	runtimes.set(key, promise);
-	promise.catch(() => {
-		if (runtimes.get(key) === promise) runtimes.delete(key);
-	});
-	return promise;
+	return memoizeWorkerRuntime("ghidra", [python, configured, session.cwd], () =>
+		resolveRuntime(python, configured, session.cwd),
+	);
 }
 
 /** Share identical installation requests, but serialize different overrides without reusing their results. */

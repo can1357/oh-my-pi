@@ -85,7 +85,7 @@ interface CursorExecBridgeOptions {
 	cwd: string;
 	getCwd?: () => string;
 	tools: Map<string, AgentTool>;
-	/** Resolves execution overrides (mounted-device permission wrappers) before the canonical map. */
+	/** Resolves execution overrides (mounted tool-command permission wrappers) before the canonical map. */
 	getExecutableTool?: (name: string) => AgentTool | undefined;
 	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session

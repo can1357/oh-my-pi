@@ -2278,6 +2278,62 @@ describe("advisor", () => {
 			expect(block?.type === "toolCall" ? block.thoughtSignature : "kept").toBeUndefined();
 		});
 
+		it("drops a chat-completions reasoning_details envelope when it rewrites a later thinking block", async () => {
+			const secret = "ADVISOR_DETAILS_SECRET_123";
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			// The first thinking block holds the turn's received `reasoning_details`,
+			// which carry the second block's raw text.
+			const assistant = {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: "Plan.",
+						thinkingSignature: JSON.stringify({
+							reasoningDetails: [{ type: "reasoning.text", text: `Plan.Use ${secret} now.`, index: 0 }],
+							field: "reasoning",
+						}),
+					},
+					{ type: "text", text: "Working." },
+					{ type: "thinking", thinking: `Use ${secret} now.`, thinkingSignature: "reasoning" },
+				],
+				api: "openai-completions",
+				provider: "openrouter",
+				model: "google/gemini-3-pro-preview",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 1,
+			} as AssistantMessage;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [assistant] as AgentMessage[] },
+			};
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => [{ role: "user", content: "go on", timestamp: 2 } as AgentMessage],
+				obfuscator,
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			runtime.onTurnEnd();
+			await Promise.resolve();
+
+			expect(JSON.stringify(agent.state.messages)).not.toContain(secret);
+			const first = (agent.state.messages[0] as AssistantMessage).content[0];
+			expect(first).toMatchObject({ type: "thinking", thinking: "Plan.", thinkingSignature: "reasoning" });
+		});
+
 		it("falls back to one redacted update when a regex secret spans source messages", async () => {
 			const obfuscator = new SecretObfuscator([{ type: "regex", content: "BEGIN[\\s\\S]*END" }]);
 			const promptInputs: Array<string | AgentMessage[]> = [];

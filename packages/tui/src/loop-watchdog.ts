@@ -61,7 +61,8 @@ const CPU_BUSY_RATIO = 0.01;
  * With a sampler, a logged block also carries `cause`, `causeShare` and `top`
  * from {@link summarizeBlock}: the stack frames that dominated the blocked
  * window, which name the culprit where no phase label does. Every valid tick
- * drains the sampler, logged or not, so its buffer never outgrows one interval.
+ * drains the sampler, logged or not, so its buffer never outgrows one interval,
+ * and stop() stops it.
  */
 export class LoopWatchdog {
 	#intervalMs: number;
@@ -125,6 +126,7 @@ export class LoopWatchdog {
 		this.#generation++;
 		this.#handle?.cancel?.();
 		this.#handle = undefined;
+		this.#sampler?.stop();
 		resetLoopPhaseWindow();
 	}
 

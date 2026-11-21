@@ -3,6 +3,7 @@
  * and text deltas, at most one tool call, then a terminal `done` or `error`.
  */
 import type { PromptResponse } from "@oh-my-pi/pi-utils/acp";
+import type { FinalizeResult } from "../../error/finalize";
 import type { Api, AntigravityCliPayload, AssistantMessage, Model, ToolCall } from "../../types";
 import type { AssistantMessageEventStream } from "../../utils/event-stream";
 
@@ -117,13 +118,15 @@ export class StepWriter {
 	}
 
 	/** Fail once without allowing later ACP events to mutate the published result. */
-	fail(reason: "aborted" | "error", message: string): void {
+	fail(result: FinalizeResult): void {
 		if (this.done) return;
 		this.#endText();
 		this.#endThinking();
-		this.output.stopReason = reason;
-		this.output.errorMessage = message;
-		this.#stream.push({ type: "error", reason, error: this.output });
+		this.output.stopReason = result.stopReason;
+		this.output.errorMessage = result.message;
+		this.output.errorStatus = result.status;
+		this.output.errorId = result.id;
+		this.#stream.push({ type: "error", reason: result.stopReason, error: this.output });
 	}
 
 	#endText(): void {
