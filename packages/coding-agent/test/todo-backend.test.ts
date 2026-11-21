@@ -1054,37 +1054,50 @@ describe("todo backend", () => {
 			expect(session.getTodoPhases()).toEqual([]);
 		});
 
-		it("whatever lands as the backend accepts, the change is committed in its own session or not at all, and the backend is sent nothing older than omp's list", async () => {
-			// `ends` is what omp may hold afterwards, `outcomes` how the call may end. `unsent` marks an
-			// edit the backend is not sent: once the call has committed, it keeps the call's list.
-			const cases: Array<{
-				land: (session: AgentSession, abort: AbortController) => unknown;
-				ends: string[][];
-				outcomes: string[];
-				unsent?: boolean;
-			}> = [
-				{ land: (_session, abort) => abort.abort(), ends: [["a"], ["a", "b"]], outcomes: ["aborted", "committed"] },
-				{ land: session => session.newSession(), ends: [[]], outcomes: ["committed", "failed"] },
-				{
-					land: session => session.setTodoPhases(list("edit")),
-					ends: [["edit"]],
-					outcomes: ["committed", "failed"],
+		// What may land as the backend accepts. `ends` is what omp may hold afterwards, `outcomes` how the
+		// call may end. `unsent` marks an edit the backend is not sent: once the call has committed, it
+		// keeps the call's list.
+		const landings: Array<{
+			what: string;
+			land: (session: AgentSession, abort: AbortController) => unknown;
+			ends: string[][];
+			outcomes: string[];
+			unsent?: boolean;
+		}> = [
+			{
+				what: "an abort",
+				land: (_session, abort) => abort.abort(),
+				ends: [["a"], ["a", "b"]],
+				outcomes: ["aborted", "committed"],
+			},
+			{ what: "/new", land: session => session.newSession(), ends: [[]], outcomes: ["committed", "failed"] },
+			{
+				what: "an edit",
+				land: session => session.setTodoPhases(list("edit")),
+				ends: [["edit"]],
+				outcomes: ["committed", "failed"],
+			},
+			{
+				what: "an edit made while no backend was selected for a moment",
+				land: session => {
+					cfgTodoBackend.override(session.settings, "native");
+					session.setTodoPhases(list("edit"));
+					cfgTodoBackend.override(session.settings, "tracker");
 				},
-				{
-					// An edit made while no backend was selected for a moment.
-					land: session => {
-						cfgTodoBackend.override(session.settings, "native");
-						session.setTodoPhases(list("edit"));
-						cfgTodoBackend.override(session.settings, "tracker");
-					},
-					ends: [["edit"]],
-					outcomes: ["committed", "failed"],
-					unsent: true,
-				},
-				// A client that sets the list omp already has.
-				{ land: session => session.setTodoPhases(list("a")), ends: [["a"], ["a", "b"]], outcomes: ["committed"] },
-			];
-			for (const { land, ends, outcomes, unsent } of cases) {
+				ends: [["edit"]],
+				outcomes: ["committed", "failed"],
+				unsent: true,
+			},
+			{
+				what: "a client setting the list omp already has",
+				land: session => session.setTodoPhases(list("a")),
+				ends: [["a"], ["a", "b"]],
+				outcomes: ["committed"],
+			},
+		];
+		it.each(landings)(
+			"when $what lands as the backend accepts, the change is committed in its own session or not at all, and the backend is sent nothing older than omp's list",
+			async ({ land, ends, outcomes, unsent }) => {
 				const seen = { ends: new Set<string>(), outcomes: new Set<string>() };
 				// It lands while the backend still decides (`steps` below zero), or some microtasks after
 				// its answer: before omp has read the answer, or after the commit. Both sides are seen
@@ -1127,8 +1140,8 @@ describe("todo backend", () => {
 				}
 				expect([...seen.ends].sort()).toEqual(ends.map(end => JSON.stringify(end)).sort());
 				expect([...seen.outcomes].sort()).toEqual(outcomes);
-			}
-		});
+			},
+		);
 
 		it("an abort ends the call at once, also behind a held call; the backend is not asked and is sent nothing more", async () => {
 			const backend = tracker("tracker", true);
