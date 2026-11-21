@@ -171,7 +171,7 @@ describe("task live progress rendering", () => {
 			"line 5",
 			"line 6",
 			"Wall time: 0.03 seconds",
-			"[raw output: artifact://123]",
+			"[raw output: local://123.log]",
 		];
 		const progress = makeProgress([...chronological].reverse());
 

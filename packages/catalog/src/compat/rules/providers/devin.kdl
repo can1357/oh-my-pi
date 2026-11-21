@@ -40,6 +40,19 @@ provider "devin" {
 	// otherwise fail and silently fall back to the next model (issue #18423).
 	temperature-floor 0.0001
 
+	// Cascade refuses a request whose decompressed protobuf exceeds 32 MiB
+	// (`resource_exhausted`). It relays its upstream's image rules: Claude 600
+	// images, 10 MiB base64 each, 8,000 px edges (3,000 px past 20 images); GPT
+	// 1,500 images; Gemini counts images only against context. On Devin's own
+	// host the byte budget bounds 60 images; a custom baseUrl gets no byte
+	// clamp, so 40 images at the 500 KiB resize target (682,667 B base64 each,
+	// 27.3 MB in all) stay under the limit.
+	image-count-budget 40
+	official-image-count-budget 60
+	inline-image-byte-budget 24000000
+	request-body-byte-limit 32000000
+	catalog-endpoint-budgets #true
+
 	// Enterprise (ACUs) fallback prices: https://docs.devin.ai/desktop/models
 	// (as of 2026-11-05). Seed only when upstream reports no token price.
 	// Self-serve SWE-2 Flash is free until 2026-12-04 18:00 UTC; SWE-2 in
@@ -102,6 +115,58 @@ provider "devin" {
 		}
 	}
 
+	// Gemini promotions. GetCliModelConfigs reports the account's promo price
+	// and its end (`promoStatus.endDate`) but no list price, so each patch
+	// carries only a dated card: the reported price stands until the promo
+	// ends, then the rate the catalog reported before the promo applies.
+	// Gemini 3.7 and 3.8 Flash: introductory pricing through 2026-12-31 Pacific,
+	// then list (https://docs.devin.ai/desktop/models).
+	class "gemini" {
+		family "flash" {
+			revision ">=3.7 <3.9" {
+				cost-patch {
+					effective-rates {
+						list-price {
+							effective-from "2027-01-01T08:00:00Z"
+							input 1.5
+							output 7.5
+							cache-read 0.15
+						}
+					}
+				}
+			}
+		}
+	}
+	// Gemini 4 Argon: 50% off list until 2026-12-01 08:00 UTC (same docs page).
+	// residue: Argon, Carbon and Hydrogen share one class rank and no family;
+	// each list names the logical id plus its raw effort uids, as for SWE-2.
+	models "gemini-4-argon" "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high" {
+		cost-patch {
+			effective-rates {
+				list-price {
+					effective-from "2026-12-01T08:00:00Z"
+					input 4
+					output 20
+					cache-read 0.2
+				}
+			}
+		}
+	}
+	// Gemini 4 Carbon: promo until 2026-11-24 16:00 UTC; the docs list no
+	// Carbon price, so list is the catalog's pre-promo rate.
+	models "gemini-4-carbon" "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high" {
+		cost-patch {
+			effective-rates {
+				list-price {
+					effective-from "2026-11-24T16:00:00Z"
+					input 4
+					output 20
+					cache-read 0.2
+				}
+			}
+		}
+	}
+
 	// SWE-1.7 and GLM-5.2 High: plan-included on PRO, no published promo
 	// schedule — enterprise list is the only published per-token price.
 	models "swe-1-7" "swe-1-7-medium" {
@@ -131,6 +196,10 @@ provider "devin" {
 	// below, so an unpublished generation records no cache-write price.
 	class "anthropic" {
 		cache-write-rate 1.25
+		// Past 20 images Claude rejects any image edge over 3,000 px, and Devin
+		// relays images as sent.
+		image-count-budget 20
+		official-image-count-budget 20
 	}
 	class "openai" {
 		family "gpt" {
@@ -205,6 +274,32 @@ provider "devin" {
 					output-multiplier 1.5
 				}
 			}
+		}
+	}
+	// Devin bills Gemini images at a fixed ~1,089 tokens from 512 px to 4,096 px
+	// (Google's fixed `media_resolution` budget passed through), under the
+	// lineage's unverified 1,120. verified: billing matched across 8 sizes on
+	// Gemini 3.7 Flash, 4 Carbon and 4 Neon; 3.5/3.8 Flash and 4 Hydrogen/Argon
+	// billed 1,089-1,091 in a single two-point check and stay on the lineage
+	// rule until measured.
+	class "gemini" {
+		family "flash" {
+			revision ">=3.7 <3.8" {
+				image-tokenization {
+					regime "fixed"
+					verified #true
+					tokens 1089
+				}
+			}
+		}
+	}
+	// residue: Carbon and Neon share their class rank with Argon and Hydrogen
+	// and have no family; the lists name each logical id plus its raw effort uids.
+	models "gemini-4-carbon" "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high" "gemini-4-neon" "gemini-4-neon-low" "gemini-4-neon-medium" "gemini-4-neon-high" "gemini-4-neon-xhigh" {
+		image-tokenization {
+			regime "fixed"
+			verified #true
+			tokens 1089
 		}
 	}
 	// residue: Gemini 2.5 Pro's legacy uid carries no model identity.

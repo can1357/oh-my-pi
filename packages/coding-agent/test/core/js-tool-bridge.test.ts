@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
+import {
+	EVAL_TIMEOUT_PAUSE_OP,
+	EVAL_TIMEOUT_RESUME_OP,
+	isEvalTimeoutControlEvent,
+} from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function createTool(name: string, execute: AgentTool["execute"]): AgentTool {
@@ -64,13 +69,40 @@ describe("callSessionTool", () => {
 			{
 				session,
 				emitStatus: event => {
-					statuses.push(event);
+					if (!isEvalTimeoutControlEvent(event)) statuses.push(event);
 				},
 			},
 		);
 
 		expect(result).toBe("hello");
 		expect(statuses).toEqual([expect.objectContaining({ op: "read", path: "/tmp/demo.txt", chars: 5 })]);
+	});
+
+	it("returns a large result whole, without the model's artifact spill or notices", async () => {
+		const payload = JSON.stringify({
+			items: Array.from({ length: 4000 }, (_, i) => ({ id: i, title: `item ${i}` })),
+		});
+		const tool = wrapToolWithMetaNotice(
+			createTool("mcp_list", async () => ({ content: [{ type: "text", text: payload }] })),
+		);
+		const saved: string[] = [];
+		const session: ToolSession = {
+			...createSession([tool]),
+			getToolContext: () =>
+				({
+					sessionManager: {
+						saveArtifact: async (text: string) => {
+							saved.push(text);
+							return "1";
+						},
+					},
+				}) as unknown as AgentToolContext,
+		};
+
+		const result = await callSessionTool("mcp_list", {}, { session });
+
+		expect(result).toBe(payload);
+		expect(saved).toEqual([]);
 	});
 
 	it("settles an interrupted speculative wait without starting ordinary tool execution", async () => {
@@ -745,7 +777,7 @@ describe("callSessionTool", () => {
 		await callSessionTool(
 			"checklist",
 			{ op: "done", task: "Persist alias" },
-			{ session, emitStatus: event => statuses.push(event) },
+			{ session, emitStatus: event => !isEvalTimeoutControlEvent(event) && statuses.push(event) },
 		);
 
 		expect(lookup).toHaveBeenCalledTimes(1);
@@ -756,7 +788,18 @@ describe("callSessionTool", () => {
 		expect(persisted).toHaveLength(1);
 	});
 
-	it("pauses the watchdog for wire aliases of delegated work tools", async () => {
+	it("passes a FREEFORM tool's raw string as its input field", async () => {
+		const tool = {
+			...createTool("edit", async (_id: string, args: unknown) => ({
+				content: [{ type: "text" as const, text: (args as { input: string }).input }],
+			})),
+			parameters: type({ input: "string" }),
+			customFormat: { syntax: "lark" as const, definition: "start: /.+/" },
+		};
+		expect(await callSessionTool("edit", "*** patch", { session: createSession([tool]) })).toBe("*** patch");
+	});
+
+	it("pauses the watchdog for session tools reached through wire aliases", async () => {
 		for (const [name, alias] of [
 			["wait", "join_jobs"],
 			["task", "delegate"],
@@ -805,9 +848,13 @@ describe("callSessionTool", () => {
 		await callSessionTool(
 			"todo",
 			{ op: "done", task: "Task 0" },
-			{ session, emitStatus: event => statuses.push(event) },
+			{ session, emitStatus: event => !isEvalTimeoutControlEvent(event) && statuses.push(event) },
 		);
-		await callSessionTool("todo", { op: "view" }, { session, emitStatus: event => statuses.push(event) });
+		await callSessionTool(
+			"todo",
+			{ op: "view" },
+			{ session, emitStatus: event => !isEvalTimeoutControlEvent(event) && statuses.push(event) },
+		);
 
 		expect(phases[0]?.tasks[0]?.status).toBe("completed");
 		expect(statuses.map(event => event.committed)).toEqual([true, false]);
@@ -846,7 +893,7 @@ describe("callSessionTool", () => {
 		const result = await callSessionTool(
 			"mcp__demo_fail",
 			{},
-			{ session, emitStatus: event => statuses.push(event) },
+			{ session, emitStatus: event => !isEvalTimeoutControlEvent(event) && statuses.push(event) },
 		);
 
 		expect(result).toEqual({
@@ -877,7 +924,11 @@ describe("callSessionTool", () => {
 		]);
 		const statuses: Array<Record<string, unknown>> = [];
 
-		const result = await callSessionTool("custom", {}, { session, emitStatus: event => statuses.push(event) });
+		const result = await callSessionTool(
+			"custom",
+			{},
+			{ session, emitStatus: event => !isEvalTimeoutControlEvent(event) && statuses.push(event) },
+		);
 
 		expect(result).toEqual({
 			text: "preview mismatch",
@@ -917,13 +968,20 @@ describe("callSessionTool", () => {
 
 	it("rejects checkpoint and rewind before reaching the registry", async () => {
 		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
-		const session = createSession([createTool("checkpoint", execute), createTool("rewind", execute)]);
+		const session = createSession([
+			createTool("checkpoint", execute),
+			createTool("rewind", execute),
+			createTool("yield", execute),
+		]);
 
 		await expect(callSessionTool("checkpoint", { goal: "g" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
 		);
 		await expect(callSessionTool("rewind", { report: "r" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
+		);
+		await expect(callSessionTool("yield", { data: { result: "done" } }, { session })).rejects.toThrow(
+			"call the direct `yield` tool",
 		);
 		expect(execute).not.toHaveBeenCalled();
 	});
@@ -932,6 +990,7 @@ describe("callSessionTool", () => {
 		for (const [name, alias] of [
 			["checkpoint", "savepoint"],
 			["rewind", "restorepoint"],
+			["yield", "submit"],
 		]) {
 			const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "not committed" }] });
 			const tool = { ...createTool(name, execute), customWireName: alias };

@@ -1,8 +1,8 @@
 import type { EmbeddingRequestFailure } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
-import { redactUrlForLog } from "../mcp/json-rpc";
 import { memoryNoticeErrorText } from "../memory-backend/messages";
 import { redactMemorySecrets } from "../memory-backend/redact";
 import type { AgentSession } from "../session/agent-session";
+import { redactUrlForLog } from "../utils/redact-url";
 
 /** `notice` source of Mnemopi embedding failures; print mode writes these to stderr. */
 export const MNEMOPI_NOTICE_SOURCE = "Mnemopi";

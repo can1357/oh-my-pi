@@ -15,6 +15,7 @@ import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import { noteAgentArrival } from "@oh-my-pi/pi-tui/overlays/agent-identity";
 export { MAIN_AGENT_ID };
 export type { AgentStatus, AgentMetricsSummary };
 
@@ -150,8 +151,8 @@ export interface AgentRegistryApi {
 	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean;
 	/** Accepted-but-running refs whose run already finished. */
 	staleAcceptedRuns(): AgentRef[];
-	/** Record a short activity gist for the work-aware roster. */
-	setActivity(id: string, activity: string): void;
+	/** Record a roster heartbeat for `id` when it still matches `expected`. */
+	setActivity(id: string, activity: string, expected?: AgentRefExpectation): void;
 	/** Attach a live session to `id` when it still matches `expected`. */
 	attachSession(
 		id: string,
@@ -233,6 +234,8 @@ export class AgentRegistry implements AgentRegistryApi {
 		};
 		Object.defineProperty(ref, kMintedRef, { value: true });
 		this.#refs.set(ref.id, ref);
+		// Name colours follow arrival order; a re-registered or restored ref keeps its original `createdAt`.
+		if (ref.kind === "sub") noteAgentArrival(ref.id, ref.createdAt);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
@@ -391,10 +394,9 @@ export class AgentRegistry implements AgentRegistryApi {
 	 * intent text can neither break the roster nor smuggle terminal escapes —
 	 * every caller is safe without sanitizing at its own call site.
 	 */
-	setActivity(id: string, activity: string): void {
+	setActivity(id: string, activity: string, expected?: AgentRefExpectation): void {
 		const ref = this.#refs.get(id);
-		if (!ref) return;
-		if (ref.status !== "running") return;
+		if (!ref || ref.status !== "running" || !this.#matchesExpected(ref, expected)) return;
 		const gist = oneLineLabel(activity);
 		ref.lastActivity = Date.now();
 		if (ref.activity === gist) return;

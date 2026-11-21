@@ -159,8 +159,11 @@ describe("TernTab on native DOM reads", () => {
 			request.read === "snapshot" ? SNAPSHOT : { nodes: request.value === "e1-2" ? [] : [BUTTON], total: 0 },
 		);
 		await tab.observe();
-		await expect(tab.id(9)).rejects.toThrow("Unknown element id 9. Run tab.observe() to refresh the element list.");
-		await expect(tab.id(2)).rejects.toThrow("Element id 2 is stale. Run tab.observe() again.");
+		// `id` answers a thenable element handle; awaiting it settles the lookup.
+		await expect(Promise.resolve(tab.id(9))).rejects.toThrow(
+			"Unknown element id 9. Run tab.observe() to refresh the element list.",
+		);
+		await expect(Promise.resolve(tab.id(2))).rejects.toThrow("Element id 2 is stale. Run tab.observe() again.");
 	});
 
 	it("clicks by resolving the selector natively and pressing the resolved point, with no page script", async () => {
@@ -330,7 +333,7 @@ describe("TernTab on native DOM reads", () => {
 		expect(kitCalls).toEqual([
 			["markAll", [{ engine: "pierce", query: 'select[name="state"][class="a \\"b\\""]' }]],
 			["unmark", [["t1"]]],
-			["select", [{ engine: "handle", token: "t2" }, ["ca"]]],
+			["select", [{ engine: "handle", token: "t2" }, [{ kind: "string", value: "ca" }]]],
 			["unmark", ["t2"]],
 		]);
 	});

@@ -366,10 +366,10 @@ If you want runtime conversion into a richer Python type, pass `decode=` to
 `host_tool(...)`. That lets you keep the JSON Schema contract on the wire while
 parsing the incoming argument object into a dataclass or model in the handler.
 
-`tool_execution_update`/`tool_execution_end` events for a top-level or
-`xd://` device dispatch carry the host tool's name, but a call made through the
-eval bridge only surfaces as the enclosing `eval` call. To observe which host
-tools actually ran regardless of dispatch path, subscribe with
+`tool_execution_update`/`tool_execution_end` events for a top-level call or a
+tool command run inside a `bash` call carry the host tool's name, but a call
+made through the eval bridge only surfaces as the enclosing `eval` call. To
+observe which host tools actually ran regardless of dispatch path, subscribe with
 `client.on_host_tool_completed(...)`; it receives a
 `HostToolCompletedEvent(tool_name, tool_call_id)` after `execute()` returns
 without raising.
@@ -440,10 +440,10 @@ elif request.method in {"input", "editor"}:
     client.send_ui_value(request.id, "approved")
 ```
 
-After `client.set_ask_dialog(True)`, the agent's `ask` tool sends one `ask`
-request carrying every question (`request.questions`) instead of one `select`
-per question. Answer with one `AskAnswer` per question, in order; hosts always
-offer free text, sent as `custom_input`:
+After `client.set_ask_dialog(True)`, an extension's `ui.askDialog` sends one
+`ask` request carrying every question (`request.questions`) instead of one
+`select` per question. Answer with one `AskAnswer` per question, in order; hosts
+always offer free text, sent as `custom_input`:
 
 ```python
 from omp_rpc import AskAnswer
@@ -456,8 +456,14 @@ if request.method == "ask":
     )
 ```
 
-Servers without the command raise `RpcCommandError` from `set_ask_dialog`, so
-keep handling `select` as the fallback.
+Servers without the command raise `RpcCommandError` from `set_ask_dialog`, so keep handling `select` as the fallback for extension `ui.askDialog` calls. This setting does not affect the `ask` tool.
+
+The `ask` tool sends one `form` request carrying the model's HTML form (`request.html`), without an enable command. RPC clients must handle this request; the tool no longer walks its fields through separate prompts. Answer with the submitted values by control `name`, as an HTML form would submit them (a checkbox group gives a list); omp checks them against the form:
+
+```python
+if request.method == "form":
+    client.send_ui_data(request.id, {"store": "sqlite", "ttl_days": 30})
+```
 
 For non-interactive scripts, you can install a default headless policy instead of
 handling every request manually:

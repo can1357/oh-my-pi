@@ -2,7 +2,7 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** Shape forwarded from the plan-proposal handler to InteractiveMode's
- *  approval popup. Populated by the `xd://propose` dispatch when the agent
+ *  approval popup. Populated by the `propose` tool when the agent
  *  submits a plan for approval. `planFilePath` is the agent-chosen
  *  `local://<slug>-plan.md` artifact — it is never renamed on approval, so
  *  links to it stay valid for the session. */

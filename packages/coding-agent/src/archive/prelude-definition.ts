@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { EvalPreludeDefinition } from "../eval/preludes";
+import type { HostEvalPreludeDefinition } from "../eval/preludes";
 import archiveDocumentation from "../prompts/tools/archive.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
@@ -11,6 +11,7 @@ import {
 	archiveProjects,
 	archivePrompts,
 	archiveRecaps,
+	archiveSearch,
 	archiveSession,
 	archiveSessions,
 } from "./archive";
@@ -27,7 +28,8 @@ const project = "string > 0";
 const paramsSchema = type({ action: "'projects'", "limit?": limit, "+": "reject" })
 	.or({ action: "'sessions' | 'recaps'", "project?": project, "limit?": limit, "+": "reject" })
 	.or({ action: "'session'", id: "string > 0", "limit?": limit, "+": "reject" })
-	.or({ action: "'prompts'", "query?": "string > 0", "project?": project, "limit?": limit, "+": "reject" });
+	.or({ action: "'prompts'", "query?": "string > 0", "project?": project, "limit?": limit, "+": "reject" })
+	.or({ action: "'search'", query: "string > 0", "project?": project, "limit?": limit, "+": "reject" });
 
 type ArchiveParams = typeof paramsSchema.infer;
 
@@ -52,6 +54,8 @@ async function archiveView(params: ArchiveParams, cwd: string): Promise<ArchiveV
 			return archiveSession(params.id.endsWith(".jsonl") ? resolveToCwd(params.id, cwd) : params.id, count);
 		case "prompts":
 			return archivePrompts(params.query, resolveProject(params.project, cwd), count);
+		case "search":
+			return archiveSearch(params.query, resolveProject(params.project, cwd), count);
 		case "recaps":
 			return archiveRecaps(resolveProject(params.project, cwd), count);
 	}
@@ -66,8 +70,10 @@ function describeArchiveCall(parameters: unknown): string | undefined {
 			return "archive.projects()";
 		case "session":
 			return `archive.session(${parsed.id})`;
+		case "search":
+			return `archive.search(${JSON.stringify(parsed.query)})`;
 		case "prompts":
-			if (parsed.query) return `archive.search(${JSON.stringify(parsed.query)})`;
+			if (parsed.query) return `archive.prompts(${JSON.stringify(parsed.query)})`;
 			return `archive.prompts(${parsed.project ? shortenPath(parsed.project) : ""})`;
 		case "sessions":
 		case "recaps":
@@ -75,8 +81,8 @@ function describeArchiveCall(parameters: unknown): string | undefined {
 	}
 }
 
-/** Create the read-only archive prelude: prompt history, recent projects, past sessions, and recaps. */
-export function createArchivePrelude(session: ToolSession): EvalPreludeDefinition {
+/** Create the read-only archive prelude: prompt history, recent projects, past sessions, recaps, and session search. */
+export function createArchivePrelude(session: ToolSession): HostEvalPreludeDefinition {
 	return {
 		name: "archive",
 		documentation: archiveDocumentation,

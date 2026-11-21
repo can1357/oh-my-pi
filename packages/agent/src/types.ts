@@ -145,8 +145,8 @@ export interface SoftToolRequirement {
 	/**
 	 * Per-call compliance check: a turn satisfies the requirement only when every
 	 * tool call passes. Defaults to `name === toolName`. Lets a host demand a
-	 * specific invocation shape (e.g. `write` targeting a virtual device path)
-	 * instead of any call to `toolName`. Escalation still forces `toolName`.
+	 * specific invocation shape (e.g. a `bash` call running a particular tool
+	 * command) instead of any call to `toolName`. Escalation still forces `toolName`.
 	 */
 	satisfies?(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean;
 	/** Host-owned reminder messages, injected once per `id` activation. */
@@ -345,8 +345,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	hasIrcInterrupts?: () => boolean | Promise<boolean>;
 	/**
-	 * Peeks whether a background completion (finished job, exited supervised
-	 * process) is queued for aside injection at the next boundary.
+	 * Peeks whether a background notice (finished job, exited supervised
+	 * process, output a running job was asked to report) is queued for aside
+	 * injection at the next boundary.
 	 *
 	 * Same rules as {@link hasIrcInterrupts}: non-consuming, only cuts
 	 * *interruptible* waits short, in either interruptMode. Without
@@ -451,8 +452,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Resolve a tool call whose name matched no advertised tool (including
 	 * `customWireName` aliases). Lets hosts route calls to tools they expose
-	 * through side transports (e.g. `xd://` device mounts) instead of failing
-	 * with "Tool not found". Returning `undefined` keeps the failure.
+	 * through a side transport (e.g. mounted tool commands run through `bash`)
+	 * instead of failing with "Tool not found". Returning `undefined` keeps the failure.
 	 *
 	 * `advertised` is the very snapshot exact-name dispatch just searched — the
 	 * set offered to THIS request. A host must resolve against it rather than
@@ -464,9 +465,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 	/**
 	 * Names reachable through {@link resolveFallbackTool} but absent from the
-	 * advertised set (e.g. `xd://` device mounts). Consulted only to name a
-	 * plausible target when a call misses, so a mis-transcribed device call is
-	 * recoverable; never a dispatch source.
+	 * advertised set (e.g. mounted tool commands run through `bash`). Consulted
+	 * only to name a plausible target when a call misses, so a mis-transcribed
+	 * command name is recoverable; never a dispatch source.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
 
@@ -1086,9 +1087,9 @@ export type ToolTier = "read" | "write" | "exec";
 /**
  * How an enabled tool is presented to the model. `"essential"` tools are exposed
  * as normal top-level tools. `"discoverable"` tools are removed from the top-level
- * schema and either mounted under `xd://` device URLs (when that transport is
- * active) or surfaced through BM25 tool search — keeping their schemas off every
- * request. Selection (settings, `hidden`, `defaultInactive`, explicit `--tools`,
+ * schema and either mounted as a tool command in the `bash` tool (when that
+ * tool is active) or surfaced through BM25 tool search — keeping their schemas
+ * off every request. Selection (settings, `hidden`, `defaultInactive`, explicit `--tools`,
  * provider availability) decides whether a tool is enabled; `loadMode` only
  * decides how an enabled tool is presented.
  */
@@ -1111,11 +1112,6 @@ export type ToolApprovalDecision =
 			reason?: string;
 			override?: boolean;
 			policy?: "allow" | "deny" | "prompt";
-			/** User-policy key for this decision. When set, `tools.approval.<policyKey>`
-			 *  is consulted instead of `tools.approval.<tool.name>`. Lets a dispatcher
-			 *  tool (e.g. `write` for an `xd://` device call) scope user allow/deny/
-			 *  prompt policies to the tool it dispatches into. */
-			policyKey?: string;
 	  };
 export type ToolApproval = ToolApprovalDecision | ((args: unknown, context?: AgentToolContext) => ToolApprovalDecision);
 
@@ -1194,7 +1190,7 @@ export interface AgentTool<
 	readonly delegationGuidance?: string;
 	/**
 	 * On-demand documentation topics (`topic → markdown`), readable as
-	 * `xd://<tool>/<topic>`. Lets a tool keep large sub-surfaces out of its
+	 * `help://<tool>/<topic>`. Lets a tool keep large sub-surfaces out of its
 	 * description and advertise only a one-line pointer per topic.
 	 */
 	docTopics?(): Readonly<Record<string, string>>;
@@ -1317,6 +1313,12 @@ export interface AgentContext {
 	systemPrompt: string[];
 	messages: AgentMessage[];
 	tools?: AgentTool<any>[];
+	/**
+	 * Inactive tools that may become active later in the conversation. A provider that announces tool changes
+	 * in-band (Anthropic `tool_addition`) declares them from the first request, so activating one leaves the
+	 * cached prefix intact. See {@link SentToolDefinitions.withInactiveTools}.
+	 */
+	standbyTools?: AgentTool<any>[];
 }
 
 /**

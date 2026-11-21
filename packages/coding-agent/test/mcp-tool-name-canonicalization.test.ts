@@ -4,7 +4,10 @@ import {
 	createMCPToolName,
 	resolveMCPToolAlias,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import { resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import {
+	resolveMountedToolCommandExecutable,
+	type ToolCommandState,
+} from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import type { Tool } from "@oh-my-pi/pi-coding-agent/tools/index";
 
 // `createMCPToolName` joins the sanitized server and tool with a SINGLE
@@ -148,7 +151,7 @@ describe("canonicalMCPToolNameCandidates", () => {
 });
 
 /** Minimal state exposing the fields the mounted resolver reads. */
-function xdevStateWith(options: { mounted?: string[]; active?: string[] }): XdevState {
+function toolCommandStateWith(options: { mounted?: string[]; active?: string[] }): ToolCommandState {
 	const mounted = options.mounted ?? [];
 	const active = options.active ?? [];
 	const tools = new Map<string, Tool>();
@@ -161,15 +164,14 @@ function xdevStateWith(options: { mounted?: string[]; active?: string[] }): Xdev
 	};
 }
 
-describe("resolveMountedXdevExecutable", () => {
-	it("resolves mounted devices only, never the active set", () => {
+describe("resolveMountedToolCommandExecutable", () => {
+	it("resolves mounted tools only, never the active set", () => {
 		const bank = createMCPToolName("seedpatch-client", "bank");
-		const state = xdevStateWith({ mounted: ["github"], active: [bank] });
+		const state = toolCommandStateWith({ mounted: ["github"], active: [bank] });
 
-		expect(resolveMountedXdevExecutable(state, "github")?.name).toBe("github");
-		expect(resolveMountedXdevExecutable(state, "xd://github")?.name).toBe("github");
-		// Active but unmounted: only mounted devices resolve through xd://.
-		expect(resolveMountedXdevExecutable(state, bank)).toBeUndefined();
+		expect(resolveMountedToolCommandExecutable(state, "github")?.name).toBe("github");
+		// Active but unmounted: the mounted resolver does not read the active set.
+		expect(resolveMountedToolCommandExecutable(state, bank)).toBeUndefined();
 	});
 });
 
@@ -222,24 +224,24 @@ describe("resolveMCPToolAlias", () => {
 	});
 
 	it("refuses an alias ambiguous ACROSS presentation sets", () => {
-		// `sdk.ts` folds mounted devices and the agent's advertised tools into ONE
+		// `sdk.ts` folds mounted tools and the agent's advertised tools into ONE
 		// lookup so uniqueness spans their union. Resolving each set with its own
 		// call and taking the first hit would let a mounted match quietly win a
 		// call that is ambiguous overall.
 		const mountedName = createMCPToolName("foo", "bar__foo_bar_baz");
 		const advertisedName = createMCPToolName("foo__bar", "foo_bar_baz");
-		const state = xdevStateWith({ mounted: [mountedName] });
+		const state = toolCommandStateWith({ mounted: [mountedName] });
 		const advertised = [{ name: advertisedName }];
 		const emitted = "mcp__foo__bar__foo_bar_baz";
 
 		const union = (candidate: string): { name: string } | undefined =>
-			resolveMountedXdevExecutable(state, candidate) ?? advertised.find(t => t.name === candidate);
+			resolveMountedToolCommandExecutable(state, candidate) ?? advertised.find(t => t.name === candidate);
 		expect(resolveMCPToolAlias(emitted, union)).toBeUndefined();
 
 		// Either set on its own still resolves; only the union is ambiguous.
-		expect(resolveMCPToolAlias(emitted, candidate => resolveMountedXdevExecutable(state, candidate))?.name).toBe(
-			mountedName,
-		);
+		expect(
+			resolveMCPToolAlias(emitted, candidate => resolveMountedToolCommandExecutable(state, candidate))?.name,
+		).toBe(mountedName);
 		expect(resolveMCPToolAlias(emitted, over([advertisedName]))?.name).toBe(advertisedName);
 	});
 });

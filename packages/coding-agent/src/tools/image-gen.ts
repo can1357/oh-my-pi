@@ -1,11 +1,10 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import {
 	type GeneratedImage,
 	generateImage,
+	type ImageContent,
 	type ImageGenerationRequest,
 	type ImageGenerationResult,
 	isImageGenerationApi,
@@ -13,17 +12,9 @@ import {
 	parseAntigravityCredentials,
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
-import {
-	isEnoent,
-	logger,
-	parseImageMetadata,
-	prompt,
-	ptree,
-	Snowflake,
-	truncate,
-	untilAborted,
-} from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, parseImageMetadata, prompt, ptree, truncate, untilAborted } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -31,7 +22,9 @@ import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
+import { journalCompletion } from "../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../session/role-models";
+import { saveImagesToTemp } from "../utils/image-temp";
 import { resolveReadPath, specialFileKind } from "./path-utils";
 
 const IMAGE_TIMEOUT = 3 * 60 * 1000;
@@ -68,7 +61,6 @@ interface ImageGenToolDetails {
 	model: string;
 	imageCount: number;
 	imagePaths: string[];
-	images: GeneratedImage[];
 	responseText?: string;
 	usage?: ImageGenerationResult["usage"];
 }
@@ -130,26 +122,6 @@ async function resolveInputImage(input: ImageInput, cwd: string): Promise<{ data
 	throw new Error("input entries must include either path or data.");
 }
 
-function imageExtension(mimeType: string): string {
-	const extensions: Record<string, string> = {
-		"image/png": "png",
-		"image/jpeg": "jpg",
-		"image/gif": "gif",
-		"image/webp": "webp",
-	};
-	return extensions[mimeType] ?? "png";
-}
-
-async function saveImagesToTemp(images: ImageGenerationResult["images"]): Promise<string[]> {
-	return Promise.all(
-		images.map(async image => {
-			const filepath = path.join(os.tmpdir(), `omp-image-${Snowflake.next()}.${imageExtension(image.mimeType)}`);
-			await Bun.write(filepath, Buffer.from(image.data, "base64"));
-			return filepath;
-		}),
-	);
-}
-
 /**
  * Chat model that relays a hosted Responses image model's `image_generation`
  * call: the session model when it can carry the tool on the same provider,
@@ -201,27 +173,44 @@ function defaultImageCandidates(chain: RoleChainCandidate[], sessionModel: Model
 	});
 }
 
+/**
+ * `image` at the requested `WIDTHxHEIGHT`: providers treat the size as a hint (gpt-image returns its native
+ * sizes), so a different one is resampled to what was asked for.
+ */
+async function atRequestedSize(image: GeneratedImage, requested: string | undefined): Promise<GeneratedImage> {
+	if (!requested) return image;
+	const [width, height] = requested.split("x").map(Number) as [number, number];
+	const bytes = Buffer.from(image.data, "base64");
+	const actual = await new Bun.Image(bytes).metadata();
+	if (actual.width === width && actual.height === height) return { ...image, size: requested };
+	const resized = new Bun.Image(bytes).resize(width, height);
+	const jpeg = image.mimeType === "image/jpeg";
+	const encoded = await (jpeg ? resized.jpeg({ quality: 92 }) : resized.png()).bytes();
+	return {
+		...image,
+		data: Buffer.from(encoded).toBase64(),
+		mimeType: jpeg ? "image/jpeg" : "image/png",
+		size: requested,
+	};
+}
+
 async function buildToolResult(
 	model: Model,
-	result: ImageGenerationResult,
+	generated: ImageGenerationResult,
+	requestedSize: string | undefined,
 ): Promise<AgentToolResult<ImageGenToolDetails, ImageGenParams>> {
-	const imagePaths = await saveImagesToTemp(result.images);
 	// Hosted backends may run a different model than the selected catalog entry; report what actually ran.
-	const ranModel = result.model ?? model.id;
-	if (imagePaths.length === 0) {
-		return {
-			content: [{ type: "text", text: `No image data returned.${result.text ? `\n\n${result.text}` : ""}` }],
-			details: {
-				provider: model.provider,
-				model: ranModel,
-				imageCount: 0,
-				imagePaths: [],
-				images: [],
-				responseText: result.text,
-				usage: result.usage,
-			},
-		};
+	const ranModel = generated.model ?? model.id;
+	if (generated.images.length === 0) {
+		throw new ToolError(
+			`${model.provider}/${ranModel} returned no image.${generated.text ? `\n\n${generated.text}` : ""}`,
+		);
 	}
+	const result = {
+		...generated,
+		images: await Promise.all(generated.images.map(image => atRequestedSize(image, requestedSize))),
+	};
+	const imagePaths = await saveImagesToTemp(result.images);
 	const modelLine =
 		ranModel === model.id ? `Model: ${ranModel}` : `Model: ${ranModel} (catalog entry ${model.provider}/${model.id})`;
 	const lines = [`Provider: ${model.provider}`, modelLine, `Generated ${imagePaths.length} image(s):`];
@@ -231,14 +220,18 @@ async function buildToolResult(
 		lines.push(meta ? `  ${imagePath} (${meta})` : `  ${imagePath}`);
 	}
 	if (result.text) lines.push("", result.text.trim());
+	const images: ImageContent[] = result.images.map(image => ({
+		type: "image",
+		data: image.data,
+		mimeType: image.mimeType,
+	}));
 	return {
-		content: [{ type: "text", text: lines.join("\n") }],
+		content: [{ type: "text", text: lines.join("\n") }, ...images],
 		details: {
 			provider: model.provider,
 			model: ranModel,
 			imageCount: result.images.length,
 			imagePaths,
-			images: result.images,
 			responseText: result.text,
 			usage: result.usage,
 		},
@@ -343,7 +336,16 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								ctx.modelRegistry.resolveModelHeaders(carrier, headerSignal),
 						}
 					: undefined;
+				// The tool result's `details.usage` is display-only: session totals never sum it, so the request is
+				// journaled here. Usage only: the result already names the images. The context types its manager
+				// read-only; the session manager behind it journals, a worker child's snapshot view is skipped.
+				const journal = journalCompletion(ctx.sessionManager, {
+					purpose: "image-gen",
+					role: "image",
+					usageOnly: true,
+				});
 				try {
+					const started = performance.now();
 					const result = await generateImage(resolvedModel, request, {
 						apiKey,
 						fetch: ctx.fetch ?? fetch,
@@ -351,7 +353,18 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						carrier: resolvedCarrier,
 						sessionId,
 					});
-					return buildToolResult(model, result);
+					journal?.({
+						role: "assistant",
+						content: [],
+						api: model.api,
+						provider: model.provider,
+						model: result.model ?? model.id,
+						usage: result.usage,
+						stopReason: "stop",
+						timestamp: Date.now(),
+						duration: Math.round(performance.now() - started),
+					});
+					return buildToolResult(model, result, params.image_size);
 				} catch (error) {
 					if (!(error instanceof ProviderHttpError) || requestSignal?.aborted) throw error;
 					failures.push(error);

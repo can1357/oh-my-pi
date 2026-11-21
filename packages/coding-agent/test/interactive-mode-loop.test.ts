@@ -67,6 +67,7 @@ describe("InteractiveMode loop auto-submit", () => {
 		Reflect.deleteProperty(session, "isCompacting");
 		Reflect.deleteProperty(session, "isStreaming");
 		Reflect.deleteProperty(session, "hasPostPromptWork");
+		Reflect.deleteProperty(session, "isRunActive");
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 	});
@@ -159,6 +160,43 @@ describe("InteractiveMode loop auto-submit", () => {
 
 		expect(resolved).toHaveLength(1);
 		expect(resolved[0].text).toBe("deliver this");
+	});
+
+	// A turn that yields while background subagents/jobs still hold the run open
+	// (`agent_pause`) is not the end of the iteration: the loop must neither run
+	// its condition nor spend budget until the run's terminal `agent_end`.
+	it("waits for a paused run to end before starting the next iteration", async () => {
+		vi.useFakeTimers();
+		let runActive = true;
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+		Object.defineProperty(session, "hasPostPromptWork", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isRunActive", { configurable: true, get: () => runActive });
+		const evaluate = vi.spyOn(loopCondition, "evaluateLoopCondition").mockResolvedValue({ kind: "continue" });
+		mode.loopCondition = { command: "test -f GO", until: false };
+		const limit = { kind: "iterations", initial: 3, remaining: 3 } as const;
+		mode.loopLimit = { ...limit };
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "check progress";
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+		expect(resolved).toHaveLength(0);
+		expect(evaluate).not.toHaveBeenCalled();
+		expect(mode.loopLimit).toEqual(limit);
+
+		runActive = false;
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(evaluate).toHaveBeenCalledTimes(1);
+		expect(mode.loopLimit).toEqual({ ...limit, remaining: 2 });
+		expect(resolved).toHaveLength(1);
+		expect(resolved[0].text).toBe("check progress");
 	});
 
 	it("disables reset loops when vibe blocks the session transition", async () => {

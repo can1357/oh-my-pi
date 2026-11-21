@@ -18,6 +18,11 @@ def _make_browser():
             if value.flags & re.DOTALL:
                 flags += "s"
             return {"__omp_re": {"source": value.pattern, "flags": flags}}
+        # Patterns nested in dicts and lists (`requests(filter=re.compile(...))` inside options) are encoded too.
+        if isinstance(value, dict):
+            return {key: _encode_arg(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_encode_arg(item) for item in value]
         return value
 
     def _arguments(args, kwargs):
@@ -34,7 +39,8 @@ def _make_browser():
             values.append(options)
         return values
 
-    async def _invoke(action, options):
+    # `quiet`: the caller returns the structured value, so its listing (page URLs with tokens) is not printed.
+    async def _invoke(action, options, quiet=False):
         response = await _omp_prelude(
             "browser",
             {
@@ -49,7 +55,7 @@ def _make_browser():
         if not isinstance(response, dict):
             raise RuntimeError("browser returned an invalid response")
         text = response.get("text")
-        if isinstance(text, str) and text:
+        if not quiet and isinstance(text, str) and text:
             print(text)
         details = response.get("details")
         if not isinstance(details, dict):
@@ -647,13 +653,13 @@ def _make_browser():
 
         async def tabs(self):
             """List managed browser tabs."""
-            details = await _invoke("tabs", {})
+            details = await _invoke("tabs", {}, quiet=True)
             value = details.get("value")
             return value if isinstance(value, list) else []
 
         async def targets(self, *, app=None, timeout=None):
             """List the user's own pages `target` can adopt (Tern browser blocks or relay Chrome tabs)."""
-            details = await _invoke("targets", {"app": app, "timeout": timeout})
+            details = await _invoke("targets", {"app": app, "timeout": timeout}, quiet=True)
             value = details.get("value")
             return value if isinstance(value, list) else []
 

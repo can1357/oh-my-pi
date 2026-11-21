@@ -72,6 +72,15 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: "AbortAndRestoreQueueResult",
 	},
 	{
+		name: "abort_and_deliver_queue",
+		doc: "Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input.",
+		result: { aborted: "boolean" },
+	},
+	{
+		name: "resume",
+		doc: "Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way.",
+	},
+	{
 		name: "new_session",
 		doc: "Start a new session.",
 		params: { "parentSession?": "string" },
@@ -222,7 +231,18 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	{
 		name: "set_model",
 		doc: "Select a model by provider and id.",
-		params: { provider: "string", modelId: "string" },
+		params: {
+			provider: "string",
+			modelId: "string",
+			"thinkingLevel?": doc(
+				"ConfiguredThinkingLevel",
+				"Thinking level to run the model at, clamped to it; omitted re-applies the session's level.",
+			),
+			"role?": doc(
+				"string",
+				"Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted.",
+			),
+		},
 		result: "ModelInfo",
 	},
 	{ name: "cycle_model", doc: "Cycle to the next model.", result: "ModelCycleResult", nullable: true },
@@ -232,7 +252,20 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { models: "ModelInfo[]" },
 		unwrap: "models",
 	},
-	{ name: "set_thinking_level", doc: "Set the thinking level.", params: { level: "ThinkingLevel" } },
+	{
+		name: "get_model_picker",
+		doc: "Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles.",
+		params: {
+			"query?": doc("string", "Search text; blank browses every model, `provider/` limits matches to a provider."),
+			"limit?": doc("number.integer", "Most rows to return; default 100."),
+		},
+		result: "ModelPickerResult",
+	},
+	{
+		name: "set_thinking_level",
+		doc: "Set the thinking level.",
+		params: { level: doc("ConfiguredThinkingLevel", "`auto` lets omp pick the effort per turn.") },
+	},
 	{
 		name: "cycle_thinking_level",
 		doc: "Cycle to the next thinking level.",

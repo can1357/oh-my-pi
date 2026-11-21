@@ -5,12 +5,12 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
-	CODEX_CLIENT_VERSION,
 	codexRoutingHint,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
+import { getCodexClientVersion } from "@oh-my-pi/pi-catalog/wire/codex-version";
 import {
 	$env,
 	$flag,
@@ -88,6 +88,7 @@ import {
 	resolveCodexResponsesLite,
 	sanitizeCodexCallId,
 	transformRequestBody,
+	withCodexRoutingFieldsFirst,
 } from "./openai-codex/request-transformer";
 import { applyCodexAccessPrograms, dropRejectedCodexAccessPrograms } from "./openai-codex/access-programs";
 import {
@@ -156,6 +157,7 @@ import {
 	normalizeOpenAIPromptCacheKey,
 	pickUnrecordedResponsesToolCalls,
 	populateResponsesUsageFromResponse,
+	parseAssistantMessagePhase,
 	promoteResponsesToolUseStopReason,
 	settleReasoningSummary,
 	type SequentialCutoffSummaryState,
@@ -666,7 +668,7 @@ function createCodexRequestMetadata(
 }
 
 function applyCodexCompatibilityHeaders(headers: Headers, metadata: CodexCompatibilityIdentity): void {
-	headers.set(OPENAI_HEADERS.SCOPED_SESSION_ID, metadata.affinitySessionId ?? metadata.sessionId);
+	headers.set(OPENAI_HEADERS.SESSION_ID, metadata.affinitySessionId ?? metadata.sessionId);
 	headers.set(OPENAI_HEADERS.THREAD_ID, metadata.threadId);
 	headers.set(OPENAI_HEADERS.WINDOW_ID, metadata.windowId);
 	if (metadata.turnMetadataJson) {
@@ -1157,8 +1159,9 @@ function getCodexServiceTierCostMultiplier(
 ): number {
 	// The subscription route draws on included plan usage, so its cost is the
 	// usage-equivalent: each tier's multiplier comes from the catalog table, which
-	// uses OpenAI's included-usage rates (Astra: Fast 2.5x, Ultrafast 8x). A tier
-	// with no entry stays at 1x rather than an invented multiplier.
+	// uses OpenAI's included-usage rates (GPT-6 Astra: Fast 2.5x, Ultrafast 8x;
+	// GPT-6.2: Fast 2x, Ultrafast 6x). A tier with no entry stays at 1x rather
+	// than an invented multiplier.
 	if (serviceTier !== "flex" && serviceTier !== "priority" && serviceTier !== "ultrafast") return 1;
 	return model.serviceTierCost?.[serviceTier] ?? 1;
 }
@@ -1264,7 +1267,7 @@ function createCodexRequestContext(
 	const url = resolveCodexResponsesUrl(baseUrl);
 
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
-	const codexClientVersion = CODEX_CLIENT_VERSION;
+	const codexClientVersion = getCodexClientVersion();
 	const requestHeaders = { ...model.headers, ...options?.headers };
 	const rawRequestDump: RawHttpRequestDump = {
 		provider: model.provider,
@@ -1840,7 +1843,7 @@ async function openCodexWebSocketTransport(
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 			});
 		const eventStream = websocketConnection.streamRequest(
-			{ send: websocketRequest },
+			{ send: withCodexRoutingFieldsFirst(websocketRequest) },
 			timeouts,
 			requestSetup.requestSignal,
 			onSseEvent,
@@ -1951,7 +1954,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 		return { type: "thinking", thinking: "" };
 	}
 	if (item.type === "message") {
-		const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : undefined;
+		const phase = parseAssistantMessagePhase(item.phase);
 		return { type: "text", text: "", textSignature: encodeTextSignatureV1(item.id, phase) };
 	}
 	if (item.type === "function_call") {
@@ -2490,7 +2493,7 @@ class CodexStreamProcessor {
 
 		if (item.type === "message" && block?.type === "text") {
 			block.text = finalizeMessageText(item, block.text);
-			const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : undefined;
+			const phase = parseAssistantMessagePhase(item.phase);
 			block.textSignature = encodeTextSignatureV1(item.id, phase);
 			stream.push({
 				type: "text_end",
@@ -3250,7 +3253,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						baseUrl: model.baseUrl || CODEX_BASE_URL,
 						url: "",
 						requestHeaders: {},
-						codexClientVersion: CODEX_CLIENT_VERSION,
+						codexClientVersion: getCodexClientVersion(),
 						turnState: {},
 						responsesLite: options?.responsesLite === true,
 						transformedBody: { model: model.id },
@@ -3320,7 +3323,7 @@ export async function prewarmOpenAICodexResponses(
 	if (!shouldUseCodexWebSocket(model, state, options?.preferWebsockets)) return;
 	const metadataSession = getOrCreateCodexMetadataSessionState(transportSessionId, providerSessionState);
 	const turnState = getOrCreateCodexTurnState(metadataSession, sessionKey);
-	const codexClientVersion = CODEX_CLIENT_VERSION;
+	const codexClientVersion = getCodexClientVersion();
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
 	const attestation = await getCodexAttestationHeader(accountId);
 	const routedRequest: Pick<RequestBody, "model" | "service_tier"> = {
@@ -4121,7 +4124,7 @@ async function openCodexSseEventStream(
 		response = await fetchWithRetry(url, {
 			method: "POST",
 			headers,
-			body: JSON.stringify(body),
+			body: JSON.stringify(withCodexRoutingFieldsFirst(body)),
 			signal,
 			prepareInit: () => {
 				// A retried non-2xx attempt leaves its guard armed for the retry-status
@@ -4221,14 +4224,11 @@ function createCodexHeaders(
 	headers.set(OPENAI_HEADERS.VERSION, codexClientVersion);
 	headers.set("User-Agent", USER_AGENT);
 	if (sessionId) {
-		// The backend derives prompt-cache affinity from the session headers
-		// (codex-rs `responses_session_id`); a side request shares its parent's.
-		const affinitySessionId = requestMetadata?.affinitySessionId ?? sessionId;
-		headers.set(OPENAI_HEADERS.CONVERSATION_ID, affinitySessionId);
-		headers.set(OPENAI_HEADERS.SESSION_ID, affinitySessionId);
+		// The backend derives prompt-cache affinity from `session-id` (codex-rs
+		// `responses_session_id`); a side request shares its parent's.
+		headers.set(OPENAI_HEADERS.SESSION_ID, requestMetadata?.affinitySessionId ?? sessionId);
 		headers.set("x-client-request-id", sessionId);
 	} else {
-		headers.delete(OPENAI_HEADERS.CONVERSATION_ID);
 		headers.delete(OPENAI_HEADERS.SESSION_ID);
 		headers.delete("x-client-request-id");
 	}
@@ -4236,7 +4236,6 @@ function createCodexHeaders(
 	if (requestMetadata) {
 		applyCodexCompatibilityHeaders(headers, requestMetadata);
 	} else {
-		headers.delete(OPENAI_HEADERS.SCOPED_SESSION_ID);
 		headers.delete(OPENAI_HEADERS.THREAD_ID);
 		headers.delete(OPENAI_HEADERS.WINDOW_ID);
 		headers.delete(OPENAI_HEADERS.TURN_METADATA);
