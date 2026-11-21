@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	createMCPJsonRpcError,
+	isTransientMCPInitialFailure,
 	MCPTransportError,
 	normalizeMCPTransportError,
 } from "@oh-my-pi/pi-coding-agent/mcp/errors";
@@ -212,11 +213,78 @@ describe("isRetriableConnectionError", () => {
 		).toBe(false);
 	});
 
+	it("does not replay a live 429 tool call through the reconnect path", () => {
+		const error = new MCPTransportError({
+			transport: "http",
+			stage: "receive",
+			failure: "http_status",
+			message: "HTTP 429: rate limited",
+			retryable: true,
+			code: 429,
+			retryAfterMs: 1_000,
+		});
+		// A 429 on tools/call is not a stale-connection signal: replaying it
+		// would tear down a healthy session and ignore Retry-After.
+		expect(isRetriableConnectionError(error)).toBe(false);
+	});
+
+	it("classifies 429 as retryable and carries a capped Retry-After", () => {
+		const error = normalizeMCPTransportError(
+			Object.assign(new Error("HTTP 429: rate limited"), {
+				headers: new Headers({ "Retry-After": "30" }),
+			}),
+			{ transport: "http", stage: "receive" },
+		);
+		expect(error).toMatchObject({ failure: "http_status", code: 429, retryable: true, retryAfterMs: 30_000 });
+		expect(isRetriableConnectionError(error)).toBe(false);
+	});
+
+	it("caps an absurd Retry-After while keeping the 429 retryable", () => {
+		const error = normalizeMCPTransportError(
+			Object.assign(new Error("HTTP 429: rate limited"), {
+				headers: new Headers({ "Retry-After": "86400" }),
+			}),
+			{ transport: "http", stage: "receive" },
+		);
+		expect(error.retryable).toBe(true);
+		expect(error.retryAfterMs).toBeLessThanOrEqual(5 * 60_000);
+	});
+
 	it("returns false for non-Error values", () => {
 		expect(isRetriableConnectionError("ECONNREFUSED")).toBe(false);
 		expect(isRetriableConnectionError(null)).toBe(false);
 		expect(isRetriableConnectionError(undefined)).toBe(false);
 		expect(isRetriableConnectionError({ message: "ECONNREFUSED" })).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// isTransientMCPInitialFailure
+// ---------------------------------------------------------------------------
+
+describe("isTransientMCPInitialFailure", () => {
+	const initial = (code: number, retryAfterMs?: number) =>
+		new MCPTransportError({
+			transport: "http",
+			stage: "receive",
+			failure: "http_status",
+			message: `HTTP ${code}: failure`,
+			retryable: true,
+			code,
+			retryAfterMs,
+		});
+
+	it("accepts only a 429 that carried Retry-After", () => {
+		expect(isTransientMCPInitialFailure(initial(429, 1_000))).toBe(true);
+		expect(isTransientMCPInitialFailure(initial(429))).toBe(false);
+	});
+
+	it("rejects permanent and unhinted initial failures", () => {
+		for (const code of [404, 502, 503]) {
+			expect(isTransientMCPInitialFailure(initial(code))).toBe(false);
+			expect(isTransientMCPInitialFailure(initial(code, 1_000))).toBe(false);
+		}
+		expect(isTransientMCPInitialFailure(new Error("HTTP 429: slow down"))).toBe(false);
 	});
 });
 

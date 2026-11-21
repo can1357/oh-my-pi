@@ -839,6 +839,59 @@ describe("handshake-era Streamable HTTP failures", () => {
 		expect(error.data).toContain("[redacted]");
 		expect(error.data).not.toContain("server-secret");
 	});
+	it("classifies a 429 with Retry-After as retryable and carries the capped delay", async () => {
+		const { url } = serveLegacy(() =>
+			new Response('{"error":"rate_limited"}', {
+				status: 429,
+				headers: { "Retry-After": "2", "Content-Type": "application/json" },
+			}),
+		);
+		const peer = await legacyPeer(url);
+		const error = await rejectionOf(peer.request("tools/list", { _meta: requestMeta() }));
+
+		expect(error).toBeInstanceOf(MCPTransportError);
+		expect(error).toMatchObject({
+			transport: "http",
+			stage: "receive",
+			failure: "http_status",
+			code: 429,
+			retryable: true,
+			retryAfterMs: 2_000,
+		});
+	});
+
+	it("caps an absurd Retry-After instead of parking reconnects", async () => {
+		const { url } = serveLegacy(() => new Response("slow down", { status: 429, headers: { "Retry-After": "3600" } }));
+		const peer = await legacyPeer(url);
+		const error = await rejectionOf(peer.request("tools/list", { _meta: requestMeta() }));
+
+		expect(error).toMatchObject({ code: 429, retryable: true });
+		expect((error as MCPTransportError).retryAfterMs).toBeLessThanOrEqual(5 * 60_000);
+	});
+
+	it("parses an HTTP-date Retry-After into a bounded delay", async () => {
+		const date = new Date(Date.now() + 5_000).toUTCString();
+		const { url } = serveLegacy(() => new Response("slow down", { status: 429, headers: { "Retry-After": date } }));
+		const peer = await legacyPeer(url);
+		const error = await rejectionOf(peer.request("tools/list", { _meta: requestMeta() }));
+
+		expect(error).toMatchObject({ code: 429, retryable: true });
+		const retryAfterMs = (error as MCPTransportError).retryAfterMs;
+		expect(retryAfterMs).toBeGreaterThan(0);
+		expect(retryAfterMs).toBeLessThanOrEqual(5 * 60_000);
+	});
+
+	it("keeps a 401 without Retry-After non-retryable", async () => {
+		const { url } = serveLegacy(() => new Response("unauthorized", { status: 401 }));
+		const peer = await legacyPeer(url);
+
+		await expect(peer.request("tools/list", { _meta: requestMeta() })).rejects.toMatchObject({
+			transport: "http",
+			failure: "http_status",
+			code: 401,
+			retryable: false,
+		});
+	});
 });
 
 describe("handshake-era Streamable HTTP waits", () => {

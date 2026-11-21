@@ -105,6 +105,7 @@ function startError(error: unknown, upstream: Upstream): MCPTransportError {
 		code: normalized.code,
 		data: normalized.data,
 		traceId: normalized.traceId,
+		retryAfterMs: normalized.retryAfterMs,
 		rpc: normalized.rpc,
 		cause: normalized,
 	});

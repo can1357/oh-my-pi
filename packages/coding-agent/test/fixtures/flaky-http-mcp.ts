@@ -2,9 +2,9 @@
 /**
  * Test fixture: a minimal Streamable HTTP MCP server whose availability can be
  * flipped. While "down" it closes its GET SSE streams (the client sees the
- * transport end, like a process restart) and answers every request with 503;
- * back "up" it is a fresh generation with new session ids, like a server that
- * has just been redeployed.
+ * transport end, like a process restart) and answers every request with a
+ * configurable status (503 by default); back "up" it is a fresh generation
+ * with new session ids, like a server that has just been redeployed.
  *
  * Doubles as the manual reproduction for the reconnect schedule. Standalone:
  *
@@ -20,7 +20,7 @@ export interface FlakyHttpMcpServer {
 	readonly url: string;
 	/** Number of `initialize` requests answered, across generations. */
 	readonly initializes: number;
-	/** Number of POST requests (one per connection attempt) refused with 503 while down. */
+	/** Number of POST requests (one per connection attempt) refused while down. */
 	readonly refusals: number;
 	/** Text the `ping` tool answers with for the current generation. */
 	readonly pong: string;
@@ -34,6 +34,14 @@ export function startFlakyHttpMcpServer(
 		log?: (line: string) => void;
 		/** When set, MCP requests whose `Authorization` header differs from its current value get 401. */
 		authorization?: () => string;
+		/**
+		 * When set, POSTs answered while down use this status (default 503) and
+		 * carry `Retry-After: <downRetryAfterSeconds>` when that is also set.
+		 * Lets tests reproduce a 429 capacity answer instead of a restart blip.
+		 */
+		downStatus?: number;
+		/** `Retry-After` seconds sent with down-status POST answers. */
+		downRetryAfterSeconds?: number;
 	} = {},
 ): FlakyHttpMcpServer {
 	const log = options.log ?? (() => {});
@@ -58,7 +66,12 @@ export function startFlakyHttpMcpServer(
 			}
 			if (state.down) {
 				if (request.method === "POST") state.refusals += 1;
-				return new Response("restarting", { status: 503 });
+				const status = options.downStatus ?? 503;
+				const headers =
+					options.downRetryAfterSeconds !== undefined
+						? { "Retry-After": String(options.downRetryAfterSeconds) }
+						: undefined;
+				return new Response("restarting", { status, headers });
 			}
 			if (options.authorization && request.headers.get("Authorization") !== options.authorization()) {
 				return new Response("unauthorized", { status: 401 });

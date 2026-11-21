@@ -58,6 +58,7 @@ There is no reconnect ladder, crash breaker or background retry schedule in the 
 - `reconnectServer(name, { manual })` re-resolves credentials. If they changed, the link retargets to the new identity. A manual reconnect (`/mcp reconnect`) additionally sends `omp/restart`, which stops the upstream and clears the host's crash guard; automatic recovery never restarts an upstream, because a modern one is shared with other sessions. Then discovery and catalogs are reloaded.
 - If the tunnel is lost (daemon restart), the link fails its in-flight requests as non-retryable, re-attaches, re-sends its roots, and the manager re-opens subscriptions and reloads catalogs.
 - A 401/403 from a remote server, including one from the first era probe, calls the manager's refresh hook once; fresh headers retarget the link and the request is retried once. Resource subscriptions of the old identity are not replayed; the manager re-derives them from the reloaded catalog.
+- An `initialize` answer of HTTP 429 carrying `Retry-After` is the one transient initial failure: the manager makes one reconnect attempt, and the next request can start the upstream again. The server-stated wait (seconds or HTTP-date) is parsed and capped at 5 minutes; 404, 502/503 without a stated wait, timeouts and auth rejections stay one-shot.
 - A handshake-era HTTP server that expired its session answers 404: the host retires that session and the retried call opens a new one.
 - `/mcp test`, the OAuth discovery probe and other one-off connections pass `live: true`, which sends the `no-store` hint so every answer comes from the server, not the store.
 
@@ -117,6 +118,7 @@ Subprocess units survive a daemon re-exec with their pipes; sessions re-attach a
 | Server slower than the startup window | no tools at startup; they register when it answers |
 | Server exits with requests in flight | those requests fail (non-retryable) with exit code and stderr; the next request starts a new process |
 | Server crashes repeatedly | crash guard: requests fail immediately for 30 s; `/mcp reconnect` clears it |
+| `initialize` answers 429 with `Retry-After` | transient: one reconnect attempt; the stated wait is parsed and capped at 5 minutes, and the host starts the upstream again on the next request | Best-effort recovery |
 | Daemon restarts | links re-attach; in-flight requests fail and are not replayed |
 | Daemon unreachable | the in-process host is used |
 | Owning session disposed | its manager disconnects (bounded to 3 s); leases drop and the host collects what is unused |
