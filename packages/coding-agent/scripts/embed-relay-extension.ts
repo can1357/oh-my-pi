@@ -5,6 +5,12 @@ import { generateEmbeddedExtension } from "../../browser-relay/scripts/build-ext
 const PLACEHOLDER = path.resolve(import.meta.dir, "../src/tools/browser/relay/embedded-extension.ts");
 const EMBEDDED_ZST = path.resolve(import.meta.dir, "../src/tools/browser/relay/extension.generated.json.zst");
 
+/**
+ * zstd level for the embedded extension: slow, but paid once per binary or bundle build (once per target when
+ * cross-compiling), while the smaller asset ships in every binary and npm package.
+ */
+const EMBEDDED_RELAY_EXTENSION_ZSTD_LEVEL = 19;
+
 let generated: Promise<string> | undefined;
 
 /**
@@ -15,7 +21,7 @@ let generated: Promise<string> | undefined;
  */
 export async function embeddedRelayExtensionFiles(): Promise<Record<string, string | Uint8Array>> {
 	generated ??= generateEmbeddedExtension();
-	const compressed = await Bun.zstdCompress(Buffer.from(await generated, "utf8"), { level: 19 });
+	const compressed = await Bun.zstdCompress(Buffer.from(await generated, "utf8"), { level: EMBEDDED_RELAY_EXTENSION_ZSTD_LEVEL });
 	return {
 		[EMBEDDED_ZST]: compressed,
 		// A compiled binary gets an absolute `$bunfs` path, which `path.resolve` keeps; the npm bundle gets one relative
