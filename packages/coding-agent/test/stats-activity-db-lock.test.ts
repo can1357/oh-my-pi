@@ -1,13 +1,42 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import { closeDb, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
-import { installStatsTestIsolation } from "@oh-my-pi/omp-stats/test-support/temp-agent";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
-import { getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getStatsDbPath, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { loadDailyActivity } from "../src/stats/activity-client";
 import type { StatsActivityWorkerOutbound } from "../src/stats/activity-protocol";
 
-installStatsTestIsolation("@omp-stats-activity-lock-");
+// The activity worker resolves stats.db from the environment it inherits, so the
+// temp agent directory goes through PI_CONFIG_DIR, and XDG overrides are cleared
+// so the default profile cannot redirect it to a shared XDG data dir.
+const XDG_KEYS = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
+const originalAgentDir = getAgentDir();
+const originalEnv: Record<string, string | undefined> = {};
+let tempDir: TempDir | undefined;
+
+beforeEach(() => {
+	tempDir = TempDir.createSync("@omp-stats-activity-lock-");
+	for (const key of [...XDG_KEYS, "PI_CONFIG_DIR"]) {
+		originalEnv[key] = process.env[key];
+		delete process.env[key];
+	}
+	const configDir = path.relative(os.homedir(), tempDir.join("config"));
+	process.env.PI_CONFIG_DIR = configDir;
+	setAgentDir(path.join(os.homedir(), configDir, "agent"));
+});
+
+afterEach(() => {
+	closeDb();
+	for (const [key, value] of Object.entries(originalEnv)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+	setAgentDir(originalAgentDir);
+	tempDir?.removeSync();
+	tempDir = undefined;
+});
 
 function request(timestamp: number): MessageStats {
 	return {

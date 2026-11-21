@@ -5,7 +5,6 @@
 ### Added
 
 - Added `readDailyActivity()`, which reads the stored daily activity through its own connection that never writes, so another process holding the stats database write lock cannot fail or delay it; it returns null when no stats database exists yet ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
-- Added the `@oh-my-pi/omp-stats/test-support/temp-agent` export for tests that need a temporary agent directory ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

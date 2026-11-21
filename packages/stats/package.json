@@ -61,8 +61,7 @@
     "src",
     "build.ts",
     "README.md",
-    "CHANGELOG.md",
-    "test/helpers/temp-agent.ts"
+    "CHANGELOG.md"
   ],
   "exports": {
     ".": {
@@ -86,10 +85,6 @@
     "./client/*": {
       "types": "./src/client/*.ts",
       "import": "./src/client/*.ts"
-    },
-    "./test-support/temp-agent": {
-      "types": "./test/helpers/temp-agent.ts",
-      "import": "./test/helpers/temp-agent.ts"
     },
     "./*.js": "./src/*.ts"
   }
