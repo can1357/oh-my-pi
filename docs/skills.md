@@ -157,7 +157,7 @@ System prompt construction (`src/system-prompt.ts`) uses discovered skills as fo
 
 - if an active tool declares `readsSkillUris: true`:
    - include the discovered skills list, excluding hidden skills
-   - mounted `xd://` tools count when their capability metadata is projected
+   - mounted tool commands count when their capability metadata is projected
 - otherwise:
    - omit the discovered list
 

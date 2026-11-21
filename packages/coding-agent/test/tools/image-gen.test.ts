@@ -107,6 +107,17 @@ function collectPaths(result: CustomToolResult<{ imagePaths: string[] }>): void 
 	generatedImagePaths.push(...(result.details?.imagePaths ?? []));
 }
 
+/** Asserts the result carries a leading text block and one image block per generated image. */
+function expectGeneratedImageBlocks(
+	result: CustomToolResult<{ imagePaths: string[] }>,
+	expected: Array<{ data: string; mimeType: string }>,
+): void {
+	const [text, ...images] = result.content;
+	expect(text?.type).toBe("text");
+	expect(images).toEqual(expected.map(image => ({ type: "image", data: image.data, mimeType: image.mimeType })));
+	expect(result.details?.imagePaths).toHaveLength(expected.length);
+}
+
 describe("imageGenTool catalog routing", () => {
 	afterEach(() => vi.restoreAllMocks());
 
@@ -357,7 +368,7 @@ describe("imageGenTool catalog routing", () => {
 			aspect_ratio: "16:9",
 			input_references: [{ type: "image_url", image_url: { url: `data:image/png;base64,${PNG_DATA}` } }],
 		});
-		expect(result.details?.images[0]?.mimeType).toBe("image/webp");
+		expectGeneratedImageBlocks(result, [{ data: PNG_DATA, mimeType: "image/webp" }]);
 	});
 
 	it("uses the selected Gemini catalog id and base URL", async () => {
@@ -611,7 +622,7 @@ describe("imageGenTool catalog routing", () => {
 		collectPaths(result);
 
 		expect(result.details?.model).toBe("gpt-image-2-codex");
-		expect(result.details?.images[0]).toMatchObject({ size: "1774x887", quality: "low" });
+		expect(result.content[1]).toMatchObject({ type: "image", data: WEBP_DATA });
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-2)");
 		expect(text).toContain("(1774x887, quality low)");
@@ -659,9 +670,15 @@ describe("imageGenTool catalog routing", () => {
 			results.push(result);
 		}
 		// The provider's own size comes back resampled to the requested image_size.
-		const sized = results[1]!.details!;
-		expect(sized.images[0]?.size).toBe("1024x1536");
-		expect(await new Bun.Image(fs.readFileSync(sized.imagePaths[0]!)).metadata()).toMatchObject({
+		const sized = results[1]!;
+		const sizedBlock = sized.content[1];
+		expect(sizedBlock?.type).toBe("image");
+		const sizedData = sizedBlock?.type === "image" ? sizedBlock.data : "";
+		expect(await new Bun.Image(Buffer.from(sizedData, "base64")).metadata()).toMatchObject({
+			width: 1024,
+			height: 1536,
+		});
+		expect(await new Bun.Image(fs.readFileSync(sized.details!.imagePaths[0]!)).metadata()).toMatchObject({
 			width: 1024,
 			height: 1536,
 		});
