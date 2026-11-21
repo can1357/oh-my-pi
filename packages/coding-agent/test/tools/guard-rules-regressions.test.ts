@@ -1606,6 +1606,26 @@ describe("guard rule review regressions", () => {
 		}
 	});
 
+	it("asks for a discarding git command that recurses into submodules, which the probe leaves out", async () => {
+		await dirtyRepo(cwd);
+		await $`git checkout -- a.txt`.cwd(cwd).quiet();
+		for (const command of [
+			"git reset --hard",
+			"git reset --hard --recurse-submodules --no-recurse-submodules",
+			"git checkout -- . --recurse-submodules",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+		for (const command of [
+			"git reset --hard --recurse-submodules",
+			"git reset --hard --recurse",
+			"git checkout -f --recurse-submodules main",
+			"git restore --recurse-submodules .",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
+
 	it("passes a `git clean` without `-f` or `-i`, which git refuses by default", async () => {
 		await dirtyRepo(cwd);
 		fs.writeFileSync(path.join(cwd, "scratch.txt"), "x\n");

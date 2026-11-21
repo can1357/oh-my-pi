@@ -1799,8 +1799,25 @@ function isLongOption(arg: string, name: string): boolean {
 	return flag.length > 2 && name.startsWith(flag);
 }
 
+/**
+ * Whether a git subcommand's options, before a `--`, end with `--recurse-submodules` (or an
+ * abbreviation of it) rather than `--no-recurse-submodules`.
+ */
+function recursesSubmodules(rest: readonly string[]): boolean {
+	let recurses = false;
+	for (const arg of rest) {
+		if (arg === "--") break;
+		if (!arg.startsWith("--")) continue;
+		if (isLongOption(arg, "--recurse-submodules")) recurses = true;
+		else if (isLongOption(arg, "--no-recurse-submodules")) recurses = false;
+	}
+	return recurses;
+}
+
 /** A word the shell expands before git sees it: one with a variable, or a leading `~`. */
 const SHELL_EXPANDED_RE = /\$|^~/;
+/** A brace group with no brace inside, matched in time linear in the word. */
+const BRACE_GROUP_RE = /\{[^{}]*\}/g;
 /**
  * Whether `word` holds a brace expansion, which can make one word several (`{build,dist}`,
  * `out{1..3}`). One the source quoted counts too, which only widens the check.
@@ -1821,8 +1838,6 @@ function resolvePathspecs(words: readonly string[], command: ShellCommand, scope
 	const resolved = words.map(word => {
 		if (hasBraceExpansion(word)) return undefined;
 		if (!SHELL_EXPANDED_RE.test(word)) return word;
-/** A brace group with no brace inside, matched in time linear in the word. */
-const BRACE_GROUP_RE = /\{[^{}]*\}/g;
 		return resolveCommandWordPath(command, word, command.cwd, scope.home);
 	});
 	return resolved.every((word): word is string => word !== undefined) ? resolved : [];
@@ -2297,6 +2312,14 @@ function discardChanges(
 		return hit(
 			"discard_changes",
 			`\`git ${sub}\` runs with another index (\`GIT_INDEX_FILE\`), whose changes the guard cannot check`,
+		);
+	}
+	// The probe leaves submodules out, but with `--recurse-submodules` the command also resets
+	// their work trees, whose changes it would discard.
+	if (sub !== "clean" && recursesSubmodules(rest)) {
+		return hit(
+			"discard_changes",
+			`\`git ${sub} --recurse-submodules\` also discards changes in submodules, which the guard cannot check`,
 		);
 	}
 	let check: VcsDiscardCheck = { ...probe.check, gitDir: target.gitDir, workTree: target.workTree };
