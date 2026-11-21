@@ -1,6 +1,6 @@
 import { describe, expect, it, type Mock, vi } from "bun:test";
-import type { Agent, AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
+import type { AfterToolCallContext, Agent, AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@oh-my-pi/pi-ai";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
@@ -34,6 +34,7 @@ interface CoordinatorHostBundle {
 	hasQueuedMessages: Mock<() => boolean>;
 	scheduleAgentContinue: Mock<(options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => void>;
 	appendMessage: Mock<(message: AgentMessage) => void>;
+	waitForIdle: Mock<() => Promise<void>>;
 	schedulePostPromptTask: Mock<(task: (signal: AbortSignal) => Promise<void>, options?: { delayMs?: number }) => void>;
 }
 
@@ -43,6 +44,7 @@ function makeHost(): CoordinatorHostBundle {
 	const hasQueuedMessages = vi.fn(() => true);
 	const appendMessage = vi.fn((_message: AgentMessage) => undefined);
 	const replaceMessages = vi.fn((_messages: AgentMessage[]) => undefined);
+	const waitForIdle = vi.fn(async () => undefined);
 	const schedulePostPromptTask = vi.fn(
 		(_task: (signal: AbortSignal) => Promise<void>, _options?: { delayMs?: number }) => undefined,
 	);
@@ -58,6 +60,7 @@ function makeHost(): CoordinatorHostBundle {
 			hasQueuedMessages,
 			appendMessage,
 			replaceMessages,
+			waitForIdle,
 		} as unknown as Agent,
 		sessionManager: {
 			getCwd: () => "/tmp",
@@ -77,6 +80,7 @@ function makeHost(): CoordinatorHostBundle {
 		hasQueuedMessages,
 		scheduleAgentContinue,
 		appendMessage,
+		waitForIdle,
 		schedulePostPromptTask,
 	};
 }
@@ -381,6 +385,27 @@ describe("TTSR stream buffers", () => {
 		const isTrigger = (event: AgentSessionEvent): boolean => event.type === "ttsr_triggered";
 		expect(emitSessionEvent.mock.calls.filter(([event]) => isTrigger(event))).toHaveLength(1);
 	});
+
+	it("reminds a tool call of a non-interrupting rule when its toolcall_end never arrived", async () => {
+		const { host } = makeHost();
+		const manager = new TtsrManager({ enabled: true, contextMode: "discard", interruptMode: "never" });
+		expect(manager.addRule(makeRule("tool:bash"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call-1",
+			name: "bash",
+			arguments: { command: `echo ${CONDITION}` },
+		};
+		const message = assistantMessage([toolCall]);
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(toolDelta(message, JSON.stringify(toolCall.arguments)));
+		coordinator.onAssistantMessageEnd({ ...message, stopReason: "toolUse" } as AssistantMessage);
+
+		const result = coordinator.afterToolCall({ toolCall } as AfterToolCallContext);
+		expect(result?.additionalContext).toContain("Test reminder");
+	});
 });
 
 /**
@@ -486,5 +511,49 @@ describe("TTSR injection notice", () => {
 		expect(injection.content).toContain('<system-interrupt reason="rule_violation"');
 		expect(injection.content).toContain("Output interrupted: violated user-defined rule.");
 		expect(injection.content).not.toContain("was not interrupted");
+	});
+});
+
+describe("TTSR interrupt retry", () => {
+	it("appends the injection only after the interrupted run settles its aborted tail", async () => {
+		const { host, appendMessage, waitForIdle, schedulePostPromptTask, scheduleAgentContinue } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "keep",
+			interruptMode: "always",
+			repeatMode: "after-gap",
+			repeatGap: 0,
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const messages = host.agent.state.messages;
+		appendMessage.mockImplementation(message => {
+			messages.push(message);
+		});
+		const interrupted = assistantMessage();
+		messages.push(interrupted);
+		coordinator.onAssistantMessageStart();
+		expect(await coordinator.checkMessageUpdate(textDelta(interrupted, CONDITION))).toBe(true);
+
+		// The interrupted run (e.g. a tool still executing after a `toolUse` stop)
+		// is still unwinding when the delayed retry task fires.
+		const run = Promise.withResolvers<void>();
+		waitForIdle.mockImplementation(() => run.promise);
+		const task = schedulePostPromptTask.mock.calls[0]?.[0];
+		if (!task) throw new Error("Expected a scheduled retry task");
+		const retry = task(new AbortController().signal);
+		await Promise.resolve();
+		expect(appendMessage).not.toHaveBeenCalled();
+		expect(scheduleAgentContinue).not.toHaveBeenCalled();
+
+		// The loop ends the run by appending a fresh aborted assistant.
+		const abortedTail = { ...assistantMessage(), stopReason: "aborted" } as AgentMessage;
+		messages.push(abortedTail);
+		run.resolve();
+		await retry;
+
+		expect(messages.at(-2)).toBe(abortedTail);
+		expect(messages.at(-1)).toMatchObject({ role: "custom", customType: "ttsr-injection" });
+		expect(scheduleAgentContinue).toHaveBeenCalledTimes(1);
 	});
 });
