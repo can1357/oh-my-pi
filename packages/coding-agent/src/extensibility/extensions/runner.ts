@@ -1806,6 +1806,8 @@ export class ExtensionRunner {
 		if (!this.#sessionStartEvent || !decider()) return undefined;
 		const sessionId = this.sessionManager.getSessionId();
 		const closing = "The session is closing; nothing was saved.";
+		// Set once the backend accepted in time: run if the tool's wait is aborted before it reads that.
+		let uncommitted: (() => void) | undefined;
 		const asked = this.#todoCalls.then(async () => {
 			// Not put to a backend: a call whose turn comes as the session closes, one aborted while
 			// it waited, one whose session or list changed meanwhile (the backend would hold a list
@@ -1869,13 +1871,16 @@ export class ExtensionRunner {
 			if (verdict === true) {
 				// Accepted for a session omp has left: its record of what the backend holds stays unknown.
 				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
-				// The list changed while the backend decided: the tool commits nothing, so `next` is such
-				// a change, also when the edit queued no list (made while no backend was selected).
-				if (!Bun.deepEquals(current(), change.previous)) resync();
-				// Otherwise a list waiting for this backend (a late acceptance's correction, or a client
-				// setting the list it had) would go out before the tool commits `next` and take the change
-				// back. Not when the id went to another extension meanwhile: the list is that one's to get.
-				else if (this.#todoPending?.backend === backend && owns()) this.#todoPending = undefined;
+				// The list changed while the backend decided (an edit made with no backend selected queues
+				// none), or the call was aborted as it answered: the tool commits nothing, omp's list follows.
+				if (signal?.aborted || !Bun.deepEquals(current(), change.previous)) resync();
+				else {
+					// A list waiting for this backend (a late acceptance's correction, or a client setting
+					// the list it had) would go out before the tool commits `next` and take the change back.
+					// Not when the id went to another extension meanwhile: the list is that one's to get.
+					if (this.#todoPending?.backend === backend && owns()) this.#todoPending = undefined;
+					uncommitted = resync;
+				}
 				// `next` is recorded as held only when this backend held `previous`. After a failed call,
 				// or when it was selected or took the id over since, the commit's list still goes out.
 				const held =
@@ -1895,7 +1900,10 @@ export class ExtensionRunner {
 			() => {},
 		);
 		// An abort ends the wait at once, also while an earlier call still holds the line.
-		return untilAborted(signal, asked);
+		return untilAborted(signal, asked).catch((error: unknown) => {
+			uncommitted?.();
+			throw error;
+		});
 	}
 
 	#queueTodoBackendCall(): void {

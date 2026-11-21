@@ -968,6 +968,42 @@ describe("todo backend", () => {
 			expect(session.getTodoPhases()).toEqual([]);
 		});
 
+		it("a todo call aborted as the backend accepts leaves the backend with omp's list, wherever the abort lands", async () => {
+			const outcomes = new Set<string>();
+			// The abort lands some microtasks after the backend's answer: before omp has read the
+			// answer, between reading it and the tool's commit, or after the commit.
+			for (let steps = 0; steps < 24; steps++) {
+				const backend = tracker("tracker", true);
+				const { session } = await open([backend.extension], "tracker");
+				session.commitTodoPhases(list("a"));
+				await settled(session);
+				const gate = Promise.withResolvers<void>();
+				backend.applyHold = gate.promise;
+				const deciding = backend.entered();
+				const abort = new AbortController();
+				const call = todo(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
+				await deciding;
+				void gate.promise.then(async () => {
+					for (let step = 0; step < steps; step++) await null;
+					abort.abort();
+				});
+				gate.resolve();
+				outcomes.add(
+					await call.then(
+						result => (result.isError ? "failed" : "committed"),
+						() => "aborted",
+					),
+				);
+				// The backend's answer to a call omp gave up is handled in a continuation of its own promise.
+				await Bun.sleep(0);
+				await settled(session);
+
+				const holds = backend.calls.length > 1 ? tasksOf(backend).at(-1) : ["a", "b"];
+				expect({ steps, holds }).toEqual({ steps, holds: committed(session) });
+			}
+			expect(outcomes).toEqual(new Set(["aborted", "committed"]));
+		});
+
 		it("an abort ends the call at once, also behind a held call; the backend is not asked and is sent nothing more", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
