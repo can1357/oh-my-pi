@@ -3051,19 +3051,27 @@ describe("openai-codex streaming", () => {
 	it("exhausts the provider retry budget on repeated empty SSE stalls", async () => {
 		using tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
+		const firstEventTimeoutMs = 10;
+		vi.useFakeTimers();
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		let requestCount = 0;
-		const fetchMock: FetchImpl = async (input, init) => {
+		const fetchMock: FetchImpl = async () => {
 			requestCount += 1;
-			const signal = getRequestSignal(input, init);
-			if (signal?.aborted) throw signal.reason;
-			return createStalledErrorResponse(200, signal);
+			const body = new ReadableStream<Uint8Array>(
+				{
+					// Advance only when the SSE parser reads the now-open body, not while
+					// the separate pre-response watchdog still owns the fetch attempt.
+					pull: () => queueMicrotask(() => vi.advanceTimersByTime(firstEventTimeoutMs)),
+				},
+				{ highWaterMark: 0 },
+			);
+			return new Response(body, { headers: { "content-type": "text/event-stream" } });
 		};
 		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
 		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
 			apiKey: createCodexTestToken(),
 			fetch: fetchMock,
-			streamFirstEventTimeoutMs: 10,
+			streamFirstEventTimeoutMs: firstEventTimeoutMs,
 		}).result();
 
 		expect(requestCount).toBe(6);
