@@ -946,6 +946,28 @@ describe("todo backend", () => {
 			expect(tasksOf(backend)).toEqual([["a"]]);
 		});
 
+		it("a todo call still with the backend when the exit wait ends fails then, and leaves the list as it was", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			// The wait is a real timer inside the runner; the handler budget stays at its 30 s default.
+			testSetSessionShutdownHandlerTimeoutMs(30);
+			backend.applyHold = Promise.withResolvers<void>().promise;
+
+			const deciding = backend.entered();
+			// Without a signal, as a call from an eval cell is made: nothing else would end its wait.
+			const call = todo(session, { op: "init", items: ["a"] });
+			await deciding;
+			await session.dispose();
+			const result = await Promise.race([
+				call,
+				// Not a wait: a task queued behind the microtasks of a call that has ended.
+				Bun.sleep(0).then(() => undefined),
+			]);
+
+			expect(result?.isError).toBe(true);
+			expect(session.getTodoPhases()).toEqual([]);
+		});
+
 		it("an abort ends the call at once, also behind a held call; the backend is not asked and is sent nothing more", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");

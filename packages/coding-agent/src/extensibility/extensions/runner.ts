@@ -1805,12 +1805,13 @@ export class ExtensionRunner {
 		};
 		if (!this.#sessionStartEvent || !decider()) return undefined;
 		const sessionId = this.sessionManager.getSessionId();
+		const closing = "The session is closing; nothing was saved.";
 		const asked = this.#todoCalls.then(async () => {
 			// Not put to a backend: a call whose turn comes as the session closes, one aborted while
 			// it waited, one whose session or list changed meanwhile (the backend would hold a list
 			// omp will not commit), and one whose backend was deselected or disabled meanwhile (no
 			// backend decides any more).
-			if (this.#todoClosed) return "The session is closing; nothing was saved.";
+			if (this.#todoClosed) return closing;
 			if (signal?.aborted) return undefined;
 			// Asked before anything lets the call through: a list equal to `previous` proves nothing
 			// once the session changed, since two empty lists are equal.
@@ -1860,7 +1861,9 @@ export class ExtensionRunner {
 				extension,
 				extensionHandlerTimeoutMs,
 				(_kind, message) => message,
-				signal,
+				// Given up with the wait on exit, like a `replace`: a call made without a signal would
+				// otherwise stay raced against the handler timeout after the session is gone.
+				signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
 			);
 			waiting = false;
 			if (verdict === true) {
@@ -1885,7 +1888,7 @@ export class ExtensionRunner {
 			}
 			// Accepted in the moment omp stopped waiting.
 			if (accepted) resync();
-			return refused(verdict ?? "the call was aborted");
+			return this.#todoGivenUp.signal.aborted ? closing : refused(verdict ?? "the call was aborted");
 		});
 		this.#todoCalls = asked.then(
 			() => {},
