@@ -389,12 +389,11 @@ describe("shouldEnableSynchronizedOutputByDefault", () => {
 		).toBe(false);
 	});
 
-	it("enables sync when TERM_FEATURES advertises the Sy capability, even through SSH/mux", () => {
+	it("enables sync when TERM_FEATURES advertises the Sy capability, even through SSH", () => {
 		expect(shouldEnableSynchronizedOutputByDefault({ TERM_FEATURES: "ClSyTc" }, "base")).toBe(true);
 		expect(
 			shouldEnableSynchronizedOutputByDefault({ TERM_FEATURES: "ClSyTc", SSH_CONNECTION: "1 2 3 4" }, "base"),
 		).toBe(true);
-		expect(shouldEnableSynchronizedOutputByDefault({ TERM_FEATURES: "ClSyTc", TMUX: "1" }, "base")).toBe(true);
 	});
 
 	it("does not treat a TERM_FEATURES list without the Sy token as advertising support", () => {
@@ -413,6 +412,13 @@ describe("shouldEnableSynchronizedOutputByDefault", () => {
 		expect(shouldEnableSynchronizedOutputByDefault({ CMUX_WORKSPACE_ID: "workspace" }, "wezterm")).toBe(false);
 		expect(shouldEnableSynchronizedOutputByDefault({ TERM: "tmux-256color" }, "iterm2")).toBe(false);
 		expect(shouldEnableSynchronizedOutputByDefault({ TERM: "screen-256color" }, "kitty")).toBe(false);
+	});
+
+	it("ignores outer-terminal sync hints that leak into a multiplexer pane (#20091)", () => {
+		// iTerm2 exports TERM_FEATURES; tmux 3.6 inherits it but swallows DEC 2026.
+		expect(shouldEnableSynchronizedOutputByDefault({ TERM_FEATURES: "ClSyTc", TMUX: "1" }, "base")).toBe(false);
+		expect(shouldEnableSynchronizedOutputByDefault({ TERM_FEATURES: "ClSyTc", ZELLIJ: "0" }, "base")).toBe(false);
+		expect(shouldEnableSynchronizedOutputByDefault({ WT_SESSION: "abc", TMUX: "1" }, "trueColor")).toBe(false);
 	});
 
 	it("enables sync inside Herdr even when a Kitty/Ghostty identity leaks", () => {

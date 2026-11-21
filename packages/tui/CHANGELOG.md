@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Fixed the TUI flashing and visibly repainting top-to-bottom inside tmux before 3.7 (most visibly in an inactive pane) when the outer terminal's `TERM_FEATURES` or `WT_SESSION` leaked into the pane; multiplexer panes now start with synchronized output off until the pane itself reports DEC 2026 support ([#20091](https://github.com/can1357/oh-my-pi/issues/20091))
 
 ## [19.1.0] - 2026-11-21
 
