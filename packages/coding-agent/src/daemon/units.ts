@@ -2044,7 +2044,14 @@ export class UnitTable {
 			} catch (error) {
 				logger.warn("Module unit stop failed", { id: entry.snapshot.id, error: errorMessage(error) });
 			}
-			await Promise.race([unit.exited.catch(() => undefined), Bun.sleep(timeoutMs + 1_000)]);
+			const deadline = Promise.withResolvers<void>();
+			const timer = setTimeout(deadline.resolve, timeoutMs + 1_000);
+			try {
+				await Promise.race([unit.exited.catch(() => undefined), deadline.promise]);
+			} finally {
+				// A stopped unit's deadline must not keep the daemon process alive.
+				clearTimeout(timer);
+			}
 			this.#settleModule(entry, unit, undefined, reason);
 			return;
 		}
