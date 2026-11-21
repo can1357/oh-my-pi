@@ -839,15 +839,10 @@ describe("LiteLLM provider discovery", () => {
 				return Response.json({
 					data: [
 						{ model_group: "drop-audio-speech", mode: "audio_speech", supports_vision: false },
-						{
-							model_group: "drop-audio-transcription",
-							model_info: { mode: "audio_transcription", supports_vision: false },
-						},
 						{ model_group: "drop-batch", mode: "batch", supports_vision: false },
 						{ model_group: "drop-embedding", mode: "embedding", supports_vision: false },
 						{ model_group: "drop-guardrail", mode: "guardrail", supports_vision: false },
 						{ model_group: "drop-image-edit", mode: "image_edit", supports_vision: false },
-						{ model_group: "drop-image-generation", mode: "image_generation", supports_vision: false },
 						{ model_group: "drop-moderation", mode: "moderation", supports_vision: false },
 						{ model_group: "drop-ocr", mode: "ocr", supports_vision: false },
 						{ model_group: "drop-rerank", mode: "rerank", supports_vision: false },
@@ -926,6 +921,42 @@ describe("LiteLLM provider discovery", () => {
 			{ id: "typesafe/jev-1.14", api: "openai-decisions", kind: "judge" },
 		]);
 	});
+
+	test("routes image_generation and audio_transcription groups onto their runner apis", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://primary:4000/v1/models")
+				return Response.json({
+					data: [{ id: "qwen-image" }, { id: "qwen3-asr" }, { id: "keep-chat" }],
+				});
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{ model_group: "qwen-image", mode: "image_generation", supports_vision: false },
+						{ model_group: "qwen3-asr", mode: "audio_transcription", supports_vision: false },
+						{ model_group: "keep-chat", mode: "chat", supports_vision: false },
+					],
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		const routes = models?.map(model => ({ id: model.id, api: model.api, kind: model.kind }));
+		expect(routes).toEqual([
+			{ id: "keep-chat", api: "openai-completions", kind: undefined },
+			{ id: "qwen-image", api: "openai-images", kind: "image" },
+			{ id: "qwen3-asr", api: "openai-transcriptions", kind: "stt" },
+		]);
+	});
+
 
 	test("keeps probing for a decisions mode that only a later endpoint reports (#16939)", async () => {
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
@@ -1858,12 +1889,10 @@ describe("LiteLLM provider discovery", () => {
 				return Response.json({
 					data: [
 						{ id: "drop-audio-speech", mode: "audio_speech" },
-						{ id: "drop-audio-transcription", mode: "audio_transcription" },
 						{ id: "drop-batch", mode: "batch" },
 						{ id: "drop-embedding", mode: "embedding" },
 						{ id: "drop-guardrail", mode: "guardrail" },
 						{ id: "drop-image-edit", mode: "image_edit" },
-						{ id: "drop-image-generation", mode: "image_generation" },
 						{ id: "drop-moderation", mode: "moderation" },
 						{ id: "drop-ocr", mode: "ocr" },
 						{ id: "drop-rerank", mode: "rerank" },
@@ -1929,6 +1958,38 @@ describe("LiteLLM provider discovery", () => {
 			{ id: "typesafe/jev-1.14", api: "openai-decisions", kind: "judge" },
 		]);
 	});
+
+	test("routes image_generation and audio_transcription rows from the /v1/models fallback onto their runner apis", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://fallback:4000/v1/models") {
+				return Response.json({
+					data: [
+						{ id: "qwen-image", mode: "image_generation" },
+						{ id: "qwen3-asr", mode: "audio_transcription" },
+						{ id: "keep-chat", mode: "chat" },
+					],
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://fallback:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		const routes = models?.map(model => ({ id: model.id, api: model.api, kind: model.kind }));
+		expect(routes).toEqual([
+			{ id: "keep-chat", api: "openai-completions", kind: undefined },
+			{ id: "qwen-image", api: "openai-images", kind: "image" },
+			{ id: "qwen3-asr", api: "openai-transcriptions", kind: "stt" },
+		]);
+	});
+
 
 	test("enriches LiteLLM /v1/models fallback entries missing from stencil.so with bundled reasoning metadata", async () => {
 		const calls: string[] = [];

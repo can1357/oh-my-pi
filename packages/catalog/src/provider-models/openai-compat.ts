@@ -6050,8 +6050,17 @@ export function resolveLiteLLMApi(
 	id: string,
 	fallbackApi: Api = "openai-completions",
 ): Api {
-	if (entry && getLiteLLMMetadataValue(entry, "mode") === "decisions") {
-		return "openai-decisions";
+	if (entry) {
+		const mode = getLiteLLMMetadataValue(entry, "mode");
+		if (mode === "decisions") {
+			return "openai-decisions";
+		}
+		if (mode === "image_generation") {
+			return "openai-images";
+		}
+		if (mode === "audio_transcription") {
+			return "openai-transcriptions";
+		}
 	}
 	return classifyLiteLLMApiRoute(entry, id) === "openai" ? "openai-responses" : fallbackApi;
 }
