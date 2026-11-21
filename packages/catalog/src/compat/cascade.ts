@@ -8,9 +8,14 @@
  * constrained-dimension count, priority)` tuple wins, and an equal-tuple
  * same-axis contest throws {@link AmbiguousOverlapError}. Declaration and
  * file order are never semantic.
+ *
+ * Runtime rules ({@link setRuntimeProviderRule}) join the bundled tree as a
+ * second layer: the layer is the last rank component, so a runtime rule wins
+ * a tie with a bundled rule and still loses to a more specific one.
  */
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { compileRuleDirectives } from "./axes";
 import { parseRevision, type Revision, type RevisionTerm, revisionSatisfies } from "./revision";
 import rules from "./rules.json";
 import type { CompiledCascade, CompiledRule, CompiledSelector, ResolvedAxes, ResolveTarget } from "./types";
@@ -108,9 +113,12 @@ interface PreparedTarget {
 	modelTokens?: readonly string[];
 }
 
+/** `(model-selector exactness, constrained dimensions, priority, layer)`; layer 1 is a runtime rule. */
+type Rank = readonly [number, number, number, number];
+
 interface RankedRule {
 	rule: IndexedRule;
-	rank: readonly [number, number, number];
+	rank: Rank;
 }
 
 let ruleIndex: RuleIndex | undefined;
@@ -123,15 +131,17 @@ function appendRule(map: Map<string, IndexedRule[]>, key: string, rule: IndexedR
 	else map.set(key, [rule]);
 }
 
-function buildRuleIndex(cascade: CompiledCascade): RuleIndex {
+function buildRuleIndex(bundled: readonly CompiledRule[], runtime: readonly CompiledRule[] = []): RuleIndex {
 	const index: RuleIndex = {
 		globals: [],
 		byClass: new Map(),
 		byProvider: new Map(),
 		byClassProvider: new Map(),
 	};
-	for (let order = 0; order < cascade.rules.length; order++) {
-		const compiled = cascade.rules[order];
+	const ordered = runtime.length === 0 ? bundled : [...bundled, ...runtime];
+	for (let order = 0; order < ordered.length; order++) {
+		const compiled = ordered[order];
+		const layer = order < bundled.length ? 0 : 1;
 		const revision = compiled.revision?.map(term => {
 			const parsed = parseRevision(term.revision);
 			if (!parsed) throw new Error(`invalid compiled revision term in ${compiled.source}`);
@@ -157,7 +167,7 @@ function buildRuleIndex(cascade: CompiledCascade): RuleIndex {
 			ranked,
 		};
 		for (let exactness = 0; exactness <= 2; exactness++) {
-			ranked.push({ rule, rank: [exactness, dimensions, priority] });
+			ranked.push({ rule, rank: [exactness, dimensions, priority, layer] });
 		}
 		if (compiled.models !== undefined) {
 			const exact = new Set<string>();
@@ -192,7 +202,7 @@ function buildRuleIndex(cascade: CompiledCascade): RuleIndex {
 }
 
 function getRuleIndex(): RuleIndex {
-	ruleIndex ??= buildRuleIndex(rules.cascade);
+	ruleIndex ??= buildRuleIndex(rules.cascade.rules, [...runtimeRules.values()]);
 	return ruleIndex;
 }
 
@@ -328,8 +338,8 @@ function modelExactness(rule: IndexedRule, prepared: PreparedTarget): number {
 	return -1;
 }
 
-/** `(exactness, dimensions, priority)` when the rule matches, else undefined. */
-function rankRule(rule: IndexedRule, prepared: PreparedTarget): readonly [number, number, number] | undefined {
+/** The rule's {@link Rank} against the target when it matches, else undefined. */
+function rankRule(rule: IndexedRule, prepared: PreparedTarget): Rank | undefined {
 	const { compiled } = rule;
 	if (!identityMatches(rule, prepared)) return undefined;
 	let exactness = 0;
@@ -343,22 +353,16 @@ function rankRule(rule: IndexedRule, prepared: PreparedTarget): readonly [number
 		if (best < 0) return undefined;
 		exactness = best;
 	}
-	return [exactness, rule.dimensions, rule.priority];
+	return rule.ranked[exactness].rank;
 }
 
-type WinnerTable = Record<string, { rank: readonly [number, number, number]; rule: IndexedRule }>;
+type WinnerTable = Record<string, { rank: Rank; rule: IndexedRule }>;
 
-function rankCompare(a: readonly [number, number, number], b: readonly [number, number, number]): number {
-	return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+function rankCompare(a: Rank, b: Rank): number {
+	return a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3];
 }
 
-function contestAxis(
-	winners: WinnerTable,
-	axis: string,
-	rank: readonly [number, number, number],
-	rule: IndexedRule,
-	target: ResolveTarget,
-): void {
+function contestAxis(winners: WinnerTable, axis: string, rank: Rank, rule: IndexedRule, target: ResolveTarget): void {
 	const held = winners[axis];
 	if (held) {
 		const order = rankCompare(held.rank, rank);
@@ -379,7 +383,7 @@ function contestAxis(
 function contest(
 	winners: WinnerTable,
 	axes: Record<string, unknown> | undefined,
-	rank: readonly [number, number, number],
+	rank: Rank,
 	rule: IndexedRule,
 	target: ResolveTarget,
 ): void {
@@ -401,6 +405,43 @@ function collect(winners: WinnerTable, pick: (rule: CompiledRule) => Record<stri
  * hits instead of thrashing. Entries share rule values: a few hundred bytes each.
  */
 const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 16384 });
+
+/** Runtime rule per provider id, in registration order ({@link setRuntimeProviderRule}). */
+const runtimeRules = new Map<string, CompiledRule>();
+const rulesChangeListeners: Array<() => void> = [];
+
+/**
+ * Adds, replaces, or (with `undefined`) removes the runtime rule assigning
+ * `directives` to every model of `provider`: what a KDL `provider "<id>" { … }`
+ * block's axis lines would set, keyed by directive (`{ "prompt-perturbation": true }`).
+ * The rule ranks as a provider-scoped rule in the runtime layer, so it
+ * overrides bundled provider-wide assignments but not model-scoped ones.
+ * Clears every memo derived from rule resolution.
+ *
+ * @throws Error from {@link compileRuleDirectives} when a directive is unknown or its value invalid.
+ */
+export function setRuntimeProviderRule(
+	provider: string,
+	directives: Readonly<Record<string, unknown>> | undefined,
+): void {
+	if (directives === undefined) {
+		if (!runtimeRules.delete(provider)) return;
+	} else {
+		runtimeRules.set(provider, {
+			source: `runtime:${provider}`,
+			providers: [provider],
+			...compileRuleDirectives(directives),
+		});
+	}
+	ruleIndex = undefined;
+	resolveCache.clear();
+	for (const listener of rulesChangeListeners) listener();
+}
+
+/** Calls `listener` after every runtime rule change; modules memoizing rule resolution clear their caches there. */
+export function onCascadeRulesChange(listener: () => void): void {
+	rulesChangeListeners.push(listener);
+}
 
 function keyPart(value: string | undefined): string {
 	return value === undefined ? "-1:" : `${value.length}:${value}`;
@@ -482,7 +523,7 @@ export function bypassCascadeMemoForTesting<T>(fn: () => T): T {
  * mutable rule data. Bundled target lookups use {@link resolveCascade}.
  */
 export function resolveCascadeRules(cascade: CompiledCascade, target: ResolveTarget): ResolvedAxes {
-	return cloneAxes(resolveRanked(target, rankRelevantRules(buildRuleIndex(cascade), prepareTarget(target))));
+	return cloneAxes(resolveRanked(target, rankRelevantRules(buildRuleIndex(cascade.rules), prepareTarget(target))));
 }
 
 /**

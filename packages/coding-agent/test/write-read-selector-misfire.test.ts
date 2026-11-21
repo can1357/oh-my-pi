@@ -11,7 +11,7 @@ import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 // expression (`src/foo.tsx:1-260:raw`) as the target. Because a literal colon
 // filename is legal on POSIX (issue #4618), that used to resolve to filesystem
 // creation and report success, leaving a stray zero-byte file the model could
-// not recover from (issue #6387 — local analogue of the #6123 xd:// guard).
+// not recover from (issue #6387).
 
 function session(cwd: string): ToolSession {
 	return {

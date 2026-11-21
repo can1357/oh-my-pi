@@ -12,6 +12,37 @@
 - Anthropic requests now declare `Context.inactiveTools` as deferred from the first request, so a tool activated later no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
 - Fixed OAuth logins failing with `getifaddrs returned an error` on Android/Termux before the browser callback started ([#16127](https://github.com/can1357/oh-my-pi/issues/16127)).
 
+- With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
+- Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
+- Usage reports of a provider an extension registers now survive across omp processes. Registering a provider's first usage adapter no longer discards the reports another process cached for it, so each new session stops re-probing the provider's usage endpoint; replacing an existing adapter still invalidates them ([#20030](https://github.com/can1357/oh-my-pi/pull/20030) by [@ahsanatha](https://github.com/ahsanatha))
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added provider hooks (`setProviderHooks` in `@oh-my-pi/pi-ai/provider-hooks`), which replace a provider's stream adapter or image generation while its models keep their api.
+- Added opt-in prompt perturbation: model-visible prompt prose and tool descriptions use a per-install wording chosen from a committed paraphrase pool covering every static system- and tool-prompt line. Models enable it with the `prompt-perturbation` KDL axis; `OMP_PROMPT_PERTURBATION=1`/`0` forces it on or off.
+
+### Changed
+
+- The Cursor provider forwards `bash` instead of `write` so staged previews can be finalized
+- Increased provider stream watchdog defaults from 5 to 15 minutes, preventing slow one-shot completions from being interrupted prematurely.
+- Extended Gemini reasoning-stream protection to allow longer planning sequences before interruption.
+
+### Fixed
+
+- Broker-backed credential stores now detect a login the broker stores but does not serve and keep it in the local `agent.db` (`HybridAuthCredentialStore`) instead of losing it on the next snapshot; a broker-only `RemoteAuthCredentialStore` fails the upload with `AuthBrokerUnservedProviderError`.
+- OpenAI Codex requests no longer send the `session_id` and `conversation_id` headers; the session goes out only as `session-id`, like the Codex CLI, so proxies that reject underscore header names (Envoy, nginx defaults) pass them ([#20018](https://github.com/can1357/oh-my-pi/issues/20018))
+- Preserved the intended conversation structure when a user message follows a tool result for models that fold user messages after tool results.
+- LiteLLM requests now rotate to another configured API key when a 422 budget-exceeded response disables the current key. ([#19860](https://github.com/can1357/oh-my-pi/issues/19860))
+- GPT-6.2 system prompts are now sent as leading developer messages through third-party Responses proxies, enabling prompt caching and avoiding unnecessary full-rate input charges on subsequent turns. ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
+- Improved thinking-mode detection across request formats, avoiding unnecessary retries and correctly remembering formats accepted or rejected by the server. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
+- Auth refresh failures that could cause an access token to expire before the next retry are now surfaced with a warning instead of remaining visible only in debug logs. ([#19590](https://github.com/can1357/oh-my-pi/pull/19590) by [@will-bogusz](https://github.com/will-bogusz))
+- Chat Completions now preserve reasoning returned only in `reasoning_details`, including reasoning from Bifrost Gemini. ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
+- Antigravity quota exhaustion is now reported as a 429 rate-limit error, allowing configured retries, credential rotation, and model fallback behavior to apply correctly instead of treating the response as assistant text. ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
+- Anthropic requests now preserve prompt caching when tools are activated later in a conversation, avoiding unnecessary system-prompt and transcript cache rewrites. ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
+
 ## [19.0.1] - 2026-11-19
 
 ### Fixed
@@ -2167,40 +2198,4 @@
 - Fixed model switches to Devin rejecting foreign provider response IDs, reasoning signatures, and empty interrupted turns as invalid Cascade history.
 - Classified zero-output Devin `invalid_argument` trailers as context overflow when the serialized message history is already large, routing cumulative tool-output payload failures through context maintenance—including artifact-backed shake rescue—instead of retrying the same rejected history.
 
-## [17.0.5] - 2026-07-18
-
-### Changed
-
-- Changed Anthropic API-key requests to default to a 1-hour prompt-cache retention (using the extended-cache-ttl-2025-04-11 beta) to prevent cold-misses during idle sessions, with support for PI_CACHE_RETENTION values "short" and "none" to override this behavior.
-
-### Fixed
-
-- Fixed transient OpenAI stream truncations by retrying once before output becomes replay-unsafe, preventing recoverable transport errors from failing the turn.
-- Fixed native Kimi Code K3 thinking being disabled during named function selection by utilizing generic required tool choice.
-- Fixed /login moonshot validating China-platform API keys against the international host instead of honoring MOONSHOT_BASE_URL.
-- Fixed Anthropic session stickiness suppressing usage-based re-ranking indefinitely by gating stickiness on a 1-hour cache warmth window (configurable via ANTHROPIC_SESSION_STICKY_CACHE_WARM_MS) to restore proactive multi-account load balancing after long idle periods.
-- Fixed credential ranking where clockless Anthropic usage windows incorrectly outranked clocked sibling credentials.
-- Fixed tool request failures (HTTP 400) on local grammar-constrained OpenAI-compatible backends (such as llama.cpp, LM Studio, and vLLM) by widening bare boolean subschemas into a value-accepting primitive union.
-- Fixed custom OAuth Anthropic-compatible endpoints receiving generated Claude Code fingerprint headers even when explicit header overrides were provided.
-- Fixed active sessions for plan-gated OpenAI Codex models (Sol/Luna) silently re-routing to sibling OAuth accounts when usage headroom changed, ensuring session stickiness is preserved as long as the preferred credential remains usable and eligible.
-
-## [17.0.4] - 2026-07-18
-
-### Fixed
-
-- Fixed Kimi Code usage reports dropping the 5h window reset time (`omp usage` showed no "resets in …" for the 5h limit): the API returns `resetTime` on the limit `detail`, not on `window`, so the parsed row-level reset is now carried onto the window when the window itself has none.
-- Made Kimi device-id persistence best-effort: a missing or unwritable `~/.omp/agent` directory no longer throws during Kimi header construction, which silently nulled every `kimi-code` usage probe on fresh installs.
-- Coerced boolean tool-schema subschemas to MFJS object forms for native Moonshot/Kimi endpoints, preventing the task tool's `outputSchema` field from causing HTTP 400 responses ([#5952](https://github.com/can1357/oh-my-pi/issues/5952)).
-
-## [17.0.3] - 2026-07-17
-
-### Fixed
-
-- Replaced the opaque `h2 is not supported` failure on the Cursor run transport with an actionable error naming the ALPN-stripping proxy as the cause and pointing at the `providers.cursor.baseUrl` HTTP/2 bridge workaround. The run RPC is HTTP/2-only, so behind a TLS-intercepting proxy that strips ALPN (e.g. Zscaler) bun cannot negotiate `h2` and the completion cannot proceed ([#5828](https://github.com/can1357/oh-my-pi/issues/5828)).
-- Restored the `createAssistantMessageEventStream()` root export used by legacy provider extensions ([#5879](https://github.com/can1357/oh-my-pi/issues/5879)).
-- Fixed parallel Responses tool-result images interleaving synthetic user messages before all pending outputs, preventing strict OpenRouter/Moonshot backends from rejecting follow-up requests. ([#5850](https://github.com/can1357/oh-my-pi/issues/5850))
-- Fixed Kimi Code K3 requests to send native named efforts (`low`, `high`, `max`) and use adaptive effort rather than generic token budgets on explicit Anthropic transport overrides ([#5893](https://github.com/can1357/oh-my-pi/issues/5893)).
-- Automatically invalidate and rotate OAuth credentials when an "invalidated oauth token" error occurs
-- Fixed Anthropic usage reports treating the organization response header as the account identity, which caused the 5h/7d status-line segment to disappear for OAuth credentials without stored organization metadata. ([#5698](https://github.com/can1357/oh-my-pi/issues/5698))
-
-Older entries are archived in [packages/ai/CHANGELOG.md@f0b33d0e132f](https://github.com/can1357/oh-my-pi/blob/f0b33d0e132ff781c8617c04fa1ae66335876331/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@de21c0ac454b](https://github.com/can1357/oh-my-pi/blob/de21c0ac454b1a66d8dfff32b0ed4751a08f809b/packages/ai/CHANGELOG.md).
