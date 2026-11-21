@@ -16,9 +16,9 @@
 //   void  omp_applefm_free(char *);
 //
 // `emit` runs on arbitrary threads, strictly sequentially per request. Events:
-// text · reasoning · toolCall · usage, then exactly one terminal `done` or
-// `error` delivered with `final = true`, after which `context` is never used
-// again.
+// text · reasoning · toolCall · usage · finish, then exactly one terminal
+// `done` or `error` delivered with `final = true`, after which `context` is
+// never used again.
 //
 // The executor streams opaque `LanguageModelExecutorGenerationChannel.Event`
 // values whose discriminators are internal enums; they are decoded through
@@ -375,8 +375,7 @@ struct ChannelDecoder {
 		case let usage as Channel.Usage:
 			return [Self.usage(usage)]
 		default:
-			if label != "updateMetadata" { log("ignored \(type) action '\(label)'") }
-			return []
+			return Self.untyped(label, payload, channel: type)
 		}
 	}
 
@@ -404,8 +403,7 @@ struct ChannelDecoder {
 		case let usage as Channel.Usage:
 			return [Self.usage(usage)]
 		default:
-			if label != "updateMetadata" { log("ignored tool call action '\(label)'") }
-			return []
+			return Self.untyped(label, payload, channel: "tool call")
 		}
 	}
 
@@ -415,6 +413,35 @@ struct ChannelDecoder {
 		event.cachedInput = usage.input.cachedTokenCount
 		event.output = usage.output.totalTokenCount
 		event.reasoning = usage.output.reasoningTokenCount
+		return event
+	}
+
+	/// Actions whose payload type is absent from the SDK's public interface.
+	private static func untyped(_ label: String, _ payload: Any, channel: String) -> [Event] {
+		switch label {
+		case "updateFinishReason":
+			return [finish(payload)]
+		case "updateMetadata":
+			return []
+		default:
+			log("ignored \(channel) action '\(label)'")
+			return []
+		}
+	}
+
+	/// `Transcript.FinishReason` cases understood by the provider.
+	private static let finishReasons: Set<String> = ["contentCompleted", "maximumResponseTokensExceeded"]
+
+	/// `Transcript.FinishReason` is exported but missing from the SDK's
+	/// `.swiftinterface`, so the payload cannot be cast; its case name is the
+	/// last component of its reflection, e.g.
+	/// `FoundationModels.Transcript.FinishReason.contentCompleted`.
+	private static func finish(_ reason: Any) -> Event {
+		let path = String(reflecting: reason).prefix { $0 != "(" }
+		let name = String(path.split(separator: ".").last ?? path)
+		if !finishReasons.contains(name) { log("unknown finish reason '\(name)'") }
+		var event = Event("finish")
+		event.reason = name
 		return event
 	}
 }
