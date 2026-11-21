@@ -34,8 +34,6 @@ import {
 	numericOption,
 	SETTING_TABS,
 	type SubmenuOption,
-	TAB_LEADS,
-	TAB_METADATA,
 	type SettingTab,
 	type SettingsHost,
 	type SettingsDisplayEntry,
@@ -49,7 +47,15 @@ import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./compos
 import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
-import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
+import {
+	getSettingDef,
+	getSettingsForTab,
+	groupDisplayName,
+	type SettingDef,
+	tabDisplayLead,
+	tabDisplayMetadata,
+} from "./settings-defs";
+import { displayTemplate, displayText } from "./display-catalog";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { themePickerOptions } from "./theme-selector";
 import type { SelectPickerOptions } from "../native/picker";
@@ -107,24 +113,29 @@ function settingsTabsNode(tabs: readonly Tab[], active: string | undefined): Nat
 /** Footer hints for `mode`, mirroring the ANSI footer line. */
 function settingsHintsNode(mode: SettingsHintMode): NativeNode {
 	const confirmKeys: readonly KeyName[] = actionHint("tui.select.confirm", "")?.keys ?? [];
-	const close = actionHint("tui.select.cancel", "close");
-	const switchTabs: NativeHint = { keys: ["left", "right"], label: "switch tabs" };
+	const change = displayText("chrome.hint.change", "change");
+	const close = actionHint("tui.select.cancel", displayText("chrome.hint.close", "close"));
+	const switchTabs: NativeHint = {
+		keys: ["left", "right"],
+		label: displayText("chrome.hint.switchTabs", "switch tabs"),
+	};
+	const jumpSections: NativeHint = { keys: ["tab"], label: displayText("chrome.hint.jumpSections", "jump sections") };
 	let hints: (NativeHint | undefined)[];
 	switch (mode) {
 		case "search":
 			hints = [
-				actionHint("tui.select.confirm", "change"),
-				{ keys: ["tab"], label: "jump tabs" },
-				actionHint("tui.select.cancel", "exit search"),
+				actionHint("tui.select.confirm", change),
+				{ keys: ["tab"], label: displayText("chrome.hint.jumpTabs", "jump tabs") },
+				actionHint("tui.select.cancel", displayText("chrome.hint.exitSearch", "exit search")),
 			];
 			break;
 		case "plugins":
-			hints = [{ keys: ["tab"], label: "switch tabs" }, close];
+			hints = [{ keys: ["tab"], label: switchTabs.label }, close];
 			break;
 		case "sections":
 			hints = [
-				actionHint(["tui.select.up", "tui.select.down"], "jump sections"),
-				{ keys: ["tab", ...confirmKeys], label: "to settings" },
+				actionHint(["tui.select.up", "tui.select.down"], jumpSections.label),
+				{ keys: ["tab", ...confirmKeys], label: displayText("chrome.hint.toSettings", "to settings") },
 				switchTabs,
 				close,
 			];
@@ -132,11 +143,11 @@ function settingsHintsNode(mode: SettingsHintMode): NativeNode {
 		case "rows":
 		case "rows-sections":
 			hints = [
-				{ keys: [...confirmKeys, "space"], label: "change" },
+				{ keys: [...confirmKeys, "space"], label: change },
 				...(mode === "rows-sections"
-					? [{ keys: ["tab"], label: "jump sections" } satisfies NativeHint, switchTabs]
-					: [{ keys: ["tab"], label: "switch tabs" } satisfies NativeHint]),
-				{ keys: [], label: "type to search" },
+					? [jumpSections, switchTabs]
+					: [{ keys: ["tab"], label: switchTabs.label } satisfies NativeHint]),
+				{ keys: [], label: displayText("chrome.hint.typeToSearch", "type to search") },
 				close,
 			];
 			break;
@@ -447,7 +458,10 @@ class ProviderLimitsSubmenu extends Container {
 			return {
 				value: provider,
 				label: provider,
-				description: limit === undefined ? "Unlimited" : `Limit: ${limit}`,
+				description:
+					limit === undefined
+						? displayText("chrome.unlimited", "Unlimited")
+						: displayTemplate("chrome.limit", `Limit: ${limit}`, { limit: String(limit) }),
 			};
 		});
 		const clearItem: SelectItem[] =
@@ -542,7 +556,7 @@ function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number 
 	let nameWidth = 0;
 	for (const tab of SETTING_TABS) {
 		for (const def of getSettingsForTab(entries, tab)) {
-			if (def.group) nameWidth = Math.max(nameWidth, visibleWidth(def.group));
+			if (def.group) nameWidth = Math.max(nameWidth, visibleWidth(groupDisplayName(tab, def.group)));
 		}
 	}
 	return Math.min(22, nameWidth) + 4;
@@ -551,11 +565,15 @@ function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number 
 function getSettingsTabs(): Tab[] {
 	return [
 		...SETTING_TABS.map(id => {
-			const meta = TAB_METADATA[id];
+			const meta = tabDisplayMetadata(id);
 			const icon = theme.symbol(meta.icon);
 			return { id, label: `${icon} ${meta.label}`, short: icon };
 		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
+		{
+			id: "plugins",
+			label: `${theme.icon.package} ${displayText("chrome.pluginsTab", "Plugins")}`,
+			short: theme.icon.package,
+		},
 	];
 }
 
@@ -708,24 +726,38 @@ export class SettingsSelectorComponent implements Component {
 		const confirm = editorKey("tui.select.confirm");
 		const cancel = editorKey("tui.select.cancel");
 		const tab = formatKeyHint("tab");
-		const switchTabs = `${formatKeyHints(["left", "right"])} to switch tabs`;
+		const toChange = displayText("chrome.hint.toChange", "to change");
+		const toSwitchTabs = displayText("chrome.hint.toSwitchTabs", "to switch tabs");
+		const toJumpSections = displayText("chrome.hint.toJumpSections", "to jump sections");
+		const toClose = displayText("chrome.hint.toClose", "to close");
+		const switchTabs = `${formatKeyHints(["left", "right"])} ${toSwitchTabs}`;
 		if (this.#searchList) {
-			return `${confirm} to change · ${tab} to jump tabs · ${cancel} to exit search`;
+			const toJumpTabs = displayText("chrome.hint.toJumpTabs", "to jump tabs");
+			const toExitSearch = displayText("chrome.hint.toExitSearch", "to exit search");
+			return `${confirm} ${toChange} · ${tab} ${toJumpTabs} · ${cancel} ${toExitSearch}`;
 		}
 		if (this.#currentTabId === "plugins") {
-			return `${tab} to switch tabs · ${cancel} to close`;
+			return `${tab} ${toSwitchTabs} · ${cancel} ${toClose}`;
 		}
 		if (this.#currentList?.sectionFocused) {
-			return `${editorKeys("tui.select.up", "tui.select.down")} to jump sections · ${tab}/${confirm} to settings · ${switchTabs} · ${cancel} to close`;
+			const upDown = editorKeys("tui.select.up", "tui.select.down");
+			const toSettings = displayText("chrome.hint.toSettings", "to settings");
+			return `${upDown} ${toJumpSections} · ${tab}/${confirm} ${toSettings} · ${switchTabs} · ${cancel} ${toClose}`;
 		}
-		const nav = this.#hasSectionJump ? `${tab} to jump sections · ${switchTabs}` : `${tab} to switch tabs`;
-		return `${confirm}/${formatKeyHint("space")} to change · ${nav} · Type to search · ${cancel} to close`;
+		const nav = this.#hasSectionJump ? `${tab} ${toJumpSections} · ${switchTabs}` : `${tab} ${toSwitchTabs}`;
+		const search = displayText("chrome.hint.typeToSearchUpper", "Type to search");
+		return `${confirm}/${formatKeyHint("space")} ${toChange} · ${nav} · ${search} · ${cancel} ${toClose}`;
 	}
 
 	/** Single-line search banner: accent icon, editable query with live cursor, right-aligned match count. */
 	#renderSearchBanner(width: number): string {
 		const icon = theme.symbol("icon.search");
-		const countText = this.#searchMatchCount === 1 ? "1 match" : `${this.#searchMatchCount} matches`;
+		const countText =
+			this.#searchMatchCount === 1
+				? displayText("chrome.matchOne", "1 match")
+				: displayTemplate("chrome.matches", `${this.#searchMatchCount} matches`, {
+						count: String(this.#searchMatchCount),
+					});
 		const rightWidth = visibleWidth(countText) + 1; // trailing margin
 		const prefix = ` ${theme.fg("accent", icon)} `;
 		// The input pads itself to exactly this width and keeps the cursor in view.
@@ -747,7 +779,9 @@ export class SettingsSelectorComponent implements Component {
 		const tabLines = this.#tabBar.render(innerWidth);
 		const searching = this.#searchList !== null;
 		const showPreview = !searching && this.#currentTabId === "appearance";
-		const previewLines = showPreview ? ["", theme.fg("muted", "Preview:"), this.#getStatusPreviewString()] : [];
+		const previewLines = showPreview
+			? ["", theme.fg("muted", displayText("chrome.preview", "Preview:")), this.#getStatusPreviewString()]
+			: [];
 
 		// Fixed chrome: top border, tabs, divider, [search row], divider, hint, bottom border.
 		const fixedRows = 1 + tabLines.length + 1 + (searching ? 1 : 0) + 1 + 1 + 1;
@@ -766,7 +800,7 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Settings"));
+		out.push(topBorder(width, displayText("chrome.overlayTitle", "Settings")));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) {
@@ -826,9 +860,14 @@ export class SettingsSelectorComponent implements Component {
 
 		const pages: TspPrefsProps["pages"][number][] = SETTING_TABS.map(id => {
 			const changed = this.#changedCount(id);
-			return { id, label: TAB_METADATA[id].label, icon: id, changed: changed > 0 ? changed : undefined };
+			return { id, label: tabDisplayMetadata(id).label, icon: id, changed: changed > 0 ? changed : undefined };
 		});
-		pages.push({ id: PLUGINS_PAGE, label: "Installed", icon: "plugins", group: "Plugins" });
+		pages.push({
+			id: PLUGINS_PAGE,
+			label: displayText("chrome.installed", "Installed"),
+			icon: "plugins",
+			group: "Plugins",
+		});
 
 		let sections: TspPrefsProps["sections"] = [];
 		let focus: string | null = null;
@@ -843,9 +882,13 @@ export class SettingsSelectorComponent implements Component {
 			sections = list.prefsSections(
 				item => {
 					const def = getSettingDef(entries, item.id);
+					// The id stays canonical (`prefsSectionId`) even when the heading is translated.
 					const group = def?.group ?? "General";
 					const id = prefsSectionId(group);
-					return searching && def ? { id: `${def.tab}/${id}`, title: group, page: def.tab } : { id, title: group };
+					const title = def?.group
+						? groupDisplayName(def.tab, def.group)
+						: displayText("chrome.sectionGeneral", "General");
+					return searching && def ? { id: `${def.tab}/${id}`, title, page: def.tab } : { id, title };
 				},
 				item => this.#prefsControl(item.id, item.currentValue),
 			);
@@ -883,10 +926,10 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const props: TspPrefsProps = {
-			title: "omp settings",
+			title: displayText("chrome.prefsTitle", "omp settings"),
 			pages,
 			page: searching ? this.#preSearchTabId : this.#currentTabId,
-			lead: searching ? undefined : (pluginPage?.lead ?? (tab ? TAB_LEADS[tab] : undefined)),
+			lead: searching ? undefined : (pluginPage?.lead ?? (tab ? tabDisplayLead(tab) : undefined)),
 			query: searching ? this.#searchQuery : undefined,
 			cursor: searching ? this.#searchInput.getCursor() : undefined,
 			sections,
@@ -960,7 +1003,7 @@ export class SettingsSelectorComponent implements Component {
 					mono: !def.secret && MONO_TEXT_SETTING.test(def.path) ? true : undefined,
 				};
 			case "providerLimits":
-				return { k: "action", label: "Edit…", act: "edit" };
+				return { k: "action", label: displayText("chrome.edit", "Edit…"), act: "edit" };
 			case "multiselect":
 				return {
 					k: "multi",
@@ -976,7 +1019,7 @@ export class SettingsSelectorComponent implements Component {
 		const value: unknown = def.defaultValue;
 		switch (def.type) {
 			case "boolean":
-				return value ? "On" : "Off";
+				return value ? displayText("chrome.on", "On") : displayText("chrome.off", "Off");
 			case "submenu": {
 				const raw = this.#getSubmenuCurrentValue(def.path, value);
 				return this.#submenuOptions(def).find(o => o.value === raw)?.label ?? raw;
@@ -1154,7 +1197,10 @@ export class SettingsSelectorComponent implements Component {
 		if (searching) {
 			const count = this.#searchMatchCount;
 			if (memo.search?.input !== this.#searchInput || memo.search.count !== count) {
-				const countText = count === 1 ? "1 match" : `${count} matches`;
+				const countText =
+					count === 1
+						? displayText("chrome.matchOne", "1 match")
+						: displayTemplate("chrome.matches", `${count} matches`, { count: String(count) });
 				memo.search = {
 					input: this.#searchInput,
 					count,
@@ -1185,7 +1231,7 @@ export class SettingsSelectorComponent implements Component {
 						"col",
 						{ gap: "xs" },
 						[
-							text([span("Preview:", "muted")]),
+							text([span(displayText("chrome.preview", "Preview:"), "muted")]),
 							this.#callbacks.describeStatusLinePreview?.() ??
 								text(styledSpans(source), { wrap: "none", truncate: "end" }),
 						],
@@ -1209,7 +1255,7 @@ export class SettingsSelectorComponent implements Component {
 		children.push(memo.hints[mode]);
 
 		if (memo.root && sameItems(memo.root.children, children)) return memo.root.node;
-		const root = overlayCard("omp.overlay.settings", "Settings", children);
+		const root = overlayCard("omp.overlay.settings", displayText("chrome.overlayTitle", "Settings"), children);
 		memo.root = { children, node: root };
 		return root;
 	}
@@ -1313,7 +1359,7 @@ export class SettingsSelectorComponent implements Component {
 			{
 				layout: "flat",
 				typeToSearch: false,
-				emptyText: "No matching settings",
+				emptyText: displayText("chrome.noMatches", "No matching settings"),
 				hint: "",
 			},
 		);
@@ -1369,7 +1415,7 @@ export class SettingsSelectorComponent implements Component {
 
 		tabResults.sort((a, b) => a.bestScore - b.bestScore || a.order - b.order);
 		for (const result of tabResults) {
-			const meta = TAB_METADATA[result.tab];
+			const meta = tabDisplayMetadata(result.tab);
 			items.push({
 				id: `__tab:${result.tab}`,
 				label: `${theme.symbol(meta.icon)} ${meta.label}`,
@@ -1419,7 +1465,7 @@ export class SettingsSelectorComponent implements Component {
 		const empty: Tab[] = [];
 		const matchedIds = new Set<SettingTab>(matchedTabOrder);
 		for (const id of matchedTabOrder) {
-			const meta = TAB_METADATA[id];
+			const meta = tabDisplayMetadata(id);
 			const icon = theme.symbol(meta.icon);
 			const count = counts.get(id) ?? 0;
 			if (count > 0) {
@@ -1428,14 +1474,14 @@ export class SettingsSelectorComponent implements Component {
 		}
 		for (const id of SETTING_TABS) {
 			if (matchedIds.has(id)) continue;
-			const meta = TAB_METADATA[id];
+			const meta = tabDisplayMetadata(id);
 			const icon = theme.symbol(meta.icon);
 			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
 		}
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
 		empty.push({
 			id: "plugins",
-			label: `${theme.icon.package} Plugins`,
+			label: `${theme.icon.package} ${displayText("chrome.pluginsTab", "Plugins")}`,
 			short: theme.icon.package,
 			muted: true,
 		});
@@ -1726,7 +1772,7 @@ export class SettingsSelectorComponent implements Component {
 	#formatProviderLimitsValue(value: unknown): string {
 		const limits = this.#context.settings.normalizeProviderLimits(value);
 		const entries = Object.entries(limits).sort(([a], [b]) => a.localeCompare(b));
-		if (entries.length === 0) return "Unlimited";
+		if (entries.length === 0) return displayText("chrome.unlimited", "Unlimited");
 		return entries.map(([provider, limit]) => `${provider}: ${limit}`).join(", ");
 	}
 
@@ -1877,7 +1923,13 @@ export class SettingsSelectorComponent implements Component {
 			const item = this.#defToItem(def);
 			if (!item) continue;
 			if (def.group && def.group !== lastGroup) {
-				items.push({ id: `__heading:${def.group}`, label: def.group, currentValue: "", heading: true });
+				// The heading is display text; the id and `lastGroup` stay canonical.
+				items.push({
+					id: `__heading:${def.group}`,
+					label: groupDisplayName(def.tab, def.group),
+					currentValue: "",
+					heading: true,
+				});
 				lastGroup = def.group;
 			}
 			items.push(item);
@@ -1898,7 +1950,7 @@ export class SettingsSelectorComponent implements Component {
 		if (this.#callbacks.getStatusLinePreview) {
 			return this.#callbacks.getStatusLinePreview();
 		}
-		return theme.fg("dim", "(preview not available)");
+		return theme.fg("dim", displayText("chrome.previewUnavailable", "(preview not available)"));
 	}
 
 	/**
