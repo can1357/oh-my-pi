@@ -17,11 +17,9 @@ import * as path from "node:path";
 import { hashlineFileHash } from "@oh-my-pi/pi-natives";
 import { expandTilde, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { normalizeToLF, stripBom } from "../edit/normalize";
+import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { InternalUrlRouter } from "../internal-urls";
-import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
-import { escapeHarnessTags } from "../session/harness-tags";
 import type { ToolSession } from ".";
 import { resolveArtifactSpillThreshold } from "./output-meta";
 import { formatPathRelativeToCwd, normalizeWindowsDriveAliasPath } from "./path-utils";
@@ -76,15 +74,9 @@ interface ParsedRows {
 function parseRows(outputText: string): ParsedRows {
 	const bare: NumberedRow[] = [];
 	const prefixed: PrefixedRow[] = [];
-	// Async delivery escapes harness tags, so the model would receive `&lt;system-notice>` instead of the file's
-	// line. A result may be backgrounded after it is built, so this applies on every path. The escape matches
-	// across line breaks (`<` ending a row, `system-x…` starting the next), so it is applied to the whole output;
-	// it only replaces `<` with `&lt;`, so line indexes align, and a row it changes is skipped.
-	const escaped = escapeHarnessTags(outputText).split("\n");
 	const rows = outputText.split("\n");
 	for (let n = 0; n < rows.length; n++) {
 		const row = rows[n];
-		if (escaped[n] !== row) continue;
 		const tab = TAB_ROW.exec(row);
 		if (tab) bare.push({ line: Number(tab[1]), text: tab[2] });
 		const plain = BARE_ROW.exec(row);
@@ -245,7 +237,8 @@ function claim(claims: Map<string, ClaimedRows>, absolutePath: string, row: Numb
 }
 
 /**
- * Read a file the way the edit store snapshots it: BOM-stripped, LF-normalized UTF-8. `reservedSize` is the size
+ * Read a file as the edit store takes it: LF-normalized UTF-8 with any leading BOM kept. The store (`recordSnapshot`,
+ * `hashlineFileHash`) removes exactly one BOM itself, so the text goes to it unchanged. `reservedSize` is the size
  * probed (and charged to the read budget) before this read; at most one byte more is read, and a longer file
  * (grown or replaced after the probe) is unusable. Undefined when unusable.
  */
@@ -255,24 +248,28 @@ async function readSnapshotText(absolutePath: string, reservedSize: number): Pro
 			.slice(0, reservedSize + 1)
 			.bytes();
 		if (bytes.length > reservedSize) return undefined;
-		const decoded = decodeUtf8Text(bytes);
-		return decoded === null ? undefined : normalizeToLF(stripBom(decoded).text);
+		const decoded = decodeUtf8Text(bytes, { keepBom: true });
+		return decoded === null ? undefined : normalizeToLF(decoded);
 	} catch (err) {
 		logger.debug("bash seen-lines: unreadable file", { path: absolutePath, err: String(err) });
 		return undefined;
 	}
 }
 
-/** Lines of `text` whose content equals a claimed row, ascending. */
+/** Lines of `text` (as read, BOM kept) whose content equals a claimed row, ascending. */
 function verifiedLines(text: string, rows: ClaimedRows): number[] {
-	const lines = text.split("\n");
+	// Line numbers are those of the text as the store holds it: one leading BOM removed.
+	const hadBom = text.startsWith("\uFEFF");
+	const lines = (hadBom ? text.slice(1) : text).split("\n");
 	const lineCount = text.endsWith("\n") ? lines.length - 1 : lines.length;
 	const verified: number[] = [];
 	for (const [line, texts] of rows) {
 		if (line < 1 || line > lineCount) continue;
 		const content = lines[line - 1];
 		const bare = content.endsWith("\r") ? content.slice(0, -1) : content;
-		if (texts.has(bare)) verified.push(line);
+		// Numbered views print a file's BOM after the line number on line 1 (`1\t\uFEFFtext`), so a BOM file's line 1
+		// also matches in its raw form, BOM included. A file without a BOM never accepts a BOM-prefixed row.
+		if (texts.has(bare) || (hadBom && line === 1 && texts.has(`\uFEFF${bare}`))) verified.push(line);
 	}
 	return verified.sort((a, b) => a - b);
 }
@@ -299,7 +296,7 @@ function formatLineRanges(lines: readonly number[]): string {
 /** A file whose numbered rows in a bash result match its current content. */
 export interface BashSeenFile {
 	absolutePath: string;
-	/** BOM-stripped, LF-normalized content the rows matched; recorded as the snapshot. */
+	/** LF-normalized content the rows matched, any leading BOM kept; recorded as the snapshot (the store strips one BOM). */
 	text: string;
 	/** Verified 1-based lines, ascending; never empty. */
 	lines: number[];
@@ -374,25 +371,12 @@ export function formatBashSeenLinesFooter(files: readonly BashSeenFile[], sessio
 }
 
 /**
- * Whether a bash result reaches the model uncut. `text` is its text content;
- * `outputNotice` is the notice a backgrounded job's delivered text appends to
- * it (`formatOutputNotice` of the result's meta). Two later cuts apply:
- * - the tool wrapper middle-elides `text` over the spill threshold (bytes,
- *   measured before notices are appended);
- * - an async follow-up longer than {@link ASYNC_INLINE_RESULT_MAX_CHARS}
- *   (text plus notice) is replaced by a preview.
- * Both are checked for every bash result: a foreground call can be
- * backgrounded while its result is still being built.
+ * Whether a bash result reaches the model uncut. `text` is the result text as returned (footer included): the tool
+ * wrapper middle-elides text over the spill threshold (bytes, measured before notices are appended), which would
+ * drop credited rows.
  */
-export function bashResultReachesModelWhole(
-	text: string,
-	outputNotice: string,
-	settings: Settings | undefined,
-): boolean {
-	return (
-		text.length + outputNotice.length <= ASYNC_INLINE_RESULT_MAX_CHARS &&
-		Buffer.byteLength(text, "utf-8") <= resolveArtifactSpillThreshold(settings)
-	);
+export function bashResultReachesModelWhole(text: string, settings: Settings | undefined): boolean {
+	return Buffer.byteLength(text, "utf-8") <= resolveArtifactSpillThreshold(settings);
 }
 
 /** Record each file's verified lines as displayed under its tag; returns the files recorded. */

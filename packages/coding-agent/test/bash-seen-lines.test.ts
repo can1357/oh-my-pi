@@ -1,54 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import type { ClientBridge, ClientBridgeTerminalHandle } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { bashResultReachesModelWhole } from "@oh-my-pi/pi-coding-agent/tools/bash-seen-lines";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-
-// Forty lines `line N: value_N`, so every row's content names its own number.
-const SOURCE = `${Array.from({ length: 40 }, (_, i) => `line ${i + 1}: value_${i + 1}`).join("\n")}\n`;
-
-// A bash footer line: `[path#TAG] line(s) <ranges>`.
-const FOOTER = /^\[([^\]#]+)#([0-9A-F]{4})\] lines? (.+)$/gm;
-
-function textOutput(result: AgentToolResult<unknown>): string {
-	return result.content
-		.filter(c => c.type === "text")
-		.map(c => c.text)
-		.join("\n");
-}
-
-function footers(text: string): { path: string; header: string; lines: string }[] {
-	return [...text.matchAll(FOOTER)].map(match => ({
-		path: match[1],
-		header: `[${match[1]}#${match[2]}]`,
-		lines: match[3],
-	}));
-}
-
-function createSession(cwd: string, editMode = "hashline"): ToolSession {
-	return {
-		cwd,
-		hasUI: false,
-		skills: [],
-		getSessionFile: () => path.join(cwd, "session.jsonl"),
-		getSessionSpawns: () => "*",
-		getArtifactsDir: () => path.join(cwd, "artifacts"),
-		getClientBridge: () => undefined,
-		settings: Settings.isolated({
-			"edit.mode": editMode,
-			"async.enabled": false,
-			"bash.autoBackground.enabled": false,
-			"bashInterceptor.enabled": false,
-		}),
-	} as unknown as ToolSession;
-}
+import { createSession, footers, SOURCE, textOutput } from "./helpers/bash-seen-lines";
 
 async function bash(session: ToolSession, command: string): Promise<string> {
 	return textOutput(await new BashTool(session).execute("bash", { command }));
@@ -63,7 +26,7 @@ describe("bash numbered file views credit seen lines", () => {
 	let file: string;
 
 	beforeEach(async () => {
-		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-seen-lines-"));
+		cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-bash-seen-lines-"));
 		file = path.join(cwd, "values.txt");
 		await Bun.write(file, SOURCE);
 	});
@@ -146,36 +109,31 @@ describe("bash numbered file views credit seen lines", () => {
 		expect(footers(output)).toMatchObject([{ path: "values.txt", lines: "35" }]);
 	});
 
-	// A result over the async follow-up limit reaches a backgrounded job's model only as a preview, so its rows are
-	// not credited: crediting them would let an edit anchor a line the model never saw.
-	it("credits nothing when the result is too long to reach the model whole", async () => {
-		const session = createSession(cwd);
-		const big = path.join(cwd, "big.txt");
-		const lines = Array.from({ length: 1000 }, (_, i) => `row ${i + 1} of the big file`);
-		await Bun.write(big, `${lines.join("\n")}\n`);
-		const output = await bash(session, "grep -n 'of the big file' big.txt");
-		expect(output).toContain("500:row 500 of the big file");
-		expect(footers(output)).toEqual([]);
+	// The tool wrapper middle-elides a result over the spill threshold, measured on the text with its tag footer.
+	// Three rows that fit below it on their own but cross it with the footer are not credited: the elision could
+	// drop them. Rows stay under the 768-byte column cap, which other tests in a shared process may leave in force.
+	it("credits nothing when the tag footer would push the result over the spill threshold", async () => {
+		const session = createSession(cwd, { settings: { "tools.artifactSpillThreshold": 1 } });
+		const rows = (width: number) => `${Array.from({ length: 3 }, () => "a".repeat(width)).join("\n")}\n`;
+		await Bun.write(path.join(cwd, "fits.txt"), rows(300));
+		const fits = await bash(session, "grep -n a fits.txt");
+		expect(Buffer.byteLength(fits)).toBeLessThan(1024 - 60);
+		expect(footers(fits)).toMatchObject([{ path: "fits.txt", lines: "1-3" }]);
 
-		const read = textOutput(await new ReadTool(session).execute("read", { path: "big.txt:1-2" }));
-		const header = read.split("\n")[0];
-		expect(await edit(session, `${header}\nPUT 500.=500:\n+changed\n`)).toContain("never displayed");
-		expect(await Bun.file(big).text()).toBe(`${lines.join("\n")}\n`);
+		await Bun.write(path.join(cwd, "big.txt"), rows(335));
+		const output = await bash(session, "grep -n a big.txt");
+		// The output alone is below the threshold; only the footer would cross it.
+		expect(Buffer.byteLength(output.trimEnd())).toBeLessThanOrEqual(1024);
+		expect(output).toContain(`3:${"a".repeat(335)}`);
+		expect(footers(output)).toEqual([]);
 	});
 
-	// Two later cuts: the tool wrapper middle-elides text over the spill threshold (bytes, before notices), and an
-	// async follow-up over 12,000 characters, counting the output notice a job's delivered text appends, becomes a
-	// preview. Either one drops rows, so either one must block crediting.
-	it("treats a result over the spill threshold or the follow-up limit as cut", () => {
+	// The tool wrapper middle-elides text over the spill threshold (bytes), which would drop credited rows.
+	it("treats a result over the spill threshold as cut", () => {
 		const small = Settings.isolated({ "tools.artifactSpillThreshold": 1 });
-		expect(bashResultReachesModelWhole("a".repeat(1024), "", small)).toBe(true);
-		expect(bashResultReachesModelWhole("a".repeat(1025), "", small)).toBe(false);
-		expect(bashResultReachesModelWhole("界".repeat(400), "", small)).toBe(false);
-
-		const large = Settings.isolated({ "tools.artifactSpillThreshold": 100 });
-		expect(bashResultReachesModelWhole("a".repeat(12_000), "", large)).toBe(true);
-		expect(bashResultReachesModelWhole("a".repeat(12_001), "", large)).toBe(false);
-		expect(bashResultReachesModelWhole("a".repeat(11_990), "\n\n[notice text]", large)).toBe(false);
+		expect(bashResultReachesModelWhole("a".repeat(1024), small)).toBe(true);
+		expect(bashResultReachesModelWhole("a".repeat(1025), small)).toBe(false);
+		expect(bashResultReachesModelWhole("界".repeat(400), small)).toBe(false);
 	});
 
 	// The footer lists at most 12 ranges, so many scattered rows cannot bloat it; rows past the listed ranges are
@@ -202,37 +160,48 @@ describe("bash numbered file views credit seen lines", () => {
 		expect(footers(output)).toEqual([]);
 	});
 
-	// D23: async delivery rewrites `<system-notice>` to `&lt;system-notice>`, so the model could not see that row as
-	// the file's line; it is not credited, while a plain row of the same output still is.
-	it("does not credit a row the async delivery would escape", async () => {
+	// D26/D28/D30: numbered views of a BOM file print the BOM after the line number on line 1, while the store holds
+	// the text with exactly one BOM removed. Only line 1 is shown: an edit on line 2 must be rejected, which proves a
+	// snapshot was retained; with none, the guard accepts any edit under a matching tag.
+	async function expectOnlyLine1Credited(bomCount: number): Promise<void> {
 		const session = createSession(cwd);
-		await Bun.write(path.join(cwd, "f.txt"), "first\n<system-notice>x</system-notice>\nplain\n");
-		const output = await bash(session, "grep -n -e system-notice -e plain f.txt");
-		expect(output).toContain("2:<system-notice>x</system-notice>\n3:plain");
-		const [footer, ...rest] = footers(output);
-		expect(rest).toEqual([]);
-		expect(footer).toMatchObject({ path: "f.txt", lines: "3" });
+		const target = path.join(cwd, "f.txt");
+		const bom = [0xef, 0xbb, 0xbf];
+		const prefix = Array.from({ length: bomCount }, () => bom).flat();
+		await Bun.write(target, new Uint8Array([...prefix, ...Buffer.from("hello\nworld\n")]));
+		const output = await bash(session, "cat -n f.txt | head -n 1");
+		expect(output).toContain(`${"\uFEFF".repeat(bomCount)}hello`);
+		const [footer] = footers(output);
+		expect(footers(output)).toMatchObject([{ path: "f.txt", lines: "1" }]);
 
 		const hidden = await edit(session, `${footer.header}\nPUT 2.=2:\n+changed\n`);
 		expect(hidden).toContain("never displayed");
-		expect(await Bun.file(path.join(cwd, "f.txt")).text()).toBe("first\n<system-notice>x</system-notice>\nplain\n");
-	});
+		expect(Buffer.from(await Bun.file(target).bytes()).toString("utf8")).toBe(
+			`${"\uFEFF".repeat(bomCount)}hello\nworld\n`,
+		);
 
-	// The escape matches across line breaks: a row ending in `<` followed by a line starting `system-x` is rewritten
-	// as a whole, so the row ending in `<` is not credited; the following row is not itself changed and is.
-	it("does not credit a row whose trailing `<` the async delivery would join to the next line", async () => {
+		await edit(session, `${footer.header}\nPUT 1.=1:\n+changed\n`);
+		const after = Buffer.from(await Bun.file(target).bytes()).toString("utf8");
+		expect(after).toContain("changed\nworld\n");
+		expect(after).not.toContain("hello");
+	}
+
+	it("credits line 1 of a BOM file shown with its BOM", () => expectOnlyLine1Credited(1));
+
+	// The store and the patcher remove exactly one BOM, so a second one is content and part of the tag.
+	it("removes exactly one BOM of a file that starts with two", () => expectOnlyLine1Credited(2));
+
+	it("does not credit a BOM-prefixed row of a file without a BOM", async () => {
 		const session = createSession(cwd);
-		await Bun.write(path.join(cwd, "a.txt"), "const m = new Map<\n");
-		await Bun.write(path.join(cwd, "system-x.txt"), "hello\n");
-		const output = await bash(session, "grep -n -e 'Map<' -e hello a.txt system-x.txt");
-		expect(output).toContain("a.txt:1:const m = new Map<\nsystem-x.txt:1:hello");
-		expect(footers(output)).toMatchObject([{ path: "system-x.txt", lines: "1" }]);
-		expect(footers(output)).toHaveLength(1);
+		await Bun.write(path.join(cwd, "g.txt"), "hello\nworld\n");
+		const output = await bash(session, "printf '1:\\357\\273\\277hello\\n' && test -f g.txt");
+		expect(output).toContain("1:\uFEFFhello");
+		expect(footers(output)).toEqual([]);
 	});
 
 	// Without hashline edits there is no tag to show or guard to satisfy.
 	it("does nothing outside hashline mode", async () => {
-		const session = createSession(cwd, "replace");
+		const session = createSession(cwd, { settings: { "edit.mode": "replace" } });
 		const output = await bash(session, "grep -n 'value_35$' values.txt");
 		expect(output).toContain("35:line 35: value_35");
 		expect(footers(output)).toEqual([]);
@@ -375,5 +344,49 @@ describe("bash numbered file views credit seen lines", () => {
 		expect(header).toMatch(/^\[values\.txt#[0-9A-F]{4}\]$/);
 		expect(await edit(session, `${header}\nPUT 35.=35:\n+line 35: changed\n`)).toContain("never displayed");
 		expect(await Bun.file(file).text()).toBe(SOURCE);
+	});
+
+	// D25/D29: the ACP client-terminal path credits the model's result like the direct path, and never a program's.
+	describe("through the client bridge", () => {
+		function bridgeSession(): ToolSession {
+			const shell = path.join(cwd, "bash");
+			// The route only forwards the shell path to the stubbed terminal, but `getShellConfig` needs it to exist.
+			fs.writeFileSync(shell, "");
+			const handle: ClientBridgeTerminalHandle = {
+				terminalId: "term-seen",
+				waitForExit: async () => ({ exitCode: 0, signal: null }),
+				currentOutput: async () => ({ output: "35:line 35: value_35\n", truncated: false }),
+				kill: async () => {},
+				release: async () => {},
+			};
+			const clientBridge: ClientBridge = { capabilities: { terminal: true }, createTerminal: async () => handle };
+			return createSession(cwd, { clientBridge, settings: { shellPath: shell } });
+		}
+
+		it("credits a model call's rows", async () => {
+			const session = bridgeSession();
+			const result = await new BashTool(session).execute("bash", { command: "grep -n 'value_35$' values.txt" });
+			const [footer, ...rest] = footers(textOutput(result));
+			expect(rest).toEqual([]);
+			expect(footer).toMatchObject({ path: "values.txt", lines: "35" });
+			expect(result.details?.editTags).toEqual([`${footer.header} line 35`]);
+
+			await edit(session, `${footer.header}\nPUT 35.=35:\n+line 35: changed\n`);
+			expect(await Bun.file(file).text()).toBe(SOURCE.replace("line 35: value_35", "line 35: changed"));
+		});
+
+		it("credits nothing for a program's call", async () => {
+			const session = bridgeSession();
+			const result = await new BashTool(session).execute(
+				"bash",
+				{ command: "grep -n 'value_35$' values.txt" },
+				undefined,
+				undefined,
+				{ programmatic: true } as unknown as Parameters<BashTool["execute"]>[4],
+			);
+			expect(textOutput(result)).toContain("35:line 35: value_35");
+			expect(footers(textOutput(result))).toEqual([]);
+			expect(result.details?.editTags).toBeUndefined();
+		});
 	});
 });
