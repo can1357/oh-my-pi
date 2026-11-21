@@ -609,7 +609,11 @@ describe("todo backend", () => {
 			await session.waitForIdle();
 			await session.prompt("next");
 
-			expect(backend.asked.map(change => change.op)).toEqual(["init", "init", "init"]);
+			// The call that waited was never put to the backend.
+			const askedAbout = backend.asked.map(change =>
+				change.next.flatMap(phase => phase.tasks.map(task => task.content)),
+			);
+			expect(askedAbout).toEqual([["refused"], ["refused too"], ["aborted"]]);
 			const reminders = session.messages.filter(
 				message => message.role === "custom" && message.customType === "todo-error-reminder",
 			);

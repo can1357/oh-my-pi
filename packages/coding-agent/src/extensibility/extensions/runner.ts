@@ -687,7 +687,10 @@ export class ExtensionRunner {
 	#todoClosed = false;
 	/** Set when a backend accepted a change omp did not commit: the next list goes out even if it equals {@link #todoSent}. */
 	#todoStale = false;
-	/** The list a late acceptance put in {@link #todoPending}, which the commit after a later acceptance in time replaces. */
+	/**
+	 * The list a late acceptance put in {@link #todoPending}. A later acceptance in time drops it
+	 * while the session's list is still that call's `previous`: the commit that follows sends the list.
+	 */
 	#todoCorrection: TodoBackendList | undefined;
 	/** `todo.backend` ids already reported as unregistered. */
 	#reportedTodoBackends = new Set<string>();
