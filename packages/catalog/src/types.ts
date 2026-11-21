@@ -1754,6 +1754,16 @@ export interface Model<TApi extends Api = Api> {
 	cursorSupportsAgent?: boolean;
 	/** Cursor explicitly reports support for sandboxed execution. */
 	cursorSupportsSandboxing?: boolean;
+	/**
+	 * Cursor Teams/Enterprise Cursor Token Rate does not apply (catalog marks Grok
+	 * and Composer). Set from `cursor-token-rate-exempt` in cursor.kdl.
+	 */
+	cursorTokenRateExempt?: boolean;
+	/**
+	 * Per-million-token surcharge on every usage leg when pricing Cursor usage on
+	 * Teams/Enterprise. Set from models.yml `providers.cursor.teamsTokenRatePerMillion`.
+	 */
+	teamsTokenRatePerMillion?: number;
 	/** Factory Droid: account-resolved upstream rotation (first entry is the default `x-api-provider`). */
 	factoryDroidApiProviders?: string[];
 	/** Factory Droid: `configured_order` when live routing chose the rotation; absent means registry order. */

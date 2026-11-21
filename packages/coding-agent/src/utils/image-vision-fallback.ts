@@ -20,7 +20,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { Api, completeSimple, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
-import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, getModelTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -143,7 +143,7 @@ function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | unde
 		firstImageModel ??= model;
 		// Rows without a rate card rank last; a declared free row prices at 0.
 		if (getModelPricingStatus(model) === "unknown") continue;
-		const cost = getEffectiveTokenCost(model.cost);
+		const cost = getModelTokenCost(model);
 		const price = cost.input + cost.output;
 		if (price < cheapestPrice) {
 			cheapest = model;

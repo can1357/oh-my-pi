@@ -320,4 +320,25 @@ describe("ratchet plan, split, and cost", () => {
 		expect(gate.warnings.join(" ")).toContain("mystery-model");
 		expect(gate.warnings.join(" ")).toContain("shared-model");
 	});
+
+	it("prices catalog rows with the model's Teams token rate", async () => {
+		const models = [
+			{
+				id: "gemini-flash",
+				provider: "cursor",
+				cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+				teamsTokenRatePerMillion: 0.25,
+			},
+		];
+		const harness = await setup({ models });
+		await approveAll(harness);
+		await harness.writeRows(
+			"baseline",
+			() => 0.2,
+			() => ({ model: "gemini-flash", usage: { input_tokens: 1000, output_tokens: 500 } }),
+		);
+		const gate = await harness.gate("baseline");
+		// 1000 in × $1.25/MTok + 500 out × $2.25/MTok = $0.002375 per case.
+		expect(gate.table.split("\n")[2]).toContain("0.0024");
+	});
 });

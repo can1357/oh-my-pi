@@ -13,6 +13,7 @@
  */
 import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { resolveTeamsTokenRatePerMillion } from "@oh-my-pi/pi-catalog/cursor-teams-token-rate";
 import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
@@ -84,6 +85,8 @@ interface ModelJson {
 	thinking: readonly Effort[] | null;
 	input: ("text" | "image")[];
 	cost: Model<Api>["cost"];
+	/** Cursor Teams token rate billed flat per token on top of `cost`, outside its multipliers; absent when none. */
+	teamsTokenRatePerMillion?: number;
 	pricingStatus: ModelPricingStatus;
 }
 
@@ -116,6 +119,7 @@ function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
 function toModelJson(model: Model<Api>): ModelJson {
 	// Scalar legs report the card in force now, not the one current when the row was built.
 	const { input, output, cacheRead, cacheWrite } = getEffectiveTokenCost(model.cost);
+	const teamsTokenRatePerMillion = resolveTeamsTokenRatePerMillion(model);
 	return {
 		provider: model.provider,
 		kind: modelKind(model),
@@ -128,6 +132,7 @@ function toModelJson(model: Model<Api>): ModelJson {
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
 		input: model.input,
 		cost: { ...model.cost, input, output, cacheRead, cacheWrite },
+		...(teamsTokenRatePerMillion > 0 ? { teamsTokenRatePerMillion } : {}),
 		pricingStatus: getModelPricingStatus(model),
 	};
 }

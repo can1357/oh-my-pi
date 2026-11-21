@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The frustration run's cost estimate for Cursor models now includes the Cursor Teams/Enterprise token rate when `teamsTokenRatePerMillion` is set for the `cursor` provider in `models.yml` ([#16183](https://github.com/can1357/oh-my-pi/pull/16183) by [@joseotaviorf](https://github.com/joseotaviorf))
+
 ### Added
 
 - Added `readDailyActivity()`, which reads the stored daily activity through its own connection that never writes, so another process holding the stats database write lock cannot fail or delay it; it returns null when no stats database exists yet ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))

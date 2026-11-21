@@ -12,8 +12,9 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { resolveTeamsTokenRatePerMillion } from "@oh-my-pi/pi-catalog/cursor-teams-token-rate";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
-import type { ModelCost, Usage } from "@oh-my-pi/pi-catalog/types";
+import type { Api, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 
 export const RATCHET_ROOT = path.join(".omp", "ratchet");
@@ -91,8 +92,11 @@ export interface RatchetState {
 	prices: Record<string, RatchetPrice>;
 }
 
-/** Resolves a served model id to catalog rates; undefined when unknown or ambiguous. */
-export type PriceLookup = (model: string) => ModelCost | undefined;
+/** The parts of a model that price its usage: rate card plus any per-token surcharge. */
+export type PricedModel = Pick<Model<Api>, "cost" | "cursorTokenRateExempt" | "teamsTokenRatePerMillion">;
+
+/** Resolves a served model id to catalog pricing; undefined when unknown or ambiguous. */
+export type PriceLookup = (model: string) => PricedModel | undefined;
 
 export interface GateResult {
 	variant: string;
@@ -538,14 +542,17 @@ export function normalizeUsage(raw: unknown): Usage | undefined {
 	};
 }
 
-function priceFor(state: RatchetState, lookup: PriceLookup, model: string): ModelCost | undefined {
+/** An explicit `prices` entry is the whole rate: no catalog surcharge applies. */
+function priceFor(state: RatchetState, lookup: PriceLookup, model: string): PricedModel | undefined {
 	const override = state.prices[model];
 	if (override) {
 		return {
-			input: override.in,
-			output: override.out,
-			cacheRead: override.cache_read ?? override.in,
-			cacheWrite: override.cache_write ?? override.in,
+			cost: {
+				input: override.in,
+				output: override.out,
+				cacheRead: override.cache_read ?? override.in,
+				cacheWrite: override.cache_write ?? override.in,
+			},
 		};
 	}
 	return lookup(model);
@@ -566,12 +573,12 @@ function rowCost(state: RatchetState, lookup: PriceLookup, row: ResultRow, unpri
 			continue;
 		}
 		if (typeof model !== "string") return undefined;
-		const cost = priceFor(state, lookup, model);
-		if (!cost) {
+		const priced = priceFor(state, lookup, model);
+		if (!priced) {
 			unpriced.add(model);
 			return undefined;
 		}
-		total += calculateUsageCost(cost, usage).total;
+		total += calculateUsageCost(priced.cost, usage, undefined, resolveTeamsTokenRatePerMillion(priced)).total;
 	}
 	return total;
 }

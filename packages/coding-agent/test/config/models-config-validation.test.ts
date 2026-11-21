@@ -277,6 +277,12 @@ describe("model kind must match its api", () => {
 			),
 		).not.toThrow();
 	});
+
+	test("teamsTokenRatePerMillion is rejected for non-cursor providers", () => {
+		expect(() =>
+			validateProviderConfiguration("openrouter", { teamsTokenRatePerMillion: 0.25, models: [] }, "models-config"),
+		).toThrow('Provider openrouter: "teamsTokenRatePerMillion" is only supported for the "cursor" provider.');
+	});
 });
 
 describe("models.yml input modality the catalog cannot express (#16342)", () => {

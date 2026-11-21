@@ -27,6 +27,8 @@ export interface ProviderOverride {
 	guardrailVersion?: Model<Api>["guardrailVersion"];
 	guardrailTrace?: Model<Api>["guardrailTrace"];
 	requestMetadata?: Model<Api>["requestMetadata"];
+	/** Cursor Teams/Enterprise Cursor Token Rate ($/M per token class); 0 or unset is off. */
+	teamsTokenRatePerMillion?: number;
 }
 
 /**

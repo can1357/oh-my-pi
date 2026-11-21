@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Model browser prices for Cursor models now include the Cursor Teams/Enterprise token rate when `teamsTokenRatePerMillion` is set for the `cursor` provider in `models.yml` ([#16183](https://github.com/can1357/oh-my-pi/pull/16183) by [@joseotaviorf](https://github.com/joseotaviorf))
+
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))

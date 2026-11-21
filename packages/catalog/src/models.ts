@@ -1,5 +1,6 @@
 import { classifyModel } from "./compat/taxonomy";
 import { getCatalogProvider, getCatalogProviders, openModelCatalog } from "./model-catalog-format";
+import { resolveTeamsTokenRatePerMillion } from "./cursor-teams-token-rate";
 import modelsData from "./models.json" with { type: "json" };
 import { dueDatedCard, dueEffectiveRate } from "./pricing";
 import type {
@@ -111,12 +112,41 @@ export function getFactoryDroidCreditRate(
 /**
  * The base token card in force at `timestamp` (Unix ms, default now): the
  * latest due `timeBased` effective rate, else the row's own legs. Price
- * displays read this rather than the scalar legs, which keep the card current
- * when the row was built while bundles, caches, and long sessions outlive it.
+ * displays read {@link getModelTokenCost} instead, which this underlies.
  * Applies no long-context tier or peak/off-peak multiplier.
  */
 export function getEffectiveTokenCost(cost: ModelCost, timestamp = Date.now()): TokenCost {
 	return resolveTokenCost(cost, 0, timestamp);
+}
+
+type PricedModel = Pick<Model<Api>, "cost" | "cursorTokenRateExempt" | "teamsTokenRatePerMillion">;
+
+/**
+ * What a model charges per million tokens at `timestamp`, as displayed: the
+ * effective card plus its Teams token rate on priced rows, so a displayed price
+ * matches what {@link calculateCost} records. Price displays read this rather
+ * than the scalar legs, which keep the card current when the row was built
+ * while bundles, caches, and long sessions outlive it.
+ */
+export function getModelTokenCost(model: PricedModel, timestamp = Date.now()): TokenCost {
+	return withTeamsTokenRate(getEffectiveTokenCost(model.cost, timestamp), resolveTeamsTokenRatePerMillion(model));
+}
+
+function withTeamsTokenRate(rates: TokenCost, perMillion: number): TokenCost {
+	const tokenRate = chargedTokenRate(rates, perMillion);
+	if (tokenRate === 0) return rates;
+	return {
+		input: rates.input + tokenRate,
+		output: rates.output + tokenRate,
+		cacheRead: rates.cacheRead + tokenRate,
+		cacheWrite: rates.cacheWrite + tokenRate,
+	};
+}
+
+/** The Teams token rate a card bills: none on unpriced cards, which must not show a surcharge-only cost. */
+function chargedTokenRate(rates: TokenCost, perMillion: number): number {
+	const priced = rates.input !== 0 || rates.output !== 0 || rates.cacheRead !== 0 || rates.cacheWrite !== 0;
+	return priced ? perMillion : 0;
 }
 
 function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {
@@ -192,32 +222,47 @@ export function getNextTimeBasedPricingTransition(cost: ModelCost, timestamp?: n
 }
 
 /** Price a fully uncached prompt at its request timestamp (Unix ms); scheduled prices default to now. */
-export function calculateUncachedInputCost(cost: ModelCost, promptInputTokens: number, timestamp?: number): number {
+export function calculateUncachedInputCost(
+	cost: ModelCost,
+	promptInputTokens: number,
+	timestamp?: number,
+	teamsTokenRatePerMillion = 0,
+): number {
 	const pricingTimestamp = cost.timeBased ? (timestamp ?? Date.now()) : undefined;
 	const rates = resolveTokenCost(cost, promptInputTokens, pricingTimestamp);
-	return (rates.input / 1_000_000) * promptInputTokens * timeBasedMultiplier(cost.timeBased, pricingTimestamp);
+	const listPerToken = (rates.input / 1_000_000) * timeBasedMultiplier(cost.timeBased, pricingTimestamp);
+	return (listPerToken + chargedTokenRate(rates, teamsTokenRatePerMillion) / 1_000_000) * promptInputTokens;
 }
 
 /** Price usage at its request timestamp (Unix ms); only scheduled prices default to now. */
-export function calculateUsageCost(cost: ModelCost, usage: Usage, timestamp?: number): Usage["cost"] {
+export function calculateUsageCost(
+	cost: ModelCost,
+	usage: Usage,
+	timestamp?: number,
+	teamsTokenRatePerMillion = 0,
+): Usage["cost"] {
 	const orchestration = usage.orchestration;
 	const promptInputTokens =
 		usage.input + usage.cacheRead + usage.cacheWrite + (orchestration?.input ?? 0) + (orchestration?.cacheRead ?? 0);
 	const pricingTimestamp = cost.timeBased ? (timestamp ?? Date.now()) : undefined;
 	const rates = resolveTokenCost(cost, promptInputTokens, pricingTimestamp);
 	const multiplier = timeBasedMultiplier(cost.timeBased, pricingTimestamp);
-	usage.cost.input = (rates.input / 1000000) * (usage.input + (orchestration?.input ?? 0)) * multiplier;
-	usage.cost.output = (rates.output / 1000000) * (usage.output + (orchestration?.output ?? 0)) * multiplier;
-	usage.cost.cacheRead =
-		(rates.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0)) * multiplier;
-	usage.cost.cacheWrite = cacheWriteCost(rates, usage) * multiplier;
+	// The token rate is one flat addition per token, outside the tariff and cache-write multipliers.
+	const tokenRate = chargedTokenRate(rates, teamsTokenRatePerMillion) / 1000000;
+	const inputTokens = usage.input + (orchestration?.input ?? 0);
+	const outputTokens = usage.output + (orchestration?.output ?? 0);
+	const cacheReadTokens = usage.cacheRead + (orchestration?.cacheRead ?? 0);
+	usage.cost.input = ((rates.input / 1000000) * multiplier + tokenRate) * inputTokens;
+	usage.cost.output = ((rates.output / 1000000) * multiplier + tokenRate) * outputTokens;
+	usage.cost.cacheRead = ((rates.cacheRead / 1000000) * multiplier + tokenRate) * cacheReadTokens;
+	usage.cost.cacheWrite = cacheWriteCost(rates, usage) * multiplier + tokenRate * usage.cacheWrite;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
 }
 
 /** Price usage at its request timestamp (Unix ms); preserve the resulting monetary amounts for display. */
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage, timestamp?: number): Usage["cost"] {
-	return calculateUsageCost(model.cost, usage, timestamp);
+	return calculateUsageCost(model.cost, usage, timestamp, resolveTeamsTokenRatePerMillion(model));
 }
 
 /**

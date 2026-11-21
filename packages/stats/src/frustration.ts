@@ -19,7 +19,7 @@
 import { type Judge, judgeQuestions, type Model } from "@oh-my-pi/pi-ai";
 import { compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/compat/revision";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
+import { getModelTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { getTimeRangeConfig } from "./aggregator";
 import {
@@ -215,7 +215,7 @@ export async function estimateFrustrationRun(range?: string | null): Promise<Fru
 	const { cutoff } = getTimeRangeConfig(range);
 	const { messages, chars } = getPendingFrustrationTotals(cutoff);
 	const inputTokens = messages * REQUEST_OVERHEAD_TOKENS + Math.ceil(chars / CHARS_PER_TOKEN);
-	const rates = getEffectiveTokenCost(model.cost);
+	const rates = getModelTokenCost(model);
 	const cost = (inputTokens * rates.input) / 1e6 + (messages * OUTPUT_TOKENS_PER_REQUEST * rates.output) / 1e6;
 	return { available: true, messages, chars, inputTokens, cost, judge: `${model.provider}/${model.id}` };
 }

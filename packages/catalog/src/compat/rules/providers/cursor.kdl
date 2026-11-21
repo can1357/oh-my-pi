@@ -63,6 +63,7 @@ provider "cursor" {
 	}
 	class "xai" {
 		family "grok" {
+			cursor-token-rate-exempt #true
 			revision ">=4.5 <4.8" {
 				// Cursor advertised Grok 4.5/4.6/4.7 Context window 256k (product
 				// cap; not xAI native 500k). Max context is unmarked.
@@ -99,6 +100,9 @@ provider "cursor" {
 	models "grok-4" "grok-4.*" "grok-4-*" "grok-4:*" "grok-4_*" {
 		input-modalities "text" "image"
 	}
+	models "composer-*" "composer*" {
+		cursor-token-rate-exempt #true
+	}
 	models "composer-2.5" "composer-2.5.*" "composer-2.5-*" "composer-2.5:*" "composer-2.5_*" {
 		input-modalities "text" "image"
 	}
@@ -130,8 +134,10 @@ provider "cursor" {
 	// only source — never mirrored from another provider's card.
 	// Ids absent from the Cursor docs (composer-1/1.5, gpt-5.1 non-Codex,
 	// kimi-k2.5, grok-code-fast-1, default/Auto) stay unpriced rather than
-	// proxied. Teams/Enterprise $0.25/M token rate, 10% residency uplift,
-	// and legacy Max Mode +20% are plan-specific and excluded.
+	// proxied. Teams/Enterprise Cursor Token Rate ($0.25/M per token class on
+	// third-party models) is opt-in via models.yml `teamsTokenRatePerMillion`;
+	// Grok and Composer are exempt in catalog. Residency uplift and legacy Max
+	// Mode +20% stay excluded.
 
 	// Claude 4 Sonnet: $3/$15, cache $0.30/$3.75.
 	models "claude-4-sonnet" {

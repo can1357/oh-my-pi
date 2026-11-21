@@ -21,7 +21,7 @@ Import from subpaths (`@oh-my-pi/pi-catalog/<module>`) or the root barrel.
 
 ## models.json and rules.json are generated
 
-Never edit `src/models.json` or `src/compat/rules.json` by hand. `models.json` is a compact generated catalog; use `getBundledProviders()` and `getBundledModels()` instead of reading its internal format. It is produced from upstream sources (stencil.so, provider catalog discovery, OpenCode docs) by `scripts/generate-models.ts`; `rules.json` is compiled from the KDL tree in `src/compat/rules/`. Regenerate with:
+Never edit `src/models.json` or `src/compat/rules.json` by hand. `models.json` is produced from upstream sources (stencil.so, provider catalog discovery, OpenCode docs) by `scripts/generate-models.ts`; `rules.json` is compiled from the KDL tree in `src/compat/rules/`. Regenerate with:
 
 ```sh
 bun run gen:compat   # src/compat/rules/**/*.kdl -> src/compat/rules.json
@@ -42,15 +42,16 @@ Ships TypeScript source directly (no build step); requires Bun ≥ 1.4.4.
 
 The `models` subpath (also exported from the root) provides timestamp-aware pricing helpers:
 
-| API                                                               | Result                                                                                                    |
-| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `calculateCost(model, usage, timestamp?)`                         | Updates and returns `usage.cost` using `model.cost`.                                                      |
-| `calculateUsageCost(cost, usage, timestamp?)`                     | Updates and returns `usage.cost` using a `ModelCost`.                                                     |
-| `calculateUncachedInputCost(cost, promptInputTokens, timestamp?)` | Returns the cost of a fully uncached prompt.                                                              |
-| `getEffectiveTokenCost(cost, timestamp?)`                         | Returns the base card in force: the latest due effective rate, else the row's own legs.                   |
-| `getTimeBasedPricingPeriod(cost, timestamp?)`                     | Returns `"peak"`, `"off-peak"`, or `undefined` without a recurring tariff.                                |
-| `hasRecurringTariff(schedule)`                                    | Whether a `TimeBasedCost` carries a peak/off-peak tariff rather than only dated rate cards.               |
-| `getNextTimeBasedPricingTransition(cost, timestamp?)`             | Returns the next actual peak/off-peak change strictly after the timestamp, or `undefined` if none exists. |
+| API                                                                                          | Result                                                                                                         |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `calculateCost(model, usage, timestamp?)`                                                    | Updates and returns `usage.cost` using `model.cost`.                                                           |
+| `calculateUsageCost(cost, usage, timestamp?, teamsTokenRatePerMillion?)`                     | Updates and returns `usage.cost` using a `ModelCost`; optional per-million Teams token surcharge on every leg. |
+| `calculateUncachedInputCost(cost, promptInputTokens, timestamp?, teamsTokenRatePerMillion?)` | Returns the cost of a fully uncached prompt; optional Teams surcharge matches `calculateUsageCost`.            |
+| `getEffectiveTokenCost(cost, timestamp?)`                                                    | Returns the base card in force: the latest due effective rate, else the row's own legs.                        |
+| `getModelTokenCost(model, timestamp?)`                                                       | Returns what the model charges per million as displayed: the effective card plus its Teams token rate.         |
+| `getTimeBasedPricingPeriod(cost, timestamp?)`                                                | Returns `"peak"`, `"off-peak"`, or `undefined` without a recurring tariff.                                     |
+| `hasRecurringTariff(schedule)`                                                               | Whether a `TimeBasedCost` carries a peak/off-peak tariff rather than only dated rate cards.                    |
+| `getNextTimeBasedPricingTransition(cost, timestamp?)`                                        | Returns the next actual peak/off-peak change strictly after the timestamp, or `undefined` if none exists.      |
 
 Timestamps are Unix milliseconds; omitted timestamps use the current time for scheduled pricing. Flat token prices are unaffected. Pricing selects the latest applicable effective rate card, then its long-context tier, then the peak/off-peak multiplier. A transition query concerns the recurring tariff, not dated rate-card changes.
 
