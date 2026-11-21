@@ -497,11 +497,19 @@ describe("todo backend", () => {
 		const committed = (session: AgentSession): string[] =>
 			session.getTodoPhases().flatMap(phase => phase.tasks.map(task => task.content));
 
-		it("an accepted todo call commits, and the backend is not told a second time", async () => {
+		it("an accepted todo call commits, and the backend is not told a second time, nor sent a list a client set again meanwhile", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
 
-			const result = await todo(session, { op: "init", items: ["a", "b"] });
+			const deciding = backend.entered();
+			const call = todo(session, { op: "init", items: ["a", "b"] });
+			await deciding;
+			// The list omp already has: sent after the backend's answer, it would take the change back.
+			session.commitTodoPhases([]);
+			gate.resolve();
+			const result = await call;
 			await settled(session);
 
 			expect(result.isError).not.toBe(true);
