@@ -274,7 +274,10 @@ export class OmfgController {
 				target.level,
 			);
 			this.#registerLive(savedRule);
-			request.component.markSaved(shortenPath(target.filePath));
+			const savedPath = shortenPath(target.filePath);
+			// Dismiss on success; errors keep the panel so the user can read them.
+			this.#closeActiveRequest({ abort: false });
+			this.ctx.showStatus(`Saved TTSR rule to ${savedPath}`);
 			return { kind: "saved" };
 		}
 	}
