@@ -325,10 +325,10 @@ describe("advisor tool-call loop guard", () => {
 	});
 
 	it.each([
-		{ device: "mcp__peers_wait", exempt: "mcp__peers_wait", redirects: 0 },
-		{ device: "mcp__other_tool", exempt: "mcp__peers_wait", redirects: 1 },
-		{ device: "mcp__peers_wait", exempt: "write", redirects: 0 },
-	])("applies advisor exemption $exempt to writes to $device", ({ device, exempt, redirects }) => {
+		{ command: "mcp__peers_wait --json {}", exempt: "mcp__peers_wait", redirects: 0 },
+		{ command: "mcp__other_tool --json {}", exempt: "mcp__peers_wait", redirects: 1 },
+		{ command: "mcp__peers_wait --json {}", exempt: "bash", redirects: 0 },
+	])("applies advisor exemption $exempt to the `$command` tool command", ({ command, exempt, redirects }) => {
 		const messages: AgentMessage[] = [];
 		const guard = new AdvisorLoopGuard({
 			settings: Settings.isolated({
@@ -351,8 +351,8 @@ describe("advisor tool-call loop guard", () => {
 						{
 							type: "toolCall",
 							id: `call-${index}`,
-							name: "write",
-							arguments: { path: `xd://${device}`, content: "{}" },
+							name: "bash",
+							arguments: { command },
 						},
 					],
 					api: "anthropic-messages",

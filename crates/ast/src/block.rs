@@ -67,8 +67,9 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 	Ok(resolve_block(&code, lang.as_deref(), path.as_deref(), line)?.map(|(lines, _)| lines))
 }
 
-/// Byte range of the complete lines of a multiline syntax block starting on
-/// `line`, excluding its terminal newline. Reject a shared closing line so
+/// Byte range of the complete lines of the multiline block starting on `line`.
+///
+/// Excludes the block's terminal newline. Rejects a shared closing line so
 /// moving or deleting the block cannot take a neighbouring statement with it.
 pub fn standalone_block_at(code: &str, path: &str, line: u32) -> Result<Option<Range<usize>>> {
 	let Some((lines, bytes)) = resolve_block(code, None, Some(path), line)? else {

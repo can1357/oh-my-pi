@@ -23,11 +23,11 @@ const mcpTool: CustomTool = {
 };
 
 describe("/tan prompt-cache tool presentation", () => {
-	for (const xdev of [true, false]) {
-		it(`preserves the parent's request tools with xd:// ${xdev ? "enabled" : "disabled"}`, async () => {
+	for (const toolCommands of [true, false]) {
+		it(`preserves the parent's request tools with tool commands ${toolCommands ? "enabled" : "disabled"}`, async () => {
 			using dir = TempDir.createSync("@omp-tan-tools-");
 			const cwd = dir.path();
-			const settings = Settings.isolated({ "tools.xdev": xdev, "marketplace.autoUpdate": "off" });
+			const settings = Settings.isolated({ "tools.commands": toolCommands, "marketplace.autoUpdate": "off" });
 			const auth = createInMemoryAuthStorage();
 			auth.keys.setRuntime("openai", "test-key");
 			const base = {
@@ -58,12 +58,12 @@ describe("/tan prompt-cache tool presentation", () => {
 					hasUI: false,
 					systemPrompt: [...parent.systemPrompt],
 					toolNames: parent.getEnabledToolNames(),
-					mountedToolNames: parent.getMountedXdevToolNames(),
+					mountedToolNames: parent.getMountedToolCommandNames(),
 					advertiseHeadlessAsk: parent.getActiveToolNames().includes("ask"),
 					parentTaskPrefix: "Tan-fixture",
 					sessionManager: SessionManager.inMemory(cwd),
 				});
-				await child.setActiveToolPresentation(parent.getEnabledToolNames(), parent.getMountedXdevToolNames());
+				await child.setActiveToolPresentation(parent.getEnabledToolNames(), parent.getMountedToolCommandNames());
 				try {
 					const advertised = (session: typeof parent) =>
 						session.agent.state.tools.map(tool => ({
@@ -71,10 +71,10 @@ describe("/tan prompt-cache tool presentation", () => {
 							description: tool.description,
 							parameters: tool.parameters,
 						}));
-					if (xdev) expect(parent.getMountedXdevToolNames()).toContain(mcpTool.name);
-					else expect(parent.getMountedXdevToolNames()).toEqual([]);
+					if (toolCommands) expect(parent.getMountedToolCommandNames()).toContain(mcpTool.name);
+					else expect(parent.getMountedToolCommandNames()).toEqual([]);
 					expect(parent.getActiveToolNames()).toContain("ask");
-					expect(child.getMountedXdevToolNames()).toEqual(parent.getMountedXdevToolNames());
+					expect(child.getMountedToolCommandNames()).toEqual(parent.getMountedToolCommandNames());
 					expect(child.systemPrompt).toEqual(parent.systemPrompt);
 					expect(advertised(child)).toEqual(advertised(parent));
 					// Run a real turn: the model calls the inherited ask with a schema-valid payload, so the
