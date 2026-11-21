@@ -9,6 +9,7 @@ import type {
 	Model,
 	ModelSpec,
 	OpenAICompat,
+	ProviderSessionState,
 	StreamOptions,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -495,6 +496,96 @@ describe("OpenRouter Responses request shape", () => {
 		}
 
 		expect(bodies[1]?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "continue" }] }]);
+	});
+
+	it("recovers when an auto-routed upstream rejects another upstream's encrypted reasoning", async () => {
+		const reasoning = {
+			type: "reasoning",
+			id: "rs_foreign",
+			encrypted_content: "EmMKYQ_foreign",
+			summary: [{ type: "summary_text", text: "Earlier reasoning" }],
+		};
+		const reasoningResponse = (items: Array<typeof reasoning>, text: string) =>
+			new Response(
+				`${[
+					...items.map((item, output_index) => ({ type: "response.output_item.done", output_index, item })),
+					{
+						type: "response.output_item.done",
+						output_index: items.length,
+						item: {
+							type: "message",
+							id: `msg_${text}`,
+							role: "assistant",
+							content: [{ type: "output_text", text }],
+						},
+					},
+					{ type: "response.completed", response: { status: "completed" } },
+				]
+					.map(event => `data: ${JSON.stringify(event)}`)
+					.join("\n\n")}\n\n`,
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		const acceptedReasoning = { ...reasoning, id: "rs_accepted", encrypted_content: "gAAAAA_accepted" };
+		const newReasoning = { ...reasoning, id: "rs_new", encrypted_content: "gAAAAA_new" };
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const body = JSON.parse(String(init?.body));
+			bodies.push(body);
+			if (bodies.length === 1) return reasoningResponse([reasoning], "first");
+			if (bodies.length === 2) return reasoningResponse([acceptedReasoning], "second");
+			if (JSON.stringify(body.input).includes(reasoning.encrypted_content)) {
+				return Response.json(
+					{
+						error: {
+							message: `The encrypted content ${reasoning.encrypted_content} could not be verified. Reason: Encrypted content could not be decrypted or parsed.`,
+							type: "invalid_request_error",
+							code: "invalid_encrypted_content",
+						},
+					},
+					{ status: 400 },
+				);
+			}
+			return bodies.length === 4 ? reasoningResponse([newReasoning], "recovered") : createSseResponse();
+		};
+		const model = buildOpenRouterResponsesModel({ id: "openrouter/auto-code", reasoning: true });
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const firstMessage = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerSessionState,
+		}).result();
+		const followup: Context = {
+			messages: [firstMessage, { role: "user", content: "continue", timestamp: 1 }],
+		};
+		const secondMessage = await streamOpenAIResponses(model, followup, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerSessionState,
+		}).result();
+		const mixedHistory: Context = {
+			messages: [...followup.messages, secondMessage, { role: "user", content: "continue", timestamp: 2 }],
+		};
+		const result = await streamOpenAIResponses(model, mixedHistory, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerSessionState,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(bodies).toHaveLength(4);
+		expect(JSON.stringify(bodies[2]?.input)).toContain(reasoning.encrypted_content);
+		expect(JSON.stringify(bodies[2]?.input)).toContain(acceptedReasoning.encrypted_content);
+		expect(JSON.stringify(bodies[3]?.input)).not.toContain(reasoning.encrypted_content);
+		expect(JSON.stringify(bodies[3]?.input)).toContain(acceptedReasoning.encrypted_content);
+		const next = await streamOpenAIResponses(
+			model,
+			{ messages: [...mixedHistory.messages, result, { role: "user", content: "again", timestamp: 3 }] },
+			{ apiKey: "test-key", fetch: fetchMock, providerSessionState },
+		).result();
+		expect(next.stopReason).toBe("stop");
+		expect(bodies).toHaveLength(5);
+		expect(JSON.stringify(bodies[4]?.input)).not.toContain(reasoning.encrypted_content);
+		expect(JSON.stringify(bodies[4]?.input)).toContain(acceptedReasoning.encrypted_content);
+		expect(JSON.stringify(bodies[4]?.input)).toContain(newReasoning.encrypted_content);
 	});
 
 	it("replays foreign tool-call history without a fabricated reasoning id", async () => {
