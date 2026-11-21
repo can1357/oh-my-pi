@@ -652,6 +652,13 @@ export interface Terminal {
 	 */
 	onSixelSupport?(callback: (supported: boolean) => void): void;
 	/**
+	 * Whether the latest DA1 reply carried no capability attributes at all
+	 * (`ESC [ c`), or `undefined` before any DA1 reply. A definite `true`
+	 * marks a broken responder: it answers capability queries while claiming
+	 * no capabilities, so graphics-query successes cannot be trusted.
+	 */
+	da1CapabilityEmpty?: boolean | undefined;
+	/**
 	 * Subscribe to OSC 7501 feature-query results across terminal restarts.
 	 * A late subscriber receives the current answer; unsubscribe on host teardown.
 	 */
@@ -905,6 +912,8 @@ export class ProcessTerminal implements Terminal {
 	#glyphProtocolCallbacks: GlyphProtocolReportHandler[] = [];
 	#sixelSupport: boolean | undefined;
 	#sixelSupportCallbacks: Array<(supported: boolean) => void> = [];
+	/** DA1 replied with no capability attributes at all (`ESC [ c`): a broken responder. */
+	#da1CapabilityEmpty: boolean | undefined;
 	#tspPending = false;
 	#tspResult: TspHello | null | undefined;
 	#tspFallbackLogged = false;
@@ -1066,6 +1075,10 @@ export class ProcessTerminal implements Terminal {
 	onSixelSupport(callback: (supported: boolean) => void): void {
 		this.#sixelSupportCallbacks.push(callback);
 		if (this.#sixelSupport !== undefined) callback(this.#sixelSupport);
+	}
+	/** Whether the latest DA1 reply carried no capability attributes at all. */
+	get da1CapabilityEmpty(): boolean | undefined {
+		return this.#da1CapabilityEmpty;
 	}
 
 	onTspHello(callback: TspHelloHandler): void {
@@ -1352,9 +1365,12 @@ export class ProcessTerminal implements Terminal {
 		const osc11ResponsePattern =
 			/^\x1b\]11;rgba?:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})(?:\x07|\x1b\\)$/;
 
-		// DA1 (Primary Device Attributes) response: \x1b[?...c
-		const da1ResponsePattern = /^\x1b\[\?[\d;]*c$/;
+		// DA1 (Primary Device Attributes) response: \x1b[?...c. A few terminals
+		// answer the query with a bare ESC [ c — no `?`, no attributes — which
+		// must still be recognized (and treated as claiming no capabilities).
+		const da1ResponsePattern = /^\x1b\[\??[\d;]*c$/;
 		const da1SixelAttributePattern = /;4(?:;|c$)/u;
+		const da1AttributelessPattern = /^\x1b\[c$/;
 
 		// Private CSI partial: \x1b[?<digits/semicolons>... — incomplete probe response
 		// that the StdinBuffer flushed before the terminator arrived (split across
@@ -1610,6 +1626,9 @@ export class ProcessTerminal implements Terminal {
 				// Publish graphics support without forwarding DA1 bytes to application
 				// input or changing ownership of the existing probe sentinel.
 				const supportsSixel = da1SixelAttributePattern.test(sequence);
+				// `ESC [ c` with no attributes at all is a broken responder: it
+				// answers the query while claiming no capabilities whatsoever.
+				this.#da1CapabilityEmpty = da1AttributelessPattern.test(sequence);
 				if (supportsSixel !== this.#sixelSupport) {
 					this.#sixelSupport = supportsSixel;
 					for (const callback of this.#sixelSupportCallbacks) {
@@ -2648,6 +2667,7 @@ export class ProcessTerminal implements Terminal {
 		this.#glyphProtocolCallbacks = [];
 		this.#sixelSupport = undefined;
 		this.#sixelSupportCallbacks = [];
+		this.#da1CapabilityEmpty = undefined;
 		setTerminalGlyphProtocol(false);
 		this.#tspPending = false;
 		this.#endTspTmuxPane();

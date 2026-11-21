@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Fixed auto-graphed tables reserving blank rows on terminals whose SIXEL renderer draws nothing despite answering capability queries (Konsole 26.08): the probe now refuses upgrades when DA1 advertises no capabilities at all.
 
 ### Breaking Changes
 

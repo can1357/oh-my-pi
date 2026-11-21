@@ -2626,7 +2626,17 @@ export class TUI extends Container {
 
 	#finishSixelProbe(supported: boolean): void {
 		this.#clearSixelProbeState();
-		if (supported) this.#enableSixelProtocol();
+		if (!supported) return;
+		// A terminal that answers DA1 with no capability attributes at all
+		// (`ESC [ c`) contradicts an XTSMGRAPHICS success: it answers capability
+		// queries it cannot act on (Konsole 26.08 replies with bare DA1, succeeds
+		// the XTSMGRAPHICS geometry query, and draws nothing when sent SIXEL
+		// data). Trust the responder's own emptiness over the broader query
+		// success — terminals that list attributes without SIXEL (foot answers
+		// DA1 with a populated list) keep the upgrade path — and leave tables
+		// as text.
+		if (this.terminal.da1CapabilityEmpty === true) return;
+		this.#enableSixelProtocol();
 	}
 
 	#enableSixelProtocol(): void {
