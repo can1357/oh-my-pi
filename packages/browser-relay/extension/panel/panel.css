@@ -842,7 +842,7 @@ pre[data-pn]:hover .pn-code-copy,
 	margin: 8px 0 0;
 }
 
-.pn-stop,
+.pn-stopped,
 .pn-marker,
 .pn-custom {
 	margin: 8px 0;
@@ -2573,4 +2573,46 @@ select.pn-field {
 	.pn-teach-shot img {
 		transition: none;
 	}
+}
+
+.pn-thinking-slider {
+	display: flex;
+	flex: none;
+	align-items: center;
+	gap: 2px;
+	padding: 6px 8px;
+	border-top: 1px solid var(--border);
+	color: var(--fg-faint);
+}
+
+.pn-thinking-slider > svg {
+	flex: none;
+	margin-right: 4px;
+}
+
+.pn-thinking-step {
+	flex: 1;
+	min-width: 0;
+	height: 22px;
+	padding: 0 2px;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--fg-muted);
+	font-size: 11.5px;
+}
+
+.pn-thinking-step:hover {
+	background: var(--hover);
+	color: var(--fg);
+}
+
+.pn-thinking-step[aria-checked="true"] {
+	background: var(--hover);
+	color: var(--accent);
+	font-weight: 600;
+}
+
+.pn-thinking-none {
+	font-size: 11.5px;
 }

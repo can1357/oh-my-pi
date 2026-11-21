@@ -1,0 +1,9 @@
+{
+	"keep": {
+		"instructions": "A coding agent is rebuilding a program from scratch. Its context is being reset to save space: older turns move to an archive file the agent can reread, but it only rereads what it knows it needs. `task` is its assignment, `recent` its latest turns, and `turn` one older turn (its notes, tool calls, and tool outputs). Should this turn stay verbatim in the agent's context? Yes when it holds information the agent will need again and would not think to look up: observed behavior of the reference program, expected outputs or failing cases not yet fixed, design decisions and their reasons, constraints, or the current shape of code it is still changing. No when it is superseded (an older version of a file that was rewritten later, a bug since fixed, a plan already carried out), routine (successful builds, directory listings, passing runs), or recoverable by reading the workspace.",
+		"criteria": {
+			"true": "Keep verbatim in context",
+			"false": "Archive"
+		}
+	}
+}

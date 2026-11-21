@@ -10,6 +10,7 @@ import {
 	renderChangelogEntries,
 	selectChangelogEntries,
 } from "../utils/changelog";
+import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
@@ -381,7 +382,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					`${guide}[${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}${agent}`,
 				);
 				// What the job is for leads; full mode follows it with what the command does and the whole command.
-				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [job.intent ?? job.label];
+				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [jobDisplayLabel(job)];
 				const indent = jobTreeIndent(row, theme);
 				for (const entry of lines) {
 					if (!entry) continue;
@@ -550,8 +551,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			const lines = all.map(name => `${active.includes(name) ? "*" : "-"} ${name}`);
-			for (const mounted of runtime.session.getXdevToolEntries()) {
-				lines.push(`~ xd://${mounted.name}`);
+			for (const mounted of runtime.session.getToolCommandEntries()) {
+				lines.push(`~ ${mounted.name}`);
 			}
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();

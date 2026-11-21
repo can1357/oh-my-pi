@@ -27,7 +27,7 @@ function createSession(testDir: string): ToolSession {
 			"grep.contextAfter": 0,
 			"astGrep.enabled": true,
 			"astEdit.enabled": true,
-			"tools.xdev": false,
+			"tools.commands": false,
 		}),
 	};
 }
