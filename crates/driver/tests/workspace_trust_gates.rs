@@ -223,6 +223,37 @@ impl Gateway {
 	}
 
 	async fn start_with_registry(scratch: &Path, tools: Arc<omp_tool::Registry>) -> Self {
+		Self::start_with_tool_support(scratch, tools, false).await
+	}
+
+	async fn start_with_tools(scratch: &Path) -> Self {
+		let mut registry = omp_tool::Registry::new();
+		for spec in [
+			omp_tools::read::spec(omp_tools::read::ReadPolicy::default()),
+			omp_tools::grep::spec(omp_tools::grep::SearchPolicy::default()),
+			omp_tools::glob::spec(omp_tools::grep::SearchPolicy::default()),
+		] {
+			registry
+				.declare_remote(
+					spec,
+					omp_tool::Presentation::Slot,
+					omp_tool::Claims {
+						precedence: omp_tool::Precedence::CORE,
+						claimant:   omp_core::Str::new_static("omp/core"),
+						replaces:   None,
+					},
+					omp_tool::ExecutionMode::Parallel,
+				)
+				.expect("declare consult tool for gateway projection");
+		}
+		Self::start_with_tool_support(scratch, Arc::new(registry), true).await
+	}
+
+	async fn start_with_tool_support(
+		scratch: &Path,
+		tools: Arc<omp_tool::Registry>,
+		require_tools: bool,
+	) -> Self {
 		let mut compiled = Catalog::embedded().compiled().clone();
 		for provider in &mut compiled.providers {
 			provider.management = ManagementCapabilities {
@@ -239,10 +270,18 @@ impl Gateway {
 			.models()
 			.iter()
 			.find(|model| {
-				model
-					.capabilities
-					.operations
-					.contains_kind(OperationKind::Chat)
+				model.routes.len() == 1
+					&& model
+						.capabilities
+						.operations
+						.contains_kind(OperationKind::Chat)
+					&& (!require_tools
+						|| model.capabilities.chat.as_ref().is_some_and(|chat| {
+							chat
+								.tools
+								.constraints()
+								.is_some_and(|tools| tools.maximum_tools.is_none_or(|maximum| maximum >= 3))
+						}))
 			})
 			.expect("chat model");
 		let route_id = model.routes.first().expect("chat route").clone();
@@ -514,4 +553,131 @@ async fn a_digest_bound_grant_admits_the_inputs_until_one_changes() {
 	};
 	assert_eq!(withheld.decision, TrustDecisionKind::DigestChanged);
 	assert!(withheld.named.iter().any(|path| path == ".omp/mcp.json"), "{withheld:?}");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consult_child_is_read_only_and_never_opens_the_source_for_write() {
+	use omp_driver::consult::{ConsultSource, child_options, prepare_root};
+	let workspace = Workspace::new();
+	let _daemon = workspace.daemon(WorkspaceTrust::Untrusted).await;
+	let gateway = Gateway::start_with_tools(workspace.home.parent().expect("scratch")).await;
+	let source_gateway_scratch = tempfile::tempdir().expect("source gateway scratch");
+	let source_gateway = Gateway::start_with_tools(source_gateway_scratch.path()).await;
+
+	// Build a completed, production-composed session as the consult source.
+	let (mut source_kernel, mut source_session) = workspace.compose(&source_gateway).await;
+	turn(&source_gateway, &mut source_kernel, &mut source_session).await;
+	drop(source_kernel);
+	drop(source_session);
+	let source_path = workspace.session.clone();
+	let before = fs::read(&source_path).expect("source bytes before");
+	let source_dir = tempfile::tempdir().expect("consult temp");
+	let root = prepare_root(source_dir.path(), &ConsultSource {
+		id:    Str::new_static("fixture"),
+		path:  source_path.clone(),
+		model: gateway.model.clone(),
+	})
+	.expect("private root");
+	let mut options = child_options(&root);
+	options.gateway = Some(gateway.channel.clone());
+	let (mut kernel, mut session, _) = compose_kernel(
+		&workspace.data,
+		&workspace.project,
+		gateway.model.as_str(),
+		Arc::clone(&workspace.con),
+		options,
+	)
+	.await
+	.expect("consult child composition");
+
+	for name in omp_driver::consult::CONSULT_TOOLS {
+		assert_eq!(
+			kernel.tool_registry().presentation(name).expect(name),
+			omp_tool::Presentation::Slot
+		);
+	}
+	assert_eq!(
+		kernel
+			.tool_registry()
+			.presentation("goal")
+			.expect("hidden goal"),
+		omp_tool::Presentation::Hidden
+	);
+	assert!(kernel.tool_registry().live_spec("write").is_err(), "write is not registered");
+
+	// A full consult turn completes normally with exactly three declared tools.
+	gateway.answer("The saved session records the earlier work.");
+	kernel
+		.run_turn(
+			&mut session,
+			TurnInput {
+				text:        Str::new_static("Summarize the saved session."),
+				attachments: Vec::new(),
+			},
+			RunControl::new(CancellationToken::new(), None),
+		)
+		.await
+		.expect("full consult turn");
+	drop(kernel);
+	drop(session);
+	let _ = gateway.fake.take_calls();
+
+	// A deliberately invalid model response tries to call a tool not in the wire
+	// roster.
+	let mut options = child_options(&root);
+	options.gateway = Some(gateway.channel.clone());
+	let (mut kernel, mut session, _) = compose_kernel(
+		&workspace.data,
+		&workspace.project,
+		gateway.model.as_str(),
+		Arc::clone(&workspace.con),
+		options,
+	)
+	.await
+	.expect("second consult child composition");
+	let args = serde_json::json!({});
+	let call = ToolCall {
+		id:        ToolCallId::from("forbidden-write"),
+		name:      Str::new_static("write"),
+		arguments: omp_ai::OpaqueJson::new(args.clone()),
+	};
+	gateway.fake.push(FakeScript::chat(vec![
+		Ok(ChatEvent::ToolCallStarted { index: 0, id: call.id.clone(), name: call.name.clone() }),
+		Ok(ChatEvent::ToolArgumentsDelta {
+			index: 0,
+			bytes: bytes::Bytes::from(serde_json::to_vec(&args).expect("arguments")),
+		}),
+		Ok(ChatEvent::ToolCallReady { index: 0, call }),
+		Ok(ChatEvent::Completed(Completion {
+			reason:  FinishReason::ToolCalls,
+			blocks:  1,
+			usage:   Usage::default(),
+			receipt: ExecutionReceipt::default().into(),
+		})),
+	]));
+	let rejected = kernel
+		.run_turn(
+			&mut session,
+			TurnInput {
+				text:        Str::new_static("Try to write to the saved session."),
+				attachments: Vec::new(),
+			},
+			RunControl::new(CancellationToken::new(), None),
+		)
+		.await;
+	assert!(rejected.is_err(), "an undeclared write call must be refused");
+	let captured = gateway.fake.calls();
+	assert!(!captured.is_empty(), "the child reached the gateway");
+	assert!(
+		captured.iter().all(|call| matches!(
+			call.shape,
+			omp_ai::provider::fake::CapturedOperation::Chat { tools: 3, .. }
+		)),
+		"only the three read tools reach the wire: {captured:?}"
+	);
+
+	assert_eq!(
+		fs::read(&source_path).expect("source bytes after"),
+		before,
+		"source journal unchanged after full turn"
+	);
 }
