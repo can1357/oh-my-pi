@@ -4,11 +4,12 @@ import { logger } from "@oh-my-pi/pi-utils";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
+	type DisposeByOwnerOptions,
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
-	resolveOwnerScopedSessionKey,
 	type SessionOwners,
+	waitForPromiseWithCancellation,
 } from "./executor-base";
 
 interface KernelSessionRegistryOptions {
@@ -39,6 +40,7 @@ export interface KernelSession<TKernel extends RegistryKernel> extends SessionOw
 }
 
 interface StartingKernelSession<TSession> extends SessionOwners {
+	sessionId: string;
 	promise: Promise<TSession>;
 }
 
@@ -55,7 +57,7 @@ export interface KernelSessionRegistryContext<
 interface KernelSessionRegistryDescriptor<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
-	TResult,
+	R,
 	TSession extends KernelSession<TKernel>,
 > {
 	languageLabel: string;
@@ -63,7 +65,7 @@ interface KernelSessionRegistryDescriptor<
 	buildSessionKey: (sessionId: string, cwd: string, interpreter: string | undefined) => string;
 	createSession: (session: KernelSession<TKernel>) => TSession;
 	startKernel: (cwd: string, options: TOptions) => Promise<TKernel>;
-	executeWithKernel: (kernel: TKernel, code: string, options: TOptions) => Promise<TResult>;
+	executeWithKernel: (kernel: TKernel, code: string, options: TOptions) => Promise<R>;
 	waitForStartup?: (promise: Promise<TSession>, options: TOptions) => Promise<TSession>;
 	replaceSessionKernel?: (
 		session: TSession,
@@ -86,10 +88,17 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<TOptions extends KernelSessionRegistryOptions, TResult> {
+interface KernelSessionRegistry<
+	TKernel extends RegistryKernel,
+	TOptions extends KernelSessionRegistryOptions,
+	R,
+	TSession extends KernelSession<TKernel>,
+> {
 	disposeAll(): Promise<void>;
-	disposeByOwner(ownerId: string): Promise<void>;
-	executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult>;
+	disposeByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void>;
+	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
+	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
+	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -126,14 +135,29 @@ export function formatSessionKernelTimeoutAnnotation(timeoutMs: number | undefin
 export function createKernelSessionRegistry<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
-	TResult,
+	R extends { cancelled: boolean },
 	TSession extends KernelSession<TKernel>,
 >(
-	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, TResult, TSession>,
-): KernelSessionRegistry<TOptions, TResult> {
+	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, R, TSession>,
+): KernelSessionRegistry<TKernel, TOptions, R, TSession> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
+	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
+	// Kernel each session key's latest started cell ran on; a different kernel means the old one's state is gone.
+	// Keyed by the session key string, not the session record, so a disposed and recreated record
+	// (owner release, session switch and back, disposeAll) still reports the loss. Only an explicit reset clears it.
+	const kernelIds = new WeakMap<TKernel, number>();
+	let nextKernelId = 1;
+	const servedKernelIds = new Map<string, number>();
+	function kernelIdOf(kernel: TKernel): number {
+		let id = kernelIds.get(kernel);
+		if (id === undefined) {
+			id = nextKernelId++;
+			kernelIds.set(kernel, id);
+		}
+		return id;
+	}
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -143,6 +167,14 @@ export function createKernelSessionRegistry<
 
 	function waitForStartup(promise: Promise<TSession>, options: TOptions): Promise<TSession> {
 		return descriptor.waitForStartup?.(promise, options) ?? promise;
+	}
+
+	function throwIfCallerCancelled(options: TOptions): void {
+		if (!options.signal?.aborted) return;
+		const timedOut =
+			descriptor.isTimedOutCancellation?.(options.signal.reason, options.signal) ??
+			isTimedOutCancellation(options.signal.reason, descriptor.cancelledErrorClass, options.signal);
+		throw new descriptor.cancelledErrorClass(timedOut);
 	}
 
 	function isCurrent(session: TSession, kernel?: TKernel): boolean {
@@ -168,8 +200,11 @@ export function createKernelSessionRegistry<
 			attachSessionOwner(starting, sessionId, options.kernelOwnerId);
 			return await waitForStartup(starting.promise, options);
 		}
+		// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 		let startingSession!: StartingKernelSession<TSession>;
-		const startup = (async () => {
+		// Kernels are shared by every owner of the key, so the readers and timers a
+		// kernel starts carry no caller's log context.
+		const startup = logger.withoutContext(async () => {
 			const kernel = await descriptor.startKernel(cwd, options);
 			const session = descriptor.createSession({
 				sessionKey,
@@ -183,10 +218,11 @@ export function createKernelSessionRegistry<
 				sessions.set(sessionKey, session);
 			}
 			return session;
-		})();
+		});
 		startingSession = {
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
+			sessionId,
 			promise: startup,
 		};
 		attachSessionOwner(startingSession, sessionId, options.kernelOwnerId);
@@ -199,8 +235,9 @@ export function createKernelSessionRegistry<
 	}
 
 	async function replaceSessionKernel(session: TSession, cwd: string, options: TOptions): Promise<TKernel> {
-		if (descriptor.replaceSessionKernel) {
-			return await descriptor.replaceSessionKernel(session, cwd, options, context);
+		const replace = descriptor.replaceSessionKernel;
+		if (replace) {
+			return await logger.withoutContext(() => replace(session, cwd, options, context));
 		}
 		if (descriptor.logBeforeReplacement) {
 			logger.warn(`${descriptor.languageLabel} subprocess died or is unresponsive; spawning fresh process`, {
@@ -216,7 +253,7 @@ export function createKernelSessionRegistry<
 			throw new descriptor.cancelledErrorClass(false);
 		}
 		requireRemainingKernelTimeoutMs(options.deadlineMs, descriptor.cancelledErrorClass);
-		const next = await descriptor.startKernel(cwd, options);
+		const next = await logger.withoutContext(() => descriptor.startKernel(cwd, options));
 		if (sessions.get(session.sessionKey) !== session) {
 			await next.shutdown().catch(() => undefined);
 			throw new descriptor.cancelledErrorClass(false);
@@ -225,18 +262,73 @@ export function createKernelSessionRegistry<
 		return next;
 	}
 
+	async function acquireDefaultReplacementKernel(
+		session: TSession,
+		kernel: TKernel,
+		cwd: string,
+		options: TOptions,
+	): Promise<TKernel> {
+		const existing = replacingSessionKernels.get(session);
+		if (existing?.kernel === kernel) {
+			return await waitForPromiseWithCancellation(existing.promise, options, descriptor.cancelledErrorClass);
+		}
+		if (!isCurrent(session)) throw new descriptor.cancelledErrorClass(false);
+		if (session.kernel !== kernel) {
+			const currentKernel = session.kernel;
+			if (currentKernel.isAlive()) return currentKernel;
+			return await acquireDefaultReplacementKernel(session, currentKernel, cwd, options);
+		}
+		const replacement = {
+			kernel,
+			promise: replaceSessionKernel(session, cwd, {
+				...options,
+				signal: undefined,
+				deadlineMs: undefined,
+			}),
+		};
+		replacingSessionKernels.set(session, replacement);
+		const release = (): void => {
+			if (replacingSessionKernels.get(session) === replacement) {
+				replacingSessionKernels.delete(session);
+			}
+		};
+		void replacement.promise.then(release, release);
+		return await waitForPromiseWithCancellation(replacement.promise, options, descriptor.cancelledErrorClass);
+	}
+
 	async function acquireLiveSessionKernel(session: TSession, cwd: string, options: TOptions): Promise<TKernel> {
 		if (descriptor.acquireLiveSessionKernel) {
 			return await descriptor.acquireLiveSessionKernel(session, cwd, options, context);
 		}
 		if (!isCurrent(session)) throw new descriptor.cancelledErrorClass(false);
-		if (!session.kernel.isAlive()) await replaceSessionKernel(session, cwd, options);
+		const kernel = session.kernel;
+		if (!kernel.isAlive()) await acquireDefaultReplacementKernel(session, kernel, cwd, options);
 		if (!isCurrent(session)) throw new descriptor.cancelledErrorClass(false);
 		return session.kernel;
 	}
 
 	async function shutdownSession(session: TSession, resetting: boolean): Promise<RegistryKernelShutdownResult> {
-		return await (descriptor.shutdownSession?.(session, resetting) ?? session.kernel.shutdown());
+		const replacement = replacingSessionKernels.get(session)?.promise;
+		let shutdown: Promise<RegistryKernelShutdownResult>;
+		try {
+			shutdown = descriptor.shutdownSession?.(session, resetting) ?? session.kernel.shutdown();
+		} catch (error) {
+			if (replacement) await replacement.catch(() => undefined);
+			throw error;
+		}
+		if (!replacement) return await shutdown;
+		const [result] = await Promise.allSettled([shutdown, replacement]);
+		if (result.status === "rejected") throw result.reason;
+		return result.value;
+	}
+	async function settleShutdown(
+		session: TSession,
+		resetting: boolean,
+	): Promise<PromiseSettledResult<RegistryKernelShutdownResult>> {
+		return await shutdownSession(session, resetting).then(
+			value => ({ status: "fulfilled", value }),
+			reason => ({ status: "rejected", reason }),
+		);
 	}
 
 	async function resetSession(sessionKey: string): Promise<void> {
@@ -251,27 +343,32 @@ export function createKernelSessionRegistry<
 	async function disposeAll(): Promise<void> {
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
+		servedKernelIds.clear();
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
-		const started = await Promise.allSettled(pending);
 		const all = [...sessions.entries()];
-		for (const result of started) {
-			if (result.status !== "fulfilled") continue;
-			if (!all.some(([, session]) => session === result.value)) {
-				all.push([result.value.sessionKey, result.value]);
-			}
-		}
 		for (const [id, session] of all) {
 			descriptor.invalidateSession?.(session);
 			if (sessions.get(id) === session) sessions.delete(id);
 		}
-		const results = await Promise.allSettled(all.map(([, session]) => shutdownSession(session, false)));
+		const shutdowns = all.map(([, session]) => settleShutdown(session, false));
+		const started = await Promise.allSettled(pending);
+		for (const result of started) {
+			if (result.status !== "fulfilled") continue;
+			if (all.some(([, session]) => session === result.value)) continue;
+			const session = result.value;
+			all.push([session.sessionKey, session]);
+			descriptor.invalidateSession?.(session);
+			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+			shutdowns.push(settleShutdown(session, false));
+		}
+		const results = await Promise.all(shutdowns);
 		for (let i = 0; i < all.length; i += 1) {
 			const [id, session] = all[i];
 			const result = results[i];
 			if (result.status === "fulfilled" && result.value?.confirmed !== false) continue;
 			const reason = result.status === "rejected" ? result.reason : "not confirmed";
 			logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
-				sessionId: session.sessionId,
+				kernelSessionId: session.sessionId,
 				sessionKey: id,
 				cwd: session.cwd,
 				reason,
@@ -280,19 +377,22 @@ export function createKernelSessionRegistry<
 		}
 	}
 
-	async function disposeByOwner(ownerId: string): Promise<void> {
+	async function disposeByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void> {
+		const keepSessionId = options?.keepSessionId;
 		const toShutdown: TSession[] = [];
 		const startingToShutdown: StartingKernelSession<TSession>[] = [];
-		for (const session of [...sessions.values()]) {
-			if (!session.ownerIds.has(ownerId)) continue;
+		for (const session of Array.from(sessions.values())) {
+			if (!session.ownerIds.has(ownerId) || session.sessionId === keepSessionId) continue;
 			if (session.ownerIds.size === 1) {
 				toShutdown.push(session);
 				continue;
 			}
 			session.ownerIds.delete(ownerId);
 		}
-		for (const [sessionKey, starting] of [...startingSessions.entries()]) {
-			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
+		for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
+			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId) || starting.sessionId === keepSessionId) {
+				continue;
+			}
 			if (starting.ownerIds.size === 1) {
 				startingSessions.delete(sessionKey);
 				startingToShutdown.push(starting);
@@ -304,6 +404,7 @@ export function createKernelSessionRegistry<
 			descriptor.invalidateSession?.(session);
 			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 		}
+		const shutdowns = toShutdown.map(session => settleShutdown(session, false));
 		const started = await Promise.allSettled(startingToShutdown.map(starting => starting.promise));
 		for (const result of started) {
 			if (result.status !== "fulfilled") continue;
@@ -311,8 +412,9 @@ export function createKernelSessionRegistry<
 			descriptor.invalidateSession?.(session);
 			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 			toShutdown.push(session);
+			shutdowns.push(settleShutdown(session, false));
 		}
-		const results = await Promise.allSettled(toShutdown.map(session => shutdownSession(session, false)));
+		const results = await Promise.all(shutdowns);
 		for (let i = 0; i < toShutdown.length; i += 1) {
 			const session = toShutdown[i];
 			const result = results[i];
@@ -322,7 +424,7 @@ export function createKernelSessionRegistry<
 			}
 			const reason = result.status === "rejected" ? result.reason : "not confirmed";
 			logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
-				sessionId: session.sessionId,
+				kernelSessionId: session.sessionId,
 				sessionKey: session.sessionKey,
 				cwd: session.cwd,
 				reason,
@@ -331,15 +433,21 @@ export function createKernelSessionRegistry<
 		}
 	}
 
-	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult> {
+	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
-		const sessionKey = resolveOwnerScopedSessionKey({
-			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
-			ownerId: options.kernelOwnerId,
-			reset: options.reset === true,
-			hasSession: key => sessions.has(key) || startingSessions.has(key),
-			getOwners: key => sessions.get(key) ?? startingSessions.get(key),
-		});
+		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
+		const kernel = sessions.get(sessionKey)?.kernel;
+		return kernel?.isAlive() ? kernel : undefined;
+	}
+
+	function getPresentSession(cwd: string, options: TOptions): TSession | undefined {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		return sessions.get(descriptor.buildSessionKey(sessionId, cwd, options.interpreter));
+	}
+
+	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
 		}
@@ -347,6 +455,7 @@ export function createKernelSessionRegistry<
 			const inFlight = resettingSessions.get(sessionKey);
 			if (inFlight) await inFlight.catch(() => undefined);
 			else {
+				servedKernelIds.delete(sessionKey);
 				const resetPromise = resetSession(sessionKey);
 				resettingSessions.set(
 					sessionKey,
@@ -363,36 +472,37 @@ export function createKernelSessionRegistry<
 			if (inFlight) await inFlight.catch(() => undefined);
 		}
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
-		if (options.signal?.aborted) {
-			const timedOut =
-				descriptor.isTimedOutCancellation?.(options.signal.reason, options.signal) ??
-				isTimedOutCancellation(options.signal.reason, descriptor.cancelledErrorClass, options.signal);
-			throw new descriptor.cancelledErrorClass(timedOut);
-		}
+		throwIfCallerCancelled(options);
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
-		const runOptions = { ...options, cwd };
+		throwIfCallerCancelled(options);
+		const claimKernelRestartNotice = (): boolean => {
+			const id = kernelIdOf(kernel);
+			const previous = servedKernelIds.get(sessionKey);
+			servedKernelIds.set(sessionKey, id);
+			return previous !== undefined && previous !== id;
+		};
+		const runOptions = { ...options, cwd, claimKernelRestartNotice };
+		let result: R;
 		try {
-			return await descriptor.executeWithKernel(kernel, code, runOptions);
+			result = await descriptor.executeWithKernel(kernel, code, runOptions);
 		} catch (err) {
 			if (
 				descriptor.isCancellation?.(err) ||
-				isCancellationError(err, descriptor.cancelledErrorClass) ||
-				options.signal?.aborted
+				isCancellationError(err, descriptor.cancelledErrorClass, {
+					signal: options.signal,
+					deadlineMs: options.deadlineMs,
+				})
 			)
 				throw err;
 			if (kernel.isAlive()) throw err;
-			let retryKernel: TKernel;
-			if (descriptor.acquireLiveSessionKernel) {
-				retryKernel = await acquireLiveSessionKernel(session, cwd, options);
-			} else {
-				if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
-				retryKernel = await replaceSessionKernel(session, cwd, options);
-			}
-			if (!isCurrent(session, retryKernel)) throw new descriptor.cancelledErrorClass(false);
-			return await descriptor.executeWithKernel(retryKernel, code, runOptions);
+			throw new Error(
+				`${descriptor.languageLabel} kernel died during execution; completion is uncertain and the cell was not replayed. The next call will start a fresh kernel.`,
+				{ cause: err },
+			);
 		}
+		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession };
 }

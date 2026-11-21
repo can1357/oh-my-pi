@@ -16,7 +16,10 @@ export interface GoogleVertexOptions extends GoogleSharedStreamOptions {
 	location?: string;
 }
 
-const API_VERSION = "v1";
+// `v1beta1`, the Google Gen AI SDK's default: Agent Platform serves long decodes
+// (`continuationToken`, Gemini 4 Hydrogen past 65,536 output tokens) only there.
+// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen#known-issues
+const API_VERSION = "v1beta1";
 
 export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 	model: Model<"google-vertex">,
@@ -27,7 +30,6 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 		model,
 		options,
 		api: "google-vertex",
-		retainTextSignature: true,
 		prepare: async (): Promise<GoogleGenAIRequestPlan> => {
 			const apiKey = resolveApiKey(options);
 			const params = buildGoogleGenerateContentParams(model, context, options ?? {});
@@ -53,8 +55,8 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 				];
 			}
 			const baseHeaders: Record<string, string> = {
-				...(model.headers ?? {}),
-				...(options?.headers ?? {}),
+				...model.headers,
+				...options?.headers,
 			};
 			// Vertex AI ignores a `serviceTier` request-body field (unlike the direct
 			// Gemini API); priority must travel as a request header. Only `priority`

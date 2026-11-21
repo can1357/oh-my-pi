@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: "Code review specialist for quality/security analysis"
-tools: read, grep, glob, bash, lsp, web_search, ast_grep
+tools: read, find, grep, glob, bash, lsp, web_search, ast_grep
 spawns: scout
 model: "@slow"
 output:
@@ -109,7 +109,7 @@ memcpy(buf, data.ptr, data.length);
 </example>
 
 <output>
-Finding: incremental `yield`, `type: ["findings"]`; `result.data`:
+Finding: incremental `yield`, `type: ["findings"]`; `data`:
 - `title`: imperative, ≤80 chars.
 - `body`: one paragraph.
 - `priority`: 0-3.

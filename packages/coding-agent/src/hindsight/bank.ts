@@ -21,9 +21,9 @@
  */
 
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
-import * as git from "../utils/git";
-import type { HindsightApi } from "./client";
+import type { HindsightClientApi } from "./client";
 import type { HindsightConfig } from "./config";
 
 const DEFAULT_BANK_NAME = "omp";
@@ -33,13 +33,21 @@ const MISSION_SET_CAP = 10_000;
 
 export type RecallTagsMatch = "any" | "all" | "any_strict" | "all_strict";
 
+/** Banks already ensured on the server: a `Set<string>`, or a subagent worker's view of main's set. */
+export interface HindsightBankSet extends Iterable<string> {
+	readonly size: number;
+	has(bankId: string): boolean;
+	add(bankId: string): unknown;
+	delete(bankId: string): boolean;
+}
+
 /**
  * Resolved bank target for a session: which bank to talk to, plus optional
  * tags to attach to retains and to filter recalls by.
  */
 export interface BankScope {
 	bankId: string;
-	/** Tags applied to every retain. Undefined when scoping does not use tags. */
+	/** Tags applied to project-scoped retains; global tool writes omit them. Undefined when scoping does not use tags. */
 	retainTags?: string[];
 	/** Tags filter for recall/reflect. Undefined when scoping does not use tags. */
 	recallTags?: string[];
@@ -57,9 +65,9 @@ function baseBankId(config: HindsightConfig): string {
 /**
  * Best-effort project label from a working-directory path.
  *
- * When `directory` lives inside a git repository we resolve the primary
+ * When `directory` lives inside a repository we resolve the primary
  * checkout root (or the shared common dir for bare-repo worktrees) via
- * {@link git.repo.primaryRootSync} and basename that, so every linked
+ * the native VCS adapter and basename that, so every linked
  * worktree of one repo shares the same `project:<name>` tag.
  * Outside a repo (or when resolution fails), fall back to the cwd basename.
  *
@@ -70,12 +78,11 @@ function baseBankId(config: HindsightConfig): string {
  *
  * Sync only: this runs on the hot path of `computeBankScope`, which is
  * exposed as a sync API to callers like `backend.ts` and must stay sync.
- * `git.repo.primaryRootSync` walks `.git`/`commondir` with sync file reads —
- * no subprocess — so the cost is one or two `stat`s and a small `readFile`.
+ * Native repository discovery never launches a subprocess.
  */
 function projectLabel(directory: string): string {
 	if (!directory) return UNKNOWN_PROJECT;
-	const primary = git.repo.primaryRootSync(directory);
+	const primary = vcs.repo(directory)?.primaryRoot() ?? null;
 	return path.basename(primary ?? directory).toLowerCase() || UNKNOWN_PROJECT;
 }
 
@@ -127,10 +134,10 @@ export function deriveBankId(config: HindsightConfig, directory: string): string
  * unboundedly across long-lived processes.
  */
 export async function ensureBankExists(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	config: HindsightConfig,
-	banksSet: Set<string>,
+	banksSet: HindsightBankSet,
 ): Promise<void> {
 	if (banksSet.has(bankId)) return;
 

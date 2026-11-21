@@ -33,7 +33,7 @@ class Bits {
 		if (n === 0) return 0;
 		if (n < 0 || n > 31) fail("invalid bit count");
 		let value = 0;
-		for (let left = n; left > 0; ) {
+		for (let left = n; left > 0;) {
 			if (this.pos >= this.bytes.byteLength - 16) fail("truncated compressed data");
 			const take = Math.min(left, 8 - this.bit);
 			value = value * 2 ** take + ((this.bytes[this.pos]! >>> (8 - this.bit - take)) & (2 ** take - 1));
@@ -211,7 +211,7 @@ export class Rar5Decoder {
 			if ((flags & 0x80) === 0) return;
 
 			const levelLengths = new Uint8Array(20);
-			for (let i = 0; i < 20; ) {
+			for (let i = 0; i < 20;) {
 				const length = bits.read(4);
 				if (length === 15) {
 					const zeros = bits.read(4);
@@ -226,7 +226,7 @@ export class Rar5Decoder {
 			level.build(levelLengths);
 			const tableLength = version === 1 ? TABLE_SIZE : TABLE_SIZE - 16;
 			const lengthsCompact = new Uint8Array(tableLength);
-			for (let i = 0; i < tableLength; ) {
+			for (let i = 0; i < tableLength;) {
 				const symbol = level.decode(bits);
 				if (symbol < 16) {
 					lengthsCompact[i++] = symbol;
@@ -358,7 +358,7 @@ function applyFilters(output: Uint8Array, filters: Filter[]): void {
 			}
 		} else if (filter.type === 1 || filter.type === 2) {
 			const fileSize = 1 << 24;
-			for (let pos = 0; pos + 4 < data.byteLength; ) {
+			for (let pos = 0; pos + 4 < data.byteLength;) {
 				const opcode = data[pos++]!;
 				if (opcode !== 0xe8 && (filter.type === 1 || opcode !== 0xe9)) continue;
 				const offset = (filter.start + pos) & (fileSize - 1);

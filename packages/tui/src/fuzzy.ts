@@ -42,6 +42,16 @@ const ALPHANUMERIC_SWAP_PENALTY = 5;
 const COMPACT_PHRASE_BONUS = 1200;
 const PHRASE_BONUS = 1000;
 
+/**
+ * Shortest needle worth scanning past its leading occurrence for.
+ *
+ * One or two characters sit mid-word in nearly every candidate — "im" is inside
+ * "experimental" — so rescanning that short would hand the word-start bonus to
+ * the whole corpus at once and reshuffle the list on the opening keystrokes of a
+ * search instead of narrowing it. Shadowing only misleads for real phrases.
+ */
+const MIN_SHADOW_RESCAN_LENGTH = 3;
+
 function normalizeForSearch(value: string): string {
 	return value
 		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
@@ -58,27 +68,41 @@ function normalizeForSearch(value: string): string {
 // index across keystrokes eliminates the redundant normalize + word-split + Set
 // build on every character. Consumers only read the result, so sharing is safe.
 //
-// Admission is conservative so the cache helps the repeated-filter hot path
-// without paying for one-off text: only short texts are cached (long inputs —
-// pasted prompts, transcripts searched via the message selector — would bloat
-// memory), and admission stops at the cap instead of evicting, so a stream of
-// unique texts (message/session search) can't churn the map.
+// Only short texts are cached (long inputs — pasted prompts, transcripts
+// searched via the message selector — would bloat memory). The map is a
+// bounded LRU: a hit re-inserts the entry (Map iteration order is insertion
+// order) and a miss at capacity evicts the oldest entry, so a burst of one-off
+// texts can't pin itself forever and starve later selectors of the cache.
+// A single ranking pass only admits/promotes its first INDEX_CACHE_MAX
+// candidates; the tail of a larger list is looked up without promotion and
+// built uncached otherwise, so re-ranking an oversized list keeps its head
+// cached instead of cyclically evicting every entry. Candidate lists larger
+// than the cap should hold a {@link FuzzyCorpus}.
 const INDEX_CACHE_MAX = 4096;
 const MAX_CACHED_TEXT_LEN = 4096;
 const indexCache = new Map<string, SearchIndex>();
 
-function buildSearchIndex(text: string): SearchIndex {
+function buildSearchIndex(text: string, admit = true): SearchIndex {
 	// Long inputs (pasted prompts, transcripts) are never cached; bypass the Map
 	// entirely so they don't pay a hash lookup on every search.
 	if (text.length > MAX_CACHED_TEXT_LEN) return buildUncachedSearchIndex(text);
 
 	const cached = indexCache.get(text);
-	if (cached !== undefined) return cached;
+	if (cached !== undefined) {
+		if (admit) {
+			indexCache.delete(text);
+			indexCache.set(text, cached);
+		}
+		return cached;
+	}
 
 	const result = buildUncachedSearchIndex(text);
-	if (indexCache.size < INDEX_CACHE_MAX) {
-		indexCache.set(text, result);
+	if (!admit) return result;
+	if (indexCache.size >= INDEX_CACHE_MAX) {
+		const oldest = indexCache.keys().next().value;
+		if (oldest !== undefined) indexCache.delete(oldest);
 	}
+	indexCache.set(text, result);
 	return result;
 }
 
@@ -172,6 +196,53 @@ function isWordBoundaryPhrase(normalized: string, index: number, length: number)
 	return before && after;
 }
 
+/**
+ * Offset of the first whole-word occurrence of `phrase` in `normalized`, or -1.
+ *
+ * A bare `indexOf` reports only the leading occurrence, so a qualifying match is
+ * dropped whenever an earlier non-qualifying one shadows it — the whole word
+ * "image" in "reimage image provider" loses to the "image" inside "reimage".
+ * Occurrences are scanned left to right, so the first qualifying hit is also the
+ * best-scoring one: the caller's position tiebreak grows with the offset.
+ *
+ * Only a hit buried inside a word can shadow. A leading hit that already starts
+ * a word is an ordinary prefix match — the query is "image" and the text says
+ * "images" — and it is scored exactly as before rather than borrowing a
+ * whole-word bonus from some later occurrence; `findCompactWordStart` treats its
+ * leading word-start hit the same way. The rescan is additionally limited to
+ * {@link MIN_SHADOW_RESCAN_LENGTH} and longer needles.
+ */
+function findWordBoundaryPhrase(normalized: string, phrase: string): number {
+	if (phrase.length === 0) return -1;
+	const first = normalized.indexOf(phrase);
+	if (first < 0) return -1;
+	if (isWordBoundaryPhrase(normalized, first, phrase.length)) return first;
+	if (first === 0 || normalized[first - 1] === " ") return -1;
+	if (phrase.length < MIN_SHADOW_RESCAN_LENGTH) return -1;
+	for (let at = normalized.indexOf(phrase, first + 1); at >= 0; at = normalized.indexOf(phrase, at + 1)) {
+		if (isWordBoundaryPhrase(normalized, at, phrase.length)) return at;
+	}
+	return -1;
+}
+
+/**
+ * Offset of the first occurrence of `needle` that starts a word in `index.compact`,
+ * or -1. Same shadowing hazard, and the same length floor, as
+ * {@link findWordBoundaryPhrase}.
+ */
+function findCompactWordStart(index: SearchIndex, needle: string): number {
+	if (needle.length === 0) return -1;
+	const { compact, compactWordStarts } = index;
+	const first = compact.indexOf(needle);
+	if (first < 0) return -1;
+	if (compactWordStarts.has(first)) return first;
+	if (needle.length < MIN_SHADOW_RESCAN_LENGTH) return -1;
+	for (let at = compact.indexOf(needle, first + 1); at >= 0; at = compact.indexOf(needle, at + 1)) {
+		if (compactWordStarts.has(at)) return at;
+	}
+	return -1;
+}
+
 function scoreTokenAgainstWord(token: string, word: SearchWord): FuzzyMatch | null {
 	if (word.text === token) {
 		return { matches: true, score: withPosition(-200, word.index) };
@@ -230,8 +301,8 @@ function scoreTokenDirect(token: string, index: SearchIndex): FuzzyMatch {
 	if (token.length === 0) return { matches: true, score: 0 };
 
 	let best: FuzzyMatch | null = null;
-	const compactIndex = index.compact.indexOf(token);
-	if (compactIndex >= 0 && index.compactWordStarts.has(compactIndex)) {
+	const compactIndex = findCompactWordStart(index, token);
+	if (compactIndex >= 0) {
 		best = { matches: true, score: withPosition(-140, compactIndex) };
 	}
 
@@ -250,11 +321,11 @@ function scoreTokenDirect(token: string, index: SearchIndex): FuzzyMatch {
 	return best ?? { matches: false, score: 0 };
 }
 
-function scoreToken(token: string, index: SearchIndex): FuzzyMatch {
+function scoreToken(token: string, swapVariants: readonly string[], index: SearchIndex): FuzzyMatch {
 	let best = scoreTokenDirect(token, index);
 	if (best.matches) return best;
 
-	for (const variant of buildAlphanumericSwapQueries(token)) {
+	for (const variant of swapVariants) {
 		const match = scoreTokenDirect(variant, index);
 		if (!match.matches) continue;
 		const score = match.score + ALPHANUMERIC_SWAP_PENALTY;
@@ -266,18 +337,26 @@ function scoreToken(token: string, index: SearchIndex): FuzzyMatch {
 	return best;
 }
 
-/** A query normalized and split once, so `fuzzyRank` doesn't re-normalize the
- * same query for every candidate in the list. */
+/** A query normalized and split once, so ranking doesn't re-normalize the
+ * same query (or rebuild its alphanumeric-swap variants) for every candidate. */
 interface PreparedQuery {
 	normalized: string;
 	tokens: string[];
+	/** `buildAlphanumericSwapQueries` of each token, index-aligned with `tokens`. */
+	tokenSwaps: string[][];
 	compact: string;
 }
 
 function prepareQuery(query: string): PreparedQuery | null {
 	const normalized = normalizeForSearch(query);
 	if (normalized.length === 0) return null;
-	return { normalized, tokens: normalized.split(" "), compact: normalized.replaceAll(" ", "") };
+	const tokens = normalized.split(" ");
+	return {
+		normalized,
+		tokens,
+		tokenSwaps: tokens.map(buildAlphanumericSwapQueries),
+		compact: normalized.replaceAll(" ", ""),
+	};
 }
 
 function fuzzyMatchCore(pq: PreparedQuery | null, index: SearchIndex): FuzzyMatch {
@@ -290,20 +369,20 @@ function fuzzyMatchCore(pq: PreparedQuery | null, index: SearchIndex): FuzzyMatc
 	}
 
 	let totalScore = 0;
-	const phraseIndex = index.normalized.indexOf(pq.normalized);
-	if (phraseIndex >= 0 && isWordBoundaryPhrase(index.normalized, phraseIndex, pq.normalized.length)) {
+	const phraseIndex = findWordBoundaryPhrase(index.normalized, pq.normalized);
+	if (phraseIndex >= 0) {
 		totalScore -= PHRASE_BONUS;
 		totalScore += phraseIndex * 0.01;
 	}
 
-	const compactPhraseIndex = index.compact.indexOf(pq.compact);
-	if (compactPhraseIndex >= 0 && index.compactWordStarts.has(compactPhraseIndex)) {
+	const compactPhraseIndex = findCompactWordStart(index, pq.compact);
+	if (compactPhraseIndex >= 0) {
 		totalScore -= COMPACT_PHRASE_BONUS;
 		totalScore += compactPhraseIndex * 0.01;
 	}
 
-	for (const token of pq.tokens) {
-		const match = scoreToken(token, index);
+	for (let i = 0; i < pq.tokens.length; i++) {
+		const match = scoreToken(pq.tokens[i]!, pq.tokenSwaps[i]!, index);
 		if (!match.matches) {
 			return { matches: false, score: 0 };
 		}
@@ -318,6 +397,33 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch {
 	if (pq === null) return { matches: true, score: 0 };
 	return fuzzyMatchCore(pq, buildSearchIndex(text));
 }
+
+/**
+ * A query normalized and tokenized once for matching against many texts.
+ *
+ * `fuzzyMatch(query, text)` re-normalizes `query` (and rebuilds its
+ * alphanumeric-swap variants) on every call; filters that test one query
+ * against every row should build one `FuzzyQuery` per keystroke instead.
+ * `query.match(text)` returns exactly what `fuzzyMatch(query, text)` returns.
+ */
+export class FuzzyQuery {
+	readonly #prepared: PreparedQuery | null;
+
+	constructor(query: string) {
+		this.#prepared = prepareQuery(query);
+	}
+
+	/** Same result as `fuzzyMatch(query, text)`; `text` may be a prepared {@link FuzzyText}. */
+	match(text: string | FuzzyText): FuzzyMatch {
+		const pq = this.#prepared;
+		if (pq === null) return { matches: true, score: 0 };
+		return fuzzyMatchCore(pq, typeof text === "string" ? buildSearchIndex(text) : fuzzyTextIndex(text));
+	}
+}
+
+// Module-private read access to `FuzzyText#index` for `FuzzyQuery.match`;
+// assigned by FuzzyText's static initializer.
+let fuzzyTextIndex: (text: FuzzyText) => SearchIndex;
 
 /**
  * A text prepared once for repeated fuzzy matching.
@@ -336,17 +442,64 @@ export class FuzzyText {
 		this.#index = buildUncachedSearchIndex(text);
 	}
 
-	/** Match `query` (space-separated tokens; all must match) against the prepared text. */
-	match(query: string): FuzzyMatch {
-		return fuzzyMatchCore(prepareQuery(query), this.#index);
+	static {
+		fuzzyTextIndex = text => text.#index;
 	}
+
+	/** Match `query` (space-separated tokens; all must match) against the prepared text. */
+	match(query: string | FuzzyQuery): FuzzyMatch {
+		return typeof query === "string" ? fuzzyMatchCore(prepareQuery(query), this.#index) : query.match(this);
+	}
+}
+
+/**
+ * Items prepared once for repeated {@link fuzzyRank}-equivalent ranking.
+ *
+ * `fuzzyRank` resolves each candidate's search index through the bounded module
+ * cache, which holds at most {@link INDEX_CACHE_MAX} entries; larger candidate
+ * lists (the full model catalog) rebuild the overflow on every query. Hold one
+ * corpus per stable candidate list and call {@link rank} per keystroke instead.
+ */
+export class FuzzyCorpus<T> {
+	readonly #items: readonly T[];
+	readonly #indexes: SearchIndex[];
+
+	constructor(items: readonly T[], getText: (item: T) => string) {
+		this.#items = items;
+		this.#indexes = items.map(item => buildUncachedSearchIndex(getText(item)));
+	}
+
+	/** Same results as `fuzzyRank(items, query, getText)` for the prepared items. */
+	rank(query: string): FuzzyFilterResult<T>[] {
+		if (!query.trim()) return this.#items.map(item => ({ item, score: 0 }));
+		const indexes = this.#indexes;
+		return rankIndexed(this.#items, prepareQuery(query), i => indexes[i]!);
+	}
+}
+
+function rankIndexed<T>(
+	items: readonly T[],
+	pq: PreparedQuery | null,
+	indexAt: (i: number) => SearchIndex,
+): FuzzyFilterResult<T>[] {
+	const results: FuzzyFilterResult<T>[] = [];
+	for (let i = 0; i < items.length; i++) {
+		const index = indexAt(i);
+		const match = pq === null ? { matches: true, score: 0 } : fuzzyMatchCore(pq, index);
+		if (match.matches) {
+			results.push({ item: items[i]!, score: match.score });
+		}
+	}
+
+	results.sort((a, b) => a.score - b.score);
+	return results;
 }
 
 /**
  * Filter and sort items by fuzzy match quality (best matches first).
  * Supports space-separated tokens: all tokens must match.
  */
-export function fuzzyRank<T>(items: T[], query: string, getText: (item: T) => string): FuzzyFilterResult<T>[] {
+export function fuzzyRank<T>(items: readonly T[], query: string, getText: (item: T) => string): FuzzyFilterResult<T>[] {
 	if (!query.trim()) {
 		return items.map(item => ({ item, score: 0 }));
 	}
@@ -354,18 +507,7 @@ export function fuzzyRank<T>(items: T[], query: string, getText: (item: T) => st
 	// A non-blank query that normalizes to empty (pure punctuation) matches
 	// everything with score 0, but still calls getText per item — consumers rely
 	// on its side effects (see fuzzy-cache.test.ts).
-	const pq = prepareQuery(query);
-	const results: FuzzyFilterResult<T>[] = [];
-	for (const item of items) {
-		const text = getText(item);
-		const match = pq === null ? { matches: true, score: 0 } : fuzzyMatchCore(pq, buildSearchIndex(text));
-		if (match.matches) {
-			results.push({ item, score: match.score });
-		}
-	}
-
-	results.sort((a, b) => a.score - b.score);
-	return results;
+	return rankIndexed(items, prepareQuery(query), i => buildSearchIndex(getText(items[i]!), i < INDEX_CACHE_MAX));
 }
 
 export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => string): T[] {

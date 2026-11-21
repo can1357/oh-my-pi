@@ -11,6 +11,7 @@ import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/ty
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
+import { buildWellKnownUrls } from "./oauth-discovery";
 
 /** Credential-id prefix for OMP-managed MCP OAuth credentials keyed by profile and server URL. */
 const MCP_OAUTH_URL_CREDENTIAL_PREFIX = "mcp_oauth:";
@@ -91,10 +92,24 @@ export interface MCPStoredOAuthCredential extends OAuthCredential {
 	 * Unset on legacy credentials minted before issue #3502's fix.
 	 */
 	authorizationUrl?: string;
+	/**
+	 * Scope the grant holds (space-separated): the token response's `scope`
+	 * (RFC 6749 §5.1), else the authorization request's. Sent again on refresh,
+	 * and updated from the refresh response: Microsoft Entra v2 refuses a
+	 * refresh that names no scope when the client is also the resource
+	 * (AADSTS90009), and §6 forbids asking for more than was granted. Unset on
+	 * credentials minted before it was kept.
+	 */
+	scope?: string;
 }
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
+
+function isGoogleAuthorizationHost(hostname: string): boolean {
+	const host = hostname.toLowerCase();
+	return host === "accounts.google.com" || host.endsWith(".accounts.google.com");
+}
 
 function hasOAuthScope(scopes: string | null | undefined, scope: string): boolean {
 	return !!scopes && scopes.split(/\s+/).includes(scope);
@@ -210,7 +225,7 @@ function staticClientIdFromConfig(config: MCPOAuthConfig): string | undefined {
 	const fromConfig = config.clientId?.trim();
 	if (fromConfig) return fromConfig;
 	try {
-		return new URL(config.authorizationUrl).searchParams.get("client_id") ?? undefined;
+		return new URL(config.authorizationUrl).searchParams.get("client_id")?.trim() || undefined;
 	} catch {
 		return undefined;
 	}
@@ -298,6 +313,8 @@ export interface MCPOAuthConfig {
 	authorizationUrl: string;
 	/** Token endpoint URL */
 	tokenUrl: string;
+	/** Authorization-server issuer URL used for metadata discovery. */
+	issuerUrl?: string;
 	/** Dynamic client registration endpoint advertised by the authorization server. */
 	registrationUrl?: string;
 	/** Client ID (optional when already embedded in authorization URL) */
@@ -333,6 +350,17 @@ export interface MCPOAuthConfig {
 }
 
 /**
+ * Raised by {@link MCPOAuthFlow} when the provider requires a `client_id` that
+ * neither config nor dynamic client registration supplied. The message is the
+ * user-facing diagnostic (registration endpoint, HTTP status, redacted detail,
+ * `oauth.clientId` remedy), so callers surface it verbatim instead of folding it
+ * into generic status-code mappings (issue #19641).
+ */
+export class MCPOAuthClientIdRequiredError extends Error {
+	override name = "MCPOAuthClientIdRequiredError";
+}
+
+/**
  * Generic OAuth flow for MCP servers.
  * Supports standard OAuth 2.0 authorization code flow with PKCE.
  */
@@ -342,6 +370,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	#codeVerifier?: string;
 	#fetch: FetchImpl;
 	#resource?: string;
+	#requestedScope?: string;
+	#grantedScope?: string;
 	/**
 	 * Details of a rejected dynamic client-registration attempt. Populated by
 	 * {@link #tryRegisterClient} when the provider advertises a registration
@@ -402,6 +432,14 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	get authorizationUrl(): string {
 		return this.config.authorizationUrl;
 	}
+	/**
+	 * Scope to persist for refresh: what the token response says was granted
+	 * (RFC 6749 §5.1), else what the authorization request asked for. A refresh
+	 * must not ask for more than was granted (§6).
+	 */
+	get grantedScope(): string | undefined {
+		return this.#grantedScope ?? this.#requestedScope;
+	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		if (!this.#resolvedClientId) {
@@ -422,23 +460,36 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			params.set("response_type", "code");
 		}
 		const existingClientId = params.get("client_id")?.trim();
-		if (this.#resolvedClientId && !existingClientId) {
+		if (this.#resolvedClientId) {
 			params.set("client_id", this.#resolvedClientId);
+		} else if (existingClientId) {
+			params.set("client_id", existingClientId);
+		} else {
+			params.delete("client_id");
 		}
 		if (this.config.scopes && !params.get("scope")) {
 			params.set("scope", this.config.scopes);
 		}
+		this.#requestedScope = params.get("scope")?.trim() || undefined;
 		const prompt = this.config.prompt ?? (hasOAuthScope(params.get("scope"), "offline_access") ? "consent" : "");
 		if (prompt && !params.get("prompt")) {
 			params.set("prompt", prompt);
 		}
+		// Google only mints refresh tokens when access_type=offline is requested;
+		// without it Google-hosted MCP servers can never refresh (#12438).
+		// Other providers ignore the unknown parameter, so scope the default to
+		// Google issuers and never override an explicit value.
+		if (!params.get("access_type") && isGoogleAuthorizationHost(authUrl.hostname)) {
+			params.set("access_type", "offline");
+		}
 		const existingResource = params.get("resource")?.trim();
-		if (existingResource) {
-			// A resource already embedded in the provider's authorization URL is
-			// provider-authored, not OMP's server-URL fallback. Preserve same-host
-			// values here even when the caller marked its separate
-			// `config.resource` as fallback; gateway-hosted MCP servers can use
-			// origin-only or path-scoped values as the token audience.
+		if (this.#resource && !this.config.stripSameOriginResource) {
+			// Protected-resource or authorization-server metadata identifies the
+			// requested audience; a query carried by the endpoint URL does not.
+			params.set("resource", this.#resource);
+		} else if (existingResource) {
+			// An embedded resource outranks OMP's server-URL fallback. Gateway-
+			// hosted MCP servers can use origin-only or path-scoped audiences.
 			const filtered = filterResourceIndicator(resolveResourceUri(existingResource), this.config.authorizationUrl);
 			if (filtered) {
 				this.#resource = filtered;
@@ -499,6 +550,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/x-www-form-urlencoded",
+				// GitHub's token endpoint replies form-encoded unless JSON is requested.
+				Accept: "application/json",
 			},
 			body: params.toString(),
 			signal: this.ctrl.signal,
@@ -516,6 +569,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			token_type?: string;
 			error?: string;
 			error_description?: string;
+			scope?: string;
 		};
 
 		// Some providers (e.g. the Slack Web API) signal failure with HTTP 200 and
@@ -529,6 +583,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		// Calculate expiry timestamp
 		const expiresIn = data.expires_in ?? 3600; // Default to 1 hour
 		const expires = Date.now() + expiresIn * 1000;
+		this.#grantedScope = typeof data.scope === "string" ? data.scope.trim() || undefined : undefined;
 
 		return {
 			access: data.access_token,
@@ -606,7 +661,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 		try {
 			const registrationBody: Record<string, unknown> = {
-				client_name: "oh-my-pi",
+				client_name: "Codex",
 				redirect_uris: [redirectUri],
 				grant_types: ["authorization_code", "refresh_token"],
 				response_types: ["code"],
@@ -641,8 +696,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				client_secret?: string;
 			};
 
-			if (data.client_id && data.client_id.trim() !== "") {
-				this.#resolvedClientId = data.client_id;
+			const clientId = data.client_id?.trim();
+			if (clientId) {
+				this.#resolvedClientId = clientId;
 			}
 			if (data.client_secret && data.client_secret.trim() !== "") {
 				this.#registeredClientSecret = data.client_secret;
@@ -659,35 +715,16 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	async #resolveRegistrationEndpoint(): Promise<string | null> {
-		const authorizationUrl = new URL(this.config.authorizationUrl);
-
-		// origin-root well-known; most servers serve metadata here.
-		const rootUrl = new URL("/.well-known/oauth-authorization-server", authorizationUrl.origin).toString();
-		const endpoint = await this.#tryWellKnownForRegistration(rootUrl);
-		if (endpoint) return endpoint;
-
-		// path-prefixed well-known for gateways (e.g. https://gateway.example.com/my-service/).
-		const normalizedPath = authorizationUrl.pathname.replace(/\/$/, "");
-		const lastSlash = normalizedPath.lastIndexOf("/");
-		// Bare-origin authorization URL — nothing further to try.
-		if (lastSlash < 0) return null;
-
-		// Single-segment paths are the gateway prefix itself; multi-segment paths
-		// drop the trailing segment (typically a service endpoint).
-		const prefixPath = lastSlash === 0 ? normalizedPath : normalizedPath.slice(0, lastSlash);
-		const prefixedUrl = new URL(
-			".well-known/oauth-authorization-server",
-			`${authorizationUrl.origin}${prefixPath}/`,
-		).toString();
-		const prefixedEndpoint = await this.#tryWellKnownForRegistration(prefixedUrl);
-		if (prefixedEndpoint) return prefixedEndpoint;
-
-		// RFC 8414 §3.1 path-ful issuer form: /.well-known/oauth-authorization-server/<path>.
-		const pathfulUrl = new URL(
-			`/.well-known/oauth-authorization-server${normalizedPath}`,
-			authorizationUrl.origin,
-		).toString();
-		return await this.#tryWellKnownForRegistration(pathfulUrl);
+		const candidates = buildWellKnownUrls(
+			"/.well-known/oauth-authorization-server",
+			this.config.issuerUrl ?? this.config.authorizationUrl,
+			this.config.issuerUrl !== undefined,
+		);
+		for (const url of candidates) {
+			const endpoint = await this.#tryWellKnownForRegistration(url.toString());
+			if (endpoint) return endpoint;
+		}
+		return null;
 	}
 
 	async #tryWellKnownForRegistration(wellKnownUrl: string): Promise<string | null> {
@@ -722,7 +759,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				throw this.#missingClientIdError();
 			}
 		} catch (error) {
-			if (error instanceof Error && /client[_-]?id/i.test(error.message)) {
+			if (error instanceof MCPOAuthClientIdRequiredError) {
 				throw error;
 			}
 			// Ignore network/probe failures to avoid blocking flows that still work.
@@ -749,12 +786,12 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 * status into the message and point the user at the manual `oauth.clientId`
 	 * workaround. Refs issue #4307.
 	 */
-	#missingClientIdError(): Error {
+	#missingClientIdError(): MCPOAuthClientIdRequiredError {
 		const failure = this.#registrationFailure;
 		const manualHint =
 			"Configure `oauth.clientId` (and `oauth.clientSecret` if the flow needs one) on the MCP server entry in mcp.json.";
 		if (!failure) {
-			return new Error(
+			return new MCPOAuthClientIdRequiredError(
 				`OAuth provider requires client_id, and no dynamic-client-registration endpoint was advertised. ${manualHint}`,
 			);
 		}
@@ -764,7 +801,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				: failure.detail
 					? `network error — ${failure.detail}`
 					: "network error";
-		return new Error(
+		return new MCPOAuthClientIdRequiredError(
 			`OAuth provider requires client_id, and dynamic client registration was rejected ` +
 				`(POST ${failure.endpoint} → ${outcome}). The server likely restricts registration to pre-approved clients. ${manualHint}`,
 		);
@@ -790,6 +827,8 @@ export interface RefreshMCPOAuthTokenOptions {
 	 * Preserved advertised resources leave this false/undefined.
 	 */
 	stripSameOriginResource?: boolean;
+	/** Scopes to request on refresh (the original grant's). Omitted when unset. */
+	scope?: string;
 }
 
 /**
@@ -803,8 +842,10 @@ export async function refreshMCPOAuthToken(
 	clientSecret?: string,
 	resourceOrOpts?: string | RefreshMCPOAuthTokenOptions,
 	opts?: RefreshMCPOAuthTokenOptions,
-): Promise<OAuthCredentials> {
-	const optsFromTrailing = typeof resourceOrOpts === "string" ? opts : resourceOrOpts;
+): Promise<OAuthCredentials & { scope?: string }> {
+	// Only an object in the fifth position is the options; a positional
+	// `undefined` resource keeps the trailing options.
+	const optsFromTrailing = typeof resourceOrOpts === "object" ? resourceOrOpts : opts;
 	const fetchImpl: FetchImpl = optsFromTrailing?.fetch ?? fetch;
 	const resource = typeof resourceOrOpts === "string" ? resourceOrOpts : undefined;
 	// Filter against the authorization-server origin when known (RFC 8414
@@ -816,7 +857,8 @@ export async function refreshMCPOAuthToken(
 		grant_type: "refresh_token",
 		refresh_token: refreshToken,
 	});
-	if (clientId) params.set("client_id", clientId);
+	const normalizedClientId = clientId?.trim();
+	if (normalizedClientId) params.set("client_id", normalizedClientId);
 	// Drop redundant indicators so refresh stays consistent with the initial
 	// grant; see {@link filterResourceIndicator} for context.
 	const resolvedResource = filterResourceIndicator(resolveResourceUri(resource), filterAnchor, {
@@ -824,10 +866,12 @@ export async function refreshMCPOAuthToken(
 	});
 	if (resolvedResource) params.set("resource", resolvedResource);
 	if (clientSecret) params.set("client_secret", clientSecret);
+	const scope = optsFromTrailing?.scope?.trim();
+	if (scope) params.set("scope", scope);
 
 	const response = await fetchImpl(tokenUrl, {
 		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
 		body: params.toString(),
 		signal: optsFromTrailing?.signal,
 	});
@@ -841,11 +885,14 @@ export async function refreshMCPOAuthToken(
 		access_token: string;
 		refresh_token?: string;
 		expires_in?: number;
+		scope?: string;
 	};
 	const expiresIn = data.expires_in ?? 3600;
+	const grantedScope = typeof data.scope === "string" ? data.scope.trim() : "";
 	return {
 		access: data.access_token,
 		refresh: data.refresh_token ?? refreshToken,
 		expires: Date.now() + expiresIn * 1000,
+		...(grantedScope ? { scope: grantedScope } : {}),
 	};
 }

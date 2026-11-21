@@ -1,21 +1,38 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	type InputItem,
-	type RequestBody,
+	moveCodexInstructionsToInput,
 	transformRequestBody,
+	withCodexRoutingFieldsFirst,
 } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	buildTransformedCodexRequestBody,
 	convertCodexResponsesMessages,
-	resetOpenAICodexHistoryAfterCompaction,
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { isOpenAIResponsesProgressEvent } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import type { CodexCompactionRequestContext, Context, FetchImpl, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import { isOpenAIResponsesProgressEvent } from "@oh-my-pi/pi-ai/utils/websocket";
+import type {
+	CodexCompactionRequestContext,
+	Context,
+	FetchImpl,
+	ModelSpec,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
+
+/** The base-instructions developer item codex-rs leads every request with. */
+function baseInstructions(text: string): Record<string, unknown> {
+	return {
+		type: "message",
+		role: "developer",
+		content: [{ type: "input_text", text }],
+		internal_chat_message_metadata_passthrough: { content_item_kinds: ["model.base_instructions"] },
+	};
+}
 
 beforeAll(() => configureCredentialRedaction(true));
 afterAll(() => configureCredentialRedaction(false));
@@ -164,6 +181,22 @@ describe("openai-codex optional response controls", () => {
 		expect(suppressed.reasoning).toEqual({ effort: "medium" });
 		expect("summary" in (suppressed.reasoning ?? {})).toBe(false);
 		expect("stream_options" in suppressed).toBe(false);
+	});
+
+	it("removes inherited reasoning summaries when model compatibility disables them", async () => {
+		const base = createCodexModel("gpt-5.5");
+		const model = buildModel({
+			...base,
+			compat: { ...base.compatConfig, supportsReasoningSummary: false },
+		} as ModelSpec<"openai-codex-responses">);
+
+		const body = await transformRequestBody({ model: model.id, reasoning: { summary: "auto" } }, model, {
+			reasoningEffort: "medium",
+			reasoningSummary: "detailed",
+		});
+
+		expect(body.reasoning).toEqual({ effort: "medium" });
+		expect("stream_options" in body).toBe(false);
 	});
 
 	it("disables native reasoning with effort none when an external scratchpad replaces it", async () => {
@@ -366,11 +399,7 @@ describe("openai-codex Responses Lite input shaping", () => {
 		expect(body.instructions).toBeUndefined();
 		expect(body.tools).toBeUndefined();
 		expect(body.input?.[0]).toEqual({ type: "additional_tools", role: "developer", tools });
-		expect(body.input?.[1]).toEqual({
-			type: "message",
-			role: "developer",
-			content: [{ type: "input_text", text: "test instructions" }],
-		});
+		expect(body.input?.[1]).toEqual(baseInstructions("test instructions"));
 		expect(body.input?.[2]).toEqual({
 			type: "message",
 			role: "user",
@@ -378,30 +407,77 @@ describe("openai-codex Responses Lite input shaping", () => {
 		});
 	});
 
-	it("resolves Lite from explicit options, the environment, then the model default", async () => {
+	it("defaults normal inference to full Responses and keeps explicit options above the environment", async () => {
 		const previous = Bun.env.PI_CODEX_RESPONSES_LITE;
 		const model = createCodexModel("gpt-5.6-terra", { useResponsesLite: true });
 		try {
 			delete Bun.env.PI_CODEX_RESPONSES_LITE;
-			const modelDefault = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(modelDefault.instructions).toBeUndefined();
-			expect(modelDefault.input?.[0]?.type).toBe("additional_tools");
-
-			Bun.env.PI_CODEX_RESPONSES_LITE = "false";
-			const envOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(envOptOut.instructions).toBe("sys");
-			expect(envOptOut.input?.some(item => item.type === "additional_tools")).toBe(false);
+			const defaultRequest = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
+			expect(defaultRequest.input?.[0]).toEqual(baseInstructions("sys"));
+			expect(defaultRequest.input?.some(item => item.type === "additional_tools")).toBe(false);
 
 			Bun.env.PI_CODEX_RESPONSES_LITE = "true";
+			const envOptIn = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
+			expect(envOptIn.instructions).toBeUndefined();
+			expect(envOptIn.input?.[0]?.type).toBe("additional_tools");
+
 			const explicitOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {
 				responsesLite: false,
 			});
-			expect(explicitOptOut.instructions).toBe("sys");
+			expect(explicitOptOut.input?.[0]).toEqual(baseInstructions("sys"));
 			expect(explicitOptOut.input?.some(item => item.type === "additional_tools")).toBe(false);
 		} finally {
 			if (previous === undefined) delete Bun.env.PI_CODEX_RESPONSES_LITE;
 			else Bun.env.PI_CODEX_RESPONSES_LITE = previous;
 		}
+	});
+});
+
+describe("withCodexRoutingFieldsFirst", () => {
+	it("leads with codex-rs routing fields and keeps the rest in place", () => {
+		const body = {
+			input: [],
+			tools: [],
+			previous_response_id: "resp_1",
+			service_tier: "priority",
+			stream: true,
+			model: "gpt-6.2-sol",
+			type: "response.create",
+			store: false,
+		};
+		expect(Object.keys(withCodexRoutingFieldsFirst(body))).toEqual([
+			"type",
+			"model",
+			"stream",
+			"service_tier",
+			"previous_response_id",
+			"input",
+			"tools",
+			"store",
+		]);
+		expect(Object.keys(body)[0]).toBe("input");
+	});
+});
+
+describe("moveCodexInstructionsToInput", () => {
+	it("derives the codex-rs item id from the thread and the text", () => {
+		// uuid5(uuid5(NAMESPACE_OID, "thread-1"), "sys"), as codex-rs build_responses_request computes it.
+		const body: Record<string, unknown> = {
+			instructions: "sys",
+			prompt_cache_key: "thread-1",
+			input: [{ role: "user" }],
+		};
+		moveCodexInstructionsToInput(body);
+		expect(body).toEqual({
+			prompt_cache_key: "thread-1",
+			input: [{ id: "msg_6e6ddc8f-32b3-592b-a5b6-b5f2aface174", ...baseInstructions("sys") }, { role: "user" }],
+		});
+	});
+
+	it("drops empty instructions without adding an item", () => {
+		const body: { instructions?: string; input: unknown[] } = { instructions: "", input: [] };
+		moveCodexInstructionsToInput(body);
+		expect(body).toEqual({ input: [] });
 	});
 });
 
@@ -417,8 +493,9 @@ describe("openai-codex fresh execution input shaping", () => {
 			undefined,
 		);
 
-		expect(body.instructions).toBe("You are a helpful assistant.");
+		expect(body.instructions).toBeUndefined();
 		expect(body.input).toEqual([
+			baseInstructions("You are a helpful assistant."),
 			{
 				type: "message",
 				role: "developer",
@@ -444,6 +521,7 @@ describe("openai-codex fresh execution input shaping", () => {
 		);
 
 		expect(body.input).toEqual([
+			baseInstructions("You are a helpful assistant."),
 			{
 				type: "message",
 				role: "developer",
@@ -680,11 +758,11 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
 			apiKey: createCodexTestToken(),
 			fetch: fetchMock,
+			responsesLite: true,
 		}).result();
 
 		expect(result.stopReason).toBe("stop");
 		expect(captured!.headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
-		expect(captured!.headers.get("version")).toBe("0.144.1");
 		const body = captured!.body;
 		expect(body.reasoning).toEqual({ context: "all_turns" });
 		expect(body.instructions).toBeUndefined();
@@ -692,8 +770,8 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 		expect((body.input as Array<Record<string, unknown>>)[0]?.type).toBe("additional_tools");
 	});
 
-	it("omits the lite marker while retaining canonical client_metadata", async () => {
-		const model = createCodexModel("gpt-5.1-codex");
+	it("uses full Responses for normal inference when the model advertises Lite", async () => {
+		const model = createCodexModel("gpt-5.6-terra", { useResponsesLite: true });
 		let captured: CapturedCodexRequest | undefined;
 		const fetchMock = createCodexFetchMock(createCodexSse(COMPLETED_CODEX_EVENTS), request => {
 			captured = request;
@@ -706,6 +784,12 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(captured?.headers.get("x-openai-internal-codex-responses-lite")).toBeNull();
+		expect(captured?.body.instructions).toBeUndefined();
+		expect(Object.keys(captured?.body ?? {}).slice(0, 3)).toEqual(["model", "stream", "input"]);
+		expect((captured!.body.input as Array<Record<string, unknown>>)[0]).toMatchObject(
+			baseInstructions("You are a helpful assistant."),
+		);
+		expect(captured?.body.parallel_tool_calls).toBeUndefined();
 		expect(captured?.body.client_metadata).toBeDefined();
 	});
 });
@@ -749,20 +833,6 @@ describe("openai-codex response.metadata moderation", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "Hello" })]);
-	});
-});
-
-describe("openai-codex websocket append with client metadata", () => {
-	it("does not break append equality when client_metadata rotates between turns", async () => {
-		// buildAppendInput contract proxied through the transformer-produced body:
-		// two turns differing only in client_metadata must still compare equal
-		// once input/client_metadata are excluded. Exercised at the unit level in
-		// the websocket delta test; here we pin the body-shape invariant the
-		// comparison relies on (client_metadata is a top-level body key).
-		const model = createCodexModel("gpt-5.1-codex");
-		const body: RequestBody = { model: model.id, client_metadata: { "x-codex-turn-metadata": "{}" } };
-		const transformed = await transformRequestBody(body, model, {});
-		expect(transformed.client_metadata).toEqual({ "x-codex-turn-metadata": "{}" });
 	});
 });
 

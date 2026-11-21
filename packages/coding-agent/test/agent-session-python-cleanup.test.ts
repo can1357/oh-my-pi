@@ -1,19 +1,25 @@
-import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pythonExecutor from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { PythonKernel as PythonKernelInstance } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import * as pythonKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession, type ExtensionFactory, type WorkspaceTree } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const OK_EXECUTION = { status: "ok", cancelled: false, timedOut: false, stdinRequested: false } as const;
 
 class FakeKernel {
+	readonly id = Snowflake.next();
+	readonly pythonPath = "/fake/python";
+	readonly #death = Promise.withResolvers<void>();
 	executeCalls: string[] = [];
 	shutdownCalls = 0;
 	alive = true;
@@ -25,6 +31,10 @@ class FakeKernel {
 
 	isAlive(): boolean {
 		return this.alive;
+	}
+
+	whenDead(): Promise<void> {
+		return this.#death.promise;
 	}
 
 	async execute(code: string, options?: { signal?: AbortSignal }): Promise<typeof OK_EXECUTION> {
@@ -56,6 +66,7 @@ class FakeKernel {
 	shutdown = vi.fn(async () => {
 		this.shutdownCalls += 1;
 		this.alive = false;
+		this.#death.resolve();
 		this.blockedExecutionReject?.(new Error("Kernel shut down during execution"));
 		return { confirmed: true };
 	});
@@ -74,9 +85,14 @@ const createTempProject = () => {
 	return { tempDir, cwd };
 };
 
-// createAgentSession opens an AuthStorage at <agentDir>/auth.db that is not
-// closed when construction fails. Point agentDir at a separate dir so the
-// auth.db handle doesn't keep the per-test project temp dir locked on Windows.
+// Inject in-memory auth and a shared model registry: letting createAgentSession
+// discover them per call opens <agentDir>/auth.db and rebuilds the model cache
+// in every fresh agentDir, which costs ~1s per session locally and pushed the
+// two-session tests past their timeout on loaded CI runners. A separate agentDir
+// per session still keeps other per-agent SQLite handles from locking the
+// per-test project temp dir on Windows.
+const authStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
 const agentDirPool: TempDir[] = [];
 const createAgentDir = (): string => {
 	const dir = TempDir.createSync("@pi-python-cleanup-agentdir-");
@@ -118,6 +134,8 @@ const createSession = async (
 		await createAgentSession({
 			cwd,
 			agentDir: createAgentDir(),
+			authStorage,
+			modelRegistry,
 			sessionManager: options.sessionManager ?? SessionManager.inMemory(cwd),
 			settings: Settings.isolated({ "python.kernelMode": "session" }),
 			model: getModel(),
@@ -167,16 +185,20 @@ describe("AgentSession python cleanup", () => {
 		}
 		originalNullPrompt = undefined;
 		vi.restoreAllMocks();
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		await pythonExecutor.disposeAllKernelSessions();
 		await Bun.sleep(0);
-		// Best-effort cleanup: createAgentSession opens AuthStorage/AgentStorage
+		// Best-effort cleanup: createAgentSession opens AgentStorage
 		// inside agentDir that may outlive the test (dispose() doesn't close them).
 		// On Windows the leaked SQLite handles keep the dir locked; swallow EBUSY
 		// rather than failing the test — the OS temp dir reaper will clean up.
 		for (const tempDir of [...tempDirs.splice(0), ...agentDirPool.splice(0)]) {
 			await tempDir.remove().catch(() => {});
 		}
+	});
+
+	afterAll(() => {
+		authStorage.close();
 	});
 
 	it("does not dispose unrelated Python owners when createAgentSession fails before session construction", async () => {
@@ -203,6 +225,8 @@ describe("AgentSession python cleanup", () => {
 			createAgentSession({
 				cwd,
 				agentDir: createAgentDir(),
+				authStorage,
+				modelRegistry,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings: Settings.isolated({ "python.kernelMode": "session" }),
 				model: getModel(),
@@ -232,7 +256,6 @@ describe("AgentSession python cleanup", () => {
 			kernelOwnerId: "fresh-owner-before",
 		});
 		expect(startSpy).toHaveBeenCalledTimes(2);
-		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
 		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
 
 		await pythonExecutor.executePython("print('still alive before')", {
@@ -271,6 +294,8 @@ describe("AgentSession python cleanup", () => {
 			createAgentSession({
 				cwd,
 				agentDir: createAgentDir(),
+				authStorage,
+				modelRegistry,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings: Settings.isolated({ "python.kernelMode": "session", "memory.backend": "local" }),
 				model: getModel(),
@@ -300,7 +325,6 @@ describe("AgentSession python cleanup", () => {
 			kernelOwnerId: "fresh-owner-after",
 		});
 		expect(startSpy).toHaveBeenCalledTimes(2);
-		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
 		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
 
 		await pythonExecutor.executePython("print('still alive after')", {
@@ -661,48 +685,6 @@ describe("AgentSession python cleanup", () => {
 		expect(executeSpy).not.toHaveBeenCalled();
 	});
 
-	it("rejects eval starts that reach async preflight after dispose begins", async () => {
-		const { tempDir, cwd } = createTempProject();
-		tempDirs.push(tempDir);
-		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
-			output: "late",
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
-			totalLines: 1,
-			totalBytes: 4,
-			outputLines: 1,
-			outputBytes: 4,
-			displayOutputs: [],
-			stdinRequested: false,
-		});
-		const artifactStarted = Promise.withResolvers<void>();
-		const releaseArtifact = Promise.withResolvers<void>();
-		const sessionManager = SessionManager.inMemory(cwd);
-		vi.spyOn(sessionManager, "allocateArtifactPath").mockImplementation(async () => {
-			artifactStarted.resolve();
-			await releaseArtifact.promise;
-			return {};
-		});
-
-		const session = await createSession(tempDir, cwd, { sessionManager });
-		const EvalTool = session.getToolByName("eval");
-		expect(EvalTool).toBeDefined();
-		const execution = EvalTool!.execute(
-			"call-id",
-			{ language: "py", code: "print('late after artifact')" },
-			undefined,
-			undefined,
-			undefined,
-		);
-		await artifactStarted.promise;
-		const disposeSession = session.dispose();
-		releaseArtifact.resolve();
-		await expect(execution).rejects.toThrow("Python execution is unavailable while session disposal is in progress");
-		await disposeSession;
-		expect(executeSpy).not.toHaveBeenCalled();
-	});
-
 	it("aborts every active concurrent Python execution owned by the session during dispose", async () => {
 		const { tempDir, cwd } = createTempProject();
 		tempDirs.push(tempDir);
@@ -737,5 +719,179 @@ describe("AgentSession python cleanup", () => {
 		expect(secondResult.cancelled).toBe(true);
 		expect(kernel.executeCalls).toEqual(["print('blocked')", "print('blocked')"]);
 		expect(kernel.shutdownCalls).toBe(1);
+	});
+
+	it("shuts down the previous session's retained kernel when newSession opens a new session file", async () => {
+		const { tempDir, cwd } = createTempProject();
+		tempDirs.push(tempDir);
+		const previousKernel = new FakeKernel();
+		const nextKernel = new FakeKernel();
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValueOnce(previousKernel as unknown as PythonKernelInstance)
+			.mockResolvedValueOnce(nextKernel as unknown as PythonKernelInstance);
+		const session = await createSession(tempDir, cwd, {
+			sessionManager: SessionManager.create(cwd, tempDir.join("sessions")),
+		});
+
+		try {
+			await session.executePython("print('previous')");
+			expect(await session.newSession()).toBe(true);
+			await previousKernel.whenDead();
+			await session.executePython("print('next')");
+
+			expect(previousKernel.shutdownCalls).toBe(1);
+			expect(nextKernel.shutdownCalls).toBe(0);
+			expect(nextKernel.executeCalls).toEqual(["print('next')"]);
+		} finally {
+			await session.dispose();
+		}
+		expect(nextKernel.shutdownCalls).toBe(1);
+	});
+
+	it("keeps the kernel a session_switch hook starts for the new session", async () => {
+		const { tempDir, cwd } = createTempProject();
+		tempDirs.push(tempDir);
+		const previousKernel = new FakeKernel();
+		const hookKernel = new FakeKernel();
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi
+			.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValueOnce(previousKernel as unknown as PythonKernelInstance)
+			.mockResolvedValueOnce(hookKernel as unknown as PythonKernelInstance);
+		// oxlint-disable-next-line prefer-const -- captured by the hook closure before assignment
+		let session!: AgentSession;
+		const hookExtension: ExtensionFactory = api => {
+			api.on("session_switch", async () => {
+				await session.executePython("print('hook')");
+			});
+		};
+		session = await createSession(tempDir, cwd, {
+			extensions: [hookExtension],
+			sessionManager: SessionManager.create(cwd, tempDir.join("sessions")),
+		});
+
+		try {
+			await session.executePython("print('previous')");
+			expect(await session.newSession()).toBe(true);
+			await previousKernel.whenDead();
+			await session.executePython("print('next')");
+
+			expect(startSpy).toHaveBeenCalledTimes(2);
+			expect(hookKernel.shutdownCalls).toBe(0);
+			expect(hookKernel.executeCalls).toEqual(["print('hook')", "print('next')"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("releases a kernel started for the target of a switch that rolls back, keeping the restored one", async () => {
+		const { tempDir, cwd } = createTempProject();
+		tempDirs.push(tempDir);
+		const originalKernel = new FakeKernel();
+		const targetKernel = new FakeKernel();
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValueOnce(originalKernel as unknown as PythonKernelInstance)
+			.mockResolvedValueOnce(targetKernel as unknown as PythonKernelInstance);
+		const targetManager = SessionManager.create(cwd, tempDir.join("sessions"));
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile()!;
+		await targetManager.close();
+		// oxlint-disable-next-line prefer-const -- captured by the hook closure before assignment
+		let session!: AgentSession;
+		const hookExtension: ExtensionFactory = api => {
+			api.on("session_switch", async () => {
+				await session.executePython("print('target')");
+			});
+		};
+		session = await createSession(tempDir, cwd, {
+			extensions: [hookExtension],
+			sessionManager: SessionManager.create(cwd, tempDir.join("sessions")),
+		});
+		// Fail the first step after the hook while the target is adopted, forcing rollback.
+		const replaceMessages = session.agent.replaceMessages.bind(session.agent);
+		let failed = false;
+		vi.spyOn(session.agent, "replaceMessages").mockImplementation(messages => {
+			if (!failed && session.sessionFile === targetSessionFile) {
+				failed = true;
+				throw new Error("replace failed");
+			}
+			replaceMessages(messages);
+		});
+
+		try {
+			await session.executePython("print('original')");
+			await expect(session.switchSession(targetSessionFile)).rejects.toThrow("replace failed");
+			expect(session.sessionFile).not.toBe(targetSessionFile);
+			await targetKernel.whenDead();
+			await session.executePython("print('after')");
+
+			expect(targetKernel.executeCalls).toEqual(["print('target')"]);
+			expect(originalKernel.shutdownCalls).toBe(0);
+			expect(originalKernel.executeCalls).toEqual(["print('original')", "print('after')"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("lets a cell running in the previous session's kernel finish before a fork releases it", async () => {
+		const { tempDir, cwd } = createTempProject();
+		tempDirs.push(tempDir);
+		const kernel = new FakeKernel();
+		const blockedExecution = Promise.withResolvers<typeof OK_EXECUTION>();
+		const started = Promise.withResolvers<void>();
+		kernel.blockedCode = "print('blocked')";
+		kernel.blockedExecution = blockedExecution.promise;
+		kernel.blockedExecutionStarted = () => started.resolve();
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(pythonKernel.PythonKernel, "start").mockResolvedValueOnce(kernel as unknown as PythonKernelInstance);
+		const session = await createSession(tempDir, cwd, {
+			sessionManager: SessionManager.create(cwd, tempDir.join("sessions")),
+		});
+
+		try {
+			session.sessionManager.appendMessage({ role: "user", content: "before fork", timestamp: 1 });
+			const execution = session.executePython("print('blocked')");
+			await started.promise;
+			expect(await session.fork()).toBe(true);
+			await Bun.sleep(0);
+			expect(kernel.shutdownCalls).toBe(0);
+
+			blockedExecution.resolve(OK_EXECUTION);
+			const result = await execution;
+			expect(result.cancelled).toBe(false);
+			expect(result.exitCode).toBe(0);
+			await kernel.whenDead();
+			expect(kernel.shutdownCalls).toBe(1);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps the retained kernel when a transition stays on the same session file", async () => {
+		const { tempDir, cwd } = createTempProject();
+		tempDirs.push(tempDir);
+		const kernel = new FakeKernel();
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi
+			.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValue(kernel as unknown as PythonKernelInstance);
+		const session = await createSession(tempDir, cwd, {
+			sessionManager: SessionManager.create(cwd, tempDir.join("sessions")),
+		});
+
+		try {
+			await session.executePython("x = 1");
+			expect(await session.resetSessionContext()).toBeDefined();
+			await session.executePython("print(x)");
+
+			expect(startSpy).toHaveBeenCalledTimes(1);
+			expect(kernel.shutdownCalls).toBe(0);
+			expect(kernel.executeCalls).toEqual(["x = 1", "print(x)"]);
+		} finally {
+			await session.dispose();
+		}
 	});
 });

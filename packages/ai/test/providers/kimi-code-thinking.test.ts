@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { kimiCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import type { MessageCreateParamsStreaming } from "../../src/providers/anthropic-wire";
 import { type KimiApiFormat, type KimiOptions, streamKimi } from "../../src/providers/kimi";
@@ -43,7 +44,7 @@ const TITLE_CONTEXT: Context = {
 };
 
 const K3_MODEL = buildModel({
-	id: "k3",
+	id: "kimi-k3",
 	name: "K3",
 	api: "openai-completions",
 	provider: "kimi-code",
@@ -261,9 +262,18 @@ describe("Kimi K3 thinking transport", () => {
 		expect(payload).not.toHaveProperty("thinking.budget_tokens");
 	});
 
-	it("keeps the legacy K2 default on the Anthropic transport", async () => {
+	it("keeps budgeted thinking on the Anthropic transport for models without the native effort contract", async () => {
 		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
-		const model = getBundledModel<"openai-completions">("kimi-code", "kimi-for-coding");
+		// Discovery marks a model `thinkingFormat: "kimi"` only when `/models`
+		// advertises `think_efforts`; legacy rows (today `kimi-for-coding-highspeed`,
+		// historically `kimi-for-coding` itself) stay on the budget dialect.
+		const model = buildModel({
+			...K3_MODEL,
+			id: "kimi-for-coding-highspeed",
+			name: "Kimi For Coding (highspeed)",
+			thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+			compat: { ...K3_MODEL.compatConfig, thinkingFormat: "zai", kimiApiFormat: "anthropic" },
+		} satisfies ModelSpec<"openai-completions">);
 
 		const payload = await captureKimiPayload(model, Effort.High);
 
@@ -299,8 +309,7 @@ describe("Kimi K3 thinking transport", () => {
 
 	it("downgrades named tool choice to required for K3 thinking", async () => {
 		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
-		const bundledModel = getBundledModel<"openai-completions">("kimi-code", "k3");
-		expect(bundledModel.compat.thinkingFormat).toBe("kimi");
+		expect(K3_MODEL.compat.nativeKimiK3Reasoning).toBe(true);
 		let payload: unknown;
 		const capturePayload = async (
 			model: Model<"openai-completions">,
@@ -324,24 +333,125 @@ describe("Kimi K3 thinking transport", () => {
 			await stream.result();
 		};
 
-		for (const model of [K3_MODEL, bundledModel]) {
-			await capturePayload(model, { type: "tool", name: "set_title" });
-			expect(payload).toMatchObject({
-				thinking: { type: "enabled" },
-				tool_choice: "required",
-				tools: [{ type: "function", function: { name: "set_title" } }],
-			});
+		await capturePayload(K3_MODEL, { type: "tool", name: "set_title" });
+		expect(payload).toMatchObject({
+			thinking: { type: "enabled" },
+			tool_choice: "required",
+			tools: [{ type: "function", function: { name: "set_title" } }],
+		});
 
-			await capturePayload(model, "required");
-			expect(payload).toMatchObject({
-				thinking: { type: "enabled" },
-				tool_choice: "required",
-				tools: [{ type: "function", function: { name: "set_title" } }],
-			});
-		}
+		await capturePayload(K3_MODEL, "required");
+		expect(payload).toMatchObject({
+			thinking: { type: "enabled" },
+			tool_choice: "required",
+			tools: [{ type: "function", function: { name: "set_title" } }],
+		});
 
 		await capturePayload(K3_MODEL, { type: "tool", name: "missing_tool" }, []);
 		expect((payload as { tool_choice?: unknown }).tool_choice).toBeUndefined();
+	});
+
+	for (const disableReasoning of [false, true]) {
+		it(`honors forced tool use on bundled and discovered K3 transports with reasoning ${disableReasoning ? "disabled" : "enabled"}`, async () => {
+			vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+			const ids = ["k3", "k3-256k", "k3.1-pro", "k3.1-pro-highspeed"];
+			const fetchDynamicModels = kimiCodeModelManagerOptions({
+				apiKey: "test-key",
+				fetch: async () =>
+					Response.json({
+						data: ids.map(id => ({
+							id,
+							display_name: id,
+							context_length: id === "k3-256k" ? 262_144 : 1_048_576,
+							supports_reasoning: true,
+							supports_thinking_type: "only",
+							think_efforts: {
+								support: true,
+								valid_efforts: ["low", "high", "max"],
+								default_effort: "max",
+							},
+							protocol: null,
+						})),
+					}),
+			}).fetchDynamicModels;
+			if (!fetchDynamicModels) throw new Error("Kimi Code dynamic discovery is not configured");
+			const discovered =
+				(await fetchDynamicModels())?.map(spec => buildModel(spec as ModelSpec<"openai-completions">)) ?? [];
+			expect(discovered.map(model => model.id)).toEqual(ids);
+			const models = [...ids.map(id => getBundledModel<"openai-completions">("kimi-code", id)), ...discovered];
+
+			for (const model of models) {
+				expect(model.identity).toMatchObject({ class: "kimi", family: "k3" });
+				for (const format of ["openai", "anthropic"] as const) {
+					let payload: Record<string, unknown> | undefined;
+					const stream = streamKimi(model, TITLE_CONTEXT, {
+						apiKey: "test-key",
+						format,
+						reasoning: Effort.Max,
+						disableReasoning,
+						toolChoice: { type: "tool", name: "set_title" },
+						onPayload: body => {
+							payload = body as Record<string, unknown>;
+							throw new Error("stop after payload capture");
+						},
+					});
+					await stream.result();
+
+					if (format === "openai") {
+						expect(payload?.tool_choice).toEqual(
+							disableReasoning ? { type: "function", function: { name: "set_title" } } : "required",
+						);
+						expect(payload?.thinking).toEqual(
+							disableReasoning ? { type: "disabled" } : { type: "enabled", effort: Effort.Max },
+						);
+					} else {
+						expect(payload?.tool_choice).toEqual({ type: "tool", name: "set_title" });
+						// Forced Anthropic choices omit thinking; native K3 keeps its
+						// mandatory provider default rather than receiving a disabled block.
+						expect(payload?.thinking).toBeUndefined();
+					}
+				}
+			}
+		});
+	}
+
+	it("honors native Moonshot K3 forced choice without relaxing other Anthropic hosts", async () => {
+		for (const { provider, baseUrl, forced } of [
+			{ provider: "moonshot", baseUrl: "https://api.moonshot.ai/v1", forced: true },
+			{ provider: "synthetic", baseUrl: "https://api.moonshot.ai/v1", forced: false },
+			{ provider: "synthetic", baseUrl: "https://shim.example/v1", forced: true },
+		]) {
+			const model = buildModel({
+				...K3_MODEL,
+				id: "kimi-k3",
+				provider,
+				baseUrl,
+				compat: K3_MODEL.compatConfig,
+			} satisfies ModelSpec<"openai-completions">);
+			let payload: MessageCreateParamsStreaming | undefined;
+			const stream = streamOpenAIAnthropicShim(
+				model,
+				TITLE_CONTEXT,
+				{
+					apiKey: "test-key",
+					reasoning: Effort.Max,
+					toolChoice: { type: "tool", name: "set_title" },
+					onPayload: body => {
+						payload = body as MessageCreateParamsStreaming;
+						throw new Error("stop after payload capture");
+					},
+				},
+				{ anthropicBaseUrl: baseUrl, defaultFormat: "anthropic" },
+			);
+			await stream.result();
+
+			expect(payload?.tool_choice).toEqual(forced ? { type: "tool", name: "set_title" } : { type: "auto" });
+			if (forced) {
+				expect(payload?.thinking).toBeUndefined();
+			} else {
+				expect(payload?.thinking).toMatchObject({ type: "enabled" });
+			}
+		}
 	});
 });
 
@@ -366,7 +476,7 @@ describe("Kimi K2.7 Code thinking policy", () => {
 		expect(model.compat.disableReasoningOnForcedToolChoice).toBe(true);
 	});
 
-	it("downgrades the forced tool choice on Kimi Code's Anthropic endpoint", async () => {
+	it("preserves the forced tool choice on Kimi Code's Anthropic endpoint", async () => {
 		const model = getBundledModel<"openai-completions">("kimi-code", "kimi-for-coding");
 		let payload: MessageCreateParamsStreaming | undefined;
 		const stream = streamOpenAIAnthropicShim(
@@ -390,21 +500,21 @@ describe("Kimi K2.7 Code thinking policy", () => {
 
 		await stream.result();
 
-		// api.kimi.com keeps thinking enabled server-side no matter what the
-		// request carries: an omitted thinking block defaults to enabled, and an
-		// explicit disabled block is rejected (#3852). Either way a forced
-		// tool_choice 400s (`tool_choice 'specified' is incompatible with
-		// thinking enabled`), so the only viable path is downgrading the choice
-		// to auto while keeping the tool available — thinking stays on.
-		expect(payload?.tool_choice).toEqual({ type: "auto" });
-		expect(payload?.thinking).toBeDefined();
+		// The resolved Kimi Code policy honors the caller's named choice while
+		// explicitly disabling thinking for this title-generation request.
+		expect(payload?.tool_choice).toEqual({ type: "tool", name: "set_title" });
+		expect(payload?.thinking).toBeUndefined();
 	});
 
-	it("downgrades forced tool choice for every thinking-locked Kimi Code alias", async () => {
-		// The kimi-code catalog aliases the mandatory-thinking K2.7 Code family
-		// as `kimi-for-coding[-highspeed]` and K3 as `k3`; none match the native
-		// `kimi-k2.7-code*` id pattern, so each must be recognised explicitly.
-		for (const id of ["k3", "kimi-for-coding", "kimi-for-coding-highspeed"]) {
+	it("preserves forced tool choice for the reviewed Kimi Code aliases", async () => {
+		// The catalog bakes each alias's reviewed identity and wire policy.
+		for (const id of [
+			"k3.1-pro",
+			"k3.1-pro-highspeed",
+			"k3",
+			"kimi-for-coding",
+			"kimi-for-coding-highspeed",
+		] as const) {
 			const model = getBundledModel<"openai-completions">("kimi-code", id);
 			let payload: MessageCreateParamsStreaming | undefined;
 			const stream = streamOpenAIAnthropicShim(
@@ -427,7 +537,7 @@ describe("Kimi K2.7 Code thinking policy", () => {
 
 			await stream.result();
 
-			expect(payload?.tool_choice).toEqual({ type: "auto" });
+			expect(payload?.tool_choice).toEqual({ type: "tool", name: "set_title" });
 		}
 	});
 

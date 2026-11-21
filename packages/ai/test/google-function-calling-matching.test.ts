@@ -15,13 +15,14 @@ const ZERO_USAGE: Usage = {
 function createGoogleModel(
 	id: string,
 	api: "google-generative-ai" | "google-vertex" = "google-generative-ai",
+	provider: "google" | "google-antigravity" | "google-vertex" = api === "google-vertex" ? "google-vertex" : "google",
 ): Model<typeof api> {
 	return buildModel({
 		id,
 		name: id,
 		api,
-		provider: api === "google-vertex" ? "google-vertex" : "google",
-		baseUrl: "https://example.com",
+		provider: provider,
+		baseUrl: provider === "google-antigravity" ? "https://daily-cloudcode-pa.googleapis.com" : "https://example.com",
 		reasoning: false,
 		input: ["text", "image"],
 		cost: {
@@ -30,6 +31,21 @@ function createGoogleModel(
 			cacheRead: 0,
 			cacheWrite: 0,
 		},
+		contextWindow: 200000,
+		maxTokens: 8192,
+	});
+}
+
+function createCloudCodeAssistModel(provider: "google-antigravity" | "google-gemini-cli"): Model<"google-gemini-cli"> {
+	return buildModel({
+		id: "gemini-3.5-flash",
+		name: "gemini-3.5-flash",
+		api: "google-gemini-cli",
+		provider,
+		baseUrl: "https://cloudcode-pa.googleapis.com",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200000,
 		maxTokens: 8192,
 	});
@@ -132,7 +148,7 @@ describe("Google GenerateContent function response matching", () => {
 	});
 
 	it("keeps Claude call IDs on non-Vertex Google-compatible endpoints", () => {
-		const model = createGoogleModel("claude-sonnet-4-5");
+		const model = createGoogleModel("claude-sonnet-4-5", "google-generative-ai", "google-antigravity");
 		const { functionCall, functionResponse } = functionCallAndResponse(
 			model,
 			contextWithToolResult("actual_tool_name"),
@@ -141,5 +157,105 @@ describe("Google GenerateContent function response matching", () => {
 		expect(functionCall?.id).toBe("call_12345_abc");
 		expect(functionResponse?.id).toBe("call_12345_abc");
 		expect(functionResponse?.name).toBe(functionCall?.name);
+	});
+});
+
+describe("Google GenerateContent parallel function response order", () => {
+	function contextWithResultsStoredOutOfOrder(): Context {
+		return {
+			messages: [
+				{ role: "user", content: "Read both files", timestamp: 1000 },
+				{
+					role: "assistant",
+					provider: "google",
+					api: "google-generative-ai",
+					model: "gemini-2.5-flash",
+					content: [
+						{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "/a" } },
+						{ type: "toolCall", id: "call_b", name: "read", arguments: { path: "/b" } },
+					],
+					usage: ZERO_USAGE,
+					stopReason: "toolUse",
+					timestamp: 2000,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_b",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "b body" }],
+					timestamp: 3000,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_a",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "a body" }],
+					timestamp: 3001,
+				},
+			],
+		};
+	}
+
+	it.each([
+		{ route: "Gemini API, Gemini 2.5", model: createGoogleModel("gemini-2.5-flash") },
+		{ route: "Vertex", model: createGoogleModel("gemini-3.5-flash", "google-vertex") },
+		{ route: "Antigravity", model: createCloudCodeAssistModel("google-antigravity") },
+		{ route: "Gemini CLI", model: createCloudCodeAssistModel("google-gemini-cli") },
+		{ route: "Gemini API, Gemini 3.5", model: createGoogleModel("gemini-3.5-flash") },
+	])("sends same-name results in call order: $route", ({ model }) => {
+		const contents = convertMessages(model, contextWithResultsStoredOutOfOrder());
+		const responseTurns = contents.filter(c => c.parts?.some(part => part.functionResponse));
+		expect(responseTurns).toHaveLength(1);
+		expect(responseTurns[0].parts?.map(part => part.functionResponse?.response)).toEqual([
+			{ output: "a body" },
+			{ output: "b body" },
+		]);
+	});
+});
+
+describe("Google GenerateContent Gemini < 3 tool-result image order", () => {
+	it("sends buffered tool-result images in call order", () => {
+		const image = (data: string) => ({ type: "image" as const, mimeType: "image/png", data });
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Screenshot both", timestamp: 1000 },
+				{
+					role: "assistant",
+					provider: "google",
+					api: "google-generative-ai",
+					model: "gemini-2.5-flash",
+					content: [
+						{ type: "toolCall", id: "call_a", name: "shot", arguments: { target: "a" } },
+						{ type: "toolCall", id: "call_b", name: "shot", arguments: { target: "b" } },
+					],
+					usage: ZERO_USAGE,
+					stopReason: "toolUse",
+					timestamp: 2000,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_b",
+					toolName: "shot",
+					isError: false,
+					content: [image("image-b")],
+					timestamp: 3000,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_a",
+					toolName: "shot",
+					isError: false,
+					content: [image("image-a")],
+					timestamp: 3001,
+				},
+			],
+		};
+		const contents = convertMessages(createGoogleModel("gemini-2.5-flash"), context);
+		const images = contents
+			.flatMap(c => c.parts ?? [])
+			.flatMap(part => (part.inlineData ? [part.inlineData.data] : []));
+		expect(images).toEqual(["image-a", "image-b"]);
 	});
 });

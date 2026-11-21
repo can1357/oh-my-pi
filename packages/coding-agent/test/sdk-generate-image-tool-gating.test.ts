@@ -134,10 +134,10 @@ describe("generate_image tool gating", () => {
 		expect(names).toContain("generate_image");
 	});
 
-	it("exposes generate_image as an xd:// device (not top-level) in a default session", async () => {
-		// Default session (no explicit --tools) with tools.xdev on: image-gen is a
-		// discoverable custom tool, so it mounts as an xd:// device instead of
-		// shipping its schema top-level.
+	it("mounts generate_image as a command in a default session", async () => {
+		// Default session (no explicit --tools) with tools.commands on mounts the
+		// discoverable custom tool as a bash command instead of shipping its schema
+		// top-level.
 		const { session } = await createAgentSession({
 			...startupShortcuts(),
 			cwd: registryDir,
@@ -150,23 +150,10 @@ describe("generate_image tool gating", () => {
 		});
 		sessions.push(session);
 		expect(session.getActiveToolNames()).not.toContain("generate_image");
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("generate_image");
+		expect(session.getToolCommandEntries().map(entry => entry.name)).toContain("generate_image");
 	});
 
-	it("keeps ambient tools top-level across runtime selection without write", async () => {
-		const ambientTool = customTool("ambient_search");
-		const session = await sessionWithCustomTools(["read"], [ambientTool]);
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getXdevToolEntries()).toEqual([]);
-
-		await session.setActiveToolsByName(session.getEnabledToolNames());
-
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
-	});
-
-	it("exposes ambient MCP-shaped tools directly when write was not granted", async () => {
+	it("keeps ambient MCP-shaped tools top-level when the explicit list omits bash", async () => {
 		let mcpCalls = 0;
 		const mcpTool = {
 			name: "mcp__test__search",
@@ -195,9 +182,9 @@ describe("generate_image tool gating", () => {
 		sessions.push(session);
 
 		expect(session.getActiveToolNames()).toContain("generate_image");
-		expect(session.getActiveToolNames()).toContain(mcpTool.name);
 		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).toContain(mcpTool.name);
+		expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain(mcpTool.name);
 		expect(session.getAllToolNames()).toContain(mcpTool.name);
 		const directTool = session.getToolByName(mcpTool.name);
 		expect(directTool).toBeDefined();
@@ -206,30 +193,7 @@ describe("generate_image tool gating", () => {
 		expect(mcpCalls).toBe(1);
 	});
 
-	it("does not add write for an MCP device when write was omitted", async () => {
-		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
-		expect(session.getActiveToolNames()).toContain("mcp__test__search");
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
-
-		await session.refreshMCPTools([]);
-
-		expect(session.getActiveToolNames()).not.toContain("write");
-	});
-
-	it("does not add write during enabled-set round trips", async () => {
-		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
-		expect(session.getActiveToolNames()).not.toContain("write");
-
-		await session.setActiveToolsByName(session.getEnabledToolNames());
-		expect(session.getActiveToolNames()).toContain("mcp__test__search");
-		expect(session.getActiveToolNames()).not.toContain("write");
-
-		await session.refreshMCPTools([]);
-		expect(session.getActiveToolNames()).not.toContain("write");
-	});
-
-	it("preserves explicitly requested write after MCP devices disconnect", async () => {
+	it("preserves an explicitly requested write after MCP tools disconnect", async () => {
 		const session = await sessionWithCustomTools(["read", "write"], [customTool("mcp__test__search", true)]);
 
 		await session.refreshMCPTools([]);
@@ -237,36 +201,13 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).toContain("write");
 	});
 
-	it("unmounts devices when write is removed at runtime", async () => {
-		const ambientTool = customTool("ambient_search");
-		const session = await sessionWithCustomTools(["read", "write"], [ambientTool]);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
-
-		await session.setActiveToolsByName(["read", ambientTool.name]);
-
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
-	});
-
-	it("keeps all remaining tools top-level after MCP disconnect without write", async () => {
-		const ambientTool = customTool("ambient_search");
-		const session = await sessionWithCustomTools(["read"], [ambientTool, customTool("mcp__test__search", true)]);
-
-		await session.refreshMCPTools([]);
-
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
-	});
-
-	it("keeps ambient custom tools top-level when an explicit session omitted read", async () => {
+	it("mounts ambient custom tools when an explicit session includes bash", async () => {
 		const ambientTool = customTool("ambient_search");
 		const session = await sessionWithCustomTools(["bash"], [ambientTool]);
 
-		expect(session.getActiveToolNames()).not.toContain("read");
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(ambientTool.name);
+		expect(session.getActiveToolNames()).toContain("bash");
+		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
+		expect(session.getToolCommandEntries().map(entry => entry.name)).toContain(ambientTool.name);
 	});
 
 	it("keeps ambient tools top-level when write is shadowed by a custom tool", async () => {
@@ -276,7 +217,7 @@ describe("generate_image tool gating", () => {
 
 		expect(session.hasBuiltInTool("write")).toBe(false);
 		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(ambientTool.name);
+		expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain(ambientTool.name);
 
 		const rpcTool: AgentTool = {
 			name: "rpc_shadow_search",
@@ -291,7 +232,7 @@ describe("generate_image tool gating", () => {
 		await session.refreshRpcHostTools([rpcTool]);
 		expect(session.hasBuiltInTool("write")).toBe(false);
 		expect(session.getActiveToolNames()).toContain(rpcTool.name);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(rpcTool.name);
+		expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain(rpcTool.name);
 	});
 
 	it("keeps ambient tools top-level when read is shadowed by a custom tool", async () => {
@@ -301,7 +242,7 @@ describe("generate_image tool gating", () => {
 
 		expect(session.hasBuiltInTool("read")).toBe(false);
 		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(ambientTool.name);
+		expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain(ambientTool.name);
 
 		const rpcTool: AgentTool = {
 			name: "rpc_shadow_read_search",
@@ -315,10 +256,10 @@ describe("generate_image tool gating", () => {
 		};
 		await session.refreshRpcHostTools([rpcTool]);
 		expect(session.getActiveToolNames()).toContain(rpcTool.name);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(rpcTool.name);
+		expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain(rpcTool.name);
 	});
 
-	it("keeps newly discovered tools top-level after runtime read removal", async () => {
+	it("mounts newly discovered RPC tools while bash stays active", async () => {
 		const session = await sessionWithCustomTools(["read", "bash"], []);
 		await session.setActiveToolsByName(["bash"]);
 
@@ -335,10 +276,11 @@ describe("generate_image tool gating", () => {
 		await session.refreshRpcHostTools([rpcTool]);
 
 		expect(session.getActiveToolNames()).not.toContain("read");
-		expect(session.getActiveToolNames()).toContain(rpcTool.name);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(rpcTool.name);
+		expect(session.getActiveToolNames()).toContain("bash");
+		expect(session.getActiveToolNames()).not.toContain(rpcTool.name);
+		expect(session.getToolCommandEntries().map(entry => entry.name)).toContain(rpcTool.name);
 	});
-	it("exposes newly discovered RPC tools directly when write was omitted", async () => {
+	it("keeps newly discovered RPC tools top-level when the explicit list omits bash", async () => {
 		const { session } = await createAgentSession({
 			...startupShortcuts(),
 			cwd: registryDir,
@@ -352,7 +294,9 @@ describe("generate_image tool gating", () => {
 			toolNames: ["read"],
 		});
 		sessions.push(session);
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getToolCommandEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).not.toContain("write");
+		await session.setActiveToolsByName(["read"]);
 		expect(session.getActiveToolNames()).not.toContain("write");
 
 		const rpcTool: AgentTool = {
@@ -367,8 +311,8 @@ describe("generate_image tool gating", () => {
 		};
 		await session.refreshRpcHostTools([rpcTool]);
 
-		expect(session.getActiveToolNames()).toContain("rpc_search");
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).toContain(rpcTool.name);
+
+		expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain("rpc_search");
 	});
 });

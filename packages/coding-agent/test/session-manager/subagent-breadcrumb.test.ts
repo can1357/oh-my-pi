@@ -30,6 +30,7 @@ async function writeSubagentSession(parentFile: string, agentId: string, userTex
 	const sub = await SessionManager.open(subFile, undefined, undefined, {
 		initialCwd: path.dirname(parentFile),
 		suppressBreadcrumb: true,
+		parentSession: parentFile,
 	});
 	sub.appendMessage({ role: "user", content: userText, timestamp: 2 });
 	sub.appendMessage(makeAssistantMessage());
@@ -95,6 +96,38 @@ describe("SessionManager subagent breadcrumb isolation", () => {
 			expect(dump).not.toContain("subagent work");
 		} finally {
 			await resumed.close();
+		}
+	});
+
+	it("records the parent file only when opening a fresh subagent session", async () => {
+		const mainFile = await createParentSession();
+		const subFile = await writeSubagentSession(mainFile, "HeaderWorker", "subagent work");
+
+		const freshHeader = JSON.parse((await Bun.file(subFile).text()).split("\n")[1] ?? "null") as {
+			parentSession?: string;
+		};
+		expect(freshHeader.parentSession).toBe(mainFile);
+
+		const resumed = await SessionManager.open(subFile, undefined, undefined, {
+			parentSession: `${mainFile}.replacement`,
+		});
+		try {
+			expect(resumed.getHeader()?.parentSession).toBe(mainFile);
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("omits parentSession when a fresh child has no persisted parent", async () => {
+		const childFile = path.join(testAgentDir, "memory-parent-child.jsonl");
+		const child = await SessionManager.open(childFile, undefined, undefined, {
+			initialCwd: cwd,
+			parentSession: undefined,
+		});
+		try {
+			expect(child.getHeader()?.parentSession).toBeUndefined();
+		} finally {
+			await child.close();
 		}
 	});
 

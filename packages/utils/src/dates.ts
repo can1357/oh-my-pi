@@ -100,7 +100,7 @@ export function format(value: Date | number, pattern: string): string {
 	const date = asDate(value);
 	let result = "";
 
-	for (let index = 0; index < pattern.length; ) {
+	for (let index = 0; index < pattern.length;) {
 		if (pattern[index] === "'") {
 			if (pattern[index + 1] === "'") {
 				result += "'";

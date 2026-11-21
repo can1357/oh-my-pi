@@ -1,9 +1,10 @@
 /**
  * Context-reducing surgical compaction ("shake").
  *
- * `shake` drops heavy content out of the live context mechanically: whole
- * tool-call results and large fenced/XML blocks are replaced with short
- * placeholders. This module is the pure layer — region detection and in-place
+ * `shake` drops heavy content out of the live context mechanically:
+ * tool-result text and large fenced/XML blocks are replaced with short
+ * placeholders while non-text tool-result content is preserved. This module
+ * is the pure layer — region detection and in-place
  * mutation only. Artifact offload, persistence, and provider-session teardown
  * are orchestrated by the caller (`AgentSession.shake`).
  *
@@ -17,6 +18,7 @@ import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "./en
 import { invalidateMessageCache } from "./message-cache";
 import {
 	collectToolCallsById,
+	getToolResultMessage,
 	isArtifactRecoveryToolResult,
 	isProtectedToolResult,
 	isSkillReadToolResult,
@@ -80,6 +82,7 @@ const PLACEHOLDER_TOKEN_ESTIMATE = 16;
 export interface ToolResultShakeRegion {
 	kind: "toolResult";
 	entry: SessionMessageEntry;
+	/** Estimated tokens in the removable text only; retained images are excluded. */
 	tokens: number;
 	originalText: string;
 	/** Human label for the offload doc (tool name). */
@@ -107,18 +110,19 @@ export type ShakeRegion = ToolResultShakeRegion | BlockShakeRegion;
 const OPENING_XML = /^<([a-z_-]+)(?:\s+[^>]*)?>$/;
 const CLOSING_XML = /^<\/([a-z_-]+)>$/;
 
-function getToolResultMessage(entry: SessionEntry): ToolResultMessage | undefined {
-	if (entry.type !== "message") return undefined;
-	const message = entry.message as AgentMessage;
-	if (message.role !== "toolResult") return undefined;
-	return message as ToolResultMessage;
-}
-
-function toolResultText(message: ToolResultMessage): string {
-	return message.content
-		.filter((block): block is TextContent => block.type === "text")
-		.map(block => block.text)
-		.join("\n");
+function toolResultText(
+	message: ToolResultMessage,
+	tokenizer: Tokenizer,
+): { originalText: string; tokens: number } | undefined {
+	const fragments: string[] = [];
+	for (const block of message.content) {
+		if (block.type === "text" && block.text.length > 0) fragments.push(block.text);
+	}
+	if (fragments.length === 0) return undefined;
+	return {
+		originalText: fragments.join("\n"),
+		tokens: tokenizer.countTokens(fragments),
+	};
 }
 
 /** Estimate the token contribution of an entry for the protect-recent window. */
@@ -292,10 +296,11 @@ function scanContentBlocks(
  * Pure detection: locate every eligible shake region on a branch.
  *
  * Walks the protect-recent window (most recent `protectTokens` of context is
- * kept intact), collects whole tool-result messages (honoring `protectedTools`
- * and skipping already-pruned results) and large fenced/XML blocks inside
- * user/developer/assistant/custom messages. Tool results flagged contextually
- * useless by their tool bypass the protect window — there is nothing recent
+ * kept intact), collects the text from eligible tool-result messages
+ * (honoring `protectedTools` and skipping already-pruned results) and large
+ * fenced/XML blocks inside user/developer/assistant/custom messages.
+ * Contextually useless tool results bypass the protect window — there is
+ * nothing recent
  * worth keeping in them. Returns regions in document order.
  *
  * `toolCall` blocks are never touched (tool-call/result pairing is preserved)
@@ -307,6 +312,7 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 	if (n === 0) return [];
 
 	// Tokens of all entries strictly more recent than index i.
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const accumulatedAfter = new Array<number>(n);
 	let acc = 0;
 	for (let i = n - 1; i >= 0; i--) {
@@ -339,13 +345,13 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 			if (toolResult.prunedAt !== undefined) continue;
 			if (isProtectedToolResult(toolResult, toolCallsById.get(toolResult.toolCallId), config.protectedTools))
 				continue;
-			const text = toolResultText(toolResult);
-			if (text.length === 0) continue;
+			const text = toolResultText(toolResult, tokenizer);
+			if (!text) continue;
 			regions.push({
 				kind: "toolResult",
 				entry: entry as SessionMessageEntry,
-				tokens: tokenizer.countMessage(toolResult as AgentMessage),
-				originalText: text,
+				tokens: text.tokens,
+				originalText: text.originalText,
 				label: toolResult.toolName,
 			});
 			continue;
@@ -414,16 +420,26 @@ function getBlockTextSlot(entry: SessionMessageEntry | CustomMessageEntry, block
 /**
  * Pure mutation: replace a single region's content in place.
  *
- * Tool-result: replaces the message content with the placeholder text and
- * stamps `prunedAt`. Block: splices `replacement` over `[start, end)` of the
- * target text block. When several block regions share one text block they MUST
- * be applied highest-start-first so earlier offsets stay valid — use
- * {@link applyShakeRegions}, which orders them correctly.
+ * Tool-result: replaces its first non-empty text block with the placeholder,
+ * removes its other text blocks, preserves every non-text block, and stamps
+ * `prunedAt`. Block: splices `replacement` (`replacementTokens` long) over
+ * `[start, end)` of the target text block, and on an assistant turn adds the
+ * tokens removed to `elidedOutputTokens`. When several block regions share one
+ * text block they MUST be applied highest-start-first so earlier offsets stay
+ * valid — use {@link applyShakeRegions}, which orders them correctly.
  */
-export function applyShakeRegion(region: ShakeRegion, replacement: string): void {
+export function applyShakeRegion(region: ShakeRegion, replacement: string, replacementTokens: number): void {
 	if (region.kind === "toolResult") {
 		const message = region.entry.message as ToolResultMessage;
-		message.content = [{ type: "text", text: replacement }];
+		const replacementIndex = message.content.findIndex(block => block.type === "text" && block.text.length > 0);
+		if (replacementIndex < 0) return;
+		const kept: typeof message.content = [];
+		for (let index = 0; index < message.content.length; index++) {
+			const block = message.content[index];
+			if (block.type !== "text") kept.push(block);
+			else if (index === replacementIndex) kept.push({ type: "text", text: replacement });
+		}
+		message.content = kept;
 		message.prunedAt = Date.now();
 		invalidateMessageCache(message as AgentMessage);
 		return;
@@ -436,7 +452,14 @@ export function applyShakeRegion(region: ShakeRegion, replacement: string): void
 	// rebuilds, so an in-place block rewrite must drop its cached estimate/convert.
 	// Custom-message entries are re-materialized into a fresh AgentMessage on every
 	// buildSessionContext, so they carry no stable cached identity to invalidate.
-	if (region.entry.type === "message") invalidateMessageCache(region.entry.message);
+	if (region.entry.type !== "message") return;
+	const message = region.entry.message;
+	// `usage.output` keeps billing the removed text; the persisted tally lets
+	// every later count of a replayed turn take it off again.
+	if (message.role === "assistant") {
+		message.elidedOutputTokens = (message.elidedOutputTokens ?? 0) + Math.max(0, region.tokens - replacementTokens);
+	}
+	invalidateMessageCache(message);
 }
 
 /**
@@ -444,11 +467,14 @@ export function applyShakeRegion(region: ShakeRegion, replacement: string): void
  * that splicing one region never shifts the offsets of another in the same text
  * block; tool-result regions are independent.
  */
-export function applyShakeRegions(items: Array<{ region: ShakeRegion; replacement: string }>): void {
+export function applyShakeRegions(
+	items: Array<{ region: ShakeRegion; replacement: string; replacementTokens: number }>,
+): void {
 	const ordered = [...items].sort((a, b) => {
 		const aStart = a.region.kind === "block" ? a.region.start : -1;
 		const bStart = b.region.kind === "block" ? b.region.start : -1;
 		return bStart - aStart;
 	});
-	for (const { region, replacement } of ordered) applyShakeRegion(region, replacement);
+	for (const { region, replacement, replacementTokens } of ordered)
+		applyShakeRegion(region, replacement, replacementTokens);
 }

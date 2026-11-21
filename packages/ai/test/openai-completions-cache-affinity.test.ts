@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type OpenAICompletionsOptions, streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, Context, FetchImpl, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
-import { buildOpenAICompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 0 }] };
@@ -20,10 +20,10 @@ const {
 const openAI56CompletionsModel: Model<"openai-completions"> = {
 	...openAI56CompletionsSpec,
 	api: "openai-completions",
-	compat: buildOpenAICompat({
+	compat: resolveModelPolicy({
 		...openAI56CompletionsSpec,
 		api: "openai-completions",
-	}),
+	}).compat,
 };
 
 const emptyUsage: Usage = {
@@ -161,6 +161,23 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 
 		expect(body.prompt_cache_options).toEqual({ mode: "implicit", ttl: "30m" });
 		expect(JSON.stringify(body.messages)).not.toContain("prompt_cache_breakpoint");
+	});
+
+	it("rejects the Responses-only 12h lifetime before sending a request", async () => {
+		let sent = false;
+		const fetchMock: FetchImpl = async () => {
+			sent = true;
+			return chatCompletionsSse();
+		};
+		const result = await streamOpenAICompletions(openAI56CompletionsModel, context, {
+			apiKey: "test-key",
+			promptCache: { mode: "implicit", ttl: "12h" },
+			fetch: fetchMock,
+		}).result();
+
+		expect(sent).toBe(false);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("12h prompt caching is only available on the Responses API");
 	});
 
 	it("does not synthesize first-turn content or a caller-disabled breakpoint", async () => {

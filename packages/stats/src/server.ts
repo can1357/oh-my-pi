@@ -1,26 +1,35 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $, type Server } from "bun";
 import {
-	getBehaviorDashboardStats,
 	getCostDashboardStats,
 	getDashboardStats,
+	getFolderStats,
 	getModelDashboardStats,
 	getOverviewStats,
 	getProviderDashboardStats,
+	getProviderWindowStats,
 	getRecentErrors,
 	getRecentRequests,
 	getRequestDetails,
+	getTimeRangeConfig,
 	getToolDashboardStats,
-	getTotalMessageCount,
-	syncAllSessions,
 } from "./aggregator";
-import { decodeEmbeddedClientArchive } from "./embedded-client";
+import { initDb } from "./db";
+import { decodeEmbeddedClientArchive, hasEmbeddedClientArchive } from "./embedded-client";
 import embeddedClientArchiveTxt from "./embedded-client.generated.txt";
+import {
+	cancelFrustrationRun,
+	estimateFrustrationRun,
+	getFrustrationDashboardStats,
+	type StatsJudgeProvider,
+	setStatsJudgeProvider,
+	startFrustrationRun,
+} from "./frustration";
 import { getGainDashboardStats } from "./gain-aggregator";
+import { statsLive } from "./live";
 import {
 	prepareStatsPort,
 	recoverStatsPort,
@@ -29,8 +38,18 @@ import {
 	STATS_DASHBOARD_HOSTNAME_HEADER,
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
-
-const EMBEDDED_CLIENT_ARCHIVE = decodeEmbeddedClientArchive(embeddedClientArchiveTxt);
+import { getStatsByModel, getTimeSeries } from "./rollup";
+import { buildSpotlightDashboardJson, getSpotlightSessionContext } from "./spotlight-aggregator";
+import {
+	buildSessionTrace,
+	getTraceEntry,
+	listSessionSummaries,
+	TRACE_ETAG_VERSION,
+	type TraceFingerprint,
+	traceEtagForFingerprint,
+	traceFingerprintForEtag,
+	TracePathError,
+} from "./trace";
 
 const CLIENT_DIR = path.join(import.meta.dir, "client");
 const STATIC_DIR = path.join(import.meta.dir, "..", "dist", "client");
@@ -44,60 +63,32 @@ const IS_BUN_COMPILED =
 // dashboard sources or prebuilt dist/client next to the bundle, so the
 // embedded archive is the only viable asset source.
 const IS_PREBUILT = IS_BUN_COMPILED || Boolean(process.env.PI_BUNDLED || Bun.env.PI_BUNDLED);
-const USE_EMBEDDED_CLIENT = EMBEDDED_CLIENT_ARCHIVE !== null || IS_PREBUILT;
+// Sniff the base64 gzip magic instead of decoding: importing this module (every
+// TUI start) must not pay for a multi-megabyte archive nobody may serve.
+const USE_EMBEDDED_CLIENT = hasEmbeddedClientArchive(embeddedClientArchiveTxt) || IS_PREBUILT;
 
-const EMBEDDED_CLIENT_DIR_ROOT = path.join(os.tmpdir(), "omp-stats-client");
-let embeddedClientDirPromise: Promise<string> | null = null;
+let embeddedClientFilesPromise: Promise<Map<string, Blob>> | null = null;
 
-function sanitizeArchivePath(archivePath: string): string | null {
-	const normalized = archivePath.replaceAll("\\", "/").replace(/^\.\//, "");
-	if (!normalized || normalized === ".") return null;
-	if (normalized.includes("..") || path.isAbsolute(normalized)) return null;
-	return normalized;
-}
+async function getEmbeddedClientFiles(): Promise<Map<string, Blob>> {
+	if (embeddedClientFilesPromise) return embeddedClientFilesPromise;
 
-async function extractEmbeddedClientArchive(archiveBytes: Buffer, outputDir: string): Promise<void> {
-	const archive = new Bun.Archive(archiveBytes);
-	const files = await archive.files();
-	const extractRoot = path.resolve(outputDir);
-
-	for (const [archivePath, file] of files) {
-		const sanitizedPath = sanitizeArchivePath(archivePath);
-		if (!sanitizedPath) continue;
-		const destinationPath = path.resolve(extractRoot, sanitizedPath);
-		if (!destinationPath.startsWith(extractRoot + path.sep)) {
-			throw new Error(`Archive entry escapes extraction directory: ${archivePath}`);
-		}
-		await Bun.write(destinationPath, file);
-	}
-}
-
-async function getEmbeddedClientDir(): Promise<string> {
-	if (!USE_EMBEDDED_CLIENT) return STATIC_DIR;
-	if (embeddedClientDirPromise) return embeddedClientDirPromise;
-
-	if (!EMBEDDED_CLIENT_ARCHIVE) {
+	const archive = decodeEmbeddedClientArchive(embeddedClientArchiveTxt);
+	if (!archive) {
 		throw new Error(
 			"Embedded stats client bundle missing. Rebuild the omp binary or npm bundle with embedded stats assets.",
 		);
 	}
 
-	embeddedClientDirPromise = (async () => {
-		const bundleHash = Bun.hash(EMBEDDED_CLIENT_ARCHIVE).toString(16);
-		const outputDir = path.join(EMBEDDED_CLIENT_DIR_ROOT, bundleHash);
-		const markerPath = path.join(outputDir, "index.html");
-		try {
-			const marker = await fs.stat(markerPath);
-			if (marker.isFile()) return outputDir;
-		} catch {}
+	// Keep bundled assets in memory so OS temporary-file cleanup cannot break a live dashboard.
+	embeddedClientFilesPromise = new Bun.Archive(archive).files().then(files => {
+		for (const [name, file] of files) {
+			// Archive entries are untyped blobs; infer MIME types just as disk-backed Bun files do.
+			files.set(name, new File([file], name, { type: Bun.file(name).type }));
+		}
+		return files;
+	});
 
-		await fs.rm(outputDir, { recursive: true, force: true });
-		await fs.mkdir(outputDir, { recursive: true });
-		await extractEmbeddedClientArchive(EMBEDDED_CLIENT_ARCHIVE, outputDir);
-		return outputDir;
-	})();
-
-	return embeddedClientDirPromise;
+	return embeddedClientFilesPromise;
 }
 
 async function getLatestMtime(dir: string): Promise<number> {
@@ -136,15 +127,8 @@ async function getLatestMtime(dir: string): Promise<number> {
 const ensureClientBuild = async () => {
 	if (USE_EMBEDDED_CLIENT) return;
 	const indexPath = path.join(STATIC_DIR, "index.html");
-	const cssPath = path.join(STATIC_DIR, "styles.css");
-	const clientSourceMtime = await getLatestMtime(CLIENT_DIR);
-	const tailwindConfigPath = path.join(import.meta.dir, "..", "tailwind.config.js");
-	let tailwindConfigMtime = 0;
-	try {
-		const tailwindConfigStats = await fs.stat(tailwindConfigPath);
-		tailwindConfigMtime = tailwindConfigStats.mtimeMs;
-	} catch {}
-	const sourceMtime = Math.max(clientSourceMtime, tailwindConfigMtime);
+	const cssPath = path.join(STATIC_DIR, "index.css");
+	const sourceMtime = await getLatestMtime(CLIENT_DIR);
 	let shouldBuild = true;
 	try {
 		const [indexStats, cssStats] = await Promise.all([fs.stat(indexPath), fs.stat(cssPath)]);
@@ -164,7 +148,7 @@ const ensureClientBuild = async () => {
 
 	await fs.rm(STATIC_DIR, { recursive: true, force: true });
 
-	console.log("Building stats client...");
+	logger.debug("Building stats client");
 	const packageRoot = path.join(import.meta.dir, "..");
 	const buildResult = await $`bun run build.ts`.cwd(packageRoot).quiet().nothrow();
 	if (buildResult.exitCode !== 0) {
@@ -172,23 +156,63 @@ const ensureClientBuild = async () => {
 		const details = output ? `\n${output}` : "";
 		throw new Error(`Failed to build stats client (exit ${buildResult.exitCode})${details}`);
 	}
-
-	const indexHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Usage Statistics</title>
-    <link rel="stylesheet" href="styles.css">
-</head>
-<body>
-    <div id="root"></div>
-    <script src="index.js" type="module"></script>
-</body>
-</html>`;
-
-	await Bun.write(path.join(STATIC_DIR, "index.html"), indexHtml);
 };
+
+/**
+ * Required on every spending/mutating POST. A custom header forces a CORS
+ * preflight, which this server never approves, so a hostile page cannot
+ * trigger a paid judge run through a cross-site form or `fetch`.
+ */
+const STATS_ACTION_HEADER = "X-Omp-Stats-Action";
+
+/** What the page's Close calls; unset, the page offers none. */
+let closeHandler: (() => void) | undefined;
+
+/** Longest a Spotlight build serves later requests of its data version: its time range moves with the clock. */
+const SPOTLIGHT_VIEW_TTL_MS = 60_000;
+
+/** Spotlight payloads (JSON) of one live data version by `range\0agent`, with when each was requested. */
+let spotlightViews: { version: number; views: Map<string, { at: number; json: Promise<string> }> } | null = null;
+
+/** Aborted when the last dashboard of this process stops, ending the Spotlight builds still running for it. */
+let spotlightBuilds = new AbortController();
+
+/** Settles when the last queued Spotlight build does: builds run one at a time, as they did on the server's thread. */
+let spotlightQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * The Spotlight dashboard as JSON, built once per data version and view. Every open page refetches on each version
+ * bump and a build takes seconds of a worker's CPU and memory, so pages showing the same view share one build and
+ * different views wait their turn.
+ */
+function spotlightView(range: string | null, agent: string | null): Promise<string> {
+	const version = statsLive().status().version;
+	if (spotlightViews?.version !== version) spotlightViews = { version, views: new Map() };
+	const views = spotlightViews.views;
+	const key = `${range ?? ""}\0${agent ?? ""}`;
+	const cached = views.get(key);
+	if (cached && Date.now() - cached.at < SPOTLIGHT_VIEW_TTL_MS) return cached.json;
+	const { signal } = spotlightBuilds;
+	const json = spotlightQueue.then(() => buildSpotlightDashboardJson(range, agent, signal));
+	spotlightQueue = json.catch(() => {});
+	const entry = { at: Date.now(), json };
+	views.set(key, entry);
+	// A failed build is not reused.
+	json.catch(() => {
+		if (views.get(key) === entry) views.delete(key);
+	});
+	return json;
+}
+
+/**
+ * Let the page close the dashboard: while `close` is set, it shows a Close
+ * button (and takes Esc and Ctrl+C) that calls it. `omp stats` sets it while
+ * Tern shows the page in place of the block it runs in, where the page has no
+ * way out of its own; `undefined` takes Close away again.
+ */
+export function setStatsCloseHandler(close: (() => void) | undefined): void {
+	closeHandler = close;
+}
 
 /**
  * Handle API requests.
@@ -197,8 +221,12 @@ export async function handleApi(req: Request): Promise<Response> {
 	const url = new URL(req.url);
 	const path = url.pathname;
 
-	// Stats reads are DB-only; explicit /api/sync does the expensive session scan.
+	// Stats reads are DB-only; ingest runs in the background (see `live.ts`).
 	const range = url.searchParams.get("range");
+
+	if (path === "/api/status") {
+		return Response.json(statsLive().status());
+	}
 
 	if (path === "/api/stats") {
 		const stats = await getDashboardStats(range);
@@ -220,14 +248,34 @@ export async function handleApi(req: Request): Promise<Response> {
 		return Response.json(stats);
 	}
 
-	if (path === "/api/stats/behavior") {
-		const stats = await getBehaviorDashboardStats(range);
+	if (path === "/api/stats/frustration") {
+		const stats = await getFrustrationDashboardStats(range);
 		return Response.json(stats);
+	}
+
+	if (path === "/api/frustration/estimate") {
+		const estimate = await estimateFrustrationRun(range);
+		return Response.json(estimate);
+	}
+
+	if (path === "/api/frustration/judge" || path === "/api/frustration/cancel") {
+		if (req.method !== "POST") return Response.json({ error: "POST required" }, { status: 405 });
+		if (req.headers.get(STATS_ACTION_HEADER) !== "1") {
+			return Response.json({ error: `${STATS_ACTION_HEADER}: 1 header required` }, { status: 403 });
+		}
+		if (path === "/api/frustration/cancel") return Response.json(cancelFrustrationRun());
+		const result = await startFrustrationRun(range);
+		if (!result.started) return Response.json({ error: result.error }, { status: result.status });
+		return Response.json(result.job, { status: 202 });
 	}
 
 	if (path === "/api/stats/tools") {
 		const stats = await getToolDashboardStats(range);
 		return Response.json(stats);
+	}
+
+	if (path === "/api/stats/provider-windows") {
+		return Response.json(await getProviderWindowStats(range, url.searchParams.get("provider")));
 	}
 
 	if (path === "/api/stats/providers") {
@@ -248,18 +296,19 @@ export async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path === "/api/stats/models") {
-		const stats = await getDashboardStats(range);
-		return Response.json(stats.byModel);
+		// Also the port-conflict identity probe: keep it to the one query it serves.
+		await initDb();
+		return Response.json(getStatsByModel(getTimeRangeConfig(range).cutoff));
 	}
 
 	if (path === "/api/stats/folders") {
-		const stats = await getDashboardStats(range);
-		return Response.json(stats.byFolder);
+		const stats = await getFolderStats(range);
+		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/timeseries") {
-		const stats = await getDashboardStats(range);
-		return Response.json(stats.timeSeries);
+		await initDb();
+		return Response.json(getTimeSeries(getTimeRangeConfig(range)));
 	}
 
 	if (path.startsWith("/api/request/")) {
@@ -270,16 +319,92 @@ export async function handleApi(req: Request): Promise<Response> {
 		return Response.json(details);
 	}
 
+	if (path === "/api/close") {
+		if (req.method === "GET") return Response.json({ closable: closeHandler !== undefined });
+		if (req.method !== "POST") return Response.json({ error: "GET or POST required" }, { status: 405 });
+		if (req.headers.get(STATS_ACTION_HEADER) !== "1") {
+			return Response.json({ error: `${STATS_ACTION_HEADER}: 1 header required` }, { status: 403 });
+		}
+		if (!closeHandler) return Response.json({ error: "this dashboard is not closed from its page" }, { status: 404 });
+		closeHandler();
+		return new Response(null, { status: 202 });
+	}
+
 	if (path === "/api/sync") {
-		const result = await syncAllSessions();
-		const count = await getTotalMessageCount();
-		return Response.json({ ...result, totalMessages: count });
+		if (req.method !== "POST") return Response.json({ error: "POST required" }, { status: 405 });
+		statsLive().requestSync();
+		return Response.json(statsLive().status(), { status: 202 });
 	}
 
 	if (path === "/api/stats/gain") {
 		const project = url.searchParams.get("project");
 		const stats = await getGainDashboardStats(range, project);
 		return Response.json(stats);
+	}
+	if (path === "/api/stats/spotlight") {
+		return new Response(await spotlightView(range, url.searchParams.get("agent")), {
+			headers: { "content-type": "application/json;charset=utf-8" },
+		});
+	}
+
+	if (path === "/api/stats/spotlight/session") {
+		const file = url.searchParams.get("file");
+		if (!file) return Response.json({ error: "file required" }, { status: 400 });
+		const context = await getSpotlightSessionContext(file);
+		if (!context) return Response.json({ error: "not a Spotlight experiment session" }, { status: 404 });
+		return Response.json(context);
+	}
+
+	if (path === "/api/sessions") {
+		const limitParam = Number(url.searchParams.get("limit") ?? "100");
+		const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.floor(limitParam) : 100;
+		const q = url.searchParams.get("q") ?? undefined;
+		return Response.json(await listSessionSummaries(limit, q));
+	}
+
+	if (path === "/api/session/trace") {
+		const file = url.searchParams.get("file");
+		if (!file) return Response.json({ error: "file required" }, { status: 400 });
+		try {
+			// ETag-first: compare the client's etag against the
+			// root+child fingerprint WITHOUT building the trace. A matching
+			// (unchanged) poll returns 304 after stats only; only a changed
+			// tree pays the full re-read/re-parse/rebuild in
+			// buildSessionTrace (itself memoized for non-conditional polls).
+			// The fingerprint covers child transcripts, so a subagent-only
+			// append changes the ETag and never 304s stale.
+			const clientEtag = req.headers.get("if-none-match");
+			let fingerprint: TraceFingerprint | undefined;
+			if (clientEtag) {
+				fingerprint = await traceFingerprintForEtag(file);
+				if (fingerprint !== undefined) {
+					const etag = `"${TRACE_ETAG_VERSION}:${traceEtagForFingerprint(fingerprint)}"`;
+					if (clientEtag === etag) return new Response(null, { status: 304 });
+				}
+			}
+			const trace = await buildSessionTrace(file, fingerprint);
+			const etag = `"${TRACE_ETAG_VERSION}:${trace.etag}"`;
+			if (clientEtag === etag) return new Response(null, { status: 304 });
+			return Response.json(trace, { headers: { ETag: etag } });
+		} catch (err) {
+			if (err instanceof TracePathError) return Response.json({ error: err.message }, { status: 400 });
+			if (isEnoent(err)) return Response.json({ error: "session not found" }, { status: 404 });
+			throw err;
+		}
+	}
+
+	if (path === "/api/session/entry") {
+		const file = url.searchParams.get("file");
+		const id = url.searchParams.get("id");
+		if (!file || !id) return Response.json({ error: "file and id required" }, { status: 400 });
+		try {
+			const entry = await getTraceEntry(file, id);
+			if (!entry) return Response.json({ error: "entry not found" }, { status: 404 });
+			return Response.json({ entry });
+		} catch (err) {
+			if (err instanceof TracePathError) return Response.json({ error: err.message }, { status: 400 });
+			throw err;
+		}
 	}
 
 	return new Response("Not Found", { status: 404 });
@@ -289,9 +414,14 @@ export async function handleApi(req: Request): Promise<Response> {
  * Handle static file requests.
  */
 async function handleStatic(requestPath: string): Promise<Response> {
-	const staticDir = await getEmbeddedClientDir();
+	if (USE_EMBEDDED_CLIENT) {
+		const files = await getEmbeddedClientFiles();
+		const file = files.get(requestPath.slice(1)) ?? files.get("index.html");
+		return file ? new Response(file) : new Response("Not Found", { status: 404 });
+	}
+
 	const filePath = requestPath === "/" ? "/index.html" : requestPath;
-	const fullPath = path.join(staticDir, filePath);
+	const fullPath = path.join(STATIC_DIR, filePath);
 
 	const file = Bun.file(fullPath);
 	if (await file.exists()) {
@@ -299,7 +429,7 @@ async function handleStatic(requestPath: string): Promise<Response> {
 	}
 
 	// SPA fallback
-	const index = Bun.file(path.join(staticDir, "index.html"));
+	const index = Bun.file(path.join(STATIC_DIR, "index.html"));
 	if (await index.exists()) {
 		return new Response(index);
 	}
@@ -313,12 +443,80 @@ export function formatStatsDashboardUrl(hostname: string, port: number): string 
 	return `http://${urlHostname}:${port}`;
 }
 
-function createDashboardServer(port: number, hostname: string) {
+/** Extra Host names (comma-separated) the dashboard answers to; `*.example.com` allows its subdomains. */
+export const STATS_ALLOWED_HOSTS_ENV = "OMP_STATS_ALLOWED_HOSTS";
+
+/**
+ * Suffixes no public DNS server can hand out: loopback, mDNS, private-use names, Tailscale MagicDNS, and the
+ * undelegated search domains home routers assign (`.lan`, `.home`, `.corp`, `.localdomain`).
+ */
+const PRIVATE_NAME_SUFFIXES = [
+	".localhost",
+	".local",
+	".internal",
+	".home.arpa",
+	".ts.net",
+	".lan",
+	".home",
+	".corp",
+	".localdomain",
+];
+const IPV4_LITERAL = /^\d+\.\d+\.\d+\.\d+$/;
+
+/** Host names allowed beyond the built-in rules: exact names and `.suffix`es. */
+interface AllowedHosts {
+	exact: Set<string>;
+	suffixes: string[];
+}
+
+function normalizeHostName(name: string): string {
+	return name.trim().toLowerCase().replace(/\.$/, "");
+}
+
+/**
+ * DNS-rebinding guard. A rebinding page reaches the dashboard under a public name whose DNS the attacker
+ * controls, and the browser sends that name as Host; it can never send an IP literal or a name public DNS
+ * cannot resolve. So IP literals, `localhost`, single-label names (LAN and MagicDNS short names) and
+ * {@link PRIVATE_NAME_SUFFIXES} pass (Tailscale Serve forwards its `*.ts.net` Host unchanged), and any other
+ * dotted name must be the bind name or listed in {@link STATS_ALLOWED_HOSTS_ENV}. `hostname` is the parsed
+ * request URL's.
+ */
+function isRebindSafeHost(hostname: string, allowed: AllowedHosts): boolean {
+	const name = normalizeHostName(hostname);
+	if (name.startsWith("[") || IPV4_LITERAL.test(name) || !name.includes(".")) return true;
+	if (allowed.exact.has(name)) return true;
+	return [...PRIVATE_NAME_SUFFIXES, ...allowed.suffixes].some(suffix => name.endsWith(suffix));
+}
+
+function readAllowedHosts(bindHostname: string): AllowedHosts {
+	// The operator chose the bind name, and the printed URL and the reuse probe both use it.
+	const allowed: AllowedHosts = { exact: new Set([normalizeHostName(bindHostname)]), suffixes: [] };
+	for (const entry of (process.env[STATS_ALLOWED_HOSTS_ENV] ?? "").split(",")) {
+		const name = normalizeHostName(entry);
+		if (name.startsWith("*.")) {
+			if (name.length > 2) allowed.suffixes.push(name.slice(1));
+		} else if (name) {
+			allowed.exact.add(name);
+		}
+	}
+	return allowed;
+}
+
+function createDashboardServer(port: number, hostname: string): Server<undefined> {
+	const allowedHosts = readAllowedHosts(hostname);
 	const server = Bun.serve({
 		port,
 		hostname,
-		async fetch(req) {
+		async fetch(req, server) {
 			const url = new URL(req.url);
+			if (!isRebindSafeHost(url.hostname, allowedHosts)) {
+				return new Response(
+					`Host not allowed; add it to ${STATS_ALLOWED_HOSTS_ENV} to serve the dashboard under it`,
+					{
+						status: 403,
+					},
+				);
+			}
 			const path = url.pathname;
 
 			// The identity header lets another omp session's reuse probe positively
@@ -331,6 +529,14 @@ function createDashboardServer(port: number, hostname: string) {
 			if (req.method === "OPTIONS") {
 				return new Response(null, { headers: dashboardHeaders });
 			}
+
+			if (path === "/api/events") {
+				// Long-lived stream: exempt from the idle timeout.
+				server.timeout(req, 0);
+				return liveEventStream(dashboardHeaders, req.signal);
+			}
+			// A Spotlight build runs on a worker and can outlast the idle timeout, which counts a pending handler.
+			if (path === "/api/stats/spotlight") server.timeout(req, 0);
 
 			try {
 				let response: Response;
@@ -352,7 +558,7 @@ function createDashboardServer(port: number, hostname: string) {
 					headers,
 				});
 			} catch (error) {
-				console.error("Server error:", error);
+				logger.error("Stats dashboard request failed", { path, error: String(error) });
 				return Response.json(
 					{ error: error instanceof Error ? error.message : "Unknown error" },
 					{ status: 500, headers: dashboardHeaders },
@@ -363,45 +569,145 @@ function createDashboardServer(port: number, hostname: string) {
 	return server;
 }
 
+/** Keep-alive comment cadence so proxies and the browser keep the stream open. */
+const EVENT_HEARTBEAT_MS = 15_000;
+
 /**
- * Start the HTTP server, reusing a live dashboard or reclaiming a stale omp listener.
+ * Server-sent events of {@link LiveStatus}: the current status immediately,
+ * then every change (sync progress, data version bumps, indexing backlog).
+ * Disconnects unsubscribe, so ingest winds down once no page is listening.
+ */
+function liveEventStream(headers: Record<string, string>, signal: AbortSignal): Response {
+	const live = statsLive();
+	// Ingest starts when the first page connects, not when the server binds.
+	live.start();
+	const encoder = new TextEncoder();
+	let cleanup = () => {};
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			const write = (chunk: string) => {
+				try {
+					controller.enqueue(encoder.encode(chunk));
+				} catch {
+					// Stream already closed: the client left without a cancel.
+					cleanup();
+				}
+			};
+			write(`data: ${JSON.stringify(live.status())}\n\n`);
+			const unsubscribe = live.subscribe((_status, frame) => write(`data: ${frame}\n\n`));
+			const heartbeat = setInterval(() => write(": keep-alive\n\n"), EVENT_HEARTBEAT_MS);
+			const onAbort = () => cleanup();
+			cleanup = () => {
+				cleanup = () => {};
+				unsubscribe();
+				clearInterval(heartbeat);
+				signal.removeEventListener("abort", onAbort);
+			};
+			if (signal.aborted) cleanup();
+			else signal.addEventListener("abort", onAbort, { once: true });
+		},
+		cancel() {
+			cleanup();
+		},
+	});
+	return new Response(stream, {
+		headers: {
+			...headers,
+			"Content-Type": "text/event-stream",
+			"Cache-Control": "no-cache",
+			Connection: "keep-alive",
+		},
+	});
+}
+
+/** A dashboard this process started or found; `reused` distinguishes another process's server from one we own. */
+export interface StatsServerHandle {
+	hostname: string;
+	port: number;
+	/** True when the dashboard belongs to another process and this process has no server to keep alive. */
+	reused: boolean;
+	stop: () => void;
+}
+
+// Dashboards this process already bound, keyed by requested and bound
+// `hostname:port`. A second in-process start (e.g. `/trace` twice in one
+// session, or a caller passing back a fallback port) must return the live
+// handle: probing our own port can time out under load and would then start
+// yet another dashboard on a fallback port.
+const activeServers = new Map<string, StatsServerHandle>();
+/** Dashboards bound by this process (any port); background ingest stops when the last one does. */
+let liveServers = 0;
+
+export interface StartServerOptions {
+	/** Host judge for the Frustration dashboard's judge runs; replaces any previously registered one. */
+	judge?: StatsJudgeProvider;
+}
+
+/**
+ * Start the dashboard on `port`, or reuse the current dashboard already serving it.
+ * An older dashboard there is stopped and replaced; any other holder (a foreign
+ * program, or a dashboard too busy to answer the identity probe) is left running
+ * and the dashboard binds an ephemeral port instead.
  */
 export async function startServer(
 	port = 3847,
 	hostname = STATS_DASHBOARD_HOSTNAME,
-): Promise<{ hostname: string; port: number; stop: () => void }> {
-	await ensureClientBuild();
-	const preparation = await prepareStatsPort(port, hostname);
-	if (preparation === "reuse") {
-		return { hostname, port, stop: () => {} };
+	options: StartServerOptions = {},
+): Promise<StatsServerHandle> {
+	if (options.judge) setStatsJudgeProvider(options.judge);
+	const requestedKey = `${hostname}:${port}`;
+	if (port !== 0) {
+		const active = activeServers.get(requestedKey);
+		if (active) return active;
 	}
-
-	try {
-		const server = createDashboardServer(port, hostname);
-		return {
+	await ensureClientBuild();
+	const register = (server: Server<undefined>): StatsServerHandle => {
+		liveServers++;
+		let stopped = false;
+		const boundPort = server.port ?? port;
+		const keys = port === 0 ? [`${hostname}:${boundPort}`] : [requestedKey, `${hostname}:${boundPort}`];
+		const handle: StatsServerHandle = {
 			hostname,
-			port: server.port ?? port,
-			stop: () => server.stop(),
+			port: boundPort,
+			reused: false,
+			stop: () => {
+				for (const key of keys) activeServers.delete(key);
+				server.stop(true);
+				if (stopped) return;
+				stopped = true;
+				// The last dashboard in this process takes background ingest and Spotlight builds down with it.
+				if (--liveServers === 0) {
+					statsLive().stop();
+					spotlightBuilds.abort(new Error("Stats dashboard stopped"));
+					spotlightBuilds = new AbortController();
+				}
+			},
 		};
+		for (const key of keys) activeServers.set(key, handle);
+		return handle;
+	};
+
+	let claim = await prepareStatsPort(port, hostname);
+	if (claim === "bind") {
+		const server = bindDashboardServer(port, hostname);
+		if (server) return register(server);
+		claim = await recoverStatsPort(port, hostname);
+	}
+	if (claim === "reuse") return { hostname, port, reused: true, stop: () => {} };
+	if (claim === "bind") {
+		const server = bindDashboardServer(port, hostname);
+		if (server) return register(server);
+	}
+	logger.warn("Stats dashboard port is held by another process; serving on an ephemeral port", { hostname, port });
+	return register(createDashboardServer(0, hostname));
+}
+
+/** {@link createDashboardServer}, or null when the port is already in use. */
+function bindDashboardServer(port: number, hostname: string): Server<undefined> | null {
+	try {
+		return createDashboardServer(port, hostname);
 	} catch (error) {
-		if (!(error instanceof Error && "code" in error && error.code === "EADDRINUSE")) throw error;
-
-		const recovery = await recoverStatsPort(port, hostname);
-		if (recovery === "reuse") {
-			return { hostname, port, stop: () => {} };
-		}
-
-		try {
-			const server = createDashboardServer(port, hostname);
-			return {
-				hostname,
-				port: server.port ?? port,
-				stop: () => server.stop(),
-			};
-		} catch (retryError) {
-			throw new Error(`Failed to start stats dashboard on ${hostname}:${port} after reclaiming it.`, {
-				cause: retryError,
-			});
-		}
+		if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") return null;
+		throw error;
 	}
 }

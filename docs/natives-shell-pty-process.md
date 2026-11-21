@@ -4,22 +4,25 @@ This document covers execution/process/terminal primitives in `@oh-my-pi/pi-nati
 
 ## Implementation files
 
-- `crates/pi-natives/src/shell.rs`
-- `crates/pi-shell/src/shell.rs`
-- `crates/pi-shell/src/cancel.rs`
-- `crates/pi-shell/src/windows.rs` (Windows-only PATH enrichment)
-- `crates/pi-shell/src/process.rs`
-- `crates/pi-natives/src/pty.rs`
-- `crates/pi-natives/src/ps.rs`
-- `crates/pi-natives/src/keys.rs`
-- `crates/pi-natives/src/task.rs`
+- `crates/natives/src/shell.rs`
+- `crates/natives/src/shell/vfs.rs` (host-injected filesystem bridge)
+- `crates/vfs/` (shared filesystem abstraction)
+- `crates/shell/src/shell.rs`
+- `crates/shell/src/cancel.rs`
+- `crates/builtins` (embedded-shell builtins: bash builtins plus in-process utility/process commands)
+- `crates/shell/src/windows.rs` (Windows-only PATH enrichment)
+- `crates/shell/src/process.rs`
+- `crates/natives/src/pty.rs`
+- `crates/natives/src/ps.rs`
+- `crates/natives/src/keys.rs`
+- `crates/natives/src/task.rs`
 - `packages/natives/native/index.d.ts`
 
 ## Layer ownership
 
 - **Package entrypoint** (`packages/natives/native/index.js`): loads the `.node` addon and exports generated N-API bindings.
-- **Rust N-API module layer** (`crates/pi-natives/src/*`): JS-facing shell/PTY/process/key exports and callback bridging.
-- **Runtime core** (`crates/pi-shell/src/*`): brush shell execution, cancellation cleanup, minimizer integration, command fixups, and cross-platform process references.
+- **Rust N-API module layer** (`crates/natives/src/*`): JS-facing shell/PTY/process/key exports and callback bridging.
+- **Runtime core** (`crates/shell/src/*`): the embedded bash engine and its session execution (`bash`, `sys`, `vfs`, `host`, `session`, `tools`, `extras`), cancellation cleanup, minimizer integration, command fixups, and cross-platform process references.
 - **Consumers** (`packages/coding-agent`, `packages/tui`): higher-level session policy, output artifact/minimizer handling, render policy, and UI key handling.
 
 ## Shell subsystem (`shell`)
@@ -33,28 +36,79 @@ Shell execution modes:
 
 Both stream merged stdout/stderr text through a threadsafe callback and return `{ exitCode?, cancelled, timedOut, minimized?, workingDir? }`.
 
-Persistent `Shell` also exposes `liveBackgroundJobCount()`, which silently reaps completed jobs and returns the number of live `&`/`nohup` children. This lets a host retain a per-call shell while background children remain alive; dropping the shell would kill them.
+Persistent `Shell` also exposes `liveBackgroundJobCount()`, which silently reaps completed jobs and returns the number of live jobs tracked by the session. Hosts can retain per-call shells while ordinary background jobs remain alive. Only jobs that still run an external process count; exited ones are reaped between commands and keep their status for a later `wait`. Builtin `nohup <command> &` is special: the operand is detached so it survives shell teardown; this is not the behavior of the system `nohup` binary.
 
-`ShellOptions` supports `sessionEnv`, `snapshotPath`, and optional output `minimizer`. `ShellExecuteOptions` additionally supports command, cwd, command-scoped `env`, timeout/signal, and minimizer. `ShellRunOptions` supports command, cwd, command-scoped env, timeout, and signal.
+`ShellOptions` supports `sessionEnv`, `snapshotPath`, output `minimizer`, and `filesystem`. `ShellExecuteOptions` additionally supports `command`, `cwd`, command-scoped `env`, `timeoutMs`, and `signal`. `ShellRunOptions` supports `command`, `cwd`, command-scoped `env`, `timeoutMs`, `signal`, and a run-only `filesystem` override.
 
 ### Session creation and environment model
 
-Rust creates `brush_core::Shell` with:
+Rust starts a `omp_shell::session::Session` (the bash engine driven by a task on the supplied Tokio runtime, `crates/shell/src/session.rs`) with:
 
-- inherited environment disabled (`do_not_inherit_env: true`), followed by explicit environment reconstruction from host env,
-- profile and rc loading skipped,
-- bash-mode builtins, with `exec` and `suspend` disabled,
-- native `sleep`, `timeout`, and `nohup` builtins registered,
+- an explicitly reconstructed environment: the host env (non-UTF-8 entries dropped, duplicate `PATH`s merged), then `sessionEnv`, both through the skip-list below; nothing else is inherited and no profile or rc file is read,
+- the session `filesystem` behind the engine's filesystem seam (`omp_shell::vfs::VfsFs`); `scheme://` paths are absolute to the engine, and externals receive the host files that backed URL arguments and working directories alias (an unbacked or read-only URL working directory refuses the external); on Windows an MSYS drive path (`/c/x`, `/mnt/c/x`) is the drive path `C:/x` wherever the engine resolves a name (command names, redirections, `test`, `cd`, `source`), as it is for pi's utilities, so a single-letter root directory names a drive,
+- the engine's bash builtins (`exec` never replaces this process; `suspend` refuses),
+- pi's in-process utilities and process commands (`lsof`, `pgrep`, `pkill`, `pidwait`, `ps`, `sleep`, `top`) as engine commands from `omp_builtins::extras` (see the next section); `kill` is the engine builtin and refuses to signal this process, its process group or its ancestors,
+- `timeout`, `nohup` (detaches its operand so it survives shell teardown; withheld when `PI_DISABLE_NOHUP_BUILTIN` is set) and an opt-in `git` as host callouts (`crates/shell/src/tools`); anything a `git` layer does not take runs the git binary with the original arguments:
+   - `PI_SMART_GIT` serves supported `git worktree add` invocations through `omp-vcs`: copy-on-write clone, worktree registration, and reconciliation to the target commit, with an in-process checkout fallback when cloning is unavailable;
+   - `PI_GIT_GUARD` (set by the coding agent from `bash.gitGuard`; `crates/shell/src/git/guard.rs`) judges git commands that discard or move work by the checkout they run in. In a repository's main checkout, which other sessions may share, it refuses with exit status 1: `stash` other than `list`/`show`/`create`, `reset --hard`, `reset` to a commit other than HEAD's, `switch` and `checkout` of a branch or commit, and `checkout` of paths and working-tree `restore` unless the repository is mid-merge/rebase/cherry-pick/revert (unmerged index entries or the operation's state files; a finished rebase's leftover `REBASE_HEAD` does not count), and even then not forced or whole-tree forms. A linked worktree of a non-bare repository, and a submodule inside one, run everything: a command that discards uncommitted tracked changes first records them as a `git stash create` commit on the `refs/omp/discarded` reflog and says so on stderr (refused instead when it recurses into submodules, through `--recurse-submodules` or `submodule.recurse`, since that record does not hold their changes), and `stash pop`/`apply`/`drop`/`branch`/`clear` refuse a stash-list entry whose `WIP on <branch>:`/`On <branch>:` subject names another branch, a detached HEAD, or no branch. It judges the expanded argv in the directory git actually runs in (`cd` and `-C` applied); `--git-dir`/`--work-tree`/`GIT_DIR`-style redirection is refused, since the repository it changes is not the one found from the directory,
 - skip-list for shell-sensitive vars (`PS1`, `PWD`, `SHLVL`, bash function exports, etc.),
-- a non-exported `env="$env"` fallback so PowerShell-style `$env:NAME` survives brush parameter expansion unless the user shadows `env`.
+- a non-exported `env="$env"` fallback so PowerShell-style `$env:NAME` survives parameter expansion unless the user shadows `env`.
+
+URL-backed external spawns return an owned `SpawnFuture`, which the VM polls without blocking the driver. Cancelling a pending spawn drops its provider request before launching a process. External I/O pumps and decoding relays are cooperative state machines polled with the process; they do not park threads around engine I/O. Shared process-substitution feeds retain one OS pipe per engine descriptor and return unread bytes when their last holder closes. The standalone `obash` driver uses the same pollable operations without requiring a Tokio runtime.
 
 Session env behavior:
 
 - `ShellOptions.sessionEnv` / one-shot `sessionEnv` is applied at session creation.
-- `ShellRunOptions.env` / one-shot `env` is command-scoped (`EnvironmentScope::Command`) and popped after the command.
+- `ShellRunOptions.env` / one-shot `env` is command-scoped: exported for the command, and every named variable is restored afterwards.
 - `PATH` is merged specially on Windows with case-insensitive dedupe.
-- Windows-only path enrichment (`pi-shell/src/windows.rs`) appends discovered Git-for-Windows paths when present and not already included.
+- Host and forwarded session environments omit Git repository-location overrides (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`), so Git rediscovers the repository from cwd. Explicit command-scoped `env` can supply them again.
+- Windows-only path enrichment (`crates/shell/src/windows.rs`) appends discovered Git-for-Windows paths when present and not already included.
 - `snapshotPath`, when present, is sourced during session creation with stdout/stderr/stdin wired to null files.
+
+### Forked state (subshells and background jobs)
+
+Subshells, pipeline stages, background jobs, command and process substitutions, coprocs and in-engine nested `bash`/`sh` run as green-thread virtual processes (`Vproc`) inside one engine. Each forked vproc owns its global state as an `Image` (`crates/shell/src/bash/image.rs`): global variables and every other process record (functions, aliases, options, traps, positional parameters, `umask`, the directory stack, `hash` entries, history). Forking clones the parent's image, or the root's via `StateStore::snapshot`, in O(1): an `Image` is persistent maps (`crates/shell/src/bash/cow_map.rs`) whose clones share their entries until one side writes, as `fork(2)` shares memory pages. A child therefore keeps the state of its fork whatever the parent changes later, and its own writes stay private. Records outside any image (`Key::forked`) stay in the store: kernel state every vproc shares (the vpid and job counters, the start time, zftp's shared status files) and the root vproc's own fields (cwd, mode, `$?`, `PIPESTATUS`, `$!`, the job table, `getopts` progress, `ulimit` values), which a forked vproc keeps as fields of its own. The root shell's state is the store itself, which `MemStore` keeps in an `Image`, so a session's per-command state image (`Session::latest_image`) is an O(1) clone too, and `Shell::save_state()` (`Shell.saveState()` in JS) serializes it for a later process to resume (`ShellOptions.state`, `Session::resume`): the process state without the environment variables the session's environment still holds unchanged, which the resuming session takes from its own; refused when another engine build or record schema saved it. `Shell::externalize` saves a forked vproc's image as what it changed relative to the root's (`Image::diff`).
+
+### Host-injected filesystem
+
+`filesystem` is `{ handler: (error: Error | null, request: ShellFsRequest) => Promise<ShellFsResponse>, nativeLocalPaths?: boolean, onFileChange?: (error: Error | null, change: ShellFileChange) => void }`. The bridge covers shell redirections, globs, cwd changes, and in-process utility file operations; paths travel verbatim, including absolute `scheme://` URLs. With `nativeLocalPaths: true`, all host paths bypass the handler and only URL paths are routed to it; otherwise the handler receives host paths too. Ordinary external programs still use the OS filesystem rather than this callback interface.
+
+`onFileChange` reports the host files a command changed itself, as `{ path, before?, after? }` with the content on either side (absent where there was no file). It covers a builtin's writes, renames and removals (`sed -i`, `cp`, `mv`, `rm`, `tee`) and the target of a redirection, each compared once its command is done: a temporary file renamed into place is one change of the target, and a redirection's file is read after the program writing through it exits. What a spawned program opens on its own is not reported. Only text files of at most 4 MiB that git would track are reported (inside a work tree, not ignored, outside `.git`), at most 1024 files and 32 MiB per command and 64 MiB per filesystem; binary files and symlinks are skipped.
+
+Requests identify an operation (`metadata`, `readDir`, `open`, `read`, `write`, `close`, mutation operations, and others); generated `ShellFs*` types define the complete wire contract. Binary payloads use `Uint8Array`/`Buffer`; positional request offsets and other `u64` quantities use `bigint`, while responses accept exact `number | bigint`. Return `{ error: { code, message? } }` for filesystem errors; rejected promises or malformed responses are provider failures. `local`/`localTarget` responses can delegate operations to native host paths after the provider applies its access policy.
+
+The session filesystem is restored after a run-only override. Provider waits are scoped to run cancellation. Successful runs wait for dropped virtual-file closes so writes have settled; close failures are reported on stderr and fail otherwise-successful commands.
+
+### In-process utility builtins (uutils-derived)
+
+Beyond the bash builtins, the session runs the in-process command-line utilities implemented in the `omp-builtins` crate (`crates/builtins`) — in-house ports of uutils coreutils/findutils/sed built on `uucore` 0.8.0, and a `jq` that behaves like jq 1.8.2, built on vendored, jq-patched jaq crates (`crates/vendor/jaq-*`). The set includes `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `ls`, `find`, `grep`, `mkdir`, `rm`, `mv`, `cp`, `ln`, `sed`, `jq`, `fd`, `diff`, the checksum/`tr`/`cut`/`date` families, and more; `omp_builtins::extras::extras()` is the authoritative list.
+
+These utilities are found before `PATH`, so on Windows `find`, `sort`, `timeout` and `whoami` shadow the System32 programs of the same names, whose options are `/X` switches. A command line written in such a program's own syntax goes to `PATH`'s program instead (`Host::defers_to_path`, `crates/shell/src/cmd_dialect.rs`). The syntax is decided by markers, tokens only one side writes: a cmd marker is one of the program's switches (as `PROGRAM /?` lists them), anywhere on the line; a GNU marker is `-x`, `--x`, or `find`'s `(`, `)`, `!`. Any GNU marker keeps pi's utility; otherwise a cmd marker sends the line to the program, unless it has more operands than the program takes (`timeout 5 sort /t x` stays pi's `timeout`). Whether the GNU reading is valid is never consulted: `find /c` would walk all of `C:` and still goes to `FIND`. So `dir | find /c /v ""`, `sort data.txt /r` and `timeout /t 5` run the Windows programs, while `find /c -name x` and `sort -r` stay pi's. When `PATH` has no such program the utility runs after all. `type` still reports the utility.
+
+Three search-related builtins are worth calling out:
+
+- `grep` is implemented on the ripgrep libraries (`grep-regex`/`grep-searcher`), with directory walks and ordered parallel search served by `omp-xfs` (`rg`/`grep` output stays in path order).
+- `rg` is a sibling builtin with ripgrep defaults (recursive search, ignore/hidden filtering, binary suppression) — a separate module and argument model, not an alias of `grep`.
+- `fd` is backed by `omp-xfs`'s parallel `walk::ordered` walk (filters run on the walk's workers; matches print in path order as the walk settles them, with `.fdignore` read by the walker as an extra ignore file), `globset`, and `regex`.
+- `ast-grep` (also `sg`) runs ast-grep 0.50's `run` command (`-p`/`-r`/`-U`, `--json`, context, `--heading`, `--files-with-matches`, `--stdin`) on the `omp-ast` search engine with ast-grep's piped (uncolored) output; `scan`, `test`, `new`, `lsp`, `outline`, `--config`, `--interactive`, `--kind`, `--debug-query`, and `--inspect` exit 2 as unsupported.
+
+Walks rooted on a local filesystem (`find`, `fd`, `rg`, `grep -r`, and the `grep`/`glob` natives) list network mounts below the root (NFS, SMB, autofs, sshfs, …; read from the mount table in `crates/xfs/src/fs/mounts.rs`) but do not descend into them; name the mount as the search root to walk it. ovnfs mounts are always walked. The ordered traversal behind `find` lists the next directories ahead on the blocking pool while listings are slow (network filesystems, cold caches) and stays serial while they are fast.
+
+Each builtin runs inside the shell process (no `fork`/`exec`) against the `omp-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated (`ExtrasGate` in `crates/shell/src/extras.rs`, built in `crates/shell/src/tools/mod.rs`):
+
+- `PI_DISABLE_UUTILS_BUILTINS` disables the whole utility set (bare names resolve to system binaries again),
+- `PI_DISABLE_UUTILS_DESTRUCTIVE` disables the destructive shadows together: `rm`, `mv`, `cp`, `dd`, `rsync` and `tar`, which overwrite or delete files, and `ln`, which can clobber via `-f`,
+- `PI_DISABLE_RM_BUILTIN` / `PI_DISABLE_MV_BUILTIN` disable `rm`/`mv` individually.
+
+Builtin switches are read from `sessionEnv` first, then the process environment, during session creation. Values are truthy when present and not empty, `"0"`, or case-insensitive `"false"`; command-scoped `env` does not change registration.
+
+`omp zsh` on Windows (the process shell, `crates/shell/src/process`) offers the same utilities the other way round: only as a fallback when `PATH` has no program of that name (`Host::fallback`), so a program on `PATH` keeps running and the Unix tools Windows lacks are still there. A defined `command_not_found_handler` wins over the fallback. The same switches apply. `type`/`whence` still answer from `PATH`, and `exec` of a missing name stays not found. On Linux and macOS a missing command stays not found.
+
+On Windows, `omp zsh` takes zsh's function library (`fpath`, for `compinit`) from an MSYS2, Cygwin or Git for Windows zsh: the root of a `…\usr\bin` (or Cygwin `…\bin`) on `PATH`, then `C:\msys64`, `C:\cygwin64` and `C:\cygwin`. A console `read` that Ctrl-C ends is not end of input: when the shell traps or ignores `INT`, the read resumes after the trap, as a Unix read interrupted by `SIGINT` does. `read -k`/`-q` read the terminal in cbreak mode on every platform.
+
+Windows has no process groups or terminal foreground, so the spawner maps them onto console process groups. A foreground program stays in the shell's console group, so the keyboard's Ctrl-C reaches it as `SIGINT` reaches a Unix foreground group. A program whose `INT` is ignored (a background job without job control) or a job-control job gets a group of its own, so the keyboard's Ctrl-C passes it by. `fg` makes the shell forward the next Ctrl-C to that job's group as `CTRL_BREAK_EVENT`, and the shell itself is not interrupted, which emulates `tcsetpgrp`. `jobs`/`fg`/`bg` work, and `kill -STOP`/`-CONT` pause and resume a job. Ctrl-Z does not suspend the foreground program: Windows programs read the console themselves, so the key reaches the program (often as end of input) and never the shell. Catching it would mean running every foreground program behind a pseudoconsole the shell relays.
+
+A `<(…)`/`>(…)` passed to a Windows program becomes a named pipe `\\.\pipe\obash-pump-…` in place of `/dev/fd/N`. Programs often open a path once just to inspect it (`cmd`'s `type`, the MSYS runtime's `stat`), so the pipe keeps instances listening, from the spawn on, until the connection that moves data is known: for the child's reading, the newest connection still open once it settled (the MSYS runtime's path check opens first and never reads); for its writing, the first that delivers bytes. Builtins and functions keep reading `/dev/fd/N` in-process. MSYS and Cygwin programs (Git for Windows' `diff`, `cmp`, …) see such a path as a regular file whose size is what the pipe holds when they `stat` it: one that trusts the size may take a pipe whose producer has not written yet for an empty file (`diff <(slow) <(slow)` reporting no difference). Native Windows programs just read.
 
 ### Runtime lifecycle and state transitions
 
@@ -64,7 +118,7 @@ Persistent shell (`Shell.run`) uses this state machine:
 - **Running**: first `run()` lazily creates a session, stores an abort token, executes command.
 - **Completed + keepalive**: if execution control flow is normal, abort state is cleared and session is reused.
 - **Completed + teardown**: if control flow is loop/script/shell-exit related, session is dropped.
-- **Cancelled/Timed out**: Tokio cancellation token is triggered, descendants started after the baseline snapshot receive termination waves, a 2-second graceful wait is allowed, the task may be aborted, and the persistent session is dropped if the lock can be acquired.
+- **Cancelled/Timed out**: Tokio cancellation is triggered; a per-run spawn registry targets that run's processes and descendants with TERM/KILL waves. A 2-second graceful task wait is allowed (5 seconds on Windows), the task may be aborted, and the persistent session is dropped if the lock can be acquired.
 - **Error**: session is dropped.
 
 One-shot shell (`executeShell`) always creates and drops a fresh session per call.
@@ -73,19 +127,22 @@ One-shot shell (`executeShell`) always creates and drops a fresh session per cal
 
 - Stdout/stderr are routed into a shared pipe and read concurrently.
 - Reader decodes UTF-8 incrementally; invalid byte sequences emit `U+FFFD` replacement chunks.
+- On Windows with a non-UTF-8 ANSI code page, encoding is decided per producer. Each external program writing into the capture or a command substitution writes into its own relay pipe (`crates/shell/src/sys/relay.rs`, started by `PiHost::spawn`) and is decoded on its own: UTF-8 until its first invalid sequence, then the ANSI code page for the rest of that program's output. A program's stdout and stderr share one relay, so their interleaving survives. The relay is no thread: the program's `ExtProc` polls it on the shell's own task (the shell's end of the relay pipe is overlapped, and its completions wake that task), and nothing else reads the pipe, so when the program exits the shell sizes its output exactly: what the relay read plus what the pipe holds then. The exit is reported once the relay has forwarded that much, however long a slow capture reader takes. Bytes the decoder holds for a character the program ended inside wait for end of stream; the exit waits at most 50ms for it when a process the program left running keeps the pipe open. The relay goes on forwarding what such a process writes until the end of the stream, after the exit was reported (as a task on the session's runtime once the program's `ExtProc` is gone), and releases held bytes there. What builtins write (`printf`, `cut`, `cat` of a legacy file, a native program's output passed through `| head`) is judged per line: valid UTF-8 stays UTF-8; a line that strict-decodes in the ANSI code page and reads worse as UTF-8 is decoded from it, unless, in a multibyte code page, its only flaw is a character cut short at its end; anything else gets `U+FFFD`. ASCII streams at once; a line holding other bytes is emitted at its newline, after 50ms without output, or at 64 KiB, keeping a character split across writes for its next bytes, and the encoding chosen for a partly emitted line holds to its newline. Pipeline pipes and files are never decoded, so binary data passes byte for byte.
+- The N-API output bridge has a bounded 64-chunk queue and awaits callback execution, backpressuring pipe readers and the child. Queued chunks are coalesced before forwarding. A single callback stalled for 30 seconds disconnects the bridge so readers can continue draining.
 - The command runs with `ProcessGroupPolicy::NewProcessGroup`.
 - After the foreground command completes, the reader drains until EOF, 250ms of idle output, or 2s maximum; reader shutdown then gets a 250ms timeout.
+- The JS forwarding pump then drains accepted output on normal completion/errors; interrupted runs allow at most 2 seconds before aborting that pump. Cancellation delays reader shutdown by 500ms on non-Windows or 2s on Windows so pipeline consumers can flush.
 - Optional minimizer configuration can capture and rewrite output. When minimization occurs, the result includes `minimized` with filter name, replacement/original text, and byte counts.
 - A successful result can include `workingDir`, reflecting the shell's cwd after execution.
 - Consumers are responsible for persisting or displaying minimizer artifacts; the native result only carries the data.
 
 ### Cancellation, timeout, and abort
 
-- `CancelToken` is constructed from `timeoutMs` and optional `AbortSignal`, then converted into the shared `pi_shell::cancel::CancelToken`.
-- On cancellation/timeout, shell cancellation token is triggered, descendant cleanup runs, then the task gets a 2-second graceful window before forced abort.
+- `CancelToken` is constructed from `timeoutMs` and optional `AbortSignal`, then converted into the shared `omp_shell::cancel::CancelToken`.
+- On cancellation/timeout, shell cancellation token is triggered, descendant cleanup runs, then the task gets a 2-second graceful window (5 seconds on Windows) before forced abort.
 - Structured result flags are used:
-  - timeout -> `exitCode` omitted, `timedOut: true`.
-  - abort signal / `Shell.abort()` -> `exitCode` omitted, `cancelled: true`.
+   - timeout -> `exitCode` omitted, `timedOut: true`.
+   - abort signal / `Shell.abort()` -> `exitCode` omitted, `cancelled: true`.
 
 `Shell.abort()` behavior:
 
@@ -116,7 +173,7 @@ Common surfaced errors include:
 - `resize(cols, rows)`
 - `kill()`
 
-Both start methods invoke `onStart(error, pid)` after spawning (the implementation supplies `0` only if a platform child PID is unavailable). `PtyStartOptions` supports `command`, optional `cwd`, `env`, `timeoutMs`, `signal`, `cols`, `rows`, and `shell`; its default shell is `sh`. `PtyArgvStartOptions` instead requires `application` and `args` and has no `shell`.
+Both start methods invoke `onStart(error, pid)` after spawning (the implementation supplies `0` only if a platform child PID is unavailable). `PtyStartOptions` supports `command`, optional `cwd`, optional `env`, `timeoutMs`, `signal`, `cols`, `rows`, and `shell`; its default shell is `sh`. `PtyArgvStartOptions` instead requires `application` and `args` and has no `shell`.
 
 ### Runtime lifecycle and state transitions
 
@@ -137,20 +194,21 @@ Concurrency guard:
 - PTY opened via `portable_pty::native_pty_system().openpty(...)`.
 - On Windows, `openpty()` is run on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
 - `start()` runs the command through the configured shell:
-  - `cmd.exe`/`cmd` gets `/c`,
-  - `powershell`/`pwsh` gets `-Command`,
-  - other shells get `-lc`.
+   - `cmd.exe`/`cmd` gets `/c`,
+   - `powershell`/`pwsh` gets `-Command`,
+   - other shells get `-lc`.
 - `startArgv()` passes each argument directly to `portable_pty::CommandBuilder`.
+- PTY commands inherit the process environment after stripping Git repository-location overrides; explicit PTY `env` values can add them back.
 - Default size is `120x40`; dimensions are clamped (`cols 20..400`, `rows 5..200`) on start and resize.
-- `write()` sends raw bytes to PTY stdin.
+- `write(data: string)` sends the string's UTF-8 bytes to PTY stdin.
 - `resize()` sends a control message and clamps dimensions again.
 - `kill()` sends a control message that marks the run cancelled and terminates PTY process targets.
 
 Output path:
 
-- dedicated reader thread reads master stream,
-- incremental UTF-8 decode emits `U+FFFD` for invalid bytes,
-- chunks forwarded through N-API threadsafe callback.
+- a dedicated reader thread reads the master stream and incrementally decodes UTF-8, replacing invalid bytes with `U+FFFD`,
+- a bounded 64-chunk queue backpressures that reader; a separate async pump coalesces output and awaits N-API callback execution,
+- the control loop never waits on JS callback execution, so input, resize, kill, and child-status checks remain live.
 
 Termination path:
 
@@ -161,10 +219,12 @@ Termination path:
 ### Cancellation and timeout semantics
 
 - `timeoutMs` and `AbortSignal` feed a `CancelToken`.
-- Loop calls `ct.heartbeat()` periodically with a 16ms maximum wait cadence.
-- Timeout classification is based on the heartbeat error string containing `Timeout`.
-- Cancellation/kill starts a 300ms post-cancel drain window; normal child exit starts a 300ms post-exit drain window.
-- Final reader drain is 50ms on non-Windows and 500ms on Windows.
+- Preflight heartbeat checks before `openpty` and spawn reject cancellation as setup errors.
+- The running loop calls `ct.heartbeat()` with a 16ms maximum control wait cadence. Timeout classification uses a heartbeat error containing `Timeout`.
+- Cancellation, kill, or a lost JS callback terminates process targets and starts a 300ms post-cancel window. The result may still include an exit code observed while reaping.
+- On non-Windows, cancelled-child reaping polls for up to 500ms, then delegates an unfinished reap to a detached thread rather than pinning the promise.
+- Normal finite runs wait for accepted output to reach JS. A descendant that holds the slave open can end draining after 2s with an empty queue and no callback in flight; backpressure is not treated as an idle slave.
+- Interrupted runs abort a slow output pump and wait up to 300ms for it to stop; an already-queued JS callback may still run.
 
 ### Failure behavior
 
@@ -175,7 +235,6 @@ Error surfaces include:
 - PTY spawn failure,
 - writer/reader acquisition failure,
 - child status/wait failures,
-- lock poisoning,
 - control-channel disconnection (`PTY session is no longer available`).
 
 Control call failures when not running:
@@ -197,11 +256,15 @@ Current JS surface is the `Process` class:
 
 ### Behavior
 
-- `killTree(signal?)` sends the requested signal to the process and descendants, children first; on Windows the signal argument is ignored and processes are terminated via `TerminateProcess`.
-- `terminate(options?)` is async. By default it uses a 1000ms graceful phase and a 5000ms post-hard-kill wait. Passing `gracefulMs < 0` skips the graceful phase. `group: true` also targets the process group where supported; aborting its signal rejects the promise.
+- `killTree(signal?)` defaults to the hard-kill signal, sends it to the process and descendants children-first, and returns the number signalled; on Windows the signal argument is ignored and processes are terminated via `TerminateProcess`.
+- `terminate(options?)` is async and resolves whether the tree exited within its wait windows. Defaults are 1000ms graceful wait and 5000ms post-hard-kill wait. `gracefulMs < 0` skips the graceful wait, not the initial polite signal. `group: true` also targets the process group where supported; aborting its signal rejects termination waits.
 - `waitForExit(options?)` resolves `true` when the process exits and `false` on timeout; aborting its signal rejects the promise.
 
-The platform-specific implementation lives in `pi_shell::process`; `crates/pi-natives/src/ps.rs` is a N-API shim plus re-exports used by PTY termination.
+The platform-specific implementation lives in `omp_shell::process`; `crates/natives/src/ps.rs` is a N-API shim plus re-exports used by PTY termination.
+
+`execReplace(path, argv, env, keepFds)` is a separate synchronous process handoff: on Unix it clears `FD_CLOEXEC` on `keepFds` and calls `execve`, replacing the host process in the same PID without JS/native cleanup on success. `path` is not looked up on `PATH`. Callers must restore the terminal and flush logs first. Interior NUL bytes, exec failures, and unsupported platforms throw; Windows callers must use spawn-and-wait instead.
+
+`expandWindowsLongPath(path)` and `getWindowsShortPath(path)` are exported from `shell.rs`. They preserve the input when expansion/short-name lookup fails and are identity functions off Windows.
 
 ## Key parsing subsystem (`keys`)
 
@@ -227,12 +290,13 @@ The parser combines:
 
 Modifier handling:
 
-- only shift/alt/ctrl/super bits are compared for key matching,
-- lock bits are masked out before comparisons.
+- high-level key IDs support shift/alt/ctrl/super,
+- Kitty matching masks caps-lock and num-lock bits before comparing modifier masks; unsupported modifier bits are not silently ignored.
 
 Layout behavior:
 
 - base-layout fallback is intentionally constrained so remapped layouts do not create false matches for ASCII letters/symbols.
+- `parseKey` and high-level `matchesKey` ignore Kitty release events; `parseKittySequence` preserves the event type (press/repeat/release) for callers that need it.
 
 ### Failure behavior
 

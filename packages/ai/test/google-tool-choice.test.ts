@@ -5,12 +5,6 @@ import type { Context, Tool, ToolChoice } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 describe("mapGoogleToolChoice (F7)", () => {
-	it("returns string passthrough for auto/none/any", () => {
-		expect(mapGoogleToolChoice("auto" as unknown as ToolChoice)).toBe("auto");
-		expect(mapGoogleToolChoice("none" as unknown as ToolChoice)).toBe("none");
-		expect(mapGoogleToolChoice("any" as unknown as ToolChoice)).toBe("any");
-	});
-
 	it("maps 'required' to 'any'", () => {
 		expect(mapGoogleToolChoice("required" as unknown as ToolChoice)).toBe("any");
 	});

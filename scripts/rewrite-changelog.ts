@@ -8,7 +8,7 @@
  * the final shipped behavior belongs in release notes.
  *
  * For every non-empty `[Unreleased]` section this script hands the whole section
- * to a small model (default `google-antigravity/gemini-3.7-flash` via `@oh-my-pi/pi-ai`)
+ * to a small model (default `openai-codex/gpt-5.6-luna` via `@oh-my-pi/pi-ai`),
  * and asks for a complete replacement grouped by changelog category. The model
  * returns structured sections/items; markdown is rendered locally so only the
  * Unreleased section changes and formatting stays deterministic.
@@ -25,14 +25,24 @@
  *   bun scripts/rewrite-changelog.ts --package coding-agent
  *   bun scripts/rewrite-changelog.ts --model google/gemini-3.5-flash
  *
- * Auth: resolves the provider API key through omp's auth storage
- * (~/.omp/agent/agent.db: stored key, OAuth, or env var fallback).
+ * Auth: requests go through an omp auth-storage key resolver (auth broker when
+ * configured, else ~/.omp/agent/agent.db, or env var fallback), so invalidated or
+ * exhausted credentials are refreshed, disabled, or rotated like in a session.
  */
 
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { type } from "@oh-my-pi/omptype";
-import { type Api, completeSimple, Effort, type Model, type Tool, type ToolCall } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type ApiKey,
+	type AuthStorage,
+	completeSimple,
+	Effort,
+	type Model,
+	type Tool,
+	type ToolCall,
+} from "@oh-my-pi/pi-ai";
 import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -46,7 +56,10 @@ import {
 	resolveRepoRoot,
 } from "./fix-changelogs";
 
-const DEFAULT_MODEL = "google-antigravity/gemini-3.7-flash";
+const SOURCE_LABEL = "rewrite-changelog";
+const DEFAULT_MODEL = "openai-codex/gpt-5.6-luna";
+/** Tried in order after the primary model fails (quota exhaustion, auth, hard API errors). */
+const FALLBACK_MODELS: string[] = [];
 
 // --------------------------------------------------------------------------
 // Prompts
@@ -89,25 +102,29 @@ Call the \`rewrite\` tool with the rewritten release note sections.
 
 interface RewriteModel {
 	model: Model<Api>;
-	apiKey: string;
+	apiKey: ApiKey;
 	spec: string;
 }
 
-async function openModel(modelSpec: string): Promise<RewriteModel> {
+/**
+ * Resolves `<provider>/<model-id>` against the bundled catalog and binds it to a
+ * `storage` key resolver. A resolver (not a captured bearer) lets
+ * `completeSimple` refresh, disable, and rotate a rejected credential, which
+ * also reports revoked tokens back to the auth broker.
+ */
+async function openModel(modelSpec: string, storage: AuthStorage): Promise<RewriteModel> {
 	const slash = modelSpec.indexOf("/");
 	if (slash <= 0) throw new Error(`--model must be <provider>/<model-id>, got "${modelSpec}"`);
 	const provider = modelSpec.slice(0, slash);
 	const modelId = modelSpec.slice(slash + 1);
 	const model = getBundledModel(provider as GeneratedProvider, modelId);
 	if (!model) throw new Error(`unknown model "${modelSpec}" (not in bundled catalog)`);
-	const storage = await discoverAuthStorage({ sourceLabel: "rewrite-changelog" });
-	const apiKey = await storage.getApiKey(provider);
-	if (!apiKey) {
+	if (!(await storage.keys.get(provider))) {
 		throw new Error(
-			`no credentials for provider "${provider}" via ${storage.sourceLabel ?? "auth storage"} (check broker or run \`omp login\`)`,
+			`no credentials for provider "${provider}" via ${SOURCE_LABEL} (check broker or run \`omp login\`)`,
 		);
 	}
-	return { model, apiKey, spec: modelSpec };
+	return { model, apiKey: storage.keys.resolver(provider), spec: modelSpec };
 }
 
 // --------------------------------------------------------------------------
@@ -300,8 +317,39 @@ async function run(options: RunOptions): Promise<RunResult> {
 	const paths = (await changelogPaths(repoRoot)).filter(
 		changelogPath => !options.packageFilter || changelogPath.includes(options.packageFilter),
 	);
-	const model = await openModel(options.model);
+	const specs = [options.model, ...FALLBACK_MODELS.filter(spec => spec !== options.model)];
+	const opened = new Map<string, Promise<RewriteModel>>();
+	let auth: Promise<AuthStorage> | undefined;
+	// Once a model spec fails (all requestRewrite retries or open error), later
+	// files skip straight to the next spec instead of re-burning its retries.
+	let activeSpec = 0;
+	async function rewriteWithFallback(packageName: string, unreleasedBody: string): Promise<RewrittenSection[]> {
+		let lastError: unknown;
+		for (let i = activeSpec; i < specs.length; i++) {
+			const spec = specs[i];
+			if (!spec) continue;
+			try {
+				let model = opened.get(spec);
+				if (!model) {
+					auth ??= discoverAuthStorage({ sourceLabel: SOURCE_LABEL });
+					model = auth.then(storage => openModel(spec, storage));
+					opened.set(spec, model);
+				}
+				return await requestRewrite(await model, packageName, unreleasedBody);
+			} catch (error) {
+				lastError = error;
+				activeSpec = Math.max(activeSpec, i + 1);
+				const next = specs[i + 1];
+				if (next) {
+					const message = error instanceof Error ? error.message : String(error);
+					console.warn(`${packageName}: ${spec} failed (${message}); falling back to ${next}`);
+				}
+			}
+		}
+		throw lastError;
+	}
 	const concurrency = options.concurrency ?? 4;
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results: Array<RewrittenFile | undefined> = new Array(paths.length);
 
 	let pathIndex = 0;
@@ -323,7 +371,7 @@ async function run(options: RunOptions): Promise<RunResult> {
 				.replace(/^## \[Unreleased\]\n?/, "")
 				.trim();
 
-			const rewritten = await requestRewrite(model, changelogPath, unreleasedBody);
+			const rewritten = await rewriteWithFallback(changelogPath, unreleasedBody);
 			applyRewrite(section, rewritten);
 			const next = renderChangelog(document);
 			if (next === content) continue;
@@ -343,14 +391,23 @@ async function run(options: RunOptions): Promise<RunResult> {
 	}
 
 	const workers = Array.from({ length: Math.min(concurrency, paths.length) }, worker);
-	await Promise.all(workers);
+	try {
+		await Promise.all(workers);
+	} finally {
+		// Broker-backed storage runs a background SSE/long-poll loop that keeps
+		// the event loop alive; release it once requests are done.
+		await auth?.then(
+			storage => storage.close(),
+			() => {},
+		);
+	}
 
 	const changed: RewrittenFile[] = [];
 	for (const res of results) {
 		if (res !== undefined) changed.push(res);
 	}
 
-	return { model: model.spec, changed };
+	return { model: specs.slice(0, activeSpec + 1).join(" -> "), changed };
 }
 
 // --------------------------------------------------------------------------
@@ -396,7 +453,7 @@ function usage(): string {
 		"while preserving public contract, exports, API, config, auth, and billing behavior.",
 		"",
 		"Options:",
-		`  -m, --model <prov/id>  Classifier model (default ${DEFAULT_MODEL}).`,
+		`  -m, --model <prov/id>  Classifier model (default ${DEFAULT_MODEL}${FALLBACK_MODELS.length > 0 ? `; falls back to ${FALLBACK_MODELS.join(", ")} on failure` : ""}).`,
 		"  --package <substr> Only changelogs whose path contains this substring.",
 		"  --concurrency <n>  Max concurrent changelogs to process in parallel (default 4).",
 		"  --dry-run          Report what would be dropped without writing files.",

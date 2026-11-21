@@ -2,6 +2,216 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Fixed
+
+- Improved diagnostics when a configured embedding provider fails, making provider errors visible in logs while preserving the existing fallback behavior.
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed embedding requests failing when oversized inputs were clipped in the middle of an emoji or other Unicode character.
+
+## [18.21.0] - 2026-11-16
+
+### Changed
+
+- Improved file memory bank performance by reducing unnecessary disk synchronization during checkpointing, lowering per-turn I/O overhead for banks shared across multiple processes.
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added configurable embedding query prefixes and input types for instruction-tuned and asymmetric embedding models, including Qwen3-Embedding, E5, and NVIDIA NIM.
+- Added the `embeddings.onRequestFailed` callback, allowing hosts to handle and surface failed embedding API requests.
+
+## [18.20.0] - 2026-11-12
+
+### Fixed
+
+- Fixed fact extraction storing decimals, prices, and IP-address fragments as `version` facts and leaving symbols such as `→` in `metric` fact keys ([#18886](https://github.com/can1357/oh-my-pi/issues/18886))
+
+## [18.18.4] - 2026-11-09
+
+### Fixed
+
+- Fixed late background embedding writes overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18503](https://github.com/can1357/oh-my-pi/pull/18503) by [@eggpeat](https://github.com/eggpeat))
+- Fixed a second `Mnemopi` instance configured for a different local embedding model silently reusing the first instance's encoder while stamping its vectors with the configured model: local encoders are now cached per model, and a failed load evicts only that model's entry ([#18562](https://github.com/can1357/oh-my-pi/pull/18562) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed recall returning episodic summaries for working memories that had been invalidated.
+
+## [18.18.1] - 2026-11-08
+
+### Fixed
+
+- Fixed recall scoring memories against vectors from a previous embedding model while a model-change rebuild was still running or had failed: dense search now only uses vectors stamped with the active model, falling back to lexical matching for memories awaiting re-embedding ([#18442](https://github.com/can1357/oh-my-pi/pull/18442) by [@eggpeat](https://github.com/eggpeat))
+- Fixed model-change embedding rebuilds overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18441](https://github.com/can1357/oh-my-pi/pull/18441) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed embedding rebuilds failing on hosted APIs that cap the inputs per request: `embed()` now splits large lists into requests of at most `MNEMOPI_EMBEDDING_BATCH_SIZE` texts (default 64; set `10` for DashScope) or the `embeddings.batchSize` runtime option, and returns `null` when the API returns a different number of vectors than texts ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+- Fixed an embedding model change deleting every stored vector when the new provider had no key, did not answer, or rejected a batch partway through: the store now embeds the whole corpus with the new model before replacing anything, keeps the old vectors if any request fails, and tries again on the next open ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+- Fixed rejected embedding API requests leaving no trace: the status and the first 300 characters of the response body now go to the log at `debug`, or at `warn` when runtime debug is on ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+
+## [18.17.0] - 2026-11-06
+
+### Changed
+
+- Development installs reuse fastembed’s ONNX Runtime instead of installing a duplicate native runtime.
+
+## [18.14.2] - 2026-10-31
+
+### Fixed
+
+- Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
+### Fixed
+
+- Fixed local embeddings using one spinning CPU thread per core, so a single recall query cost several CPU-seconds on a many-core machine ([#17109](https://github.com/can1357/oh-my-pi/pull/17109) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.13.0] - 2026-10-26
+
+### Fixed
+
+- Fixed polyphonic recall's graph voice finding no memories for non-English names (e.g. `Hà Nội`) or names of three or more words, and Vietnamese words like `tôi` being stored as the participant `i` ([#16723](https://github.com/can1357/oh-my-pi/issues/16723))
+
+## [18.12.4] - 2026-10-20
+
+### Fixed
+
+- Fixed background fact extraction storing only the first 5 facts of a plain-line extractor answer; it now keeps up to 20, matching JSON answers ([#16377](https://github.com/can1357/oh-my-pi/pull/16377) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.11.2] - 2026-10-16
+
+### Fixed
+
+- Fixed `MNEMOPI_<LABEL>_WEIGHT` and `MNEMOPI_TIER<N>_WEIGHT` having no effect on recall ranking ([#13824](https://github.com/can1357/oh-my-pi/pull/13824) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.11.1] - 2026-10-15
+
+### Fixed
+
+- Fixed a failing `mnemopi` CLI command or MCP memory call dropping the embeddings of memories it had just stored ([#15804](https://github.com/can1357/oh-my-pi/pull/15804) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.11.0] - 2026-10-14
+
+### Fixed
+
+- Fixed polyphonic recall ranking unrelated memories above relevant ones when the query shared only a common word such as "that" with an extracted fact subject ([#15512](https://github.com/can1357/oh-my-pi/issues/15512)).
+
+## [18.9.0] - 2026-10-11
+
+### Added
+
+- Exported `clipRecallContent` for applications that need to format content consistently with Mnemopi recall previews.
+
+### Fixed
+
+- Fixed memory-save performance degradation and excessive memory-database growth when date-related terms such as “today” appeared in otherwise unrelated memories.
+
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed long retained transcripts exhausting local memory extraction models by limiting each extraction input to 8192 characters while keeping the opening context and newest turns ([#14956](https://github.com/can1357/oh-my-pi/issues/14956)).
+
+## [18.8.7] - 2026-10-09
+
+### Fixed
+
+- Fixed proactive linking freezing the host for seconds per stored memory on large banks; a memory's graph links are now written in one commit instead of one per link ([#14998](https://github.com/can1357/oh-my-pi/issues/14998)).
+
+## [18.8.5] - 2026-10-08
+
+### Fixed
+
+- Fixed new memories gaining graph links (`related_to`, `references`, `ctx`) to memories that were already invalidated, superseded, or expired; proactive linking and consolidation now link only to memories recall can still return, so the graph stops growing toward retired memories ([#14427](https://github.com/can1357/oh-my-pi/pull/14427) by [@tickernelz](https://github.com/tickernelz)).
+
+## [18.5.1] - 2026-10-03
+
+### Changed
+
+- Upgraded local embedding support to fastembed 3.0.0. Models now download from Hugging Face into the updated cache layout, with interrupted downloads resuming automatically; existing models are migrated on first use while producing the same vectors.
+
+### Fixed
+
+- Fixed enhanced recall returning cached results from an unrelated longer query when answering a shorter query.
+- Fixed local embedding setup on fresh caches and Linux ARM64, including compatibility with current model downloads and ARM64 tokenization support.
+
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added per-instance `polyphonicRecall` and `enhancedRecall` options to `Mnemopi` and `BeamMemory`, so memories opened side by side can use different recall policies; `configureRecallFeatures` remains the process-wide default and the env vars still win
+
+### Fixed
+
+- Fixed `MNEMOPI_POLYPHONIC_RECALL` / `polyphonicRecall` having no effect: `recallEnhanced` now fuses its ranking with the vector, graph, fact and temporal voices, and extracted subject/predicate/object facts are consolidated so the fact voice has data ([#2323](https://github.com/can1357/oh-my-pi/issues/2323))
+- Fixed `MNEMOPI_ENHANCED_RECALL` / `enhancedRecall` having no effect: `recallEnhanced` now caches results, keyed on every recall option so a different limit, fact inclusion, channel, query time or bank never reuses another call's ranking, and any database write clears it ([#2323](https://github.com/can1357/oh-my-pi/issues/2323))
+- Fixed polyphonic recall's graph voice taking seconds on densely linked banks (`proactiveLinking`): it now walks from at most 16 seeds in one batched edge query per hop and reports at most 64 memories, and `recallEnhanced` no longer drops rows below `topK` to a token budget
+- Fixed a failed `consolidated_facts` backfill never being retried; backfill and fact consolidation failures are now logged
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed extracted facts still being recalled after their source memory was invalidated or expired. ([#12825](https://github.com/can1357/oh-my-pi/pull/12825) by [@Jpei1994](https://github.com/Jpei1994))
+
+## [18.3.3] - 2026-09-27
+
+### Fixed
+
+- Fixed recall search matching query terms inside unrelated words, improving result relevance and ensuring exact matches are prioritized.
+- Fixed sleep summaries replacing shortened terms within larger words, preventing unintended word corruption.
+
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved SQLite vector search and import performance by reducing repeated database metadata checks.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Fixed an explicitly invalidated memory still being returned by an identical repeat query until the recall cache expired.
+- Fixed recall continuing to serve a stale, pre-embedding ranking for up to an hour after background embeddings finished, when the enhanced recall cache is enabled.
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed working-memory recall returning too few or no results after matching memories were invalidated.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed working-memory search returning too few or no results when the most relevant matches had been superseded, ensuring valid older entries are still returned.
+
+## [18.0.0] - 2026-08-22
+
+### Fixed
+
+- Fixed false-positive location extraction in episodic gists by properly enforcing capitalization constraints for proper nouns.
+- Improved episodic gist participant extraction with Unicode support to properly capture names in non-Latin scripts (e.g., Cyrillic, Greek).
+
 ## [17.3.8] - 2026-08-19
 
 ### Added

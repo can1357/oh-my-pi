@@ -127,6 +127,27 @@ describe("openai-completions parseChunkUsage", () => {
 		expect(usage.totalTokens).toBe(6_250);
 	});
 
+	it("reads Vertex/Gemini cachedContentTokenCount as a cache-read source", () => {
+		// Vertex AI (and gateways fronting it) report cache hits in
+		// usage.cachedContentTokenCount (camelCase) with no OpenAI-shaped
+		// cached_tokens field. promptTokenCount/prompt_tokens includes the
+		// cached portion, so input = prompt_tokens - cachedContentTokenCount.
+		const usage = parseChunkUsage(
+			{
+				prompt_tokens: 33_006,
+				completion_tokens: 110,
+				total_tokens: 33_116,
+				cachedContentTokenCount: 28_639,
+			},
+			OPENAI_MODEL,
+			undefined,
+		);
+
+		expect(usage.cacheRead).toBe(28_639);
+		expect(usage.input).toBe(4_367);
+		expect(usage.totalTokens).toBe(33_116);
+	});
+
 	it("maps DeepSeek prompt_cache_hit_tokens + prompt_cache_miss_tokens correctly", () => {
 		// DeepSeek (https://api-docs.deepseek.com/api/create-chat-completion)
 		// exposes cache hit/miss at the top level where prompt_tokens = hit + miss.

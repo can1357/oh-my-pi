@@ -3,6 +3,8 @@ import { localBackend } from "./local-backend";
 import { offBackend } from "./off-backend";
 import type { MemoryBackend } from "./types";
 
+import { cfgMemoryBackend } from "./settings";
+
 /**
  * Pick the active memory backend for a Settings instance.
  *
@@ -10,6 +12,7 @@ import type { MemoryBackend } from "./types";
  * through this):
  *   - `memory.backend === "hindsight"`  → Hindsight remote memory
  *   - `memory.backend === "mnemopi"`  → local Mnemopi SQLite memory
+ *   - `memory.backend === "sharpshooter"` → friction-gated project decision memory
  *   - `memory.backend === "local"`      → local rollout summary pipeline
  *   - everything else                   → no-op
  *
@@ -17,9 +20,10 @@ import type { MemoryBackend } from "./types";
  * a config is loaded, `memory.backend` is the sole runtime selector.
  */
 export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBackend> {
-	const id = settings.get("memory.backend");
+	const id = cfgMemoryBackend.get(settings);
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
+	if (id === "sharpshooter") return (await import("../sharpshooter/backend")).sharpshooterBackend;
 	if (id === "local") return localBackend;
 	return offBackend;
 }

@@ -11,12 +11,19 @@
  *   and `user@example.com` are not treated as imports).
  * - Relative paths resolve against the importing file's directory, not the
  *   working directory.
+ * - `\ ` inside a path represents a literal space; unescaped whitespace
+ *   terminates the path.
  * - `~/...` resolves to the user's home directory.
  * - Imports inside fenced code blocks (` ``` ` / `~~~`) and inline code
  *   spans (`` `…` ``) are preserved verbatim so technical examples like
  *   `npm install @types/node` survive intact.
  * - Recursive imports are followed up to {@link MAX_AT_IMPORT_DEPTH} hops;
- *   cycles are broken silently.
+ *   cycles are broken silently. A file that is imported more than once is
+ *   expanded at every occurrence — only an import pointing back into the
+ *   current import chain counts as a cycle. Output therefore grows with
+ *   fan-out raised to the depth: a file that imports the next one N times
+ *   per level yields up to N^{@link MAX_AT_IMPORT_DEPTH} copies of the
+ *   deepest file. A shared expansion budget also caps total file reads.
  * - When the referenced file cannot be read, the original `@token` is
  *   left untouched and a debug log is emitted.
  *
@@ -30,14 +37,18 @@ import { readFile } from "../capability/fs";
 /** Maximum number of recursive `@`-import hops. Matches Claude Code's documented cap. */
 export const MAX_AT_IMPORT_DEPTH = 5;
 
+/** Maximum number of successfully expanded imports in one top-level document. */
+export const MAX_AT_IMPORT_EXPANSIONS = 256;
+
 /**
  * Matches a candidate `@import` token: a leading boundary (start-of-string
  * or single whitespace char) and a token whose first character is path-like.
+ * Backslash-space pairs remain inside the token; other whitespace ends it.
  *
  * The boundary character is captured separately so the slice arithmetic in
  * {@link expandLine} aligns with the `@` position, not the whitespace.
  */
-const AT_IMPORT_REGEX = /(^|[ \t])@([./~A-Za-z0-9_-][^\s]*)/g;
+const AT_IMPORT_REGEX = /(^|[ \t])@([./~A-Za-z0-9_-](?:\\ |[^\s])*)/g;
 
 /**
  * Trailing characters stripped from a captured path token: sentence-ending
@@ -69,8 +80,9 @@ export async function expandAtImports(
 	const maxDepth = options.maxDepth ?? MAX_AT_IMPORT_DEPTH;
 	const home = options.home ?? os.homedir();
 	const absoluteSource = path.resolve(filePath);
-	const visited = new Set<string>([absoluteSource]);
-	return await expand(content, path.dirname(absoluteSource), 0, maxDepth, home, visited);
+	const chain: string[] = [absoluteSource];
+	const budget = { remaining: MAX_AT_IMPORT_EXPANSIONS };
+	return await expand(content, path.dirname(absoluteSource), 0, maxDepth, home, chain, budget);
 }
 
 async function expand(
@@ -79,7 +91,8 @@ async function expand(
 	depth: number,
 	maxDepth: number,
 	home: string,
-	visited: Set<string>,
+	chain: readonly string[],
+	budget: { remaining: number },
 ): Promise<string> {
 	if (depth >= maxDepth) return content;
 
@@ -90,7 +103,7 @@ async function expand(
 			out.push(segment.text);
 			continue;
 		}
-		out.push(await expandTextSegment(segment.text, baseDir, depth, maxDepth, home, visited));
+		out.push(await expandTextSegment(segment.text, baseDir, depth, maxDepth, home, chain, budget));
 	}
 	return out.join("");
 }
@@ -101,11 +114,12 @@ async function expandTextSegment(
 	depth: number,
 	maxDepth: number,
 	home: string,
-	visited: Set<string>,
+	chain: readonly string[],
+	budget: { remaining: number },
 ): Promise<string> {
 	const lines = text.split("\n");
 	for (let i = 0; i < lines.length; i++) {
-		lines[i] = await expandLine(lines[i], baseDir, depth, maxDepth, home, visited);
+		lines[i] = await expandLine(lines[i], baseDir, depth, maxDepth, home, chain, budget);
 	}
 	return lines.join("\n");
 }
@@ -116,7 +130,8 @@ async function expandLine(
 	depth: number,
 	maxDepth: number,
 	home: string,
-	visited: Set<string>,
+	chain: readonly string[],
+	budget: { remaining: number },
 ): Promise<string> {
 	if (!line.includes("@")) return line;
 
@@ -134,7 +149,7 @@ async function expandLine(
 		matches.push({
 			start: atPos,
 			end: atPos + 1 + trimmedToken.length,
-			importPath: trimmedToken,
+			importPath: trimmedToken.replace(/\\ /g, " "),
 		});
 	}
 
@@ -144,7 +159,7 @@ async function expandLine(
 	let cursor = 0;
 	for (const m of matches) {
 		parts.push(line.slice(cursor, m.start));
-		const expanded = await resolveAndExpand(m.importPath, baseDir, depth, maxDepth, home, visited);
+		const expanded = await resolveAndExpand(m.importPath, baseDir, depth, maxDepth, home, chain, budget);
 		parts.push(expanded ?? line.slice(m.start, m.end));
 		cursor = m.end;
 	}
@@ -158,10 +173,17 @@ async function resolveAndExpand(
 	depth: number,
 	maxDepth: number,
 	home: string,
-	visited: Set<string>,
+	chain: readonly string[],
+	budget: { remaining: number },
 ): Promise<string | null> {
+	if (budget.remaining <= 0) {
+		logger.debug("@-import: expansion budget exhausted", { remaining: budget.remaining });
+		return null;
+	}
 	const resolved = resolveImportPath(importPath, baseDir, home);
-	if (visited.has(resolved)) {
+	// Only an ancestor in the current import chain counts as a cycle. The
+	// same file imported twice from unrelated places is expanded twice.
+	if (chain.includes(resolved)) {
 		logger.debug("@-import: skipping cyclic include", { path: resolved });
 		return null;
 	}
@@ -172,10 +194,8 @@ async function resolveAndExpand(
 		return null;
 	}
 
-	// Visited is shared across the whole expansion tree to break cycles,
-	// even cycles that span multiple importing files.
-	visited.add(resolved);
-	return await expand(content, path.dirname(resolved), depth + 1, maxDepth, home, visited);
+	budget.remaining--;
+	return await expand(content, path.dirname(resolved), depth + 1, maxDepth, home, [...chain, resolved], budget);
 }
 
 function resolveImportPath(importPath: string, baseDir: string, home: string): string {

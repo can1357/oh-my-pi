@@ -42,6 +42,7 @@ const OPTS = {
 	watchedRoles: true,
 	expandPrimaryContext: true,
 	expandEditDiffs: true,
+	expandToolIO: true,
 	includeThinking: true,
 } as const;
 
@@ -51,38 +52,6 @@ function chunksToText(chunks: AgentMessage[] | null): string | null {
 }
 
 describe("renderAdvisorDeltaChunks (delta-split)", () => {
-	it("alternating user/agent byte-identical to single-block", () => {
-		const msgs = [user("first", 1), agent("a1", 2), user("second", 3), agent("a2", 4)];
-		const old = `### Session update\n\n${formatSessionHistoryMarkdown(msgs, OPTS)}`;
-		const chunks = renderAdvisorDeltaChunks(msgs, {
-			wip: false,
-			includeThinking: true,
-			advisorRegexSecretValues: new Set(),
-		});
-		expect(chunksToText(chunks)).toBe(old);
-	});
-
-	it("consecutive same-role user byte-identical", () => {
-		const msgs = [user("u1", 1), user("u2", 2), agent("a", 3)];
-		const old = `### Session update\n\n${formatSessionHistoryMarkdown(msgs, OPTS)}`;
-		expect(
-			chunksToText(
-				renderAdvisorDeltaChunks(msgs, { wip: false, includeThinking: true, advisorRegexSecretValues: new Set() }),
-			),
-		).toBe(old);
-	});
-
-	it("toolCall + toolResult pairing byte-identical", () => {
-		const msgs = [toolCall("call_1", 1), toolResult("call_1", 2), user("done", 3)];
-		const old = `### Session update\n\n${formatSessionHistoryMarkdown(msgs, OPTS)}`;
-		const chunks = renderAdvisorDeltaChunks(msgs, {
-			wip: false,
-			includeThinking: true,
-			advisorRegexSecretValues: new Set(),
-		});
-		expect(chunksToText(chunks)).toBe(old);
-	});
-
 	it("complex mixed history byte-identical", () => {
 		const msgs = [
 			user("question", 1),

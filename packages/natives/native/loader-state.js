@@ -3,9 +3,9 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as zlib from "node:zlib";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
+import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionStamp } from "./version-sentinel.js";
 
 /**
  * Native addon loader for `@oh-my-pi/pi-natives`.
@@ -14,7 +14,7 @@ import { embeddedAddon } from "./embedded-addon.js";
  * `pi_natives.<platform>-<arch>*.node` is required, validated, and returned":
  * platform/variant detection, candidate-path resolution, on-disk staging from
  * `node_modules` (Windows update safety), embedded-addon extraction (Bun
- * standalone binaries), version-sentinel validation, and the aggregated error
+ * standalone binaries), release-stamp validation, and the aggregated error
  * surface for diagnostic-friendly failures.
  *
  * `native/index.js` is reduced to one `loadNative()` call plus the generated
@@ -31,7 +31,14 @@ import { embeddedAddon } from "./embedded-addon.js";
  * post-build `--reset` stub) is the authoritative compiled-mode signal.
  */
 
-const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
+const SUPPORTED_PLATFORMS = [
+	"linux-x64",
+	"linux-arm64",
+	"darwin-x64",
+	"darwin-arm64",
+	"win32-x64",
+	"win32-arm64",
+];
 
 /**
  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the
@@ -49,6 +56,14 @@ function startupMarker(text) {
 }
 
 function getNativesDir() {
+	// Match pi-utils directory overrides without depending on pi-utils.
+	const override = process.env.PI_NATIVES_DIR?.trim();
+	if (override) {
+		let dir = override;
+		if (dir === "~") dir = os.homedir();
+		else if (dir.startsWith("~/") || dir.startsWith("~\\")) dir = os.homedir() + dir.slice(1);
+		if (path.isAbsolute(dir)) return path.normalize(dir);
+	}
 	const xdgDataHome = process.env.XDG_DATA_HOME;
 	if (xdgDataHome && fs.existsSync(path.join(xdgDataHome, "omp"))) {
 		return path.join(xdgDataHome, "omp", "natives");
@@ -434,36 +449,6 @@ function selectEmbeddedAddonFile(selectedVariant) {
 	return embeddedAddon.files.find(file => file.variant === "baseline") || null;
 }
 
-function readTarString(buffer, offset, length) {
-	const end = Math.min(offset + length, buffer.length);
-	let stringEnd = offset;
-	while (stringEnd < end && buffer[stringEnd] !== 0) stringEnd++;
-	return buffer.toString("utf8", offset, stringEnd);
-}
-
-function readTarOctal(buffer, offset, length) {
-	const value = readTarString(buffer, offset, length).trim();
-	if (!value) return 0;
-	const parsed = Number.parseInt(value, 8);
-	if (!Number.isFinite(parsed)) {
-		throw new Error(`Invalid tar octal value: ${value}`);
-	}
-	return parsed;
-}
-
-function isZeroTarBlock(buffer, offset) {
-	for (let index = 0; index < 512; index++) {
-		if (buffer[offset + index] !== 0) return false;
-	}
-	return true;
-}
-
-function getTarEntryName(header) {
-	const name = readTarString(header, 0, 100);
-	const prefix = readTarString(header, 345, 155);
-	return prefix ? `${prefix}/${name}` : name;
-}
-
 function isSafeEmbeddedAddonFilename(filename) {
 	return filename.length > 0 && path.basename(filename) === filename && !filename.includes("/") && !filename.includes("\\");
 }
@@ -472,7 +457,7 @@ function isEmbeddedAddonFileCurrent(targetPath, file) {
 	try {
 		const stat = fs.statSync(targetPath);
 		if (!stat.isFile()) return false;
-		return typeof file.size !== "number" || stat.size === file.size;
+		return stat.size === file.size;
 	} catch (err) {
 		if (err && err.code === "ENOENT") return false;
 		throw err;
@@ -494,70 +479,31 @@ function writeEmbeddedAddonFile(targetPath, content) {
 	}
 }
 
-export function extractEmbeddedAddonArchive({ archivePath, files, targetDir }) {
-	const pending = new Map();
+export function extractEmbeddedAddons({ files, targetDir }) {
 	for (const file of files) {
 		if (!isSafeEmbeddedAddonFilename(file.filename)) {
 			throw new Error(`Unsafe embedded addon filename: ${file.filename}`);
 		}
-		const targetPath = path.join(targetDir, file.filename);
-		if (!isEmbeddedAddonFileCurrent(targetPath, file)) {
-			pending.set(file.filename, file);
-		}
 	}
-	if (pending.size === 0) return [];
-
-	const archive = zlib.gunzipSync(fs.readFileSync(archivePath));
 	const writtenPaths = [];
-	let offset = 0;
-
-	while (offset + 512 <= archive.length) {
-		if (isZeroTarBlock(archive, offset)) break;
-		const header = archive.subarray(offset, offset + 512);
-		const filename = getTarEntryName(header);
-		const size = readTarOctal(header, 124, 12);
-		const typeflag = header[156] === 0 ? "0" : String.fromCharCode(header[156]);
-		offset += 512;
-
-		if (offset + size > archive.length) {
-			throw new Error(`Truncated embedded addon archive entry: ${filename}`);
+	for (const file of files) {
+		const targetPath = path.join(targetDir, file.filename);
+		if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
+		const content = Bun.zstdDecompressSync(fs.readFileSync(file.zstdPath));
+		if (content.length !== file.size) {
+			throw new Error(`Embedded addon size mismatch for ${file.filename}: expected ${file.size}, got ${content.length}`);
 		}
-
-		if (!isSafeEmbeddedAddonFilename(filename)) {
-			throw new Error(`Unsafe embedded addon archive entry: ${filename}`);
-		}
-		if (typeflag !== "0") {
-			throw new Error(`Unsupported embedded addon archive entry type ${typeflag}: ${filename}`);
-		}
-
-		const file = pending.get(filename);
-		if (file) {
-			if (typeof file.size === "number" && file.size !== size) {
-				throw new Error(`Embedded addon size mismatch for ${filename}: expected ${file.size}, got ${size}`);
-			}
-			const targetPath = path.join(targetDir, filename);
-			writeEmbeddedAddonFile(targetPath, archive.subarray(offset, offset + size));
-			pending.delete(filename);
-			writtenPaths.push(targetPath);
-		}
-
-		offset += Math.ceil(size / 512) * 512;
+		writeEmbeddedAddonFile(targetPath, content);
+		writtenPaths.push(targetPath);
 	}
-
-	if (pending.size > 0) {
-		throw new Error(`Embedded addon archive missing: ${[...pending.keys()].join(", ")}`);
-	}
-
 	return writtenPaths;
 }
 
-function maybeExtractEmbeddedAddon(ctx, errors) {
+function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(ctx.selectedVariant)) {
 	if (!ctx.isCompiledBinary || !embeddedAddon) return null;
 	if (embeddedAddon.platformTag !== ctx.platformTag || embeddedAddon.version !== ctx.packageVersion) return null;
-
-	const selectedEmbeddedFile = selectEmbeddedAddonFile(ctx.selectedVariant);
-	if (!selectedEmbeddedFile) return null;
-	const targetPath = path.join(ctx.versionedDir, selectedEmbeddedFile.filename);
+	if (!file) return null;
+	const targetPath = path.join(ctx.versionedDir, file.filename);
 
 	startupMarker("native:extractEmbeddedAddon:start");
 	try {
@@ -568,40 +514,12 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 		return null;
 	}
 
-	if (embeddedAddon.archive) {
-		try {
-			extractEmbeddedAddonArchive({
-				archivePath: embeddedAddon.archive.filePath,
-				files: embeddedAddon.files,
-				targetDir: ctx.versionedDir,
-			});
-			if (isEmbeddedAddonFileCurrent(targetPath, selectedEmbeddedFile)) {
-				return targetPath;
-			}
-			errors.push(`embedded addon archive (${embeddedAddon.archive.filename}): missing ${selectedEmbeddedFile.filename}`);
-			return null;
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			errors.push(`embedded addon archive (${embeddedAddon.archive.filename}): ${message}`);
-			return null;
-		}
-	}
-
-	if (isEmbeddedAddonFileCurrent(targetPath, selectedEmbeddedFile)) {
-		return targetPath;
-	}
-	if (!selectedEmbeddedFile.filePath) {
-		errors.push(`embedded addon metadata missing file path for ${selectedEmbeddedFile.filename}`);
-		return null;
-	}
-
 	try {
-		const buffer = fs.readFileSync(selectedEmbeddedFile.filePath);
-		fs.writeFileSync(targetPath, buffer);
+		extractEmbeddedAddons({ files: [file], targetDir: ctx.versionedDir });
 		return targetPath;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		errors.push(`embedded addon write (${selectedEmbeddedFile.filename}): ${message}`);
+		errors.push(`embedded addon extraction (${file.filename}): ${message}`);
 		return null;
 	}
 }
@@ -648,54 +566,295 @@ function maybeStageNodeModulesAddon(ctx, errors) {
 	return stagedPath;
 }
 
+/**
+ * Before release identities existed, published native addons still shared
+ * this stable core ABI. Let those on-disk addons bridge a package-version bump
+ * when they expose the signature; keep every identified addon and a current
+ * on-disk file paired with resident old exports on the strict path below.
+ */
+function isCompatiblePreSentinelNativeAddon(bindings, diskHasExpectedStamp) {
+	if (diskHasExpectedStamp) return false;
+	if (bindingsHaveReleaseIdentity(bindings)) return false;
+	return (
+		typeof bindings.countTokens === "function" &&
+		typeof bindings.executeShell === "function" &&
+		typeof bindings.visibleWidth === "function" &&
+		typeof bindings.DesktopSession === "function" &&
+		typeof bindings.DesktopSession.prototype?.capture === "function" &&
+		typeof bindings.DesktopSession.prototype?.execute === "function" &&
+		typeof bindings.DesktopSession.prototype?.close === "function"
+	);
+}
+
 export function validateLoadedBindings(ctx, bindings, candidate) {
 	// In workspace dev (running out of `packages/natives/native/` rather than a
 	// `node_modules` install or a compiled bundle) the local `.node` only gains
-	// the renamed sentinel after `bun --cwd=packages/natives run build`. Skip
+	// the new release stamp after `bun --cwd=packages/natives run build`. Skip
 	// validation there so a stale post-pull dev tree boots while the rebuild
-	// completes; install and compiled-binary paths still validate.
+	// completes; install and compiled-binary paths still validate. The mismatch
+	// is not swallowed silently: `native/index.js` exports `missingNativeExport`
+	// for every symbol the stale addon predates, so the first call through one
+	// reports the addon, both releases, and the rebuild command.
 	if (ctx.isWorkspaceLoad) return;
-	if (typeof bindings[ctx.versionSentinelExport] === "function") return;
+	const residentVersion = bindingsReleaseVersion(bindings);
+	if (residentVersion === ctx.packageVersion) return;
 
-	// The expected sentinel is missing. Distinguish two failure modes by the
-	// sentinel the bindings DO carry:
+	// The bindings report another release (or none). Distinguish two failure
+	// modes by what the file on disk carries:
 	//   - disk stale: the `.node` on disk predates this loader (its own build);
 	//     reinstalling re-syncs the file.
 	//   - process stale: an in-place upgrade landed a new release on disk while
 	//     this process still holds the previous addon generation resident in the
 	//     dynamic-loader's native-module cache. `require` returns those old
-	//     exports, which carry the PRIOR sentinel — disk is already consistent,
+	//     exports, which report the PRIOR release — disk is already consistent,
 	//     so reinstall is a no-op and only restarting the process re-syncs.
-	const residentSentinel = Object.keys(bindings).find(
-		key => key !== ctx.versionSentinelExport && /^__piNativesV[A-Za-z0-9_]+$/.test(key),
-	);
-	// A prior sentinel alone cannot distinguish a resident old module from an
-	// actually stale file: `require` returns the same exports in both cases.
-	// The restart diagnosis is valid only when the selected file itself carries
-	// the current sentinel; otherwise a restart would simply reload stale disk.
-	let diskHasExpectedSentinel = false;
+	// Resident exports alone cannot tell these apart: `require` returns the
+	// same exports in both cases. The restart diagnosis is valid only when the
+	// selected file itself carries the current stamp; otherwise a restart would
+	// simply reload stale disk.
+	let diskHasExpectedStamp = false;
 	try {
-		diskHasExpectedSentinel = fs.readFileSync(candidate).includes(ctx.versionSentinelExport);
+		diskHasExpectedStamp = containsVersionStamp(fs.readFileSync(candidate), ctx.packageVersion);
 	} catch {
 		// The successful require above normally guarantees readability. If the
 		// file disappears concurrently, retain the safe reinstall diagnosis.
 	}
-	if (residentSentinel && diskHasExpectedSentinel) {
-		const residentVersion = residentSentinel.slice("__piNativesV".length).replace(/_/g, ".");
+	if (isCompatiblePreSentinelNativeAddon(bindings, diskHasExpectedStamp)) return;
+	if (residentVersion && diskHasExpectedStamp) {
 		throw new Error(
-			`Loaded ${candidate}, which exposes the @oh-my-pi/pi-natives@${residentVersion} version ` +
-				`sentinel \`${residentSentinel}\` but not the @${ctx.packageVersion} sentinel ` +
-				`\`${ctx.versionSentinelExport}\` this loader expects. omp was upgraded to ` +
-				`${ctx.packageVersion} while this session was running; the ${residentVersion} addon is ` +
-				"still resident in this process. Disk is already consistent — restart omp to pick up " +
-				`${ctx.packageVersion} (reinstalling changes nothing).`,
+			`Loaded ${candidate}, which reports @oh-my-pi/pi-natives@${residentVersion}, but this loader is ` +
+				`@${ctx.packageVersion}. omp was upgraded to ${ctx.packageVersion} while this session was running; ` +
+				`the ${residentVersion} addon is still resident in this process. Disk is already consistent — ` +
+				`restart omp to pick up ${ctx.packageVersion} (reinstalling changes nothing).`,
 		);
 	}
 	throw new Error(
-		`Loaded ${candidate} but it does not expose the @oh-my-pi/pi-natives@${ctx.packageVersion} ` +
-			`version sentinel \`${ctx.versionSentinelExport}\`. The .node file on disk is from a different ` +
+		`Loaded ${candidate} but it reports ${residentVersion ? `@oh-my-pi/pi-natives@${residentVersion}` : "no release version"}, ` +
+			`not the @${ctx.packageVersion} this loader expects. The .node file on disk is from a different ` +
 			"release than this loader — reinstall to re-sync.",
 	);
+}
+
+/**
+ * Identity of the addon `loadNative()` returned, in the shape the
+ * missing-export diagnostic reports. Null until a load succeeds.
+ * @type {{ path: string; version: string | null; packageVersion: string; stale: boolean } | null}
+ */
+let loadedAddon = null;
+
+/**
+ * Describe a loaded addon so a symbol it predates can name the file, the
+ * release the file came from, and the release this tree expects.
+ * @param {Record<string, unknown>} bindings
+ * @param {string} candidate
+ * @param {{ packageVersion: string }} ctx
+ */
+function describeLoadedAddon(bindings, candidate, ctx) {
+	const version = bindingsReleaseVersion(bindings);
+	return {
+		path: candidate,
+		version,
+		packageVersion: ctx.packageVersion,
+		stale: version !== ctx.packageVersion,
+	};
+}
+
+/**
+ * The addon behind this process's `@oh-my-pi/pi-natives` exports.
+ * @returns {{ path: string; version: string | null; packageVersion: string; stale: boolean } | null}
+ */
+export function nativeAddonStatus() {
+	return loadedAddon;
+}
+
+/**
+ * Stand-in for an export the loaded addon does not provide.
+ *
+ * A workspace tree tolerates a release mismatch on purpose: a checkout that
+ * pulled a new release keeps running until `bun run build:native` finishes
+ * (see `validateLoadedBindings`), and PR CI loads release addons under a newer
+ * checkout the same way. Such an addon has no value for any symbol added after
+ * its build, so a bare `undefined` export surfaced as `<symbol> is not a
+ * function` — every `write` call in a tree that pulled the read-projection
+ * guard, for one — with nothing naming the stale addon.
+ *
+ * Only a stale addon gets the stub. On a current addon an absent export is not
+ * version drift but a symbol this build does not implement, and callers probe
+ * for exactly that (`typeof native.x === "function"`); they must keep seeing
+ * `undefined`.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {((...args: unknown[]) => never) | undefined}
+ */
+export function missingNativeExport(symbolName, addon = loadedAddon) {
+	if (!addon?.stale) return undefined;
+	return () => {
+		throw new Error(missingNativeExportMessage(symbolName, addon));
+	};
+}
+
+/**
+ * Static reads a {@link missingNativeClass} stand-in answers normally rather
+ * than throwing: the function-object intrinsics every caller and inspector
+ * touches, and `then`, so an accidental `await` on the export resolves to the
+ * class instead of exploding somewhere unrelated.
+ */
+const CLASS_STUB_PLAIN_STATICS = new Set(["prototype", "name", "length", "constructor", "then"]);
+
+/**
+ * Class counterpart of {@link missingNativeExport}: a stand-in that fails with
+ * the addon's identity attached instead of as a bare `undefined` export, which
+ * surfaces as `undefined is not a constructor` at the callsite and names
+ * nothing.
+ *
+ * Same staleness rule as the function stub: only a stale addon gets a
+ * stand-in, so `typeof native.Thing === "function"` capability probes against
+ * a current addon keep their meaning.
+ *
+ * Several of these classes are entered through a static rather than a
+ * constructor — `FileLock.tryAcquire`, `IpcServer.listen`, `Process.fromPid`,
+ * `PowerAssertion.start` — so the stand-in answers any other static read with
+ * the same diagnostic. Only a stale addon reaches it, and only for a class
+ * that addon does not carry, so nothing on a healthy tree meets a proxy.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {(new (...args: unknown[]) => never) | undefined}
+ */
+export function missingNativeClass(symbolName, addon = loadedAddon) {
+	if (!addon?.stale) return undefined;
+	const stub = class MissingNativeClass {
+		constructor() {
+			throw new Error(missingNativeExportMessage(symbolName, addon));
+		}
+	};
+	return new Proxy(stub, {
+		get(target, key, receiver) {
+			if (typeof key === "symbol" || CLASS_STUB_PLAIN_STATICS.has(key)) return Reflect.get(target, key, receiver);
+			throw new Error(missingNativeExportMessage(`${symbolName}.${key}`, addon));
+		},
+	});
+}
+
+/**
+ * Actionable text for {@link missingNativeExport}. `addon` is injectable so the
+ * wording can be pinned without a stale `.node` on disk.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {string}
+ */
+export function missingNativeExportMessage(symbolName, addon = loadedAddon) {
+	const rebuild = "rebuild it with `bun run build:native`";
+	if (!addon) return `@oh-my-pi/pi-natives does not export \`${symbolName}\`; ${rebuild}.`;
+	if (!addon.stale) {
+		return `@oh-my-pi/pi-natives export \`${symbolName}\` is missing from ${addon.path}; ${rebuild}.`;
+	}
+	const loaded = addon.version
+		? `the @oh-my-pi/pi-natives@${addon.version} addon`
+		: "an addon without a release stamp";
+	return (
+		`@oh-my-pi/pi-natives export \`${symbolName}\` is missing: ${addon.path} is ${loaded}, not ` +
+		`@${addon.packageVersion} — ${rebuild}.`
+	);
+}
+
+/**
+ * One-line notice for a workspace tree running an addon from another release.
+ *
+ * The missing-symbol stubs only speak when a caller touches a symbol the addon
+ * does not carry. A symbol it does carry runs that release's behaviour — an
+ * older shell, an older grep — with no marker at all, so this notice is the
+ * only provenance those failures get.
+ *
+ * `stale` is any release difference, so the wording must not assume the addon
+ * is the older side.
+ * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
+ * @returns {string}
+ */
+export function staleWorkspaceAddonNotice(addon) {
+	const loaded = addon.version ? `@oh-my-pi/pi-natives@${addon.version}` : "an addon without a release stamp";
+	return (
+		`[omp-natives] ${addon.path} is ${loaded}, but this checkout is @${addon.packageVersion}. ` +
+		"Symbols this checkout expects may be missing and shared ones may behave differently; " +
+		"run `bun run build:native` before trusting results from this tree.\n"
+	);
+}
+
+/**
+ * Whether the copy of this module running on the current thread has already
+ * written the mismatched-addon notice. One per loaded copy, which is one per
+ * main thread in every shape this package ships; the write itself is confined
+ * to the main thread by {@link onMainThread}.
+ */
+const staleNoticeState = { reported: false };
+
+/** Memoized answer from {@link onMainThread}; `undefined` until first asked. */
+let mainThreadAnswer;
+
+/**
+ * True on a process's main thread, false inside a worker thread.
+ *
+ * Resolved through `createRequire` on first use rather than imported at module
+ * scope: `packages/coding-agent/src/cli.ts` keeps `node:worker_threads` out of
+ * ordinary startup on purpose, and this module is reached statically from
+ * `sqlite-locks` on launches that never load an addon. Asking only when a
+ * mismatch has already been found keeps that boundary. A runtime without the
+ * builtin answers "main thread", which is the safe side: the notice prints.
+ * @returns {boolean}
+ */
+function onMainThread() {
+	if (mainThreadAnswer === undefined) {
+		try {
+			mainThreadAnswer = createRequire(import.meta.url)("node:worker_threads").isMainThread !== false;
+		} catch {
+			mainThreadAnswer = true;
+		}
+	}
+	return mainThreadAnswer;
+}
+
+/**
+ * Write {@link staleWorkspaceAddonNotice} once, from the main thread, when a
+ * workspace tree loads an addon of another release.
+ *
+ * Three guards, each load-bearing.
+ *
+ * Main thread only, because fd 2 is shared and a worker reaches `loadNative()`
+ * long after interactive mode owns the terminal — the subagent, JS-eval and
+ * tab workers all start then, so a per-worker write paints into a rendered
+ * frame. The main thread has already said it at startup; a worker repeating it
+ * adds nothing and costs the display. A worker *process* keeps the notice: it
+ * has its own main thread, and `subprocess/worker-client.ts` captures its
+ * stderr to a file rather than the terminal.
+ *
+ * Latched, because `loadNative()` is not a startup-only call: the lazy
+ * entrypoints in `clipboard.js` and friends call it on every invocation.
+ *
+ * Workspace loads only, because {@link validateLoadedBindings} has a second
+ * success path — it accepts a pre-sentinel addon on an installed load
+ * (`isCompatiblePreSentinelNativeAddon`), which reports no release and so
+ * counts as `stale`. That user has no repository to build.
+ *
+ * The write is a synchronous `fs.writeSync` to fd 2 for the same reason as
+ * {@link startupMarker}: it must survive a crash that follows it. `write` and
+ * `state` are injectable so a test can exercise the guards without consuming
+ * this copy's latch.
+ * @param {{ isWorkspaceLoad: boolean }} ctx
+ * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
+ * @param {{ write?: (text: string) => void; state?: { reported: boolean } }} [deps]
+ * @returns {boolean} whether this call wrote the notice
+ */
+export function reportStaleWorkspaceAddon(ctx, addon, deps = {}) {
+	const state = deps.state ?? staleNoticeState;
+	// Thread identity last: the three cheap gates reject every ordinary launch
+	// before `node:worker_threads` is resolved at all.
+	if (!ctx.isWorkspaceLoad || !addon.stale || state.reported || !onMainThread()) return false;
+	state.reported = true;
+	try {
+		(deps.write ?? (text => fs.writeSync(2, text)))(staleWorkspaceAddonNotice(addon));
+	} catch {
+		// stderr unavailable; the notice is best-effort, the stubs still speak
+	}
+	return true;
 }
 
 /**
@@ -715,6 +874,18 @@ function installNativeTokioRuntime(bindings) {
 	} catch (err) {
 		startupMarker(`native:tokioRuntime:failed:${err instanceof Error ? err.message : String(err)}`);
 	}
+}
+
+/**
+ * Point the addon at `<nativesDir>/grammars`, where the agent downloads the
+ * tree-sitter grammars that load as WebAssembly on demand (pi-utils
+ * `getNativeGrammarsDir()` resolves the same path). Version cleanup never
+ * touches it: only release-version directories are removed. Older addons
+ * predating the export link every grammar and need no directory.
+ */
+function configureGrammarDir(bindings, nativesDir) {
+	const setGrammarDir = bindings.__ompSetGrammarDir;
+	if (typeof setGrammarDir === "function") setGrammarDir(path.join(nativesDir, "grammars"));
 }
 
 
@@ -801,14 +972,12 @@ export function initLoaderContext(overrides = {}) {
 		userDataDir,
 	});
 
-	// Version sentinel emitted by the Rust addon under a `js_name` that encodes
-	// the package version (`__piNativesV{major}_{minor}_{patch}`).
-	// `scripts/release.ts` bumps the name in `crates/pi-natives/src/lib.rs` in
-	// lock-step with the version, so a `.node` from a different release
-	// physically cannot expose the symbol this loader is looking for. That
-	// turns the silent `<sym> is not a function` crash from a Windows
-	// locked-file update into an actionable load-time error.
-	const versionSentinelExport = `__piNativesV${packageVersion.replace(/[^A-Za-z0-9]/g, "_")}`;
+	// Release validation compares `__piNativesBuildVersion()` — the version the
+	// build pipeline stamps into the addon after linking
+	// (`scripts/stamp-native-version.ts`) — with `package.json#version`, so a
+	// `.node` from a different release is rejected at load time instead of
+	// surfacing later as a silent `<sym> is not a function` crash from a
+	// Windows locked-file update.
 
 	return {
 		platformTag,
@@ -822,29 +991,69 @@ export function initLoaderContext(overrides = {}) {
 		addonFilenames,
 		addonLabel,
 		candidates,
-		versionSentinelExport,
 		isWorkspaceLoad,
 		nativesDir,
 	};
 }
 
+/**
+ * Exports of each `.node` file this copy of the loader opened, by the path it
+ * was opened at.
+ * @type {Map<string, Record<string, unknown>>}
+ */
+const openedAddons = new Map();
+
+/**
+ * Open one `.node` addon and return its exports, as `require` does for a
+ * `.node` file. `process.dlopen` rather than `require`: Bun's `require` cannot
+ * load any module from a path that contains `?` (it reads the path cut at the
+ * `?`), and the addon's directory follows `HOME`, `PI_NATIVES_DIR` or the
+ * install location, so it can hold one. `dlopen` takes the path as it is.
+ *
+ * Like `require`, it opens a file once and then returns the same exports:
+ * `loadNative()` runs again on every call of the lazy entrypoints
+ * (`clipboard.js`, `desktop.js`, …), and a second `dlopen` of the file runs the
+ * addon's init again, which makes new classes that `instanceof` against the
+ * first ones fails.
+ * @param {string} candidate
+ * @returns {Record<string, unknown>}
+ */
+export function openNativeAddon(candidate) {
+	const opened = openedAddons.get(candidate);
+	if (opened) return opened;
+	const addonModule = { exports: {} };
+	process.dlopen(addonModule, candidate);
+	openedAddons.set(candidate, addonModule.exports);
+	return addonModule.exports;
+}
+
 export function loadNative() {
 	startupMarker("native:loadNative:start");
 	const ctx = initLoaderContext();
-	const require_ = createRequire(import.meta.url);
 
 	const errors = [];
 	const embeddedCandidate = maybeExtractEmbeddedAddon(ctx, errors);
 	const stagedCandidate = embeddedCandidate ? null : maybeStageNodeModulesAddon(ctx, errors);
 	const prepended = [embeddedCandidate, stagedCandidate].filter(c => typeof c === "string");
 	const runtimeCandidates = prepended.length > 0 ? [...prepended, ...ctx.candidates] : ctx.candidates;
+	const fallbackEmbeddedFile =
+		ctx.selectedVariant === "modern" && embeddedAddon
+			? embeddedAddon.files.find(file => file.variant === "baseline")
+			: null;
+	const fallbackEmbeddedPath = fallbackEmbeddedFile && path.join(ctx.versionedDir, fallbackEmbeddedFile.filename);
 
 	for (const candidate of runtimeCandidates) {
+		if (fallbackEmbeddedFile && candidate === fallbackEmbeddedPath) {
+			maybeExtractEmbeddedAddon(ctx, errors, fallbackEmbeddedFile);
+		}
 		try {
 			startupMarker(`native:require:${path.basename(candidate)}`);
-			const bindings = require_(candidate);
+			const bindings = openNativeAddon(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
+			configureGrammarDir(bindings, ctx.nativesDir);
+			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
+			reportStaleWorkspaceAddon(ctx, loadedAddon);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
 			return bindings;

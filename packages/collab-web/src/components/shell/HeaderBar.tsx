@@ -1,19 +1,42 @@
+import type { SessionHeader, SessionState } from "@oh-my-pi/pi-wire";
 import { LogOut, PanelRight } from "lucide-react";
 import type { ReactNode } from "react";
-import type { GuestSnapshot } from "../../lib/client";
+import { memo } from "react";
+import type { ConnectionPhase } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
+import { OmpMark } from "./OmpMark";
 import { ThemeToggle } from "./ThemeToggle";
 
+const PHASE_LABEL: Record<ConnectionPhase, string> = {
+	connecting: "Connecting",
+	waiting: "Joining",
+	live: "Live",
+	reconnecting: "Reconnecting",
+	ended: "Ended",
+};
+
 export interface HeaderBarProps {
-	snapshot: GuestSnapshot;
+	header: SessionHeader | null;
+	state: SessionState | null;
+	phase: ConnectionPhase;
+	readOnly: boolean;
 	subCount: number;
 	railOpen: boolean;
 	onToggleRail(): void;
 	onLeave(): void;
 }
 
-export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave }: HeaderBarProps): ReactNode {
-	const { header, state, phase, readOnly } = snapshot;
+/** Memoized on its snapshot fields, so streaming frames that leave them untouched skip it. */
+export const HeaderBar = memo(function HeaderBar({
+	header,
+	state,
+	phase,
+	readOnly,
+	subCount,
+	railOpen,
+	onToggleRail,
+	onLeave,
+}: HeaderBarProps): ReactNode {
 	const title = header?.title ?? state?.sessionName ?? "session";
 	const usage = state?.contextUsage;
 	let pct: number | null = null;
@@ -28,6 +51,10 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 	return (
 		<header className="sh-header">
 			<div className="sh-header-left">
+				<span className="sh-brand" aria-label="omp collab">
+					<OmpMark />
+					<span className="sh-brand-slash">/</span>
+				</span>
 				<span className="sh-title" title={title}>
 					{title}
 				</span>
@@ -38,6 +65,10 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 				)}
 			</div>
 			<div className="sh-header-right">
+				<span className={`sh-status sh-status-${phase}`} title={`connection: ${phase}`}>
+					<span className={`sh-dot sh-dot-${phase}`} />
+					{PHASE_LABEL[phase]}
+				</span>
 				{readOnly && (
 					<span className="sh-chip" title="you joined with a read-only link — watching only">
 						read-only
@@ -69,7 +100,6 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 						))}
 					</span>
 				)}
-				<span className={`sh-dot sh-dot-${phase}`} title={phase} />
 				<ThemeToggle />
 				<button
 					type="button"
@@ -86,4 +116,4 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 			</div>
 		</header>
 	);
-}
+});

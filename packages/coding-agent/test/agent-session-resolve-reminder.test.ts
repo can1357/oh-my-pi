@@ -2,69 +2,124 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, isSoftToolRequirement } from "@oh-my-pi/pi-agent-core";
-import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool, isSoftToolRequirement } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { dispatchResolutionDevice, queueResolveHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
+import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { queueResolveHandler, specialToolCommands } from "@oh-my-pi/pi-coding-agent/tools/resolve";
+import type { ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { buildNamedToolChoice } from "@oh-my-pi/pi-coding-agent/utils/tool-choice";
+import { REJECT_COMMAND_NAME, RESOLVE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession resolve reminder", () => {
 	let session: AgentSession;
 	let toolSession: ToolSession;
 	let tempDir: string;
-	let mock: MockModel;
-	let authStorage: AuthStorage | undefined;
+
+	const sessions: AgentSession[] = [];
+	const authStorages: AuthStorage[] = [];
 
 	const transitions: Array<"new" | "switch" | "branch"> = ["new", "switch", "branch"];
-	beforeEach(async () => {
-		tempDir = path.join(os.tmpdir(), `pi-resolve-reminder-test-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
 
+	async function buildFixture(options: { toolCommands?: boolean } = {}): Promise<{
+		session: AgentSession;
+		toolSession: ToolSession;
+	}> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Test model not found in registry");
 		}
 
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const auth = await AuthStorage.create(path.join(tempDir, `auth-${Snowflake.next()}.db`));
+		auth.keys.setRuntime("anthropic", "test-key");
+		authStorages.push(auth);
+		const modelRegistry = new ModelRegistry(auth, path.join(tempDir, `models-${Snowflake.next()}.yml`));
 
-		mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const bashTool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Mock bash tool",
+			parameters: type("object"),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+		};
+		const toolRegistry = new Map<string, AgentTool>([[bashTool.name, bashTool]]);
+		const toolCommands: ToolCommandState | undefined = options.toolCommands
+			? {
+					tools: toolRegistry,
+					mountedNames: new Set(),
+					builtInNames: new Set(["bash"]),
+					isActive: name => name === "bash",
+				}
+			: undefined;
 
-		toolSession = {
-			getToolChoiceQueue: () => session.toolChoiceQueue,
-			buildToolChoice: (name: string) => buildNamedToolChoice(name, session.model!),
-			peekQueueInvoker: () => session.peekQueueInvoker(),
-			peekPendingInvoker: () => session.peekPendingInvoker(),
-			clearPendingInvokers: () => session.clearPendingInvokers(),
-			peekPlanProposalHandler: () => session.peekPlanProposalHandler(),
-		} as unknown as ToolSession;
-
+		const sessionRef: { current?: AgentSession } = {};
 		const agent = new Agent({
-			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: options.toolCommands ? [bashTool] : [],
+				messages: [],
+			},
 			streamFn: mock.stream,
-			getToolChoice: () => session.nextToolChoiceDirective(),
+			getToolChoice: () => sessionRef.current?.nextToolChoiceDirective(),
 		});
 
-		session = new AgentSession({
+		const created = new AgentSession({
 			agent,
 			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "sessions")),
 			settings: Settings.isolated(),
 			modelRegistry,
+			toolRegistry: options.toolCommands ? toolRegistry : undefined,
+			builtInToolNames: options.toolCommands ? ["bash"] : undefined,
+			toolCommands,
 		});
+		sessionRef.current = created;
+		sessions.push(created);
+		if (options.toolCommands) {
+			await created.setActiveToolsByName(["bash"]);
+		}
+
+		const proxy: ToolSession = {
+			settings: created.settings,
+			getToolChoiceQueue: () => created.toolChoiceQueue,
+			buildToolChoice: (name: string) => buildNamedToolChoice(name, created.model!),
+			peekQueueInvoker: () => created.peekQueueInvoker(),
+			peekPendingInvoker: () => created.peekPendingInvoker(),
+			clearPendingInvokers: () => created.clearPendingInvokers(),
+			peekPlanProposalHandler: () => created.peekPlanProposalHandler(),
+		} as unknown as ToolSession;
+
+		return { session: created, toolSession: proxy };
+	}
+
+	function command(session: ToolSession, name: string): Tool {
+		const tool = specialToolCommands(session).find(candidate => candidate.name === name);
+		if (!tool) throw new Error(`Missing ${name} tool command`);
+		return tool;
+	}
+
+	beforeEach(async () => {
+		tempDir = path.join(os.tmpdir(), `pi-resolve-reminder-test-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+
+		const fixture = await buildFixture();
+		session = fixture.session;
+		toolSession = fixture.toolSession;
 	});
 
 	afterEach(async () => {
-		await session.dispose();
-		authStorage?.close();
-		authStorage = undefined;
+		for (const item of sessions) await item.dispose();
+		sessions.length = 0;
+		for (const auth of authStorages) auth.close();
+		authStorages.length = 0;
 		if (fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
@@ -98,7 +153,7 @@ describe("AgentSession resolve reminder", () => {
 		expect(await session.switchSession(targetPath)).toBe(true);
 	}
 
-	it("delivers the resolve reminder via a non-forcing soft requirement, not a steer or a forced tool_choice", () => {
+	it("queues the resolve reminder as a non-forcing soft requirement instead of a steer or a forced tool_choice", () => {
 		queueResolveHandler(toolSession, {
 			label: "AST Edit: 1 replacement in 1 file",
 			sourceToolName: "ast_edit",
@@ -110,9 +165,12 @@ describe("AgentSession resolve reminder", () => {
 		const directive = session.nextToolChoiceDirective();
 		expect(isSoftToolRequirement(directive)).toBe(true);
 		if (!isSoftToolRequirement(directive)) throw new Error("expected soft requirement");
-		expect(directive.toolName).toBe("write");
-		expect(directive.satisfies?.({ name: "write", arguments: { path: "xd://resolve" } })).toBe(true);
-		expect(directive.satisfies?.({ name: "write", arguments: { path: "xd://reject" } })).toBe(true);
+		// No bash tool in this session, so a non-compliant turn falls back to the recoverable `reject`.
+		expect(directive.toolName).toBe(REJECT_COMMAND_NAME);
+		expect(directive.satisfies?.({ name: RESOLVE_COMMAND_NAME })).toBe(true);
+		expect(directive.satisfies?.({ name: "bash", arguments: { command: "resolve looks right" } })).toBe(true);
+		expect(directive.satisfies?.({ name: "bash", arguments: { command: "reject wrong" } })).toBe(true);
+		expect(directive.satisfies?.({ name: "bash", arguments: { command: "echo resolve" } })).toBe(false);
 		expect(directive.satisfies?.({ name: "write", arguments: { path: "/tmp/out.md" } })).toBe(false);
 		const reminder = directive.reminder[0];
 		expect(reminder?.role).toBe("custom");
@@ -120,6 +178,21 @@ describe("AgentSession resolve reminder", () => {
 			expect(reminder.customType).toBe("resolve-reminder");
 		}
 		expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+	});
+
+	it("escalates to bash instead of reject while tool commands are active", async () => {
+		const fixture = await buildFixture({ toolCommands: true });
+		queueResolveHandler(fixture.toolSession, {
+			label: "AST Edit: 1 replacement in 1 file",
+			sourceToolName: "ast_edit",
+			apply: async () => ({ content: [{ type: "text", text: "Applied" }] }),
+		});
+
+		const directive = fixture.session.nextToolChoiceDirective();
+		expect(isSoftToolRequirement(directive)).toBe(true);
+		if (!isSoftToolRequirement(directive)) throw new Error("expected soft requirement");
+		expect(directive.toolName).toBe("bash");
+		expect(directive.satisfies?.({ name: "bash", arguments: { command: "resolve looks right" } })).toBe(true);
 	});
 
 	it.each(transitions)("clears a staged preview after a successful %s session boundary", async transition => {
@@ -149,7 +222,7 @@ describe("AgentSession resolve reminder", () => {
 		});
 
 		expect(isSoftToolRequirement(session.nextToolChoiceDirective())).toBe(true);
-		await dispatchResolutionDevice(toolSession, "resolve", "looks correct");
+		await command(toolSession, RESOLVE_COMMAND_NAME).execute("resolve-call", { reason: "looks correct" });
 
 		expect(applyRuns).toBe(1);
 		expect(session.nextToolChoiceDirective()).toBeUndefined();
@@ -170,7 +243,7 @@ describe("AgentSession resolve reminder", () => {
 			peekPlanProposalHandler: () => undefined,
 		} as ToolSession;
 
-		const { result } = await dispatchResolutionDevice(facade, "reject", "drain stale gate");
+		const result = await command(facade, REJECT_COMMAND_NAME).execute("reject-call", { reason: "drain stale gate" });
 		expect(result.isError ?? false).toBe(false);
 		expect(session.nextToolChoiceDirective()).toBeUndefined();
 	});

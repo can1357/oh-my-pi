@@ -1,0 +1,36 @@
+// Provider-wire compat for "ollama-cloud"; regenerated from the frozen census using deployment contract selectors.
+
+provider "ollama-cloud" {
+	default-model "gpt-oss:120b"
+	env "OLLAMA_CLOUD_API_KEY"
+	discovery label="Ollama Cloud" oauth-provider="ollama-cloud"
+
+	// Legacy deployments can reject assistant thinking history (#1000).
+	strip-thinking-history #true
+	thinking-mode "effort"
+	// Same runtime as local Ollama: a trailing assistant turn is continued verbatim.
+	supports-assistant-prefill #true
+	// Replaces the provider checks in model-registry.ts and the generator:
+	// never send a caller output limit.
+	omit-max-output-tokens #true
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-v4-pro:preview" {
+		thinking-efforts "low" "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-4*" "glm-5" "glm-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	// #9693 verifies thinking history for these GLM-5.2 wire IDs only.
+	models "glm-5.2" {
+		strip-thinking-history #false
+		thinking-efforts "high" "max"
+	}
+	models "glm-5.2:cloud" {
+		strip-thinking-history #false
+	}
+}

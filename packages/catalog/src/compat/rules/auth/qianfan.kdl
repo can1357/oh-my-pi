@@ -1,0 +1,9 @@
+auth "qianfan" {
+	name "Qianfan"
+	login "api-key" {
+		auth-url "https://console.bce.baidu.com/qianfan/ais/console/apiKey"
+		instructions "Copy your Qianfan API key from the console"
+		prompt "Paste your Qianfan API key" placeholder="bce-v3/ALTAK-..."
+		validate "chat-completions" label="qianfan" base-url="https://qianfan.baidubce.com/v2" model="deepseek-v3.2" tolerate-model-denied=#true
+	}
+}

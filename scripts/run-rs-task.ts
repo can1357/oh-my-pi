@@ -14,19 +14,40 @@ const RUST_AFFECTING_FILE_NAMES = [
 	"rustfmt.toml",
 	".rustfmt.toml",
 ] as const satisfies readonly string[];
-// brush-core became a workspace member for Bazel hermeticity (path-patch
-// rendering is machine-local), but the cargo dev tasks keep their historical
-// scope: the vendored fork is not held to workspace lint/test gates.
+// Remote-tracking trunks the branch is diffed against (a local `main` can carry the commits being checked).
+const TRUNKS = ["upstream/main", "origin/main"] as const satisfies readonly string[];
+// Vendored path-patched crates are workspace members for Bazel hermeticity
+// (path-patch rendering is machine-local), but cargo dev tasks keep their
+// historical scope: the forks are not held to workspace format/lint/test gates.
 //
-// pi-builtins is NOT excluded. It is first-party, and although it opts out of
+// omp-builtins is NOT excluded. It is first-party, and although it opts out of
 // the workspace's pedantic/nursery lints in its own manifest (most of it is
 // ported third-party code), it is held to default clippy and to zero rustc
 // warnings like everything else.
-const VENDORED_FORK_EXCLUDES = ["--exclude", "brush-core"] as const satisfies readonly string[];
+const VENDORED_FORK_EXCLUDES = [
+	"--exclude",
+	"cfg_aliases",
+	"--exclude",
+	"jaq-core",
+	"--exclude",
+	"jaq-json",
+	"--exclude",
+	"jaq-std",
+	"--exclude",
+	"napi",
+] as const satisfies readonly string[];
+// grep-searcher's upstream ripgrep code predates the workspace clippy policy, but
+// the fork's own `search_push` (src/searcher/push.rs, see its README.md) carries
+// tests, so it is exempt from the lint gates only and still runs under test:rs.
+const LINT_EXEMPT_FORK_EXCLUDES = [
+	...VENDORED_FORK_EXCLUDES,
+	"--exclude",
+	"grep-searcher",
+] as const satisfies readonly string[];
 const TASK_COMMANDS = {
 	"check:rs": [
 		["cargo", "fmt", "--all", "--", "--check"],
-		["cargo", "clippy", "--workspace", ...VENDORED_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"],
+		["cargo", "clippy", "--workspace", ...LINT_EXEMPT_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"],
 	],
 	"fix:rs": [
 		["cargo", "fmt", "--all"],
@@ -34,7 +55,7 @@ const TASK_COMMANDS = {
 			"cargo",
 			"clippy",
 			"--workspace",
-			...VENDORED_FORK_EXCLUDES,
+			...LINT_EXEMPT_FORK_EXCLUDES,
 			"--fix",
 			"--allow-dirty",
 			"--no-deps",
@@ -43,7 +64,7 @@ const TASK_COMMANDS = {
 		],
 	],
 	"fmt:rs": [["cargo", "fmt", "--all"]],
-	"lint:rs": [["cargo", "clippy", "--workspace", ...VENDORED_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"]],
+	"lint:rs": [["cargo", "clippy", "--workspace", ...LINT_EXEMPT_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"]],
 	"test:rs": [
 		[
 			"cargo",
@@ -54,6 +75,15 @@ const TASK_COMMANDS = {
 			"--status-level=fail",
 			"--final-status-level=fail",
 		],
+		// nextest cannot run doctests (no stable libtest-json interface for
+		// them), so they need their own libtest pass. It runs every runnable
+		// doctest in the workspace's lib crates; today that is tree-sitter-go's
+		// one example, since omp-natives is a `cdylib`, which rustdoc refuses to
+		// collect doctests from, and omp-builtins' 16 examples are `ignore`d
+		// vendored uutils docs. `--doc` overrides a crate's own
+		// `doctest = false`, so a vendored crate whose examples do not compile
+		// (napi-rs's) has to be in VENDORED_FORK_EXCLUDES.
+		["cargo", "test", "--doc", "--workspace", ...VENDORED_FORK_EXCLUDES],
 	],
 } as const satisfies Record<string, readonly (readonly string[])[]>;
 
@@ -68,9 +98,10 @@ if (!isRustTaskName(taskName)) {
 	process.exit(1);
 }
 
-if (taskName !== "fmt:rs" && !(isCI() || (await hasRustAffectingChanges()))) {
-	console.log(`Skipping ${taskName} (not in CI and no Rust-affecting changes were found).`);
-	process.exit(0);
+if (taskName !== "fmt:rs") {
+	const decision = await decideWhetherToRun();
+	console.log(`${decision.run ? "Running" : "Skipping"} ${taskName}: ${decision.reason}`);
+	if (!decision.run) process.exit(0);
 }
 
 for (const command of TASK_COMMANDS[taskName]) {
@@ -84,26 +115,81 @@ function isRustTaskName(value: string | undefined): value is RustTaskName {
 	return value != null && value in TASK_COMMANDS;
 }
 
-function isCI(): boolean {
-	const value = Bun.env.CI;
+interface RunDecision {
+	run: boolean;
+	/** Printed as one line, so a skipped Rust gate is never silent. */
+	reason: string;
+}
+
+type GitResult = { ok: true; text: string } | { ok: false; error: string };
+
+/**
+ * Runs unless the branch provably changed nothing Rust builds from since its merge base with a trunk.
+ * `CI` is not read: omp exports `CI=true` into every agent command. GitHub Actions and
+ * `OMP_FORCE_RUST_TASKS=1` force a run.
+ */
+async function decideWhetherToRun(): Promise<RunDecision> {
+	if (isEnabled(Bun.env.OMP_FORCE_RUST_TASKS)) return { run: true, reason: "OMP_FORCE_RUST_TASKS is set." };
+	// A CI job on `main` has an empty branch diff by definition and must still check everything.
+	if (Bun.env.GITHUB_ACTIONS === "true") return { run: true, reason: "running in GitHub Actions." };
+	const changed = await changedPathsSinceTrunk();
+	if (typeof changed === "string")
+		return { run: true, reason: `cannot tell what this checkout changed (${changed}).` };
+	const rust = changed.filter(isRustAffectingPath);
+	if (rust.length === 0) {
+		return {
+			run: false,
+			reason:
+				"no Rust-affecting change since the merge base with main. Set OMP_FORCE_RUST_TASKS=1 to run it anyway.",
+		};
+	}
+	return {
+		run: true,
+		reason: `${JSON.stringify(rust[0])}${rust.length > 1 ? ` and ${rust.length - 1} more` : ""} changed.`,
+	};
+}
+
+function isEnabled(value: string | undefined): boolean {
 	if (!value) return false;
 	const normalized = value.trim().toLowerCase();
 	return normalized !== "" && normalized !== "0" && normalized !== "false";
 }
 
-async function hasRustAffectingChanges(): Promise<boolean> {
-	const result = await $`git status --porcelain -z`.cwd(repoRoot).quiet().nothrow();
-	if (result.exitCode !== 0) {
-		const stderr = result.stderr.toString().trim();
-		const suffix = stderr === "" ? `exit ${result.exitCode}` : stderr;
-		console.warn(`Warning: failed to inspect git status: ${suffix}. Running ${taskName} conservatively.`);
-		return true;
+/**
+ * Paths changed since the merge base with each fetched trunk (three-dot, so the trunk's newer commits
+ * do not count), plus uncommitted and untracked files; a string says why that cannot be known.
+ */
+async function changedPathsSinceTrunk(): Promise<string[] | string> {
+	const shallow = await git("rev-parse", "--is-shallow-repository");
+	if (!shallow.ok) return shallow.error;
+	// A shallow clone can report a stale merge base.
+	if (shallow.text.trim() === "true") return "shallow clone; run git fetch --unshallow";
+	// `--untracked-files=all` lists a new crate's files instead of one `crates/new/` entry.
+	const status = await git("status", "--porcelain", "-z", "--untracked-files=all");
+	if (!status.ok) return status.error;
+	const paths = getChangedPathsFromPorcelain(status.text);
+	let diffed = false;
+	for (const trunk of TRUNKS) {
+		const base = await git("merge-base", "HEAD", `refs/remotes/${trunk}`);
+		if (!base.ok) continue;
+		diffed = true;
+		// `--no-renames` reports both sides, so moving a file out of a crate still counts.
+		const committed = await git("diff", "--no-renames", "--name-only", "-z", base.text.trim(), "HEAD");
+		if (!committed.ok) return committed.error;
+		paths.push(...committed.text.split("\0").filter(Boolean));
 	}
-	return getChangedPathsFromPorcelain(result.stdout).some(isRustAffectingPath);
+	return diffed ? paths : `no fetched ${TRUNKS.join(" or ")}`;
 }
 
-function getChangedPathsFromPorcelain(buf: Uint8Array): string[] {
-	const entries = new TextDecoder().decode(buf).split("\0").filter(Boolean);
+async function git(...args: string[]): Promise<GitResult> {
+	const result = await $`git ${args}`.cwd(repoRoot).quiet().nothrow();
+	if (result.exitCode === 0) return { ok: true, text: result.text() };
+	const firstLine = result.stderr.toString().trim().split("\n")[0];
+	return { ok: false, error: `git ${args[0]}: ${firstLine || `exit ${result.exitCode}`}` };
+}
+
+function getChangedPathsFromPorcelain(porcelain: string): string[] {
+	const entries = porcelain.split("\0").filter(Boolean);
 	const changedPaths: string[] = [];
 
 	for (let index = 0; index < entries.length; index += 1) {
@@ -132,7 +218,13 @@ function isRustAffectingPath(changedPath: string): boolean {
 	const normalized = changedPath.replace(/\\/g, "/");
 	const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
 	return (
-		normalized.endsWith(".rs") || normalized.startsWith(".cargo/") || isOneOf(fileName, RUST_AFFECTING_FILE_NAMES)
+		normalized.endsWith(".rs") ||
+		// Everything under crates/ feeds a crate: fixtures, include_bytes! data, grammars build.rs compiles.
+		normalized.startsWith("crates/") ||
+		normalized.startsWith(".cargo/") ||
+		// `test:rs` is `cargo nextest run`, which reads its filters and scheduling from here.
+		normalized === ".config/nextest.toml" ||
+		isOneOf(fileName, RUST_AFFECTING_FILE_NAMES)
 	);
 }
 
@@ -144,13 +236,31 @@ async function resolveCargoBinary(): Promise<string> {
 	// On macOS runners, Homebrew's `rustup-init` binary is on PATH before the
 	// rustup proxies in `$CARGO_HOME/bin`, and invoking it as `cargo` falls
 	// through to its installer mode ("unexpected argument 'nextest' found").
-	// Ask rustup directly for the cargo binary in the active toolchain.
-	const result = await $`rustup which cargo`.cwd(repoRoot).quiet().nothrow();
+	// Ask rustup directly for the cargo binary of the repository's toolchain.
+	// rustup lets RUSTUP_TOOLCHAIN override `rust-toolchain.toml`, and a
+	// caller's shell can carry one (mise exports its global rust pin into every
+	// shell it starts), so it is left out here: the gates are the pinned
+	// toolchain's, whatever toolchain the caller's shell names.
+	const env: Record<string, string | undefined> = { ...process.env };
+	delete env.RUSTUP_TOOLCHAIN;
+	const result = await $`rustup which cargo`.cwd(repoRoot).env(env).quiet().nothrow();
 	if (result.exitCode === 0) {
 		const resolved = result.stdout.toString().trim();
 		if (resolved !== "") return resolved;
 	}
 	return "cargo";
+}
+
+/**
+ * The rustup toolchain a resolved cargo belongs to, read from its path
+ * (`<RUSTUP_HOME>/toolchains/<toolchain>/bin/cargo`), or `undefined` when the
+ * cargo is not a rustup toolchain's own binary.
+ */
+function toolchainOfCargo(cargo: string): string | undefined {
+	const bin = path.dirname(cargo);
+	const toolchainDir = path.dirname(bin);
+	if (path.basename(bin) !== "bin" || path.basename(path.dirname(toolchainDir)) !== "toolchains") return undefined;
+	return path.basename(toolchainDir);
 }
 
 async function runCommand(command: readonly string[]): Promise<number> {
@@ -166,6 +276,15 @@ async function runCommand(command: readonly string[]): Promise<number> {
 		const pathSep = process.platform === "win32" ? ";" : ":";
 		const currentPath = env.PATH ?? env.Path ?? "";
 		env.PATH = currentPath === "" ? toolchainBin : `${toolchainBin}${pathSep}${currentPath}`;
+		// cargo looks for its `fmt` and `clippy` subcommands in `$CARGO_HOME/bin`
+		// before PATH when PATH does not name that directory, and the rustup
+		// proxies there take their toolchain from RUSTUP_TOOLCHAIN when it is
+		// set. A caller's RUSTUP_TOOLCHAIN (mise exports its global rust pin into
+		// every shell it starts) then runs another toolchain's rustfmt and clippy
+		// than the cargo resolved above. Name that cargo's own toolchain, so one
+		// toolchain runs the whole task.
+		const toolchain = toolchainOfCargo(cargoBinary);
+		if (toolchain !== undefined) env.RUSTUP_TOOLCHAIN = toolchain;
 	}
 	const proc = Bun.spawn(argv, {
 		cwd: repoRoot,

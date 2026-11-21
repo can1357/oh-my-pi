@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { loadTheme } from "../../../src/modes/theme/loader";
+import { loadTheme } from "@oh-my-pi/pi-tui/theme/loader";
 
 describe("Birch card contrast", () => {
 	it("renders user and custom cards with explicit dark foregrounds", async () => {

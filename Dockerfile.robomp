@@ -4,7 +4,7 @@
 #
 # Extends `pi-base` (from /Dockerfile, default target oh-my-pi/pi:dev) and adds
 # the robomp Python package + a Vite-built SolidJS dashboard bundle. The pi
-# toolchain (python + bun + rustup launcher + pi-natives + omp_rpc wheel +
+# toolchain (python + bun + rustup launcher + omp-natives + omp_rpc wheel +
 # /usr/local/bin/omp shim) all comes from PI_BASE; this file only layers what's
 # robomp-specific.
 #
@@ -17,7 +17,7 @@
 ###############################################################################
 
 ARG PI_BASE=oh-my-pi/pi:dev
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.4
 
 ############################
 # 1) web-builder — Bun + Vite, builds the SolidJS dashboard bundle.
@@ -45,9 +45,9 @@ ENV PI_ROOT=/work/pi
 
 WORKDIR /app
 
-# robomp is an MIT product; OMP's dual-license payload remains available from
-# the inherited base image under /usr/share/doc/omp.
-COPY LICENSE THIRD-PARTY-NOTICES.txt /usr/share/doc/robomp/
+# robomp is an MIT product; its notices cover the dashboard bundle. The native
+# addon's payload remains available from the base image under /usr/share/doc/omp.
+COPY LICENSE python/robomp/THIRD-PARTY-NOTICES.txt /usr/share/doc/robomp/
 
 # robomp itself. Drop the Vite-built dashboard into the package tree before
 # `pip install` so it lands in the installed wheel (`static/**/*` is declared

@@ -1,6 +1,20 @@
 import { describe, expect, it } from "bun:test";
-import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-chat-server";
-import type { AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream } from "@oh-my-pi/pi-ai/types";
+import {
+	adoptReplayedGeminiSignatures,
+	encodeResponse,
+	encodeStream,
+	parseRequest,
+} from "@oh-my-pi/pi-ai/providers/openai-chat-server";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { createCodexModel } from "./helpers";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	AssistantMessageEventStream,
+	ToolCall,
+} from "@oh-my-pi/pi-ai/types";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
@@ -53,6 +67,41 @@ function emptyAssistant(): AssistantMessage {
 }
 
 describe("auth-gateway openai-chat: parseRequest", () => {
+	for (const strict of [false, true, undefined]) {
+		it(`preserves strict=${strict} through the gateway to Codex`, () => {
+			const parsed = parseRequest({
+				model: "test-model",
+				messages: [{ role: "user", content: "Find the config file" }],
+				tools: [
+					{
+						type: "function",
+						function: {
+							name: "search_files",
+							...(strict !== undefined ? { strict } : {}),
+							parameters: {
+								type: "object",
+								properties: { query: { type: "string" }, path: { type: "string" } },
+								required: ["query"],
+							},
+						},
+					},
+				],
+			});
+			const [wire] = convertOpenAICodexResponsesTools(parsed.context.tools ?? [], createCodexModel("gpt-5.5"));
+			if (wire.type !== "function") throw new Error("Expected function tool");
+			if (strict === undefined) {
+				expect(wire).not.toHaveProperty("strict");
+			} else {
+				expect(wire.strict).toBe(strict);
+			}
+			if (strict === true) {
+				expect(wire.parameters.required).toEqual(["query", "path"]);
+			} else {
+				expect(wire.parameters.required).toEqual(["query"]);
+			}
+		});
+	}
+
 	it("converts a full request into a Context", () => {
 		const parsed = parseRequest({
 			model: "gpt-5.2",
@@ -140,6 +189,73 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		expect(parsed.options.toolChoice).toEqual({ name: "lookup" });
 		expect(parsed.options.responseFormat).toEqual({ type: "json_object" });
 		expect(parsed.options.extra).toEqual({ includeStreamingUsage: true });
+	});
+
+	it("replays a client's Gemini signature to the resolved model in the form its transport sends", () => {
+		const signedTurn = () =>
+			parseRequest({
+				model: "gemini",
+				messages: [
+					{ role: "user", content: "hi" },
+					{
+						role: "assistant",
+						content: null,
+						tool_calls: [
+							{
+								id: "call_1",
+								type: "function",
+								function: { name: "lookup", arguments: "{}" },
+								extra_content: { google: { thought_signature: "sig-123" } },
+							},
+						],
+					},
+					{ role: "tool", tool_call_id: "call_1", content: "ok" },
+				],
+			}).context;
+		const replayedSignature = (model: NonNullable<ReturnType<typeof getBundledModel>>) => {
+			const context = signedTurn();
+			adoptReplayedGeminiSignatures(context, model);
+			const assistant = transformMessages(context.messages, model).find(message => message.role === "assistant");
+			const call =
+				assistant?.role === "assistant" ? assistant.content.find(part => part.type === "toolCall") : undefined;
+			return call?.type === "toolCall" ? call.thoughtSignature : undefined;
+		};
+
+		const native = getBundledModel("google", "gemini-2.5-pro");
+		const compatible = getBundledModel("kilo", "google/gemini-2.5-pro");
+		if (!native || !compatible) throw new Error("expected bundled Gemini models");
+		expect(replayedSignature(native)).toBe("sig-123");
+		expect(JSON.parse(replayedSignature(compatible) ?? "null")).toEqual({
+			perCall: { google: { thought_signature: "sig-123" } },
+		});
+	});
+
+	it("coerces content:null to empty content for non-function roles (Codex #10956)", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.2",
+			messages: [
+				{ role: "user", content: "hi" },
+				{ role: "user", content: null },
+			],
+		});
+		expect(parsed.context.messages).toHaveLength(2);
+		const empty = parsed.context.messages[1];
+		expect(empty.role).toBe("user");
+		if (empty.role !== "user") throw new Error("unreachable");
+		expect(empty.content).toEqual([]);
+	});
+
+	it("leaves legacy function-role content:null on the string path (Codex #10956)", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.2",
+			messages: [{ role: "function", name: "lookup", content: null }],
+		});
+		expect(parsed.context.messages).toHaveLength(1);
+		const result = parsed.context.messages[0];
+		expect(result.role).toBe("toolResult");
+		if (result.role !== "toolResult") throw new Error("unreachable");
+		expect(result.toolName).toBe("lookup");
+		expect(result.content).toEqual([{ type: "text", text: "" }]);
 	});
 
 	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
@@ -239,6 +355,16 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		expect(tool.toolName).toBe("submit_move");
 	});
 
+	it('preserves reasoning_effort:"none" as an explicit reasoning-off request', () => {
+		const parsed = parseRequest({
+			model: "openai-codex/gpt-5.6-luna",
+			messages: [{ role: "user", content: "hello" }],
+			reasoning_effort: "none",
+		});
+		expect(parsed.options.reasoning).toBeUndefined();
+		expect(parsed.options.forceReasoningOff).toBe(true);
+	});
+
 	it("leaves toolName empty when no matching tool_call_id and no wire name", () => {
 		const parsed = parseRequest({
 			model: "m",
@@ -294,6 +420,34 @@ describe("auth-gateway openai-chat: encodeResponse", () => {
 		});
 	});
 
+	it("emits Google thought signatures in tool-call metadata", () => {
+		const message: AssistantMessage = {
+			...emptyAssistant(),
+			content: [
+				{
+					type: "toolCall",
+					id: "call_google",
+					name: "check",
+					arguments: { value: "test" },
+					thoughtSignature: "sig-google",
+				},
+			],
+			stopReason: "toolUse",
+		};
+		const out = encodeResponse(message, "gemini-test");
+		const choices = out.choices as Array<{
+			message: { tool_calls?: Array<Record<string, unknown>> };
+		}>;
+		expect(choices[0].message.tool_calls).toEqual([
+			{
+				id: "call_google",
+				type: "function",
+				function: { name: "check", arguments: '{"value":"test"}' },
+				extra_content: { google: { thought_signature: "sig-google" } },
+			},
+		]);
+	});
+
 	it("maps length stop reason and emits null content when text is empty", () => {
 		const message: AssistantMessage = { ...emptyAssistant(), stopReason: "length" };
 		const out = encodeResponse(message, "gpt-test");
@@ -309,7 +463,13 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		// Pre-populate partial.content so toolcall_start can look up id/name by contentIndex.
 		partial.content = [
 			{ type: "text", text: "" },
-			{ type: "toolCall", id: "call_A", name: "tool_a", arguments: {} },
+			{
+				type: "toolCall",
+				id: "call_A",
+				name: "tool_a",
+				arguments: {},
+				thoughtSignature: "sig-stream",
+			},
 			{ type: "toolCall", id: "call_B", name: "tool_b", arguments: {} },
 		];
 		const events: AssistantMessageEvent[] = [
@@ -357,7 +517,12 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(textDeltas.join("")).toBe("Hi there");
 
 		// Collect tool_call deltas; verify index sequence.
-		const toolDeltas: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> = [];
+		const toolDeltas: Array<{
+			index: number;
+			id?: string;
+			function?: { name?: string; arguments?: string };
+			extra_content?: unknown;
+		}> = [];
 		for (const c of chunks) {
 			const tc = c.choices[0].delta.tool_calls;
 			if (Array.isArray(tc)) toolDeltas.push(...(tc as typeof toolDeltas));
@@ -367,6 +532,7 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(starts.map(s => s.index)).toEqual([0, 1]);
 		expect(starts[0].id).toBe("call_A");
 		expect(starts[0].function?.name).toBe("tool_a");
+		expect(starts[0].extra_content).toEqual({ google: { thought_signature: "sig-stream" } });
 		expect(starts[1].id).toBe("call_B");
 		expect(starts[1].function?.name).toBe("tool_b");
 
@@ -382,6 +548,42 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		const finishChunk = chunks[chunks.length - 1];
 		expect(finishChunk.choices[0].delta).toEqual({});
 		expect(finishChunk.choices[0].finish_reason).toBe("tool_calls");
+	});
+	it("emits settled tool arguments when the provider streams no argument deltas", async () => {
+		const partial = emptyAssistant();
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call-weather",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		};
+		partial.content = [toolCall];
+		const events: AssistantMessageEvent[] = [
+			{ type: "toolcall_start", contentIndex: 0, partial },
+			{ type: "toolcall_end", contentIndex: 0, toolCall, partial },
+			{ type: "done", reason: "toolUse", message: { ...partial, stopReason: "toolUse" } },
+		];
+
+		const payloads = (await collectStream(encodeStream(makeEventStream(events, partial), "cursor/composer-2.5"))).map(
+			parseSseLine,
+		);
+
+		expect(payloads).toContainEqual(
+			expect.objectContaining({
+				choices: [
+					expect.objectContaining({
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									function: { arguments: '{"city":"Paris"}' },
+								},
+							],
+						},
+					}),
+				],
+			}),
+		);
 	});
 
 	it("emits an error envelope when the stream errors", async () => {
@@ -399,6 +601,7 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		const aborted: unknown[] = [];
 		async function* neverEndingEvents() {
 			await new Promise(() => {});
+			yield undefined as never;
 		}
 		const events = neverEndingEvents() as unknown as AssistantMessageEventStream;
 		(events as { result(): Promise<AssistantMessage> }).result = async () => emptyAssistant();

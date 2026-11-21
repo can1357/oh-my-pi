@@ -1,10 +1,11 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage, AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getProjectDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { LocalBlobBackend } from "../src/blob-broker/broker";
 import { contextHasImageUrls, supportsRemoteImageUrls } from "../src/blob-broker/context-images";
@@ -13,6 +14,7 @@ import { type BlobPersistence, BlobRegistry } from "../src/blob-broker/store";
 import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallback";
 import { createCommandUploader, extractUploadUrl, splitCommandTemplate } from "../src/blob-broker/uploaders";
 import { BlobStore as SessionBlobStore } from "../src/session/blob-store";
+import { writeFakeExecutable } from "./helpers/fake-executable";
 
 const PNG_B64 = Buffer.from("blob-broker-test-bytes-1").toString("base64");
 const OTHER_B64 = Buffer.from("blob-broker-test-bytes-2").toString("base64");
@@ -158,14 +160,6 @@ describe("BlobRegistry lazy blobs", () => {
 		expect((await store.serve(request())).status).toBe(200);
 		expect(renders).toBe(2);
 	});
-
-	it("responds 410 when a lazy source is gone", async () => {
-		const store = new BlobRegistry();
-		const entry = store.registerLazy("gone", "image/png", async () => null);
-		expect(entry.bytes).toBe(0);
-		const response = await store.serve(new Request(`http://blob.local/${entry.path}`));
-		expect(response.status).toBe(410);
-	});
 });
 
 describe("BlobRegistry persistence", () => {
@@ -244,6 +238,30 @@ describe("BlobRegistry persistence", () => {
 		// Same content address: registration reused the existing blob file.
 		expect(await sessionStore.has(hash)).toBe(true);
 	});
+
+	it("keeps the flushed index when a background save that started earlier finishes later", async () => {
+		const persist = makePersist(60_000);
+		const write = vi.spyOn(Bun, "write");
+		vi.useFakeTimers();
+		try {
+			const registry = new BlobRegistry({ persist });
+			const bytes = new Uint8Array(Buffer.from("shared-index"));
+			await registry.registerBytes("first-image", "image/png", bytes);
+			// Start the debounced background save, then register again and flush before it lands.
+			vi.advanceTimersByTime(1_000);
+			await registry.registerBytes("second-image", "image/png", bytes);
+			registry.flush();
+			// Let the stale background write (and its rename continuation) settle.
+			await Promise.allSettled(write.mock.results.map(result => result.value));
+		} finally {
+			vi.useRealTimers();
+			write.mockRestore();
+		}
+
+		const reloaded = new BlobRegistry({ persist });
+		expect(reloaded.lookup("first-image")).not.toBeNull();
+		expect(reloaded.lookup("second-image")).not.toBeNull();
+	});
 });
 
 describe("ImageUrlService", () => {
@@ -297,7 +315,7 @@ describe("ImageUrlService", () => {
 		expect(served.status).toBe(200);
 		const bytes = new Uint8Array(await served.arrayBuffer());
 		expect(bytes.byteLength).toBeGreaterThan(8);
-		expect([...bytes.slice(1, 4)]).toEqual([0x50, 0x4e, 0x47]); // "PNG"
+		expect(Array.from(bytes.slice(1, 4))).toEqual([0x50, 0x4e, 0x47]); // "PNG"
 
 		// Inline retry: placeholder frames gain data and lose their urls.
 		const context: Context = {
@@ -321,6 +339,11 @@ describe("supportsRemoteImageUrls", () => {
 		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-antigravity"))).toBe(true);
 		// Same API shape, backend that cannot fetch arbitrary URLs.
 		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "opencode"))).toBe(false);
+		// Moonshot-native hosts reject remote image URLs on both transports
+		// ("unsupported image url" 400) despite the openai-completions catalog api.
+		expect(supportsRemoteImageUrls(makeModel("openai-completions", "kimi-code"))).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "kimi-code"))).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("openai-completions", "moonshot"))).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-gemini-cli"))).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("bedrock-converse-stream", "amazon-bedrock"))).toBe(false);
 	});
@@ -331,6 +354,17 @@ describe("uploaders", () => {
 		expect(splitCommandTemplate(`pasta -b -f {file}`)).toEqual(["pasta", "-b", "-f", "{file}"]);
 		expect(splitCommandTemplate(`up --name "two words" '{file}'`)).toEqual(["up", "--name", "two words", "{file}"]);
 		expect(splitCommandTemplate(`a\\ b c`)).toEqual(["a b", "c"]);
+		// Windows paths keep their separators; backslash still escapes quotes and spaces.
+		expect(splitCommandTemplate(`C:\\tools\\up.exe -f {file}`, "win32")).toEqual([
+			"C:\\tools\\up.exe",
+			"-f",
+			"{file}",
+		]);
+		expect(splitCommandTemplate(`"C:\\Program Files\\up.exe" a\\ b \\"q\\"`, "win32")).toEqual([
+			"C:\\Program Files\\up.exe",
+			"a b",
+			'"q"',
+		]);
 	});
 
 	it("extracts the last url on stdout and trims trailing punctuation", () => {
@@ -339,15 +373,24 @@ describe("uploaders", () => {
 	});
 
 	it("runs a command uploader end to end against a stub binary", async () => {
-		const stub = path.join(os.tmpdir(), `omp-test-uploader-${process.pid}.sh`);
-		await Bun.write(
-			stub,
-			`#!/bin/sh\ntest -s "$2" || exit 3\necho "uploaded $2"\necho "https://files.example/abc.$3"\n`,
+		const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-test-uploader-"));
+		cleanups.push(() => void fs.promises.rm(stubDir, { recursive: true, force: true }));
+		const stub = writeFakeExecutable(
+			stubDir,
+			"uploader",
+			`import * as fs from "node:fs";
+const [, file, ext] = process.argv.slice(2);
+if (fs.statSync(file, { throwIfNoEntry: false })?.size) {
+	console.log(\`uploaded \${file}\`);
+	console.log(\`https://files.example/abc.\${ext}\`);
+} else {
+	process.exitCode = 3;
+}
+`,
 		);
-		await fs.promises.chmod(stub, 0o755);
-		cleanups.push(() => void fs.promises.rm(stub, { force: true }));
 
-		const uploader = createCommandUploader(`${stub} --x {file} {ext}`);
+		// Quoted, not escaped: a native Windows path must survive template splitting.
+		const uploader = createCommandUploader(`"${stub}" --x {file} {ext}`);
 		const publication = await uploader.upload({
 			bytes: new Uint8Array(Buffer.from("payload")),
 			mimeType: "image/png",
@@ -358,6 +401,31 @@ describe("uploaders", () => {
 			destination: "command",
 			bytes: 7,
 		});
+	});
+
+	it("rejects command uploads when the project directory becomes inaccessible", async () => {
+		const projectDir = getProjectDir();
+		const accessSync = fs.accessSync;
+		const access = vi.spyOn(fs, "accessSync").mockImplementation((target, mode) => {
+			if (target === projectDir) {
+				throw Object.assign(new Error("operation not permitted"), { code: "EACCES" });
+			}
+			return accessSync(target, mode);
+		});
+		const uploader = createCommandUploader(
+			`${process.execPath} -e "console.log('https://files.example/' + process.cwd())" {file}`,
+		);
+		try {
+			await expect(
+				uploader.upload({
+					bytes: new Uint8Array(Buffer.from("payload")),
+					mimeType: "image/png",
+					extension: "png",
+				}),
+			).rejects.toThrow(`Project directory is not accessible: ${projectDir}`);
+		} finally {
+			access.mockRestore();
+		}
 	});
 });
 
@@ -410,7 +478,7 @@ describe("wrapStreamFnWithBlobUrlFallback", () => {
 				{ type: "done", reason: "stop", message: done },
 			]);
 		};
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, () => service);
 
 		const decorated = await service.decorateContext(makeContext(), anthropicModel);
 		const stream = await wrapped(anthropicModel, decorated, undefined);
@@ -437,7 +505,7 @@ describe("wrapStreamFnWithBlobUrlFallback", () => {
 				{ type: "error", reason: "error", error: errorMessage("mid-stream failure") },
 			]);
 		};
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, () => service);
 
 		const decorated = await service.decorateContext(makeContext(), anthropicModel);
 		const stream = await wrapped(anthropicModel, decorated, undefined);

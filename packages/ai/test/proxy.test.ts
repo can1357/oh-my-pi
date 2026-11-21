@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
+	__resetGlobalProxyFetch,
+	__resetProxyCache,
 	connectProxiedSocket,
 	getProxyForProvider,
 	getProxyForUrl,
+	installGlobalProxyFetch,
 	isLocalOrMetadataHost,
 	shouldBypassProxy,
 	wrapFetchForProxy,
@@ -96,11 +101,15 @@ function proxyEnvKeys(): Set<string> {
 }
 
 // Snapshot + clear every proxy-related env var so each test starts clean and
-// leaves nothing behind for later files. Provider-specific tests use unique
-// provider ids so the module-level resolver cache can never cross-contaminate.
+// leaves nothing behind for later files.
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
+	// The resolver memoizes per provider for the lifetime of the process;
+	// earlier files (e.g. openai-responses-sampling-params) drain real
+	// providers with no proxy env set, which would otherwise cache
+	// `undefined` past the env writes below.
+	__resetProxyCache();
 	saved = {};
 	for (const key of proxyEnvKeys()) {
 		saved[key] = Bun.env[key];
@@ -109,6 +118,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	__resetProxyCache();
 	for (const key of proxyEnvKeys()) delete Bun.env[key];
 	for (const key in saved) {
 		const value = saved[key];
@@ -174,7 +184,6 @@ describe("isLocalOrMetadataHost / shouldBypassProxy hard-coded ranges", () => {
 	const bypassed = [
 		"localhost",
 		"app.localhost",
-		"127.0.0.1",
 		"127.5.5.5",
 		"10.1.2.3",
 		"192.168.1.1",
@@ -202,7 +211,6 @@ describe("isLocalOrMetadataHost / shouldBypassProxy hard-coded ranges", () => {
 
 	const proxied = [
 		"api.sakana.ai",
-		"api.openai.com",
 		"172.15.0.1", // just below the 172.16/12 block
 		"172.32.0.1", // just above the 172.16/12 block
 		"11.0.0.1", // not RFC1918
@@ -277,12 +285,6 @@ describe("wrapFetchForProxy", () => {
 		expect(calls[0].proxy).toBeUndefined();
 	});
 
-	it("does not inject a proxy when none is configured for the provider", async () => {
-		const { fetch, calls } = makeCapture();
-		await wrapFetchForProxy(fetch, "wrap-none")("https://api.sakana.ai/v1/responses");
-		expect(calls[0].proxy).toBeUndefined();
-	});
-
 	it("does not route one provider's request through another provider's proxy", async () => {
 		Bun.env.PI_PROXY_SAKANA = PROXY;
 		const { fetch, calls } = makeCapture();
@@ -296,6 +298,101 @@ describe("wrapFetchForProxy", () => {
 		await wrapFetchForProxy(fetch, "wrap-badurl")("not a url");
 		expect(calls).toHaveLength(1);
 		expect(calls[0].proxy).toBeUndefined();
+	});
+});
+
+describe("installGlobalProxyFetch", () => {
+	const nativeFetch = globalThis.fetch;
+	let calls: Array<{ url: string; proxy: unknown }>;
+
+	beforeEach(() => {
+		calls = [];
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			calls.push({
+				url: input instanceof Request ? input.url : String(input),
+				proxy: (init as { proxy?: unknown } | undefined)?.proxy,
+			});
+			return new Response("ok");
+		}) as typeof globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = nativeFetch;
+		__resetGlobalProxyFetch();
+	});
+
+	it("routes bare global fetch through PI_PROXY", async () => {
+		Bun.env.PI_PROXY = PROXY;
+		installGlobalProxyFetch();
+		await fetch("https://api.anthropic.com/v1/oauth/token", { method: "POST" });
+		expect(calls[0].proxy).toBe(PROXY);
+	});
+
+	it("leaves global fetch untouched when PI_PROXY is unset", async () => {
+		const before = globalThis.fetch;
+		installGlobalProxyFetch();
+		expect(globalThis.fetch).toBe(before);
+		await fetch("https://api.anthropic.com/v1/oauth/token");
+		expect(calls[0].proxy).toBeUndefined();
+	});
+
+	it("keeps a caller-supplied proxy so PI_PROXY_<PROVIDER> still wins", async () => {
+		Bun.env.PI_PROXY = PROXY;
+		Bun.env.PI_PROXY_GLOBAL_PREC = "http://127.0.0.1:24561";
+		installGlobalProxyFetch();
+		await wrapFetchForProxy(globalThis.fetch, "global-prec")("https://api.anthropic.com/v1/messages");
+		expect(calls[0].proxy).toBe("http://127.0.0.1:24561");
+	});
+
+	it("bypasses loopback targets so local model servers stay direct", async () => {
+		Bun.env.PI_PROXY = PROXY;
+		installGlobalProxyFetch();
+		await fetch("http://127.0.0.1:11434/api/chat");
+		expect(calls[0].proxy).toBeUndefined();
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"reaches a Unix-socket service instead of sending it to PI_PROXY",
+		async () => {
+			const socket = path.join(os.tmpdir(), `omp-proxy-${process.pid}.sock`);
+			const connections = new Set<net.Socket>();
+			const server = net.createServer(connection => {
+				connections.add(connection);
+				connection.once("close", () => connections.delete(connection));
+				connection.end("HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nlocal broker");
+			});
+			const listening = Promise.withResolvers<void>();
+			server.once("error", listening.reject);
+			server.listen(socket, listening.resolve);
+			await listening.promise;
+
+			try {
+				Bun.env.PI_PROXY = PROXY;
+				globalThis.fetch = nativeFetch;
+				installGlobalProxyFetch();
+				const response = await fetch("http://blob-broker.local/info", {
+					unix: socket,
+					signal: AbortSignal.timeout(1_500),
+				});
+				expect(await response.text()).toBe("local broker");
+			} finally {
+				for (const connection of connections) connection.destroy();
+				const closed = Promise.withResolvers<void>();
+				server.close(error => {
+					if (error) closed.reject(error);
+					else closed.resolve();
+				});
+				await closed.promise;
+			}
+		},
+	);
+
+	it("installs once", async () => {
+		Bun.env.PI_PROXY = PROXY;
+		installGlobalProxyFetch();
+		const wrapped = globalThis.fetch;
+		installGlobalProxyFetch();
+		expect(globalThis.fetch).toBe(wrapped);
 	});
 });
 

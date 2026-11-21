@@ -7,7 +7,7 @@ import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { createCodexModel } from "./helpers";
 
-// Literal Harmony analysis-channel marker. openai-codex/gpt-5.x reject any
+// Literal Harmony analysis-channel marker. openai-codex/gpt-oss reject any
 // request whose input carries this reserved control-token spelling as data
 // (invalid_prompt / "Request blocked"), permanently poisoning the session.
 const MARKER = "<|channel|>analysis";
@@ -36,7 +36,7 @@ function harmonyPoisonedContext(): { context: Context; user: UserMessage; toolRe
 		content: [{ type: "toolCall", id: "call_1", name: "grep", arguments: { pattern: "channel" } }],
 		api: "openai-codex-responses",
 		provider: "openai-codex",
-		model: "gpt-5.6-sol",
+		model: "gpt-oss-120b",
 		usage: ZERO_USAGE,
 		stopReason: "stop",
 		timestamp: 0,
@@ -77,7 +77,7 @@ function collectWireText(items: ResponseInput): string {
 
 describe("issue #6913: Harmony control-token escaping at the request boundary", () => {
 	it("escapes markers in codex user text and tool results without mutating persisted history", () => {
-		const model = createCodexModel("gpt-5.6-sol");
+		const model = createCodexModel("gpt-oss-120b");
 		const { context, user, toolResult } = harmonyPoisonedContext();
 
 		const wire = collectWireText(convertCodexResponsesMessages(model, context));
@@ -92,8 +92,8 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 
 	it("escapes markers on the shared openai-responses builder for harmony models", () => {
 		const model = buildModel({
-			id: "gpt-5.6",
-			name: "gpt-5.6",
+			id: "gpt-oss-120b",
+			name: "gpt-oss-120b",
 			api: "openai-responses",
 			provider: "openai",
 			baseUrl: "https://api.openai.com/v1",
@@ -135,12 +135,12 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 		expect(wire).toContain(MARKER);
 	});
 
-	it("detects Harmony via the wire model id for deployment/catalog aliases", () => {
-		// Opaque local id, gpt-5.4 on the wire (Azure-style alias). The gate must
-		// resolve `requestModelId`, not the non-Harmony local id.
+	it("uses resolved gpt-oss identity for deployment/catalog aliases", () => {
+		// The catalog id carries lineage while requestModelId is an opaque Azure
+		// deployment name. The request boundary consumes the resolved identity.
 		const model = buildModel({
-			id: "my-azure-deployment",
-			requestModelId: "gpt-5.4",
+			id: "gpt-oss-120b",
+			requestModelId: "my-azure-deployment",
 			name: "my-azure-deployment",
 			api: "openai-responses",
 			provider: "azure",
@@ -163,8 +163,8 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 
 	it("escapes replayed native-history input items carrying a raw marker", () => {
 		const model = buildModel({
-			id: "gpt-5.6",
-			name: "gpt-5.6",
+			id: "gpt-oss-120b",
+			name: "gpt-oss-120b",
 			api: "openai-responses",
 			provider: "openai",
 			baseUrl: "https://api.openai.com/v1",
@@ -202,8 +202,8 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 
 	it("escapes replayed EasyInputMessage items that omit the type field", () => {
 		const model = buildModel({
-			id: "gpt-5.6",
-			name: "gpt-5.6",
+			id: "gpt-oss-120b",
+			name: "gpt-oss-120b",
 			api: "openai-responses",
 			provider: "openai",
 			baseUrl: "https://api.openai.com/v1",
@@ -239,7 +239,7 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 	});
 
 	it("escapes model-authored tool-call arguments in replayed codex assistant history", () => {
-		const model = createCodexModel("gpt-5.6-sol");
+		const model = createCodexModel("gpt-oss-120b");
 		// The model wrote an article *about* Harmony: its own stored function_call
 		// arguments legitimately contain reserved control-token spellings.
 		const storedArguments = JSON.stringify({ path: "post.md", content: `intro ${MARKER} outro` });
@@ -248,7 +248,7 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 			content: [{ type: "toolCall", id: "call_w", name: "write", arguments: { path: "post.md" } }],
 			api: "openai-codex-responses",
 			provider: "openai-codex",
-			model: "gpt-5.6-sol",
+			model: "gpt-oss-120b",
 			usage: ZERO_USAGE,
 			stopReason: "stop",
 			timestamp: 0,
@@ -278,7 +278,7 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 	});
 
 	it("escapes assistant fallback text and tool-call arguments for harmony models", () => {
-		const model = createCodexModel("gpt-5.6-sol");
+		const model = createCodexModel("gpt-oss-120b");
 		// No native providerPayload — the block re-encode path used by
 		// full-transcript retries and cross-provider fallback.
 		const assistant: AssistantMessage = {
@@ -289,7 +289,7 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 			],
 			api: "openai-codex-responses",
 			provider: "openai-codex",
-			model: "gpt-5.6-sol",
+			model: "gpt-oss-120b",
 			usage: ZERO_USAGE,
 			stopReason: "stop",
 			timestamp: 0,

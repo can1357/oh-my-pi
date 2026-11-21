@@ -1,23 +1,37 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
+import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
+import { cfgOffline } from "../config/auxiliary-model-policy";
+import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
+import { autosaveApprovedPlan } from "../plan-mode/plan-autosave";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
 import planYoloHandoffPrompt from "../prompts/system/plan-yolo-handoff.md" with { type: "text" };
 import prewalkChecklistPrompt from "../prompts/system/prewalk-checklist.md" with { type: "text" };
 import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with { type: "text" };
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "../thinking";
+import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import type { PlanProposalHandler } from "../tools/resolve";
-import { ToolError } from "../tools/tool-errors";
+import { toolCommandDispatches } from "../tools/tool-commands";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
+import { PREWALK_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-
+import { cfgPrewalkAuto } from "./settings";
 const PREWALK_CONTINUE_MESSAGE_TYPE = "prewalk-continue";
 const PREWALK_CHECKLIST_MESSAGE_TYPE = "prewalk-checklist";
 
@@ -32,46 +46,64 @@ const PREWALK_ACTION_TOOLS: Record<string, true> = {
 const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
 
 /**
- * Whether a completed tool result is the first workspace-mutating action that
- * arms the prewalk hand-off. A direct `edit`/`write` call always counts; a
- * `write` that dispatched an `xd://` device (e.g. `lsp`, `ast_edit`, `debug`)
- * counts only when the wrapped tool resolved to a `write`/`exec` approval tier.
- * Read-only device calls — LSP navigation, `debug` inspection, `ast_edit` on
- * internal URLs, help lookups — leave the tier `read` (or absent) and must not
- * switch the model mid-investigation (issue #7312).
+ * Name of the tool behind a completed result that is a workspace-mutating
+ * action arming the prewalk hand-off; undefined when the result does not arm
+ * it. A direct `edit`/`write` call counts unless the write touched no files: a
+ * subagent messaging its parent through `write agent://…`, a reply, process
+ * stdin, or background-work control is coordination, not implementation, and
+ * must not hand the plan off. A `bash` run counts only through the tool
+ * commands it executed: one whose wrapped tool resolved to the `write`
+ * approval tier arms the hand-off, named after that tool. Read-only tool
+ * commands — LSP navigation, `debug` inspection, `ast_edit` on internal URLs,
+ * `--help` lookups — leave the tier `read` (or absent) and must not switch the
+ * model mid-investigation (issue #7312); an unresolved tier declines the switch
+ * too. Exec-tier tool commands (test runners, remote commands, and any tool
+ * without a declared approval) count no more than a plain shell command, which
+ * never arms the hand-off (issue #19002). MCP approval stays conservatively
+ * `write`, so an MCP tool the server declared read-only is excluded through the
+ * hint its dispatch recorded for the tool that ran.
  */
-function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
-	if (!PREWALK_ACTION_TOOLS[result.toolName]) return false;
-	const details = result.details;
-	// A direct filesystem edit/write carries no `xd://` dispatch metadata.
-	if (!details || typeof details !== "object" || !("xdev" in details) || !details.xdev) return true;
-	const xdev = details.xdev;
-	// Device dispatch: switch only on a genuine mutation tier. An absent tier
-	// (help lookup, unresolved approval) declines the switch, matching the
-	// reporter's "stay on the large model a couple turns longer" preference.
-	if (typeof xdev !== "object" || !("tier" in xdev)) return false;
-	return xdev.tier === "write" || xdev.tier === "exec";
+function prewalkImplementationTool(result: ToolResultMessage): string | undefined {
+	if (PREWALK_ACTION_TOOLS[result.toolName]) {
+		const details = result.details;
+		const touchesNoFiles =
+			!!details && typeof details === "object" && "touchesNoFiles" in details && details.touchesNoFiles === true;
+		return touchesNoFiles ? undefined : result.toolName;
+	}
+	return toolCommandDispatches(result.toolName, result).find(
+		dispatch => dispatch.mode === "execute" && dispatch.tier === "write" && dispatch.readOnlyHint !== true,
+	)?.tool;
 }
 
 /** Capabilities the prewalk coordinator borrows from its owning session. */
 export interface PrewalkCoordinatorHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	settings: Settings;
 	model(): Model | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
+	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
+	resolveDefaultPrewalk(): Prewalk | undefined;
+	/** Resolves `prewalk.autoTarget`; warns and returns undefined when it cannot be used. */
+	resolveAutoPrewalkTarget(): Prewalk | undefined;
+	/** Judges a new task for `prewalk.auto`; undefined when there is nothing to judge. */
+	classifyAutoPrewalk(request: string, signal: AbortSignal): Promise<AutoPrewalkDecision | undefined>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
-	): Promise<void>;
+		isCurrent?: () => boolean,
+	): Promise<boolean>;
 	setActiveToolsByName(names: string[]): Promise<void>;
-	setActiveToolPresentation(toolNames: string[], mountedToolNames: string[]): Promise<void>;
-	runToolRegistryMutation<T>(mutation: () => Promise<T>): Promise<T>;
+	restoreNonMCPToolPresentation(
+		nonMCPToolNames: string[],
+		nonMCPMountedToolNames: string[],
+		registeredToolNames: readonly string[],
+	): Promise<void>;
+	getAllToolNames(): string[];
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
-	getSelectedMCPToolNames(): string[];
-	getMountedXdevToolNames(): string[];
+	getMountedToolCommandNames(): string[];
 	hasBuiltInTool(name: string): boolean;
 	getPlanModeState(): PlanModeState | undefined;
 	setPlanModeState(state: PlanModeState | undefined): void;
@@ -85,9 +117,23 @@ export interface PrewalkCoordinatorHost {
 export interface PrewalkCoordinatorOptions {
 	prewalk?: Prewalk;
 	planYolo?: PlanYolo;
+	/** Keep `prewalk.auto` away from this session until `/new` (`--no-prewalk`). */
+	suppressAutoPrewalk?: boolean;
+}
+
+/** The models around a completed handoff, kept to return to the planning model. */
+interface PrewalkHandoff {
+	source: Model;
+	sourceThinkingLevel: ConfiguredThinkingLevel | undefined;
+	target: Model;
+	targetThinkingLevel: ConfiguredThinkingLevel | undefined;
+	/** Armed by `prewalk.auto`: the handoff belongs to one task, so the next task returns to `source`. */
+	auto: boolean;
 }
 
 /** Coordinates one-way model prewalks and automatic plan-yolo handoffs. */
+
+export type PrewalkRestartResult = "armed" | "reset" | "rejected";
 export class PrewalkCoordinator {
 	readonly #host: PrewalkCoordinatorHost;
 	#prewalk: Prewalk | undefined;
@@ -95,18 +141,43 @@ export class PrewalkCoordinator {
 	#continuePending = false;
 	#todoSeen = false;
 	#planYolo: PlanYolo | undefined;
-	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[] } | undefined;
+	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	#planYoloArmed = false;
+	#handoff: PrewalkHandoff | undefined;
+	#selectionEpoch = 0;
+	/** The arm whose switch is in flight; `disarm()` clears it to cancel that switch and report it itself. */
+	#switching: Prewalk | undefined;
+	/** The pending arm `prewalk.auto` made, as opposed to a manual or configured one. */
+	#autoArm: Prewalk | undefined;
+	/** Session-local opt-out from auto-prewalk: `/prewalk off`, or `--no-prewalk` at startup. `/new` clears it. */
+	#autoSuppressed: boolean;
 
 	constructor(host: PrewalkCoordinatorHost, options: PrewalkCoordinatorOptions = {}) {
 		this.#host = host;
-		this.#prewalk = options.prewalk;
+		const prewalk = options.prewalk;
+		const handoff = prewalk ? host.sessionManager.getSessionLocalModelChange() : undefined;
+		// A revived session still on the target its recorded handoff switched to has spent this prewalk;
+		// one that starts elsewhere (an explicit startup model, a fallback) keeps the arm.
+		const target = prewalk ? `${prewalk.target.provider}/${prewalk.target.id}` : undefined;
+		const current = host.model();
+		const spent =
+			handoff?.role === PREWALK_MODEL_CHANGE_ROLE &&
+			handoff.model === target &&
+			`${current?.provider}/${current?.id}` === target;
+		this.#prewalk = spent ? undefined : prewalk;
 		this.#planYolo = options.planYolo;
+		this.#autoSuppressed = options.suppressAutoPrewalk === true;
 	}
 
 	/** Current prewalk target, if the one-way switch remains armed. */
 	get state(): Prewalk | undefined {
 		return this.#prewalk;
+	}
+
+	/** Whether the armed prewalk would perform a model or thinking-level handoff. */
+	get willHandoff(): boolean {
+		const prewalk = this.#prewalk;
+		return prewalk !== undefined && !this.#isNoop(prewalk);
 	}
 
 	#isNoop(prewalk: Prewalk): boolean {
@@ -120,9 +191,146 @@ export class PrewalkCoordinator {
 
 	#clearPrewalkState(): void {
 		this.#prewalk = undefined;
+		this.#autoArm = undefined;
 		this.#planInjected = false;
 		this.#continuePending = false;
 		this.#todoSeen = false;
+	}
+
+	/**
+	 * A later model/effort selection owns the active model, even if its identity is unchanged: it drops the handoff,
+	 * cancels a pending auto arm, and supersedes any prewalk switch still in flight. Manual and configured arms stay.
+	 */
+	releaseHandoff(): void {
+		this.#selectionEpoch++;
+		if (this.#autoArm && this.#autoArm === this.#prewalk) {
+			this.#scrubPlanNudge(undefined, true);
+			this.#clearPrewalkState();
+		}
+		this.#handoff = undefined;
+	}
+
+	/** Retire the outgoing cycle and prepare a configured prewalk for a fresh main session. */
+	async resetForNewSession(enabled: boolean): Promise<void> {
+		const handoff = this.#handoff;
+		this.#autoSuppressed = false;
+		const restoreSource = handoff !== undefined && (enabled || handoff.auto) && this.#onHandoffTarget(handoff);
+		this.#scrubPlanNudge(undefined, true);
+		this.#clearPrewalkState();
+		this.releaseHandoff();
+		// Best-effort: /new has already committed the transcript switch, so an
+		// unusable planning model must not abort the rest of session setup.
+		if (restoreSource) await this.#restoreSource(handoff);
+		if (!enabled) return;
+		const prewalk = this.#host.resolveDefaultPrewalk();
+		if (!prewalk) return;
+		if (this.#isNoop(prewalk)) {
+			this.#disarmNoop(prewalk);
+			return;
+		}
+		// Like startup, inject guidance at the first completed turn, not into an empty transcript.
+		this.#prewalk = prewalk;
+	}
+
+	/** Whether the session still sits on the model and effort `handoff` switched to. */
+	#onHandoffTarget(handoff: PrewalkHandoff): boolean {
+		const current = this.#host.model();
+		return (
+			current?.provider === handoff.target.provider &&
+			current?.id === handoff.target.id &&
+			this.#host.configuredThinkingLevel() === handoff.targetThinkingLevel
+		);
+	}
+
+	async #restoreSource(handoff: PrewalkHandoff): Promise<void> {
+		if (cfgOffline.get(this.#host.settings) && handoff.source.provider !== this.#host.model()?.provider) return;
+		const epoch = this.#selectionEpoch;
+		try {
+			// A selection made while the planning model loads owns the session; do not override it.
+			const restored = await this.#host.setModelTemporary(
+				handoff.source,
+				handoff.sourceThinkingLevel,
+				() => this.#selectionEpoch === epoch,
+			);
+			// Temporary selection treats undefined as "keep/default"; restoration must preserve
+			// the original selector, including auto or an explicitly inherited effort.
+			if (restored) this.#host.restoreThinkingLevel(handoff.sourceThinkingLevel);
+		} catch (error) {
+			this.#host.emitNotice(
+				"warning",
+				`Prewalk: could not restore ${handoff.source.provider}/${handoff.source.id}: ${error instanceof Error ? error.message : String(error)}`,
+				"prewalk",
+			);
+		}
+	}
+
+	/** `/prewalk off`: keep auto-prewalk out of this session until `/new`. */
+	suppressAuto(): void {
+		this.#autoSuppressed = true;
+	}
+
+	/** Effective `prewalk.auto` mode: session opt-outs and plan mode (whose plan-file write would trip a handoff) turn it off. */
+	#autoMode(): "off" | "suggest" | "on" {
+		if (this.#autoSuppressed || this.#host.getPlanModeState()?.enabled === true) return "off";
+		return cfgPrewalkAuto.get(this.#host.settings);
+	}
+
+	/**
+	 * Starts a new user task. An auto handoff belongs to the task that armed it, so the
+	 * session returns to that task's planning model unless a later explicit selection took ownership. An auto arm
+	 * the previous task never used is dropped so this task is judged on its own. Manual and configured arms stay.
+	 */
+	async beginAutoTask(): Promise<void> {
+		if (this.#autoArm && this.#autoArm === this.#prewalk) {
+			this.#scrubPlanNudge(undefined, true);
+			this.#clearPrewalkState();
+		}
+		const handoff = this.#handoff;
+		if (!handoff?.auto) return;
+		this.releaseHandoff();
+		if (this.#onHandoffTarget(handoff)) await this.#restoreSource(handoff);
+	}
+
+	/**
+	 * Starts judging a new user task. Undefined when auto-prewalk is off for this turn or an arm already owns it.
+	 * Never rejects: a failed judgment resolves undefined, so the turn proceeds as if auto-prewalk were off.
+	 */
+	classifyAuto(request: string, signal: AbortSignal): Promise<AutoPrewalkDecision | undefined> | undefined {
+		if (this.#autoMode() === "off" || this.#prewalk !== undefined) return undefined;
+		return this.#host.classifyAutoPrewalk(request, signal).catch(error => {
+			logger.debug("auto-prewalk: skipped after a failure", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		});
+	}
+
+	/**
+	 * Applies a decision right before its task is dispatched; synchronous, so nothing can interleave before the
+	 * request carries it. `suggest` reports the decision. Under `on`, a confident prewalk arms a handoff from the
+	 * active model to the auto target and returns the plan nudge for the caller to deliver with the task.
+	 */
+	applyAuto(decision: AutoPrewalkDecision | undefined): AgentMessage | undefined {
+		const mode = this.#autoMode();
+		if (!decision || mode === "off" || this.#prewalk !== undefined) return undefined;
+		if (mode === "suggest" || !decision.arm) {
+			const chance = decision.probabilities.prewalk.toFixed(2);
+			const summary =
+				decision.route !== "prewalk"
+					? `${decision.route} (prewalk ${chance})`
+					: decision.arm
+						? `prewalk ${chance}`
+						: `prewalk ${chance} (below threshold)`;
+			if (mode === "suggest") this.#host.emitNotice("info", `Auto-prewalk: ${summary}`, "prewalk");
+			else logger.debug("auto-prewalk: not armed", { decision: summary });
+			return undefined;
+		}
+		const target = this.#host.resolveAutoPrewalkTarget();
+		// Already on the target: nothing to hand off, and nothing worth reporting on every task.
+		if (!target || this.#isNoop(target)) return undefined;
+		const planMessage = this.#armPending(target.target, target.thinkingLevel);
+		if (planMessage) this.#autoArm = this.#prewalk;
+		return planMessage;
 	}
 
 	#disarmNoop(prewalk: Prewalk): void {
@@ -138,6 +346,16 @@ export class PrewalkCoordinator {
 	async advanceAtTurnEnd(liveMessages: AgentMessage[], context: AgentTurnEndContext | undefined): Promise<void> {
 		const prewalk = this.#prewalk;
 		if (!prewalk || context?.message.role !== "assistant") return;
+		if (cfgOffline.get(this.#host.settings) && prewalk.target.provider !== this.#host.model()?.provider) {
+			this.#scrubPlanNudge(liveMessages);
+			this.#clearPrewalkState();
+			this.#host.emitNotice(
+				"warning",
+				"Prewalk disarmed: offline mode restricts handoffs to the active provider.",
+				"prewalk",
+			);
+			return;
+		}
 		if (this.#isNoop(prewalk)) {
 			this.#scrubPlanNudge(liveMessages);
 			this.#disarmNoop(prewalk);
@@ -161,10 +379,14 @@ export class PrewalkCoordinator {
 		}
 
 		const todoGateOpen = this.#todoSeen || !this.#host.getActiveToolNames().includes("todo");
-		const action = todoGateOpen
-			? context.toolResults.find(result => isPrewalkImplementationAction(result))
-			: undefined;
-		if (!action) {
+		let actionTool: string | undefined;
+		if (todoGateOpen) {
+			for (const result of context.toolResults) {
+				actionTool = prewalkImplementationTool(result);
+				if (actionTool) break;
+			}
+		}
+		if (!actionTool) {
 			if (!this.#planInjected) {
 				this.#planInjected = true;
 				this.#continuePending = true;
@@ -182,8 +404,10 @@ export class PrewalkCoordinator {
 		}
 
 		await this.#host.waitForSessionMessagePersistence(context.message);
+		if (this.#prewalk !== prewalk) return;
 		for (const toolResult of context.toolResults) {
 			await this.#host.waitForSessionMessagePersistence(toolResult);
+			if (this.#prewalk !== prewalk) return;
 		}
 		this.#scrubPlanNudge(liveMessages);
 		const target = prewalk.target;
@@ -191,13 +415,59 @@ export class PrewalkCoordinator {
 			this.#disarmNoop(prewalk);
 			return;
 		}
-		await this.#host.setModelTemporary(target, prewalk.thinkingLevel, { ephemeral: true });
-		this.#clearPrewalkState();
+		const source = this.#host.model();
+		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
+		const auto = this.#autoArm === prewalk;
+		const epoch = this.#selectionEpoch;
+		this.#switching = prewalk;
+		const switched = await this.#host.setModelTemporary(
+			target,
+			prewalk.thinkingLevel,
+			() => this.#selectionEpoch === epoch,
+		);
+		const disarmed = this.#switching !== prewalk;
+		this.#switching = undefined;
+		// A newer arm (a re-run `/prewalk`) survives; otherwise this switch consumes its arm.
+		const replaced = this.#prewalk !== undefined && this.#prewalk !== prewalk;
+		if (!replaced) this.#clearPrewalkState();
+		if (!switched) {
+			// `disarm()` already reported its cancellation, and a newer arm owns what comes next.
+			if (disarmed || replaced) return;
+			if (!modelsAreEqual(this.#host.model(), target)) {
+				this.#host.emitNotice(
+					"info",
+					`Prewalk: cancelled the switch to ${target.provider}/${target.id}; the model or thinking level changed while it was switching.`,
+					"prewalk",
+				);
+				return;
+			}
+			// The target landed, but a selection during the switch took ownership: implement here, never restore.
+			this.#host.emitNotice(
+				"info",
+				`Prewalk: switched to ${target.provider}/${target.id} after first ${actionTool} call; your selection during the switch keeps the session here.`,
+				"prewalk",
+			);
+			this.#steerChecklist();
+			return;
+		}
+		if (source) {
+			this.#handoff = {
+				source,
+				sourceThinkingLevel,
+				target,
+				targetThinkingLevel: this.#host.configuredThinkingLevel(),
+				auto,
+			};
+		}
 		this.#host.emitNotice(
 			"info",
-			`Prewalk: switched to ${target.provider}/${target.id} after first ${action.toolName} call.`,
+			`Prewalk: switched to ${target.provider}/${target.id} after first ${actionTool} call.`,
 			"prewalk",
 		);
+		this.#steerChecklist();
+	}
+
+	#steerChecklist(): void {
 		this.#host.agent.steer({
 			role: "custom",
 			customType: PREWALK_CHECKLIST_MESSAGE_TYPE,
@@ -208,7 +478,25 @@ export class PrewalkCoordinator {
 		});
 	}
 
-	/** Arms a prewalk immediately for an explicit slash-command request. */
+	/** Drops a pending prewalk hand-off (e.g. `prewalk.enabled` turned off); no-op when none is armed. */
+	disarm(): void {
+		const active = this.#prewalk;
+		if (!active) return;
+		this.#scrubPlanNudge(undefined, true);
+		this.#clearPrewalkState();
+		if (this.#switching === active) {
+			// Cancel the switch in flight; it stays silent because this notice already reports it.
+			this.#switching = undefined;
+			this.#selectionEpoch++;
+		}
+		this.#host.emitNotice(
+			"info",
+			`Prewalk: disarmed; staying on the active model instead of switching to ${active.target.provider}/${active.target.id}.`,
+			"prewalk",
+		);
+	}
+
+	/** Arms a prewalk immediately for an explicit slash-command request; it takes over a matching auto arm. */
 	arm(target: Model, thinkingLevel?: ConfiguredThinkingLevel): boolean {
 		const active = this.#prewalk;
 		if (active) {
@@ -217,35 +505,74 @@ export class PrewalkCoordinator {
 				`Prewalk: already armed for ${active.target.provider}/${active.target.id}, waiting for the first edit/write.`,
 				"prewalk",
 			);
-			return (
+			const matches =
 				active.target.provider === target.provider &&
 				active.target.id === target.id &&
-				active.thinkingLevel === thinkingLevel
-			);
+				active.thinkingLevel === thinkingLevel;
+			if (matches) this.#autoArm = undefined;
+			return matches;
 		}
+		const planMessage = this.#armPending(target, thinkingLevel);
+		if (!planMessage) return false;
+		this.#host.agent.steer(planMessage);
+		return true;
+	}
+
+	/** Arms an inactive prewalk; returns the plan nudge for the caller to deliver, or undefined for a no-op target. */
+	#armPending(target: Model, thinkingLevel: ConfiguredThinkingLevel | undefined): AgentMessage | undefined {
 		const candidate = { target, thinkingLevel };
 		if (this.#isNoop(candidate)) {
 			this.#disarmNoop(candidate);
-			return false;
+			return undefined;
 		}
 		this.#prewalk = candidate;
 		this.#planInjected = true;
 		this.#continuePending = true;
 		this.#todoSeen = false;
-		this.#host.agent.steer({
+		this.#host.emitNotice(
+			"info",
+			`Prewalk: armed for ${target.provider}/${target.id} — will switch at the first edit/write once the todo list exists.`,
+			"prewalk",
+		);
+		return {
 			role: "custom",
 			customType: PREWALK_PLAN_MESSAGE_TYPE,
 			content: prewalkPlanPrompt,
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
-		});
-		this.#host.emitNotice(
-			"info",
-			`Prewalk: armed for ${target.provider}/${target.id} — will switch at the first edit/write once the todo list exists.`,
-			"prewalk",
-		);
-		return true;
+		};
+	}
+
+	/**
+	 * Restores the planning model and reuses or creates the requested one-shot handoff.
+	 * A different active arm rejects the restart before the current model changes.
+	 */
+	async restart(
+		source: Model,
+		sourceThinkingLevel: ConfiguredThinkingLevel | undefined,
+		target: Model,
+		targetThinkingLevel: ConfiguredThinkingLevel | undefined,
+	): Promise<PrewalkRestartResult> {
+		const active = this.#prewalk;
+		if (
+			active &&
+			(active.target.provider !== target.provider ||
+				active.target.id !== target.id ||
+				active.thinkingLevel !== targetThinkingLevel)
+		) {
+			this.arm(target, targetThinkingLevel);
+			return "rejected";
+		}
+
+		await this.#host.setModelTemporary(source, sourceThinkingLevel);
+		if (!active) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
+		if (this.#isNoop(active)) {
+			this.#scrubPlanNudge();
+			this.#disarmNoop(active);
+			return "reset";
+		}
+		return "armed";
 	}
 
 	/** Lazily enables plan-yolo's plan phase before the first prompt is built. */
@@ -253,39 +580,76 @@ export class PrewalkCoordinator {
 		if (!this.#planYolo || this.#planYoloArmed) return;
 		this.#planYoloArmed = true;
 		const previousEnabledTools = this.#host.getEnabledToolNames();
-		const previousMountedTools = this.#host.getMountedXdevToolNames();
-		const augmentations = this.#host.hasBuiltInTool("write") ? ["write"] : [];
-		await this.#host.setActiveToolsByName([...new Set([...previousEnabledTools, ...augmentations])]);
-		this.#planYoloPreviousNonMCPPresentation = {
-			enabled: previousEnabledTools.filter(name => !isMCPToolName(name)),
-			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
-		};
-		this.#host.setPlanModeState({
+		const previousMountedTools = this.#host.getMountedToolCommandNames();
+		const previousRegisteredTools = this.#host.getAllToolNames();
+		const previousPlanModeState = this.#host.getPlanModeState();
+		const planModeState: PlanModeState = {
 			enabled: true,
 			planFilePath: this.#host.getPlanReferencePath() || "local://PLAN.md",
 			workflow: "parallel",
-		});
+		};
+		// PlanYolo's injected write drafts the plan file; it is not a user grant.
+		// Publish plan mode before applying the tool set: plan mode confines that
+		// write to the plan file, and SessionTools presents `propose` top-level from
+		// it when `propose` cannot run as a `bash` command.
+		this.#host.setPlanModeState(planModeState);
+		// Only the built-in write enforces plan mode's plan-file guard. A shadowing
+		// extension `write` would let the plan phase mutate the workspace, so it is
+		// left out of the plan tool set.
+		const planTools = this.#host.hasBuiltInTool("write")
+			? [...previousEnabledTools, "write"]
+			: previousEnabledTools.filter(name => name !== "write");
+		try {
+			await this.#host.setActiveToolsByName([...new Set(planTools)]);
+		} catch (error) {
+			this.#host.setPlanModeState(previousPlanModeState);
+			this.#planYoloArmed = false;
+			throw error;
+		}
+		this.#planYoloPreviousNonMCPPresentation = {
+			enabled: previousEnabledTools.filter(name => !isMCPToolName(name)),
+			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+			registered: previousRegisteredTools,
+		};
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
 	}
 
-	#scrubPlanNudge(liveMessages: AgentMessage[]): void {
-		if (!this.#planInjected) return;
-		const isPlanNudge = isPrewalkPlanNudge;
-		for (let index = liveMessages.length - 1; index >= 0; index--) {
-			if (!isPlanNudge(liveMessages[index])) continue;
-			invalidateMessageCache(liveMessages[index]);
-			liveMessages.splice(index, 1);
+	#scrubPlanNudge(liveMessages?: AgentMessage[], includeContinuation = false): void {
+		if (liveMessages) {
+			for (let index = liveMessages.length - 1; index >= 0; index--) {
+				if (!isPrewalkPlanNudge(liveMessages[index])) continue;
+				invalidateMessageCache(liveMessages[index]);
+				liveMessages.splice(index, 1);
+			}
 		}
 		const stateMessages = this.#host.agent.state.messages;
-		const filtered = stateMessages.filter(message => !isPlanNudge(message));
+		const filtered = stateMessages.filter(message => !isPrewalkPlanNudge(message));
 		if (filtered.length !== stateMessages.length) this.#host.agent.replaceMessages(filtered);
+		// Delivered continuations are persisted history; only pending ones can be canceled.
+		const isPendingNudge = (message: AgentMessage): boolean =>
+			isPrewalkPlanNudge(message) ||
+			(includeContinuation && message.role === "custom" && message.customType === PREWALK_CONTINUE_MESSAGE_TYPE);
+		const steering = this.#host.agent.peekSteeringQueue();
+		if (steering.some(isPendingNudge)) {
+			this.#host.agent.replaceQueue(
+				"steering",
+				steering.filter(message => !isPendingNudge(message)),
+			);
+		}
 	}
 
 	async #finalizePlanYoloProposal(title: string): Promise<AgentToolResult<unknown>> {
 		const planYolo = this.#planYolo;
 		const state = this.#host.getPlanModeState();
 		if (!planYolo || !state?.enabled) throw new ToolError("Plan mode is not active.");
-		const { planFilePath, title: resolvedTitle } = await resolveApprovedPlan({
+		if (cfgOffline.get(this.#host.settings) && planYolo.target.provider !== this.#host.model()?.provider) {
+			throw new ToolError("Offline mode restricts plan handoffs to the active provider.");
+		}
+		const {
+			planFilePath,
+			planContent,
+			title: resolvedTitle,
+		} = await resolveApprovedPlan({
 			suppliedTitle: title,
 			statePlanFilePath: state.planFilePath,
 			readPlan: url =>
@@ -295,18 +659,43 @@ export class PrewalkCoordinator {
 				}),
 			listPlanFiles: () => listPlanFiles({ localProtocolOptions: this.#host.localProtocolOptions() }),
 		});
+		let autosavedPlan: string | null = null;
+		try {
+			autosavedPlan = await autosaveApprovedPlan({
+				settings: this.#host.settings,
+				cwd: this.#host.sessionManager.getCwd(),
+				title: resolvedTitle,
+				planContent,
+			});
+			if (autosavedPlan) {
+				const displayPath = truncateToWidth(replaceTabs(shortenPath(autosavedPlan)), TRUNCATE_LENGTHS.CONTENT);
+				this.#host.emitNotice("info", `Plan autosaved to ${displayPath}.`, "plan-yolo");
+			}
+		} catch (error) {
+			logger.warn("Failed to autosave approved plan", { error });
+			const detail = truncateToWidth(
+				shortenEmbeddedPaths(
+					replaceTabs(error instanceof Error ? error.message : String(error))
+						.replace(/[\r\n]+/g, " ")
+						.trim(),
+				),
+				TRUNCATE_LENGTHS.CONTENT,
+			);
+			this.#host.emitNotice(
+				"warning",
+				`Plan autosave failed: ${detail} Continuing with implementation.`,
+				"plan-yolo",
+			);
+		}
 		this.#host.setPlanModeState(undefined);
 		const previousPresentation = this.#planYoloPreviousNonMCPPresentation;
 		try {
 			if (previousPresentation) {
-				await this.#host.runToolRegistryMutation(async () => {
-					const liveMCP = this.#host.getSelectedMCPToolNames();
-					const liveMountedMCP = this.#host.getMountedXdevToolNames().filter(isMCPToolName);
-					await this.#host.setActiveToolPresentation(
-						[...new Set([...previousPresentation.enabled, ...liveMCP])],
-						[...new Set([...previousPresentation.mounted, ...liveMountedMCP])],
-					);
-				});
+				await this.#host.restoreNonMCPToolPresentation(
+					previousPresentation.enabled,
+					previousPresentation.mounted,
+					previousPresentation.registered,
+				);
 			}
 		} catch (error) {
 			this.#host.setPlanModeState(state);
@@ -315,7 +704,7 @@ export class PrewalkCoordinator {
 		this.#host.setPlanProposalHandler(null);
 		this.#planYolo = undefined;
 		this.#planYoloPreviousNonMCPPresentation = undefined;
-		await this.#host.setModelTemporary(planYolo.target, planYolo.thinkingLevel, { ephemeral: true });
+		await this.#host.setModelTemporary(planYolo.target, planYolo.thinkingLevel);
 		this.#host.emitNotice(
 			"info",
 			`Plan-yolo: plan approved, switched to ${planYolo.target.provider}/${planYolo.target.id} to implement "${resolvedTitle}".`,

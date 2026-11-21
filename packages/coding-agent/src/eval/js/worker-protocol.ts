@@ -1,6 +1,11 @@
-import type { JsDisplayOutput } from "./shared/types";
+import type { EvalDisplayOutput } from "../types";
+import type { RuntimeCallIdentity, ShadowSnapshot } from "./shared/runtime";
 
-export type { JsDisplayOutput } from "./shared/types";
+export interface EvalPreludeSource {
+	name: string;
+	exports: string[];
+	source: string;
+}
 
 export interface SessionSnapshot {
 	cwd: string;
@@ -11,6 +16,12 @@ export interface SessionSnapshot {
 	 * accept `local://…` paths instead of writing a literal `local:/` directory.
 	 */
 	localRoots?: Record<string, string>;
+	/** Enabled host-capability snippets projected for this JavaScript cell. */
+	preludes?: EvalPreludeSource[];
+	/** Selected package directory consulted only after the importing file's project. */
+	packageRoot?: string;
+	/** Model-visible description of the selected package environment. */
+	packageEnvironment?: string;
 }
 
 export interface RunErrorPayload {
@@ -23,9 +34,26 @@ export interface RunErrorPayload {
 
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
+/** Request to inspect or invoke the retained JavaScript tool registry. */
+export type JsToolRequest =
+	| { op: "describe"; names: string[] }
+	| { op: "call"; name: string; args: Record<string, unknown> };
+
 export type WorkerInbound =
 	| { type: "init"; snapshot: SessionSnapshot }
 	| { type: "run"; runId: string; code: string; filename: string; snapshot: SessionSnapshot }
+	| ({ type: "tool"; runId: string } & JsToolRequest)
+	| { type: "shadow-snapshot"; id: string; snapshot: SessionSnapshot }
+	| {
+			type: "run-if-snapshot-matches";
+			id: string;
+			runId: string;
+			code: string;
+			filename: string;
+			snapshot: SessionSnapshot;
+			expectedRevision: number;
+			expectedDigest: string;
+	  }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 
@@ -33,12 +61,27 @@ export type WorkerOutbound =
 	| { type: "ready" }
 	| { type: "init-failed"; error: RunErrorPayload }
 	| { type: "text"; runId: string; chunk: string }
-	| { type: "display"; runId: string; output: JsDisplayOutput }
-	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
-	| { type: "result"; runId: string; ok: true }
+	| { type: "display"; runId: string; output: EvalDisplayOutput }
+	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown; identity?: RuntimeCallIdentity }
+	/** `value` carries a tool-bridge envelope (`describe`/`call`); cell runs omit it. */
+	| { type: "result"; runId: string; ok: true; value?: unknown }
 	| { type: "result"; runId: string; ok: false; error: RunErrorPayload }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
+	| { type: "shadow-snapshot"; id: string; eligible: boolean; reason?: string; snapshot?: ShadowSnapshot }
+	| { type: "shadow-run"; id: string; eligible: boolean; reason?: string }
 	| { type: "closed" };
+
+/**
+ * First raw message a Bun Worker host posts to its worker (worker-thread mode only): the port the
+ * worker sends every {@link WorkerOutbound} on instead of `parentPort`. A terminated Bun Worker drops
+ * its undelivered `parentPort` messages, but what sits on this port stays readable, so the host
+ * still hands a killed cell's last output to its run. Consumed by `worker-entry.ts`; never reaches
+ * `WorkerCore`.
+ */
+export interface WorkerOutboxMessage {
+	type: "outbox";
+	port: MessagePort;
+}
 
 export interface Transport {
 	send(msg: WorkerOutbound): void;

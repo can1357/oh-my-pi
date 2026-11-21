@@ -8,11 +8,12 @@
 
 import { type } from "@oh-my-pi/omptype";
 import { readSseEvents } from "@oh-my-pi/pi-utils";
-import type { AuthCredential, DisabledCredentialSummary } from "../auth-storage";
+import type { AuthCredential, DisabledCredentialSummary, OAuthRefreshReason } from "../auth-storage";
 import type {
 	ClientUsageReportRequest,
 	ClientUsageReportResponse,
 	ClientUsageSummaryResponse,
+	CredentialBlockDeleteRequest,
 	CredentialBlockRequest,
 	CredentialBlockResponse,
 	CredentialBlocksDeleteResponse,
@@ -30,21 +31,41 @@ import type {
 	UsageStaleResponse,
 } from "./types";
 import { AUTH_BROKER_CAPABILITIES_HEADER, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES } from "./types";
-import { getAuthBrokerWireSchemas } from "./wire-schema-resource";
+import { parseGenerationTag } from "./protocol";
+import {
+	clientUsageReportResponseSchema,
+	clientUsageSummaryResponseSchema,
+	credentialBlockResponseSchema,
+	credentialBlocksDeleteResponseSchema,
+	credentialDisableResponseSchema,
+	credentialRefreshResponseSchema,
+	credentialUploadResponseSchema,
+	disabledCredentialsResponseSchema,
+	healthzResponseSchema,
+	snapshotResponseSchema,
+	snapshotStreamEventSchema,
+	usageHistoryResponseSchema,
+	usageResponseSchema,
+	usageStaleResponseSchema,
+} from "./wire-schemas";
 
-type AuthBrokerResponseSchemaName =
-	| "clientUsageReportResponseSchema"
-	| "clientUsageSummaryResponseSchema"
-	| "credentialBlockResponseSchema"
-	| "credentialBlocksDeleteResponseSchema"
-	| "credentialDisableResponseSchema"
-	| "credentialRefreshResponseSchema"
-	| "credentialUploadResponseSchema"
-	| "disabledCredentialsResponseSchema"
-	| "healthzResponseSchema"
-	| "usageHistoryResponseSchema"
-	| "usageResponseSchema"
-	| "usageStaleResponseSchema";
+/** Response schema per endpoint, keyed by the name `#request` callers pass. */
+const RESPONSE_SCHEMAS = {
+	clientUsageReportResponseSchema,
+	clientUsageSummaryResponseSchema,
+	credentialBlockResponseSchema,
+	credentialBlocksDeleteResponseSchema,
+	credentialDisableResponseSchema,
+	credentialRefreshResponseSchema,
+	credentialUploadResponseSchema,
+	disabledCredentialsResponseSchema,
+	healthzResponseSchema,
+	usageHistoryResponseSchema,
+	usageResponseSchema,
+	usageStaleResponseSchema,
+} as const;
+
+type AuthBrokerResponseSchemaName = keyof typeof RESPONSE_SCHEMAS;
 
 export interface AuthBrokerClientOptions {
 	/** Base URL (e.g. `https://broker.tailnet:8765`). Trailing slashes are trimmed. */
@@ -82,6 +103,19 @@ export class AuthBrokerStreamUnsupportedError extends AuthBrokerError {
 	}
 }
 
+/**
+ * Read a response body. A connection that drops mid-body is a transport
+ * failure like a refused connection, so it carries no HTTP status (callers
+ * retry those) even though the status line arrived.
+ */
+async function readResponseBody(response: Response): Promise<string> {
+	try {
+		return await response.text();
+	} catch (cause) {
+		throw new AuthBrokerError("Auth broker response body was cut off", { cause });
+	}
+}
+
 export interface FetchSnapshotOptions {
 	ifGenerationGt?: number;
 	waitMs?: number;
@@ -91,18 +125,6 @@ export interface FetchSnapshotOptions {
 export type FetchSnapshotResult =
 	| { status: 200; snapshot: SnapshotResponse; generation: number }
 	| { status: 304; generation: number };
-
-function parseGenerationTag(header: string | null): number | undefined {
-	if (!header) return undefined;
-	let value = header.trim();
-	if (value.startsWith("W/")) value = value.slice(2).trim();
-	if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-		value = value.slice(1, -1);
-	}
-	const generation = Number(value);
-	if (!Number.isInteger(generation) || generation < 0) return undefined;
-	return generation;
-}
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RETRIES = 1;
@@ -153,9 +175,9 @@ export class AuthBrokerClient {
 		if (response.status === 304) {
 			return { status: 304, generation: etagGeneration ?? opts.ifGenerationGt ?? 0 };
 		}
-		const text = await response.text();
+		const text = await readResponseBody(response);
 		const raw = this.#parseJson(text, response.status);
-		const validated = getAuthBrokerWireSchemas().snapshotResponseSchema(raw);
+		const validated = snapshotResponseSchema(raw);
 		if (validated instanceof type.errors) {
 			throw new AuthBrokerError("Auth broker response failed schema validation", {
 				status: response.status,
@@ -224,7 +246,7 @@ export class AuthBrokerClient {
 					cause: err,
 				});
 			}
-			const validated = getAuthBrokerWireSchemas().snapshotStreamEventSchema(parsed);
+			const validated = snapshotStreamEventSchema(parsed);
 			if (validated instanceof type.errors) {
 				throw new AuthBrokerError("Auth broker stream event failed schema validation", {
 					body: validated.summary,
@@ -250,10 +272,12 @@ export class AuthBrokerClient {
 	}
 
 	/**
-	 * Fetch aggregate broker usage with a timeout sized for serialized
-	 * same-provider account probes.
+	 * Fetch broker usage, optionally for one provider, with a timeout sized
+	 * for serialized same-provider account probes.
 	 */
-	fetchUsage(options: { signal?: AbortSignal; maxAccountsPerProvider?: number } = {}): Promise<UsageResponse> {
+	fetchUsage(
+		options: { signal?: AbortSignal; maxAccountsPerProvider?: number; provider?: string } = {},
+	): Promise<UsageResponse> {
 		const requestedAccountCount = options.maxAccountsPerProvider;
 		const accountCount =
 			typeof requestedAccountCount === "number" && Number.isFinite(requestedAccountCount)
@@ -261,7 +285,8 @@ export class AuthBrokerClient {
 				: 1;
 		const perAccountTimeoutMs = Math.max(DEFAULT_TIMEOUT_MS, this.#timeoutMs);
 		const timeoutMs = perAccountTimeoutMs * (accountCount + 1);
-		return this.#request<UsageResponse>("GET", "/v1/usage", {
+		const query = options.provider !== undefined ? `?${new URLSearchParams({ provider: options.provider })}` : "";
+		return this.#request<UsageResponse>("GET", `/v1/usage${query}`, {
 			schema: "usageResponseSchema",
 			signal: options.signal,
 			timeoutMs,
@@ -300,15 +325,23 @@ export class AuthBrokerClient {
 		});
 	}
 
-	notifyUsageStale(signal?: AbortSignal): Promise<UsageStaleResponse> {
-		return this.#request<UsageStaleResponse>("POST", "/v1/usage/stale", {
+	notifyUsageStale(provider?: string, signal?: AbortSignal): Promise<UsageStaleResponse> {
+		const params = new URLSearchParams();
+		if (provider) params.set("provider", provider);
+		const path = `/v1/usage/stale${params.size > 0 ? `?${params.toString()}` : ""}`;
+		return this.#request<UsageStaleResponse>("POST", path, {
 			schema: "usageStaleResponseSchema",
 			signal,
 		});
 	}
 
-	async refreshCredential(id: number, signal?: AbortSignal): Promise<CredentialRefreshResponse> {
-		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh`, {
+	async refreshCredential(
+		id: number,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<CredentialRefreshResponse> {
+		const suffix = reason ? `?reason=${reason}` : "";
+		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh${suffix}`, {
 			schema: "credentialRefreshResponseSchema",
 			signal,
 		});
@@ -370,6 +403,18 @@ export class AuthBrokerClient {
 		});
 	}
 
+	async deleteCredentialBlock(
+		id: number,
+		block: CredentialBlockDeleteRequest,
+		signal?: AbortSignal,
+	): Promise<CredentialBlocksDeleteResponse> {
+		return this.#request<CredentialBlocksDeleteResponse>("DELETE", `/v1/credential/${id}/block`, {
+			body: block,
+			schema: "credentialBlocksDeleteResponseSchema",
+			signal,
+		});
+	}
+
 	async deleteCredentialBlocks(id: number, signal?: AbortSignal): Promise<CredentialBlocksDeleteResponse> {
 		return this.#request<CredentialBlocksDeleteResponse>("DELETE", `/v1/credential/${id}/blocks`, {
 			schema: "credentialBlocksDeleteResponseSchema",
@@ -389,9 +434,9 @@ export class AuthBrokerClient {
 		},
 	): Promise<t> {
 		const response = await this.#fetchRaw(method, path, opts);
-		const text = await response.text();
+		const text = await readResponseBody(response);
 		const raw = this.#parseJson(text, response.status);
-		const validated = getAuthBrokerWireSchemas()[opts.schema](raw);
+		const validated = RESPONSE_SCHEMAS[opts.schema](raw);
 		if (validated instanceof type.errors) {
 			throw new AuthBrokerError("Auth broker response failed schema validation", {
 				status: response.status,
@@ -426,7 +471,7 @@ export class AuthBrokerClient {
 	): Promise<Response> {
 		const auth = opts.auth ?? true;
 		const url = `${this.#baseUrl}${path}`;
-		const headers: Record<string, string> = { Accept: "application/json", ...(opts.headers ?? {}) };
+		const headers: Record<string, string> = { Accept: "application/json", ...opts.headers };
 		if (auth) headers.Authorization = `Bearer ${this.#token}`;
 		let payload: string | undefined;
 		if (opts.body !== undefined) {

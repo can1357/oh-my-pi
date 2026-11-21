@@ -17,4 +17,19 @@ describe("VeracityConsolidator", () => {
 			db.close();
 		}
 	});
+
+	it("records a contradiction for a single-valued relation but not for a multi-valued one", () => {
+		const consolidator = new VeracityConsolidator(":memory:");
+		try {
+			consolidator.consolidateFact("Alice", "lives_in", "Paris", "stated", "m1");
+			consolidator.consolidateFact("Alice", "lives_in", "Rome", "stated", "m2");
+			consolidator.consolidateFact("Alice", "related_to", "Rust", "stated", "m3");
+			consolidator.consolidateFact("Alice", "related_to", "Go", "stated", "m4");
+			consolidator.consolidateFact("Alice", "related_to", "Zig", "stated", "m5");
+
+			expect(consolidator.getConflicts()).toHaveLength(1);
+		} finally {
+			consolidator.close();
+		}
+	});
 });

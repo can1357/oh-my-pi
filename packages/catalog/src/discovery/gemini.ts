@@ -8,15 +8,20 @@ const GOOGLE_GENERATIVE_AI_BASE_URL = "https://generativelanguage.googleapis.com
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_PAGES = 25;
 
+// Hoisted: constructing type("string")/type("number") per property per row
+// builds a fresh schema (~2 closures + 13 slots) on a discovery hot path.
+const stringSchema = type("string");
+const numberSchema = type("number");
+
 const resilientString = type("unknown").pipe(val => {
 	if (val === undefined) return undefined;
-	const out = type("string")(val);
+	const out = stringSchema(val);
 	return out instanceof type.errors ? undefined : out;
 });
 
 const resilientNumber = type("unknown").pipe(val => {
 	if (val === undefined) return undefined;
-	const out = type("number")(val);
+	const out = numberSchema(val);
 	return out instanceof type.errors ? undefined : out;
 });
 
@@ -253,6 +258,8 @@ function inferReasoningFromGeminiId(id: string): boolean {
 
 function inferInputFromGeminiId(id: string): ("text" | "image")[] {
 	const normalized = id.toLowerCase();
+	// residue: modality inference for discovery rows without metadata — the
+	// id shape is the only signal; no request policy hangs off this.
 	if (normalized.includes("vision") || normalized.includes("image") || normalized.includes("gemini")) {
 		return ["text", "image"];
 	}

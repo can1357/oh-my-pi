@@ -6,6 +6,7 @@ import {
 	credentialString,
 	type DestinationRuntimeConfig,
 	DestinationUnavailableError,
+	destinationSpawnContext,
 	expectOk,
 	fetchFor,
 	fileNameFor,
@@ -242,7 +243,14 @@ function createFtpUploader(config: DestinationRuntimeConfig): BlobUploader {
 			if (protocol === "ftps" && port !== 990) args.push("--ssl-reqd");
 			args.push(ftpUploadUrl(protocol, host, port, destinationPath));
 			try {
-				const process = Bun.spawn(args, { stdin: request.bytes, stdout: "ignore", stderr: "pipe" });
+				const spawn = destinationSpawnContext(config.spawn);
+				const process = Bun.spawn(args, {
+					stdin: request.bytes,
+					stdout: "ignore",
+					stderr: "pipe",
+					env: { ...spawn.env },
+					cwd: spawn.cwd,
+				});
 				const stderr = await new Response(process.stderr as ReadableStream<Uint8Array>).text();
 				const exitCode = await process.exited;
 				if (exitCode !== 0) {
@@ -427,9 +435,12 @@ function createSeafileUploader(config: DestinationRuntimeConfig): BlobUploader {
 			if (!location) throw new Error("seafile share response did not include a Location URL");
 			const resultUrl = new URL(location, apiUrl);
 			if (raw) resultUrl.searchParams.set("raw", "1");
-			return publication("seafile", request, resultUrl.toString(), {
-				...(expiryInfo.expiresAt === undefined ? {} : { expiresAt: expiryInfo.expiresAt }),
-			});
+			return publication(
+				"seafile",
+				request,
+				resultUrl.toString(),
+				expiryInfo.expiresAt === undefined ? {} : { expiresAt: expiryInfo.expiresAt },
+			);
 		},
 	};
 }

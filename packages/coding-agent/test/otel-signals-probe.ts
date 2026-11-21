@@ -11,8 +11,11 @@
  * protobuf POST at both /v1/logs and /v1/metrics.
  */
 
-import type { AgentRunCoverage, AgentRunSummary, ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
-import { emptyAgentRunCoverage, emptyAgentRunSummary } from "@oh-my-pi/pi-agent-core";
+import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
+import type { AgentContext, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
+import { type } from "@oh-my-pi/omptype";
+import type { Message } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import {
 	createTelemetryExportConfig,
 	flushTelemetryExport,
@@ -43,7 +46,7 @@ function readVarint(bytes: Uint8Array, offset: number): [number, number] {
 
 function protobufFields(bytes: Uint8Array): ProtobufField[] {
 	const fields: ProtobufField[] = [];
-	for (let offset = 0; offset < bytes.length; ) {
+	for (let offset = 0; offset < bytes.length;) {
 		const [tag, nextOffset] = readVarint(bytes, offset);
 		offset = nextOffset;
 		const wireType = tag & 7;
@@ -99,6 +102,18 @@ function assertSingleMetricPoint(metricName: string): void {
 		throw new Error(`${metricName} expected one dimensioned point, got ${counts.join(",")}`);
 	}
 }
+function assertMetricPresent(metricName: string): void {
+	const counts = metricPayloads.map(payload => pointCountForMetric(payload, metricName));
+	if (!counts.some(count => count !== undefined && count > 0)) {
+		throw new Error(`${metricName} expected a dimensioned point, got ${counts.join(",")}`);
+	}
+}
+
+function identityConverter(messages: AgentMessage[]): Message[] {
+	return messages.filter(
+		message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+	) as Message[];
+}
 
 const server = Bun.serve({
 	port: 0,
@@ -123,17 +138,15 @@ const base = `http://localhost:${server.port}`;
 process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = `${base}/v1/logs`;
 process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = `${base}/v1/metrics`;
 process.env.OTEL_SERVICE_NAME = "oh-my-pi-signals-probe";
-// Force a short metric export interval so the periodic reader flushes fast.
-process.env.OTEL_METRIC_EXPORT_INTERVAL = "500";
 
-await initTelemetryExport();
+await initTelemetryExport(true);
 if (!isTelemetryExportEnabled()) {
 	console.error("PROBE: providers did not register");
 	await server.stop(true);
 	process.exit(2);
 }
 
-const config = createTelemetryExportConfig(undefined);
+const config = createTelemetryExportConfig(undefined, () => true);
 if (!config) {
 	console.error("PROBE: export config not produced");
 	await server.stop(true);
@@ -143,64 +156,47 @@ if (!config) {
 // Bridged utility logger -> OTel log record.
 logger.error("probe error", { code: "probe" });
 
-// Metric instruments via the agent telemetry hooks.
-const usage: ChatUsageEvent = {
-	span: undefined as never,
-	agent: { id: "main", name: "Main" },
-	conversationId: "probe-session",
-	stepNumber: 0,
-	model: "claude-haiku-4-5",
+// Run the real agent-loop usage path. The mock response carries a provider
+// charge, but the ChatUsageEvent only gets a cost when the resolver installed
+// by createTelemetryExportConfig() runs.
+const mock = createMockModel({
 	provider: "anthropic",
-	serviceTier: undefined,
-	usage: {
-		inputTokens: 1000,
-		outputTokens: 200,
-		totalTokens: 1200,
-		cachedInputTokens: 0,
-		cacheWriteTokens: 0,
-		reasoningOutputTokens: 0,
-	},
-	cost: { usd: 0.01 },
-	attributes: undefined,
-	headers: undefined,
-};
-await config.onChatUsage?.(usage);
-
-const summary: AgentRunSummary = {
-	...emptyAgentRunSummary(),
-	chats: { total: 1, byStopReason: { end_turn: 1 }, totalLatencyMs: 1500 },
-	tools: {
-		total: 1,
-		ok: 1,
-		error: 0,
-		skipped: 0,
-		blocked: 0,
-		timeout: 0,
-		aborted: 0,
-		totalLatencyMs: 42,
-		byName: {
-			read: { total: 1, ok: 1, error: 0, skipped: 0, blocked: 0, timeout: 0, aborted: 0, totalLatencyMs: 42 },
+	id: "probe-model",
+	responses: [
+		{
+			content: [{ type: "toolCall", id: "probe-call", name: "probe", arguments: {} }],
+			usage: {
+				input: 1000,
+				output: 200,
+				cost: { input: 0.02, output: 0.03, cacheRead: 0, cacheWrite: 0, total: 0.05 },
+			},
 		},
-	},
-	stepCount: 1,
+		{ content: ["ok"], usage: { input: 20, output: 5 } },
+	],
+});
+const probeTool: AgentTool = {
+	name: "probe",
+	label: "Probe",
+	description: "Records one tool call for the exporter probe.",
+	parameters: type({}),
+	execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
 };
-const coverage: AgentRunCoverage = {
-	...emptyAgentRunCoverage(),
-	toolsAvailable: ["read", "write"],
-	toolsInvoked: ["read"],
-	toolsUnused: ["write"],
-	modelsUsed: ["claude-haiku-4-5"],
-	providersUsed: ["anthropic"],
-};
-config.onRunEnd?.(summary, coverage);
+const context: AgentContext = { systemPrompt: [], messages: [], tools: [probeTool] };
+for await (const _event of agentLoop(
+	[{ role: "user", content: "probe", timestamp: Date.now() }],
+	context,
+	{ model: mock.model, convertToLlm: identityConverter, telemetry: config },
+	undefined,
+	mock.stream,
+)) {
+	// Drain the real agent-loop event stream.
+}
 
 await flushTelemetryExport();
-// The metric reader exports on its own interval; wait one cycle then flush.
-await Bun.sleep(700);
-await flushTelemetryExport();
-assertSingleMetricPoint("pi.omp.agent.chat.calls");
-assertSingleMetricPoint("pi.omp.agent.tool.calls");
-assertSingleMetricPoint("pi.omp.agent.tool.duration");
+assertSingleMetricPoint("omp.agent.chat.cost.estimated_usd");
+assertMetricPresent("omp.agent.chat.calls");
+assertSingleMetricPoint("omp.agent.tool.calls");
+assertSingleMetricPoint("omp.agent.tool.duration");
 await server.stop(true);
 
 const ok = seen.has("logs") && seen.has("metrics");

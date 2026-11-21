@@ -118,6 +118,19 @@ describe("native vector kernel parity", () => {
 		}
 	});
 
+	test("MMR treats repeated case-folded words as a set across Unicode whitespace", () => {
+		const contents = [
+			"ALPHA alpha\u00a0BETA beta\uFEFFİ i\u0307 ".repeat(16),
+			"alpha beta i\u0307",
+			"gamma delta gamma",
+			"\t \uFEFF",
+		];
+		const scores = Float64Array.from([1, 0.9, 0.8, 0.7]);
+		const expected = [0, 2, 3, 1];
+		const results = contents.map((content, id) => ({ content, id, score: scores[id] }));
+		expect(mmrRerank(results, 0.3, 4).map(result => result.id)).toEqual(expected);
+	});
+
 	test("mmrRerank wrapper preserves the pre-native limit contract at u32 boundaries", () => {
 		const results = Array.from({ length: 8 }, (_v, i) => ({
 			content: `item ${i} alpha beta`,

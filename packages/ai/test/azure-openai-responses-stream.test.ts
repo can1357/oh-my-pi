@@ -95,6 +95,39 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 
+	it("replays a malformed native function call with parseable arguments so its output stays paired", async () => {
+		const previous = {
+			...createAssistantMessage(""),
+			stopReason: "toolUse" as const,
+			providerPayload: {
+				type: "openaiResponsesHistory" as const,
+				provider: "azure" as const,
+				items: [
+					{
+						type: "function_call",
+						id: "fc_bad",
+						call_id: "call_bad",
+						name: "bash",
+						arguments: '{"command":"unterminated',
+					},
+					{ type: "function_call_output", call_id: "call_bad", output: "durable result" },
+				],
+			},
+		};
+
+		const payload = await captureAzurePayload({
+			messages: [previous, { role: "user", content: "continue", timestamp: Date.now() }],
+		});
+		const input = payload.input as Array<Record<string, unknown>>;
+
+		const badCall = input.find(item => item.type === "function_call" && item.call_id === "call_bad");
+		expect(JSON.parse(String(badCall?.arguments))).toMatchObject({ __rawJson: '{"command":"unterminated' });
+		expect(input).toContainEqual(
+			expect.objectContaining({ type: "function_call_output", call_id: "call_bad", output: "durable result" }),
+		);
+		expect(JSON.stringify(input)).not.toContain("Orphan");
+	});
+
 	it("sends an async onPayload replacement body", async () => {
 		let capturedBody: Record<string, unknown> | undefined;
 		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -153,6 +186,22 @@ describe("azure openai responses streaming", () => {
 			{ role: "developer", content: "Second instruction" },
 			{ role: "user", content: [{ type: "input_text", text: "Say hello" }] },
 		]);
+	});
+
+	it("omits reasoning summaries when model compatibility disables them", async () => {
+		const model: Model<"azure-openai-responses"> = buildModel({
+			...azureModel,
+			reasoning: true,
+			compat: { ...azureModel.compatConfig, supportsReasoningSummary: false },
+		} as ModelSpec<"azure-openai-responses">);
+
+		const payload = await captureAzurePayload(
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			model,
+			{ reasoning: "high", reasoningSummary: "detailed" },
+		);
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
 	});
 
 	it("keeps Azure Responses prompt_cache_key separate from Anthropic cache controls", async () => {

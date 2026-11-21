@@ -67,6 +67,9 @@ describe("visibleWidth — parity with the native width engine", () => {
 		["osc66-inline", `pre ${ESC}]66;s=2;AB${ST} post`],
 		["osc66-multi", `${ESC}]66;s=2;A${ST} ${ESC}]66;s=3;B${ST}`],
 		["osc66-with-tabs", `\t${ESC}]66;s=2;X${ST}\t`],
+		["apc-st", `${ESC}_Ga=p,U=1,q=2,i=123,p=123,c=9,r=4${ST}ab`],
+		["apc-bel", `x${ESC}_marker${BEL}y`],
+		["apc-multi", `${ESC}_Ga=p,i=1${ST}a${ESC}_Ga=p,i=2${ST}b`],
 	];
 	for (const [name, input] of corpus) {
 		it(name, () => {
@@ -87,6 +90,15 @@ describe("visibleWidth — parity with the native width engine", () => {
 		expect(visibleWidth(`${ESC}]66;s=2;big${ST}`)).toBe(6); // 2 * width("big")
 		expect(visibleWidth(`${ESC}]66;w=5;Hi${BEL}`)).toBe(5); // explicit width, scale 1
 		expect(visibleWidth(`${ESC}]66;s=3:w=4;X${ST}`)).toBe(12); // 3 * 4
+	});
+
+	it("measures APC payloads as zero cells (Kitty placement prefix on placeholder rows)", () => {
+		// Regression: `Bun.stringWidth` counts APC payloads as printable, which
+		// broke centering math for Unicode-placeholder thumbnail rows — the
+		// composer attachment chip painted its right border inside the card.
+		const cells = "\u{10eeee}\u0305\u030d".repeat(9);
+		const line = `${ESC}_Ga=p,U=1,q=2,i=123,p=123,c=9,r=4${ST}${ESC}[38;2;1;2;3m${cells}${ESC}[39m`;
+		expect(visibleWidth(line)).toBe(9);
 	});
 });
 

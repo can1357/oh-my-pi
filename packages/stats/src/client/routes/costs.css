@@ -1,0 +1,24 @@
+/* Costs page: component breakdown list. */
+
+.costs-components {
+	display: flex;
+	flex-direction: column;
+}
+
+.costs-component-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto 56px;
+	align-items: center;
+	gap: 12px;
+	padding: 7px 0;
+	border-bottom: 1px solid var(--line-1);
+}
+
+.costs-component-share {
+	text-align: right;
+}
+
+.costs-component-total {
+	border-bottom: 0;
+	font-weight: 500;
+}

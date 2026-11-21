@@ -1,0 +1,661 @@
+%YAML 1.2
+# Vendored from zyxar/Sublime-CMakeLists@2560a080 (patched: `scope:source.regexp#base` -> `scope:source.regexp`, the context syntect's bundled Regular Expression grammar has); MIT, copyright (c) 2012-2020 The Sublime CMake authors.
+# https://www.sublimetext.com/docs/3/syntax.html
+# https://cmake.org/cmake/help/v3.0/manual/cmake-language.7.html
+--- #---------------------------------------------------------------------------
+name: CMake
+comment: Written by Raoul Wols <raoulwols@gmail.com>, 2017
+file_extensions: [CMakeLists.txt, cmake]
+scope: source.cmake
+#-------------------------------------------------------------------------------
+variables:
+  # Note: we're not doing legacy
+  unquoted_argument_element: "[^ \t()#\"\\']"
+  unquoted_argument: "{{unquoted_argument_element}}+"
+  identifier: \b[[:alpha:]_][[:alnum:]_]*\b
+  generic_named_parameter: \b@?[A-Z_][A-Z0-9_]*(?=[^\w\-<>=\$])
+#-------------------------------------------------------------------------------
+contexts:
+  prototype:
+    - include: comment-block
+    - include: comment-line
+    - include: variable-substitution
+    - include: generator-expression
+
+  main:
+    - include: scope:commands.builtin.cmake#main
+    - include: if
+    - include: foreach
+    - include: while
+    - include: set
+    - include: function
+    - include: macro
+    - include: include
+    - include: illegal-command
+    - include: generic-command
+
+  illegal-command:
+    - match: (?i)\bendif\b
+      scope: invalid.illegal.stray.endif.cmake
+    - match: (?i)\belse\b
+      scope: invalid.illegal.stray.else.cmake
+    - match: (?i)\belseif\b
+      scope: invalid.illegal.stray.elseif.cmake
+    - match: (?i)\bendforeach\b
+      scope: invalid.illegal.stray.endforeach.cmake
+    - match: (?i)\bendwhile\b
+      scope: invalid.illegal.stray.endwhile.cmake
+    - match: (?i)\bbreak\b
+      scope: invalid.illegal.stray.break.cmake
+    - match: (?i)\bendfunction\b
+      scope: invalid.illegal.stray.endfunction.cmake
+    - match: (?i)\bendmacro\b
+      scope: invalid.illegal.stray.endmacro.cmake
+
+  args-illegal-boilerplate:
+    - match: \s+
+    - match: \n
+    - match: .+
+      scope: invalid.illegal.expected-opening-brace.cmake
+      pop: true
+
+  # --- INCLUDE ----------------------------------------------------------------
+
+  include:
+    - match: (?i)\binclude\b
+      scope: keyword.control.import.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: include-args
+        - include: args-illegal-boilerplate
+
+  include-args:
+    - meta_scope: meta.function-call.arguments.cmake
+    - match: \bOPTIONAL\b
+      scope: variable.parameter.include.OPTIONAL.cmake
+    - match: \bNO_POLICY_SCOPE\b
+      scope: variable.parameter.include.NO_POLICY_SCOPE.cmake
+    - match: \bRESULT_VARIABLE\b
+      scope: variable.parameter.include.RESULT_VARIABLE.cmake
+      push:
+        - match: \b{{identifier}}\b
+          scope: variable.other.readwrite.cmake
+          pop: true
+        - match: \s+
+        - match: \n
+        - match: ''
+          pop: true
+    - include: args-common
+
+  # --- FUNCTION / ENDFUNCTION -------------------------------------------------
+
+  function:
+    - match: (?i)\bfunction\b
+      scope: support.function.function.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: [function-body, function-args-first]
+        - include: args-illegal-boilerplate
+
+  function-args-first:
+    - meta_scope: meta.function-call.arguments.cmake
+    - match: '{{identifier}}'
+      scope: entity.name.function.cmake
+      set: function-args-rest
+    - include: variable-substitution
+    - match: \s+
+    - match: ''
+      set: function-args-rest
+
+  function-args-rest:
+    - meta_scope: meta.function-call.arguments.cmake
+    - include: args-common
+    - match: '{{identifier}}'
+      scope: variable.parameter.cmake
+
+  function-body:
+    - meta_scope: meta.group.function.cmake
+    - include: endfunction
+    - include: main
+
+  endfunction:
+    - match: (?i)\bendfunction\b
+      scope: support.function.endfunction.cmake
+      set:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: generic-args
+        - include: args-illegal-boilerplate
+
+  # --- MACRO / ENDMACRO -------------------------------------------------------
+
+  macro:
+    - match: (?i)\bmacro\b
+      scope: support.function.macro.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: [macro-body, macro-args-first]
+        - include: args-illegal-boilerplate
+
+  macro-args-first:
+    - meta_scope: meta.function-call.arguments.cmake
+    - match: '{{identifier}}'
+      scope: entity.name.function.cmake
+      set: macro-args-rest
+    - include: variable-substitution
+    - match: \s+
+    - match: ''
+      set: macro-args-rest
+
+  macro-args-rest:
+    - meta_scope: meta.function-call.arguments.cmake
+    - include: args-common
+    - match: '{{identifier}}'
+      scope: variable.parameter.cmake
+
+  macro-body:
+    - meta_scope: meta.group.function.cmake
+    - include: endmacro
+    - include: main
+
+  endmacro:
+    - match: (?i)\bendmacro\b
+      scope: support.function.endmacro.cmake
+      set:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: generic-args
+        - include: args-illegal-boilerplate
+
+  # --- IF / ELSEIF / ELSE / ENDIF ---------------------------------------------
+
+  if:
+    - match: (?i)\bif\b
+      scope: keyword.control.if.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: [if-body, if-args]
+        - include: args-illegal-boilerplate
+
+  if-body:
+    - meta_scope: meta.group.if.cmake
+    - include: else
+    - include: elseif
+    - include: endif
+    - include: break
+    - include: main
+
+  if-args-inline:
+    - match: \(
+      scope: punctuation.section.parens.begin.cmake
+      push: if-args
+    - match: \bDEFINED\b
+      scope: variable.parameter.if.DEFINED.cmake
+    - match: \bSTREQUAL\b
+      scope: variable.parameter.if.STREQUAL.cmake
+    - match: \bNOT\b
+      scope: keyword.operator.logical.NOT.cmake
+    - match: \bAND\b
+      scope: keyword.operator.logical.AND.cmake
+    - match: \bOR\b
+      scope: keyword.operator.logical.OR.cmake
+    - match: \bCOMMAND\b
+      scope: variable.parameter.if.COMMAND.cmake
+    - match: \bPOLICY\b
+      scope: variable.parameter.if.POLICY.cmake
+    - match: \bTARGET\b
+      scope: variable.parameter.if.TARGET.cmake
+    - match: \bTEST\b
+      scope: variable.parameter.if.TEST.cmake
+    - match: \bEXISTS\b
+      scope: variable.parameter.if.EXISTS.cmake
+    - match: \bIS_NEWER_THAN\b
+      scope: variable.parameter.if.IS_NEWER_THAN.cmake
+    - match: \bIS_DIRECTORY\b
+      scope: variable.parameter.if.IS_DIRECTORY.cmake
+    - match: \bIS_SYMLINK\b
+      scope: variable.parameter.if.IS_SYMLINK.cmake
+    - match: \bIS_ABSOLUTE\b
+      scope: variable.parameter.if.IS_ABSOLUTE.cmake
+    - match: \b(VERSION_|STR)?LESS\b
+      scope: variable.parameter.if.LESS.cmake
+    - match: \b(VERSION_|STR)?GREATER\b
+      scope: variable.parameter.if.GREATER.cmake
+    - match: \b(VERSION_|STR)?EQUAL\b
+      scope: variable.parameter.if.EQUAL.cmake
+    - match: \b(VERSION_|STR)?LESS_EQUAL\b
+      scope: variable.parameter.if.LESS_EQUAL.cmake
+    - match: \b(VERSION_|STR)?GREATER_EQUAL\b
+      scope: variable.parameter.if.GREATER_EQUAL.cmake
+    - match: \bMATCHES\b
+      scope: variable.parameter.if.MATCHES.cmake
+      push:
+        - match: \[(=*)\[
+          captures:
+            1: punctuation.definition.string.begin.cmake
+          push:
+            - meta_include_prototype: false
+            - meta_scope: string.regexp.cmake
+            - match: \]\1\]
+              scope: punctuation.definition.string.end.cmake
+              pop: true
+            - include: scope:source.regexp
+        - match: \s+
+        - match: \n
+        - match: ''
+          pop: true
+
+  if-args:
+    - meta_scope: meta.function-call.arguments.cmake
+    - include: if-args-inline
+    - include: args-common
+
+  elseif:
+    - match: (?i)\belseif\b
+      scope: keyword.control.elseif.cmake
+      set:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: [elseif-body, if-args]
+        - include: args-illegal-boilerplate
+
+  elseif-body:
+    - meta_scope: meta.group.elseif.cmake
+    - include: elseif
+    - include: else
+    - include: endif
+    - include: break
+    - include: main
+
+  else:
+    - match: (?i)\b\belse\b
+      scope: keyword.control.else.cmake
+      set:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: [else-body, if-args]
+        - include: args-illegal-boilerplate
+
+  else-body:
+    - meta_scope: meta.group.else.cmake
+    - include: endif
+    - include: break
+    - include: main
+    - match: (?i)\belse\b
+      scope: invalid.illegal.stray.else.cmake
+    - match: (?i)\belseif\b
+      scope: invalid.illegal.stray.elseif.cmake
+
+  endif:
+    - match: (?i)\bendif\b
+      scope: keyword.control.endif.cmake
+      set:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: if-args
+        - include: args-illegal-boilerplate
+
+  # --- FOREACH / ENDFOREACH ---------------------------------------------------
+
+  foreach:
+    - match: (?i)\bforeach\b
+      scope: keyword.control.foreach.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: [foreach-body, foreach-args]
+        - include: args-illegal-boilerplate
+
+  foreach-args:
+    - meta_scope: meta.function-call.arguments.cmake
+    - match: \bIN\b
+      scope: variable.parameter.foreach.IN.cmake
+    - match: \bLISTS\b
+      scope: variable.parameter.foreach.LISTS.cmake
+    - match: \bITEMS\b
+      scope: variable.parameter.foreach.ITEMS.cmake
+    - match: \bRANGE\b
+      scope: variable.parameter.foreach.RANGE.cmake
+    - include: args-common
+
+  foreach-body:
+    - meta_scope: meta.group.foreach.cmake
+    - include: break
+    - include: continue
+    - include: endforeach
+    - include: main
+
+  endforeach:
+    - match: (?i)\bendforeach\b
+      scope: keyword.control.endforeach.cmake
+      set:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: foreach-args
+        - include: args-illegal-boilerplate
+
+  # --- WHILE / ENDWHILE -------------------------------------------------------
+
+  while:
+    - match: (?i)\bwhile\b
+      scope: keyword.control.while.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: [while-body, if-args]
+        - include: args-illegal-boilerplate
+
+  while-body:
+    - meta_scope: meta.group.while.cmake
+    - include: break
+    - include: continue
+    - include: endwhile
+    - include: main
+
+  endwhile:
+    - match: (?i)\bendwhile\b
+      scope: keyword.control.endwhile.cmake
+      set:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: if-args
+        - include: args-illegal-boilerplate
+
+  # --- BREAK ------------------------------------------------------------------
+
+  break:
+    - match: (?i)\bbreak\b
+      scope: keyword.control.break.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: break-args
+        - include: args-illegal-boilerplate
+
+  break-args:
+    - meta_scope: meta.function-call.arguments.cmake
+    - include: args-common
+
+  #--- CONTINUE ----------------------------------------------------------------
+
+  continue:
+    - match: (?i)\bcontinue\b
+      scope: keyword.control.continue.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: continue-args
+        - include: args-illegal-boilerplate
+
+  continue-args:
+    - meta_scope: meta.function-call.arguments.cmake
+    - include: args-common
+
+  #--- SET ---------------------------------------------------------------------
+
+  set:
+    - match: (?i)\bset\b
+      scope: support.function.set.cmake
+      push:
+        - meta_scope: meta.function-call.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: [set-args-rest, set-args-first]
+
+  set-args-first:
+    - match: '{{identifier}}'
+      scope: variable.other.readwrite.assignment.cmake
+      pop: true
+    - include: variable-substitution
+    - match: \s+
+    - match: ''
+      pop: true
+
+  set-args-rest:
+    - meta_scope: meta.function-call.arguments.cmake
+    - match: \bFORCE\b
+      scope: variable.parameter.foreach.FORCE.cmake
+    - match: \bPARENT_SCOPE\b
+      scope: variable.parameter.foreach.PARENT_SCOPE.cmake
+    - match: \bCACHE\b
+      scope: variable.parameter.foreach.CACHE.cmake
+      push:
+        - match: \s*(FILEPATH)
+          captures:
+            1: storage.type.FILEPATH.cmake
+          pop: true
+        - match: \s*(PATH)
+          captures:
+            1: storage.type.PATH.cmake
+          pop: true
+        - match: \s*(STRING)
+          captures:
+            1: storage.type.STRING.cmake
+          pop: true
+        - match: \s*(BOOL)
+          captures:
+            1: storage.type.BOOL.cmake
+          pop: true
+        - match: \s*(INTERNAL)
+          captures:
+            1: storage.type.INTERNAL.cmake
+          pop: true
+        # anything else we scope as an error
+        - match: \s*([^\s]*)
+          captures:
+            1: invalid.illegal.expected-type.cmake
+          pop: true
+    - include: args-common
+
+  #--- COMMON FUNCTIONALITY FOR COMMANDS ---------------------------------------
+
+  args-common:
+    - match: \)
+      scope: punctuation.section.parens.end.cmake
+      pop: true
+    - match: \(
+      scope: invalid.illegal.stray.parenthesis.cmake
+    - include: string
+
+  generic-command:
+    - match: \b{{identifier}}\b
+      scope: variable.function.generic.cmake
+      push:
+        - meta_scope: meta.function-call.generic.cmake
+        - match: (?=\()
+          set:
+            - match: \(
+              scope: punctuation.section.parens.begin.cmake
+              set: generic-args
+
+  generic-args:
+    - meta_scope: meta.function-call.arguments.generic.cmake
+    - match: \)
+      scope: punctuation.section.parens.end.cmake
+      pop: true
+    # This might be useful for commands which take literal condition expressions as arguments
+    - include: if-args-inline
+    - match: (?={{generic_named_parameter}})
+      push: unquoted-argument-or-keyword
+    - include: string-unquoted
+    - include: string-quoted-double
+
+  # https://cmake.org/cmake/help/v3.0/manual/cmake-language.7.html#unquoted-argument
+  unquoted-argument-or-keyword:
+    - meta_scope: variable.parameter.generic.cmake
+    - match: (?=\t| |\(|\)|\#|\"|\\)
+      pop: true
+
+  #--- STRING HANDLING ---------------------------------------------------------
+
+  string:
+    - include: string-raw
+    - include: string-quoted-double
+    - include: string-unquoted
+
+  string-raw:
+    - match: \[(=*)\[
+      scope: punctuation.definition.string.begin.cmake
+      push:
+        - meta_include_prototype: false
+        - meta_scope: string.raw.cmake
+        - match: \]\1\]
+          scope: punctuation.definition.string.end.cmake
+          pop: true
+
+  string-quoted-double:
+    - match: '"'
+      scope: punctuation.definition.string.begin.cmake
+      push:
+        - meta_include_prototype: false
+        - meta_scope: string.quoted.double.cmake
+        - match: '"'
+          scope: punctuation.definition.string.end.cmake
+          pop: true
+        - include: escape-sequences
+        - include: highlight-semicolon
+        - include: variable-substitution
+        - include: generator-expression
+
+
+  string-unquoted:
+    - match: (?={{unquoted_argument}})
+      push:
+        - meta_include_prototype: false
+        - meta_scope: meta.string.unquoted.cmake
+        - include: variable-substitution
+        - include: generator-expression
+        - match: \\[; ()#"\\]
+          scope: constant.character.escape.cmake
+        - match: \\.
+          scope: invalid.illegal.character.escape.cmake
+        - match: (?=\t| |\(|\)|\#|\"|\\|\n)
+          pop: true
+        - match: (?=\s*$)
+          set:
+            - match: \s*$
+              pop: true
+        - match: (?=\s*#)
+          set: prototype
+        - include: highlight-semicolon
+
+  highlight-semicolon:
+    - match: ;
+      scope: punctuation.separator.cmake
+
+  escape-sequences:
+    - match: \\[()#" \\$@^trn;]
+      scope: constant.character.escape.cmake
+    - match: \\.
+      scope: invalid.illegal.character.escape.cmake
+
+  #--- VARIABLES AND GENERATOR EXPRESSIONS -------------------------------------
+
+  variable-substitution:
+    - match: (\$)(ENV)?(\{)
+      captures:
+        1: punctuation.definition.variable.substitution.cmake
+        2: keyword.operator.word.cmake
+        3: punctuation.section.braces.begin.cmake
+      push:
+        - meta_scope: meta.text-substitution.cmake
+        - match: \}
+          scope: punctuation.section.braces.end.cmake
+          pop: true
+        - match: '{{identifier}}'
+          scope: variable.other.readwrite.cmake
+        - include: prototype
+
+  generator-expression:
+    - match: (\$)(<)
+      captures:
+        1: punctuation.definition.variable.generator-expression.cmake
+        2: punctuation.section.block.begin.cmake
+      push:
+        - meta_scope: meta.generator-expression.cmake
+        - include: generator-expression-common
+        - match: ':'
+          scope: punctuation.separator.generator-expression.cmake
+          set:
+            - meta_content_scope: meta.generator-expression.cmake
+            - include: generator-expression-common
+            - include: variable-substitution
+            - include: generator-expression
+        - include: prototype
+
+  generator-expression-common:
+    - match: '>'
+      scope: punctuation.section.block.end.cmake
+      pop: true
+    - match: '{{identifier}}'
+      scope: variable.other.readwrite.cmake
+
+  #--- COMMENT HANDLING --------------------------------------------------------
+
+  comment-block:
+    - match: \#\[(=*)\[
+      scope: punctuation.definition.comment.begin.cmake
+      push:
+        - meta_scope: comment.block.cmake
+        - match: \]\1\]
+          scope: punctuation.definition.comment.end.cmake
+          pop: true
+
+  comment-line:
+    - match: \#
+      scope: punctuation.definition.comment.cmake
+      push:
+        - meta_scope: comment.line.cmake
+        - match: $
+          pop: true

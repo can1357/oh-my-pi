@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { QueryCache } from "../query-cache";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -41,6 +42,13 @@ export interface BeamCaches {
 	polyphonicEngine?: unknown;
 	extractionClient?: unknown;
 	extractionBuffer: unknown[];
+	/** Enhanced-recall result cache; installed lazily while `enhancedRecall` is enabled. */
+	queryCache?: QueryCache<RecallResult>;
+	/**
+	 * SQLite write token (`data_version` + `total_changes()`) the cached entries were
+	 * computed against; any other write to the database drops the cache.
+	 */
+	queryCacheToken?: string;
 	[key: string]: unknown;
 }
 
@@ -55,6 +63,10 @@ export interface BeamConfig {
 	localLlmEnabled: boolean;
 	maxEpisodeChars: number;
 	proactiveLinking?: boolean;
+	/** Per-instance polyphonic recall gate; `undefined` defers to the process-wide default. */
+	polyphonicRecall?: boolean;
+	/** Per-instance enhanced recall (query cache) gate; `undefined` defers to the process-wide default. */
+	enhancedRecall?: boolean;
 }
 
 export interface BeamMemoryOptions {
@@ -65,6 +77,10 @@ export interface BeamMemoryOptions {
 	channelId?: string | null;
 	useCloud?: boolean;
 	proactiveLinking?: boolean;
+	/** Route `recallEnhanced` through polyphonic recall. `MNEMOPI_POLYPHONIC_RECALL` wins when set. */
+	polyphonicRecall?: boolean;
+	/** Cache `recallEnhanced` results per query and options. `MNEMOPI_ENHANCED_RECALL` wins when set. */
+	enhancedRecall?: boolean;
 	eventEmitter?: (event: BeamEvent) => void;
 	pluginManager?: BeamPluginManager | null;
 	annotations?: AnnotationStoreLike | null;
@@ -184,6 +200,7 @@ export interface RecallOptions {
 }
 
 export interface RecallEnhancedOptions extends RecallOptions {
+	/** Set `false` to bypass the enhanced-recall result cache for this call. */
 	useCache?: boolean;
 	includeFacts?: boolean;
 }

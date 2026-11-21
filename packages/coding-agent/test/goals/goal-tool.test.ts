@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "bun:test";
 import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
-import type { Goal, GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
+import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
 	return {
@@ -279,6 +281,21 @@ describe("GoalTool", () => {
 		expect(result.details?.goal?.objective).toBe("Ship it");
 	});
 
+	it("op=pause stops continuation until the goal is resumed", async () => {
+		const harness = createRuntimeHarness({ enabled: true, mode: "active", goal: createGoal() });
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+		expect(harness.runtime.buildContinuationPrompt()).toBeDefined();
+
+		const result = await tool.execute("call-pause", { op: "pause", objective: undefined, token_budget: undefined });
+		expect(result.details?.goal?.status).toBe("paused");
+		expect(harness.runtime.buildContinuationPrompt()).toBeUndefined();
+	});
+
 	it("op=resume re-activates a paused goal", async () => {
 		const harness = createRuntimeHarness({
 			enabled: false,
@@ -315,5 +332,13 @@ describe("GoalTool", () => {
 		expect(result.details?.op).toBe("drop");
 		expect(result.details?.goal?.status).toBe("dropped");
 		expect(harness.getState()).toBeUndefined();
+	});
+
+	it("auto-approves every op in write mode; always-ask prompts only for goal changes (#14368)", () => {
+		const tool = new GoalTool(createToolSession({}));
+		for (const op of ["get", "create", "complete", "pause", "resume", "drop"]) {
+			expect(resolveApproval(tool, { op }, "write").policy).toBe("allow");
+			expect(resolveApproval(tool, { op }, "always-ask").policy).toBe(op === "get" ? "allow" : "prompt");
+		}
 	});
 });

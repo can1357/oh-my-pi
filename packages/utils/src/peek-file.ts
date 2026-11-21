@@ -1,67 +1,20 @@
 /**
  * Read the first `maxBytes` of a file (offset 0) and pass that slice to `op`.
  *
- * Buffers are reused to avoid allocating on every peek: sync uses one growable
- * `Uint8Array`; async uses a small fixed pool of `Buffer`s with a bounded wait
- * queue, falling back to a fresh allocation when the pool and queue are saturated
- * or when `maxBytes` exceeds the pool slot size.
+ * Synchronous peeks reuse one growable `Uint8Array`; asynchronous peeks allocate
+ * their result window so callback-retained slices cannot be changed by a later read.
  */
 import * as fs from "node:fs";
 
-/** Async pool slot size; larger peeks allocate ad hoc. */
-const POOLED_BUFFER_SIZE = 512;
-const ASYNC_POOL_SIZE = 10;
-/** Cap waiter queue so heavy concurrency does not queue unbounded; overflow uses alloc. */
-const MAX_ASYNC_WAITERS = 4;
 const INITIAL_SYNC_BUFFER_SIZE = 1024;
-const EMPTY_BUFFER = Buffer.alloc(0);
+const EMPTY_BUFFER = new Uint8Array(0);
 
-const asyncPool = Array.from({ length: ASYNC_POOL_SIZE }, () => Buffer.allocUnsafe(POOLED_BUFFER_SIZE));
-const availableAsyncPoolIndexes = Array.from({ length: ASYNC_POOL_SIZE }, (_, index) => index);
-const asyncPoolWaiters: Array<(index: number) => void> = [];
 let syncPool = new Uint8Array(INITIAL_SYNC_BUFFER_SIZE);
 
-/** Returns a pool slot index, or `-1` when the caller should use a standalone buffer. */
-function acquireAsyncPoolIndex(): Promise<number> | number {
-	const index = availableAsyncPoolIndexes.pop();
-	if (index !== undefined) {
-		return index;
-	}
-	if (asyncPoolWaiters.length >= MAX_ASYNC_WAITERS) {
-		return -1;
-	}
-	const { promise, resolve } = Promise.withResolvers<number>();
-	asyncPoolWaiters.push(resolve);
-	return promise;
-}
-
-function releaseAsyncPoolIndex(index: number): void {
-	if (index < 0) {
-		return;
-	}
-	const waiter = asyncPoolWaiters.shift();
-	if (waiter) {
-		waiter(index);
-		return;
-	}
-	availableAsyncPoolIndexes.push(index);
-}
-
-async function withAsyncPoolBuffer<T>(maxBytes: number, op: (buffer: Buffer) => Promise<T>): Promise<T> {
-	if (maxBytes <= 0) {
-		return op(EMPTY_BUFFER);
-	}
-	if (maxBytes > POOLED_BUFFER_SIZE) {
-		return op(Buffer.allocUnsafe(maxBytes));
-	}
-
-	const poolIndex = await acquireAsyncPoolIndex();
-	const buffer = poolIndex >= 0 ? asyncPool[poolIndex] : Buffer.allocUnsafe(maxBytes);
-	try {
-		return await op(buffer.subarray(0, maxBytes));
-	} finally {
-		releaseAsyncPoolIndex(poolIndex);
-	}
+function allocateWindow(length: number): Uint8Array {
+	const buffer = Buffer.allocUnsafe(length);
+	// A plain view preserves Uint8Array.slice semantics without zeroing bytes the read replaces.
+	return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 }
 
 function withSyncPoolBuffer<T>(maxBytes: number, op: (buffer: Uint8Array) => T): T {
@@ -104,10 +57,9 @@ export async function peekFile<T>(filePath: string, maxBytes: number, op: (heade
 
 	const fileHandle = await fs.promises.open(filePath, "r");
 	try {
-		return await withAsyncPoolBuffer(maxBytes, async buffer => {
-			const { bytesRead } = await fileHandle.read(buffer, 0, buffer.byteLength, 0);
-			return op(buffer.subarray(0, bytesRead));
-		});
+		const buffer = allocateWindow(maxBytes);
+		const { bytesRead } = await fileHandle.read(buffer, 0, buffer.byteLength, 0);
+		return op(buffer.subarray(0, bytesRead));
 	} finally {
 		await fileHandle.close();
 	}
@@ -116,9 +68,8 @@ export async function peekFile<T>(filePath: string, maxBytes: number, op: (heade
 /**
  * Read up to the last `maxBytes` of `filePath` and pass that slice to `op`.
  *
- * The tail mirror of {@link peekFile}: same pooled-buffer strategy (no per-call
- * allocation for small reads), but the read is positioned at `size - len` so the
- * window ends at EOF. When the file is shorter than `maxBytes`, the whole file is
+ * The tail mirror of {@link peekFile}: the read is positioned at `size - len` so
+ * the window ends at EOF. When the file is shorter than `maxBytes`, the whole file is
  * returned. A multi-byte codepoint straddling the leading cut decodes to a
  * replacement char — callers that parse line-oriented tails drop the partial
  * leading line anyway.
@@ -135,10 +86,9 @@ export async function peekFileTail<T>(filePath: string, maxBytes: number, op: (t
 		if (len <= 0) {
 			return op(EMPTY_BUFFER);
 		}
-		return await withAsyncPoolBuffer(len, async buffer => {
-			const { bytesRead } = await fileHandle.read(buffer, 0, buffer.byteLength, size - len);
-			return op(buffer.subarray(0, bytesRead));
-		});
+		const buffer = allocateWindow(len);
+		const { bytesRead } = await fileHandle.read(buffer, 0, buffer.byteLength, size - len);
+		return op(buffer.subarray(0, bytesRead));
 	} finally {
 		await fileHandle.close();
 	}
@@ -168,7 +118,7 @@ export async function peekFileEnds<T>(
 		const headLen = prefixBytes > 0 ? Math.min(prefixBytes, size) : 0;
 		const tailLen = suffixBytes > 0 ? Math.min(suffixBytes, size) : 0;
 
-		const head = headLen > 0 ? Buffer.allocUnsafe(headLen) : EMPTY_BUFFER;
+		const head = headLen > 0 ? allocateWindow(headLen) : EMPTY_BUFFER;
 		const headBytesRead = headLen > 0 ? (await fileHandle.read(head, 0, head.byteLength, 0)).bytesRead : 0;
 		const headSlice = head.subarray(0, headBytesRead);
 
@@ -179,7 +129,7 @@ export async function peekFileEnds<T>(
 			return op(headSlice, headSlice.subarray(Math.max(0, headBytesRead - tailLen)));
 		}
 
-		const tail = Buffer.allocUnsafe(tailLen);
+		const tail = allocateWindow(tailLen);
 		const { bytesRead: tailBytesRead } = await fileHandle.read(tail, 0, tail.byteLength, size - tailLen);
 		return op(headSlice, tail.subarray(0, tailBytesRead));
 	} finally {

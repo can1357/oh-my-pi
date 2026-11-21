@@ -4,7 +4,706 @@
 
 ### Added
 
-- `ClientCapabilities.session.configOptions.boolean` in the ACP protocol types, so clients can advertise support for boolean session config options.
+- Added `ClientCapabilities.session.configOptions.boolean` in the ACP protocol types so clients can advertise support for boolean session config options ([#9080](https://github.com/can1357/oh-my-pi/pull/9080) by [@joseotaviorf](https://github.com/joseotaviorf))
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added `LinearRegExp` (`@oh-my-pi/pi-utils/regex`), a JavaScript-compatible regular expression engine that avoids catastrophic backtracking, with support for scoped modifiers, Unicode modes and properties, Unicode set operations, large repetitions and literal dictionaries, fixed-width block counts, and additional character classes.
+- Added `RegexStream` for detecting regular-expression matches in text received incrementally in chunks.
+- Added `getCodexClientVersionPath()` to locate the Codex client version cache record under the initialized `$XDG_CACHE_HOME/omp` directory.
+
+### Changed
+
+- Improved `LinearRegExp` performance for scans and searches involving delimiters, word backreferences, required literals or suffixes, lookbehinds, and large character alphabets.
+
+### Fixed
+
+- Fixed RAR4 extraction stalling for seconds per filter on archives that declare an out-of-range delta filter channel count; such archives are now rejected as corrupt.
+- Fixed `formatAge` to display durations of one year or more in years, such as `23y ago`, instead of months.
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added utilities for formatting and parsing session spill URLs using the `local://N.log` format.
+- Added `postmortem.exitCleanlyOnStopSignals()` so long-running services exit successfully after completing cleanup on SIGINT or SIGTERM.
+
+### Fixed
+
+- Fixed Windows shell discovery incorrectly selecting the WSL `bash.exe` launcher, which could cause services to run under WSL.
+- Fixed archive opening so the extraction-size limit is enforced when an oversized member is read rather than preventing access to the entire archive.
+- Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
+- Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
+
+## [18.21.0] - 2026-11-16
+
+### Fixed
+
+- Fixed bare URLs swallowing the following word when Korean, Japanese, or Chinese text follows a parenthesized URL without a space.
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Fixed HTML-to-Markdown conversion for fetched and pasted HTML to preserve whitespace in inline elements, maintain code indentation in preformatted blocks, and avoid inserting stray blank lines between block elements.
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added a profile-aware data directory for managed Antigravity CLI installations and isolated account state.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added `mixHex` for blending two hexadecimal colors.
+
+### Fixed
+
+- Improved extraction of Cloud Code Assist quota reset information, including compound durations and reset timestamps, to provide more accurate retry guidance.
+
+## [18.19.0] - 2026-11-12
+
+### Added
+
+- Added browser utilities exposing trusted browser archive extraction limits and the installed WebKit host executable path.
+
+## [18.18.9] - 2026-11-11
+
+### Added
+
+- Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+- Added `prompt.closeCodeFence`: closes a code fence a text leaves open, by the same rule `prompt.format` uses ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+
+## [18.18.8] - 2026-11-11
+
+### Removed
+
+- Removed `getConfigAgentDirName()`; use `getAgentDir()`, which also honors `PI_CODING_AGENT_DIR` ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added utilities for reading OpenTelemetry configuration from omp-managed `.env` files, including `$otelEnv` and `withOmpOtelEnv`.
+- Added filesystem path utilities for checking paths through symlinked roots, including paths that do not yet exist, and for optionally propagating filesystem errors in directory checks.
+
+### Fixed
+
+- Fixed relaxed JSON parsing so `__proto__` is preserved as a regular own property rather than modifying the parsed object's prototype.
+- Fixed SIGHUP handling so stopped terminal sessions display recovery hints, including the `--resume` command.
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed abort signals leaving command output reads blocked when a descendant keeps stdout or stderr open after the root process exits. ([#18309](https://github.com/can1357/oh-my-pi/pull/18309) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.17.0] - 2026-11-06
+
+### Added
+
+- Added `getUpdateStateDir()`, returning the auto-update state directory (`~/.omp/update`).
+- Added `logger.setLogForwarder()` and `logger.emitForeign()` to forward log records across threads, preserving context and timestamps.
+- Added `expandTilde()` to expand a leading `~` to the home directory.
+
+### Fixed
+
+- Fixed `spawn`/`exec` timeouts never firing when the command's root exited before `spawn()` returned, which let a descendant holding stdout or stderr stall output reads until it exited.
+- `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
+- `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
+- Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- Added `ensureSqliteLockShim()`, which `openSqliteDatabase`/`openSqliteDatabaseSync` call before opening a store, so on Linux the process's SQLite locks are open-file-description locks that other closes of the file cannot release ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+- Added `assertNotHeldOpen(path)` (`@oh-my-pi/pi-utils/held-file`), which throws `EBUSY` for a SQLite database or `-shm` this process holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+
+### Changed
+
+- `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added abortable `sleepUntil` for wall-clock deadline waits that include system sleep, with bounded timer slices to recheck deadlines after resume ([#17606](https://github.com/can1357/oh-my-pi/pull/17606) by [@zhiland](https://github.com/zhiland)).
+
+### Fixed
+
+- Importing pi-utils no longer installs process-wide signal and fatal handlers in embedding hosts; exit-time cleanup stays installed ([#17674](https://github.com/can1357/oh-my-pi/issues/17674)).
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+
+## [18.14.1] - 2026-10-31
+
+### Added
+
+- Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
+
+## [18.14.0] - 2026-10-29
+
+### Added
+
+- Added `logger.withContext(fields, fn)` to attach contextual fields to all records produced during a function and its asynchronous work, plus `logger.withoutContext(fn)` for work that should not inherit caller context.
+
+### Fixed
+
+- Fixed `untilAborted` so promises passed to an already-aborted signal are still observed, preventing later rejections from being reported as unhandled.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
+### Added
+
+- Added `deadlineMs` and `waitMessage` cleanup registration options: shutdown waits longer for that callback, but only while it is still pending, and says so on stderr once nothing else is left to wait for ([#17128](https://github.com/can1357/oh-my-pi/pull/17128) by [@sjawhar](https://github.com/sjawhar))
+- A process stopped by SIGTERM now prints its registered recovery commands after the terminal is handed back, so a stopped omp session shows `omp --resume <id>` instead of leaving its last frame above the shell prompt like a crash ([#17119](https://github.com/can1357/oh-my-pi/pull/17119) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed plain TAR archives requiring a whole-container memory buffer to list entries or read a selected member ([#17175](https://github.com/can1357/oh-my-pi/pull/17175) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.13.1] - 2026-10-27
+
+### Added
+
+- Added an optional `maxFractionDigits` to `formatNumber()` that caps decimals on values below 1,000 ([#16973](https://github.com/can1357/oh-my-pi/pull/16973) by [@DusKing1](https://github.com/DusKing1))
+
+## [18.13.0] - 2026-10-26
+
+### Added
+
+- Added `parseHeifImageMimeType()`, which identifies HEIC, HEIF and AVIF images from a file header ([#16612](https://github.com/can1357/oh-my-pi/pull/16612) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `$whichAll()`, which returns every PATH match for a command in PATH order ([#16824](https://github.com/can1357/oh-my-pi/issues/16824))
+
+### Changed
+
+- Faster lenient JSONL session parsing when recovering past malformed lines ([#16995](https://github.com/can1357/oh-my-pi/pull/16995) by [@GTanger](https://github.com/GTanger))
+
+### Fixed
+
+- `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
+- `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
+- Fixed inline code spans rendering flush against the surrounding text when a backslash preceded the closing backtick ([#16972](https://github.com/can1357/oh-my-pi/pull/16972) by [@akainth015](https://github.com/akainth015))
+
+## [18.12.6] - 2026-10-21
+
+### Added
+
+- Added `RpcConnection.requestCancellable()` and `Client.requestPermission(params, { signal })`; client connections abort a handler and answer `-32800` when the peer sends `$/cancel_request`, while agent connections keep running the request and return its real result ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
+
+## [18.12.4] - 2026-10-20
+
+### Breaking Changes
+
+- `readTarEntriesFromBuffer()` in `@oh-my-pi/pi-utils/ar/tar` now returns `Promise<ArchiveIndexEntry[]>` instead of `ArchiveIndexEntry[]`; `await` its result ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Added
+
+- Added `maxStreamSize` to `ArchiveLimits` (default 4 GB): the most a large `.tar.gz` or `.tar.zst` may decompress in one pass, so a decompression bomb fails instead of running without bound ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed `bun test` runs writing their logs into your real `~/.omp/logs`: test processes now log to a per-user `omp-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `.tar.gz` and `.tar.zst` archives that decompress past 256 MB failing to list or read with a raw `Cannot create a Buffer larger than …` error; a bare `.gz` or `.zst` that large now names the archive size limit ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed frontmatter repair deleting HTML comments from document bodies and plain markdown; it now strips only leading comments ahead of the opening delimiter, so prompt bodies keep their comments ([#16481](https://github.com/can1357/oh-my-pi/pull/16481) by [@adi-IL](https://github.com/adi-IL)).
+
+## [18.12.2] - 2026-10-18
+
+### Added
+
+- Added `readSalvageableRows()` to read the rows of a damaged SQLite table that are still readable, skipping only the damaged pages ([#15751](https://github.com/can1357/oh-my-pi/pull/15751) by [@Shadorain](https://github.com/Shadorain))
+
+## [18.12.0] - 2026-10-17
+
+### Added
+
+- Added `sanitizeTextDeep()`, which applies `sanitizeText()` to every string in a JSON-shaped value without mutating it ([#15963](https://github.com/can1357/oh-my-pi/issues/15963))
+
+### Fixed
+
+- Fixed Windows archive extraction overwriting existing files or following existing symlinks when copying a symlink entry without symlink privileges ([#15931](https://github.com/can1357/oh-my-pi/pull/15931) by [@jchanghong023](https://github.com/jchanghong023)).
+
+## [18.11.3] - 2026-10-16
+
+### Fixed
+
+- Fixed Markdown fence info-string parsing to keep backtick-containing backtick openers as paragraph text while accepting backticks in tilde info strings and Unicode line separators in either fence's info string ([#15928](https://github.com/can1357/oh-my-pi/pull/15928) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed `parseHTML` treating `<link>` in RSS/Atom documents as an HTML void element, which dropped the URL text of RSS `<link>…</link>` ([#15954](https://github.com/can1357/oh-my-pi/issues/15954))
+
+## [18.11.2] - 2026-10-16
+
+### Added
+
+- Exported `sqliteFileIdentity()`, so a caller holding a long-lived SQLite connection can tell when its path now names a different file (e.g. after a corrupt store was quarantined and replaced) ([#14361](https://github.com/can1357/oh-my-pi/pull/14361) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Added `slugify()`, the shared lowercase ASCII kebab-case helper with an optional `maxLength` ([#14283](https://github.com/can1357/oh-my-pi/pull/14283) by [@jaredlyon](https://github.com/jaredlyon))
+
+### Fixed
+
+- Fixed an unhandled rejection when a subprocess is spawned with an already-aborted signal ([#15750](https://github.com/can1357/oh-my-pi/pull/15750) by [@harshaygadekar](https://github.com/harshaygadekar))
+
+## [18.10.0] - 2026-10-12
+
+### Added
+
+- Added `getMnemopiEmbedRuntimeDir()` for the shared mnemopi embedding server endpoints and logs.
+
+### Fixed
+
+- Fixed `ChildProcess.kill()` silently leaving the child running when the native process handle could not be resolved or used; it now signals the child directly and escalates to SIGKILL after the grace period.
+
+## [18.9.2] - 2026-10-11
+
+### Changed
+
+- Improved streaming JSON parsing performance for tool arguments containing many string values.
+
+### Fixed
+
+- Fixed parsing of long strings that contain closing delimiters other than double or single quotes.
+
+## [18.9.0] - 2026-10-11
+
+### Breaking Changes
+
+- Renamed `takeRecentLoopPhase()` to `takeLoopPhaseAttribution()`. The new API returns a `LoopPhaseAttribution` object (`{ label, ms }`) and reports a label only when it accounts for more time than unlabeled work within an armed measurement window.
+
+### Added
+
+- Added `withLoopPhase(label, fn)` for attributing synchronous work to a named loop phase, with automatic cleanup even when the callback throws.
+
+### Changed
+
+- Improved streaming JSON parsing performance for long tool-argument payloads.
+
+### Fixed
+
+- Fixed archive extraction on Windows systems without symlink privileges by allowing symlink entries to be extracted using supported fallbacks, while skipping unresolvable dangling links instead of failing the entire archive.
+
+## [18.8.9] - 2026-10-10
+
+### Added
+
+- Added `hueDistance`, the angular distance between two OKLCH hues
+
+## [18.8.8] - 2026-10-10
+
+### Fixed
+
+- Fixed `formatDuration` printing `60.0s` for durations just under a minute; they now read `1m` ([#15121](https://github.com/can1357/oh-my-pi/pull/15121) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added `getNativeGrammarsDir()`, where the native addon loads downloaded tree-sitter grammars from (`~/.omp/natives/grammars`).
+
+### Fixed
+
+- Fixed the virtual terminal misreading private CSI sequences such as kitty keyboard `CSI < u` and modifyOtherKeys `CSI > 4;1 m` as cursor restores or text styling, which garbled replayed PTY output.
+
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added `PI_NATIVES_DIR` support to `getNativesDir()` for configuring the native addon directory.
+- Added `ZipPackage` for lazily reading ZIP-based document packages with a total decompressed-size limit, along with `DocxImage.readBytes()` for accessing raw DOCX image data.
+
+## [18.8.0] - 2026-10-07
+
+### Added
+
+- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar` for lazily reading ZIP-based document packages with a configurable total-inflation limit, plus `DocxImage.readBytes()` for accessing raw DOCX image data.
+
+### Changed
+
+- Improved DOCX conversion to inflate only the package contents it needs, reducing unnecessary work and memory use.
+- Improved performance across HTML-to-Markdown conversion, Readability extraction, Markdown lexing, terminal emulation, terminal styling, streaming tool-argument parsing, and log writing. Large-page processing and terminal workloads now use substantially less time and memory.
+
+### Fixed
+
+- Fixed memory growth in long-lived child processes, streaming readers, prompt template compilation, and retried HTTP requests by releasing buffers, cache entries, and discarded response bodies promptly.
+- Fixed prompt templates rejecting `{{else if …}}` chains as unclosed blocks; a chain now closes with its opening block's single closing tag, as in Handlebars.
+
+## [18.6.3] - 2026-10-06
+
+### Breaking Changes
+
+- Replaced the `cursorPosition` option of `TerminalQueryResponder` with `hostCursorHandshake`, which leaves only the PTY host's own session-start cursor query unanswered instead of every cursor-position query
+
+## [18.5.1] - 2026-10-03
+
+### Added
+
+- Added utilities for detecting and scanning own-line display-math blocks in growing text, including identifying possible openers and closers efficiently.
+- Added an option to `TerminalQueryResponder` that lets PTY hosts provide cursor-position reports themselves.
+- Added `refreshShellConfigCache()` to rebuild the cached shell spawn environment from the current process environment.
+
+### Fixed
+
+- Fixed the Markdown lexer dropping text preceding U+2028 or U+2029 line-separator characters.
+
+## [18.5.0] - 2026-10-03
+
+### Added
+
+- Added the public `getSessionOwnersDir()` utility, which returns the profile-independent `~/.omp/run/session-owners` directory that names session ownership leases ([#14095](https://github.com/can1357/oh-my-pi/pull/14095) by [@andrebrait](https://github.com/andrebrait))
+
+### Fixed
+
+- Fixed SQLite error messages doubling every backslash in Windows database paths
+- Fixed corrupt-database recovery failing with `EBUSY` on Windows when several in-process openers of the same store failed at once
+
+## [18.4.12] - 2026-10-02
+
+### Fixed
+
+- Fixed multi-second temp directory removal stalls on Windows by forcing a major GC before the first deletion retry ([#13044](https://github.com/can1357/oh-my-pi/pull/13044) by [@jchanghong023](https://github.com/jchanghong023)).
+
+## [18.4.11] - 2026-10-02
+
+### Added
+
+- Added XDG-aware utility paths for skill descriptions and prediction state, with automatic adoption of legacy data when XDG locations are first resolved.
+
+### Fixed
+
+- Fixed machine-global daemon runtime paths so brokers such as text prediction use the shared XDG state location across profiles and custom agent directories.
+
+## [18.4.10] - 2026-10-02
+
+### Added
+
+- Added `startFrom(src, from)` to inline Markdown tokenizer extensions: a start hint that returns the first match at or after `from` (or `undefined`), so long paragraphs stay linear ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Added `this.source` and `this.end` for inline Markdown tokenizer extensions: the whole inline source and where the text being lexed ends in it, with one `this` per source that the link labels and emphasis inside it share, so a tokenizer can remember what it already scanned ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Added `mathSpanInContext` and `MathSpans` to `math-delimiters`, which find math spans without rescanning a run of unclosed openers ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+
+### Fixed
+
+- Fixed long Markdown paragraphs lexing slowly: a 44 KB paragraph with no blank line now parses in about 3 ms instead of 100 ms ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs with many unclosed `[`, `*` or `_`, or with a long address-like word and no dotted domain, lexing slowly: a 40 KB paragraph of each now lexes in 4-24 ms instead of 2-12 s ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs of deeply nested emphasis, links or images lexing slowly: 32 KB now lexes in about 50 ms instead of 7 s, and a long word inside every level no longer costs its length once per level, except in nested image labels that hold a backslash escape ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs with long or many unclosed runs of backticks, or `<http://` autolinks with no space or `>` after them, lexing slowly: 80 KB of each now lexes in about 50-60 ms instead of seconds (40 KB of one unclosed run took 10 s) ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs of nested brackets, URLs with long trailing punctuation, or unclosed HTML tags or comments lexing slowly: 80 KB of each now lexes in under 40 ms instead of 4-30 s ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed deeply nested Markdown links and emphasis overflowing the stack early: in a fresh process links now nest about three times as deep before a stack overflow, and emphasis twice as deep ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added `tryAcquireFileLock`, a non-blocking file-lock helper that returns `null` when the lock is already held.
+- Added an `unref` option to `AsyncDrain`, allowing applications to use long batch windows without keeping the process alive.
+
+### Changed
+
+- Improved logging efficiency and configurability by batching routine file writes, flushing urgent records promptly, adding on-demand `logger.flush()` support, and allowing file log levels to be limited with `OMP_LOG_LEVEL`. Log files are created only when needed, and obsolete log and audit files are cleaned up automatically.
+
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added `normalizePremiumRequests` (also still exported from `@oh-my-pi/pi-tui`).
+
+## [18.4.3] - 2026-09-28
+
+### Added
+
+- Added an optional `onDone` callback to `readSseJsonOrText` that reports the `[DONE]` sentinel without attaching a raw-event observer ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+### Changed
+
+- SSE events read without raw capture now share one frozen empty `raw` array instead of allocating one per event ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- Fixed the unsettled-command report overriding an explicit non-zero exit code with 1 and printing a spurious "ended before completing" line ([#13623](https://github.com/can1357/oh-my-pi/pull/13623) by [@H4vC](https://github.com/H4vC))
+
+## [18.4.2] - 2026-09-28
+
+### Added
+
+- Added cloneJsonTree to provide a high-performance deep copy utility for JSON-shaped object trees
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed SQLite stores opened with `recoverCorruption` crashing on a corrupt file instead of being preserved and recreated when the corruption surfaced as a different initialization error such as `no such table` ([#13530](https://github.com/can1357/oh-my-pi/pull/13530) by [@Hunter-124](https://github.com/Hunter-124))
+- Fixed raw stderr output staying on the previous day's log file after the log sink rotates at local midnight ([#13003](https://github.com/can1357/oh-my-pi/issues/13003)).
+
+## [18.3.1] - 2026-09-25
+
+### Fixed
+
+- Fixed log rotation near local-day boundaries so dated log files are consistently assigned to the correct local date.
+
+## [18.2.7] - 2026-09-21
+
+### Changed
+
+- Mermaid diagrams are now rendered with the native renderer, with output remaining unchanged.
+- PI_TIMING span lines now include their start offset to make unspanned gaps easier to identify.
+
+### Fixed
+
+- Fixed a startup crash when PI_TIMING profiled modules loaded via require() or TypeScript declaration assets.
+
+## [18.2.5] - 2026-09-17
+
+### Added
+
+- Added utilities for reading dotenv-sourced environment values, customizing filtered child-shell environment values, converting color palettes to RGB, cleaning trailing spaces from YAML block headers, and counting newlines in text.
+
+### Fixed
+
+- Improved rotating file logging performance by reusing an append file descriptor for each active log file.
+- Improved JSON serialization performance by avoiding unnecessary bigint handling when serializing values without bigints.
+- Fixed `$which` cache collisions for lookups using different PATH or working-directory options.
+- SSE token reads now expose raw wire-line data only when explicitly requested; the default token path no longer includes per-line raw slices.
+
+## [18.2.3] - 2026-09-17
+
+### Fixed
+
+- Optimized model configuration command execution by deduplicating requests and adding failure backoff
+- Prevented unnecessary credential command execution when runtime API keys are configured
+- Retained `readLines()` results no longer change when later chunks reuse the internal buffer.
+- Long sleeps honor elapsed time and re-arm after premature timer wakes without overflowing native timer delays.
+
+## [18.2.2] - 2026-09-16
+
+### Added
+
+- Added asynchronous and synchronous SQLite database opening APIs with path-attributed errors, optional corruption recovery that preserves private database and sidecar backups, and automatic retries for transient busy errors during asynchronous opens.
+
+## [18.2.1] - 2026-09-15
+
+### Added
+
+- Added the public `postmortem.exitProcess()` utility for host-owned hard exits that must bypass temporary process-exit guards ([#11789](https://github.com/can1357/oh-my-pi/issues/11789)).
+- Added `readSseJsonOrText`: like `readSseJson`, but a `data:` frame that is not valid JSON is yielded as its raw text instead of raising a `SyntaxError`, so a consumer can classify a reverse proxy's plain-text throttle page (`429 Too Many Requests`) that arrives after the stream headers were already sent. `readSseJson` is unchanged and shares the framing with it.
+
+### Fixed
+
+- Reading an EPUB, PPTX or XLSX whose XML has a mismatched or stray end tag no longer hangs the session forever; the parser recovers and the document converts ([#12018](https://github.com/can1357/oh-my-pi/pull/12018) by [@kaluli123123](https://github.com/kaluli123123)).
+- Fixed `filterChildShellEnv` forwarding the host process's `GIT_DIR`, `GIT_WORK_TREE`, and related repo-location overrides to child shells, where `git` would ignore the command's `cwd`.
+- ACP JSON-RPC now drains accepted inbound requests on clean stdin EOF before resolving `closed`, so in-flight methods such as `session/new` still receive a success or explicit error response instead of being dropped on exit 0 ([#11567](https://github.com/can1357/oh-my-pi/issues/11567)).
+- Fixed provider-local usage-limit reset timestamps making `waitForUsageReset` sessions resume up to eight hours late while preserving longest-window semantics for naive UTC timestamps ([#11014](https://github.com/can1357/oh-my-pi/issues/11014)).
+- `registerStdioDisconnectHandling()` now drives graceful shutdown from `process.stdout`'s own `error` event, so a closed stdout consumer exits cleanly while an unrelated write EPIPE (subprocess stdin, socket) stays fatal ([#10930](https://github.com/can1357/oh-my-pi/issues/10930)).
+- Fixed Linux `ptree` timeout cleanup occasionally leaving session-escaped descendants running during subreaper adoption.
+
+## [18.2.0] - 2026-09-15
+
+### Breaking Changes
+
+- Removed the unused `globPaths`, `loadGitignorePatterns`, and `GlobPathsOptions` exports.
+- Browser helpers now manage Chrome only: removed `Browser`, `BrowserTag`, `resolveBuildId()`, `getInstalledBrowsers()`, and `browser` options/metadata; `getDownloadUrl()` now takes `(platform, buildId, baseUrl?)`.
+
+### Added
+
+- Added `relativePathWithinNormalizedRoot()` for reusing canonical paths across containment checks.
+- Added `sleepLong()` and `MAX_TIMER_DELAY_MS`: an abortable sleep that chunks delays past the signed 32-bit timer ceiling so day-scale provider waits elapse instead of overflowing the timer.
+
+### Changed
+
+- Log-retention cleanup now runs after logger construction without keeping short-lived commands alive.
+- Debugger support now loads only when SIGUSR1 requests it.
+
+### Fixed
+
+- Fixed `extractRetryHint` dropping OpenCode Go's `Resets in …` quota window (`45min`, `2hr 15min`, `3 days`): the `reset in` pattern now accepts `Resets` phrasing, `hr`/`day` units, and compound `2hr 15min` remainders, so exhausted Go credentials block for the server-stated window instead of the 60s heuristic guess. ([#12091](https://github.com/can1357/oh-my-pi/pull/12091) by [@H4vC](https://github.com/H4vC))
+- Async file-peek callbacks now receive stable `Uint8Array` windows with copying `slice()` semantics.
+- Dotenv loading now handles multiline values and escapes consistently with Bun, preventing project values from leaking into child-shell environments.
+- SSE readers now support lone-CR line endings and CRLF split across chunks without merging or delaying events.
+
+## [18.1.22] - 2026-09-14
+
+### Fixed
+
+- Fixed `extractRetryHint` sleeping hours past the provider's stated wait when a timezone-naive `reset at` timestamp overshoots the relative retry hint: the skewed stamp is now ignored instead of winning longest-wins ([#12070](https://github.com/can1357/oh-my-pi/pull/12070) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.21] - 2026-09-14
+
+### Added
+
+- Added `getBrowserProfilesDir()` (`~/.omp/browser-profiles`; XDG: `$XDG_STATE_HOME/omp/browser-profiles`) for profiles of Chromium browsers spawned by the browser tool.
+
+### Fixed
+
+- Timed out stalled Chrome-for-Testing metadata requests after 30 seconds when looking up download metadata
+- Concurrent browser installations share one download without replacing a running browser, and stalled downloads time out with partial files cleaned up for retry.
+
+## [18.1.19] - 2026-09-12
+
+### Added
+
+- Added public `acquireFileLock()` and `FileLockHandle` APIs for holding and explicitly releasing exclusive OS-backed file locks.
+
+### Fixed
+
+- Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
+
+## [18.1.16] - 2026-09-09
+
+### Fixed
+
+- Fixed `$which` capturing `Bun.which` at import on Linux and Windows, so `Bun.which` stubs installed later (e.g. per-test spies) are honoured and PATH-only language servers no longer leak into test results.
+
+## [18.1.13] - 2026-09-07
+
+### Fixed
+
+- Fixed `filterChildShellEnv` applying the omp process's own launch-environment provenance (the pre-dotenv `NODE_ENV` and launcher-owned names read from `/proc/self/environ`) to caller-supplied environment objects; launch provenance now only applies when filtering the live `process.env`/`Bun.env`, and an explicit env resolves its dotenv mode from its own `NODE_ENV`.
+
+## [18.1.11] - 2026-09-05
+
+### Fixed
+
+- Fixed `extractRetryHint` dropping the longer timing signal when an error body carries both an account reset and an appended retry hint: competing signals now merge by longest window instead of first match, so retries honor the provider's full backoff.
+
+## [18.1.7] - 2026-09-03
+
+### Added
+
+- Added the public `getTinyWorkerRuntimeDir()` utility, which returns the standard `~/.omp/run/tiny` directory for tiny-worker runtime data.
+
+### Fixed
+
+- Fixed retry classification for Bun's bare `Socket is closed` transport error.
+
+## [18.1.6] - 2026-09-03
+
+### Added
+
+- Added `IncomingDoc` (`@oh-my-pi/pi-utils/incoming-json`) for incrementally reading path-addressed JSON data as text arrives, including string chunks and lines, array elements, and keyed object values, with structured errors for missing, incomplete, aborted, malformed, or mismatched data.
+- Added `Serial` for running asynchronous operations sequentially in call order.
+
+### Fixed
+
+- Fixed relaxed JSON parsing for single-quoted strings followed by line or block comments.
+
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added `TerminalQueryResponder` to `@oh-my-pi/pi-utils/vterm`, enabling headless PTY consumers to answer common terminal queries for cursor position, device status and attributes, and foreground/background colors without maintaining a screen buffer.
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed retry-hint extraction for body-level millisecond hints and absolute quota-reset timestamps ([#10325](https://github.com/can1357/oh-my-pi/pull/10325) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv)).
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added `postmortem.fatal` for terminal-safe top-level failure reporting.
+
+### Fixed
+
+- Fixed sub-second duration formatting so it no longer exposes floating-point precision noise.
+- Managed Chrome-for-Testing downloads now reject unsupported Linux ARM64 hosts instead of installing an incompatible x86_64 browser.
+- Fixed Markdown reference-link labels that match built-in `Object.prototype` names, such as `constructor` and `__proto__`, so they are no longer misidentified as definitions or emitted with an undefined URL ([#10283](https://github.com/can1357/oh-my-pi/issues/10283)).
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed runtime installation getting stuck for up to 60 seconds after an installer crash or forced termination, allowing subsequent installation attempts to proceed normally.
+
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added `postmortem.drainStdout` to flush buffered standard output before process exit or exec-replacement.
+- Added an `exitOnly` option to `postmortem.register` for resources that should remain available during keep-alive cleanup and be released only on actual process exit.
+- Added `hexToOklch` and `oklchToHex` color conversion utilities with sRGB gamut mapping that reduces chroma when necessary.
+- Added `checkpointWal` to checkpoint committed SQLite WAL frames without blocking concurrent readers.
+
+### Fixed
+
+- Fixed repeatable `postmortem` cleanup behavior so persistent resources and callbacks registered during cleanup remain active until the eventual process exit.
+- Fixed asynchronous `postmortem` cleanup so callbacks registered during a cleanup pass are awaited before cleanup completes, including during signal-driven exits.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed error handling so unrelated aborted requests and closed-connection failures are no longer silently suppressed.
+
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- Added the Linux `subreaper` spawn option to retain reparented descendants for process-tree cleanup.
+
+### Fixed
+
+- Keep project-directory state unchanged when changing directories fails.
+- Fixed `ptree` timeout cleanup and output capture so timed commands retain their deadline through descendant-held pipes and untimed commands read output to EOF.
+
+## [18.0.7] - 2026-08-26
+
+### Added
+
+- Added `math-delimiters`, the LaTeX span/block delimiter grammar (`mathStartIndex`, `mathOpenerAt`, `mathSpanAt`, `mathBlockAt`) shared by every Markdown renderer: pandoc's anti-currency rules for `$…$`, own-line display blocks, and delimiters matched by backslash parity, so an escaped `\$x$` stays literal and a TeX row break cannot end a span early.
+- Added `RequestError.sessionBusy(message, data)` to represent ACP session-busy errors (`-32003`) through the shared JSON-RPC transport.
+- Exported `getComposerCacheDir` for resolving the per-project Composer cache directory, including support for `XDG_CACHE_HOME`.
+
+### Fixed
+
+- Fixed OMP sessions unexpectedly exiting during socket cleanup or optional-worker communication on Bun.
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added conventional commit generation with support for dependency, security, configuration, UX, and infrastructure commit types, plus configurable caching and large-diff analysis behavior.
+
+## [18.0.5] - 2026-08-25
+
+### Added
+
+- Added `stableStringifyJson` for deterministic serialization of nested JSON-shaped data.
+
+### Fixed
+
+- Fixed managed Chrome-for-Testing installation failures when extracting the trusted browser download.
+
+## [18.0.4] - 2026-08-24
+
+### Added
+
+- Exported `getAvatarCacheDir` to resolve the avatar cache directory path.
+
+## [18.0.1] - 2026-08-23
+
+### Fixed
+
+- Fixed the Mermaid ASCII renderer throwing on left-to-right diagrams containing a `subgraph`, which made the fenced block fall back to raw source in the terminal. `offsetDrawingForSubgraphs` shifts every drawing coordinate to make room for subgraph borders that extend past the origin, but the canvas had already been sized from the pre-shift grid extents, so edges routed to the outermost column wrote past the allocation and `drawLine` threw on the missing column. The canvas and role canvas now grow by the same shift. ([#9340](https://github.com/can1357/oh-my-pi/issues/9340))
+- Fixed child shell environments inheriting Bun-autoloaded `.env.<mode>.local` values from the launch directory. ([#9290](https://github.com/can1357/oh-my-pi/issues/9290))
 
 ## [17.4.2] - 2026-08-21
 
@@ -355,7 +1054,7 @@
 
 ### Changed
 
-- Mermaid diagrams are now rendered to ASCII by a first-party vendored renderer (`src/vendor/mermaid-ascii`, derived from the MIT-licensed `beautiful-mermaid`, ASCII pipeline only) with terminal display width measured via `Bun.stringWidth` (grapheme-aware, correct for wide/East-Asian glyphs and emoji). Inline label formatting (HTML formatting tags and markdown emphasis) is now reduced to plain text instead of printed raw.
+- Mermaid diagrams are now rendered to ASCII by a first-party renderer (initially derived from the MIT-licensed `beautiful-mermaid`, ASCII pipeline only) with terminal display width measured via `Bun.stringWidth` (grapheme-aware, correct for wide/East-Asian glyphs and emoji). Inline label formatting (HTML formatting tags and markdown emphasis) is now reduced to plain text instead of printed raw.
 
 ### Removed
 

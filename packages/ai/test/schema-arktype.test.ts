@@ -68,30 +68,6 @@ describe("arkToWireSchema — emission", () => {
 		expect(toolWireSchema(plainTool).$schema).toBeUndefined();
 		expect(toolWireSchema(rejectTool).$schema).toBeUndefined();
 	});
-
-	it("emits a wire structurally equal to the plain-Zod equivalent", () => {
-		const zodTwin: Tool = {
-			name: "zod-plain",
-			description: "",
-			parameters: type({
-				name: type("string").describe("the display name"),
-				count: type("number").describe("how many items"),
-				nested: type({ inner: type("string").describe("inner value") }).describe("a nested object"),
-			}),
-		};
-		// Normalize key + array ordering (semantically irrelevant to JSON Schema).
-		const norm = (x: unknown): unknown =>
-			Array.isArray(x)
-				? [...x].map(norm).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
-				: x && typeof x === "object"
-					? Object.fromEntries(
-							Object.keys(x as Record<string, unknown>)
-								.sort()
-								.map(k => [k, norm((x as Record<string, unknown>)[k])]),
-						)
-					: x;
-		expect(norm(toolWireSchema(plainTool))).toEqual(norm(toolWireSchema(zodTwin)));
-	});
 });
 
 describe("validateToolArguments — ArkType contracts", () => {

@@ -3,6 +3,7 @@
  *
  * Resolves plugin sources to absolute local directory paths:
  *   - Relative string "./plugins/foo" → path within marketplace clone
+ *   - Bare name "foo" → `metadata.pluginRoot`/foo within marketplace clone
  *   - { source: "url", url: "https://...git" } → git clone
  *   - { source: "github", repo: "owner/repo" } → git clone from GitHub
  *   - { source: "git-subdir", url: "...", path: "sub/dir" } → git clone + subdir
@@ -12,16 +13,21 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { directoryExists, directoryIsMissing, pathIsWithin } from "@oh-my-pi/pi-utils";
 
-import { isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
-import * as git from "../../../utils/git";
+import {
+	isBarePluginSourceName,
+	type MarketplaceCatalogMetadata,
+	type MarketplacePluginEntry,
+	type PluginSource,
+} from "./types";
 
-import type { MarketplaceCatalogMetadata, MarketplacePluginEntry, PluginSource } from "./types";
+const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface ResolveContext {
 	/** Absolute path to the cloned/local marketplace directory. Required for relative sources. */
 	marketplaceClonePath?: string;
-	/** Catalog metadata — used for `pluginRoot` prepend. */
 	catalogMetadata?: MarketplaceCatalogMetadata;
 	/** Scratch directory for sources that require cloning or extraction. */
 	tmpDir: string;
@@ -39,41 +45,105 @@ export async function resolvePluginSource(
 	const { source } = entry;
 
 	if (typeof source === "string") {
-		return resolveRelativeSource(source, context);
+		return { dir: await resolveRelativeSourceDir(source, context) };
 	}
 
 	return resolveObjectSource(source, context);
 }
 
-// ── Relative string source ("./plugins/foo") ────────────────────────
-
-async function resolveRelativeSource(
-	source: string,
-	context: ResolveContext,
-): Promise<{ dir: string; tempCloneRoot?: string }> {
-	if (!source.startsWith("./")) {
-		throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
+/**
+ * Validate source constraints that can be checked without cloning or mutating files.
+ */
+export async function validatePluginSource(
+	entry: MarketplacePluginEntry,
+	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
+): Promise<string | undefined> {
+	const { source } = entry;
+	if (typeof source === "string") {
+		return resolveRelativeSourceDir(source, context);
 	}
 
+	switch (source.source) {
+		case "url":
+		case "github":
+			return undefined;
+		case "git-subdir": {
+			const syntheticRoot = path.join(path.parse(process.cwd()).root, "omp-marketplace-validation");
+			const resolved = path.resolve(syntheticRoot, source.path);
+			if (!pathIsWithin(syntheticRoot, resolved)) {
+				throw new Error(`git-subdir path "${source.path}" escapes the cloned repository`);
+			}
+			return undefined;
+		}
+		case "npm":
+			throw new Error("npm plugin sources are not yet supported. Use git-based sources instead.");
+		default: {
+			const unknownSource: unknown = source;
+			if (
+				unknownSource &&
+				typeof unknownSource === "object" &&
+				"source" in unknownSource &&
+				typeof unknownSource.source === "string"
+			) {
+				throw new Error(`Unknown plugin source type: "${unknownSource.source}"`);
+			}
+			throw new Error("Unknown plugin source type");
+		}
+	}
+}
+
+// ── String sources ─────────────────────────────────────────────────
+
+function resolveRelativeSourcePath(
+	source: string,
+	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
+): string {
+	const pluginRoot = context.catalogMetadata?.pluginRoot;
+	let relativePath: string;
+	if (source.startsWith("./")) {
+		relativePath = source;
+	} else if (pluginRoot && isBarePluginSourceName(source)) {
+		relativePath = path.join(pluginRoot, source);
+	} else {
+		throw new Error(
+			`Relative plugin source paths must start with "./", or be a bare name under metadata.pluginRoot — got: "${source}"`,
+		);
+	}
+	return resolveInsideMarketplace(relativePath, source, context);
+}
+
+function resolveInsideMarketplace(
+	relativePath: string,
+	source: string,
+	context: Pick<ResolveContext, "marketplaceClonePath">,
+): string {
 	if (!context.marketplaceClonePath) {
 		throw new Error(`Cannot resolve relative source "${source}": marketplaceClonePath is required`);
 	}
 
-	// If pluginRoot is set, prepend it to the path segment after "./"
-	const pluginRoot = context.catalogMetadata?.pluginRoot;
-	const relativePath = pluginRoot ? `./${path.join(pluginRoot, source.slice(2))}` : source;
-
-	// Resolve against marketplace root (not the .claude-plugin/ catalog subdirectory)
 	const resolved = path.resolve(context.marketplaceClonePath, relativePath);
-
-	if (!pathIsWithin(context.marketplaceClonePath, resolved)) {
+	// The path may not exist yet, and the marketplace root may sit behind a symlink.
+	if (!pathIsWithin(context.marketplaceClonePath, resolved, { throughMissing: true })) {
 		throw new Error(
 			`Plugin source "${source}" resolves outside marketplace root ("${context.marketplaceClonePath}")`,
 		);
 	}
+	return resolved;
+}
 
-	await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
-	return { dir: resolved };
+async function resolveRelativeSourceDir(
+	source: string,
+	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
+): Promise<string> {
+	const resolved = resolveRelativeSourcePath(source, context);
+	if (await directoryExists(resolved, { strict: true })) return resolved;
+	// Catalogs written for omp's earlier rule (`./foo` meaning `<pluginRoot>/foo`) keep installing.
+	const pluginRoot = context.catalogMetadata?.pluginRoot;
+	if (pluginRoot && source.startsWith("./")) {
+		const legacy = resolveInsideMarketplace(path.join(pluginRoot, source), source, context);
+		if (await directoryExists(legacy, { strict: true })) return legacy;
+	}
+	throw new Error(`Plugin source directory does not exist: "${resolved}"`);
 }
 
 // ── Object source variants ──────────────────────────────────────────
@@ -87,7 +157,11 @@ async function resolveObjectSource(
 			// { source: "url", url: "https://github.com/owner/repo.git" }
 			// Despite the name, this is typically a git clone URL
 			const targetDir = path.join(context.tmpDir, `plugin-${crypto.randomUUID()}`);
-			await git.clone(source.url, targetDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(source.url, targetDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 			return { dir: targetDir, tempCloneRoot: targetDir };
 		}
 
@@ -95,7 +169,11 @@ async function resolveObjectSource(
 			// { source: "github", repo: "owner/repo" }
 			const url = `https://github.com/${source.repo}.git`;
 			const targetDir = path.join(context.tmpDir, `plugin-${crypto.randomUUID()}`);
-			await git.clone(url, targetDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(url, targetDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 			return { dir: targetDir, tempCloneRoot: targetDir };
 		}
 
@@ -106,15 +184,21 @@ async function resolveObjectSource(
 					? source.url
 					: `https://github.com/${source.url}.git`;
 			const cloneDir = path.join(context.tmpDir, `plugin-repo-${crypto.randomUUID()}`);
-			await git.clone(url, cloneDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(url, cloneDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 
 			const subdirPath = path.resolve(cloneDir, source.path);
-			if (!pathIsWithin(cloneDir, subdirPath)) {
+			if (!pathIsWithin(cloneDir, subdirPath, { throughMissing: true })) {
 				await fs.rm(cloneDir, { recursive: true, force: true });
 				throw new Error(`git-subdir path "${source.path}" escapes the cloned repository`);
 			}
 			try {
-				await verifyDirExists(subdirPath, `git-subdir path "${source.path}" does not exist in cloned repository`);
+				if (await directoryIsMissing(subdirPath, { strict: true })) {
+					throw new Error(`git-subdir path "${source.path}" does not exist in cloned repository`);
+				}
 			} catch (err) {
 				await fs.rm(cloneDir, { recursive: true, force: true });
 				throw err;
@@ -127,21 +211,5 @@ async function resolveObjectSource(
 
 		default:
 			throw new Error(`Unknown plugin source type: "${(source as { source: string }).source}"`);
-	}
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────
-
-async function verifyDirExists(dirPath: string, errorMessage: string): Promise<void> {
-	try {
-		const stat = await fs.stat(dirPath);
-		if (!stat.isDirectory()) {
-			throw new Error(errorMessage);
-		}
-	} catch (err) {
-		if (isEnoent(err)) {
-			throw new Error(errorMessage);
-		}
-		throw err;
 	}
 }

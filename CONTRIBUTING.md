@@ -1,4 +1,4 @@
-# Contributing to oh-my-pi
+# Contributing to omp
 
 Pull requests are welcome. Keep them focused, understand the work you submit,
 and be prepared to explain and maintain it.

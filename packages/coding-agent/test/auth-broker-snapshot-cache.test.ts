@@ -1,10 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
+	AuthBrokerError,
 	type AuthBrokerServerHandle,
+	type AuthBrokerStartupRetry,
+	openAuthCredentialStore,
 	readAuthBrokerSnapshotCache,
 	type SnapshotResponse,
 	startAuthBroker,
@@ -12,6 +15,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { rejectionOf } from "./helpers/rejection";
 
 const ENV_KEYS = [
 	"OMP_AUTH_BROKER_URL",
@@ -88,7 +92,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 
 		const storage = await discoverAuthStorage(tempDir);
 		try {
-			expect(await storage.getApiKey(PROVIDER)).toBe("cached-api-key");
+			expect(await storage.keys.get(PROVIDER)).toBe("cached-api-key");
 		} finally {
 			storage.close();
 		}
@@ -97,9 +101,9 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 	test("seeds the encrypted cache after an initial broker fetch", async () => {
 		const cachePath = path.join(tempDir, "snapshot.enc");
 		const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
-		brokerStore.saveApiKey(PROVIDER, "broker-api-key");
+		await brokerStore.saveApiKey(PROVIDER, "broker-api-key");
 		const brokerStorage = new AuthStorage(brokerStore);
-		await brokerStorage.reload();
+		await brokerStorage.credentials.reload();
 		let handle: AuthBrokerServerHandle | undefined;
 		let storage: AuthStorage | undefined;
 		try {
@@ -115,7 +119,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "3600000";
 
 			storage = await discoverAuthStorage(tempDir);
-			expect(await storage.getApiKey(PROVIDER)).toBe("broker-api-key");
+			expect(await storage.keys.get(PROVIDER)).toBe("broker-api-key");
 			await waitUntil(async () => {
 				const cached = await readAuthBrokerSnapshotCache({
 					path: cachePath,
@@ -162,71 +166,161 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			});
 
 			storage = await discoverAuthStorage(tempDir);
-			expect(await storage.getApiKey(PROVIDER)).toBe("cached-api-key");
+			expect(await storage.keys.get(PROVIDER)).toBe("cached-api-key");
 		} finally {
 			storage?.close();
 			server.stop(true);
 		}
 	});
 
-	test("rejects a fresh cache when the broker rejects its bearer token", async () => {
-		const cachePath = path.join(tempDir, "snapshot.enc");
-		const server = Bun.serve({
-			port: 0,
-			fetch: () => new Response("unauthorized", { status: 401 }),
-		});
-		const url = server.url.toString();
-		try {
-			process.env.OMP_AUTH_BROKER_URL = url;
-			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
-			process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE = cachePath;
-			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "3600000";
-			await writeAuthBrokerSnapshotCache({
-				path: cachePath,
-				token: TOKEN,
-				url,
-				snapshot: makeSnapshot(Date.now()),
-			});
-
-			await expect(discoverAuthStorage(tempDir)).rejects.toMatchObject({ status: 401 });
-		} finally {
-			server.stop(true);
-		}
-	});
-
-	test("prefers a reachable broker snapshot over a fresh cached snapshot", async () => {
-		const cachePath = path.join(tempDir, "snapshot.enc");
-		const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
-		brokerStore.saveApiKey(PROVIDER, "broker-api-key");
-		const brokerStorage = new AuthStorage(brokerStore);
-		await brokerStorage.reload();
-		let handle: AuthBrokerServerHandle | undefined;
-		let storage: AuthStorage | undefined;
-		try {
-			handle = startAuthBroker({
+	// A TCP proxy in front of the broker sends a raw reply to the first connection
+	// (the startup snapshot request), as during a restart, and pipes later ones through.
+	const interruptions = [
+		{
+			name: "answers 503",
+			firstReply: "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 10\r\nConnection: close\r\n\r\nrestarting",
+			status: 503,
+		},
+		{
+			name: "drops the connection mid-body",
+			firstReply: 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"generation":',
+			status: undefined,
+		},
+	];
+	test.each(interruptions)(
+		"retries the initial snapshot when the broker $name, reporting the retry",
+		async ({ firstReply, status }) => {
+			const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
+			await brokerStore.saveApiKey(PROVIDER, "broker-api-key");
+			const brokerStorage = new AuthStorage(brokerStore);
+			await brokerStorage.credentials.reload();
+			const handle = startAuthBroker({
 				storage: brokerStorage,
 				bind: "127.0.0.1:0",
 				bearerTokens: [TOKEN],
 				disableRefresher: true,
 			});
-			process.env.OMP_AUTH_BROKER_URL = handle.url;
-			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
-			process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE = cachePath;
-			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "3600000";
-			await writeAuthBrokerSnapshotCache({
-				path: cachePath,
-				token: TOKEN,
-				url: handle.url,
-				snapshot: makeSnapshot(Date.now()),
+			const brokerPort = Number(new URL(handle.url).port);
+			let connections = 0;
+			const proxy = Bun.listen<{ first: boolean; upstream?: Promise<Bun.Socket> }>({
+				hostname: "127.0.0.1",
+				port: 0,
+				socket: {
+					open(client) {
+						client.data = { first: ++connections === 1 };
+						if (client.data.first) return;
+						client.data.upstream = Bun.connect({
+							hostname: "127.0.0.1",
+							port: brokerPort,
+							socket: {
+								data: (_upstream, chunk) => {
+									client.write(chunk);
+								},
+								close: () => {
+									client.end();
+								},
+							},
+						});
+					},
+					async data(client, chunk) {
+						if (client.data.first) client.end(firstReply);
+						else (await client.data.upstream)?.write(chunk);
+					},
+					async close(client) {
+						(await client.data.upstream)?.end();
+					},
+				},
 			});
+			const proxyUrl = `http://127.0.0.1:${proxy.port}/`;
+			let storage: AuthStorage | undefined;
+			try {
+				process.env.OMP_AUTH_BROKER_URL = proxyUrl;
+				process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+				process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+				const retries: AuthBrokerStartupRetry[] = [];
+				storage = await discoverAuthStorage(tempDir, { onBrokerRetry: retry => retries.push(retry) });
+				expect(await storage.keys.get(PROVIDER)).toBe("broker-api-key");
+				expect(retries).toMatchObject([{ url: proxyUrl, error: { status }, delayMs: 500, budgetMs: 30_000 }]);
+			} finally {
+				storage?.close();
+				proxy.stop(true);
+				await handle.close();
+				brokerStorage.close();
+				brokerStore.close();
+			}
+		},
+	);
 
-			storage = await discoverAuthStorage(tempDir);
-			expect(await storage.getApiKey(PROVIDER)).toBe("broker-api-key");
+	test("fails at once on a rejected token, and on any failure when switching brokers at runtime", async () => {
+		let status = 401;
+		let requests = 0;
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => {
+				requests += 1;
+				return new Response("refused", { status });
+			},
+		});
+		try {
+			process.env.OMP_AUTH_BROKER_URL = server.url.toString();
+			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+			expect(await rejectionOf(discoverAuthStorage(tempDir))).toMatchObject({ status: 401 });
+			expect(requests).toBe(1);
+
+			status = 503;
+			requests = 0;
+			const switched = openAuthCredentialStore({ brokerConfig: { url: server.url.toString(), token: TOKEN } });
+			expect(await rejectionOf(switched)).toMatchObject({ status: 503 });
+			expect(requests).toBe(1);
 		} finally {
-			storage?.close();
-			await handle?.close();
-			brokerStorage.close();
-			brokerStore.close();
+			server.stop(true);
+		}
+	});
+
+	test("fails startup once the broker stays unreachable for the whole retry budget", async () => {
+		// The broker accepts connections and never answers.
+		const reached = Promise.withResolvers<void>();
+		const hang = Promise.withResolvers<Response>();
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => {
+				reached.resolve();
+				return hang.promise;
+			},
+		});
+		const turn = () => {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			return promise;
+		};
+		vi.useFakeTimers();
+		try {
+			process.env.OMP_AUTH_BROKER_URL = server.url.toString();
+			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+			let settled = false;
+			const retries: AuthBrokerStartupRetry[] = [];
+			const discovered = discoverAuthStorage(tempDir, { onBrokerRetry: retry => retries.push(retry) });
+			const outcome = rejectionOf(discovered).finally(() => {
+				settled = true;
+			});
+			await reached.promise;
+			// Short of 30 s of fake time, startup is still waiting on the broker.
+			for (let second = 1; second < 30; second++) {
+				vi.advanceTimersByTime(1_000);
+				await turn();
+			}
+			expect(settled).toBe(false);
+			// At 30 s the deadline cancels the request in flight.
+			vi.advanceTimersByTime(1_000);
+			expect(await outcome).toBeInstanceOf(AuthBrokerError);
+			// Giving up is not reported as one more retry.
+			expect(retries).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+			hang.resolve(new Response(null, { status: 503 }));
+			server.stop(true);
 		}
 	});
 });

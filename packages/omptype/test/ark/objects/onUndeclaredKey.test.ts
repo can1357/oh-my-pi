@@ -4,7 +4,6 @@ import type { Eq } from "../type-assert";
 
 it("can parse an undeclared restriction", () => {
 	const T = type({ "+": "reject" });
-	// biome-ignore lint/complexity/noBannedTypes: empty object type test
 	const _type1: Eq<typeof T.infer, {}> = true;
 	expect(T({ extra: true }).toString()).toBe("extra must be removed");
 });
@@ -83,9 +82,8 @@ describe("traversal", () => {
 	});
 
 	it("fails on delete indiscriminable union key", () => {
-		expect(() =>
-			type([{ a: "string" }, "|", { b: "boolean" }]).onUndeclaredKey("delete"),
-		).toThrow(`ParseError: An unordered union of a type including a morph and a type with overlapping input is indeterminate:
+		expect(() => type([{ a: "string" }, "|", { b: "boolean" }]).onUndeclaredKey("delete"))
+			.toThrow(`ParseError: An unordered union of a type including a morph and a type with overlapping input is indeterminate:
 Left: { a: string, + (undeclared): delete }
 Right: { b: boolean, + (undeclared): delete }`);
 	});

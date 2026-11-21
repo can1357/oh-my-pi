@@ -13,12 +13,12 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext, StrippedToolCallsMarker } from "@oh-my-pi/pi-coding-agent/session/session-context";
@@ -72,7 +72,9 @@ function makeCtx(): RenderInitialMessagesTestContext {
 
 	const ctx = {
 		chatContainer,
+		pendingShellContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
 		pendingMessagesContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
+		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap<AgentMessage, Component>(),
@@ -87,6 +89,7 @@ function makeCtx(): RenderInitialMessagesTestContext {
 				buildSessionContext: llmContextSpy,
 				getEntries: vi.fn(() => []),
 				getCwd: vi.fn(() => "/tmp"),
+				getConversationTip: () => undefined,
 			},
 		},
 		sessionManager: {
@@ -152,10 +155,13 @@ function makeRenderCtx(
 ): { ctx: InteractiveModeContext; chatContainer: TranscriptContainer } {
 	const chatContainer = new TranscriptContainer();
 	chatContainer.setToolActivityVisible(!hideToolActivity);
-	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer,
+		pendingShellContainer: new Container(),
 		pendingMessagesContainer: new Container(),
+		updatePendingMessagesDisplay: () => helpers.updatePendingMessagesDisplay(),
+		compactionQueuedMessages: [],
+		keybindings: { getKeys: () => [] },
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap<AgentMessage, Component>(),
@@ -163,7 +169,7 @@ function makeRenderCtx(
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
 		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn(), imageBudget: undefined },
+		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), imageBudget: undefined },
 		resetTranscript: () => {
 			ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 			ctx.chatContainer.disposeChildren();
@@ -174,19 +180,20 @@ function makeRenderCtx(
 		},
 		// Rebuild paths honor terminal.showImages since the native-image work;
 		// keep it on so the image-replay contracts below stay meaningful.
-		settings: {
-			get: (key: string) => {
-				if (key === "terminal.showImages") return showImages;
-				if (key === "display.hideToolActivity") return hideToolActivity;
-				return false;
-			},
-		},
+		settings: Settings.isolated({
+			"terminal.showImages": showImages,
+			"display.hideToolActivity": hideToolActivity,
+			"composer.recallClearedDrafts": false,
+		}),
 		toolOutputExpanded: false,
 		hideToolActivity,
 		hideThinkingBlock: false,
+		assistantImagesVisible: showImages,
+		tableChartsVisible: true,
 		focusedAgentId: undefined,
 		editor: { addToHistory: vi.fn() },
 		viewSession: {
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			buildTranscriptSessionContext: () => transcript,
 			getToolByName: () => undefined,
 			hasBuiltInTool: () => true,
@@ -194,6 +201,7 @@ function makeRenderCtx(
 			sessionManager: {
 				getEntries: vi.fn(() => []),
 				getCwd: vi.fn(() => "/tmp"),
+				getConversationTip: () => undefined,
 				putBlobSync: vi.fn(() => ({
 					hash: "hash",
 					path: "/tmp/hash",
@@ -212,9 +220,8 @@ function makeRenderCtx(
 				ref: "blob:sha256:hash",
 			})),
 		},
-		addMessageToChat: (message: AgentMessage, options?: { populateHistory?: boolean }) =>
+		addMessageToChat: (message: AgentMessage, options?: { imageLinks?: readonly (string | undefined)[] }) =>
 			helpers.addMessageToChat(message, options),
-		getUserMessageText: (message: Message) => helpers.getUserMessageText(message),
 		renderSessionContext: (context: SessionContext, options?: RenderSessionContextOptions) =>
 			helpers.renderSessionContext(context, options),
 		renderSessionContextIncrementally: (
@@ -224,11 +231,32 @@ function makeRenderCtx(
 		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 	return { ctx, chatContainer };
 }
 
 describe("UiHelpers.renderInitialMessages — transcript source", () => {
+	it("shows only the brief intent on a settled shell card restored from raw arguments", async () => {
+		const args = { command: "ls -la", i: "Listing files: Which files have changed?" };
+		const transcript = transcriptWith([
+			assistantToolCall("ls", "bash", args),
+			{
+				role: "toolResult",
+				toolCallId: "ls",
+				toolName: "bash",
+				content: [{ type: "text", text: "index.ts" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript);
+		await new UiHelpers(ctx).renderInitialMessages();
+		const rendered = Bun.stripANSI(chatContainer.render(100).join("\n"));
+		expect(rendered).toContain("Listing files");
+		expect(rendered).not.toContain("Which files have changed?");
+		expect(args.i).toBe("Listing files: Which files have changed?");
+	});
+
 	it("renders the collapsed live display transcript, never the LLM context", async () => {
 		await Settings.init({ inMemory: true });
 		const { ctx, transcriptSpy, llmContextSpy, renderSessionContextSpy } = makeCtx();
@@ -241,19 +269,11 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 		expect(llmContextSpy).not.toHaveBeenCalled();
 		expect(renderSessionContextSpy).toHaveBeenCalledWith(transcript, {
 			updateFooter: true,
-			populateHistory: false,
 		});
 	});
 });
 
 describe("UiHelpers.renderInitialMessages — clearTerminalHistory", () => {
-	it("requests a scrollback-clearing repaint when clearTerminalHistory is set", async () => {
-		await Settings.init({ inMemory: true });
-		const { ctx } = makeCtx();
-		await new UiHelpers(ctx).renderInitialMessages({ clearTerminalHistory: true });
-		expect(ctx.ui.requestRender).toHaveBeenCalledWith(true, { clearScrollback: true });
-	});
-
 	it("never clears scrollback when clearTerminalHistory is unset", async () => {
 		await Settings.init({ inMemory: true });
 		const { ctx } = makeCtx();
@@ -262,6 +282,24 @@ describe("UiHelpers.renderInitialMessages — clearTerminalHistory", () => {
 			([force, opts]) => force === true && (opts as { clearScrollback?: boolean } | undefined)?.clearScrollback,
 		);
 		expect(clearedCall).toBeUndefined();
+	});
+});
+
+describe("UiHelpers.renderInitialMessages — queued messages", () => {
+	it("keeps the queued-message bar after a mid-turn rebuild such as rewind (#13680)", async () => {
+		const { ctx } = makeRenderCtx(makeEmptyContext());
+		vi.spyOn(ctx.viewSession, "getQueuedMessages").mockReturnValue({
+			steering: ["steer now"],
+			followUp: ["queued one", "queued two"],
+			liveSteered: 0,
+		});
+
+		await new UiHelpers(ctx).renderInitialMessages({ clearTerminalHistory: true });
+
+		const pending = Bun.stripANSI(ctx.pendingMessagesContainer.render(100).join("\n"));
+		expect(pending).toContain("steer now");
+		expect(pending).toContain("queued one");
+		expect(pending).toContain("queued two");
 	});
 });
 
@@ -276,13 +314,9 @@ describe("UiHelpers.renderInitialMessages — responsiveness", () => {
 		const transcript = transcriptWith(messages);
 		const { ctx } = makeRenderCtx(transcript);
 		let chunks = 0;
-		await new UiHelpers(ctx).renderSessionContextIncrementally(
-			transcript,
-			{ updateFooter: true, populateHistory: true },
-			() => {
-				chunks++;
-			},
-		);
+		await new UiHelpers(ctx).renderSessionContextIncrementally(transcript, { updateFooter: true }, () => {
+			chunks++;
+		});
 		return chunks;
 	}
 
@@ -327,6 +361,55 @@ describe("UiHelpers.renderInitialMessages — responsiveness", () => {
 		expect(requestRender.mock.calls.filter(([force]) => force === true)).toEqual([[true, { clearScrollback: true }]]);
 	});
 
+	it("commits only the latest replay when a second one starts mid-replay", async () => {
+		// Leaving a focused subagent while its transcript is still replaying starts
+		// the main session's replay on top of it. Overlapping replays captured each
+		// other's staged container as the visible one, so the screen kept rows of
+		// both sessions, lost the head of the older one, and cleared scrollback twice.
+		await Settings.init({ inMemory: true });
+		let current = transcriptWith(
+			Array.from({ length: 320 }, (_, index) => ({ role: "user", content: `SUBAGENT-${index}`, timestamp: index })),
+		);
+		const { ctx, chatContainer } = makeRenderCtx(current);
+		vi.spyOn(ctx.viewSession, "buildTranscriptSessionContext").mockImplementation(() => current);
+		const helpers = new UiHelpers(ctx);
+		const firstChunk = Promise.withResolvers<void>();
+		const renderIncrementally = ctx.renderSessionContextIncrementally;
+		ctx.renderSessionContextIncrementally = (context, options) =>
+			renderIncrementally(context, options, () => firstChunk.resolve());
+		const requestRender = ctx.ui.requestRender as Mock<(...args: unknown[]) => void>;
+
+		const subagentReplay = helpers.renderInitialMessages({ clearTerminalHistory: true });
+		await firstChunk.promise;
+		current = transcriptWith(
+			Array.from({ length: 3 }, (_, index) => ({ role: "user", content: `MAIN-${index}`, timestamp: index })),
+		);
+		const mainReplay = helpers.renderInitialMessages({ clearTerminalHistory: true });
+		await Promise.all([subagentReplay, mainReplay]);
+
+		const rendered = Bun.stripANSI(chatContainer.render(100).join("\n"));
+		expect(ctx.chatContainer).toBe(chatContainer);
+		expect(rendered).not.toContain("SUBAGENT-");
+		expect(rendered.match(/MAIN-\d+/g)).toEqual(["MAIN-0", "MAIN-1", "MAIN-2"]);
+		expect(requestRender.mock.calls.filter(([force]) => force === true)).toEqual([[true, { clearScrollback: true }]]);
+		expect(ctx.initialChatRendered).toBeTrue();
+	});
+
+	it("reopens live display when a replay fails before it starts rebuilding", async () => {
+		// The display gate closes when a replay is requested; a replay that throws
+		// while reading the transcript must not leave live messages hidden.
+		await Settings.init({ inMemory: true });
+		const { ctx } = makeRenderCtx(transcriptWith([{ role: "user", content: "hello", timestamp: 0 }]));
+		vi.spyOn(ctx.viewSession, "buildTranscriptSessionContext").mockImplementation(() => {
+			throw new Error("transcript unavailable");
+		});
+		ctx.initialChatRendered = true;
+		const helpers = new UiHelpers(ctx);
+
+		await expect(helpers.renderInitialMessages()).rejects.toThrow("transcript unavailable");
+		expect(ctx.initialChatRendered).toBeTrue();
+	});
+
 	it("yields across a large parallel read-result batch", async () => {
 		// Regression: a single assistant turn whose results are all grouped `read`
 		// toolResults replays entirely through the `isReadGroupResult` early
@@ -367,41 +450,19 @@ describe("UiHelpers.renderInitialMessages — responsiveness", () => {
 });
 
 describe("UiHelpers.renderInitialMessages — image replay", () => {
-	it("restores read tool image blocks onto the rebuilt assistant transcript", async () => {
+	it("restores eval image blocks onto rebuilt tool output", async () => {
 		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
 		setTerminalImageProtocol(ImageProtocol.Sixel);
 		const transcript = transcriptWith([
-			assistantToolCall("read-image", "read", { path: "sample.png" }),
-			{
-				role: "toolResult",
-				toolCallId: "read-image",
-				toolName: "read",
-				content: [{ type: "text", text: "Read image: sample.png" }, pngImage],
-				isError: false,
-				timestamp: 2,
-			},
-		]);
-		const { ctx, chatContainer } = makeRenderCtx(transcript);
-
-		await new UiHelpers(ctx).renderInitialMessages();
-
-		expect(hasImageComponent(chatContainer)).toBe(true);
-		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("Read sample.png");
-	});
-
-	it("restores eval display image blocks onto rebuilt tool output", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		const transcript = transcriptWith([
-			assistantToolCall("eval-image", "eval", { language: "py", code: "display(image)" }),
+			assistantToolCall("eval-image", "eval", { language: "py", code: "print(image)" }),
 			{
 				role: "toolResult",
 				toolCallId: "eval-image",
 				toolName: "eval",
-				content: [{ type: "text", text: "(displayed 1 image; no text output)" }, pngImage],
+				content: [{ type: "text", text: "(1 image; no text output)" }, pngImage],
 				details: {
 					language: "python",
-					cells: [{ index: 0, code: "display(image)", output: "display image 1: 1x1", status: "complete" }],
+					cells: [{ index: 0, code: "print(image)", output: "image 1: 1x1", status: "complete" }],
 				},
 				isError: false,
 				timestamp: 2,
@@ -413,7 +474,30 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 		await new UiHelpers(ctx).renderInitialMessages();
 
 		expect(hasImageComponent(chatContainer)).toBe(true);
-		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("display image 1: 1x1");
+		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("image 1: 1x1");
+	});
+
+	it("restores manual Bash image blocks from persisted message content", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([
+			{
+				role: "bashExecution",
+				command: "emit-image",
+				output: "generated",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				images: [pngImage],
+				timestamp: 1,
+			},
+		]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		expect(countImageComponents(chatContainer)).toBe(1);
+		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("$ emit-image");
 	});
 
 	it("preserves hidden read images so enabling them later can replay the image", async () => {
@@ -484,7 +568,7 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 			isError: false,
 			timestamp: 2,
 		});
-		session.appendMessage(assistantToolCall("eval-reopened", "eval", { language: "py", code: "display(image)" }));
+		session.appendMessage(assistantToolCall("eval-reopened", "eval", { language: "py", code: "print(image)" }));
 		session.appendMessage({
 			role: "toolResult",
 			toolCallId: "eval-reopened",
@@ -492,7 +576,7 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 			content: [{ type: "text", text: "(displayed 1 image; no text output)" }, pngImage],
 			details: {
 				language: "python",
-				cells: [{ index: 0, code: "display(image)", output: "display image 1: 1x1", status: "complete" }],
+				cells: [{ index: 0, code: "print(image)", output: "image 1: 1x1", status: "complete" }],
 			},
 			isError: false,
 			timestamp: 4,
@@ -789,5 +873,39 @@ describe("UiHelpers.renderInitialMessages — replay convergence (issue #7811)",
 		// Initial context build + exactly one reconciliation restart.
 		expect(transcriptSpy).toHaveBeenCalledTimes(2);
 		expect(ctx.initialChatRendered).toBeTrue();
+	});
+});
+describe("UiHelpers.renderInitialMessages — prompt history isolation", () => {
+	it("never calls editor.addToHistory when rendering past user messages", async () => {
+		await Settings.init({ inMemory: true });
+		const transcript = transcriptWith([
+			{ role: "user", content: "first user prompt", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "reply 1" }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet",
+				usage: emptyUsage,
+				stopReason: "stop",
+				timestamp: 2,
+			},
+			{ role: "user", content: "second user prompt", timestamp: 3 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "reply 2" }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet",
+				usage: emptyUsage,
+				stopReason: "stop",
+				timestamp: 4,
+			},
+		]);
+		const { ctx } = makeRenderCtx(transcript);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		expect(ctx.editor.addToHistory).not.toHaveBeenCalled();
 	});
 });

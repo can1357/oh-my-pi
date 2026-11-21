@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ToolError } from "../../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -12,6 +12,7 @@ type RequestJob = {
 	method: string;
 	params: Record<string, unknown>;
 	timeoutMs: number;
+	signal?: AbortSignal;
 	resolve: (value: Record<string, unknown>) => void;
 	reject: (error: unknown) => void;
 };
@@ -110,21 +111,41 @@ export class CmuxSocketClient {
 	async request(
 		method: string,
 		params: Record<string, unknown>,
-		opts?: { timeoutMs?: number },
+		opts?: { timeoutMs?: number; signal?: AbortSignal },
 	): Promise<Record<string, unknown>> {
 		if (this.#disposed) {
 			throw new ToolError("cmux socket closed");
 		}
+		opts?.signal?.throwIfAborted();
 		const { promise, resolve, reject } = Promise.withResolvers<Record<string, unknown>>();
-		this.#queue.push({
+		const job: RequestJob = {
 			method,
 			params,
 			timeoutMs: opts?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+			signal: opts?.signal,
 			resolve,
 			reject,
-		});
+		};
+		const onAbort = () => {
+			const index = this.#queue.indexOf(job);
+			if (index >= 0) this.#queue.splice(index, 1);
+			if (this.#activeJob === job && this.#connected) {
+				// A late reply cannot be matched to a subsequent request on this serial socket.
+				this.#destroySocketForDesync();
+				for (const waiter of this.#lineWaiters.splice(0)) {
+					waiter.reject(opts?.signal?.reason);
+				}
+			}
+			reject(opts?.signal?.reason);
+		};
+		opts?.signal?.addEventListener("abort", onAbort, { once: true });
+		this.#queue.push(job);
 		this.#pump();
-		return await promise;
+		try {
+			return await promise;
+		} finally {
+			opts?.signal?.removeEventListener("abort", onAbort);
+		}
 	}
 
 	close(): void {
@@ -147,9 +168,15 @@ export class CmuxSocketClient {
 		this.#socket = socket;
 		this.#buffer = "";
 		socket.setEncoding("utf8");
-		socket.on("data", chunk => this.#onData(String(chunk)));
-		socket.on("error", err => this.#handleSocketFailure(err));
-		socket.on("close", () => this.#handleSocketClose());
+		socket.on("data", chunk => {
+			if (this.#socket === socket) this.#onData(String(chunk));
+		});
+		socket.on("error", err => {
+			if (this.#socket === socket) this.#handleSocketFailure(err);
+		});
+		socket.on("close", () => {
+			if (this.#socket === socket) this.#handleSocketClose();
+		});
 
 		try {
 			await this.#waitForConnect(socket);
@@ -302,6 +329,7 @@ export class CmuxSocketClient {
 				this.#activeJob = job;
 				try {
 					await this.connect();
+					job.signal?.throwIfAborted();
 					const request = JSON.stringify({ id: randomUUID(), method: job.method, params: job.params });
 					const line = await this.#sendLine(request, job.timeoutMs);
 					job.resolve(this.#parseResponse(line));
@@ -336,6 +364,7 @@ export class CmuxSocketClient {
 
 	#nextLine(timeoutMs: number): Promise<string> {
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		// oxlint-disable-next-line prefer-const -- captured by the timeout closure before assignment
 		let waiter: LineWaiter;
 		const timer = setTimeout(() => {
 			const index = this.#lineWaiters.indexOf(waiter);

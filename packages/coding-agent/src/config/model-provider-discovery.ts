@@ -1,22 +1,34 @@
+import type { OAuthAccess } from "@oh-my-pi/pi-ai";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
-import { type OpenAICodexAccount, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
+import type { ModelResolutionSource } from "@oh-my-pi/pi-catalog/model-manager";
+import { MODELS_DEV_CATALOG_PROVIDER_IDS, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 
-const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
-	"google-antigravity",
-	"google-gemini-cli",
-	"openai-codex",
-];
+/**
+ * Built-in providers whose discovery requires provider-specific credentials
+ * or account expansion and therefore cannot use the standard descriptor path.
+ */
+export const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = ["google-antigravity", "kiro", "openai-codex"];
 
-export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = [
+const STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD: Record<string, true> = Object.create(null);
+for (const providerId of [
 	...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
 	...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
-];
+	...MODELS_DEV_CATALOG_PROVIDER_IDS,
+]) {
+	STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD[providerId] = true;
+}
 
-// Sentinels for local-only OAuth tokens — declared inline to avoid loading
-// provider modules at startup. Must match packages/ai/src/registry/llama-cpp.ts,
-// packages/ai/src/registry/lm-studio.ts, and packages/ai/src/registry/vllm.ts.
-const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-studio-local", "vllm-local"]);
+export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = Object.keys(STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD);
+
+// Keyless-mode markers: each api-key login's KDL `empty-fallback` (e.g.
+// `lm-studio-local`), stored on an empty paste and never sent as a bearer.
+const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(
+	authProviders().flatMap(entry =>
+		entry.login?.kind === "api-key" && entry.login.emptyFallback ? [entry.login.emptyFallback] : [],
+	),
+);
 
 /**
  * Hard bound for extension-provided fetchDynamicModels to prevent indefinite hangs
@@ -41,15 +53,15 @@ export function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiK
 }
 
 /**
- * Wraps an extension-provided fetchDynamicModels call with a hard timeout.
- * Uses a cancellable manual timer (not AbortSignal.timeout) so that a fast
- * successful path does not leave an armed timeout signal for concurrent GC.
- * The inner fetcher does not receive a signal (extension contract has none).
+ * Wraps a model-discovery operation with a hard timeout. Uses a cancellable
+ * manual timer (not AbortSignal.timeout) so that a fast successful path does
+ * not leave an armed timeout signal for concurrent GC. The inner operation
+ * does not receive a signal because not every discovery contract accepts one.
  */
-export async function withRuntimeDynamicModelsTimeout<T>(timeoutMs: number, run: () => Promise<T>): Promise<T> {
+export async function withModelDiscoveryTimeout<T>(timeoutMs: number, run: () => Promise<T>): Promise<T> {
 	const { promise: timeoutPromise, reject: timeoutReject } = Promise.withResolvers<never>();
 	const timer = setTimeout(() => {
-		timeoutReject(new Error(`fetchDynamicModels timed out after ${timeoutMs}ms`));
+		timeoutReject(new Error(`model discovery timed out after ${timeoutMs}ms`));
 	}, timeoutMs);
 	try {
 		return await Promise.race([run(), timeoutPromise]);
@@ -61,6 +73,8 @@ export async function withRuntimeDynamicModelsTimeout<T>(timeoutMs: number, run:
 export interface BuiltInDiscoveryResult {
 	models: Model<Api>[];
 	authoritativeProviders: Set<string>;
+	/** Providers whose successful endpoint refresh replaces their prior dynamic discovery slice. */
+	replaceRuntimeProviders: Set<string>;
 }
 
 export type ProviderDiscoveryStatus = "idle" | "ok" | "empty" | "cached" | "unavailable" | "unauthenticated";
@@ -71,6 +85,7 @@ export interface ProviderDiscoveryState {
 	optional: boolean;
 	stale: boolean;
 	fetchedAt?: number;
+	source?: ModelResolutionSource;
 	models: string[];
 	error?: string;
 }
@@ -92,7 +107,7 @@ export function extractGoogleOAuthToken(value: string | undefined): string | und
 }
 
 export function getOAuthCredentialsForProvider(authStorage: AuthStorage, provider: string): OAuthCredential[] {
-	const providerEntry = authStorage.getAll()[provider];
+	const providerEntry = authStorage.credentials.all()[provider];
 	if (!providerEntry) {
 		return [];
 	}
@@ -100,33 +115,48 @@ export function getOAuthCredentialsForProvider(authStorage: AuthStorage, provide
 	return entries.filter((entry): entry is OAuthCredential => entry.type === "oauth");
 }
 
+/** One account resolved for discovery; `apiKey` is the key the provider's transport sends for it. */
+export type OAuthDiscoveryAccount = OAuthAccess & { apiKey: string };
+
 /**
- * Resolve every configured Codex OAuth account for catalog discovery, refreshing
- * each credential exactly once. Codex `/models` is account-scoped, so discovery
- * must fetch per account and union the results; resolving a single access token
- * (as before) hid models available only through a sibling account (#6265).
+ * Resolve every stored OAuth account of an account-scoped discovery provider
+ * (Codex `/models`, Antigravity `fetchAvailableModels`, Kiro
+ * `ListAvailableModels`), refreshing each credential exactly once. Discovery
+ * must fetch per account and union the results; resolving a single access
+ * token hid models available only through a sibling account (#6265, #14924).
+ *
+ * `resolvedKey` is the access token or encoded key the discovery preflight
+ * resolved; it is appended when it belongs to no stored account (runtime or
+ * env credential).
  *
  * Returns `null` when any stored account fails to resolve (e.g. a transient
- * refresh failure): the Codex manager is authoritative, so unioning only the
+ * refresh failure): these managers are authoritative, so unioning only the
  * accounts that resolved would cache a partial catalog and hide the failed
  * account's models for the cache TTL. Aborting keeps the previous/bundled
  * catalog instead.
  */
-export async function resolveCodexDiscoveryAccounts(
+export async function resolveOAuthDiscoveryAccounts(
 	authStorage: AuthStorage,
-	resolvedAccessToken: string,
-): Promise<OpenAICodexAccount[] | null> {
-	const accesses = await authStorage.getOAuthAccesses("openai-codex");
-	const accounts: OpenAICodexAccount[] = [];
+	provider: string,
+	resolvedKey: string,
+): Promise<OAuthDiscoveryAccount[] | null> {
+	const accesses = await authStorage.oauth.accessAll(provider);
+	const accounts: OAuthDiscoveryAccount[] = [];
 	for (const access of accesses) {
 		if (!access.ok) return null;
-		accounts.push({ accessToken: access.accessToken, accountId: access.accountId });
+		accounts.push(access);
 	}
-	if (!accounts.some(account => account.accessToken === resolvedAccessToken)) {
-		const matchingCredential = getOAuthCredentialsForProvider(authStorage, "openai-codex").find(
-			credential => credential.access === resolvedAccessToken,
+	if (!accounts.some(account => account.accessToken === resolvedKey || account.apiKey === resolvedKey)) {
+		const matchingCredential = getOAuthCredentialsForProvider(authStorage, provider).find(
+			credential => credential.access === resolvedKey,
 		);
-		accounts.push({ accessToken: resolvedAccessToken, accountId: matchingCredential?.accountId });
+		accounts.push({
+			accessToken: resolvedKey,
+			apiKey: resolvedKey,
+			accountId: matchingCredential?.accountId,
+			email: matchingCredential?.email,
+			projectId: matchingCredential?.projectId,
+		});
 	}
 	return accounts;
 }

@@ -17,7 +17,7 @@ import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
-import "@oh-my-pi/pi-coding-agent/discovery/builtin";
+import "@oh-my-pi/pi-coding-agent/discovery";
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -105,5 +105,49 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 		const result = await loadAllMCPConfigs(projectDir, { enableProjectConfig: false, filterExa: false });
 		expect(Object.keys(result.configs)).toEqual(["shared"]);
 		expect(result.sources.shared?.level).toBe("user");
+	});
+
+	test("a malformed user mcp.json fails soft instead of dropping every source", async () => {
+		// A hand-edited user mcp.json must not reject loadAllMCPConfigs: the
+		// file contributes no entries (same contract as the mcp-json provider),
+		// and the other sources keep loading.
+		clearFsCache();
+		await fs.writeFile(path.join(userAgentDir, "mcp.json"), "{ not valid json");
+		const result = await loadAllMCPConfigs(projectDir, { enableProjectConfig: true, filterExa: false });
+		expect(Object.keys(result.configs)).toEqual(["projcontext"]);
+		expect(result.sources.projcontext?.level).toBe("project");
+	});
+
+	test("a valid-JSON non-object user mcp.json fails soft too", async () => {
+		// JSON.parse accepts bare `null`, numbers, strings, and arrays; only an
+		// object carries the server map and the disable/enable lists.
+		for (const content of ["null", "42", '"mcp"', "[]"]) {
+			clearFsCache();
+			await fs.writeFile(path.join(userAgentDir, "mcp.json"), content);
+			const result = await loadAllMCPConfigs(projectDir, { enableProjectConfig: true, filterExa: false });
+			expect(Object.keys(result.configs)).toEqual(["projcontext"]);
+			expect(result.sources.projcontext?.level).toBe("project");
+		}
+	});
+
+	test("effective extension roots survive scopeless MCP rediscovery", async () => {
+		const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-extension-"));
+		try {
+			await fs.writeFile(
+				path.join(extensionDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { extensionserver: { command: "extension-mcp" } } }),
+			);
+
+			const withEffectiveRoots = await loadAllMCPConfigs(projectDir, {
+				filterExa: false,
+				extensionRoots: { explicit: [extensionDir], mode: "merge", configured: [], configuredLevel: "user" },
+			});
+			expect(withEffectiveRoots.configs.extensionserver).toMatchObject({ command: "extension-mcp" });
+
+			const diskOnly = await loadAllMCPConfigs(projectDir, { filterExa: false });
+			expect(diskOnly.configs.extensionserver).toBeUndefined();
+		} finally {
+			await removeWithRetries(extensionDir);
+		}
 	});
 });

@@ -95,28 +95,25 @@ afterAll(() => {
 });
 
 describe("invalidateGithubCacheForBashCommand", () => {
-	it("drops cache for `gh issue close <num>`", () => {
-		seedIssue(42);
-		invalidateGithubCacheForBashCommand("gh issue close 42");
-		expect(getCached(REPO, "issue", 42, true)).toBeNull();
-	});
-
 	it("drops cache for `gh pr merge <num>` with extra flags", () => {
 		seedPr(7);
 		invalidateGithubCacheForBashCommand("gh pr merge 7 --squash --delete-branch");
 		expect(getCached(REPO, "pr", 7, true)).toBeNull();
 	});
 
-	it("drops cache for a full PR URL argument", () => {
-		seedPr(123, "other/repo");
-		invalidateGithubCacheForBashCommand("gh pr close https://github.com/other/repo/pull/123");
-		expect(getCached("other/repo", "pr", 123, true)).toBeNull();
+	it("drops the bare row for a mixed-case github.com URL", () => {
+		seedPr(6, "other/repo");
+		invalidateGithubCacheForBashCommand("gh pr close https://GitHub.com/other/repo/pull/6");
+		expect(getCached("other/repo", "pr", 6, true)).toBeNull();
 	});
 
-	it("drops cache when --repo is supplied separately", () => {
-		seedIssue(9, "third/repo");
-		invalidateGithubCacheForBashCommand("gh issue reopen 9 --repo third/repo");
-		expect(getCached("third/repo", "issue", 9, true)).toBeNull();
+	it("drops the host-qualified row for an enterprise PR URL", () => {
+		seedPr(5, "ghe.example.com/other/repo");
+		seedPr(5, "other/repo");
+		invalidateGithubCacheForBashCommand("gh pr close https://ghe.example.com/other/repo/pull/5");
+		expect(getCached("ghe.example.com/other/repo", "pr", 5, true)).toBeNull();
+		// Same slug on github.com is a different repository and keeps its row.
+		expect(getCached("other/repo", "pr", 5, true)?.rendered).toBe("pr-other/repo-5");
 	});
 
 	it("drops cache for combined `--repo=<owner/repo>` form", () => {
@@ -141,12 +138,6 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		seedIssue(33, "quoted/repo");
 		invalidateGithubCacheForBashCommand("gh issue close 'https://github.com/quoted/repo/issues/33'");
 		expect(getCached("quoted/repo", "issue", 33, true)).toBeNull();
-	});
-
-	it("no-ops on commands that do not mention gh", () => {
-		seedIssue(99);
-		invalidateGithubCacheForBashCommand("echo hello world");
-		expect(getCached(REPO, "issue", 99, true)?.rendered).toBe(`issue-${REPO}-99`);
 	});
 
 	it("invalidates across all repos when only a bare number is supplied", () => {

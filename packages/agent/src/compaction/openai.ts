@@ -15,44 +15,67 @@
  *   with `{ summary, shortSummary? }`.
  */
 
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
+import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
+import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import {
-	createOpenAICodexCompactionRequestContext,
-	createOpenAICodexCompatibilityMetadata,
-	getCodexAttestationHeader,
-} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+	applyCodexResponsesLiteShape,
+	moveCodexInstructionsToInput,
+	withCodexRoutingFieldsFirst,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
+	applyInferenceHeaders,
+	applySessionHeader,
+	resolveOpenCodeGoCacheAffinity,
+} from "@oh-my-pi/pi-ai/providers/inference-headers";
+import {
+	encodeResponsesToolResultOutput,
+	getOpenAIPromptCacheKey,
 	hoistInterleavedResponsesToolBatchMessages,
 	parseAzureDeploymentNameMap,
 	parseTextSignature,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
-	Api,
 	AssistantMessage,
 	CodexCompactionContext,
 	FetchImpl,
 	Message,
 	Model,
 	ProviderSessionState,
+	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai/types";
 import {
+	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
+	stripOpenAIResponsesInternalMetadataForReplay,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
+	truncateResponseItemId,
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { withResolvedHeaders } from "@oh-my-pi/pi-ai/utils/model-headers";
+import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
+	codexRoutingHint,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, isRecord, logger, prompt, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
+import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
+import { prepareBedrockCompactionRequest } from "./bedrock";
+import {
+	isOpenAiRemoteCompactionApi,
+	parseResponsesCompactionUsage,
+	type ResponsesCompactionUsage,
+	remoteCompactionPolicyModel,
+} from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
 export * from "./compaction-v2-streaming";
@@ -64,57 +87,100 @@ export * from "./compaction-v2-streaming";
 export const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
 
 /**
- * Hard ceiling on remote compaction HTTP requests. Unlike every provider
- * stream (guarded by first-event/idle watchdogs in pi-ai), these are raw
- * fetches awaiting one non-streamed JSON body — a connection silently dropped
- * by a middlebox would otherwise hang the whole compaction pipeline forever
- * (frozen "Auto context-full maintenance…" spinner, manual /compact queueing
- * behind it). On timeout the caller falls back to local summarization.
+ * Hard ceiling on remote compaction HTTP requests (5 minutes). Unlike every
+ * provider stream (guarded by first-event/idle watchdogs in pi-ai), these are
+ * raw fetches awaiting one non-streamed JSON body — a connection silently
+ * dropped by a middlebox would otherwise hang the whole compaction pipeline
+ * forever (frozen "Auto context-full maintenance…" spinner, manual /compact
+ * queueing behind it). On timeout the caller falls back to local summarization.
  */
-export const REMOTE_COMPACTION_TIMEOUT_MS = 180_000;
-
-const DEFAULT_AZURE_API_VERSION = "v1";
+export const REMOTE_COMPACTION_TIMEOUT_MS = 300_000;
 
 export const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE = prompt.render(contextWindowTruncatedOutputPrompt);
 
 const REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS = 256;
-const REMOTE_COMPACTION_IMAGE_TOKEN_ESTIMATE = 12_000;
+/**
+ * Per-`input_image` record estimates, tagged with the pricing tokenizer's
+ * billing key; trim re-probes share untouched items by reference.
+ */
+const remoteImageTokenCache = new WeakMap<Record<string, unknown>, { billingKey: string; tokens: number }>();
 const TOOL_RESULT_IMAGE_ATTACHMENT_TEXT = "Attached image(s) from tool result:";
 
-interface NormalizedEstimateValue {
-	value: unknown;
+/**
+ * A request as the model reads it: every string value decoded (no quoting or
+ * escapes), with keys and scalar values kept as one framing fragment.
+ */
+interface RemoteEstimateParts {
+	fragments: string[];
+	framing: string[];
 	imageTokens: number;
 }
 
-function normalizeRemoteCompactionEstimateValue(value: unknown): NormalizedEstimateValue {
-	if (Array.isArray(value)) {
-		const normalized: unknown[] = [];
-		let imageTokens = 0;
-		for (const item of value) {
-			const result = normalizeRemoteCompactionEstimateValue(item);
-			normalized.push(result.value);
-			imageTokens += result.imageTokens;
-		}
-		return { value: normalized, imageTokens };
+function collectRemoteCompactionEstimate(value: unknown, tokenizer: Tokenizer, parts: RemoteEstimateParts): void {
+	if (typeof value === "string") {
+		if (value) parts.fragments.push(value);
+		return;
 	}
-	if (!value || typeof value !== "object") return { value, imageTokens: 0 };
+	if (Array.isArray(value)) {
+		for (const item of value) collectRemoteCompactionEstimate(item, tokenizer, parts);
+		return;
+	}
+	if (value === null || typeof value !== "object") {
+		if (value !== undefined) parts.framing.push(String(value));
+		return;
+	}
 
 	const record = value as Record<string, unknown>;
 	if (record.type === "input_image") {
-		return {
-			value: { ...record, image_url: "<image>" },
-			imageTokens: REMOTE_COMPACTION_IMAGE_TOKEN_ESTIMATE,
-		};
+		let cached = remoteImageTokenCache.get(record);
+		if (cached?.billingKey !== tokenizer.frameBillingKey) {
+			const detail = record.detail;
+			cached = {
+				billingKey: tokenizer.frameBillingKey,
+				tokens: tokenizer.imageTokens(
+					typeof record.image_url === "string" ? dataUrlImageSize(record.image_url) : null,
+					detail === "low" || detail === "high" || detail === "original" || detail === "auto" ? detail : undefined,
+				),
+			};
+			remoteImageTokenCache.set(record, cached);
+		}
+		parts.imageTokens += cached.tokens;
+		return;
 	}
+	for (const key in record) {
+		const item = record[key];
+		// Opaque encrypted reasoning/compaction state: its local base64 size far
+		// exceeds what the provider bills, so it stays out of the fit estimate
+		// (same policy as `MessageCountOptions.excludeEncryptedReasoning`).
+		if (item === undefined || (key === "encrypted_content" && typeof item === "string")) continue;
+		parts.framing.push(key);
+		collectRemoteCompactionEstimate(item, tokenizer, parts);
+	}
+}
 
-	const normalized: Record<string, unknown> = {};
-	let imageTokens = 0;
-	for (const [key, item] of Object.entries(record)) {
-		const result = normalizeRemoteCompactionEstimateValue(item);
-		normalized[key] = result.value;
-		imageTokens += result.imageTokens;
-	}
-	return { value: normalized, imageTokens };
+/**
+ * Text fragments and image tokens for `value`. Strings count decoded: JSON
+ * escaping inflates quote-, backslash- and newline-dense text (code,
+ * disassembly) well past what the model reads.
+ */
+function remoteCompactionEstimateParts(
+	value: unknown,
+	tokenizer: Tokenizer,
+): { fragments: string[]; imageTokens: number } {
+	const parts: RemoteEstimateParts = { fragments: [], framing: [], imageTokens: 0 };
+	collectRemoteCompactionEstimate(value, tokenizer, parts);
+	if (parts.framing.length > 0) parts.fragments.push(parts.framing.join(" "));
+	return { fragments: parts.fragments, imageTokens: parts.imageTokens };
+}
+
+/**
+ * Tokens of stored Responses replacement history. Retained `input_image` parts
+ * count at their image estimate, not their base64 size. Opaque encrypted state
+ * stays excluded, matching ordinary message estimates and remote fit checks.
+ */
+export function countResponsesHistoryTokens(items: unknown[], tokenizer: Tokenizer): number {
+	const { fragments, imageTokens } = remoteCompactionEstimateParts(items, tokenizer);
+	return (fragments.length === 0 ? 0 : tokenizer.countTokens(fragments)) + imageTokens;
 }
 
 export interface TrimRemoteCompactionInputResult {
@@ -122,6 +188,12 @@ export interface TrimRemoteCompactionInputResult {
 	rewrittenOutputs: number;
 	estimatedTokensBefore: number;
 	estimatedTokensAfter: number;
+	/**
+	 * Whether `input` may be sent; false means it must not be. True when the
+	 * full estimate fits, or when only the image estimate pushes it over (image
+	 * pricing is a guess; the provider's own accounting decides).
+	 */
+	fits: boolean;
 }
 
 /** Verdict for one remote-compaction request measured against the model window. */
@@ -130,14 +202,17 @@ interface RemoteCompactionBudgetProbe {
 	tokens: number;
 	/** Whether the request fits the window. Always true when no window is known. */
 	fits: boolean;
+	/** Whether the request minus its image estimate fits the window. */
+	textFits: boolean;
 }
 
 /**
- * Cheap-first sizing of a remote-compaction request. Images and the request
- * frame are charged flat, so they come off the budget rather than through the
- * tokenizer; the serialized transcript is then probed with
- * {@link Tokenizer.checkTokenBudget}, which only pays for an exact count when
- * the byte bound cannot already prove the request fits.
+ * Cheap-first sizing of a remote-compaction request. Images (priced from their
+ * dimensions) and the request frame come off the budget rather than through
+ * the tokenizer; opaque `encrypted_content` payloads are excluded. The decoded
+ * request text is then probed with {@link Tokenizer.checkTokenBudget}, which
+ * only pays for an exact count when the byte bound cannot already prove the
+ * request fits.
  */
 function probeRemoteCompactionInputBudget(
 	input: Array<Record<string, unknown>>,
@@ -146,14 +221,21 @@ function probeRemoteCompactionInputBudget(
 	tools: unknown[] | undefined,
 	contextWindow: number | null | undefined,
 ): RemoteCompactionBudgetProbe {
-	const normalized = normalizeRemoteCompactionEstimateValue({ instructions, input, ...(tools ? { tools } : {}) });
-	const serialized = stringifyJson(normalized.value) ?? "";
-	const flatTokens = normalized.imageTokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS;
+	const { fragments, imageTokens } = remoteCompactionEstimateParts(
+		{ instructions, input, ...(tools ? { tools } : {}) },
+		tokenizer,
+	);
+	const flatTokens = imageTokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS;
 	if (!contextWindow || contextWindow <= 0) {
-		return { tokens: tokenizer.countTokens(serialized, "upperbound") + flatTokens, fits: true };
+		return { tokens: tokenizer.countTokens(fragments, "upperbound") + flatTokens, fits: true, textFits: true };
 	}
-	const budget = tokenizer.checkTokenBudget(serialized, Math.max(0, contextWindow - flatTokens));
-	return { tokens: budget.tokens + flatTokens, fits: budget.fits };
+	const budget = tokenizer.checkTokenBudget(fragments, Math.max(0, contextWindow - flatTokens));
+	return {
+		tokens: budget.tokens + flatTokens,
+		fits: budget.fits,
+		// A failed check carries the exact text count (or its byte upper bound).
+		textFits: budget.fits || budget.tokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS <= contextWindow,
+	};
 }
 
 function rewriteToolOutputForContextWindow(item: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -179,11 +261,23 @@ function isToolResultImageAttachment(item: Record<string, unknown>): boolean {
 	return hasLabel && hasImage;
 }
 
+/** Options for {@link trimRemoteCompactionInputToContextWindow}. */
+export interface TrimRemoteCompactionOptions {
+	/**
+	 * Whether oversized trailing tool outputs may be rewritten (default true).
+	 * False when a caller can compact a shorter prefix instead, so a kept tool
+	 * result replays intact rather than being replaced.
+	 */
+	rewriteOutputs?: boolean;
+}
+
 /**
  * Preserve the full native transcript unless trailing tool outputs alone push a
  * remote compaction request beyond the model window. Replacing only those
  * outputs keeps call/result pairing and all earlier assistant/reasoning history,
- * matching Codex's recovery path for oversized tool turns.
+ * matching Codex's recovery path for oversized tool turns. A request whose text
+ * fits but whose image estimate does not is still sendable: refusing it on an
+ * image guess would skip native compaction the provider would have accepted.
  */
 export function trimRemoteCompactionInputToContextWindow(
 	input: Array<Record<string, unknown>>,
@@ -191,14 +285,16 @@ export function trimRemoteCompactionInputToContextWindow(
 	contextWindow: number | null | undefined,
 	instructions: string,
 	tools?: unknown[],
+	options?: TrimRemoteCompactionOptions,
 ): TrimRemoteCompactionInputResult {
 	const before = probeRemoteCompactionInputBudget(input, tokenizer, instructions, tools, contextWindow);
-	if (before.fits) {
+	if (before.fits || options?.rewriteOutputs === false) {
 		return {
 			input,
 			rewrittenOutputs: 0,
 			estimatedTokensBefore: before.tokens,
 			estimatedTokensAfter: before.tokens,
+			fits: before.fits || before.textFits,
 		};
 	}
 
@@ -216,28 +312,45 @@ export function trimRemoteCompactionInputToContextWindow(
 		after = probeRemoteCompactionInputBudget(rewrittenInput, tokenizer, instructions, tools, contextWindow);
 	}
 
-	if (!rewrittenInput || !after.fits) {
+	// Rewrites that reach a full fit are kept. When they cannot, and the text
+	// already fit, the overflow is image-only: rewriting cannot shrink the image
+	// estimate, so send the untouched input rather than discard tool output.
+	if (rewrittenInput && (after.fits || (!before.textFits && after.textFits))) {
 		return {
-			input,
-			rewrittenOutputs: 0,
+			input: rewrittenInput,
+			rewrittenOutputs,
 			estimatedTokensBefore: before.tokens,
-			estimatedTokensAfter: before.tokens,
+			estimatedTokensAfter: after.tokens,
+			fits: true,
 		};
 	}
 
 	return {
-		input: rewrittenInput,
-		rewrittenOutputs,
+		input,
+		rewrittenOutputs: 0,
 		estimatedTokensBefore: before.tokens,
-		estimatedTokensAfter: after.tokens,
+		estimatedTokensAfter: before.tokens,
+		fits: before.textFits,
 	};
 }
 
-/** Race the caller's signal against the request timeout; `timeoutMs <= 0` disables the watchdog. */
-function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
-	if (timeoutMs <= 0) return signal;
-	const timeout = AbortSignal.timeout(timeoutMs);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+/**
+ * Refuse a native compaction request whose prepared input cannot fit the model
+ * window, before any network I/O. Re-expanded history behind an unreadable
+ * native boundary can exceed the window even when live context does not.
+ *
+ * @throws Error flagged `ContextOverflow` when `trimmed.fits` is false, so
+ *   compaction callers skip retries and advance to the next method.
+ */
+export function assertRemoteCompactionInputFits(trimmed: TrimRemoteCompactionInputResult, model: Model): void {
+	if (trimmed.fits) return;
+	throw attach(
+		new Error(
+			`Remote compaction input exceeds the context window of ${model.provider}/${model.id}: ` +
+				`estimated ${trimmed.estimatedTokensAfter} tokens > ${model.contextWindow}`,
+		),
+		create(Flag.ContextOverflow),
+	);
 }
 
 export type OpenAiRemoteCompactionItem = {
@@ -256,6 +369,13 @@ export interface OpenAiRemoteCompactionRequest {
 	model: string;
 	input: Array<Record<string, unknown>>;
 	instructions: string;
+	/**
+	 * Responses body cache identity. Mirrors the V2 body: the explicit
+	 * prompt-cache key when supplied (normalized to the 64-char wire limit),
+	 * else the session-derived cache id — retention-gated through
+	 * `getOpenAIPromptCacheKey`; absent when it resolves to nothing.
+	 */
+	prompt_cache_key?: string;
 	reasoning?: {
 		context?: string;
 		[key: string]: unknown;
@@ -263,7 +383,10 @@ export interface OpenAiRemoteCompactionRequest {
 	include?: string[];
 }
 
-export interface OpenAiRemoteCompactionResponse extends OpenAiRemoteCompactionPreserveData {}
+/** A `/responses/compact` result: the history to preserve, plus the usage the body reported. */
+export interface OpenAiRemoteCompactionResponse extends OpenAiRemoteCompactionPreserveData {
+	usage?: ResponsesCompactionUsage;
+}
 
 export interface RemoteCompactionRequest {
 	systemPrompt: string;
@@ -280,15 +403,20 @@ export interface RemoteCompactionResponse {
 // OpenAI provider gating + endpoint resolution
 // ============================================================================
 
-function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
-	return api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses";
-}
-
 export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 	if (model.remoteCompaction?.enabled === false) return false;
-	if (model.provider === "openai" || model.provider === "openai-codex") return true;
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+	// ChatGPT's Codex backend exposes V2 compaction on /codex/responses, but
+	// does not expose the OpenAI V1 /responses/compact endpoint. Only use the
+	// V1 path for Codex when an explicit compatible endpoint was configured.
+	if (model.provider === "openai-codex") {
+		return (model.remoteCompaction?.endpoint?.trim().length ?? 0) > 0;
+	}
+	if (model.provider === "openai") return true;
+	// Amazon Bedrock's OpenAI routes serve `/responses/compact` without an opt-in.
+	if (compactionApi === "openai-responses" && isBedrockOpenAIUrl(model.baseUrl)) return true;
 	if (model.remoteCompaction?.enabled !== true) return false;
-	return isOpenAiRemoteCompactionApi(model.remoteCompaction.api ?? model.api);
+	return isOpenAiRemoteCompactionApi(compactionApi);
 }
 
 function resolveOpenAiCompactEndpoint(model: Model): string {
@@ -315,25 +443,6 @@ function resolveAzureOpenAiCompactEndpoint(model: Model, configuredEndpoint: str
 			? configuredEndpoint
 			: `${resolveAzureOpenAiBaseUrl(model)}/responses/compact`;
 	return appendAzureApiVersion(endpoint);
-}
-
-function resolveAzureOpenAiBaseUrl(model: Model): string {
-	const baseUrl = $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
-	const resourceName = $env.AZURE_OPENAI_RESOURCE_NAME;
-	const resolvedBaseUrl =
-		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
-	if (!resolvedBaseUrl) {
-		throw new Error(
-			"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or configure model.baseUrl.",
-		);
-	}
-	return resolvedBaseUrl.replace(/\/+$/, "");
-}
-
-function appendAzureApiVersion(endpoint: string): string {
-	if (/[?&]api-version=/.test(endpoint)) return endpoint;
-	const separator = endpoint.includes("?") ? "&" : "?";
-	return `${endpoint}${separator}api-version=${encodeURIComponent($env.AZURE_OPENAI_API_VERSION || DEFAULT_AZURE_API_VERSION)}`;
 }
 
 function resolveOpenAiCompactModel(model: Model): string {
@@ -389,7 +498,7 @@ export function withOpenAiRemoteCompactionPreserveData(
 ): Record<string, unknown> | undefined {
 	if (remoteCompaction) {
 		return {
-			...(preserveData ?? {}),
+			...preserveData,
 			[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY]: remoteCompaction,
 		};
 	}
@@ -503,6 +612,7 @@ export function buildOpenAiNativeHistory(
 	messages: Message[],
 	model: Model,
 	previousReplacementHistory?: Array<Record<string, unknown>>,
+	supportsImageDetailOriginal = false,
 ): Array<Record<string, unknown>> {
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
@@ -527,7 +637,10 @@ export function buildOpenAiNativeHistory(
 						}
 					}
 				}
-				const historyItems = adaptComputerHistoryForCompaction(rawHistoryItems, model.supportsComputerUse === true);
+				const historyItems = adaptComputerHistoryForCompaction(
+					dropMalformedOpenAIResponsesToolCalls(rawHistoryItems),
+					model.supportsComputerUse === true,
+				);
 				input.push(...historyItems);
 				addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds);
 				msgIndex++;
@@ -579,7 +692,7 @@ export function buildOpenAiNativeHistory(
 					}
 				}
 				const historyItems = adaptComputerHistoryForCompaction(
-					providerPayload.items,
+					dropMalformedOpenAIResponsesToolCalls(providerPayload.items),
 					model.supportsComputerUse === true,
 				);
 				if (providerPayload.dt) {
@@ -620,8 +733,8 @@ export function buildOpenAiNativeHistory(
 					let msgId = parsedSignature?.id;
 					if (!msgId) {
 						msgId = `msg_${msgIndex}`;
-					} else if (msgId.length > 64) {
-						msgId = `msg_${Bun.hash(msgId).toString(36)}`;
+					} else {
+						msgId = truncateResponseItemId(msgId, "msg");
 					}
 					input.push({
 						type: "message",
@@ -691,12 +804,7 @@ export function buildOpenAiNativeHistory(
 
 		if (message.role === "toolResult") {
 			const normalized = normalizeResponsesToolCallId(message.toolCallId);
-			const textOutput = message.content
-				.filter(block => block.type === "text")
-				.map(block => block.text)
-				.join("\n");
-			const hasImages = message.content.some(block => block.type === "image");
-			const outputText = textOutput.length > 0 ? textOutput : hasImages ? "(see attached image)" : "";
+			const { output, outputText } = encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal);
 			if (demotedComputerCallIds.has(normalized.callId)) {
 				const resultItem =
 					message.providerMetadata?.type === "computer"
@@ -746,28 +854,16 @@ export function buildOpenAiNativeHistory(
 			input.push({
 				type: customCallIds.has(normalized.callId) ? "custom_tool_call_output" : "function_call_output",
 				call_id: normalized.callId,
-				output: outputText.toWellFormed(),
+				output,
 			});
-
-			if (hasImages && model.input.includes("image")) {
-				const contentBlocks: Array<Record<string, unknown>> = [
-					{ type: "input_text", text: TOOL_RESULT_IMAGE_ATTACHMENT_TEXT },
-				];
-				for (const block of message.content) {
-					if (block.type !== "image") continue;
-					contentBlocks.push({
-						type: "input_image",
-						detail: "auto",
-						image_url: `data:${block.mimeType};base64,${block.data}`,
-					});
-				}
-				input.push({ type: "message", role: "user", content: contentBlocks });
-			}
 		}
 
 		msgIndex++;
 	}
 
+	for (let index = 0; index < input.length; index++) {
+		input[index] = stripOpenAIResponsesInternalMetadataForReplay(input[index]!);
+	}
 	return stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
 }
 
@@ -784,10 +880,24 @@ export async function requestOpenAiRemoteCompaction(
 		fetch?: FetchImpl;
 		timeoutMs?: number;
 		sessionId?: string;
+		/**
+		 * Explicit prompt-cache identity. Feeds the Go family affinity header
+		 * (`x-opencode-session`) and the Responses body `prompt_cache_key`
+		 * under the same KDL gate as the V2 request; an absent/empty key keeps
+		 * the child conversation id.
+		 */
+		promptCacheKey?: string;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
+		/** Forwarded to {@link trimRemoteCompactionInputToContextWindow}. */
+		rewriteOutputs?: boolean;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
+	model = await withResolvedHeaders(model, signal);
+	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	if (isBedrockOpenAIUrl(model.baseUrl)) {
+		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal));
+	}
 	const endpoint = resolveOpenAiCompactEndpoint(model);
 	const requestModel = resolveOpenAiCompactModel(model);
 	const trimmed = trimRemoteCompactionInputToContextWindow(
@@ -795,6 +905,8 @@ export async function requestOpenAiRemoteCompaction(
 		new Tokenizer(model),
 		model.contextWindow,
 		instructions,
+		undefined,
+		{ rewriteOutputs: opts?.rewriteOutputs },
 	);
 	if (trimmed.rewrittenOutputs > 0) {
 		logger.info("Rewrote trailing tool outputs before OpenAI remote compaction", {
@@ -806,6 +918,13 @@ export async function requestOpenAiRemoteCompaction(
 			contextWindow: model.contextWindow,
 		});
 	}
+	assertRemoteCompactionInputFits(trimmed, model);
+	// Same cache identity as the V2 request: the resolved id prefers the
+	// explicit prompt-cache key and falls back to the session id, all
+	// retention-gated by getOpenAIPromptCacheKey (PI_CACHE_RETENTION=none
+	// resolves to nothing here, which then also drops the affinity below).
+	const cacheOptions = { sessionId: opts?.sessionId, promptCacheKey: opts?.promptCacheKey };
+	const promptCacheSessionId = getOpenAIPromptCacheKey(cacheOptions);
 	const request: OpenAiRemoteCompactionRequest = {
 		model: requestModel,
 		// Preserve the native transcript. Only oversized trailing tool outputs are
@@ -813,6 +932,7 @@ export async function requestOpenAiRemoteCompaction(
 		// reasoning, or call/result pairing.
 		input: trimmed.input,
 		instructions,
+		...(promptCacheSessionId ? { prompt_cache_key: promptCacheSessionId } : {}),
 	};
 	const isAzureOpenAiResponses = (model.remoteCompaction?.api ?? model.api) === "azure-openai-responses";
 	const isCodexResponses =
@@ -821,16 +941,36 @@ export async function requestOpenAiRemoteCompaction(
 		? {
 				"content-type": "application/json",
 				"api-key": apiKey,
-				...(model.headers ?? {}),
+				...model.headers,
 			}
 		: {
 				"content-type": "application/json",
 				Authorization: `Bearer ${apiKey}`,
-				...(model.headers ?? {}),
+				...model.headers,
 			};
+	// Same gate as the V2 request, against the request this compaction actually
+	// sends. Azure keeps its plain header shape (V2 skips the cascade there too).
+	// Only an EXPLICIT prompt-cache key feeds the affinity; the sessionId-derived
+	// cache id never does. `promptCacheSessionId` is already retention-gated.
+	if (!isAzureOpenAiResponses) {
+		applyInferenceHeaders(headers, {
+			provider: model.provider,
+			providerType: model.providerType,
+			protocol: "openai",
+			sessionId: opts?.sessionId,
+			cacheAffinity: resolveOpenCodeGoCacheAffinity(
+				remoteCompactionPolicyModel(model),
+				opts?.promptCacheKey ? promptCacheSessionId : undefined,
+			),
+		});
+	}
+	applySessionHeader(headers, model.compat, opts?.sessionId);
 
 	// Codex endpoints require additional auth headers
 	if (isCodexResponses) {
+		// Keep transport loading on the actual Codex request path, not compaction policy inspection.
+		const { createOpenAICodexCompatibilityMetadata } =
+			await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
 		const accountId = getCodexAccountId(apiKey);
 		if (accountId) {
 			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
@@ -840,8 +980,9 @@ export async function requestOpenAiRemoteCompaction(
 		if (attestation) {
 			headers[OPENAI_HEADERS.ATTESTATION] = attestation;
 		}
-		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
+		// This compaction request sends no `service_tier`, so the hint is model-only.
+		headers[OPENAI_HEADERS.ROUTING_HINT] = codexRoutingHint(request.model, undefined);
 		Object.assign(
 			headers,
 			createOpenAICodexCompatibilityMetadata({
@@ -855,9 +996,10 @@ export async function requestOpenAiRemoteCompaction(
 				includeInstallationHeader: true,
 			}).headers,
 		);
-		// Responses Lite models take the same rewrite on `/responses/compact`:
-		// instructions ride as an input item and the lite marker header is set
-		// (codex-rs routes compaction through `build_responses_request`).
+		// codex-rs routes `/responses/compact` through `build_responses_request`:
+		// instructions always ride as a leading input item, and Responses Lite
+		// models additionally take the Lite rewrite and marker header.
+		moveCodexInstructionsToInput(request);
 		if (model.useResponsesLite) {
 			applyCodexResponsesLiteShape(request);
 			headers[OPENAI_HEADERS.RESPONSES_LITE] = "true";
@@ -869,11 +1011,11 @@ export async function requestOpenAiRemoteCompaction(
 		}
 	}
 
-	const response = await (opts?.fetch ?? fetch)(endpoint, {
+	const response = await fetchImpl(endpoint, {
 		method: "POST",
 		headers,
-		body: stringifyJson(request),
-		signal: withRequestTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
+		body: stringifyJson(isCodexResponses ? withCodexRoutingFieldsFirst(request) : request),
+		signal: ptree.combineSignals(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {
@@ -894,7 +1036,7 @@ export async function requestOpenAiRemoteCompaction(
 		);
 	}
 
-	const data = (await response.json()) as { output?: unknown[] } | undefined;
+	const data = (await response.json()) as { output?: unknown[]; usage?: unknown } | undefined;
 	const rawOutput = data?.output ?? [];
 	const replacementHistory = rawOutput.filter(
 		(item): item is Record<string, unknown> =>
@@ -919,7 +1061,8 @@ export async function requestOpenAiRemoteCompaction(
 		});
 		throw new Error("Remote compaction response missing compaction item");
 	}
-	return { provider: model.provider, replacementHistory, compactionItem };
+	const usage = parseResponsesCompactionUsage(data?.usage);
+	return { provider: model.provider, replacementHistory, compactionItem, ...(usage ? { usage } : {}) };
 }
 
 /**
@@ -932,16 +1075,24 @@ export async function requestOpenAiRemoteCompaction(
  * HTTP 400 `"'messages' is required"`, compaction silently fell back to
  * local summarization, and context grew unbounded.
  *
- * When `context.model` is provided the chat-completions body is tagged with
- * that model's wire id (llama.cpp requires the field) and `context.apiKey` is
- * forwarded as `Authorization: Bearer`. Callers wrap this in `withAuth` so
- * 401s force-refresh through the standard credential rotation policy.
+ * On chat-completions endpoints the model's request headers are resolved for
+ * each call, its wire id is sent (llama.cpp requires it), and `opts.apiKey` is
+ * forwarded as `Authorization: Bearer`. Custom summarizers receive no model
+ * credentials. `opts.onPayload` can inspect or replace either request body.
+ * Callers wrap this in `withAuth` so 401s force-refresh through the standard
+ * credential rotation policy.
  */
 export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
-	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string },
+	opts?: {
+		fetch?: FetchImpl;
+		timeoutMs?: number;
+		model?: Model;
+		apiKey?: string;
+		onPayload?: SimpleStreamOptions["onPayload"];
+	},
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
 	try {
@@ -950,13 +1101,18 @@ export async function requestRemoteCompaction(
 		// Keep the raw endpoint for relative/custom fetch implementations.
 	}
 	const isChatCompletions = /\/chat\/completions\/?$/.test(endpointPath);
-	const headers: Record<string, string> = { "content-type": "application/json" };
+	const headers = new Headers({ "content-type": "application/json" });
 	if (isChatCompletions) {
-		if (opts?.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
-		if (opts?.model?.headers) Object.assign(headers, opts.model.headers);
+		if (opts?.apiKey) headers.set("Authorization", `Bearer ${opts.apiKey}`);
+		const model = opts?.model;
+		const configuredHeaders = model ? (await withResolvedHeaders(model, signal)).headers : undefined;
+		// `set` replaces case-insensitively, so a configured `authorization` overrides the default bearer.
+		if (configuredHeaders) {
+			for (const name in configuredHeaders) headers.set(name, configuredHeaders[name]!);
+		}
 	}
 
-	const body: Record<string, unknown> = isChatCompletions
+	let body: unknown = isChatCompletions
 		? {
 				model: opts?.model ? resolveOpenAiCompactModel(opts.model) : undefined,
 				messages: [
@@ -967,12 +1123,14 @@ export async function requestRemoteCompaction(
 				max_tokens: request.maxTokens,
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
+	const replacement = await opts?.onPayload?.(body, opts.model, signal);
+	if (replacement !== undefined) body = replacement;
 
 	const response = await (opts?.fetch ?? fetch)(endpoint, {
 		method: "POST",
 		headers,
 		body: stringifyJson(body),
-		signal: withRequestTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
+		signal: ptree.combineSignals(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {

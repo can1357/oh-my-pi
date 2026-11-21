@@ -1,13 +1,24 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { getKeybindings, type KeybindingsManager as TuiKeybindingsManager, setKeybindings } from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+
+let previous: TuiKeybindingsManager;
 
 beforeAll(() => {
 	initTheme();
 });
 
+// The app installs its keymap before any picker opens; delete runs through `app.session.delete`.
+beforeEach(() => {
+	previous = getKeybindings();
+	setKeybindings(KeybindingsManager.inMemory());
+});
+
 afterEach(() => {
+	setKeybindings(previous);
 	vi.restoreAllMocks();
 });
 
@@ -26,7 +37,7 @@ function createSession(id: string, title: string): SessionInfo {
 	};
 }
 
-function createSelector(onDelete: (session: SessionInfo) => Promise<boolean>): SessionSelectorComponent {
+function createSelector(onDelete: (session: SessionInfo) => Promise<boolean>): SessionSelectorComponent<SessionInfo> {
 	return new SessionSelectorComponent(
 		[createSession("session-a", "Alpha"), createSession("session-b", "Beta")],
 		() => {},
@@ -36,7 +47,7 @@ function createSelector(onDelete: (session: SessionInfo) => Promise<boolean>): S
 	);
 }
 
-function renderText(selector: SessionSelectorComponent): string {
+function renderText(selector: SessionSelectorComponent<SessionInfo>): string {
 	return selector.render(120).join("\n");
 }
 

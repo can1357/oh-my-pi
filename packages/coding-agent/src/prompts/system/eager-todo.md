@@ -2,7 +2,7 @@
 {{#if forced}}
 Before substantive work, create a phased todo.
 
-You MUST call `{{toolRefs.todo}}` first in this turn.
+You MUST call `{{toolRefs.todo}}` first in this turn. This forced call is the one exception to `{{toolRefs.todo}}` never taking a turn of its own; later updates go beside real tool calls.
 You MUST initialize the todo list with a single `init` op.
 You MUST cover the entire request from investigation through implementation and verification — not just the next immediate step.
 Task descriptions MUST be concise, specific 5-10 word labels.

@@ -1,0 +1,95 @@
+// Provider-wire compat for "stepfun" (StepFun Open Platform, api.stepfun.ai).
+
+provider "stepfun" {
+	default-model "step-5-preview"
+	env "STEPFUN_API_KEY"
+	// A successful `/v1/models` snapshot is the deployment truth, so it replaces
+	// the bundled seed rather than merging: StepFun retiring an id must remove
+	// it from the picker instead of leaving a dead seed row selectable.
+	dynamic-models-authoritative #true
+	// StepFun's own endpoint is the deployment truth: relay hosts serve the same
+	// ids with stray output ceilings and broader ladders, so the generator must
+	// not backfill limits or capabilities from same-id rows elsewhere.
+	skip-cross-provider-reference-fills #true
+	discovery label="StepFun"
+
+	// StepFun's OpenAI-compatible chat roster, bundled so the provider is
+	// selectable without a generation-time API key. The provider is not
+	// authoritative, so runtime `/v1/models` discovery merges additively; that
+	// endpoint also serves non-chat SKUs (StepAudio TTS/ASR, image models),
+	// which runtime/behavior.kdl excludes from the chat picker.
+	// Limits and per-model facts follow StepFun's published model cards, as
+	// catalogued on models.dev (`providers/stepfun-ai` + `models/stepfun`). The
+	// API accepts `max_tokens` far above any real cap (2M probes return 200), so
+	// a live probe cannot establish the ceiling, and the docs page's "64k max
+	// output" prose is not a limit the endpoint enforces either.
+	// Pricing is StepFun's published list price:
+	// https://platform.stepfun.ai/docs/en/guides/pricing/details
+	// (models.dev still carries the pre-June step-3.7-flash rates).
+	// A cache miss already covers writing the prefix into the cache ("the
+	// cache-miss input price includes writing new content to the cache"), so
+	// there is no separate cache-write tariff.
+	seed api="openai-completions" base-url="https://api.stepfun.ai/v1" bundle="always" {
+		// 1M context, input, and output. Input is text/image/video; video has no
+		// catalog representation, so the multimodal row declares text + image.
+		model "step-5-preview" name="Step 5 Preview" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.0 output=2.7 cache-read=0.05 cache-write=0
+			limits context=1000000 max-tokens=1000000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+		// Multimodal agent/coding SKU.
+		model "step-3.7-flash" name="Step 3.7 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.2 output=1.15 cache-read=0.04 cache-write=0
+			limits context=256000 max-tokens=256000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+		model "step-3.5-flash" name="Step 3.5 Flash" {
+			reasoning #true
+			input "text"
+			cost input=0.1 output=0.3 cache-read=0.02 cache-write=0
+			limits context=256000 max-tokens=256000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+		model "step-3.5-flash-2603" name="Step 3.5 Flash 2603" {
+			reasoning #true
+			input "text"
+			cost input=0.1 output=0.3 cache-read=0.02 cache-write=0
+			limits context=256000 max-tokens=256000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+
+	// StepFun's Chat Completions API documents `max_tokens` (default INF) and
+	// never the `max_completion_tokens` spelling the OpenAI baseline assumes.
+	max-tokens-field "max_tokens"
+
+	// StepFun's own API exposes the three-tier `reasoning_effort` ladder, while
+	// the shared stepfun class ladder (minimal…xhigh) documents relay hosts
+	// (OpenRouter, NanoGPT, NVIDIA, …). The provider scope therefore owns the
+	// exact set for models discovered at runtime, where no seed row declares
+	// thinking explicitly. Scoped by family, not revision: the stepfun taxonomy
+	// extracts no revision, and a family-scoped rule still cannot reach the
+	// class rule's `on` host list.
+	// Verified 2026-09-23 against
+	// `POST https://api.stepfun.ai/v1/chat/completions`: low/medium/high all
+	// return 200 on every model above, and `/v1/models` reports
+	// `reasoning_effort_support_list: ["low","medium","high"]` — the docs page
+	// still claims `step-3.5-flash-2603` accepts low/high only.
+	// Only reasoning models resolve a ladder (`resolveOverIndex` gates thinking
+	// on the target's reasoning fact), so a future non-reasoning StepFun SKU
+	// stays unaffected.
+	class "stepfun" {
+		family "step" {
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+}

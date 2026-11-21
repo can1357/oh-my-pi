@@ -177,6 +177,13 @@ describe("latexToBlock (2-D layout)", () => {
 		expect(latexToBlock("\\sqrt{x}").map(line => line.trimEnd())).toEqual([" ┌──", "╲│ x"]);
 	});
 
+	it("keeps a display radical degree inside its enclosing style wrapper", () => {
+		const lines = latexToBlock(String.raw`\textsl{\sqrt[n]{x}}`);
+
+		expect(lines.map(stripVTControlCharacters).map(line => line.trimEnd())).toEqual(["ⁿ ┌──", " ╲│ x"]);
+		expect(lines[0]).toContain("\x1b[3mⁿ\x1b[23m");
+	});
+
 	it("stacks \\binom inside stretched parentheses", () => {
 		expect(latexToBlock("\\binom{n}{k}")).toEqual(["⎛ n ⎞", "⎜   ⎟", "⎝ k ⎠"]);
 	});
@@ -317,6 +324,14 @@ describe("latexToBlock (2-D layout)", () => {
 
 	it("styles fonts across a stacked fraction (\\mathbf)", () => {
 		expect(latexToBlock("\\mathbf{\\frac{a}{b}}")).toEqual([" 𝐚 ", "───", " 𝐛 "]);
+	});
+
+	it("styles text-mode fonts across a stacked fraction", () => {
+		const lines = latexToBlock(String.raw`\textbf{\frac{a}{b}}`);
+
+		expect(lines.map(stripVTControlCharacters)).toEqual([" a ", "───", " b "]);
+		expect(lines[0]).toContain("\x1b[1m");
+		expect(lines[2]).toContain("\x1b[1m");
 	});
 
 	it("stacks limit operators inside styling wrappers", () => {

@@ -1,7 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import xterm, { type Terminal as XtermTerminal } from "@oh-my-pi/pi-utils/vterm";
-import { readTerminalRows } from "../tools/terminal-output";
-import { DAEMON_PTY_COLUMNS, DAEMON_PTY_ROWS } from "./protocol";
+import { readTerminalRows } from "@oh-my-pi/pi-tui/tools/terminal-output";
+import { DAEMON_PTY_COLUMNS, DAEMON_PTY_ROWS } from "../daemon/protocol";
 
 const VIRTUAL_SCROLLBACK_ROWS = 4_096;
 

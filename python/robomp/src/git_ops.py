@@ -211,6 +211,7 @@ def _run_git(
     extra_groups: list[int] | tuple[int, ...] | None = None,
     umask: int | None = None,
     timeout: float | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `git <args>` with optional PAT injection via `--config-env`.
 
@@ -265,6 +266,7 @@ def _run_git(
             capture_output=True,
             text=True,
             timeout=effective_timeout,
+            input=input,
             **subprocess_kwargs,
         )
     except subprocess.TimeoutExpired as exc:
@@ -557,6 +559,55 @@ def fetch_prune(
     _check(last_proc, ["git", *args])
 
 
+def _backfill_tip_blobs(
+    repo_dir: Path,
+    rev: str,
+    remote: str,
+    *,
+    token: str | None,
+    auth_url: str | None,
+    extra_env: Mapping[str, str] | None,
+    safe_directory: Path | None,
+) -> subprocess.CompletedProcess[str] | None:
+    """Fetch the blobs of ``rev``'s tree that the blob:none pool lacks.
+
+    A checkout of ``rev`` then never needs a lazy promisor fetch, which in
+    proxy-transport deployments runs in the orchestrator without a PAT and
+    dies (oh-my-pi#1818). Only the tip tree is materialized, not ``rev``'s
+    history, so the transfer is the files changed since the pool last saw
+    them. Returns the fetch result, or ``None`` when nothing was missing.
+
+    Raises ``GitCommandError`` if ``rev`` cannot be walked locally.
+    """
+    listing = ["rev-list", "--objects", "--missing=print", "--no-object-names", "-n1", rev]
+    walked = _check(_run_git(listing, cwd=repo_dir, token=None, safe_directory=safe_directory), ["git", *listing])
+    missing = [line[1:] for line in walked.stdout.splitlines() if line.startswith("?")]
+    if not missing:
+        return None
+    # Same request git's own lazy fetch sends: explicit object ids (served
+    # regardless of the filter), no negotiation, no ref updates.
+    args = [
+        "-c",
+        "fetch.negotiationAlgorithm=noop",
+        "fetch",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--recurse-submodules=no",
+        "--filter=blob:none",
+        "--stdin",
+        remote,
+    ]
+    return _run_git(
+        args,
+        cwd=repo_dir,
+        token=token,
+        auth_url=auth_url,
+        extra_env=extra_env,
+        safe_directory=safe_directory,
+        input="\n".join(missing) + "\n",
+    )
+
+
 def fetch_ref(
     repo_dir: Path,
     ref: str,
@@ -566,43 +617,74 @@ def fetch_ref(
     auth_url: str | None = None,
     safe_directory: Path | None = None,
 ) -> None:
-    """Fetch ``<ref>`` from origin AND materialize every reachable blob locally.
+    """Fetch ``<ref>`` from origin AND materialize the blobs of its tree.
 
     Callers invoke this immediately before a ``git worktree add`` / checkout
-    that needs the working-tree contents, so the blobs MUST be present after
+    that needs the working-tree contents, so those blobs MUST be present after
     this returns. ``<repo_dir>`` is typically a ``--filter=blob:none`` partial
-    clone: a plain ``git fetch origin <ref>`` would inherit
-    ``remote.origin.partialclonefilter`` from the pool, bringing the commit
-    and tree but no blobs, leaving the subsequent ``worktree add`` to trigger
-    a lazy promisor fetch — which in proxy-transport deployments has no PAT
-    in the orchestrator process and dies with::
+    clone, so the ref fetch itself brings commits and trees only;
+    :func:`_backfill_tip_blobs` then fetches exactly the missing blobs of the
+    tip. (An earlier ``--refetch --no-filter`` did the same job by re-downloading
+    and re-indexing the ref's entire history on every call.) The on-disk
+    partial-clone config is untouched, so ``fetch_prune`` stays cheap.
 
-        fatal: could not read Username for 'https://github.com'
-        fatal: could not fetch <sha> from promisor remote
-
-    (oh-my-pi#1818). ``--refetch`` forces a fresh negotiation that ignores
-    "we already have this commit", and ``--no-filter`` overrides the inherited
-    filter for this one invocation without touching the on-disk config — so
-    ``fetch_prune`` keeps its cheap blob-skipping semantics on the next pool
-    refresh. Best-effort: a non-zero exit is logged and swallowed because the
-    caller still attempts the checkout (and a stale-ref worktree add will
-    surface a more actionable error than this fetch ever could).
+    Best-effort: a failure is logged and swallowed because the caller still
+    attempts the checkout, and a stale-ref worktree add surfaces a more
+    actionable error than this fetch ever could.
     """
     remote = remote_url or "origin"
-    args = ["fetch", "--refetch", "--no-filter", remote, _branch_refspec(ref) if remote_url else ref]
+    extra_env = _explicit_remote_env(remote_url, cwd=repo_dir)
+    args = ["fetch", "--no-tags", remote, _branch_refspec(ref) if remote_url else ref]
     proc = _run_git(
         args,
         cwd=repo_dir,
         token=token,
         auth_url=auth_url,
-        extra_env=_explicit_remote_env(remote_url, cwd=repo_dir),
+        extra_env=extra_env,
         safe_directory=safe_directory,
     )
-    if proc.returncode != 0:
-        log.debug(
-            "fetch_ref non-fatal failure",
-            extra={"ref": ref, "stderr": proc.stderr},
-        )
+    if proc.returncode == 0:
+        try:
+            backfill = _backfill_tip_blobs(
+                repo_dir,
+                "FETCH_HEAD",
+                remote,
+                token=token,
+                auth_url=auth_url,
+                extra_env=extra_env,
+                safe_directory=safe_directory,
+            )
+        except GitCommandError as exc:
+            log.debug("fetch_ref blob backfill failed", extra={"ref": ref, "stderr": exc.stderr})
+            return
+        if backfill is None or backfill.returncode == 0:
+            return
+        proc = backfill
+    log.debug(
+        "fetch_ref non-fatal failure",
+        extra={"ref": ref, "stderr": proc.stderr},
+    )
+
+
+_UNSAFE_REF_BODY_RE = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
+
+
+def validate_fetch_ref(ref: str) -> str:
+    """Accept Git-valid branch names minus refspec/option-injectable characters."""
+    body = ref.removeprefix("refs/heads/")
+    if (
+        not body
+        or body.startswith(("-", "/"))
+        or body.endswith(("/", ".", ".lock"))
+        or "//" in body
+        or ".." in body
+        or "@{" in body
+        or body == "@"
+        or any(part.startswith(".") or part.endswith(".lock") for part in body.split("/"))
+        or _UNSAFE_REF_BODY_RE.search(body)
+    ):
+        raise ValueError("invalid ref")
+    return ref
 
 
 def fetch_pr_head(
@@ -613,31 +695,99 @@ def fetch_pr_head(
     remote_url: str | None = None,
     auth_url: str | None = None,
     safe_directory: Path | None = None,
+    head_ref: str | None = None,
+    head_sha: str | None = None,
+    same_repo: bool = False,
 ) -> None:
-    """Fetch ``refs/pull/<n>/head`` into FETCH_HEAD with all reachable blobs.
+    """Fetch the PR head, falling back to a verified same-repo branch.
 
     Immediately followed by ``git worktree add --detach FETCH_HEAD`` for PR
-    review checkouts. See :func:`fetch_ref` for why ``--refetch --no-filter``
-    is required: without the blob backfill, the worktree-add triggers a
-    promisor lazy fetch that fails under proxy-transport deployments
-    (oh-my-pi#1818).
+    review checkouts, so the head's tree blobs are backfilled the same way as
+    :func:`fetch_ref`; without them the worktree-add triggers a promisor lazy
+    fetch that fails under proxy-transport deployments (oh-my-pi#1818).
+
+    Raises ``GitCommandError`` when fetching, SHA verification, or backfill fails.
     """
     if pr_number <= 0:
-        raise ValueError(f"invalid PR number: {pr_number!r}")
+        raise ValueError(f"invalid pr_number={pr_number!r}")
     remote = remote_url or "origin"
+    extra_env = _explicit_remote_env(remote_url, cwd=repo_dir)
     ref = f"refs/pull/{pr_number}/head" if remote_url else f"pull/{pr_number}/head"
-    args = ["fetch", "--refetch", "--no-filter", remote, ref]
-    _check(
-        _run_git(
-            args,
+    args = ["fetch", "--no-tags", remote, ref]
+    try:
+        _check(
+            _run_git(
+                args,
+                cwd=repo_dir,
+                token=token,
+                auth_url=auth_url,
+                extra_env=extra_env,
+                safe_directory=safe_directory,
+            ),
+            ["git", *args],
+        )
+    except GitCommandError as exc:
+        # The fallback fetches a branch named by the (webhook-supplied) PR
+        # payload, so it is only eligible when we can verify the result:
+        # same-repo PR, present head ref, present head SHA. Anything else
+        # keeps the original failure.
+        if (
+            "couldn't find remote ref" not in exc.stderr
+            or not same_repo
+            or not head_ref
+            or not head_sha
+        ):
+            raise
+        validate_fetch_ref(head_ref)
+        log.warning("PR head ref unavailable; fetching same-repo branch", extra={"pr": pr_number, "head_ref": head_ref})
+        args = ["fetch", "--no-tags", remote, "--", f"refs/heads/{head_ref}"]
+        try:
+            _check(
+                _run_git(
+                    args,
+                    cwd=repo_dir,
+                    token=token,
+                    auth_url=auth_url,
+                    extra_env=extra_env,
+                    safe_directory=safe_directory,
+                ),
+                ["git", *args],
+            )
+        except GitCommandError as fallback_exc:
+            raise GitCommandError(
+                fallback_exc.cmd,
+                fallback_exc.returncode,
+                fallback_exc.stdout,
+                f"{exc.stderr}\nBranch fallback failed: {fallback_exc.stderr}",
+            ) from fallback_exc
+        probe_args = ["rev-parse", "FETCH_HEAD"]
+        probe = _run_git(
+            probe_args,
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
-            extra_env=_explicit_remote_env(remote_url, cwd=repo_dir),
+            extra_env=extra_env,
             safe_directory=safe_directory,
-        ),
-        ["git", *args],
+        )
+        _check(probe, ["git", *probe_args])
+        if probe.stdout.strip() != head_sha:
+            raise GitCommandError(
+                ["git", *probe_args],
+                1,
+                probe.stdout,
+                f"PR head SHA mismatch: expected {head_sha}, fetched {probe.stdout.strip()}",
+            )
+    backfill = _backfill_tip_blobs(
+        repo_dir,
+        "FETCH_HEAD",
+        remote,
+        token=token,
+        auth_url=auth_url,
+        extra_env=extra_env,
+        safe_directory=safe_directory,
     )
+    if backfill is not None:
+        _check(backfill, ["git", "fetch", "--stdin", remote])
 
 
 @dataclass(slots=True, frozen=True)

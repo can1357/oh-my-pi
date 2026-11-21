@@ -1,0 +1,1075 @@
+/**
+ * Shell filesystem backed by the internal URL router.
+ *
+ * The embedded shell (redirections, globs, `cd`, builtins, and the in-process
+ * coreutils) routes every `scheme://…` path here at operation time; host paths
+ * never leave the native filesystem. File-backed schemes locate their backing
+ * entry per operation and hand it back as a native redirect, so handle I/O,
+ * links, and metadata are the host filesystem's own. Other schemes are
+ * read-only files holding their rendered resource bytes (or directories, for
+ * enumerable containers). Writes reach mutable file-written schemes (`local://`)
+ * natively and handler-written schemes (`proc://`, `agent://`, `cfg://`,
+ * `out://`, …) through write-only handles whose bytes become one handler write
+ * when the handle closes, all within the tier the command was approved at.
+ *
+ * Node types never depend on the operation: a bare `skill://<name>` is the
+ * skill directory everywhere (its instructions are `skill://<name>/SKILL.md`),
+ * and a symlink whose target is a URL is followed through this filesystem
+ * while `readlink` keeps its literal spelling.
+ *
+ * A URL ending in a read selector names what `read` shows for it: `:raw` is the
+ * entry itself, and a line selector (`:10-20`, `:raw:5`, `:-30`) is a read-only
+ * file holding exactly those lines. An existing entry spelled that way wins.
+ */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import type { ToolTier } from "@oh-my-pi/pi-agent-core";
+import {
+	type ShellFileChange,
+	type ShellFilesystem,
+	ShellFsFileType,
+	type ShellFsMetadata,
+	ShellFsMissing,
+	ShellFsOp,
+	type ShellFsRequest,
+	ShellFsResolve,
+	type ShellFsResponse,
+} from "@oh-my-pi/pi-natives";
+import { isFsError } from "@oh-my-pi/pi-utils";
+import { TIER_RANK } from "../tools/approval";
+import { type ParsedSelector, parseSel, resolveTailSelector } from "../tools/read-selector";
+import { UrlContainmentError } from "./filesystem-resource";
+import { parseInternalUrl } from "./parse";
+import { InternalUrlRouter } from "./router";
+import type {
+	InternalResource,
+	InternalWriteResult,
+	ProtocolHandler,
+	ResolveContext,
+	SchemeSpec,
+	WriteContext,
+} from "./types";
+
+const URL_PATH_RE = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/is;
+/** Symlink hops before ELOOP (Linux MAXSYMLINKS). */
+const MAX_SYMLINK_HOPS = 40;
+const VIRTUAL_FILE_MODE = 0o444;
+const VIRTUAL_DIR_MODE = 0o555;
+const SINK_FILE_MODE = 0o222;
+const ERRNO_CODE_RE = /^E[A-Z0-9]+$/;
+const DENIED_MESSAGE_RE = /\b(?:not allowed|escapes|outside)\b/i;
+const INVALID_MESSAGE_RE = /\b(?:requires? an?|invalid|malformed|must be numeric)\b/i;
+const MISSING_MESSAGE_RE = /\b(?:not found|unknown|does not exist|no such|unavailable)\b/i;
+
+/** Whether `input` is spelled `scheme://…`: the only form the shell filesystem hands to URL handlers. */
+export function isUrlPath(input: string): boolean {
+	return URL_PATH_RE.test(input);
+}
+
+/** A filesystem failure carrying the errno name the shell reports. */
+export class UrlFsError extends Error {
+	override name = "UrlFsError";
+
+	constructor(
+		readonly code: string,
+		message: string,
+	) {
+		super(message);
+	}
+}
+
+/** A URL split at its mount root; remote paths keep their server-side path semantics. */
+interface UrlPath {
+	scheme: string;
+	/** `scheme://` when the authority is a path segment (local://), else `scheme://<authority>`. */
+	root: string;
+	/** Raw (percent-encoded) segments below the root. */
+	segments: string[];
+}
+
+function parseUrlPath(input: string, spec: SchemeSpec): UrlPath {
+	const match = URL_PATH_RE.exec(input);
+	if (!match) throw new UrlFsError("EINVAL", `Not a URL path: ${input}`);
+	const scheme = match[1].toLowerCase();
+	if (spec.backing === "remote" && !spec.pathAuthority) {
+		// Remote .. may cross a symlink or the /~/ account-home boundary. It
+		// cannot be collapsed locally, and must never pop the URL authority.
+		const [authority, ...segments] = match[2].split("/");
+		return { scheme, root: `${scheme}://${authority}`, segments };
+	}
+	// The authority takes part in `..` resolution: `skill://a/..` is `skill://`.
+	const segments: string[] = [];
+	for (const part of match[2].split("/")) {
+		if (part === "" || part === ".") continue;
+		if (part === "..") segments.pop();
+		else segments.push(part);
+	}
+	if (spec.pathAuthority) return { scheme, root: `${scheme}://`, segments };
+	return { scheme, root: `${scheme}://${segments[0] ?? ""}`, segments: segments.slice(1) };
+}
+
+/** `scheme:`: a bare `scheme://` root once its slashes are trimmed. */
+const BARE_SCHEME_RE = /^[a-z][a-z0-9+.-]*:$/i;
+
+/** `url` followed by `segments`, without doubling the slash after a bare `scheme://`. */
+function appendSegments(url: string, segments: readonly string[]): string {
+	if (segments.length === 0) return url;
+	const trimmed = url.replace(/\/+$/, "");
+	// Trimming `scheme://` leaves `scheme:`; its segments follow the `//` directly. An authority
+	// may end in `:` too: a wrapped resource URI (`mcp://test://x`) keeps its `test:` authority.
+	return BARE_SCHEME_RE.test(trimmed) ? `${trimmed}//${segments.join("/")}` : `${trimmed}/${segments.join("/")}`;
+}
+
+function formatUrlPath(target: UrlPath): string {
+	return appendSegments(target.root, target.segments);
+}
+
+/** Entry name a raw segment addresses, decoded the way the scheme handlers decode it. */
+function decodeSegment(segment: string): string {
+	let name: string;
+	try {
+		name = decodeURIComponent(segment);
+	} catch {
+		throw new UrlFsError("EINVAL", `Malformed percent-encoding in path segment: ${segment}`);
+	}
+	if (name.includes("/") || name === "." || name === "..") {
+		throw new UrlFsError("EINVAL", `Path segment does not name a single entry: ${segment}`);
+	}
+	return name;
+}
+
+/**
+ * Characters a raw entry name must percent-encode inside a URL segment: WHATWG
+ * `new URL` strips tabs/newlines and splits on `?`/`#`, and local:// / vault://
+ * read a raw `\` as `/`. Mirrors the kernel's child-URL encoder.
+ */
+const SEGMENT_ENCODE_RE = /[\x00-\x20\x7f"#%<>?[\\\]^`{|}]/g;
+
+/** Raw segment for an entry name; {@link decodeSegment} recovers it exactly. */
+function encodeSegment(name: string): string {
+	return name.replace(SEGMENT_ENCODE_RE, char => `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+}
+
+/**
+ * `base` URL followed by a `/`-separated path of raw entry names (a native
+ * walk's root-relative result), each name percent-encoded as `omp_vfs::child_path` does.
+ */
+export function joinUrlPath(base: string, relative: string): string {
+	return appendSegments(
+		base,
+		relative
+			.split("/")
+			.filter(name => name.length > 0)
+			.map(encodeSegment),
+	);
+}
+
+function schemeOf(url: string): string {
+	return URL_PATH_RE.exec(url)?.[1].toLowerCase() ?? url;
+}
+
+/** Host path outside every URL namespace (two-path ops may pair one with a URL). */
+interface NativeNode {
+	kind: "native";
+	path: string;
+}
+
+/** File-backed URL entry the native filesystem serves at `path`; it may not exist yet (creation). */
+interface HostNode {
+	kind: "host";
+	url: string;
+	spec: SchemeSpec;
+	path: string;
+}
+
+/** Rendered resource: read-only file bytes, or a directory. */
+interface VirtualNode {
+	kind: "virtual";
+	url: string;
+	spec: SchemeSpec;
+	directory: boolean;
+	bytes: Uint8Array;
+	/** Children of an enumerable container. */
+	entries?: ReadonlyMap<string, ShellFsFileType>;
+	/** Host directory a directory resource lists. */
+	sourcePath?: string;
+	/** JSON path named no stored value. Bytes stay the `"null"` sentinel. */
+	absent?: boolean;
+}
+
+type FsNode = NativeNode | HostNode | VirtualNode;
+
+/**
+ * Write-only handle on a handler-written URL (`proc://<id>/kill`, `agent://<id>`, `out://`, …):
+ * bytes buffer until close, then reach the scheme's `write()` as one payload.
+ */
+interface WriteSink {
+	kind: "sink";
+	url: string;
+	/** A reply URL (`out://`): blank text is dropped, and delivered text also reaches the run's reply sink. */
+	reply: boolean;
+	chunks: Uint8Array[];
+	size: number;
+	/** The scheme's `write.maxBytes`; writes past it fail with EFBIG and discard the payload. */
+	maxBytes: number;
+	overflowed: boolean;
+}
+
+/** A handler's answer to one write a shell command made to a handler-written URL other than a reply. */
+export interface UrlWriteReport {
+	url: string;
+	/** The handler's model-facing text, or why the write was refused; empty when the handler said nothing. */
+	text: string;
+	/** The write was refused; the command saw its open, write, or close fail. */
+	failed: boolean;
+}
+
+/** Handler and spec serving a URL's scheme (the MCP resource fallback has no handler of its own). */
+interface Route {
+	handler: ProtocolHandler | undefined;
+	spec: SchemeSpec;
+}
+
+type OpenRequest = NonNullable<ShellFsRequest["open"]>;
+type AccessRequest = NonNullable<ShellFsRequest["access"]>;
+
+/** Provider-owned metadata of a rendered resource: its byte size and declared read-only mode; no host identity or times. */
+function virtualMetadata(node: VirtualNode): ShellFsMetadata {
+	return node.directory
+		? { fileType: ShellFsFileType.Dir, size: 0, mode: VIRTUAL_DIR_MODE }
+		: { fileType: ShellFsFileType.File, size: node.bytes.length, mode: VIRTUAL_FILE_MODE };
+}
+
+/** Immediate children of `url` among enumerated leaf URLs: leaves are files, deeper prefixes directories. */
+function childEntries(leaves: Iterable<string>, url: string): Map<string, ShellFsFileType> {
+	const prefix = url.endsWith("://") ? url : `${url}/`;
+	const entries = new Map<string, ShellFsFileType>();
+	for (const leaf of leaves) {
+		if (!leaf.startsWith(prefix)) continue;
+		const rest = leaf.slice(prefix.length);
+		const slash = rest.indexOf("/");
+		if (slash === -1) {
+			if (rest) entries.set(decodeSegment(rest), ShellFsFileType.File);
+		} else {
+			entries.set(decodeSegment(rest.slice(0, slash)), ShellFsFileType.Dir);
+		}
+	}
+	return entries;
+}
+
+/** A read selector naming lines of its resource, pinned to absolute lines or counted from the end. */
+type LineSelector = Extract<ParsedSelector, { kind: "lines" | "tail" }>;
+
+/**
+ * Bytes of the lines `selector` names in `bytes`, each with its terminator, in
+ * file order. Lines past the end select nothing, as `sed -n` prints nothing for them.
+ */
+function selectLines(bytes: Uint8Array, selector: LineSelector): Uint8Array {
+	const starts: number[] = [];
+	if (bytes.length > 0) {
+		starts.push(0);
+		for (let at = bytes.indexOf(10); at !== -1 && at + 1 < bytes.length; at = bytes.indexOf(10, at + 1)) {
+			starts.push(at + 1);
+		}
+	}
+	const resolved = resolveTailSelector(selector, starts.length);
+	if (resolved.kind !== "lines") return bytes;
+	const chunks: Uint8Array[] = [];
+	for (const { startLine, endLine } of resolved.ranges) {
+		if (startLine > starts.length) break;
+		const end = endLine === undefined || endLine >= starts.length ? bytes.length : starts[endLine];
+		chunks.push(bytes.subarray(starts[startLine - 1], end));
+	}
+	return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
+}
+
+async function isHostDirectory(hostPath: string): Promise<boolean> {
+	try {
+		return (await fs.stat(hostPath)).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function requireField<T>(value: T | undefined | null, field: string, op: ShellFsOp): T {
+	if (value === undefined || value === null) throw new UrlFsError("EINVAL", `${op} request is missing ${field}`);
+	return value;
+}
+
+/** What {@link InternalUrlFilesystem.stat} reports about an entry. */
+export interface UrlFileStat {
+	type: "directory" | "file" | "other";
+	/** Bytes of a file; 0 for directories. */
+	size: number;
+	/** Host modification time; 0 for rendered resources, which have none. */
+	mtimeMs: number;
+	/**
+	 * The URL named no stored JSON value. Bytes are still the `"null"` sentinel.
+	 * Only the search-list split probe treats this as missing.
+	 */
+	absent?: boolean;
+}
+
+export interface InternalUrlFilesystemOptions {
+	/** Calling session's resolve context; its signal cancels in-flight operations. */
+	context: ResolveContext;
+	/** Approval tier the shell command ran under; schemes whose read or write tier exceeds it are refused. */
+	tier: ToolTier;
+	/**
+	 * Receives the text a command wrote to a reply URL (`out://`) once its handle closes, after
+	 * the scheme's handler accepted it. Absent: reply URLs refuse writes (EROFS).
+	 */
+	onReply?: (text: string) => void;
+	/**
+	 * Receives the handler's answer to each write a command made to another handler-written URL
+	 * (`proc://<id>/kill`, `agent://<id>`, …), including refusals: on Unix the shell
+	 * reports only the errno, so this is where the reason surfaces. Absent: such URLs refuse writes
+	 * (EROFS), so search and edit tools never act through a handler.
+	 */
+	onWrite?: (report: UrlWriteReport) => void;
+	/**
+	 * Receives each host text file git would track that a command changed itself, with its
+	 * content before and after: a builtin's write, rename or removal (`sed -i`, `cp`, `mv`, `rm`)
+	 * and a redirection's target, once the command is done with it. Absent: changes are not tracked.
+	 */
+	onFileChange?: (change: ShellFileChange) => void;
+	/** Tool call the command runs under; handler writes carry its id. */
+	toolCallId?: string;
+}
+
+/**
+ * Session-bound filesystem for URL paths in one embedded-shell run. Construct one
+ * per run with that run's own abort signal; handles opened through it live until
+ * the shell closes them.
+ */
+export class InternalUrlFilesystem {
+	readonly #router: InternalUrlRouter;
+	readonly #context: ResolveContext;
+	readonly #tier: ToolTier;
+	readonly #onReply: ((text: string) => void) | undefined;
+	readonly #onWrite: ((report: UrlWriteReport) => void) | undefined;
+	readonly #onFileChange: ((change: ShellFileChange) => void) | undefined;
+	readonly #toolCallId: string | undefined;
+	readonly #handles = new Map<number, VirtualNode | WriteSink>();
+	#nextHandle = 1;
+	/** Sandbox schemes whose session root this run has already created. */
+	readonly #sandboxRoots = new Set<string>();
+	/** Enumerated leaf URLs → content, per enumerable scheme. */
+	readonly #leaves = new Map<string, Promise<Map<string, string>>>();
+	/** Same session and policy without the run's signal, for cleanup the shell performs after a cancel. */
+	#cleanupFs: InternalUrlFilesystem | undefined;
+
+	constructor(options: InternalUrlFilesystemOptions) {
+		this.#router = InternalUrlRouter.instance();
+		// Directory nodes never serve their rendered listing, so handlers skip building it.
+		this.#context = { ...options.context, skipDirectoryListing: true };
+		this.#tier = options.tier;
+		this.#onReply = options.onReply;
+		this.#onWrite = options.onWrite;
+		this.#onFileChange = options.onFileChange;
+		this.#toolCallId = options.toolCallId;
+	}
+
+	/** Native shell binding: URL paths reach {@link handle}; host paths stay on the native filesystem. */
+	shellFilesystem(): ShellFilesystem {
+		const onFileChange = this.#onFileChange;
+		return {
+			handler: (error, request) =>
+				error ? Promise.resolve({ error: { code: "EIO", message: error.message } }) : this.handle(request),
+			nativeLocalPaths: true,
+			onFileChange:
+				onFileChange &&
+				((error, change) => {
+					if (!error) onFileChange(change);
+				}),
+		};
+	}
+
+	/** Serve one shell filesystem request; failures come back as errno data. */
+	async handle(request: ShellFsRequest): Promise<ShellFsResponse> {
+		// Cleanup of the shell's own temporaries must finish even after the run is cancelled.
+		// Every request of the cleanup view carries the flag (closes of its handles included),
+		// so its handles live and die in the cleanup instance.
+		if (request.cleanup === true && this.#context.signal) {
+			this.#cleanupFs ??= new InternalUrlFilesystem({
+				context: { ...this.#context, signal: undefined },
+				tier: this.#tier,
+			});
+			return this.#cleanupFs.handle(request);
+		}
+		try {
+			return await this.#dispatch(request);
+		} catch (error) {
+			return { error: this.#errno(error) };
+		}
+	}
+
+	/** The entry `input` (a URL or host path) names, following symlinks; throws {@link UrlFsError}. */
+	async stat(input: string): Promise<UrlFileStat> {
+		try {
+			const node = await this.#node(input, true, false);
+			if (node.kind === "virtual") {
+				const stat: UrlFileStat = node.directory
+					? { type: "directory", size: 0, mtimeMs: 0 }
+					: { type: "file", size: node.bytes.length, mtimeMs: 0 };
+				if (node.absent === true) stat.absent = true;
+				return stat;
+			}
+			const stats = await fs.stat(node.path);
+			return {
+				type: stats.isDirectory() ? "directory" : stats.isFile() ? "file" : "other",
+				size: stats.size,
+				mtimeMs: stats.mtimeMs,
+			};
+		} catch (error) {
+			const { code, message } = this.#errno(error);
+			throw new UrlFsError(code, message);
+		}
+	}
+
+	/** First `maxBytes` bytes of the file `input` (a URL or host path) names, following symlinks; throws {@link UrlFsError}. */
+	async readPrefix(input: string, maxBytes: number): Promise<Uint8Array> {
+		try {
+			const node = await this.#node(input, true, false);
+			if (node.kind !== "virtual") return await Bun.file(node.path).slice(0, maxBytes).bytes();
+			if (node.directory) throw new UrlFsError("EISDIR", `Is a directory: ${node.url}`);
+			return node.bytes.subarray(0, maxBytes);
+		} catch (error) {
+			const { code, message } = this.#errno(error);
+			throw new UrlFsError(code, message);
+		}
+	}
+
+	async #dispatch(request: ShellFsRequest): Promise<ShellFsResponse> {
+		const { op } = request;
+		// Handles are released even after the run is cancelled.
+		if (op === ShellFsOp.Close) {
+			const handle = requireField(request.handle, "handle", op);
+			const file = this.#handles.get(handle);
+			if (!file) throw new UrlFsError("EBADF", `Bad file handle: ${handle}`);
+			this.#handles.delete(handle);
+			if (file.kind === "sink") await this.#deliver(file);
+			return {};
+		}
+		this.#throwIfAborted();
+		switch (op) {
+			case ShellFsOp.Metadata:
+			case ShellFsOp.SymlinkMetadata: {
+				const node = await this.#node(requireField(request.path, "path", op), op === ShellFsOp.Metadata, false);
+				return node.kind === "virtual" ? { metadata: virtualMetadata(node) } : { local: node.path };
+			}
+			case ShellFsOp.ReadDir:
+				return this.#readDir(requireField(request.path, "path", op));
+			case ShellFsOp.Canonicalize:
+				return {
+					path: await this.#canonicalize(
+						requireField(request.path, "path", op),
+						request.missing ?? ShellFsMissing.Existing,
+						request.resolve ?? ShellFsResolve.Physical,
+					),
+				};
+			case ShellFsOp.BackingPath: {
+				const backing = await this.#backingPath(requireField(request.path, "path", op));
+				return backing === undefined ? {} : { path: backing };
+			}
+			case ShellFsOp.ReadLink: {
+				const node = await this.#node(requireField(request.path, "path", op), false, false);
+				if (node.kind !== "virtual") return { local: node.path };
+				throw new UrlFsError("EINVAL", `Not a symbolic link: ${node.url}`);
+			}
+			case ShellFsOp.Access:
+				return this.#access(requireField(request.path, "path", op), requireField(request.access, "access", op));
+			case ShellFsOp.Open:
+				return this.#open(requireField(request.path, "path", op), requireField(request.open, "open", op));
+			case ShellFsOp.Read: {
+				const file = this.#handle(request.handle);
+				if (file.kind === "sink") throw new UrlFsError("EBADF", `File is not open for reading: ${file.url}`);
+				const start = Number(requireField(request.offset, "offset", op));
+				const end = Math.min(file.bytes.length, start + requireField(request.length, "length", op));
+				return { data: start >= end ? new Uint8Array() : file.bytes.subarray(start, end) };
+			}
+			case ShellFsOp.Write: {
+				const file = this.#handle(request.handle);
+				if (file.kind !== "sink") throw new UrlFsError("EBADF", "File is not open for writing");
+				const data = requireField(request.data, "data", op);
+				if (file.overflowed || file.size + data.length > file.maxBytes) {
+					const error = new UrlFsError(
+						"EFBIG",
+						`${schemeOf(file.url)}:// writes are capped at ${file.maxBytes} bytes`,
+					);
+					if (file.overflowed) throw error;
+					// A truncated payload would read as complete; none of it is delivered.
+					file.overflowed = true;
+					file.chunks = [];
+					throw this.#refuseSink(file, error);
+				}
+				// The native side may reuse its buffer once the write is acknowledged.
+				file.chunks.push(Uint8Array.from(data));
+				file.size += data.length;
+				return { written: data.length, offset: file.size };
+			}
+			case ShellFsOp.Flush:
+			case ShellFsOp.Sync:
+				this.#handle(request.handle);
+				return {};
+			case ShellFsOp.FileMetadata: {
+				const file = this.#handle(request.handle);
+				if (file.kind === "sink") {
+					return { metadata: { fileType: ShellFsFileType.File, size: file.size, mode: SINK_FILE_MODE } };
+				}
+				return { metadata: virtualMetadata(file) };
+			}
+			case ShellFsOp.IsLocked:
+				this.#handle(request.handle);
+				throw new UrlFsError("ENOTSUP", "Rendered resources do not expose advisory locks");
+			case ShellFsOp.SetLen:
+			case ShellFsOp.FileSetTimes:
+			case ShellFsOp.FileSetPermissions: {
+				const file = this.#handle(request.handle);
+				if (file.kind === "sink") throw new UrlFsError("EINVAL", `Write-only handles only append: ${file.url}`);
+				throw this.#readOnly(file);
+			}
+			case ShellFsOp.CreateDir: {
+				// mkdir never follows its final component; `-p` creates missing parents inside the root.
+				const node = await this.#node(requireField(request.path, "path", op), request.recursive === true, true);
+				return { local: this.#writablePath(node) };
+			}
+			case ShellFsOp.RemoveFile:
+			case ShellFsOp.RemoveDir:
+			case ShellFsOp.RemoveDirAll:
+			case ShellFsOp.Symlink:
+			case ShellFsOp.Mknod: {
+				const create = op === ShellFsOp.Symlink || op === ShellFsOp.Mknod;
+				const node = await this.#node(requireField(request.path, "path", op), false, create);
+				return { local: this.#writablePath(node) };
+			}
+			case ShellFsOp.Rename:
+			case ShellFsOp.HardLink: {
+				const from = await this.#node(requireField(request.path, "path", op), false, false);
+				const to = await this.#node(requireField(request.target, "target", op), false, true);
+				if (op === ShellFsOp.Rename) this.#writablePath(from);
+				const localTarget = this.#writablePath(to);
+				// Each scheme is its own filesystem: links and renames never cross into or out of it.
+				const fromMount = from.kind === "native" ? "" : schemeOf(from.url);
+				if (fromMount !== (to.kind === "native" ? "" : schemeOf(to.url))) {
+					throw new UrlFsError("EXDEV", `Cannot ${op === ShellFsOp.Rename ? "move" : "link"} across filesystems`);
+				}
+				if (from.kind === "virtual") throw this.#readOnly(from);
+				return { local: from.path, localTarget };
+			}
+			case ShellFsOp.SetPermissions:
+			case ShellFsOp.SetTimes:
+			case ShellFsOp.Chown:
+			case ShellFsOp.SetXattr:
+			case ShellFsOp.RemoveXattr: {
+				const follow = op === ShellFsOp.SetPermissions || request.follow !== false;
+				const node = await this.#node(requireField(request.path, "path", op), follow, false);
+				return { local: this.#writablePath(node) };
+			}
+			case ShellFsOp.StatFs:
+			case ShellFsOp.GetXattr:
+			case ShellFsOp.ListXattr: {
+				const follow = op === ShellFsOp.StatFs || request.follow !== false;
+				const node = await this.#node(requireField(request.path, "path", op), follow, false);
+				if (node.kind !== "virtual") return { local: node.path };
+				throw new UrlFsError("ENOTSUP", `${schemeOf(node.url)}:// resources have no ${op} data: ${node.url}`);
+			}
+			default:
+				throw new UrlFsError("ENOSYS", `Unsupported filesystem operation: ${String(op)}`);
+		}
+	}
+
+	async #readDir(input: string): Promise<ShellFsResponse> {
+		const node = await this.#node(input, true, false);
+		if (node.kind !== "virtual") return { local: node.path };
+		if (!node.directory) throw new UrlFsError("ENOTDIR", `Not a directory: ${node.url}`);
+		if (node.entries) return { entries: Array.from(node.entries, ([name, fileType]) => ({ name, fileType })) };
+		if (node.sourcePath) return { local: node.sourcePath };
+		const handler = this.#router.getHandler(schemeOf(node.url));
+		if (handler?.readDirectory) {
+			return { entries: await handler.readDirectory(parseInternalUrl(node.url), this.#context) };
+		}
+		throw new UrlFsError("ENOTSUP", `${node.url} lists only through the read tool`);
+	}
+
+	async #access(input: string, access: AccessRequest): Promise<ShellFsResponse> {
+		const node = await this.#node(input, true, false);
+		if (access.write === true) this.#writablePath(node);
+		if (node.kind !== "virtual") return { local: node.path };
+		if (access.execute === true && !node.directory) throw new UrlFsError("EACCES", `Not executable: ${node.url}`);
+		return {};
+	}
+
+	async #open(input: string, open: OpenRequest): Promise<ShellFsResponse> {
+		const create = open.create === true || open.createNew === true;
+		const writes = open.write === true || open.append === true || open.truncate === true || create;
+		if (writes && isUrlPath(input)) {
+			const { spec } = this.#route(input);
+			if (spec.write?.via === "handler") return this.#openSink(input, spec, open);
+		}
+		// O_EXCL never follows a final symlink; every other open does.
+		const node = await this.#node(input, open.createNew !== true, create);
+		if (writes) return { local: this.#writablePath(node) };
+		if (node.kind !== "virtual") {
+			// The native handle of a read-only scheme's backing file refuses fd-level mutation too.
+			return this.#writeRefusal(node) ? { local: node.path, readonly: true } : { local: node.path };
+		}
+		if (node.directory) throw new UrlFsError("EISDIR", `Is a directory: ${node.url}`);
+		const handle = this.#nextHandle++;
+		this.#handles.set(handle, node);
+		return { handle };
+	}
+
+	/**
+	 * Write-only handle on a handler-written URL. Refused without a consumer for the write (a reply
+	 * sink for `out://`, {@link InternalUrlFilesystemOptions.onWrite} otherwise), for reads, where
+	 * the gate denies the write, and for appends to targets whose content a handler write replaces.
+	 */
+	#openSink(url: string, spec: SchemeSpec, open: OpenRequest): ShellFsResponse {
+		const scheme = schemeOf(url);
+		const sink: WriteSink = {
+			kind: "sink",
+			url,
+			reply: spec.write?.scope === "reply",
+			chunks: [],
+			size: 0,
+			maxBytes: spec.write?.maxBytes ?? Number.POSITIVE_INFINITY,
+			overflowed: false,
+		};
+		if (sink.reply && !this.#onReply) {
+			throw new UrlFsError("EROFS", `${scheme}:// replies reach the user only from a foreground command: ${url}`);
+		}
+		if (!sink.reply && !this.#onWrite) throw this.#readOnly({ url, spec });
+		if (open.read === true) {
+			throw this.#refuseSink(sink, new UrlFsError("EACCES", `${scheme}:// write handles are write-only: ${url}`));
+		}
+		// Reply, process and message channels hold no content, so appending to one is writing to it.
+		if (open.truncate !== true && spec.backing !== "device" && spec.write?.scope !== "coordination") {
+			throw this.#refuseSink(
+				sink,
+				new UrlFsError(
+					"EINVAL",
+					`${scheme}:// writes replace ${url} whole; truncate (>) instead of appending (>>)`,
+				),
+			);
+		}
+		const refusal = this.#tierRefusal(url);
+		if (refusal) throw this.#refuseSink(sink, refusal);
+		const handle = this.#nextHandle++;
+		this.#handles.set(handle, sink);
+		return { handle };
+	}
+
+	/**
+	 * Hand a closed sink's bytes to its scheme's handler as one write. A reply drops blank text and
+	 * then reaches the run's reply sink; any other write reports the handler's answer, and a
+	 * refusal fails the close. An overflowed sink or a cancelled run delivers nothing.
+	 */
+	async #deliver(sink: WriteSink): Promise<void> {
+		if (sink.overflowed || this.#context.signal?.aborted) return;
+		let text: string;
+		try {
+			text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(sink.chunks));
+		} catch {
+			throw this.#refuseSink(
+				sink,
+				new UrlFsError("EINVAL", `${schemeOf(sink.url)}:// writes take UTF-8 text: ${sink.url}`),
+			);
+		}
+		// A handler write's tier is resolved from its payload, which the sink holds only once it closes.
+		const refusal = this.#tierRefusal(sink.url, text);
+		if (refusal) throw this.#refuseSink(sink, refusal);
+		if (sink.reply) {
+			if (text.trim().length === 0) return;
+			await this.#router.write(sink.url, text, this.#writeContext());
+			this.#onReply?.(text);
+			return;
+		}
+		let result: InternalWriteResult | void;
+		try {
+			result = await this.#router.write(sink.url, text, this.#writeContext());
+		} catch (error) {
+			if (this.#context.signal?.aborted) throw error;
+			const { code, message } = this.#errno(error);
+			throw this.#refuseSink(sink, new UrlFsError(code, message));
+		}
+		const answer = result ? result.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n") : "";
+		if (result?.isError === true) {
+			throw this.#refuseSink(sink, new UrlFsError("EIO", answer || `${sink.url} refused the write`));
+		}
+		this.#onWrite?.({ url: sink.url, text: answer, failed: false });
+	}
+
+	/** `error`, after reporting it as the refusal of a non-reply sink's write. */
+	#refuseSink(sink: WriteSink, error: UrlFsError): UrlFsError {
+		if (!sink.reply) this.#onWrite?.({ url: sink.url, text: error.message, failed: true });
+		return error;
+	}
+
+	/** Handler write context: the session's, cancelled by the run's signal, under the command's tool call. */
+	#writeContext(): WriteContext {
+		const { cwd, signal, localProtocolOptions, session } = this.#context;
+		const toolCall = this.#toolCallId === undefined ? undefined : { id: this.#toolCallId };
+		return { cwd, signal, localProtocolOptions, session, toolCall };
+	}
+
+	/**
+	 * Host path backing `input` (URL symlinks followed), for `realpath`/`readlink -f`
+	 * to canonicalize natively and for external programs to receive; undefined for
+	 * rendered resources and for URLs no file-backed handler serves (`https://`,
+	 * MCP resources), which alias nothing. A missing entry backs onto its parent's
+	 * backing path plus its name, so missing-path modes work without creating
+	 * anything; one with no backed parent (an unknown skill) is the caller's error.
+	 */
+	async #backingPath(input: string): Promise<string | undefined> {
+		if (isUrlPath(input) && this.#router.getHandler(schemeOf(input))?.spec.backing !== "file") return undefined;
+		let node: FsNode;
+		try {
+			node = await this.#node(input, true, false);
+		} catch (error) {
+			if (this.#errno(error).code !== "ENOENT") throw error;
+			const target = parseUrlPath(input, this.#route(input).spec);
+			if (target.segments.length === 0) throw error;
+			const parent = await this.#backingPath(formatUrlPath({ ...target, segments: target.segments.slice(0, -1) }));
+			if (parent === undefined) throw error;
+			return path.join(parent, decodeSegment(target.segments[target.segments.length - 1]));
+		}
+		return node.kind === "virtual" ? undefined : node.path;
+	}
+
+	/**
+	 * Canonical spelling: symlinks resolved at the deepest existing prefix the
+	 * `missing` mode allows, the missing tail appended. Entries stay URLs while
+	 * they resolve inside their mount; a host symlink leaving it yields the host path.
+	 */
+	async #canonicalize(input: string, missing: ShellFsMissing, resolve: ShellFsResolve): Promise<string> {
+		if (!isUrlPath(input)) return input;
+		const target = parseUrlPath(input, this.#route(input).spec);
+		const lexical = formatUrlPath(target);
+		const allowedMissing =
+			missing === ShellFsMissing.Missing ? Number.POSITIVE_INFINITY : missing === ShellFsMissing.Normal ? 1 : 0;
+		if (resolve === ShellFsResolve.None) {
+			if (allowedMissing === 0) await this.#node(lexical, false, false);
+			else if (allowedMissing === 1 && target.segments.length > 0) {
+				await this.#node(formatUrlPath({ ...target, segments: target.segments.slice(0, -1) }), true, false);
+			}
+			return lexical;
+		}
+		for (let kept = target.segments.length; kept >= 0; kept--) {
+			let node: FsNode;
+			try {
+				node = await this.#node(
+					formatUrlPath({ ...target, segments: target.segments.slice(0, kept) }),
+					true,
+					false,
+				);
+			} catch (error) {
+				const absent = target.segments.length - kept + 1;
+				if (kept > 0 && absent <= allowedMissing && this.#errno(error).code === "ENOENT") continue;
+				throw error;
+			}
+			return appendSegments(await this.#canonicalUrl(node), target.segments.slice(kept));
+		}
+		return lexical;
+	}
+
+	async #canonicalUrl(node: FsNode): Promise<string> {
+		if (node.kind === "native") return fs.realpath(node.path);
+		if (node.kind === "virtual") return node.url;
+		const target = parseUrlPath(node.url, node.spec);
+		const real = await fs.realpath(node.path);
+		const rootPath =
+			target.segments.length === 0 ? node.path : await this.#locate(this.#route(node.url), target.root, false);
+		if (rootPath === null) return node.url;
+		const relative = path.relative(await fs.realpath(rootPath), real);
+		if (relative === "") return target.root;
+		if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return real;
+		return appendSegments(target.root, relative.split(path.sep).map(encodeSegment));
+	}
+
+	/**
+	 * Resolve `input` to the node it names. `follow: false` stops at a final
+	 * symlink (lstat/readlink/unlink/rename); `create` addresses a write target
+	 * that may not exist yet, which only mutable file-written schemes locate.
+	 */
+	async #node(input: string, follow: boolean, create: boolean, hops = 0): Promise<FsNode> {
+		this.#throwIfAborted();
+		if (!isUrlPath(input)) return { kind: "native", path: input };
+		if (hops > MAX_SYMLINK_HOPS) throw new UrlFsError("ELOOP", `Too many levels of symbolic links: ${input}`);
+		const route = this.#route(input);
+		if (!create) {
+			const selected = await this.#selectedNode(route, input, follow, hops);
+			if (selected) return selected;
+		}
+		const { handler, spec } = route;
+		const target = parseUrlPath(input, spec);
+		const url = formatUrlPath(target);
+		if (!handler?.locate || spec.backing !== "file") {
+			if (create) throw this.#readOnly({ url, spec });
+			return this.#virtualNode(route, target, url);
+		}
+		const writable = spec.write?.via === "file" && !spec.immutable;
+		if (writable && spec.write?.scope === "sandbox") await this.#ensureSandboxRoot(route, target.scheme);
+
+		if (!follow && target.segments.length > 0) {
+			// The final entry itself, inside its (followed) parent directory.
+			const parent = await this.#node(
+				formatUrlPath({ ...target, segments: target.segments.slice(0, -1) }),
+				true,
+				false,
+				hops,
+			);
+			if (parent.kind === "host" && (await isHostDirectory(parent.path))) {
+				const segment = target.segments[target.segments.length - 1];
+				return {
+					kind: "host",
+					url: appendSegments(parent.url, [segment]),
+					spec: parent.spec,
+					path: path.join(parent.path, decodeSegment(segment)),
+				};
+			}
+		}
+
+		let located: string | null;
+		try {
+			located = await this.#locate(route, url, create && writable);
+		} catch (error) {
+			// A symlink holding a URL looks dangling to the host; follow it through this filesystem.
+			if (!(error instanceof UrlContainmentError)) throw error;
+			if (this.#context.containSkillPaths && schemeOf(url) === "skill") throw error;
+			const redirected = await this.#urlSymlinkTarget(route, target);
+			if (redirected === undefined) throw error;
+			return this.#node(redirected, follow, create, hops + 1);
+		}
+		if (located !== null) return { kind: "host", url, spec, path: located };
+		const redirected = await this.#urlSymlinkTarget(route, target);
+		if (redirected !== undefined) {
+			if (this.#context.containSkillPaths && schemeOf(url) === "skill") {
+				throw new UrlContainmentError(`Skill link resolves outside its filesystem root: ${url}`);
+			}
+			return this.#node(redirected, follow, create, hops + 1);
+		}
+		if (create) throw this.#readOnly({ url, spec });
+		// No backing file (agent://<id>/<json-path>) or a missing entry: the handler renders it or reports why not.
+		return this.#virtualNode(route, target, url);
+	}
+
+	/**
+	 * The node a URL ending in a read selector names: the selector-free URL's own
+	 * node for `:raw`, a read-only file of the selected lines for a line selector.
+	 * Undefined when `input` ends in neither, or spells an existing entry.
+	 */
+	async #selectedNode(route: Route, input: string, follow: boolean, hops: number): Promise<FsNode | undefined> {
+		const { path: bare, sel } = this.#router.split(input);
+		if (sel === undefined) return undefined;
+		let selector: ParsedSelector;
+		try {
+			selector = parseSel(sel);
+		} catch (error) {
+			throw new UrlFsError("EINVAL", error instanceof Error ? error.message : String(error));
+		}
+		if (selector.kind !== "raw" && selector.kind !== "lines" && selector.kind !== "tail") return undefined;
+		if (await this.#entryExists(route, input)) return undefined;
+		if (selector.kind === "raw") return this.#node(bare, follow, false, hops);
+		const node = await this.#node(bare, true, false, hops);
+		if (node.kind === "virtual" && node.directory) throw new UrlFsError("EISDIR", `Is a directory: ${node.url}`);
+		const bytes = node.kind === "virtual" ? node.bytes : await Bun.file(node.path).bytes();
+		return { kind: "virtual", url: input, spec: route.spec, directory: false, bytes: selectLines(bytes, selector) };
+	}
+
+	/** Whether a file-backed scheme holds an entry spelled exactly `input`. */
+	async #entryExists(route: Route, input: string): Promise<boolean> {
+		if (!route.handler?.locate || route.spec.backing !== "file") return false;
+		try {
+			const located = await this.#locate(route, formatUrlPath(parseUrlPath(input, route.spec)), false);
+			if (located === null) return false;
+			await fs.lstat(located);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * The URL a path reaches through a symlink whose literal target is a URL:
+	 * the first such link along `target`, with the remaining segments appended.
+	 * Undefined when no prefix is such a link (host symlinks are the handler's business).
+	 */
+	async #urlSymlinkTarget(route: Route, target: UrlPath): Promise<string | undefined> {
+		for (let index = 0; index < target.segments.length; index++) {
+			let parent: string | null;
+			try {
+				parent = await this.#locate(
+					route,
+					formatUrlPath({ ...target, segments: target.segments.slice(0, index) }),
+					false,
+				);
+			} catch {
+				return undefined;
+			}
+			if (parent === null) return undefined;
+			let link: string;
+			try {
+				link = await fs.readlink(path.join(parent, decodeSegment(target.segments[index])));
+			} catch (error) {
+				if (isFsError(error) && error.code === "EINVAL") continue;
+				return undefined;
+			}
+			if (isUrlPath(link)) return appendSegments(link, target.segments.slice(index + 1));
+		}
+		return undefined;
+	}
+
+	async #virtualNode(route: Route, target: UrlPath, url: string): Promise<VirtualNode> {
+		const { handler, spec } = route;
+		if (handler?.enumerate) {
+			const leaves = await this.#enumerated(target.scheme);
+			const content = leaves.get(url);
+			if (content !== undefined) {
+				return { kind: "virtual", url, spec, directory: false, bytes: Buffer.from(content, "utf-8") };
+			}
+			const entries = childEntries(leaves.keys(), url);
+			if (entries.size > 0 || url === `${target.scheme}://`) {
+				return { kind: "virtual", url, spec, directory: true, bytes: new Uint8Array(), entries };
+			}
+		}
+		let resource: InternalResource<string | Buffer>;
+		try {
+			resource = await this.#router.resolve(url, this.#context);
+		} catch (error) {
+			if (handler || this.#context.signal?.aborted) throw error;
+			// Unregistered schemes only exist as MCP resources: no server offering one means no such file.
+			const message = error instanceof Error ? error.message : String(error);
+			throw new UrlFsError(message.startsWith("MCP resource read error") ? "EIO" : "ENOENT", message);
+		}
+		if (resource.isDirectory) {
+			return {
+				kind: "virtual",
+				url,
+				spec,
+				directory: true,
+				bytes: new Uint8Array(),
+				sourcePath: resource.sourcePath,
+			};
+		}
+		return {
+			kind: "virtual",
+			url,
+			spec,
+			directory: false,
+			bytes: typeof resource.content === "string" ? Buffer.from(resource.content, "utf-8") : resource.content,
+			...(resource.absent === true ? { absent: true } : {}),
+		};
+	}
+
+	#enumerated(scheme: string): Promise<Map<string, string>> {
+		let leaves = this.#leaves.get(scheme);
+		if (!leaves) {
+			leaves = this.#router
+				.enumerate(`${scheme}://`, this.#context)
+				.then(docs => new Map((docs ?? []).map(doc => [doc.url, doc.content])));
+			this.#leaves.set(scheme, leaves);
+		}
+		return leaves;
+	}
+
+	#locate(route: Route, url: string, create: boolean): Promise<string | null> {
+		const locate = route.handler?.locate;
+		if (!locate) return Promise.resolve(null);
+		// Nodes keep one type: a bare `skill://<name>` / `memory://root` is always its directory.
+		return locate.call(route.handler, parseInternalUrl(url), this.#context, { directory: true, create });
+	}
+
+	/** The session scratch root always exists, like a mount point. */
+	async #ensureSandboxRoot(route: Route, scheme: string): Promise<void> {
+		if (this.#sandboxRoots.has(scheme)) return;
+		const root = await this.#locate(route, `${scheme}://`, true);
+		if (root !== null) await fs.mkdir(root, { recursive: true });
+		this.#sandboxRoots.add(scheme);
+	}
+
+	#route(input: string): Route {
+		const scheme = schemeOf(input);
+		const registered = this.#router.getHandler(scheme);
+		const spec = registered?.spec ?? (this.#router.canResolve(input) ? this.#router.spec("mcp") : undefined);
+		if (!spec) throw new UrlFsError("ENOENT", `No handler for ${scheme}:// URLs: ${input}`);
+		const readTier = spec.readTier ?? "read";
+		if (TIER_RANK[readTier] > TIER_RANK[this.#tier]) {
+			throw new UrlFsError(
+				"EACCES",
+				`${scheme}:// access needs ${readTier} approval; this command was approved at ${this.#tier}`,
+			);
+		}
+		return { handler: registered, spec };
+	}
+
+	/** Host path a mutation may touch; throws unless the node's scheme is file-written, mutable, and within tier. */
+	#writablePath(node: FsNode): string {
+		if (node.kind === "virtual") throw this.#readOnly(node);
+		const refusal = this.#writeRefusal(node);
+		if (refusal) throw refusal;
+		return node.path;
+	}
+
+	/** Why `node` must not be mutated through the shell, or undefined when it may be. */
+	#writeRefusal(node: FsNode): UrlFsError | undefined {
+		if (node.kind === "native") return undefined;
+		if (node.kind === "virtual" || node.spec.write?.via !== "file" || node.spec.immutable)
+			return this.#readOnly(node);
+		return this.#tierRefusal(node.url);
+	}
+
+	/**
+	 * Why the write gate refuses writing `content` (unknown before a handle closes) to `url`: a
+	 * denying scheme, or a tier above this command's. Undefined when it allows the write.
+	 */
+	#tierRefusal(url: string, content?: string): UrlFsError | undefined {
+		const session = this.#context.session;
+		const decision = this.#router.writeTier(url, content, session);
+		const scheme = schemeOf(url);
+		if (typeof decision !== "string" && decision.policy === "deny") {
+			return new UrlFsError("EROFS", decision.reason ?? `${scheme}:// is read-only: ${url}`);
+		}
+		const tier = typeof decision === "string" ? decision : decision.tier;
+		if (TIER_RANK[tier] > TIER_RANK[this.#tier]) {
+			return new UrlFsError(
+				"EACCES",
+				`${scheme}:// writes need ${tier} approval; this command was approved at ${this.#tier}`,
+			);
+		}
+		return undefined;
+	}
+
+	#readOnly(node: { url: string; spec: SchemeSpec }): UrlFsError {
+		const scheme = schemeOf(node.url);
+		return new UrlFsError(
+			"EROFS",
+			node.spec.write?.via === "handler"
+				? `${scheme}:// takes only whole writes (a bash redirect or the write tool): ${node.url}`
+				: `${scheme}:// is read-only: ${node.url}`,
+		);
+	}
+
+	#handle(handle: number | undefined): VirtualNode | WriteSink {
+		const file = handle === undefined ? undefined : this.#handles.get(handle);
+		if (!file) throw new UrlFsError("EBADF", `Bad file handle: ${handle}`);
+		return file;
+	}
+
+	#throwIfAborted(): void {
+		if (this.#context.signal?.aborted) throw new UrlFsError("ECANCELED", "Operation cancelled");
+	}
+
+	#errno(error: unknown): { code: string; message: string } {
+		const message = error instanceof Error ? error.message : String(error);
+		if (error instanceof UrlFsError) return { code: error.code, message };
+		if (this.#context.signal?.aborted) return { code: "ECANCELED", message };
+		if (error instanceof UrlContainmentError) return { code: "EACCES", message };
+		if (isFsError(error) && ERRNO_CODE_RE.test(error.code)) return { code: error.code, message };
+		// Handlers report misses and refusals as plain errors; classify them by what they say.
+		if (DENIED_MESSAGE_RE.test(message)) return { code: "EACCES", message };
+		if (MISSING_MESSAGE_RE.test(message)) return { code: "ENOENT", message };
+		if (INVALID_MESSAGE_RE.test(message)) return { code: "EINVAL", message };
+		return { code: "EIO", message };
+	}
+}

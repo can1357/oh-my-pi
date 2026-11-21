@@ -123,7 +123,7 @@ async function openModel(modelSpec: string, storage: AuthStorage): Promise<Opene
 	const modelId = modelSpec.slice(slash + 1);
 	const model = getBundledModel(provider as GeneratedProvider, modelId);
 	if (!model) throw new Error(`unknown model "${modelSpec}" (not in bundled catalog)`);
-	const apiKey = await storage.getApiKey(provider);
+	const apiKey = await storage.keys.get(provider);
 	if (!apiKey) {
 		throw new Error(`no credentials for provider "${provider}" (run \`omp login\` or set the provider env var)`);
 	}
@@ -202,6 +202,7 @@ function turnPrompt(turn: Extract<LogItem, { kind: "turn" }>): string {
 
 /** Map `items` through `worker` with at most `limit` in flight, order preserved. */
 async function mapPool<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results = new Array<R>(items.length);
 	let next = 0;
 	const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -347,7 +348,7 @@ async function main(): Promise<void> {
 
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
-	await storage.reload();
+	await storage.credentials.reload();
 	const tiny = await openModel(values.tiny, storage);
 	const synth = values.synth === values.tiny ? tiny : await openModel(values.synth, storage);
 

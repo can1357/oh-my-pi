@@ -1,0 +1,404 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
+
+import { cfgOffline } from "../config/auxiliary-model-policy";
+import type { ModelRegistry } from "../config/model-registry";
+import type { Settings } from "../config/settings";
+import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
+import { truncateApproxTokens } from "../mnemopi/config";
+import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };
+import consolidateSystemTemplate from "../prompts/memories/sharpshooter-consolidate-system.md" with { type: "text" };
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
+import { resolveSharpshooterModel } from "./extract";
+import {
+	readSharpshooterState,
+	sharpshooterBankDir,
+	sharpshooterLockPath,
+	sharpshooterMemoryFilePath,
+	writeSharpshooterState,
+} from "./paths";
+import { consumeSharpshooterDeltas, listSharpshooterDeltas, type SharpshooterSessionDeltas } from "./queue";
+import {
+	SHARPSHOOTER_MAX_FILE_LINES,
+	SHARPSHOOTER_MEMORY_FILES,
+	type SharpshooterMemoryFile,
+	type SharpshooterState,
+} from "./types";
+
+import { cfgSharpshooterIntervalMinutes } from "./settings";
+
+const PROJECT_DOC_TOKEN_LIMIT = 6000;
+
+/**
+ * Output budget for one consolidation reply: complete rewrites of all three files at the
+ * {@link SHARPSHOOTER_MAX_FILE_LINES} ceiling plus medium reasoning over the whole backlog.
+ */
+const CONSOLIDATION_MAX_TOKENS = 32_768;
+
+/** Smallest output budget requested when the prompt leaves less context than that. */
+const MIN_CONSOLIDATION_MAX_TOKENS = 1024;
+
+/** Fixed allowance for the tool schema and per-message framing the prompt count omits. */
+const PROMPT_FRAMING_TOKENS = 1024;
+
+/** Floor and ceiling of the retry delay after a failed consolidation pass. */
+const MIN_RETRY_BACKOFF_MS = 60_000;
+const MAX_RETRY_BACKOFF_MS = 6 * 60 * 60_000;
+
+const replaceMemoryFilesTool = {
+	name: "replace_memory_files",
+	description: "Replace complete sharpshooter memory files after consolidating queued decision deltas.",
+	parameters: type({
+		files: type({
+			name: "'architecture.md' | 'product.md' | 'style.md'",
+			content: "string",
+		}).array(),
+	}),
+};
+
+export interface SharpshooterConsolidationResult {
+	ran: boolean;
+	reason?: "not_due" | "locked" | "empty" | "no_model" | "error";
+	sessions?: number;
+	deltas?: number;
+	error?: string;
+}
+
+interface ReplacementFile {
+	name: SharpshooterMemoryFile;
+	content: string;
+}
+
+export function renderSharpshooterSessions(groups: readonly SharpshooterSessionDeltas[]): string {
+	return [...groups]
+		.sort((a, b) => (a.deltas[0]?.delta.ts ?? 0) - (b.deltas[0]?.delta.ts ?? 0))
+		.map(group => {
+			const lines = [...group.deltas]
+				.sort((a, b) => a.delta.ts - b.delta.ts)
+				.map(({ delta }) => {
+					const fields = [
+						`kind=${delta.kind}`,
+						`statement=${JSON.stringify(delta.statement)}`,
+						`evidence=${JSON.stringify(delta.evidence)}`,
+						`source=${delta.source}`,
+						`friction(corrective=${delta.friction.corrective}, regression=${delta.friction.regression}, subtle=${delta.friction.subtle})`,
+					];
+					if (delta.rejectedAlternative) {
+						fields.push(`rejectedAlternative=${JSON.stringify(delta.rejectedAlternative)}`);
+					}
+					if (delta.rationale) fields.push(`rationale=${JSON.stringify(delta.rationale)}`);
+					return `- ${fields.join("; ")}`;
+				});
+			return [`### session ${group.sessionId}`, ...lines].join("\n");
+		})
+		.join("\n\n");
+}
+
+export async function runSharpshooterConsolidation(options: {
+	agentDir: string;
+	cwd: string;
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+	sessionId: string;
+	getSessionProvider?: () => string | undefined;
+	force?: boolean;
+	/** Session journal the pass's model usage is billed to; unjournaled when omitted. */
+	usageLedger?: Partial<ModelUsageLedger>;
+}): Promise<SharpshooterConsolidationResult> {
+	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
+	try {
+		await fs.mkdir(bankDir, { recursive: true });
+	} catch (error) {
+		return { ran: false, reason: "error", error: errorMessage(error) };
+	}
+
+	let acquired = false;
+	try {
+		return await withFileLock(
+			sharpshooterLockPath(options.agentDir, options.cwd),
+			async () => {
+				acquired = true;
+				return await consolidateLocked(options, bankDir);
+			},
+			{ retries: 1, retryDelayMs: 1 },
+		);
+	} catch (error) {
+		if (!acquired) return { ran: false, reason: "locked" };
+		return { ran: false, reason: "error", error: errorMessage(error) };
+	}
+}
+
+/**
+ * Earliest wall-clock ms at which a non-forced consolidation may run.
+ *
+ * One interval after the last completed pass; after consecutive failures the next attempt
+ * waits `interval × 2^(failures-1)` (clamped to [1 min, 6 h]) past the last failure, so a
+ * bank that keeps failing does not re-send its full input on every scheduler tick.
+ * Shared by the consolidation gate, the scheduler, and `/memory diagnose`.
+ */
+export function sharpshooterNextConsolidationAt(state: SharpshooterState, intervalMinutes: number): number {
+	const intervalMs = Math.max(0, intervalMinutes) * 60_000;
+	const next = state.lastConsolidatedAt + intervalMs;
+	const failures = consecutiveFailures(state);
+	if (failures === 0 || !state.lastError) return next;
+	const backoffMs = Math.min(MAX_RETRY_BACKOFF_MS, Math.max(MIN_RETRY_BACKOFF_MS, intervalMs) * 2 ** (failures - 1));
+	return Math.max(next, state.lastError.at + backoffMs);
+}
+
+/** Failures recorded since the last completed pass; an error older than that pass is stale. */
+function consecutiveFailures(state: SharpshooterState): number {
+	const error = state.lastError;
+	if (!error || error.at < state.lastConsolidatedAt) return 0;
+	return error.failures ?? 1;
+}
+
+/**
+ * Output budget for a consolidation request whose system prompt and input count `promptTokens`.
+ *
+ * {@link CONSOLIDATION_MAX_TOKENS}, capped by the model's output limit and by the context the
+ * prompt leaves free (estimate padded 10% plus {@link PROMPT_FRAMING_TOKENS}, since the local
+ * tokenizer may not match the model's), never below {@link MIN_CONSOLIDATION_MAX_TOKENS}.
+ */
+export function sharpshooterConsolidationMaxTokens(
+	model: Pick<Model, "maxTokens" | "contextWindow">,
+	promptTokens: number,
+): number {
+	let budget = CONSOLIDATION_MAX_TOKENS;
+	if (model.maxTokens !== null && model.maxTokens > 0) budget = Math.min(budget, model.maxTokens);
+	if (model.contextWindow !== null && model.contextWindow > 0) {
+		const reserved = promptTokens + Math.ceil(promptTokens / 10) + PROMPT_FRAMING_TOKENS;
+		budget = Math.min(budget, model.contextWindow - reserved);
+	}
+	return Math.max(MIN_CONSOLIDATION_MAX_TOKENS, budget);
+}
+
+async function consolidateLocked(
+	options: {
+		agentDir: string;
+		cwd: string;
+		settings: Settings;
+		modelRegistry: ModelRegistry;
+		sessionId: string;
+		getSessionProvider?: () => string | undefined;
+		force?: boolean;
+		usageLedger?: Partial<ModelUsageLedger>;
+	},
+	bankDir: string,
+): Promise<SharpshooterConsolidationResult> {
+	const state = await readSharpshooterState(options.agentDir, options.cwd);
+	try {
+		const intervalMinutes = cfgSharpshooterIntervalMinutes.get(options.settings);
+		if (!options.force && Date.now() < sharpshooterNextConsolidationAt(state, intervalMinutes)) {
+			return { ran: false, reason: "not_due" };
+		}
+
+		const groups = await listSharpshooterDeltas(options.agentDir, options.cwd);
+		if (groups.length === 0) {
+			await writeSharpshooterState(options.agentDir, options.cwd, {
+				...state,
+				lastConsolidatedAt: Date.now(),
+			});
+			return { ran: false, reason: "empty" };
+		}
+
+		const model = await resolveSharpshooterModel(
+			options.settings,
+			options.modelRegistry,
+			options.getSessionProvider?.(),
+		);
+		if (!model || (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider)) {
+			return { ran: false, reason: "no_model" };
+		}
+
+		const currentFiles = await readCurrentMemoryFiles(options.agentDir, options.cwd);
+		const projectDocs = await readProjectDocs(options.cwd);
+		const sessions = renderSharpshooterSessions(groups);
+		const input = prompt.render(consolidateInputTemplate, {
+			architecture: currentFiles["architecture.md"],
+			product: currentFiles["product.md"],
+			style: currentFiles["style.md"],
+			projectDocs,
+			sessions,
+		});
+		const system = prompt.render(consolidateSystemTemplate, {
+			maxFileLines: SHARPSHOOTER_MAX_FILE_LINES,
+		});
+
+		const maxTokens = sharpshooterConsolidationMaxTokens(model, new Tokenizer(model).countTokens([system, input]));
+		if (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider) {
+			return { ran: false, reason: "no_model" };
+		}
+		const journal = journalCompletion(options.usageLedger, { purpose: "sharpshooter:consolidate" });
+		const response = await retryTransientCompletion(
+			() => {
+				if (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider) {
+					throw new Error("Sharpshooter model provider differs from the active session provider");
+				}
+				return completeSimple(
+					model,
+					{
+						systemPrompt: [system],
+						messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+						tools: [replaceMemoryFilesTool],
+					},
+					{
+						apiKey: options.modelRegistry.resolver(model, options.sessionId),
+						sessionId: options.sessionId,
+						maxTokens,
+						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+						toolChoice: "required",
+						onAttempt: message => journal?.(message, input),
+					},
+				);
+			},
+			{ provider: model.provider },
+		);
+		if (response.stopReason === "error") {
+			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
+		}
+		if (response.stopReason === "length") {
+			throw new Error(
+				`sharpshooter consolidation response truncated at the ${maxTokens}-token output limit before replace_memory_files completed`,
+			);
+		}
+
+		const files = parseReplacementFiles(response.content, currentFiles);
+		await applyReplacementFiles(bankDir, files);
+
+		const consumedFiles = groups.flatMap(group => group.deltas.map(item => item.file));
+		const deltaCount = consumedFiles.length;
+		await consumeSharpshooterDeltas(consumedFiles);
+		const at = Date.now();
+		await writeSharpshooterState(options.agentDir, options.cwd, {
+			v: 1,
+			lastConsolidatedAt: at,
+			lastResult: {
+				at,
+				sessions: groups.length,
+				deltas: deltaCount,
+				model: model.id,
+			},
+		});
+		return { ran: true, sessions: groups.length, deltas: deltaCount };
+	} catch (error) {
+		const message = errorMessage(error);
+		await recordConsolidationError(options.agentDir, options.cwd, state, message);
+		return { ran: false, reason: "error", error: message };
+	}
+}
+
+async function readCurrentMemoryFiles(agentDir: string, cwd: string): Promise<Record<SharpshooterMemoryFile, string>> {
+	const files: Record<SharpshooterMemoryFile, string> = {
+		"architecture.md": "",
+		"product.md": "",
+		"style.md": "",
+	};
+	await Promise.all(
+		SHARPSHOOTER_MEMORY_FILES.map(async name => {
+			files[name] = await Bun.file(sharpshooterMemoryFilePath(agentDir, cwd, name))
+				.text()
+				.catch(() => "");
+		}),
+	);
+	return files;
+}
+
+async function readProjectDocs(cwd: string): Promise<string> {
+	const blocks: string[] = [];
+	for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+		const content = await Bun.file(path.join(cwd, name))
+			.text()
+			.catch(() => "");
+		if (content.trim()) blocks.push(`--- ${name} ---\n${content.trim()}`);
+	}
+	return truncateApproxTokens(blocks.join("\n\n"), PROJECT_DOC_TOKEN_LIMIT);
+}
+
+function parseReplacementFiles(
+	content: readonly unknown[],
+	currentFiles: Readonly<Record<SharpshooterMemoryFile, string>>,
+): ReplacementFile[] {
+	const toolCalls = content.filter(
+		(block): block is { type: "toolCall"; name: string; arguments: unknown } =>
+			typeof block === "object" && block !== null && "type" in block && block.type === "toolCall",
+	);
+	if (toolCalls.length !== 1 || toolCalls[0]?.name !== replaceMemoryFilesTool.name) {
+		throw new Error("sharpshooter consolidation must call replace_memory_files exactly once");
+	}
+
+	const args = toolCalls[0].arguments;
+	if (!args || typeof args !== "object" || !("files" in args) || !Array.isArray(args.files)) {
+		throw new Error("replace_memory_files requires a files array");
+	}
+
+	const seen = new Set<SharpshooterMemoryFile>();
+	const files: ReplacementFile[] = [];
+	for (const item of args.files) {
+		if (!item || typeof item !== "object" || !("name" in item) || !("content" in item)) {
+			throw new Error("replace_memory_files contains an invalid file entry");
+		}
+		const name = item.name;
+		const rawContent = item.content;
+		if (!isMemoryFileName(name) || typeof rawContent !== "string") {
+			throw new Error("replace_memory_files contains an invalid file entry");
+		}
+		if (seen.has(name)) throw new Error(`replace_memory_files contains duplicate ${name}`);
+		seen.add(name);
+		const redacted = redactSecrets(rawContent);
+		let lines = redacted.length > 0 ? 1 : 0;
+		for (let index = 0; index + 1 < redacted.length; index++) {
+			if (redacted.charCodeAt(index) === 10) lines += 1;
+		}
+		if (lines > SHARPSHOOTER_MAX_FILE_LINES) {
+			throw new Error(`${name} exceeds the ${SHARPSHOOTER_MAX_FILE_LINES}-line limit`);
+		}
+		files.push({ name, content: redacted });
+	}
+	const totalChars = files.reduce((sum, file) => sum + file.content.trim().length, 0);
+	if (totalChars === 0 && SHARPSHOOTER_MEMORY_FILES.some(name => currentFiles[name].trim().length > 0)) {
+		throw new Error("replace_memory_files returned all-empty content; refusing to wipe memory files");
+	}
+	return files;
+}
+
+function isMemoryFileName(value: unknown): value is SharpshooterMemoryFile {
+	return typeof value === "string" && (SHARPSHOOTER_MEMORY_FILES as readonly string[]).includes(value);
+}
+
+async function applyReplacementFiles(bankDir: string, files: readonly ReplacementFile[]): Promise<void> {
+	const staged = files.map(file => ({
+		...file,
+		tempPath: path.join(bankDir, `.${file.name}.${process.pid}.${crypto.randomUUID()}.tmp`),
+	}));
+	try {
+		await Promise.all(staged.map(file => Bun.write(file.tempPath, file.content)));
+		for (const file of staged) await fs.rename(file.tempPath, path.join(bankDir, file.name));
+	} finally {
+		await Promise.all(staged.map(file => fs.rm(file.tempPath, { force: true }).catch(() => {})));
+	}
+}
+
+async function recordConsolidationError(
+	agentDir: string,
+	cwd: string,
+	state: SharpshooterState,
+	message: string,
+): Promise<void> {
+	try {
+		await writeSharpshooterState(agentDir, cwd, {
+			...state,
+			lastError: { at: Date.now(), message, failures: consecutiveFailures(state) + 1 },
+		});
+	} catch {
+		// The original consolidation error is more actionable than a secondary state-write failure.
+	}
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}

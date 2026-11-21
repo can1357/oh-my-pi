@@ -1,8 +1,10 @@
 import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CommitAgentState, GitOverviewSnapshot } from "../../../commit/agentic/state";
-import { extractScopeCandidates } from "../../../commit/analysis/scope";
+import { DEFAULT_CONVENTIONAL_GENERATION_CONFIG } from "../../../commit/conventional/config";
+import { extractScopeCandidates } from "../../../commit/conventional/scope";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
-import * as git from "../../../utils/git";
+import { renderStat } from "../../utils";
 import { EXCLUDED_LOCK_FILES } from "../lock-files";
 
 function isExcludedFile(path: string): boolean {
@@ -29,6 +31,7 @@ const gitOverviewSchema = type({
 });
 
 export function createGitOverviewTool(cwd: string, state: CommitAgentState): CustomTool<typeof gitOverviewSchema> {
+	const repo = vcs.requireGit(cwd);
 	return {
 		name: "git_overview",
 		label: "Git Overview",
@@ -36,13 +39,15 @@ export function createGitOverviewTool(cwd: string, state: CommitAgentState): Cus
 		parameters: gitOverviewSchema,
 		async execute(_toolCallId, params) {
 			const staged = params.staged ?? true;
-			const allFiles = await git.diff.changedFiles(cwd, { cached: staged });
+			const allFiles = await repo.changedFiles({ cached: staged });
 			const { filtered: files, excluded } = filterExcludedFiles(allFiles);
-			const stat = await git.diff(cwd, { stat: true, cached: staged });
-			const allNumstat = await git.diff.numstat(cwd, { cached: staged });
-			const numstat = allNumstat.filter(entry => !isExcludedFile(entry.path));
-			const scopeResult = extractScopeCandidates(numstat);
-			const untrackedFiles = !staged && params.include_untracked ? await git.ls.untracked(cwd) : undefined;
+			const allNumstat = await repo.numstat({ cached: staged });
+			const stat = renderStat(allNumstat);
+			const numstat = allNumstat
+				.filter(entry => !isExcludedFile(entry.path))
+				.map(entry => ({ path: entry.path, additions: entry.added ?? 0, deletions: entry.removed ?? 0 }));
+			const scopeResult = extractScopeCandidates(numstat, DEFAULT_CONVENTIONAL_GENERATION_CONFIG);
+			const untrackedFiles = !staged && params.include_untracked ? await repo.lsFiles(true, true) : undefined;
 			const snapshot: GitOverviewSnapshot = {
 				files,
 				stat,

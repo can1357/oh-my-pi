@@ -1,14 +1,20 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type {
-	AgentEvent,
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
+import {
+	type AgentEvent,
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	joinAdditionalContext,
+	resolveToolConcurrency,
+	TOOL_RESULT_ADDITIONAL_CONTEXT,
+	type ToolResultWithAdditionalContext,
+	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	CursorExecFrameContext,
 	CursorMcpCall,
 	CursorMcpResource,
 	CursorMcpResourceContent,
@@ -18,6 +24,7 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import {
+	cursorRawReadPath,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -26,14 +33,29 @@ import {
 	piLsPath,
 	piReadPath,
 	piTimeout,
-} from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+	shellDeadlineSeconds,
+} from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
+import { editDiffString } from "@oh-my-pi/pi-natives";
+import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
+import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
-import type { ApprovalMode } from "./tools/approval";
-import { resolveApproval } from "./tools/approval";
-import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
-import type { TodoPhase, TodoStatus } from "./tools/todo";
+import {
+	approvalRestrictions,
+	resolveApproval,
+	resolveApprovalFromContext,
+	restrictedFolderReason,
+} from "./tools/approval";
+import { approvalTargetKey } from "./tools/approval-targets";
+import { getApprovalGrants } from "./tools/approval-cache";
+import {
+	confineToWorkspace,
+	resolveReadPathAsync,
+	resolveToCwd,
+	splitPathAndSelPreferringLiteral,
+} from "./tools/path-utils";
+import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
+import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -63,7 +85,7 @@ interface CursorExecBridgeOptions {
 	cwd: string;
 	getCwd?: () => string;
 	tools: Map<string, AgentTool>;
-	/** Resolves execution overrides (mounted-device permission wrappers) before the canonical map. */
+	/** Resolves execution overrides (mounted tool-command permission wrappers) before the canonical map. */
 	getExecutableTool?: (name: string) => AgentTool | undefined;
 	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
@@ -88,27 +110,23 @@ interface CursorExecBridgeOptions {
 	 *
 	 * This is a grant, not a policy: it answers "did the session hand this
 	 * channel a file-writing tool", which callers derive from their own roster
-	 * before any bridge-specific rewriting. The primary Cursor session moves
-	 * `edit` out of {@link tools} and serves it through
-	 * {@link getEditReplaceTool}, so reading the map here would deny an
-	 * edit-only session. Defaults to allowed
-	 * to preserve the primary agent's behavior; callers with a restricted tool
-	 * set (advisors) opt out. The user's approval policy is resolved separately,
-	 * per call.
+	 * before any bridge-specific rewriting. A resolver keeps that answer current
+	 * when runtime tool selection upgrades a restricted transport. The primary
+	 * Cursor session moves `edit` out of {@link tools} and serves it through
+	 * {@link getEditReplaceTool}, so reading the map here would deny an edit-only
+	 * session. Defaults to allowed to preserve the primary agent's behavior;
+	 * callers with a restricted tool set (advisors) opt out. The user's approval
+	 * policy is resolved separately, per call.
 	 */
-	allowDirectFileMutation?: boolean;
+	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
-	 * Mirror Cursor's server-owned todo list into local session state. Cursor
-	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
-	 * the provider's list and the local `todo` state diverge silently.
+	 * Mirror Cursor's server-owned todo list into local session state and the
+	 * session branch. Cursor resolves `update_todos` / `read_todos` remotely and
+	 * emits no local `todo` toolResult, so without this bridge the provider's
+	 * list and the local `todo` state diverge silently and reloads lose it.
 	 */
-	setTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (phases: TodoPhase[]) => void;
 	getTodoPhases?: () => TodoPhase[];
-	/**
-	 * Persist the mirrored list to the session branch so it survives reloads.
-	 * Cursor emits no local `todo` toolResult, so nothing else records it.
-	 */
-	persistTodoPhases?: (phases: TodoPhase[]) => void;
 	/**
 	 * Build a `grep` tool honoring a frame's own context width and match cap.
 	 *
@@ -122,7 +140,12 @@ interface CursorExecBridgeOptions {
 	 * either field silently escapes the approval gate that every other call
 	 * goes through.
 	 */
-	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): CursorBridgeTool | undefined;
+	createGrepTool?(options: {
+		context?: number;
+		contextBefore?: number;
+		contextAfter?: number;
+		totalMatchLimit?: number;
+	}): CursorBridgeTool | undefined;
 	/**
 	 * The session's live MCP connections, for Cursor's resource frames.
 	 *
@@ -221,11 +244,60 @@ function createToolResultMessage(
 	};
 }
 
+/**
+ * Per-call passive-context collector for tools the bridge executes directly.
+ * The agent loop never sees these calls, so the bridge installs its own
+ * `addAdditionalContext` sink and attaches what the call reported to the
+ * result message; `Agent` injects it after the buffered Cursor results.
+ *
+ * Also sets `rawImages`: both read frames compose `:raw` for gutter-free text,
+ * and `read` must still answer an image file with the image. The flag rides on
+ * the caller's context only, because a missing context is what lets the
+ * extension wrapper fall back to the session's approval settings.
+ */
+function createBridgeToolContext(options: CursorExecBridgeOptions): {
+	context: AgentToolContext | undefined;
+	attach(message: ToolResultMessage): ToolResultMessage;
+} {
+	const reported: string[] = [];
+	const base = options.getToolContext?.();
+	return {
+		context: base && {
+			...base,
+			rawImages: true,
+			addAdditionalContext: (value: string) => {
+				reported.push(value);
+			},
+		},
+		attach: message => {
+			const additionalContext = joinAdditionalContext(reported);
+			if (additionalContext !== undefined) {
+				(message as ToolResultWithAdditionalContext)[TOOL_RESULT_ADDITIONAL_CONTEXT] = additionalContext;
+			}
+			return message;
+		},
+	};
+}
+
 function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 	return {
 		content: [{ type: "text", text: message }],
 		details: {},
 	};
+}
+
+function buildUnavailableToolResult(
+	options: CursorExecBridgeOptions,
+	toolCallId: string,
+	toolName: string,
+): ToolResultMessage {
+	const names = [...options.tools.keys()];
+	const shown = names.slice(0, 12).join(", ") || "none";
+	const extra = names.length > 12 ? ` and ${names.length - 12} more` : "";
+	const result = buildToolErrorResult(
+		`Tool "${toolName}" not available to this agent; calling it again fails the same way. Use one of: ${shown}${extra}.`,
+	);
+	return createToolResultMessage(toolCallId, toolName, result, true);
 }
 
 async function executeTool(
@@ -237,8 +309,7 @@ async function executeTool(
 ): Promise<ToolResultMessage> {
 	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
 	if (!tool) {
-		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
-		return createToolResultMessage(toolCallId, toolName, result, true);
+		return buildUnavailableToolResult(options, toolCallId, toolName);
 	}
 
 	// Same rule as synthesizeCursorExecToolCall: optional kwargs must be absent,
@@ -266,14 +337,15 @@ async function executeTool(
 			}
 		: undefined;
 
+	const bridgeContext = createBridgeToolContext(options);
 	try {
-		result = await tool.execute(
-			toolCallId,
-			toolArgs as Record<string, unknown>,
-			undefined,
-			onUpdate,
-			options.getToolContext?.(),
-		);
+		const validatedArgs = validateAgentToolArguments(tool, {
+			type: "toolCall",
+			id: toolCallId,
+			name: toolName,
+			arguments: toolArgs,
+		});
+		result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
@@ -287,7 +359,63 @@ async function executeTool(
 	};
 	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result: sanitizedFinalResult, isError });
 
-	return createToolResultMessage(toolCallId, toolName, result, isError);
+	return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
+}
+
+/** Tool result content as `executeTool` emits it: text passed through `sanitizeText`. */
+function sanitizedContent(content: ToolResultMessage["content"]): ToolResultMessage["content"] {
+	return content.map(c => (c.type === "text" ? { ...c, text: sanitizeText(c.text) } : c));
+}
+
+/** Bridge options whose tool runs surface no call of their own. */
+function withoutEvents(options: CursorExecBridgeOptions): CursorExecBridgeOptions {
+	return { ...options, emitEvent: undefined };
+}
+
+/**
+ * Writes a native StrReplace or Write back as its `edit` card's result: the
+ * diff against the file as it was, not a `write` call of its own.
+ */
+async function materializeEdit(
+	options: CursorExecBridgeOptions,
+	toolCallId: string,
+	pathArg: string,
+	content: string,
+): Promise<ToolResultMessage> {
+	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
+	let before: string | undefined;
+	try {
+		before = await fs.promises.readFile(absolutePath, "utf8");
+	} catch (error) {
+		if (isEnoent(error)) before = "";
+	}
+	const written = await executeTool(withoutEvents(options), "write", toolCallId, { path: pathArg, content });
+	const result: ToolResultMessage = { ...written, toolName: "edit" };
+	if (!written.isError && before !== undefined) {
+		// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
+		const { diff, firstChangedLine } = editDiffString(
+			normalizeToLF(stripBom(before).text),
+			normalizeToLF(stripBom(content).text),
+			absolutePath,
+		);
+		const writeDetails =
+			typeof written.details === "object" && written.details !== null ? written.details : undefined;
+		const details: EditToolDetails = { ...writeDetails, diff, firstChangedLine, path: absolutePath };
+		result.details = details;
+	}
+	options.emitEvent?.({
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "edit",
+		result: { content: sanitizedContent(result.content), details: result.details },
+		isError: result.isError,
+	});
+	return result;
+}
+
+function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
+	const grant = options.allowDirectFileMutation;
+	return typeof grant === "function" ? grant() : grant !== false;
 }
 
 /**
@@ -300,16 +428,25 @@ async function executeTool(
  */
 function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string, pathArg: string): string | null {
 	const context = options.getToolContext?.();
-	const settings = context?.settings;
-	const approvalMode: ApprovalMode =
-		context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+	const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
 	const approval = resolveApproval(
 		{ name: toolName, approval: "write" },
 		{ path: pathArg },
 		approvalMode,
-		(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+		userPolicies,
+		getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
 	);
-	if (approval.policy === "allow") return null;
+	if (approval.policy === "allow") {
+		// The frame names its file only in `pathArg`, so the restriction check keys it here.
+		const cwd = options.getCwd?.() ?? options.cwd;
+		const target = approvalTargetKey(cwd, pathArg);
+		const restriction = restrictedFolderReason(
+			{ name: toolName, approvalCacheTargets: () => (target === undefined ? undefined : [target]) },
+			undefined,
+			approvalRestrictions(context?.settings, cwd),
+		);
+		if (restriction === undefined) return null;
+	}
 	return approval.policy === "deny"
 		? `Tool "${toolName}" is blocked by user policy.`
 		: `Tool "${toolName}" requires approval, which this channel cannot request.`;
@@ -318,9 +455,8 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
 	const toolName = "delete";
 
-	if (options.allowDirectFileMutation === false) {
-		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
-		return createToolResultMessage(toolCallId, toolName, result, true);
+	if (!allowsDirectFileMutation(options)) {
+		return buildUnavailableToolResult(options, toolCallId, toolName);
 	}
 
 	// Unlike every other frame, this one mutates the filesystem directly instead
@@ -354,7 +490,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 
 		const sizeText = fileStat.size ? ` (${fileStat.size} bytes)` : "";
 		const message = `Deleted ${pathArg}${sizeText}`;
-		result = { content: [{ type: "text", text: message }], details: {} };
+		result = { content: [{ type: "text", text: message }], details: { fileSize: fileStat.size } };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
@@ -363,6 +499,43 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 
 	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result, isError });
 	return createToolResultMessage(toolCallId, toolName, result, isError);
+}
+
+async function resolveCursorReadOffset(
+	options: CursorExecBridgeOptions,
+	readPath: string,
+	offset?: number,
+): Promise<number | undefined> {
+	if (offset === undefined || offset >= 0) return offset;
+	try {
+		const cwd = options.getCwd?.() ?? options.cwd;
+		const { path: filePath } = await splitPathAndSelPreferringLiteral(readPath, cwd);
+		const absolutePath = await resolveReadPathAsync(filePath, cwd);
+		const handle = await fs.promises.open(absolutePath, "r");
+		try {
+			const stat = await handle.stat();
+			if (!stat.isFile()) return offset;
+			const chunk = Buffer.allocUnsafe(Math.min(stat.size, 64 * 1024));
+			let lines = stat.size > 0 ? 1 : 0;
+			let position = 0;
+			let endsWithNewline = false;
+			while (position < stat.size) {
+				const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, stat.size - position), position);
+				if (bytesRead === 0) break;
+				for (let i = 0; i < bytesRead; i++) {
+					if (chunk[i] === 10) lines++;
+				}
+				endsWithNewline = chunk[bytesRead - 1] === 10;
+				position += bytesRead;
+			}
+			if (endsWithNewline) lines--;
+			return Math.max(1, lines + Math.floor(offset) + 1);
+		} finally {
+			await handle.close();
+		}
+	} catch {
+		return offset;
+	}
 }
 
 function decodeToolCallId(toolCallId?: string): string {
@@ -380,6 +553,33 @@ function decodeMcpArgs(rawArgs: Record<string, Uint8Array>): Record<string, unkn
 		}
 	}
 	return decoded;
+}
+
+/** The arguments an MCP call will execute with: the provider's decoded map, or the raw wire map decoded here. */
+function mcpCallArgs(call: CursorMcpCall): Record<string, unknown> {
+	return Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+}
+
+/**
+ * The tool an MCP call will actually run.
+ *
+ * One resolution for execution, approval preflight, and exec ordering: a
+ * replace-shaped edit (an injected StrReplace name, or `edit` carrying
+ * replacement fields) runs the replace-mode instance, and every other call
+ * runs its execution override or registry tool. Classifying or approving by
+ * the frame's name instead would judge a different tool than the one that
+ * executes.
+ */
+function resolveMcpTool(
+	options: CursorExecBridgeOptions,
+	toolName: string,
+	args: Record<string, unknown>,
+): { tool: CursorBridgeTool | undefined; preferReplace: boolean } {
+	const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
+	const tool = preferReplace
+		? options.getEditReplaceTool?.()
+		: (options.getExecutableTool?.(toolName) ?? options.tools.get(toolName));
+	return { tool, preferReplace };
 }
 
 function formatMcpToolErrorMessage(toolName: string, availableTools: string[]): string {
@@ -440,14 +640,19 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * large file never advances. Composed with the same helper, so both frames
 	 * translate a range identically.
 	 */
-	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0]) {
+	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0], frame?: CursorExecFrameContext) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const composed = piReadPath(args.path, args.offset, args.limit);
+		const composed = piReadPath(
+			args.path,
+			await resolveCursorReadOffset(this.options, args.path, args.offset),
+			args.limit,
+		);
 		// A present `limit: 0` asks for zero lines; no selector expresses that.
 		if (composed === null) {
 			return createToolResultMessage(toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
 		}
-		return await executeTool(this.options, "read", toolCallId, { path: composed });
+		const options = frame?.editMaterialization ? withoutEvents(this.options) : this.options;
+		return await executeTool(options, "read", toolCallId, { path: composed });
 	}
 
 	async ls(args: Parameters<NonNullable<ICursorExecHandlers["ls"]>>[0]) {
@@ -466,23 +671,45 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async grep(args: Parameters<NonNullable<ICursorExecHandlers["grep"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
-		const toolResultMessage = await executeTool(this.options, "grep", toolCallId, {
-			pattern: args.pattern,
-			path: searchPath,
-			case: args.caseInsensitive === true ? false : undefined,
-			skip: piGrepSkip(args.offset),
+		const scoped = this.options.createGrepTool?.({
+			contextBefore: args.contextBefore ?? args.context ?? 0,
+			contextAfter: args.contextAfter ?? args.context ?? 0,
 		});
+		const toolResultMessage = await executeTool(
+			this.options,
+			"grep",
+			toolCallId,
+			{
+				pattern: args.pattern,
+				path: searchPath,
+				case: args.caseInsensitive === true ? false : undefined,
+				skip: piGrepSkip(args.offset),
+			},
+			scoped,
+		);
 		return toolResultMessage;
 	}
 
-	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0]) {
+	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0], frame?: CursorExecFrameContext) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
+		if (frame?.editMaterialization) return await materializeEdit(this.options, toolCallId, args.path, content);
 		const toolResultMessage = await executeTool(this.options, "write", toolCallId, {
 			path: args.path,
 			content,
 		});
 		return toolResultMessage;
+	}
+
+	/** Ends the live card of a native StrReplace or Write the server completed without writing. */
+	editSettled(result: ToolResultMessage): void {
+		this.options.emitEvent?.({
+			type: "tool_execution_end",
+			toolCallId: result.toolCallId,
+			toolName: "edit",
+			result: { content: sanitizedContent(result.content), details: result.details },
+			isError: result.isError,
+		});
 	}
 
 	async delete(args: Parameters<NonNullable<ICursorExecHandlers["delete"]>>[0]) {
@@ -493,7 +720,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	async shell(args: Parameters<NonNullable<ICursorExecHandlers["shell"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const timeoutSeconds = args.timeout && args.timeout > 0 ? args.timeout : undefined;
+		const timeoutSeconds = shellDeadlineSeconds(args);
 		const toolResultMessage = await executeTool(this.options, "bash", toolCallId, {
 			command: args.command,
 			cwd: args.workingDirectory || undefined,
@@ -510,11 +737,10 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolName = "bash";
 		const tool = this.options.tools.get(toolName);
 		if (!tool) {
-			const result = buildToolErrorResult(`Tool "${toolName}" not available`);
-			return createToolResultMessage(toolCallId, toolName, result, true);
+			return buildUnavailableToolResult(this.options, toolCallId, toolName);
 		}
 
-		const timeoutSeconds = args.timeout && args.timeout > 0 ? args.timeout : undefined;
+		const timeoutSeconds = shellDeadlineSeconds(args);
 		const toolArgs = omitUndefinedArgs({
 			command: args.command,
 			cwd: args.workingDirectory || undefined,
@@ -565,8 +791,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			canStreamSanitizedDelta = false;
 		};
 
+		const bridgeContext = createBridgeToolContext(this.options);
 		try {
-			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, this.options.getToolContext?.());
+			const validatedArgs = validateAgentToolArguments(tool, {
+				type: "toolCall",
+				id: toolCallId,
+				name: toolName,
+				arguments: toolArgs,
+			});
+			result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result = buildToolErrorResult(message);
@@ -600,7 +833,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			result: sanitizedFinalResult,
 			isError,
 		});
-		return createToolResultMessage(toolCallId, toolName, result, isError);
+		return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
 	}
 
 	async diagnostics(args: Parameters<NonNullable<ICursorExecHandlers["diagnostics"]>>[0]) {
@@ -629,14 +862,14 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async piRead(call: Parameters<NonNullable<ICursorExecHandlers["piRead"]>>[0]) {
 		const { path: readPath, offset, limit } = call.args;
-		const composed = piReadPath(readPath, offset, limit);
+		const composed = piReadPath(readPath, await resolveCursorReadOffset(this.options, readPath, offset), limit);
 		// A present `limit: 0` asks for zero lines. The reference slices an empty
 		// string for it; no `read` selector expresses that, so answer directly
 		// rather than falling back to a whole-file read.
 		if (composed === null) {
 			return createToolResultMessage(call.toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
 		}
-		return await executeTool(this.options, "read", call.toolCallId, { path: composed });
+		return await executeTool(this.options, "read", call.toolCallId, { path: cursorRawReadPath(composed) });
 	}
 
 	async piBash(call: Parameters<NonNullable<ICursorExecHandlers["piBash"]>>[0]) {
@@ -784,7 +1017,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		downloadPath?: string;
 	}): Promise<CursorMcpResourceContent | null> {
 		if (downloadPath) {
-			if (this.options.allowDirectFileMutation === false) {
+			if (!allowsDirectFileMutation(this.options)) {
 				throw new Error('Tool "write" not available: this session cannot download resources to disk.');
 			}
 			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);
@@ -861,8 +1094,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * feeds `details.phases` straight into `setTodos`, so echoing the current list
 	 * back would let a call that changed nothing overwrite live UI state.
 	 */
-	todoSync(snapshot: CursorTodoSnapshot | null, toolCallId: string, error: string | null = null): ToolResultMessage {
-		const setPhases = this.options.setTodoPhases;
+	todoSync(
+		snapshot: CursorTodoSnapshot | null,
+		toolCallId: string,
+		error: string | null = null,
+		origin: "read" | "update" = "update",
+	): ToolResultMessage {
+		const commitPhases = this.options.commitTodoPhases;
 		const existing = this.options.getTodoPhases?.() ?? [];
 
 		// Mirroring is gated on having both a snapshot and somewhere to put it.
@@ -870,7 +1108,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// only on a matching `tool_execution_end`, so a refusal, a server error,
 		// or a host with no local todo state must still resolve it.
 		let phases: TodoPhase[] | undefined;
-		if (snapshot && setPhases) {
+		if (snapshot && commitPhases) {
 			const phaseByContent = new Map<string, string>();
 			for (const phase of existing) {
 				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
@@ -896,9 +1134,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				grouped.delete(phase.name);
 			}
 			for (const [name, tasks] of grouped) next.push({ name, tasks });
-			setPhases(next);
-			this.options.persistTodoPhases?.(next);
-			phases = next;
+			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
+				phases = undefined;
+			} else {
+				commitPhases(next);
+				phases = next;
+			}
 		}
 
 		const result = buildTodoSyncResult(toolCallId, phases, error);
@@ -925,17 +1166,16 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async mcp(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
-		if (cursorMcpPrefersReplaceEdit(toolName, args)) {
-			const replaceTool = this.options.getEditReplaceTool?.();
-			if (!replaceTool) {
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
+		if (preferReplace) {
+			if (!tool) {
 				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 				const message = formatMcpToolErrorMessage(toolName, availableTools);
 				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 			}
-			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
+			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), tool);
 		}
-		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 			const message = formatMcpToolErrorMessage(toolName, availableTools);
@@ -948,6 +1188,23 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	}
 
 	/**
+	 * Order an MCP call by the tool it will run.
+	 *
+	 * The bridge executes tools directly, bypassing the agent loop's batch
+	 * scheduler, so without this an exclusive tool (`edit`, `write`, …)
+	 * arriving as MCP races the frames around it: a later shell can read the
+	 * file before the edit lands, and the edit can start before an earlier
+	 * read finishes. An unknown tool executes nothing and stays shared.
+	 */
+	mcpConcurrency(call: CursorMcpCall): "shared" | "exclusive" {
+		const toolName = call.toolName || call.name;
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
+		if (!tool) return "shared";
+		return resolveToolConcurrency(tool, preferReplace ? normalizeCursorReplaceArgs(args) : args);
+	}
+
+	/**
 	 * Resolve an MCP call's approval without running it.
 	 *
 	 * Same resolution the wrapper applies at execution time, minus the
@@ -957,21 +1214,18 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async mcpApprovalPreflight(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
-		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
-		const tool = preferReplace
-			? this.options.getEditReplaceTool?.()
-			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
-		const settings = context?.settings;
-		const approvalMode: ApprovalMode =
-			context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
 		const approval = resolveApproval(
 			tool,
 			preferReplace ? normalizeCursorReplaceArgs(args) : args,
 			approvalMode,
-			(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+			userPolicies,
+			getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
+			approvalRestrictions(context?.settings, this.options.getCwd?.() ?? this.options.cwd),
 		);
 		return approval.policy === "allow";
 	}

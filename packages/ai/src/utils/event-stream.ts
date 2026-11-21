@@ -1,9 +1,32 @@
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent } from "../types";
 
+/** Anything a stream watchdog can consult for in-flight consumer-side local work. */
+export interface LocalWorkSource {
+	readonly hasPendingLocalWork: boolean;
+	/**
+	 * Epoch ms at which tracked local work last drained to zero, or 0 if none
+	 * has completed. The provider cannot answer until it receives the local
+	 * result, so idle watchdogs measure provider silence from this instant.
+	 */
+	readonly localWorkSettledAt: number;
+}
+
+/** Consumed head slots tolerated before the backlog is compacted (see {@link EventStream.queue}). */
+const QUEUE_COMPACT_MIN_HEAD = 64;
+
 // Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
+	/**
+	 * Events pushed while no consumer was waiting. The iterator dequeues by
+	 * advancing {@link #queueHead} instead of `shift()` — O(remaining) per event,
+	 * quadratic for a consumer draining a backlog — so while it drains, the
+	 * slots before the head are consumed (cleared) placeholders. Do not mutate
+	 * the array while the stream is being iterated.
+	 */
 	queue: T[] = [];
+	/** Index of the next undelivered event in {@link queue}; 0 whenever the queue is empty. */
+	#queueHead = 0;
 	waiting: Array<{ resolve: (value: IteratorResult<T>) => void; reject: (err: unknown) => void }> = [];
 	done = false;
 	/** True once finalResultPromise has been resolved or rejected. */
@@ -18,6 +41,14 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	 * not a provider stall; idle watchdogs consult {@link hasPendingLocalWork}.
 	 */
 	#pendingLocalWork = 0;
+	#localWorkSettledAt = 0;
+	/**
+	 * A downstream stream whose local work also counts as ours — set when this
+	 * stream forwards another stream's events (e.g. the Cursor discovered-id
+	 * retry drains an inner stream), so the watchdog on this stream sees the
+	 * inner exec bridge's busy state instead of aborting a healthy tool run.
+	 */
+	#localWorkDelegate: LocalWorkSource | undefined;
 	finalResultPromise: Promise<R>;
 	resolveFinalResult!: (result: R) => void;
 	rejectFinalResult!: (err: unknown) => void;
@@ -103,10 +134,34 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		}
 	}
 
+	/**
+	 * Take the event at the queue head. Clears the consumed slot so it stops
+	 * retaining the event, resets the queue once drained, and compacts it once
+	 * consumed slots are at least half of it (amortized O(1) per event).
+	 */
+	#dequeue(): T {
+		const queue = this.queue;
+		const head = this.#queueHead;
+		const event = queue[head];
+		if (head + 1 === queue.length) {
+			queue.length = 0;
+			this.#queueHead = 0;
+			return event;
+		}
+		// The slot is dead once the head moves past it; `undefined` only drops the reference.
+		queue[head] = undefined as T;
+		this.#queueHead = head + 1;
+		if (this.#queueHead >= QUEUE_COMPACT_MIN_HEAD && this.#queueHead * 2 >= queue.length) {
+			queue.splice(0, this.#queueHead);
+			this.#queueHead = 0;
+		}
+		return event;
+	}
+
 	async *[Symbol.asyncIterator](): AsyncIterator<T> {
 		while (true) {
-			if (this.queue.length > 0) {
-				yield this.queue.shift()!;
+			if (this.#queueHead < this.queue.length) {
+				yield this.#dequeue();
 			} else if (this.#failed) {
 				throw this.#error;
 			} else if (this.done) {
@@ -125,9 +180,24 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		return this.finalResultPromise;
 	}
 
-	/** True while local work tracked via {@link trackLocalWork} is pending. */
+	/** True while local work tracked via {@link trackLocalWork} — on this stream or a forwarded delegate — is pending. */
 	get hasPendingLocalWork(): boolean {
-		return this.#pendingLocalWork > 0;
+		return this.#pendingLocalWork > 0 || (this.#localWorkDelegate?.hasPendingLocalWork ?? false);
+	}
+
+	/** Latest {@link LocalWorkSource.localWorkSettledAt} across this stream and a forwarded delegate. */
+	get localWorkSettledAt(): number {
+		return Math.max(this.#localWorkSettledAt, this.#localWorkDelegate?.localWorkSettledAt ?? 0);
+	}
+
+	/**
+	 * Count `source`'s pending local work as this stream's own. Used when this
+	 * stream forwards another's events (Cursor discovered-id retry) so the
+	 * watchdog does not abort a live tool run happening on the inner stream.
+	 * Pass `undefined` to detach once forwarding ends.
+	 */
+	forwardLocalWorkFrom(source: LocalWorkSource | undefined): void {
+		this.#localWorkDelegate = source;
 	}
 
 	/**
@@ -140,6 +210,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			return await work;
 		} finally {
 			this.#pendingLocalWork--;
+			if (this.#pendingLocalWork === 0) this.#localWorkSettledAt = Date.now();
 		}
 	}
 }

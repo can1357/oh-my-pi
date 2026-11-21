@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { clearCopilotIntegrationCache } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 afterEach(() => {
+	clearCopilotIntegrationCache();
 	vi.restoreAllMocks();
 });
 
@@ -79,6 +81,47 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 		expect(requestedUrls[0]).toBe("https://api.githubcopilot.com/chat/completions");
 	});
 
+	it("sends an explicit caller integration id on chat completions", async () => {
+		const requestedIntegrationIds: (string | null)[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			requestedIntegrationIds.push(getRequestHeader(input, init, "Copilot-Integration-Id"));
+			return createUnauthorizedResponse();
+		});
+
+		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+			headers: { "Copilot-Integration-Id": "vscode-chat" },
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(requestedIntegrationIds.length).toBeGreaterThan(0);
+		expect(requestedIntegrationIds.every(id => id === "vscode-chat")).toBe(true);
+	});
+
+	it("retries a denied chat-surface request once as the Copilot CLI", async () => {
+		const seenIntegrationIds: (string | null)[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			seenIntegrationIds.push(getRequestHeader(input, init, "Copilot-Integration-Id"));
+			return new Response(JSON.stringify({ error: { message: "denied" } }), {
+				status: 403,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(seenIntegrationIds).toEqual(["copilot-chat", "copilot-developer-cli"]);
+		expect(result.errorMessage).toContain("GitHub Copilot access denied (HTTP 403)");
+	});
+
 	it("uses model baseUrl for responses API", async () => {
 		const requestedUrls: string[] = [];
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
@@ -115,7 +158,69 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain('not available for integrator "opencode"');
 		expect(result.errorMessage).toContain("Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]");
-		expect(result.errorMessage).not.toContain("only part of its fleet");
+	});
+
+	it("retries a chat-surface model_not_supported once as the Copilot CLI and succeeds", async () => {
+		const seenIntegrationIds: (string | null)[] = [];
+		let calls = 0;
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			calls++;
+			seenIntegrationIds.push(getRequestHeader(input, init, "Copilot-Integration-Id"));
+			if (calls === 1) {
+				return new Response(
+					JSON.stringify({
+						error: {
+							message: "The requested model is not supported.",
+							code: "model_not_supported",
+							param: "model",
+							type: "invalid_request_error",
+						},
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return createUnauthorizedResponse();
+		});
+
+		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(seenIntegrationIds).toEqual(["copilot-chat", "copilot-developer-cli"]);
+		// Second attempt returns 401 here (mock), proving the CLI retry fired
+		// rather than the terminal 400 being surfaced after one request.
+		expect(result.errorStatus).toBe(401);
+	});
+
+	it("surfaces model_not_supported terminally when the CLI retry stays denied", async () => {
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: {
+							message: "The requested model is not supported.",
+							code: "model_not_supported",
+							param: "model",
+							type: "invalid_request_error",
+						},
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				),
+		);
+
+		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(result.errorMessage).toContain("The requested model is not supported.");
 	});
 
 	it("omits OpenAI priority service tier while native OpenAI keeps it", async () => {
@@ -144,9 +249,11 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 	it("routes structured enterprise credentials to the enterprise chat completions host", async () => {
 		const requestedUrls: string[] = [];
 		const requestedAuthHeaders: Array<string | null> = [];
+		const requestedIntegrationIds: Array<string | null> = [];
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			requestedUrls.push(getRequestUrl(input));
 			requestedAuthHeaders.push(getRequestHeader(input, init, "Authorization"));
+			requestedIntegrationIds.push(getRequestHeader(input, init, "Copilot-Integration-Id"));
 			return createUnauthorizedResponse();
 		});
 
@@ -159,14 +266,17 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://copilot-api.ghe.example.com/chat/completions");
 		expect(requestedAuthHeaders[0]).toBe(`Bearer ${testToken}`);
+		expect(requestedIntegrationIds[0]).toBe("copilot-developer-cli");
 	});
 
 	it("routes structured business credentials to the business chat completions host", async () => {
 		const requestedUrls: string[] = [];
 		const requestedAuthHeaders: Array<string | null> = [];
+		const requestedIntegrationIds: Array<string | null> = [];
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			requestedUrls.push(getRequestUrl(input));
 			requestedAuthHeaders.push(getRequestHeader(input, init, "Authorization"));
+			requestedIntegrationIds.push(getRequestHeader(input, init, "Copilot-Integration-Id"));
 			return createUnauthorizedResponse();
 		});
 
@@ -179,6 +289,7 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://api.business.githubcopilot.com/chat/completions");
 		expect(requestedAuthHeaders[0]).toBe(`Bearer ${testToken}`);
+		expect(requestedIntegrationIds[0]).toBe("copilot-chat");
 	});
 
 	it("routes structured enterprise credentials to the enterprise responses host", async () => {
@@ -255,5 +366,56 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedInitiators[0]).toBe("agent");
+	});
+});
+
+describe("GitHub Copilot working-identity cache across streams", () => {
+	function chatCompletionsSse(): Response {
+		const chunk = (delta: unknown, finishReason: string | null) =>
+			JSON.stringify({
+				id: "chatcmpl-working-shape",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: "gpt-4o",
+				choices: [{ index: 0, delta, finish_reason: finishReason }],
+			});
+		return new Response(
+			`data: ${chunk({ role: "assistant", content: "ok" }, null)}\n\ndata: ${chunk({}, "stop")}\n\ndata: [DONE]\n\n`,
+			{ status: 200, headers: { "content-type": "text/event-stream" } },
+		);
+	}
+
+	it("starts the second stream at the learned CLI shape without a chat denial", async () => {
+		const cacheApiKey = "ghu_test_working_shape_transport";
+		const seenIntegrationIds: (string | null)[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const integrationId = getRequestHeader(input, init, "Copilot-Integration-Id");
+			seenIntegrationIds.push(integrationId);
+			if (integrationId === "copilot-chat") {
+				return new Response(JSON.stringify({ error: { message: "denied" } }), {
+					status: 403,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return chatCompletionsSse();
+		});
+
+		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
+		const first = await streamOpenAICompletions(model, testContext, {
+			apiKey: cacheApiKey,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(first.stopReason).toBe("stop");
+		expect(seenIntegrationIds).toEqual(["copilot-chat", "copilot-developer-cli"]);
+
+		const second = await streamOpenAICompletions(model, testContext, {
+			apiKey: cacheApiKey,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(second.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+		expect(seenIntegrationIds).toEqual(["copilot-chat", "copilot-developer-cli", "copilot-developer-cli"]);
 	});
 });

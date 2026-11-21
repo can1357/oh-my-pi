@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { assignLockFilesToPlan, EXCLUDED_LOCK_FILES, LOCK_FILE_MANIFESTS } from "../src/commit/agentic/lock-files";
+import { assignLockFilesToPlan } from "../src/commit/agentic/lock-files";
 import type { SplitCommitPlan } from "../src/commit/agentic/state";
 
 /**
@@ -14,7 +14,7 @@ function plan(...commits: Array<{ paths: string[] }>): SplitCommitPlan {
 	return {
 		warnings: [],
 		commits: commits.map(commit => ({
-			changes: commit.paths.map(path => ({ path, hunks: { type: "all" } })),
+			changes: commit.paths.map(path => ({ path, kind: "all" })),
 			type: "chore",
 			scope: null,
 			summary: "test",
@@ -80,11 +80,5 @@ describe("assignLockFilesToPlan", () => {
 		const target: SplitCommitPlan = { commits: [], warnings: [] };
 		assignLockFilesToPlan(target, ["uv.lock"]);
 		expect(target.commits).toEqual([]);
-	});
-
-	it("keeps EXCLUDED_LOCK_FILES in sync with LOCK_FILE_MANIFESTS", () => {
-		const manifestKeys = new Set<string>();
-		for (const key in LOCK_FILE_MANIFESTS) manifestKeys.add(key);
-		expect(new Set(EXCLUDED_LOCK_FILES)).toEqual(manifestKeys);
 	});
 });

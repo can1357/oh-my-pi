@@ -1,11 +1,10 @@
-import type { TodoPhase } from "../../tools/todo";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import {
 	applyOpsToPhases,
 	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
-	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
@@ -96,8 +95,7 @@ function currentPhases(runtime: SlashCommandRuntime): TodoPhase[] {
 }
 
 function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[]): void {
-	runtime.session.setTodoPhases(phases);
-	runtime.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+	runtime.session.commitTodoPhases(phases);
 }
 
 const TODO_HELP_TEXT = [
@@ -105,6 +103,8 @@ const TODO_HELP_TEXT = [
 	"  /todo                              Show current todos",
 	"  /todo edit                         (TUI only) open in $EDITOR",
 	"  /todo copy                         Print todos as Markdown",
+	"  /todo expand                       (TUI only) expand the sticky HUD",
+	"  /todo collapse                     (TUI only) collapse the sticky HUD",
 	"  /todo export [<path>]              Write todos to file (default: TODO.md)",
 	"  /todo import [<path>]              Replace todos from file (default: TODO.md)",
 	"  /todo append [<phase>] <task...>   Append a task",
@@ -275,6 +275,9 @@ export async function handleTodoAcp(
 				"/todo edit requires the TUI editor; use /todo export then /todo import for non-interactive edits.",
 				runtime,
 			);
+		case "expand":
+		case "collapse":
+			return usage(`/todo ${verb} controls the interactive HUD and is unavailable in this mode.`, runtime);
 		case "help":
 		case "?":
 			await runtime.output(TODO_HELP_TEXT);

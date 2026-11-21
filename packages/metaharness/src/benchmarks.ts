@@ -1,6 +1,7 @@
 /** Benchmark adapters normalize native artifacts into manager runs and traces. */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { conversationDumpRelativePath } from "../adapters/edit/dump-path";
 import { aggregate, readJobResult, readTrials } from "./runner";
 import type { BenchmarkKind } from "./store";
 
@@ -163,7 +164,7 @@ function readEditSnapshot(jobDir: string): BenchmarkSnapshot {
 				costUsd: 0,
 				durationMs: run.duration,
 				detail: JSON.stringify({ name: task.name, error: run.error ?? null, tools: run.toolCalls ?? null }),
-				tracePath: path.join("result.dump", task.id.replace(/[^a-zA-Z0-9._-]/g, "_"), `run-${runNumber}.md`),
+				tracePath: path.join("result.dump", conversationDumpRelativePath(task.id, runNumber)),
 			});
 		}
 	}
@@ -198,18 +199,16 @@ function readSnapcompactSnapshot(jobDir: string): BenchmarkSnapshot {
 		.split("\n")
 		.filter(Boolean)
 		.map(line => JSON.parse(line) as SnapRecord);
-	const traces = records.map(
-		(record, index): BenchmarkTrace => ({
-			name: `${record.cond}__${record.chunk}__${index + 1}`,
-			task: `${record.cond}:${record.chunk}`,
-			status: record.f1 > 0 ? "pass" : "fail",
-			reward: record.f1,
-			costUsd: 0,
-			durationMs: 0,
-			detail: JSON.stringify({ question: record.q, answer: record.answer, golds: record.golds, em: record.em }),
-			tracePath: `record:${index + 1}`,
-		}),
-	);
+	const traces = records.map((record, index): BenchmarkTrace => ({
+		name: `${record.cond}__${record.chunk}__${index + 1}`,
+		task: `${record.cond}:${record.chunk}`,
+		status: record.f1 > 0 ? "pass" : "fail",
+		reward: record.f1,
+		costUsd: 0,
+		durationMs: 0,
+		detail: JSON.stringify({ question: record.q, answer: record.answer, golds: record.golds, em: record.em }),
+		tracePath: `record:${index + 1}`,
+	}));
 	let rows: SnapSummaryRow[] = [];
 	if (fs.existsSync(summaryFile)) {
 		const summary: SnapSummary = JSON.parse(fs.readFileSync(summaryFile, "utf8"));

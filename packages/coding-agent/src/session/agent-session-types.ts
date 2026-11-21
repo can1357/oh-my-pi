@@ -5,8 +5,10 @@ import type {
 	AgentToolContext,
 	StreamFn,
 	ThinkingLevel,
+	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	AssistantMessage,
 	Context,
 	Effort,
 	ImageContent,
@@ -19,23 +21,42 @@ import type {
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "../advisor";
-import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager, AsyncJobManagerApi } from "../async";
+import type { EffectiveExtensionRoots } from "../capability/types";
+import type { AgentDefinition } from "../task/types";
+import type { AgentRegistryApi } from "../registry/agent-registry";
+import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
-import type { Settings, SkillsSettings } from "../config/settings";
+import type { Settings } from "../config/settings";
+import type { SkillsSettings } from "../extensibility/settings";
 import type { CursorMcpResourceAdapter } from "../cursor";
-import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
+import type { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
+import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
-import type { ExtensionRunner } from "../extensibility/extensions";
+import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
+import type { MCPLoadResult } from "../mcp";
+import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
+import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
+import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import type { ConfiguredThinkingLevel } from "../thinking";
-import type { XdevState } from "../tools/xdev";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ShellStream } from "@oh-my-pi/pi-tui/tools/shell-steps";
+import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { ShellTrace } from "@oh-my-pi/pi-wire";
+import type { SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import type { ToolSession } from "../tools";
+import type { ToolCommandState } from "../tools/tool-commands";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { SettingsGatedToolDelta, SystemPromptRebuilder } from "./session-tools";
+import type { AdvisorToolFactory } from "./session-advisors";
+import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -54,7 +75,11 @@ export interface AgentSessionDisposeOptions {
 	 * Postmortem reason that triggered this dispose (signal/fatal teardown
 	 * paths). When set, the persisted `session_exit` diagnostic records it
 	 * instead of the generic `"dispose"` used for normal programmatic disposal
-	 * (`/quit`, test teardown, subagent completion).
+	 * (`/quit`, test teardown, subagent completion). A reason that ends the process
+	 * under the turn (`EXIT`, also a subagent cut off by its owner's shutdown;
+	 * `SIGTERM`/`SIGHUP` from the host, such as a terminal restarting; a fatal
+	 * error) additionally records a turn still in flight as interrupted, so
+	 * `omp --restore` goes on with it. `SIGINT` and `MANUAL` stop it, as a quit does.
 	 */
 	reason?: postmortem.Reason;
 }
@@ -62,13 +87,55 @@ export interface AgentSessionDisposeOptions {
 /** Listener notified when command metadata changes. */
 export type CommandMetadataChangedListener = () => void | Promise<void>;
 /** Public summary of an asynchronous job. */
-export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "label" | "startTime">;
+export type AsyncJobSnapshotItem = Pick<
+	AsyncJob,
+	"id" | "type" | "status" | "label" | "intent" | "startTime" | "endTime" | "agentId" | "ownerId"
+> & {
+	/** Full command line of a job that runs a process; `label` is cut to 120 characters. */
+	command?: string;
+	/** One line on what the command does and when it ends, while widgets are on (`JobWidgetRegistry.caption`). */
+	caption?: string;
+};
+
+/** One async job as a job inspector (the jobs sheet) shows it beyond its snapshot row. */
+export interface AsyncJobInspection {
+	/** Full command line of a job that runs a process. */
+	command?: string;
+	/** Directory that command started in. */
+	cwd?: string;
+	/** Live pids the job's command spawned. */
+	pids: readonly number[];
+	/** Exit status of a settled command. */
+	exitCode?: number;
+	/** Output tail while running; the final result or error text once settled. */
+	output?: string;
+	/** Milliseconds since the UNIX epoch the command last wrote its own output; undefined before it wrote. */
+	outputModified?: number;
+	/** Artifact holding the full output when `output` is cut. */
+	artifactId?: string;
+	/** The job's live widget (frozen once it settles). */
+	widget?: JobWidgetView;
+	/** The command's shell trace (`AsyncJobProcess.trace`): what of it runs now, ran and failed. */
+	trace?: ShellTrace;
+	/** Where the command's output goes besides `output`: its tapped pipes and redirected files, oldest first. */
+	streams?: readonly ShellStream[];
+}
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */
 export interface AsyncJobSnapshot {
 	running: AsyncJobSnapshotItem[];
 	recent: AsyncJobSnapshotItem[];
 	delivery: AsyncJobDeliveryState;
+}
+
+/** Jobs of an agent and every subagent below it, with the lineage that nests them (see `AgentSession.getAsyncJobTree`). */
+export interface AsyncJobTree {
+	running: AsyncJobSnapshotItem[];
+	recent: AsyncJobSnapshotItem[];
+	/** The agent the tree is for; its own jobs are the top level. */
+	rootId?: string;
+	/** Subagents owning listed jobs, with the ancestors linking them to the root. */
+	agents: { id: string; parentId?: string }[];
 }
 
 export type { ShakeMode, ShakeResult } from "./shake-types";
@@ -121,24 +188,71 @@ export interface InitialRetryFallbackState {
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
-	/** Shared with the provider stream wrapper: current Codex Code Mode tool exposure snapshot for turn metadata. */
-	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
 	settings: Settings;
+	/**
+	 * Live extension-root policy inherited from the owning session. Subagents use
+	 * this provider so explicit roots, discovery mode, configured roots, and
+	 * provenance survive recursive task discovery.
+	 */
+	extensionRoots?: () => EffectiveExtensionRoots;
+	/**
+	 * Parent-imported extension factories rebound to this session's own
+	 * ExtensionAPI. Forwarded by session forks (e.g. `/tan`) so the child
+	 * re-registers the parent's runtime providers before the SDK's
+	 * `syncExtensionSources` prune runs against the shared model registry.
+	 */
+	preparedExtensions?: readonly PreparedExtension[];
+	/**
+	 * Source paths of the parent's loaded extensions. Forwarded alongside
+	 * {@link preparedExtensions} as the fallback the child rebinds from when a
+	 * parent construction path produced no prepared factories (mirrors the task
+	 * subagent forward) — keeps the child from building an empty extension set.
+	 */
+	extensionPaths?: readonly string[];
+	/** Raw SDK `additionalExtensionPaths`; used when no inherited root provider exists. */
+	additionalExtensionPaths?: readonly string[];
+	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */
+	disableExtensionDiscovery?: boolean;
+	/** Cost gate of the session tree; refuses this session's model requests at `session.maxCost`. */
+	costGate?: CostGateApi;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
+	/** User-authorized model agents inherited from the parent session for nested delegation. */
+	inheritedSessionAgents?: readonly AgentDefinition[];
 	/** Models to cycle through with Ctrl+P (from --models flag). */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
+	/**
+	 * Disable retry fallback, context promotion and usage-aware fallback: the turn retries on, or fails
+	 * with, its own model instead. Startup model selection, and the return to the primary after a
+	 * startup fallback, are not affected.
+	 */
+	disableModelFallback?: boolean;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
+	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
+	deferRetryFallbackValidation?: boolean;
+	/**
+	 * Override for the unexpected-stop judge verdict budget. Test seam so the
+	 * slow-verdict boundary runs in milliseconds; production never sets it.
+	 */
+	unexpectedStopJudgeTimeoutMs?: number;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
+	/** Keep `prewalk.auto` away from this session until `/new` (`--no-prewalk`). */
+	suppressAutoPrewalk?: boolean;
+	/**
+	 * Created to run an assignment its owner prompts once setup finishes (task executor spawns).
+	 * Until the first prompt, IRC messages never wake a turn the assignment would miss; see
+	 * `AgentSession.#wakeForIrc`.
+	 */
+	awaitingAssignment?: boolean;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
@@ -149,8 +263,22 @@ export interface AgentSessionConfig {
 	slashCommands?: FileSlashCommand[];
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
+	/**
+	 * Prompt-cache warmer owned by the main agent loop. The session arms it per
+	 * main-loop request, settles it when the agent run finishes, and invalidates
+	 * it when the context changes; side-channel requests never arm it.
+	 */
+	cacheWarmer?: CacheWarmer;
+	/** Returns the current enabled eval prelude definitions. */
+	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
+	/** Tool bridge context used by user-initiated Python cells to project enabled eval preludes. */
+	evalToolSession?: ToolSession;
 	/** Loaded skills already discovered by the SDK. */
 	skills?: Skill[];
+	/** Frozen routing hints shared with the system prompt and later skillful notices. */
+	skillDescriptions?: SkillDescriptionCatalog;
+	/** MCP eval namespace hints; {@link AgentSession.startHintCompression} starts them with the skill hints. */
+	mcpNamespaces?: MCPEvalNamespaceCatalog;
 	/** Skill loading warnings already captured by the SDK. */
 	skillWarnings?: SkillWarning[];
 	/** Whether runtime reloads may rediscover disk-backed skills. */
@@ -158,20 +286,35 @@ export interface AgentSessionConfig {
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
+	/** Whether this session may start memory backends. Defaults to true. */
+	memoryEnabled?: boolean;
 	/** Agent directory used when changing memory backends in a live session. */
 	memoryAgentDir?: string;
 	/** Recursion depth used to suppress live backend replacement in subagents. */
 	memoryTaskDepth?: number;
 	/** Creates built-in memory tools for the current backend. */
 	createMemoryTools?: () => Promise<AgentTool[]>;
-	/** Creates the built-in `computer` tool for session-scoped runtime enablement (see {@link AgentSession.setComputerToolEnabled}). */
-	createComputerTool?: () => Promise<AgentTool | null>;
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
-	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
-	createInspectImageTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
+	/**
+	 * Whether `switchSession` may open a session whose saved models cannot be
+	 * restored, keeping the current model and warning, instead of throwing
+	 * `Could not restore model <provider/id>`. `retry.modelFallback: false`
+	 * still forbids it. `createAgentSession` sets this from `hasUI` and its
+	 * `allowSessionModelFallback` option. Default: false.
+	 */
+	allowSessionModelFallback?: boolean;
+	/**
+	 * `false` when the extension UI context cannot reach a human: ACP installs one
+	 * for every client, but without form elicitation its prompts resolve empty.
+	 * Saved-reset consent then takes its no-prompt-UI path. `createAgentSession`
+	 * passes its `interactivePrompts` option. Default: true.
+	 */
+	interactivePrompts?: boolean;
+	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
+	rebindModelAfterDiscovery?: boolean;
 	/** Tool registry for LSP and settings. */
 	toolRegistry?: Map<string, AgentTool>;
 	/** Creates tools registered only while vibe mode is active. */
@@ -180,23 +323,29 @@ export interface AgentSessionConfig {
 	builtInToolNames?: Iterable<string>;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
+	/** Reconcile browser MCP connections after browser prelude availability changes. */
+	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
-	/** Registers the write transport when runtime xdev mounts first need it. */
-	ensureWriteRegistered?: () => Promise<boolean>;
+	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
+	ensureGoalRegistered?: () => Promise<boolean>;
+	/** Re-resolves settings-gated tools against live settings; driven by `SessionTools.reconcileBuiltinTools`. */
+	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/**
+	 * Builds one advisor's provider request transform. Each advisor is its own
+	 * conversation, so it gets its own transform state (the date/cwd reminder).
+	 * Without it, advisors share {@link transformProviderContext}.
+	 */
+	createAdvisorTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */
 	advisorStreamFn?: StreamFn;
-	/** Advisor spend already recorded for the session being opened, restored on resume. */
-	initialAdvisorCosts?: ReadonlyMap<string, number>;
-	/** Prefer websocket transport for OpenAI Codex requests when supported. */
-	preferWebsockets?: boolean;
-	/** Codex saved-reset coordinator; defaults to the process-wide singleton so concurrent sessions can't double-spend. Inject a fresh one in tests. */
+	/** Shared saved-reset coordinator; defaults process-wide so concurrent Codex/Claude sessions cannot double-spend. Inject a fresh one in tests. */
 	codexResetCoordinator?: CodexAutoRedeemCoordinator;
 	/** Provider payload hook used by the active session request path. */
 	onPayload?: SimpleStreamOptions["onPayload"];
@@ -209,61 +358,56 @@ export interface AgentSessionConfig {
 	/** Current session message-to-LLM conversion pipeline. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
-	rebuildSystemPrompt?: (
-		toolNames: string[],
-		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
-	/** Tools mounted under `xd://`, for `/tools` display. */
-	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
-	/** `xd://` presentation state backed by the canonical tool map. */
-	xdev?: XdevState;
+	rebuildSystemPrompt?: SystemPromptRebuilder;
+	/** Sources of the initial base prompt, as returned by `buildSystemPrompt`. */
+	systemPromptSources?: SystemPromptSources;
+	/** Tools mounted as bash commands, for `/tools` display. */
+	getToolCommandEntries?: () => Array<{ name: string; summary: string }>;
+	/** Tool command presentation state backed by the canonical tool map. */
+	toolCommands?: ToolCommandState;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Whether enabled MCP tools present as eval namespaces (`mcp.evalNamespaces`); read at every apply. */
+	bindsMcpToEval?: () => boolean;
+	/** MCP tools of the initial slate presented as eval namespace methods. */
+	evalBoundToolNames?: Iterable<string>;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** Installs a host-owned MCP instructions source; see {@link AgentSession.setMcpServerInstructionsSource}. */
+	setMcpServerInstructionsSource?: (source: (() => Map<string, string> | undefined) | undefined) => void;
 	/** Time-traveling stream-rule manager. */
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
 	obfuscator?: SecretObfuscator;
-	/** Inherited eval executor session id from a parent agent. */
-	parentEvalSessionId?: string;
 	/** Logical owner for retained eval kernels created by this session. */
 	evalKernelOwnerId?: string;
 	/** Async job manager owned and disposed by this session. */
 	ownedAsyncJobManager?: AsyncJobManager;
 	/** Async job manager visible to this session. */
-	asyncJobManager?: AsyncJobManager;
+	asyncJobManager?: AsyncJobManagerApi;
 	/** Registry identity used for IRC routing. */
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/** Registry whose awaits table records this agent blocked on the user while a dialog waits for their answer. */
+	agentRegistry?: AgentRegistryApi;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
+	/** OAuth account pools enforced on the session's key lookups; the session lifts them on dispose. */
+	accountPoolScope?: SessionAccountPoolScope;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
-	/** Full advisor toolset built against an advisor-scoped tool session. */
-	advisorTools?: AgentTool[];
+	/** Builds each advisor's own tool slate against a tool session no other advisor shares. */
+	advisorTools?: AdvisorToolFactory;
 	/**
-	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
-	 * match cap, against the advisor-scoped tool session. Without it an advisor
-	 * running on Cursor silently drops both fields.
-	 */
-	advisorCreateGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
-	/**
-	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs, against the
-	 * advisor-scoped tool session. The advisor's ordinary instance follows the
-	 * configured `edit.mode` and rejects the frame's `old_string`/`new_string` args.
-	 */
-	advisorCreateEditTool?(): AgentTool | undefined;
-	/**
-	 * The execute-time context the advisor's bridge tools resolve approval from.
+	 * The execute-time context for the advisor's loop and bridge tools.
 	 *
 	 * `ExtensionToolWrapper` reads `tools.approvalMode`, per-tool
 	 * `tools.approval.<tool>` policies and `autoApprove` only from this context;
-	 * with none it defaults to `yolo` with empty policies, so a bridge tool would
-	 * run a native frame the user configured `ask` or `deny` for.
+	 * with none it fails closed to `always-ask` with empty policies (no user
+	 * grant), so a bridge tool that needs a prompt cannot run unattended.
 	 */
-	advisorGetToolContext?: () => AgentToolContext | undefined;
+	advisorGetToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	/**
 	 * The live MCP connections the advisor's Cursor resource frames answer from.
 	 *
@@ -276,26 +420,55 @@ export interface AgentSessionConfig {
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */
 	advisorSharedInstructions?: string;
+	/** Shared non-blocker budget from top-level WATCHDOG.yml maxNotesPerUpdate. */
+	advisorSharedMaxNotesPerUpdate?: number;
 	/** Project context rendered for advisor sessions. */
 	advisorContextPrompt?: string;
+	/** Memory backend developer instructions rendered for advisor sessions. */
+	advisorMemoryPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
-	/** Strip tool descriptions from provider-bound side-request tool specs. */
-	pruneToolDescriptions?: boolean;
+	/** Config problems collected during WATCHDOG.yml discovery. */
+	advisorConfigWarnings?: string[];
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/**
+	 * Reconnect the MCP manager owned by this session against the session's current cwd and
+	 * rebind its tools; serialized. Resolves `undefined` once the session is disposed. Absent
+	 * when the session borrows or disables MCP.
+	 */
+	reloadOwnedMcpServers?: () => Promise<MCPLoadResult | undefined>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
+	/**
+	 * Name the unnamed session from the operator's messages, once each reply
+	 * begins (see `title.generator`). Only the interactive TUI sets this; print,
+	 * RPC, ACP, SDK and subagent sessions stay unnamed. Default: false.
+	 */
+	autoTitle?: boolean;
 }
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
+	/**
+	 * Whether a leading `/` may run an extension or custom TypeScript command
+	 * locally instead of prompting the agent (default: true). Headless task
+	 * drivers disable it so an assignment is always delivered to the model.
+	 */
+	runCommands?: boolean;
+	/**
+	 * Reject with `PromptDroppedError` when the prompt is dropped before
+	 * reaching the agent, instead of resolving `true` (default: false).
+	 */
+	throwOnDrop?: boolean;
 	/** Image attachments. */
 	images?: ImageContent[];
-	/** Queue behavior while streaming. */
-	streamingBehavior?: "steer" | "followUp";
+	/** Queue behavior while streaming. `"aside"` is non-interrupting — it does not steer/follow-up
+	 *  an in-flight tool batch, injecting at the next step boundary instead (see
+	 *  AgentSession.sendUserMessage's `deliverAs: "aside"`). */
+	streamingBehavior?: "steer" | "followUp" | "aside";
 	/** Optional tool choice override for the next LLM call. */
 	toolChoice?: ToolChoice;
 	/** Send as a developer/system message instead of user. */
@@ -306,16 +479,53 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
+	solutionSpace?: string;
+	/**
+	 * Called synchronously once this prompt is admitted: idle, at the start of
+	 * #promptWithMessage's own turn setup (before preflight, image
+	 * normalization, or provider dispatch); while streaming, once the message
+	 * is pushed onto its steer/follow-up/aside queue (after image
+	 * normalization and vision-description preprocessing for that prompt); or
+	 * is routed to an extension command, before its handler runs. Admission is
+	 * not proof that a model call will occur. A prompt dropped, cancelled, or
+	 * failed before admission still only settles through the returned promise.
+	 */
+	onPromptAdmitted?: () => void;
+	/**
+	 * Called synchronously when this prompt is pushed onto the steer or
+	 * follow-up queue, just before {@link onPromptAdmitted}, with the messages it
+	 * pushed (its hidden companions, then the prompt), so a caller can tell them
+	 * from other queued work. Not called when the prompt starts its own turn or
+	 * is queued as an aside.
+	 */
+	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
+	/**
+	 * Text prompts that must run after this one, in order. The session holds them off the
+	 * queue until this prompt reaches the agent (its run goes live, it lands on a queue, or an
+	 * extension or custom command finishes handling it), then queues them right behind it, so
+	 * no drain or other run can deliver them first. If this prompt never gets there (dropped,
+	 * refused, its setup throws, or its extension command fails), they are reported with it in
+	 * {@link DroppedPrompt.followUps}. An extension command among them rejects the whole
+	 * prompt before anything is sent.
+	 */
+	followUps?: readonly string[];
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
  *  before it reached the agent (an abort or usage preflight denial raced turn
- *  setup), so it was never persisted to the session. */
+ *  setup), so it was never persisted to the session. A prompt carrying
+ *  {@link PromptOptions.followUps} is also reported when its setup throws or the
+ *  extension command it ran fails, so the follow-ups are never lost with it. */
 export interface DroppedPrompt {
 	/** The prompt exactly as typed, before template/command expansion. */
 	text: string;
 	/** Image attachments submitted with the prompt. */
 	images?: ImageContent[];
+	/** Why the session refused it (e.g. the cost cap), for hosts to show beside the restored text; absent for an abort. */
+	reason?: string;
+	/** {@link PromptOptions.followUps} that were never sent, in order. */
+	followUps?: string[];
 }
 
 /** Options for AgentSession.followUp(). */
@@ -326,18 +536,24 @@ export interface FollowUpOptions {
 	expandPromptTemplates?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Called synchronously with the messages pushed onto the follow-up queue. See {@link PromptOptions.onPromptQueued}. */
+	onPromptQueued?: PromptOptions["onPromptQueued"];
 }
 
-/** Result from a handoff operation. */
-export interface HandoffResult {
-	document: string;
-	savedPath?: string;
+/** Options for AgentSession.steer(). */
+export interface SteerOptions {
+	/** Explicit billing/initiator attribution. */
+	attribution?: MessageAttribution;
+	/** Called synchronously with the messages pushed onto the steering queue. See {@link PromptOptions.onPromptQueued}. */
+	onPromptQueued?: PromptOptions["onPromptQueued"];
 }
 
-/** Options controlling handoff generation. */
-export interface SessionHandoffOptions {
-	autoTriggered?: boolean;
-	signal?: AbortSignal;
+/** Options for AgentSession.sendUserMessage(). */
+export interface SendUserMessageOptions {
+	/** Queue behavior; omitted starts a turn when idle and steers while streaming. */
+	deliverAs?: "steer" | "followUp" | "aside";
+	/** Explicit billing/initiator attribution. */
+	attribution?: MessageAttribution;
 }
 
 /** Result from cycleModel(). */
@@ -355,13 +571,8 @@ export interface RoleModelCycleResult {
 	role: string;
 }
 
-/** A configured role resolved to a concrete model. */
-export interface ResolvedRoleModel {
-	role: string;
-	model: Model;
-	thinkingLevel?: ConfiguredThinkingLevel;
-	explicitThinkingLevel: boolean;
-}
+import type { ResolvedRoleModel } from "@oh-my-pi/pi-tui/overlays/model-picker";
+export type { ResolvedRoleModel } from "@oh-my-pi/pi-tui/overlays/model-picker";
 
 /** Resolvable role models and the currently active index. */
 export interface RoleModelCycle {
@@ -377,6 +588,7 @@ export interface ContextUsageBreakdown {
 	systemPromptTokens: number;
 	systemToolsTokens: number;
 	systemContextTokens: number;
+	instructionFilesTokens: number;
 	skillsTokens: number;
 	messagesTokens: number;
 }
@@ -400,6 +612,15 @@ export interface SessionStats {
 	};
 	premiumRequests: number;
 	cost: number;
+	credits?: {
+		cost: number;
+		committedCost: number;
+		acuCost: number;
+	};
+	/** Concrete provider-routed model ids with finalized turn counts. */
+	routedModels?: Record<string, number>;
+	/** Failed edits by the engine's `errorKind`. */
+	editRejections?: Record<string, number>;
 	contextUsage?: ContextUsage;
 }
 
@@ -424,3 +645,49 @@ export interface ResetSessionContextResult {
 
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+
+/** A queued message the dequeue key took back, tagged with the queue it left so the editor can restore its delivery. */
+export type DequeuedMessage = RestoredQueuedMessage & { queue: "steering" | "followUp" };
+
+/** Options for the same ephemeral side turn used by /btw. */
+export interface EphemeralTurnOptions {
+	promptText: string;
+	/** Images sent with `promptText`, normalized for the model like a prompt's attachments. */
+	promptImages?: ImageContent[];
+	/** Detached prior side-turn messages to prepend to this request. They are copied and never appended to the session history. */
+	history?: readonly Message[];
+	/** Opaque provider-lineage key for a series of related side turns. Rotate it after cancellation or failure before retrying. */
+	conversationKey?: string;
+	/** Omit tool definitions and request no tool calls. Rejects before inference on transports with mandatory native tools (Cursor). Tool calls are never executed, even when this option is omitted. */
+	tools?: false;
+	/** Optional positive safe-integer output-token cap. Transports that omit or overwrite caller output limits reject this option before inference. On budget-thinking models a cap disables optional thinking (models that require it reject the cap). */
+	maxTokens?: number;
+	/** Run at the model's lowest effort where the provider carries the change as a per-message control that keeps the prompt cache (Anthropic per-message effort, OpenAI `configuration_update`) and the session thinks. Elsewhere the session's reasoning applies, since changing request-level reasoning forfeits the cache. */
+	minimizeEffort?: boolean;
+	/** Positive safe-integer UTF-8 byte cap. Reject before inference when the serialized post-transform, secret-obfuscated provider context exceeds it. Measured before `before_provider_request` hooks; payload replacements are not re-measured. */
+	maxContextBytes?: number;
+	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
+	onTextDelta?: (delta: string) => void | Promise<void>;
+	/**
+	 * Receives the provider's message for every side turn it billed, as soon as the
+	 * provider settles it (including an error event that never returns a reply), so
+	 * off-transcript callers can journal the spend. A throw is logged, never surfaced.
+	 */
+	onUsage?: (message: AssistantMessage) => void;
+	/**
+	 * Names the turn in the session journal (`recap`, `btw`). When set and no
+	 * `onUsage` is given, every billed attempt is written as a `model_usage` entry
+	 * with its reply; the prompt is left out, since the turn reads the conversation.
+	 */
+	purpose?: string;
+	signal?: AbortSignal;
+	dedupeReply?: boolean;
+	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */
+	replyMaxBytes?: number;
+}
+
+/** A side-turn response that is not appended to session history. */
+export interface EphemeralTurnResult {
+	replyText: string;
+	assistantMessage: AssistantMessage;
+}

@@ -75,7 +75,15 @@ const NONBLANK_EMPTY_ELEMENTS: Readonly<Record<string, true>> = {
 	VIDEO: true,
 };
 
-type RuleEntry = { key: string; rule: TurndownRule };
+/** Void elements that are inline content: the whitespace after one is kept, as after text. */
+const INLINE_VOID_ELEMENTS: Readonly<Record<string, true>> = {
+	EMBED: true,
+	IMG: true,
+	INPUT: true,
+};
+
+/** `filter` is `rule.filter` with string tag names lowercased once at registration. */
+type RuleEntry = { key: string; rule: TurndownRule; filter: RuleFilter };
 type Reference = { destination: string };
 
 const DEFAULT_OPTIONS: ResolvedTurndownOptions = {
@@ -91,11 +99,37 @@ const DEFAULT_OPTIONS: ResolvedTurndownOptions = {
 	preformattedCode: false,
 };
 
-function matchesFilter(filter: RuleFilter, node: TurndownNode, options: ResolvedTurndownOptions): boolean {
+function normalizeFilter(filter: RuleFilter): RuleFilter {
+	if (typeof filter === "function") return filter;
+	if (typeof filter === "string") return filter.toLowerCase();
+	return filter.map(tag => tag.toLowerCase());
+}
+
+function matchesFilter(
+	filter: RuleFilter,
+	node: TurndownNode,
+	name: string,
+	options: ResolvedTurndownOptions,
+): boolean {
 	if (typeof filter === "function") return filter(node, options);
-	const name = node.nodeName.toLowerCase();
-	if (typeof filter === "string") return name === filter.toLowerCase();
-	return filter.some(tag => name === tag.toLowerCase());
+	if (typeof filter === "string") return name === filter;
+	return filter.includes(name);
+}
+
+/** Equivalent to `node.textContent.trim() !== ""` without building the subtree text. */
+function hasNonWhitespaceText(node: TurndownNode): boolean {
+	const stack: TurndownNode[] = [node];
+	while (stack.length > 0) {
+		const current = stack.pop()!;
+		const type = current.nodeType;
+		if (type === 3 || type === 4) {
+			if (/\S/.test(current.textContent ?? "")) return true;
+		} else if (type === 1 || type === 9 || type === 11) {
+			const childNodes = current.childNodes;
+			for (let index = 0; index < childNodes.length; index++) stack.push(childNodes[index]!);
+		}
+	}
+	return false;
 }
 
 function contentWithFlankingWhitespace(content: string, delimiter: string): string {
@@ -115,8 +149,8 @@ function listItemPrefix(node: TurndownNode, options: ResolvedTurndownOptions): s
 	const parent = node.parentNode;
 	if (parent?.nodeName !== "OL") return `${options.bulletListMarker}   `;
 	const start = Number(parent.getAttribute("start") ?? "1");
-	const siblings = Array.from(parent.children);
-	return `${(Number.isFinite(start) ? start : 1) + siblings.indexOf(node)}.  `;
+	const index = node.elementIndex ?? Array.prototype.indexOf.call(parent.children, node);
+	return `${(Number.isFinite(start) ? start : 1) + index}.  `;
 }
 function hasNonblankDescendant(node: TurndownNode): boolean {
 	for (const child of Array.from(node.children)) {
@@ -142,19 +176,19 @@ export default class TurndownService {
 	addRule(key: string, rule: TurndownRule): this {
 		const previous = this.#rules.findIndex(entry => entry.key === key);
 		if (previous >= 0) this.#rules.splice(previous, 1);
-		this.#rules.unshift({ key, rule });
+		this.#rules.unshift({ key, rule, filter: normalizeFilter(rule.filter) });
 		return this;
 	}
 
 	/** Preserve matching elements as HTML when no custom rule handles them. */
 	keep(filter: RuleFilter): this {
-		this.#keepFilters.unshift(filter);
+		this.#keepFilters.unshift(normalizeFilter(filter));
 		return this;
 	}
 
 	/** Drop matching elements and all of their converted content. */
 	remove(filter: RuleFilter): this {
-		this.#removeFilters.unshift(filter);
+		this.#removeFilters.unshift(normalizeFilter(filter));
 		return this;
 	}
 
@@ -209,30 +243,38 @@ export default class TurndownService {
 	#convertNode(node: TurndownNode): string {
 		if (node.nodeType === 3) {
 			const text = node.textContent ?? "";
-			if (node.parentNode?.nodeName === "PRE") return text;
+			for (let parent = node.parentNode; parent; parent = parent.parentNode)
+				if (parent.nodeName === "PRE") return text;
 			let collapsed = text.replace(/[\t\r\n\f ]+/g, " ");
 			if (this.#previousSourceWhitespace && collapsed.startsWith(" ")) collapsed = collapsed.slice(1);
-			this.#previousSourceWhitespace = collapsed.endsWith(" ");
+			if (collapsed) this.#previousSourceWhitespace = collapsed.endsWith(" ");
 			return node.parentNode?.nodeName === "CODE" ? collapsed : this.escape(collapsed);
 		}
 		if (node.nodeType !== 1) return this.#convertChildren(node);
-		if (!(node.textContent ?? "").trim() && !NONBLANK_EMPTY_ELEMENTS[node.nodeName] && !hasNonblankDescendant(node)) {
+		const block = Boolean(BLOCK_ELEMENTS[node.nodeName]);
+		// Text after a block drops its leading space.
+		if (block) this.#previousSourceWhitespace = true;
+		const name = node.nodeName.toLowerCase();
+		if (!hasNonWhitespaceText(node) && !NONBLANK_EMPTY_ELEMENTS[node.nodeName] && !hasNonblankDescendant(node)) {
+			// Blank inline elements still separate words (and indent code inside `<pre>`) unless keep() or remove() claims them.
+			const filtered =
+				this.#keepFilters.some(filter => matchesFilter(filter, node, name, this.options)) ||
+				this.#removeFilters.some(filter => matchesFilter(filter, node, name, this.options));
 			return (
-				this.options.blankReplacement?.("", node, this.options) ?? (BLOCK_ELEMENTS[node.nodeName] ? "\n\n" : "")
+				this.options.blankReplacement?.("", node, this.options) ??
+				(block ? "\n\n" : filtered ? "" : this.#convertChildren(node))
 			);
 		}
 
-		const block = Boolean(BLOCK_ELEMENTS[node.nodeName]);
-		if (block) this.#previousSourceWhitespace = false;
-		const content = this.#convertChildren(node);
-		if (block) this.#previousSourceWhitespace = false;
-		if (node.nodeName === "CODE") this.#previousSourceWhitespace = false;
-		const custom = this.#rules.find(entry => matchesFilter(entry.rule.filter, node, this.options));
+		const custom = this.#rules.find(entry => matchesFilter(entry.filter, node, name, this.options));
+		const content = custom?.rule.skipContent ? "" : this.#convertChildren(node);
+		if (block) this.#previousSourceWhitespace = true;
+		if (node.nodeName === "CODE" || INLINE_VOID_ELEMENTS[node.nodeName]) this.#previousSourceWhitespace = false;
 		if (custom) return custom.rule.replacement(content, node, this.options);
-		if (this.#keepFilters.some(filter => matchesFilter(filter, node, this.options))) {
+		if (this.#keepFilters.some(filter => matchesFilter(filter, node, name, this.options))) {
 			return this.options.keepReplacement?.(content, node, this.options) ?? serializeNode(node);
 		}
-		if (this.#removeFilters.some(filter => matchesFilter(filter, node, this.options))) return "";
+		if (this.#removeFilters.some(filter => matchesFilter(filter, node, name, this.options))) return "";
 		return this.#defaultReplacement(content, node);
 	}
 

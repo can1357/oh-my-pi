@@ -1,16 +1,27 @@
 /**
- * Mnemopi local-embeddings worker. Loaded inside the dedicated subprocess
- * spawned by `embed-client.ts` (re-entered through the agent CLI's hidden
- * `__omp_worker_mnemopi_embed` selector). The whole point of this module is
- * that `loadFastembed()` — and therefore `onnxruntime-node`'s NAPI
- * constructor + finalizer — only ever runs in this child address space. The
- * parent `SIGKILL`s us on shutdown so the destructor that crashes Bun on
- * Windows shutdown (issue #3031, mnemopi sibling of #1606/#1607) never runs
- * in either process.
+ * Mnemopi local-embeddings worker: a child of the omp daemon's `infer` module,
+ * re-entered through the agent CLI's hidden `__omp_worker_mnemopi_embed`
+ * selector, speaking LF-delimited JSON over stdin/stdout. The whole point of
+ * this module is that `loadFastembed()` — and therefore `onnxruntime-node`'s
+ * NAPI constructor + finalizer — only ever runs in this child address space.
+ * The daemon `SIGKILL`s us on wedge, idle, and stop, and we `SIGKILL`
+ * ourselves when stdin closes, so the destructor that crashes Bun on Windows
+ * shutdown (issue #3031, mnemopi sibling of #1606/#1607) never runs.
  */
 
 import { defaultLocalModelInitializer, type StandardEmbeddingModel } from "@oh-my-pi/pi-mnemopi/core";
-import type { MnemopiEmbedModelId, MnemopiEmbedTransport, MnemopiEmbedWorkerInbound } from "./embed-protocol";
+import { logger } from "@oh-my-pi/pi-utils";
+import { claimWorkerStdout, type WorkerStdout } from "../daemon/modules/speech-frames";
+import { startParentWatchdog } from "../subprocess/parent-watchdog";
+import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound } from "./embed-protocol";
+
+/** The reply channel, claimed when the worker starts. */
+let stdout: WorkerStdout | undefined;
+
+/** Write one reply line to the daemon. */
+function send(message: MnemopiEmbedWorkerOutbound): void {
+	stdout?.write(`${JSON.stringify(message)}\n`);
+}
 
 interface LoadedModel {
 	model: MnemopiEmbedModelId;
@@ -55,10 +66,7 @@ function ensureLoaded(model: MnemopiEmbedModelId, cacheDir: string | undefined):
 	loadedKey = key;
 	return loading;
 }
-async function handleEmbed(
-	transport: MnemopiEmbedTransport,
-	message: Extract<MnemopiEmbedWorkerInbound, { type: "embed" }>,
-): Promise<void> {
+async function handleEmbed(message: Extract<MnemopiEmbedWorkerInbound, { type: "embed" }>): Promise<void> {
 	try {
 		// Each `embed` carries the model + cacheDir the wrapper was bound to.
 		// `ensureLoaded` is idempotent for the same key, so this is a no-op
@@ -71,9 +79,9 @@ async function handleEmbed(
 		for await (const batch of batches) {
 			for (const row of batch) vectors.push(row);
 		}
-		transport.send({ type: "vectors", id: message.id, vectors });
+		send({ type: "vectors", id: message.id, vectors });
 	} catch (error) {
-		transport.send({
+		send({
 			type: "error",
 			id: message.id,
 			error: error instanceof Error ? error.message : String(error),
@@ -81,15 +89,12 @@ async function handleEmbed(
 	}
 }
 
-async function handleInit(
-	transport: MnemopiEmbedTransport,
-	message: Extract<MnemopiEmbedWorkerInbound, { type: "init" }>,
-): Promise<void> {
+async function handleInit(message: Extract<MnemopiEmbedWorkerInbound, { type: "init" }>): Promise<void> {
 	try {
 		await ensureLoaded(message.model, message.cacheDir);
-		transport.send({ type: "ready", id: message.id });
+		send({ type: "ready", id: message.id });
 	} catch (error) {
-		transport.send({
+		send({
 			type: "error",
 			id: message.id,
 			error: error instanceof Error ? error.message : String(error),
@@ -97,18 +102,42 @@ async function handleInit(
 	}
 }
 
-export function startMnemopiEmbedWorker(transport: MnemopiEmbedTransport): void {
-	transport.onMessage(message => {
-		switch (message.type) {
-			case "ping":
-				transport.send({ type: "pong", id: message.id });
-				return;
-			case "init":
-				void handleInit(transport, message);
-				return;
-			case "embed":
-				void handleEmbed(transport, message);
-				return;
+/** Serve stdin requests concurrently until stdin closes. */
+export async function startMnemopiEmbedWorker(): Promise<void> {
+	// Stdout carries reply lines only; library chatter goes to stderr.
+	stdout = claimWorkerStdout();
+	// A native embed can pin the main thread; the watchdog thread still notices a dead daemon.
+	if (process.ppid > 1) startParentWatchdog(process.ppid);
+	const decoder = new TextDecoder();
+	let buffered = "";
+	for await (const chunk of Bun.stdin.stream()) {
+		buffered += decoder.decode(chunk, { stream: true });
+		let newline = buffered.indexOf("\n");
+		while (newline >= 0) {
+			const line = buffered.slice(0, newline).trim();
+			buffered = buffered.slice(newline + 1);
+			newline = buffered.indexOf("\n");
+			if (!line) continue;
+			let message: MnemopiEmbedWorkerInbound;
+			try {
+				message = JSON.parse(line) as MnemopiEmbedWorkerInbound;
+			} catch (error) {
+				logger.warn("mnemopi-embed: malformed request line", { error: String(error) });
+				continue;
+			}
+			switch (message.type) {
+				case "ping":
+					send({ type: "pong", id: message.id });
+					break;
+				case "init":
+					void handleInit(message);
+					break;
+				case "embed":
+					void handleEmbed(message);
+					break;
+			}
 		}
-	});
+	}
+	// The daemon went away: die without running the onnxruntime finalizer.
+	process.kill(process.pid, "SIGKILL");
 }

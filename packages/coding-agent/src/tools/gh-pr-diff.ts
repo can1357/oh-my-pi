@@ -1,10 +1,15 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import * as git from "../utils/git";
-import { appendRepoFlag } from "./gh-common";
+import { github } from "../utils/github";
+import { appendRepoFlag, ghApiHostArgs, parseRepoRef } from "./gh-common";
 import type { ViewLookupResult } from "./gh-view";
-import { getOrFetchView, resolveGithubCacheAuthKey } from "./github-cache";
-import { ToolError } from "./tool-errors";
+import {
+	getOrFetchView,
+	getRetainedGeneration,
+	retainCachedGeneration,
+	resolveGithubCacheAuthKey,
+} from "./github-cache";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 export const PR_DIFF_FILES_PAGE_SIZE = 100;
 export const PR_DIFF_FILES_MAX = 3000;
@@ -373,9 +378,10 @@ export async function fetchPrDiffViaFilesApi(
 	number: number,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
-	const pull = await git.github.json<GhPrApi>(
+	const ref = parseRepoRef(repo);
+	const pull = await github.json<GhPrApi>(
 		cwd,
-		["api", "--method", "GET", `/repos/${repo}/pulls/${number}`],
+		["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/pulls/${number}`],
 		signal,
 		{ repoProvided: true },
 	);
@@ -388,13 +394,14 @@ export async function fetchPrDiffViaFilesApi(
 	const sections: string[] = [];
 	let page = 1;
 	while (true) {
-		const response = await git.github.json<GhPrFileApi[]>(
+		const response = await github.json<GhPrFileApi[]>(
 			cwd,
 			[
 				"api",
+				...ghApiHostArgs(ref),
 				"--method",
 				"GET",
-				`/repos/${repo}/pulls/${number}/files`,
+				`/repos/${ref.slug}/pulls/${number}/files`,
 				"-F",
 				`per_page=${PR_DIFF_FILES_PAGE_SIZE}`,
 				"-F",
@@ -427,7 +434,7 @@ export async function fetchPrDiffFresh(
 	appendRepoFlag(args, repo, String(number));
 	let text: string;
 	try {
-		text = await git.github.text(cwd, args, signal, { repoProvided: true, trimOutput: false });
+		text = await github.text(cwd, args, signal, { repoProvided: true, trimOutput: false });
 	} catch (err) {
 		if (!isPrDiffTooLargeError(err)) throw err;
 		logger.debug("gh pr diff exceeded GitHub's aggregate line limit; falling back to per-file API", {
@@ -469,5 +476,63 @@ export async function getOrFetchPrDiff(options: PrDiffLookupOptions): Promise<Vi
 		payload: { unified: lookup.rendered, files: lookup.payload.files },
 		status: lookup.status,
 		fetchedAt: lookup.fetchedAt,
+	};
+}
+
+export interface PrDiffGenerationOptions {
+	repo: string;
+	number: number;
+	fetchedAt: number;
+	rendered: string;
+	files: PrDiffFile[];
+	cacheAuthKey?: string | null;
+}
+
+/**
+ * Persist the exact diff `/review` froze. Writes the generation table only,
+ * so a later live refresh cannot replace this snapshot.
+ * Returns the stored generation id (which can differ from `fetchedAt` when that
+ * id already belongs to a different snapshot), or null when the cache identity
+ * or database is unavailable.
+ */
+export function retainPrDiffGeneration(options: PrDiffGenerationOptions): number | null {
+	const authKey = options.cacheAuthKey === undefined ? (resolveGithubCacheAuthKey() ?? null) : options.cacheAuthKey;
+	if (authKey === null) return null;
+	return retainCachedGeneration<PrDiffPayload>({
+		authKey,
+		repo: options.repo,
+		kind: "pr-diff",
+		number: options.number,
+		includeComments: false,
+		payload: { unified: "", files: options.files },
+		rendered: options.rendered,
+		fetchedAt: options.fetchedAt,
+	});
+}
+
+/** Load one retained generation. Does not refresh the live row. */
+export function getPinnedPrDiff(
+	options: Pick<PrDiffGenerationOptions, "repo" | "number" | "fetchedAt" | "cacheAuthKey"> & {
+		settings?: Settings;
+	},
+): ViewLookupResult<PrDiffPayload> | undefined {
+	const authKey = options.cacheAuthKey === undefined ? (resolveGithubCacheAuthKey() ?? null) : options.cacheAuthKey;
+	if (authKey === null) return undefined;
+	const row = getRetainedGeneration<PrDiffPayload>(
+		options.repo,
+		"pr-diff",
+		options.number,
+		false,
+		options.fetchedAt,
+		authKey,
+		options.settings,
+	);
+	if (!row) return undefined;
+	return {
+		rendered: row.rendered,
+		sourceUrl: row.sourceUrl,
+		payload: { unified: row.rendered, files: row.payload.files },
+		status: "fresh",
+		fetchedAt: row.fetchedAt,
 	};
 }

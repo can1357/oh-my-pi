@@ -7,11 +7,33 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-import * as git from "../../../utils/git";
 
-import type { MarketplaceCatalog, MarketplaceSourceType } from "./types";
-import { isValidNameSegment } from "./types";
+import {
+	isBarePluginSourceName,
+	isValidNameSegment,
+	nameSegmentCollisionKey,
+	type MarketplaceCatalog,
+	type MarketplaceSourceType,
+} from "./types";
+
+const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** Remove abandoned clone checkouts on a later startup without touching in-flight clones. */
+export async function pruneAbandonedMarketplaceClones(cacheDir: string): Promise<void> {
+	const entries = await fs.readdir(cacheDir, { withFileTypes: true }).catch(err => {
+		if (isEnoent(err)) return [];
+		throw err;
+	});
+	const cutoff = Date.now() - GIT_CLONE_TIMEOUT_MS;
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const match = /^\.tmp-clone-(\d{13})(?:-[\w-]+)?$/.exec(entry.name);
+		if (!match || Number(match[1]) > cutoff) continue;
+		await fs.rm(path.join(cacheDir, entry.name), { recursive: true, force: true }).catch(() => {});
+	}
+}
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -84,7 +106,7 @@ export function classifySource(source: string): MarketplaceSourceType {
 
 // ── parseMarketplaceCatalog ───────────────────────────────────────────
 
-function assertField(condition: boolean, field: string, filePath: string): void {
+function assertField(condition: boolean, field: string, filePath: string): asserts condition {
 	if (!condition) {
 		throw new Error(`Missing or invalid field "${field}" in catalog: ${filePath}`);
 	}
@@ -124,8 +146,12 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 	// plugins: required array
 	assertField(Array.isArray(obj.plugins), "plugins", filePath);
 
+	const metadata = obj.metadata as Record<string, unknown> | undefined;
+	const hasPluginRoot = typeof metadata?.pluginRoot === "string" && metadata.pluginRoot.length > 0;
+
 	const plugins = obj.plugins as unknown[];
 	const validPlugins: unknown[] = [];
+	const pluginNameKeys = new Set<string>();
 	for (let i = 0; i < plugins.length; i++) {
 		try {
 			const entry = plugins[i];
@@ -143,9 +169,12 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 				`plugins[${i}].source`,
 				filePath,
 			);
-			// String sources must be relative paths starting with "./"
 			if (typeof p.source === "string") {
-				assertField((p.source as string).startsWith("./"), `plugins[${i}].source (must start with "./")`, filePath);
+				assertField(
+					p.source.startsWith("./") || (hasPluginRoot && isBarePluginSourceName(p.source)),
+					`plugins[${i}].source (must start with "./", or be a bare name under metadata.pluginRoot)`,
+					filePath,
+				);
 			}
 			// Validate required fields for typed source variants
 			if (typeof p.source === "object" && p.source !== null) {
@@ -172,6 +201,9 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 					assertField(false, `plugins[${i}].source.source (unknown variant: "${variant}")`, filePath);
 				}
 			}
+			const pluginNameKey = nameSegmentCollisionKey(p.name);
+			assertField(!pluginNameKeys.has(pluginNameKey), `plugins[${i}].name (case-equivalent duplicate)`, filePath);
+			pluginNameKeys.add(pluginNameKey);
 			validPlugins.push(entry);
 		} catch (err) {
 			// Warn and skip invalid plugin entries instead of failing the entire catalog.
@@ -270,9 +302,6 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
 	const text = await response.text();
 	const catalog = parseMarketplaceCatalog(text, source);
 
-	const catalogDir = path.join(cacheDir, catalog.name);
-	await Bun.write(path.join(catalogDir, "marketplace.json"), text);
-
 	return { catalog };
 }
 
@@ -286,13 +315,12 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
  * `promoteCloneToCache` after any duplicate/drift checks pass.
  */
 async function cloneAndReadCatalog(url: string, source: string, cacheDir: string): Promise<FetchResult> {
-	const tmpDir = path.join(cacheDir, `.tmp-clone-${Date.now()}`);
 	await fs.mkdir(cacheDir, { recursive: true });
+	const tmpDir = await fs.mkdtemp(path.join(cacheDir, `.tmp-clone-${Date.now()}-`));
 
 	logger.debug(`[marketplace] cloning ${url} → ${tmpDir}`);
-	await git.clone(url, tmpDir);
-
 	try {
+		await vcs.clone(url, tmpDir, { timeoutMs: GIT_CLONE_TIMEOUT_MS });
 		const { displayPath, content } = await readMarketplaceCatalog(tmpDir, { relativeDisplayPaths: true });
 		const catalog = parseMarketplaceCatalog(content, displayPath);
 		return { catalog, clonePath: tmpDir };

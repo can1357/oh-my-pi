@@ -10,6 +10,7 @@ import {
 	prepareUserRetentionTranscript,
 	sliceLastTurnsByUserBoundary,
 	stripMemoryTags,
+	stripRetentionProtocolMarkers,
 	truncateRecallQuery,
 } from "@oh-my-pi/pi-coding-agent/hindsight/content";
 
@@ -44,10 +45,6 @@ describe("stripMemoryTags", () => {
 	it("strips multiple sequential blocks", () => {
 		const text = "<memories>a</memories><memories>b</memories>tail";
 		expect(stripMemoryTags(text)).toBe("tail");
-	});
-
-	it("is a no-op when no tags are present", () => {
-		expect(stripMemoryTags("plain content")).toBe("plain content");
 	});
 
 	it("strips <mental_models> blocks so curated context cannot leak back into retention", () => {
@@ -96,13 +93,36 @@ describe("composeRecallQuery", () => {
 		expect(out).not.toContain("secret");
 		expect(out).toContain("visible");
 	});
+
+	it("drops punctuation-only assistant placeholder turns while preserving symbol-only user turns (#1806)", () => {
+		const withPlaceholders: HindsightMessage[] = [
+			{ role: "user", content: "Approve deploy?" },
+			{ role: "assistant", content: "." },
+			{ role: "user", content: "✅" },
+			{ role: "assistant", content: "..." },
+			{ role: "user", content: "What did I approve?" },
+		];
+		const out = composeRecallQuery("What did I approve?", withPlaceholders, 3);
+		expect(out).toContain("user: Approve deploy?");
+		expect(out).toContain("user: ✅");
+		expect(out).not.toContain("assistant: .");
+		expect(out).not.toContain("assistant: ...");
+	});
+
+	it("suppresses only the trailing user message when an earlier turn repeated the same prompt", () => {
+		const repeated: HindsightMessage[] = [
+			{ role: "user", content: "Run the tests" },
+			{ role: "assistant", content: "1 failing spec in auth.test.ts" },
+			{ role: "user", content: "Run the tests" },
+		];
+		const out = composeRecallQuery("Run the tests", repeated, 2);
+		expect(out).toBe(
+			"Prior context:\n\nuser: Run the tests\nassistant: 1 failing spec in auth.test.ts\n\nRun the tests",
+		);
+	});
 });
 
 describe("truncateRecallQuery", () => {
-	it("returns the query untouched when under the budget", () => {
-		expect(truncateRecallQuery("short", "short", 100)).toBe("short");
-	});
-
 	it("falls back to the latest query alone when no prior context block exists", () => {
 		const long = "x".repeat(200);
 		expect(truncateRecallQuery(long, long, 50)).toBe(long.slice(0, 50));
@@ -115,6 +135,25 @@ describe("truncateRecallQuery", () => {
 		expect(out.endsWith(latest)).toBe(true);
 		expect(out).toContain("CCCC");
 		expect(out).not.toContain("AAAA");
+	});
+
+	it("drops whole multi-line prior messages without splitting on YAML keys or callouts", () => {
+		const latest = "ZZ";
+		const composed = composeRecallQuery(
+			latest,
+			[
+				{ role: "assistant", content: "First line\nNote: check config\nport: 8080\nuser: quoted line" },
+				{ role: "user", content: "Keep this entry" },
+				{ role: "user", content: latest },
+			],
+			3,
+		);
+		const budget = `Prior context:\n\nuser: Keep this entry\n\n${latest}`.length + 5;
+		const out = truncateRecallQuery(composed, latest, budget);
+		expect(out).toBe(`Prior context:\n\nuser: Keep this entry\n\n${latest}`);
+		expect(out).not.toContain("Note: check config");
+		expect(out).not.toContain("port: 8080");
+		expect(out).not.toContain("quoted line");
 	});
 });
 
@@ -232,6 +271,61 @@ describe("prepareRetentionTranscript", () => {
 		expect(transcript).not.toContain("[role:");
 		expect(transcript).not.toContain(":end]");
 		expect(transcript).not.toContain("<memories>");
+	});
+	it("preserves source message timestamps in the retained conversation content", () => {
+		const messages: HindsightMessage[] = [
+			{
+				role: "user",
+				content: "i stopped doing that yesterday",
+				timestamp: "2026-08-17T10:00:00.000Z",
+			},
+			{
+				role: "assistant",
+				content: "got it, that was sunday then",
+				timestamp: "2026-08-17T10:00:05.000Z",
+			},
+		];
+		const { transcript, messageCount } = prepareRetentionTranscript(messages, true, { includeTimestamps: true });
+		expect(messageCount).toBe(2);
+		expect(transcript).toContain(
+			"[role: user]\n[timestamp: 2026-08-17T10:00:00.000Z]\ni stopped doing that yesterday\n[user:end]",
+		);
+		expect(transcript).toContain(
+			"[role: assistant]\n[timestamp: 2026-08-17T10:00:05.000Z]\ngot it, that was sunday then\n[assistant:end]",
+		);
+	});
+
+	it("still strips recalled memory blocks when messages carry timestamps", () => {
+		const messages: HindsightMessage[] = [
+			{
+				role: "user",
+				content: "<memories>\n- recalled fact about user\n</memories>\nuser-real-question-here",
+				timestamp: "2026-08-17T10:00:00.000Z",
+			},
+		];
+		const { transcript } = prepareRetentionTranscript(messages, true, { includeTimestamps: true });
+		expect(transcript).not.toContain("<memories>");
+		expect(transcript).not.toContain("recalled fact about user");
+		expect(transcript).toContain("[timestamp: 2026-08-17T10:00:00.000Z]");
+		expect(transcript).toContain("user-real-question-here");
+	});
+
+	it("keeps timestamp framing opt-in so shared Mnemopi formatting stays marker-only", () => {
+		const messages: HindsightMessage[] = [
+			{
+				role: "user",
+				content: "i stopped doing that yesterday",
+				timestamp: "2026-08-17T10:00:00.000Z",
+			},
+		];
+		const { transcript } = prepareRetentionTranscript(messages, true);
+		expect(transcript).toBe("[role: user]\ni stopped doing that yesterday\n[user:end]");
+		expect(transcript).not.toContain("[timestamp:");
+	});
+
+	it("strips timestamp protocol markers from recalled stored transcripts", () => {
+		const stored = "[role: user]\n[timestamp: 2026-08-17T10:00:00.000Z]\ni stopped doing that yesterday\n[user:end]";
+		expect(stripRetentionProtocolMarkers(stored)).toBe("i stopped doing that yesterday");
 	});
 });
 

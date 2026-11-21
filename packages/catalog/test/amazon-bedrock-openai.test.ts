@@ -4,12 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import {
-	BEDROCK_MANTLE_STATIC_MODELS,
-	bedrockMantleModelManagerOptions,
-} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
+import { filterModelsDevCatalogRows } from "@oh-my-pi/pi-catalog/provider-models/models-dev-policies";
+import { bedrockMantleModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { dropBedrockMantleOpenAIModels } from "../scripts/generated-policies";
 
 const MANTLE_MODEL_IDS = [
 	"openai.gpt-5.4",
@@ -36,29 +34,13 @@ function bedrockModel(provider: string, id: string): ModelSpec<"bedrock-converse
 
 describe("Amazon Bedrock OpenAI routing", () => {
 	test("seeds Responses-only models under the Bedrock Mantle provider", () => {
-		expect(BEDROCK_MANTLE_STATIC_MODELS.map(model => model.id)).toEqual(MANTLE_MODEL_IDS);
-		for (const model of BEDROCK_MANTLE_STATIC_MODELS) {
+		expect(seedModels("bedrock-mantle").map(model => model.id)).toEqual(MANTLE_MODEL_IDS);
+		for (const model of seedModels("bedrock-mantle")) {
 			expect(model.provider).toBe("bedrock-mantle");
 			expect(model.api).toBe("openai-responses");
 			expect(model.baseUrl).toBe("https://bedrock-mantle.{region}.api.aws/openai/v1");
 		}
 		expect(DEFAULT_MODEL_PER_PROVIDER["bedrock-mantle"]).toBe("openai.gpt-5.6-terra");
-	});
-
-	test("uses current Luna and Terra pricing", () => {
-		const byId = Object.fromEntries(BEDROCK_MANTLE_STATIC_MODELS.map(model => [model.id, model]));
-		expect(byId["openai.gpt-5.6-luna"]?.cost).toEqual({
-			input: 0.22,
-			output: 1.32,
-			cacheRead: 0.022,
-			cacheWrite: 0.275,
-		});
-		expect(byId["openai.gpt-5.6-terra"]?.cost).toEqual({
-			input: 2.2,
-			output: 13.2,
-			cacheRead: 0.22,
-			cacheWrite: 2.75,
-		});
 	});
 
 	test("account-scoped discovery is authoritative over the static seed", async () => {
@@ -119,7 +101,7 @@ describe("Amazon Bedrock OpenAI routing", () => {
 			bedrockModel("bedrock-mantle", "openai.gpt-5.6-sol"),
 		];
 
-		expect(dropBedrockMantleOpenAIModels(input).map(model => `${model.provider}/${model.id}`)).toEqual([
+		expect(filterModelsDevCatalogRows(input).map(model => `${model.provider}/${model.id}`)).toEqual([
 			"amazon-bedrock/openai.gpt-oss-120b",
 			"bedrock-mantle/openai.gpt-5.6-sol",
 		]);

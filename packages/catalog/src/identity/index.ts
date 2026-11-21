@@ -1,8 +1,8 @@
+export * from "../compat/revision";
+export { classifyModel } from "../compat/taxonomy";
+export type { ModelIdentity } from "../compat/types";
 export * from "./bundled";
-export * from "./classify";
 export * from "./dialect";
-export * from "./family";
 export * from "./id";
-export * from "./markers";
 export * from "./priority";
 export * from "./reference";

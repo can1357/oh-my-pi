@@ -9,7 +9,8 @@ import {
 	recoverHarmonyToolCall,
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import corpus from "./fixtures/harmony-leak-corpus.json" with { type: "json" };
 
 interface CorpusPositive {
@@ -26,8 +27,32 @@ interface CorpusNegative {
 const positives = corpus.positives as CorpusPositive[];
 const negatives = corpus.negatives as CorpusNegative[];
 
-const codexModel: Model = getBundledModel("openai-codex", "gpt-5.4");
-const anthropicModel: Model = getBundledModel("anthropic", "claude-sonnet-4-5");
+// Mitigation is a provider-wide rule (`providers/openai-codex.kdl`), so any
+// Codex id resolves it; a bare spec keeps this independent of the bundled roster.
+const codexModel: Model = buildModel({
+	id: "gpt-5.5",
+	name: "GPT-5.5",
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	baseUrl: "https://chatgpt.com/backend-api/codex",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 272_000,
+	maxTokens: 128_000,
+} satisfies ModelSpec<"openai-codex-responses">);
+const anthropicModel: Model = buildModel({
+	id: "claude-sonnet-4-5",
+	name: "Claude Sonnet 4.5",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+	contextWindow: 200_000,
+	maxTokens: 64_000,
+} satisfies ModelSpec<"anthropic-messages">);
 
 function createAssistantMessage(
 	content: AssistantMessage["content"],
@@ -76,11 +101,13 @@ function makeToolCallMessage(toolName: string, input: string | null, argJson: st
 const wholePayloadTrailing = () => 0;
 
 describe("isHarmonyLeakMitigationTarget", () => {
-	it("targets every openai-codex model (don't enumerate ids)", () => {
+	it("targets models enabled by resolved compatibility policy", () => {
+		expect(codexModel.compat).toMatchObject({ harmonyLeakMitigation: true });
 		expect(isHarmonyLeakMitigationTarget(codexModel)).toBe(true);
 	});
 
-	it("does not target Anthropic models", () => {
+	it("does not target models without the compatibility policy", () => {
+		expect(anthropicModel.compat).not.toMatchObject({ harmonyLeakMitigation: true });
 		expect(isHarmonyLeakMitigationTarget(anthropicModel)).toBe(false);
 	});
 });

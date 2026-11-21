@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentClientMessageSchema,
 	AgentServerMessageSchema,
+	ConversationStateStructureSchema,
+	CursorError,
+	CustomErrorDetailsSchema,
+	ErrorDetailsSchema,
 	InteractionUpdateSchema,
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
@@ -51,11 +57,106 @@ function turnEndedFrame(): Buffer {
 	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
 }
 
+/**
+ * Mid-turn checkpoint echoing the request's prompt with `callId` still pending,
+ * followed by the zero-token Cursor PROVIDER_ERROR end-stream seen live (#15830).
+ */
+function checkpointThenProviderErrorFrames(rootPromptMessagesJson: Uint8Array[], callId: string): Buffer {
+	const checkpoint = create(AgentServerMessageSchema, {
+		message: {
+			case: "conversationCheckpointUpdate",
+			value: create(ConversationStateStructureSchema, { rootPromptMessagesJson, pendingToolCalls: [callId] }),
+		},
+	});
+	const details = create(ErrorDetailsSchema, {
+		error: CursorError.ERROR_PROVIDER_ERROR,
+		details: create(CustomErrorDetailsSchema, {
+			title: "Provider Error",
+			detail:
+				"We're having trouble connecting to the model provider. This might be temporary - please try again in a moment.",
+			isRetryable: false,
+		}),
+		isExpected: true,
+	});
+	const endStream = Buffer.from(
+		JSON.stringify({
+			error: {
+				code: "resource_exhausted",
+				message: "Error",
+				details: [
+					{
+						type: "aiserver.v1.ErrorDetails",
+						value: Buffer.from(toBinary(ErrorDetailsSchema, details)).toString("base64"),
+					},
+				],
+			},
+		}),
+		"utf8",
+	);
+	return Buffer.concat([
+		frameConnectMessage(toBinary(AgentServerMessageSchema, checkpoint)),
+		frameConnectMessage(endStream, 0b00000010),
+	]);
+}
+
 /** Decode the wire conversationId from the first client frame of a request. */
 function decodeConversationId(chunk: Buffer): string | undefined {
 	const msg = fromBinary(AgentClientMessageSchema, chunk.subarray(5));
 	if (msg.message.case !== "runRequest") return undefined;
 	return msg.message.value.conversationId;
+}
+
+type WireRequest = {
+	conversationId?: string;
+	action?: string;
+	pendingToolCalls: number;
+	rootPromptMessagesJson: Uint8Array[];
+};
+
+function decodeRunRequest(chunk: Buffer): WireRequest | undefined {
+	const msg = fromBinary(AgentClientMessageSchema, chunk.subarray(5));
+	if (msg.message.case !== "runRequest") return undefined;
+	const req = msg.message.value;
+	return {
+		conversationId: req.conversationId,
+		action: req.action?.action.case,
+		pendingToolCalls: req.conversationState?.pendingToolCalls?.length ?? 0,
+		rootPromptMessagesJson: req.conversationState?.rootPromptMessagesJson ?? [],
+	};
+}
+
+/** /retry after restart: trailing tool results, no active user message. */
+function resumeContext(): Context {
+	return {
+		messages: [
+			{ role: "user", content: "Use the read tool.", timestamp: 1 },
+			{
+				role: "assistant",
+				api: "cursor-agent",
+				provider: "cursor",
+				model: "cursor-rotation-fixture",
+				content: [{ type: "toolCall", id: "call-read", name: "read", arguments: { path: "package.json" } }],
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 2,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call-read",
+				toolName: "read",
+				content: [{ type: "text", text: "package contents" }],
+				isError: false,
+				timestamp: 3,
+			},
+		],
+	};
 }
 
 /** First request ends with a bare resource_exhausted; later ones turn normally. */
@@ -76,6 +177,62 @@ async function startServer(seenConversationIds: string[]): Promise<string> {
 				stream.once("wantTrailers", () => {
 					stream.sendTrailers({ "grpc-status": "8", "grpc-message": "resource_exhausted" });
 				});
+				stream.end();
+			} else {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				stream.write(textDeltaFrame("recovered"));
+				stream.write(turnEndedFrame());
+				stream.end();
+			}
+		});
+	});
+
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("expected the fixture server to bind a tcp port");
+	return `http://127.0.0.1:${address.port}`;
+}
+
+/** Scripted fixture: each entry is a clean turn, rejection, or turn followed by a rejecting trailer. */
+async function startScriptedServer(
+	seen: WireRequest[],
+	script: Array<"reject" | "ok" | "turnEndedReject" | "checkpointProviderError" | "cut">,
+): Promise<string> {
+	server = http2.createServer();
+	server.on("session", session => {
+		sessions.add(session);
+		session.on("close", () => sessions.delete(session));
+	});
+	let requestCount = 0;
+	server.on("stream", (stream: http2.ServerHttp2Stream) => {
+		stream.on("data", (chunk: Buffer) => {
+			const decoded = decodeRunRequest(chunk);
+			if (decoded !== undefined) seen.push(decoded);
+			requestCount++;
+			const decision = script[Math.min(requestCount - 1, script.length - 1)] ?? "reject";
+			if (decision === "checkpointProviderError") {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				stream.write(checkpointThenProviderErrorFrames(decoded?.rootPromptMessagesJson ?? [], "call-read"));
+				stream.end();
+			} else if (decision === "cut") {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				stream.write(textDeltaFrame("partial"));
+				stream.end();
+			} else if (decision === "reject") {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" }, { waitForTrailers: true });
+				stream.once("wantTrailers", () => {
+					stream.sendTrailers({ "grpc-status": "8", "grpc-message": "resource_exhausted" });
+				});
+				stream.end();
+			} else if (decision === "turnEndedReject") {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" }, { waitForTrailers: true });
+				stream.once("wantTrailers", () => {
+					stream.sendTrailers({ "grpc-status": "8", "grpc-message": "resource_exhausted" });
+				});
+				stream.write(turnEndedFrame());
 				stream.end();
 			} else {
 				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
@@ -124,12 +281,23 @@ function makeModel(baseUrl: string): Model<"cursor-agent"> {
 const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
 
 /** Drain a stream and return its terminal event (done / error). */
-async function runToEnd(baseUrl: string, sessionId: string): Promise<{ type: "done" | "error"; message?: string }> {
-	const stream = streamCursor(makeModel(baseUrl), context, { apiKey: "test-token", sessionId });
-	let terminal: { type: "done" | "error"; message?: string } = { type: "done" };
+async function runToEnd(
+	baseUrl: string,
+	sessionId: string,
+	ctx: Context = context,
+): Promise<{ type: "done" | "error"; message?: string; errorId?: number; errorStatus?: number }> {
+	const stream = streamCursor(makeModel(baseUrl), ctx, { apiKey: "test-token", sessionId });
+	let terminal: { type: "done" | "error"; message?: string; errorId?: number; errorStatus?: number } = {
+		type: "done",
+	};
 	for await (const event of stream) {
 		if (event.type === "error") {
-			terminal = { type: "error", message: event.error.errorMessage };
+			terminal = {
+				type: "error",
+				message: event.error.errorMessage,
+				errorId: event.error.errorId,
+				errorStatus: event.error.errorStatus,
+			};
 		}
 	}
 	await stream.result().catch(() => {});
@@ -198,5 +366,135 @@ describe("Cursor conversationId rotation (issue #8345)", () => {
 		expect(seenConversationIds[0]).toBe("sess-sticky");
 		expect(seenConversationIds[1]).toBe(seenConversationIds[2]);
 		expect(seenConversationIds[1]).not.toBe("sess-sticky");
+	});
+
+	it("rotated retry resumes the same completed history on the fresh id", async () => {
+		// The retry must not replay the last user message: that drops every tool
+		// call and result after it, and the model restarts work it already did.
+		// It resumes over the identical rebuilt history, without the cached
+		// checkpoint (whose pending calls would re-poison the new id).
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["reject", "ok"]);
+		const replayed: string[][] = [];
+		const capture = (payload: unknown) => {
+			const run = payload as { conversationState?: { rootPromptMessagesJson: Uint8Array[] } };
+			replayed.push(
+				(run.conversationState?.rootPromptMessagesJson ?? []).map(id => Buffer.from(id).toString("hex")),
+			);
+			return undefined;
+		};
+		const run = async () => {
+			const stream = streamCursor(makeModel(baseUrl), resumeContext(), {
+				apiKey: "test-token",
+				sessionId: "sess-resume",
+				onPayload: capture,
+			});
+			let terminal: string | undefined;
+			for await (const event of stream) {
+				if (event.type === "done" || event.type === "error") terminal = event.type;
+			}
+			await stream.result().catch(() => {});
+			return terminal;
+		};
+
+		expect(await run()).toBe("error");
+		expect(await run()).toBe("done");
+
+		expect(seen).toHaveLength(2);
+		expect(seen[1]?.conversationId).not.toBe(seen[0]?.conversationId);
+		expect(seen.map(request => request.action)).toEqual(["resumeAction", "resumeAction"]);
+		expect(seen[1]?.pendingToolCalls).toBe(0);
+		expect(replayed[1]).toEqual(replayed[0]);
+	});
+
+	it("re-rotates when the rotated conversation is poisoned later", async () => {
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["reject", "ok", "reject", "ok"]);
+
+		const first = await runToEnd(baseUrl, "sess-rerotate");
+		expect(first.type).toBe("error");
+		const second = await runToEnd(baseUrl, "sess-rerotate");
+		expect(second.type).toBe("done");
+		const third = await runToEnd(baseUrl, "sess-rerotate");
+		expect(third.type).toBe("error");
+		const fourth = await runToEnd(baseUrl, "sess-rerotate");
+		expect(fourth.type).toBe("done");
+
+		expect(seen).toHaveLength(4);
+		expect(seen[0]?.conversationId).toBe("sess-rerotate");
+		expect(seen[1]?.conversationId).not.toBe(seen[0]?.conversationId);
+		expect(seen[2]?.conversationId).toBe(seen[1]?.conversationId);
+		expect(seen[3]?.conversationId).not.toBe(seen[1]?.conversationId);
+		expect(seen[3]?.conversationId).not.toBe(seen[0]?.conversationId);
+	});
+
+	it("does not re-rotate when turnEnded is followed by a rejecting trailer", async () => {
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["reject", "turnEndedReject", "reject"]);
+
+		expect((await runToEnd(baseUrl, "sess-failed-rotation")).type).toBe("error");
+		expect((await runToEnd(baseUrl, "sess-failed-rotation")).type).toBe("error");
+		expect((await runToEnd(baseUrl, "sess-failed-rotation")).type).toBe("error");
+
+		expect(seen).toHaveLength(3);
+		expect(seen[0]?.conversationId).toBe("sess-failed-rotation");
+		expect(seen[1]?.conversationId).not.toBe(seen[0]?.conversationId);
+		expect(seen[2]?.conversationId).toBe(seen[1]?.conversationId);
+	});
+
+	it("rotates after a zero-token PROVIDER_ERROR on a conversation cut mid-turn (#15830)", async () => {
+		// The cut turn leaves a checkpoint with a pending call; the continuation
+		// over the placeholder result must not resume that state on the same id.
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["checkpointProviderError", "ok"]);
+
+		const first = await runToEnd(baseUrl, "sess-provider-error");
+		expect(first.type).toBe("error");
+		expect(first.message).toContain("PROVIDER_ERROR");
+		expect((await runToEnd(baseUrl, "sess-provider-error", resumeContext())).type).toBe("done");
+
+		expect(seen).toHaveLength(2);
+		expect(seen[0]?.conversationId).toBe("sess-provider-error");
+		expect(seen[1]?.conversationId).not.toBe("sess-provider-error");
+		expect(seen[1]?.action).toBe("resumeAction");
+		expect(seen[1]?.pendingToolCalls).toBe(0);
+	});
+
+	it("keeps the rotated retry alive after a cut turn hits the zero-token rejection", async () => {
+		// The live chain: a cut turn ends with `Cursor stream ended before
+		// turnEnded`, the automatic retry resumes the poisoned id and draws the
+		// zero-token PROVIDER_ERROR, and rotation must lead to another attempt
+		// instead of ending the turn.
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["cut", "checkpointProviderError", "ok"]);
+
+		const first = await runToEnd(baseUrl, "sess-cut-rotate", resumeContext());
+		expect(first.type).toBe("error");
+		expect(first.message).toContain("Cursor stream ended before turnEnded");
+
+		const second = await runToEnd(baseUrl, "sess-cut-rotate", resumeContext());
+		expect(second.type).toBe("error");
+		expect(second.message).toContain("PROVIDER_ERROR");
+		expect(second.errorStatus).toBe(400);
+		expect(AIError.retriable(second.errorId)).toBe(true);
+
+		expect((await runToEnd(baseUrl, "sess-cut-rotate", resumeContext())).type).toBe("done");
+		expect(seen).toHaveLength(3);
+		expect(seen[0]?.conversationId).toBe("sess-cut-rotate");
+		expect(seen[1]?.conversationId).toBe("sess-cut-rotate");
+		expect(seen[2]?.conversationId).not.toBe("sess-cut-rotate");
+	});
+
+	it("keeps Cursor's verdict when the session id is minted for this one call", async () => {
+		// `streamSimple` mints a session id when the caller passes none, so a
+		// caller's retry would open yet another conversation, never the rotated one.
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["checkpointProviderError"]);
+
+		const result = await streamSimple(makeModel(baseUrl), resumeContext(), { apiKey: "test-token" }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(AIError.retriable(result.errorId)).toBe(false);
+		expect(seen).toHaveLength(1);
 	});
 });

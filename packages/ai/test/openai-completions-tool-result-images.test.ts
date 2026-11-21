@@ -30,6 +30,7 @@ const compat: ResolvedOpenAICompat = {
 	maxTokensField: "max_completion_tokens",
 	requiresToolResultName: false,
 	requiresAssistantAfterToolResult: false,
+	foldUserAfterToolResult: false,
 	requiresThinkingAsText: false,
 	requiresMistralToolIds: false,
 	thinkingFormat: "openai",
@@ -62,6 +63,13 @@ const compat: ResolvedOpenAICompat = {
 	emptyLengthFinishIsContextError: false,
 	usesOpenAIToolCallIdLimit: false,
 	dropThinkingWhenReasoningEffort: false,
+	nativeKimiK3Reasoning: false,
+	zaiReasoningEffortDialect: false,
+	clampOutputToModelMax: false,
+	stripImageInput: false,
+	rejectRootObjectUnion: false,
+	retryWithoutStrictOnGrammarError: false,
+	supportsPromptCacheKey: false,
 };
 
 function buildToolResult(toolCallId: string, timestamp: number): ToolResultMessage {
@@ -222,7 +230,7 @@ describe("openai-completions convertMessages", () => {
 		const now = Date.now();
 		// OpenAI-Responses composite ids have the shape `{call_id}|{item_id}`; a
 		// missing `call_id` leaves `|fc_...`. That is non-empty (so it survives the
-		// malformed-tool-call sanitizer in `transformMessages`) but `normalizeToolCallId`
+		// malformed-tool-call sanitizer in `transformMessages`) but `normalizeCompletionsToolCallId`
 		// splits on `|` and yields an empty string, so `ensureToolCallId` must synthesize
 		// a stable fallback and remap the matching tool result onto it.
 		const emptyNormalizingId = "|fc_readme";
@@ -319,16 +327,20 @@ describe("openai-completions convertMessages", () => {
 		// turn (text-only message) and the tool-result image batching path drop
 		// images for that combination, substituting the standard placeholder.
 		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
-		const model: Model<"openai-completions"> = {
-			...baseModel,
+		const model: Model<"openai-completions"> = buildModel({
 			id: "qwen3.7-max",
-			provider: "bailian" as Model<"openai-completions">["provider"],
+			name: "qwen3.7-max",
+			provider: "alibaba-token-plan",
 			baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 			api: "openai-completions",
+			reasoning: false,
 			// Wrong-but-realistic user config: claims vision capability even
 			// though qwen3.7-max on this endpoint is text-only upstream.
 			input: ["text", "image"],
-		};
+			cost: baseModel.cost,
+			contextWindow: baseModel.contextWindow,
+			maxTokens: baseModel.maxTokens,
+		});
 
 		const now = Date.now();
 		const assistantMessage: AssistantMessage = {
@@ -402,14 +414,18 @@ describe("openai-completions convertMessages", () => {
 		// known text-only families.
 		for (const id of ["qwen3.7-plus", "qwen-vl-max", "qwen3.8-max", "qwen3.8-max-preview", "qwen3.10-max"]) {
 			const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
-			const model: Model<"openai-completions"> = {
-				...baseModel,
+			const model: Model<"openai-completions"> = buildModel({
 				id,
-				provider: "bailian" as Model<"openai-completions">["provider"],
+				name: id,
+				provider: "alibaba-token-plan",
 				baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 				api: "openai-completions",
+				reasoning: false,
 				input: ["text", "image"],
-			};
+				cost: baseModel.cost,
+				contextWindow: baseModel.contextWindow,
+				maxTokens: baseModel.maxTokens,
+			});
 
 			const now = Date.now();
 			const assistantMessage: AssistantMessage = {
@@ -437,6 +453,152 @@ describe("openai-completions convertMessages", () => {
 			expect(Array.isArray(trailingUser.content)).toBe(true);
 			const imageParts = (trailingUser.content as Array<{ type?: string }>).filter(p => p?.type === "image_url");
 			expect(imageParts.length).toBe(1);
+		}
+	});
+	it("strips image_url content for DeepSeek models on OpenAI-compatible endpoints", () => {
+		// DeepSeek API rejects `image_url` content parts with 400
+		// "unknown variant `image_url`, expected `text`". Even if a model entry
+		// or custom models.yml misconfigures `input: ["text", "image"]`,
+		// convertMessages must never forward `image_url` parts.
+		const deepseekModelIds = [
+			{ id: "deepseek-v4-pro", provider: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
+			// V4.0 Flash weights; DeepSeek's own API serves this id with V4.1 Flash.
+			{ id: "deepseek-v4-flash", provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference/v1" },
+			{ id: "deepseek-chat", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
+			{ id: "deepseek-reasoner", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
+			{ id: "deepseek-ai/DeepSeek-V4-Pro", provider: "litellm", baseUrl: "https://llm-proxy.example.com/v1" },
+			// `vision` inside `revision` is a substring, not a multimodal token.
+			{ id: "deepseek-r1-revision-0528", provider: "litellm", baseUrl: "https://llm-proxy.example.com/v1" },
+			// `vision` inside `provisioned` is a substring, not a multimodal token.
+			{ id: "deepseek-v4-provisioned", provider: "litellm", baseUrl: "https://llm-proxy.example.com/v1" },
+		];
+
+		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
+
+		for (const spec of deepseekModelIds) {
+			const model: Model<"openai-completions"> = buildModel({
+				id: spec.id,
+				name: spec.id,
+				provider: spec.provider as Model<"openai-completions">["provider"],
+				baseUrl: spec.baseUrl,
+				api: "openai-completions",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: baseModel.cost,
+				contextWindow: baseModel.contextWindow,
+				maxTokens: baseModel.maxTokens,
+			});
+
+			const now = Date.now();
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool-1", name: "browser", arguments: { action: "screenshot" } }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: emptyUsage,
+				stopReason: "toolUse",
+				timestamp: now,
+			};
+
+			const context: Context = {
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "Take a screenshot" },
+							{ type: "image", data: "ZmFrZQ==", mimeType: "image/webp" },
+						],
+						timestamp: now - 2,
+					},
+					assistantMessage,
+					buildToolResult("tool-1", now + 1),
+				],
+			};
+
+			const messages = convertMessages(model, context, compat);
+
+			for (const m of messages) {
+				if (Array.isArray(m.content)) {
+					for (const part of m.content as Array<{ type?: string }>) {
+						expect(part?.type).not.toBe("image_url");
+					}
+				}
+			}
+
+			const userMessage = messages.find(m => m.role === "user");
+			expect(userMessage).toBeDefined();
+			const userContent = userMessage?.content;
+			const userText =
+				typeof userContent === "string"
+					? userContent
+					: (userContent as Array<{ type?: string; text?: string }>)
+							.filter(p => p?.type === "text")
+							.map(p => p?.text ?? "")
+							.join("\n");
+			expect(userText).toContain("Take a screenshot");
+			expect(userText).toContain(NON_VISION_IMAGE_PLACEHOLDER);
+
+			const toolMessage = messages.find(m => m.role === "tool");
+			expect(toolMessage).toBeDefined();
+			expect(typeof toolMessage?.content).toBe("string");
+			expect(toolMessage?.content as string).toContain(NON_VISION_IMAGE_PLACEHOLDER);
+		}
+	});
+	it("preserves image_url for the multimodal DeepSeek OCR model", () => {
+		const model = getBundledModel("novita", "deepseek/deepseek-ocr-2") as Model<"openai-completions">;
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "Read this document" },
+						{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+					],
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const messages = convertMessages(model, context, compat);
+
+		expect(messages).toHaveLength(1);
+		expect(messages[0].content).toEqual([
+			{ type: "text", text: "Read this document" },
+			{
+				type: "image_url",
+				image_url: { url: "data:image/png;base64,ZmFrZQ==" },
+			},
+		]);
+	});
+	it("preserves image_url for DeepSeek ids served by the multimodal V4.1 Flash", () => {
+		// DeepSeek's API serves both retired V4.0 Flash ids with V4.1 Flash, so
+		// the blanket DeepSeek text-only guard must not strip their image parts.
+		for (const id of ["deepseek-v4-flash-vision-exp", "deepseek-v4-flash"]) {
+			const model = getBundledModel("deepseek", id) as Model<"openai-completions">;
+			const context: Context = {
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "Describe this image" },
+							{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+						],
+						timestamp: Date.now(),
+					},
+				],
+			};
+
+			const messages = convertMessages(model, context, compat);
+
+			expect(messages).toHaveLength(1);
+			expect(messages[0].content).toEqual([
+				{ type: "text", text: "Describe this image" },
+				{
+					type: "image_url",
+					image_url: { url: "data:image/png;base64,ZmFrZQ==" },
+				},
+			]);
 		}
 	});
 });

@@ -9,12 +9,16 @@ const ARGUMENT_SUMMARY_LIMIT = 400;
 export interface ToolCallLoopGuardOptions {
 	readonly threshold: number;
 	readonly exemptTools: readonly string[];
+	/** Lets transport calls inherit an exemption from their dispatched tool without exempting the transport itself. */
+	readonly exemptionAlias?: (call: ToolCall) => string | undefined;
 }
 
 /** A completed assistant turn plus the tool results it produced. */
 export interface ToolCallLoopTurn {
 	readonly message: AssistantMessage;
 	readonly toolResults: readonly ToolResultMessage[];
+	/** The turn also delivered context outside its tool results (extension `additionalContext`). */
+	readonly injectedContext?: boolean;
 }
 
 /** Details needed to steer the model away from a repeated tool call. */
@@ -68,40 +72,70 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
 export class ToolCallLoopGuard {
 	#threshold: number;
 	#exemptTools: ReadonlySet<string>;
+	#exemptionAlias: ((call: ToolCall) => string | undefined) | undefined;
 	#lastHash: string | undefined;
 	#count = 0;
 
+	/** Keeps transport-specific exemption policy outside the shared repetition detector. */
 	constructor(options: ToolCallLoopGuardOptions) {
 		this.#threshold = Math.max(1, Math.trunc(options.threshold));
 		this.#exemptTools = new Set(options.exemptTools);
+		this.#exemptionAlias = options.exemptionAlias;
 	}
 
-	/** Records one completed turn and returns the threshold hit, if any. */
+	/** Applies the same exemption policy when counting turns and choosing the reported call. */
+	#isExempt(call: ToolCall): boolean {
+		if (this.#exemptTools.has(call.name)) return true;
+		const alias = this.#exemptionAlias?.(call);
+		return alias !== undefined && this.#exemptTools.has(alias);
+	}
+
+	/** Records one completed turn and reports repetitions at or beyond the threshold. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
-		if (toolCalls.length !== 1 || this.#exemptTools.has(toolCalls[0]!.name)) {
+		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
 			return null;
 		}
+		if (toolCalls.every(tc => this.#isExempt(tc))) {
+			// An exempt poll its tool flagged useless (a wait that elapsed or found
+			// nothing to wait for) is skipped, so alternating it with a repeated call
+			// cannot hide the loop. Any other exempt turn, failures included, may have
+			// changed state (finished jobs, a message, injected context), so it ends
+			// the repetition.
+			const idle =
+				!turn.injectedContext &&
+				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
+			if (!idle) {
+				this.#lastHash = undefined;
+				this.#count = 0;
+			}
+			return null;
+		}
 
-		const toolCall = toolCalls[0]!;
-		const canonicalArgs = JSON.stringify(canonicalizeToolCallValue(toolCall.arguments));
-		const hash = `${toolCall.name}:${canonicalArgs}`;
-		if (hash === this.#lastHash) {
+		const canonicalCalls = toolCalls
+			.map(tc => JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments)]))
+			.sort();
+		const turnHash = JSON.stringify(canonicalCalls);
+		if (turnHash === this.#lastHash) {
 			this.#count++;
 		} else {
-			this.#lastHash = hash;
+			this.#lastHash = turnHash;
 			this.#count = 1;
 		}
 
-		if (this.#count !== this.#threshold) return null;
+		if (this.#count < this.#threshold) return null;
+		const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",
-			toolName: toolCall.name,
+			toolName: reportCall.name,
 			count: this.#count,
-			resultSummary: summarizeToolResult(turn.toolResults, toolCall.id),
-			argumentsSummary: summarizeText(canonicalArgs, ARGUMENT_SUMMARY_LIMIT),
+			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
+			argumentsSummary: summarizeText(
+				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
+				ARGUMENT_SUMMARY_LIMIT,
+			),
 		};
 	}
 }

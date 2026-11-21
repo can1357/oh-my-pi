@@ -292,7 +292,7 @@ export async function searchWithKagi(
 	const body = JSON.stringify(buildRequestBody(query, options));
 
 	const response = await withAuth(
-		authStorage.resolver("kagi", { sessionId: options.sessionId }),
+		authStorage.keys.resolver("kagi", { sessionId: options.sessionId }),
 		async apiKey => {
 			const res = await fetchImpl(KAGI_SEARCH_URL, {
 				method: "POST",

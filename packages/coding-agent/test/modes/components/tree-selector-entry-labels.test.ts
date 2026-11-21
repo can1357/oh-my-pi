@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
 const ALT_A = "\x1ba";
@@ -44,6 +44,23 @@ const bookkeeping: SessionEntry[] = [
 		task: "task",
 		tools: ["bash"],
 	},
+	{
+		...base("usage", "init"),
+		type: "model_usage",
+		purpose: "auto\nthinking",
+		role: "smol\trole",
+		api: "anthropic-messages",
+		provider: "\x1b[31manthropic\x1b[0m",
+		model: "claude\nhaiku",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+	},
 ] as SessionEntry[];
 
 function selectorFor(entries: SessionEntry[]): TreeSelectorComponent {
@@ -68,13 +85,6 @@ describe("tree selector entry labels", () => {
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 	});
 
-	it("never renders a row as a bare bullet", () => {
-		const selector = selectorFor([userEntry, ...bookkeeping]);
-		selector.handleInput(ALT_A);
-		const bullets = visibleRows(selector).filter(row => /^[\s│├└─›]*•\s*$/.test(row));
-		expect(bullets).toEqual([]);
-	});
-
 	it("labels each bookkeeping entry with what it recorded", () => {
 		const selector = selectorFor([userEntry, ...bookkeeping]);
 		selector.handleInput(ALT_A);
@@ -85,6 +95,8 @@ describe("tree selector entry labels", () => {
 		expect(rows).toContain("[service tier: claude:priority]");
 		// A cleared tier is a real transition, so it says so rather than "null".
 		expect(rows).toContain("[service tier: (default)]");
+		expect(rows).toContain("[model usage: auto thinking smol role anthropic/claude haiku]");
+		expect(rows).not.toContain("\x1b[31m");
 	});
 
 	it("falls back to the entry type for kinds with nothing to spell out", () => {

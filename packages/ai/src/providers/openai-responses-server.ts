@@ -10,35 +10,52 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
-import { resolvePromptCacheKey } from "../auth-gateway/http";
+import { isRecord, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import {
+	isOpenAIReasoningEffort,
+	isOpenAIServiceTier,
+	openAIErrorResponse,
+	resolvePromptCacheKey,
+} from "../auth-gateway/http";
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
+	AssistantMessagePhase,
 	ComputerAction,
 	ComputerSafetyCheck,
 	ComputerScreenshotRef,
 	Context,
+	ImageContent,
 	Message,
 	TextContent,
 	ThinkingContent,
 	Tool,
 	ToolCall,
 } from "../types";
+import { decodeDataUri } from "./openai-data-uri";
 import {
 	type OpenAIResponsesComputerCallItem,
 	type OpenAIResponsesComputerCallOutputItem,
+	type OpenAIResponsesCustomToolCallItem,
+	type OpenAIResponsesCustomToolCallOutputItem,
 	type OpenAIResponsesFunctionCallItem,
 	type OpenAIResponsesFunctionCallOutputItem,
 	type OpenAIResponsesInputContent,
+	type OpenAIResponsesInputFileBlock,
+	type OpenAIResponsesInputImageBlock,
 	type OpenAIResponsesOutputContent,
 	type OpenAIResponsesReasoningItem,
 	type OpenAIResponsesTool,
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
-import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
+import {
+	coerceNullMessageContentInPlace,
+	encodeTextSignatureV1,
+	parseAssistantMessagePhase,
+	parseTextSignature,
+} from "./openai-shared";
 
 export type { ParsedRequest };
 
@@ -59,37 +76,20 @@ function isOpenAIResponseInclude(value: unknown): value is keyof typeof OPENAI_R
 	return typeof value === "string" && value in OPENAI_RESPONSE_INCLUDES;
 }
 
-function isReasoningEffort(value: unknown): value is NonNullable<ParsedRequest["options"]["reasoning"]> {
-	return (
-		value === "minimal" ||
-		value === "low" ||
-		value === "medium" ||
-		value === "high" ||
-		value === "xhigh" ||
-		value === "max"
-	);
-}
-
-function isServiceTier(value: unknown): value is NonNullable<ParsedRequest["options"]["serviceTier"]> {
-	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
-}
-
-function isObj(v: unknown): v is Record<string, unknown> {
-	return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
 const UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE =
 	"openai-responses: prompt_cache_options and prompt_cache_breakpoint are unsupported by this auth-gateway route; use /v1/pi/stream with options.promptCache instead";
 
 function hasUnsupportedExplicitPromptCacheFields(body: unknown): boolean {
-	if (!isObj(body)) return false;
+	if (!isRecord(body)) return false;
 	if ("prompt_cache_options" in body || "prompt_cache_breakpoint" in body) return true;
 	if (!Array.isArray(body.input)) return false;
 
 	return body.input.some(item => {
-		if (!isObj(item)) return false;
+		if (!isRecord(item)) return false;
 		if ("prompt_cache_breakpoint" in item) return true;
-		return Array.isArray(item.content) && item.content.some(part => isObj(part) && "prompt_cache_breakpoint" in part);
+		return (
+			Array.isArray(item.content) && item.content.some(part => isRecord(part) && "prompt_cache_breakpoint" in part)
+		);
 	});
 }
 
@@ -103,11 +103,11 @@ function asString(v: unknown): string | undefined {
 	return typeof v === "string" ? v : undefined;
 }
 
-type AssistantItemPhase = "commentary" | "final_answer";
+type AssistantItemPhase = AssistantMessagePhase;
 type MessageSignature = { id: string; phase?: AssistantItemPhase };
 
 function parseAssistantItemPhase(value: unknown): AssistantItemPhase | undefined {
-	return value === "commentary" || value === "final_answer" ? value : undefined;
+	return parseAssistantMessagePhase(value);
 }
 
 function messageTextSignature(id: unknown, phase: unknown): string | undefined {
@@ -161,8 +161,8 @@ function extractReasoningTextFromItem(item: OpenAIResponsesReasoningItem): strin
 type InputBlockUnion =
 	| { type: "input_text"; text: string }
 	| { type: "text"; text: string }
-	| { type: "input_image"; detail?: "auto" | "low" | "high" | "original"; image_url?: string; file_id?: string }
-	| { type: "input_file"; file_id?: string; filename?: string; file_data?: string; file_url?: string };
+	| OpenAIResponsesInputImageBlock
+	| OpenAIResponsesInputFileBlock;
 
 /** Walk an input message's content array and retain only text for the generic view.
  * Native image/file references are preserved on the message provider payload. */
@@ -290,33 +290,77 @@ function ensureAssistantPlaceholder(messages: Message[], modelId: string, now: n
 	return placeholder;
 }
 
-/** Flatten a function_call_output array form (text + refusal) into a single string. */
-function flattenFunctionOutputArray(blocks: readonly unknown[]): string {
-	const parts: string[] = [];
-	for (const raw of blocks) {
-		if (!isObj(raw)) continue;
-		const t = raw.type;
-		if (t === "output_text" || t === "text") {
+function functionOutputContent(output: string | readonly unknown[] | undefined): (TextContent | ImageContent)[] {
+	if (typeof output === "string") return [{ type: "text", text: output }];
+	if (!output) return [{ type: "text", text: "" }];
+
+	const content: (TextContent | ImageContent)[] = [];
+	let legacyText = "";
+	const flushLegacyText = (): void => {
+		if (legacyText.length === 0) return;
+		content.push({ type: "text", text: legacyText });
+		legacyText = "";
+	};
+	for (const raw of output) {
+		if (!isRecord(raw)) continue;
+		const blockType = raw.type;
+		if (blockType === "input_text") {
+			flushLegacyText();
 			const text = asString(raw.text);
-			if (text) parts.push(text);
-		} else if (t === "refusal") {
+			if (text !== undefined) content.push({ type: "text", text });
+			continue;
+		}
+		if (blockType === "output_text" || blockType === "text") {
+			const text = asString(raw.text);
+			if (text) legacyText += text;
+			continue;
+		}
+		if (blockType === "refusal") {
 			const refusal = asString(raw.refusal);
-			if (refusal) parts.push(`[refusal: ${refusal}]`);
+			if (refusal) legacyText += `[refusal: ${refusal}]`;
+			continue;
+		}
+		if (blockType === "input_image") {
+			flushLegacyText();
+			const imageUrl = asString(raw.image_url) || undefined;
+			const decoded = imageUrl ? decodeDataUri(imageUrl) : undefined;
+			const detail =
+				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"
+					? raw.detail
+					: undefined;
+			if (decoded) {
+				content.push({ type: "image", ...decoded, ...(detail ? { detail } : {}) });
+			} else {
+				const referenceImage: ImageContent = {
+					type: "image",
+					data: "",
+					mimeType: "application/octet-stream",
+					...(detail ? { detail } : {}),
+				};
+				if (imageUrl) {
+					content.push({ ...referenceImage, url: imageUrl });
+				} else {
+					const fileId = asString(raw.file_id) || undefined;
+					if (fileId) content.push({ ...referenceImage, providerFile: { provider: "openai", id: fileId } });
+				}
+			}
 		}
 	}
-	return parts.join("");
+	flushLegacyText();
+	return content.length > 0 ? content : [{ type: "text", text: "" }];
 }
 
 // ─── parseRequest ───────────────────────────────────────────────────────────
 
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
-	// Header capture is centralized in `auth-gateway/server.ts` (the
-	// allow-listed set lands on `options.headers` automatically). We also
+	// The gateway forwards allow-listed request headers itself, for the gateway
+	// token only (`applyCallerTrust` in `auth-gateway/caller-options.ts`). We
 	// consult `headers` here to populate `options.promptCacheKey` when the
 	// client signals a cache identity outside the body — see the
 	// `resolvePromptCacheKey` call further down.
 
 	rejectUnsupportedExplicitPromptCacheFields(body);
+	coerceNullMessageContentInPlace(isRecord(body) ? body.input : undefined);
 	const data = openaiResponsesRequestSchema(body);
 	if (data instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-responses: ${data.summary}`);
@@ -423,7 +467,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				let args: Record<string, unknown>;
 				try {
 					const parsedArgs: unknown = JSON.parse(argsRaw);
-					args = isObj(parsedArgs) ? parsedArgs : {};
+					args = isRecord(parsedArgs) ? parsedArgs : {};
 				} catch {
 					throw new AIError.ValidationError(
 						`openai-responses: function_call ${call.call_id} has invalid JSON arguments`,
@@ -434,13 +478,14 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					id: call.call_id,
 					name: call.name,
 					arguments: args,
+					...(call.namespace ? { namespace: call.namespace } : {}),
 					...(call.id ? { thoughtSignature: call.id } : {}),
 				};
 				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
 				continue;
 			}
 			if (effectiveType === "custom_tool_call") {
-				const call = item as { id?: string; call_id: string; name: string; input: string };
+				const call = item as OpenAIResponsesCustomToolCallItem;
 				// Custom tools carry a raw input string. We stash it in `arguments.input`
 				// matching pi-ai's openai-shared convention, and tag the call
 				// with `customWireName` so encoders re-emit it as `custom_tool_call`.
@@ -450,6 +495,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					name: call.name,
 					arguments: { input: call.input ?? "" },
 					customWireName: call.name,
+					...(call.namespace ? { namespace: call.namespace } : {}),
 					...(call.id ? { thoughtSignature: call.id } : {}),
 				};
 				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
@@ -477,18 +523,11 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 			}
 			if (effectiveType === "function_call_output") {
 				const output = item as OpenAIResponsesFunctionCallOutputItem;
-				const toolName = findToolNameById(messages, output.call_id);
-				const text =
-					typeof output.output === "string"
-						? output.output
-						: Array.isArray(output.output)
-							? flattenFunctionOutputArray(output.output)
-							: "";
 				messages.push({
 					role: "toolResult",
 					toolCallId: output.call_id,
-					toolName,
-					content: [{ type: "text", text }],
+					toolName: findToolNameById(messages, output.call_id),
+					content: functionOutputContent(output.output),
 					isError: false,
 					timestamp: now,
 				});
@@ -512,16 +551,27 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				continue;
 			}
 			if (effectiveType === "custom_tool_call_output") {
-				const output = item as { call_id: string; output: string };
+				const output = item as OpenAIResponsesCustomToolCallOutputItem;
 				const toolName = findToolNameById(messages, output.call_id);
 				messages.push({
 					role: "toolResult",
 					toolCallId: output.call_id,
 					toolName,
-					content: [{ type: "text", text: output.output ?? "" }],
+					content: functionOutputContent(output.output),
 					isError: false,
 					timestamp: now,
 				});
+				continue;
+			}
+			if (effectiveType === "additional_tools") {
+				const nativeItem = structuredCloneJSON(item) as unknown as Record<string, unknown>;
+				messages.push({
+					role: "developer",
+					content: "",
+					providerPayload: { type: "openaiResponsesHistory", items: [nativeItem], dt: true },
+					timestamp: now,
+				});
+				continue;
 			}
 			// Other item types are tolerated but not bridged.
 		}
@@ -535,15 +585,15 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	};
 
 	const options: ParsedRequest["options"] = {};
-	if (data.max_output_tokens !== undefined) options.maxOutputTokens = data.max_output_tokens;
-	if (data.temperature !== undefined) options.temperature = data.temperature;
-	if (data.top_p !== undefined) options.topP = data.top_p;
+	if (typeof data.max_output_tokens === "number") options.maxOutputTokens = data.max_output_tokens;
+	if (typeof data.temperature === "number") options.temperature = data.temperature;
+	if (typeof data.top_p === "number") options.topP = data.top_p;
 	if (data.stop !== undefined && data.stop !== null) {
 		options.stopSequences = typeof data.stop === "string" ? [data.stop] : data.stop;
 	}
 	const toolChoice = mapToolChoice(data.tool_choice as ParsedToolChoice | undefined);
 	if (toolChoice !== undefined) options.toolChoice = toolChoice;
-	if (data.reasoning?.effort && isReasoningEffort(data.reasoning.effort)) {
+	if (data.reasoning?.effort && isOpenAIReasoningEffort(data.reasoning.effort)) {
 		options.reasoning = data.reasoning.effort;
 	}
 	// OpenAI summary: `none` → suppress; `auto`/`concise`/`detailed` → request
@@ -563,7 +613,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 			});
 		}
 	}
-	if (data.service_tier !== undefined && isServiceTier(data.service_tier)) {
+	if (data.service_tier !== undefined && isOpenAIServiceTier(data.service_tier)) {
 		options.serviceTier = data.service_tier;
 	}
 	if (data.presence_penalty !== undefined) options.presencePenalty = data.presence_penalty;
@@ -574,7 +624,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (cacheKey !== undefined) options.promptCacheKey = cacheKey;
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
 	if (data.user !== undefined) options.user = data.user;
-	if (isObj(data.metadata)) options.metadata = data.metadata;
+	if (isRecord(data.metadata)) options.metadata = data.metadata;
 	// `store` is a stateful-storage hint that omp's gateway doesn't honour;
 	// silently accepted by the schema. No typed slot — drop.
 
@@ -599,12 +649,7 @@ function findToolNameById(messages: Message[], callId: string): string {
 
 // ─── formatError ────────────────────────────────────────────────────────────
 
-export function formatError(status: number, type: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { message, type } }), {
-		status,
-		headers: { "Content-Type": "application/json" },
-	});
-}
+export const formatError = openAIErrorResponse;
 
 // ─── output item builders (shared by streaming + non-streaming encoders) ────
 
@@ -628,6 +673,7 @@ type FunctionCallOutputItem = {
 	id: string;
 	call_id: string;
 	name: string;
+	namespace?: string;
 	arguments: string;
 	status: "completed";
 };
@@ -637,6 +683,7 @@ type CustomToolCallOutputItem = {
 	id: string;
 	call_id: string;
 	name: string;
+	namespace?: string;
 	input: string;
 	status: "completed";
 };
@@ -674,7 +721,7 @@ function buildReasoningItem(part: ThinkingContent): ReasoningOutputItem {
 	if (part.thinkingSignature) {
 		try {
 			const sigParsed: unknown = JSON.parse(part.thinkingSignature);
-			if (isObj(sigParsed) && sigParsed.type === "reasoning") {
+			if (isRecord(sigParsed) && sigParsed.type === "reasoning") {
 				const id = part.itemId ?? asString(sigParsed.id) ?? makeReasoningId();
 				// Preserve any extra fields (encrypted_content, …) the original carried,
 				// but normalize the summary into the canonical `{type, text}[]` shape.
@@ -701,7 +748,7 @@ function reasoningItemId(part: ThinkingContent): string {
 	if (part.thinkingSignature) {
 		try {
 			const sigParsed: unknown = JSON.parse(part.thinkingSignature);
-			if (isObj(sigParsed)) {
+			if (isRecord(sigParsed)) {
 				const id = asString(sigParsed.id);
 				if (id) return id;
 			}
@@ -782,6 +829,7 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
 					id: part.thoughtSignature ?? makeCustomCallId(),
 					call_id: wireCallId(part.id),
 					name: part.customWireName,
+					...(part.namespace ? { namespace: part.namespace } : {}),
 					input: rawInput,
 					status: "completed",
 				});
@@ -791,6 +839,7 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
 					id: part.thoughtSignature ?? makeFuncCallId(),
 					call_id: wireCallId(part.id),
 					name: part.name,
+					...(part.namespace ? { namespace: part.namespace } : {}),
 					arguments: JSON.stringify(part.arguments ?? {}),
 					status: "completed",
 				});
@@ -876,6 +925,7 @@ interface OpenFunctionCall {
 	argsText: string;
 	/** Set when the underlying ToolCall is a custom-tool emission. */
 	customWireName?: string;
+	namespace?: string;
 }
 interface OpenComputerCall {
 	kind: "computer_call";
@@ -1031,12 +1081,15 @@ export function encodeStream(
 				const itemId = tc?.thoughtSignature ?? (isCustom ? makeCustomCallId() : makeFuncCallId());
 				const callId = wireCallId(tc?.id ?? "");
 				const name = customWireName ?? tc?.name ?? "";
+				const namespace =
+					tc && typeof tc.namespace === "string" && tc.namespace.length > 0 ? tc.namespace : undefined;
 				const item = isCustom
 					? {
 							type: "custom_tool_call" as const,
 							id: itemId,
 							call_id: callId,
 							name,
+							...(namespace ? { namespace } : {}),
 							input: "",
 							status: "in_progress",
 						}
@@ -1045,6 +1098,7 @@ export function encodeStream(
 							id: itemId,
 							call_id: callId,
 							name,
+							...(namespace ? { namespace } : {}),
 							arguments: "",
 							status: "in_progress",
 						};
@@ -1058,6 +1112,7 @@ export function encodeStream(
 					name,
 					argsText: "",
 					...(isCustom ? { customWireName } : {}),
+					...(namespace ? { namespace } : {}),
 				};
 				openToolCalls.set(contentIndex, next);
 				openItemsByContentIndex.set(contentIndex, next);
@@ -1089,6 +1144,7 @@ export function encodeStream(
 						id: call.itemId,
 						call_id: call.callId ?? "",
 						name: call.customWireName,
+						...(call.namespace ? { namespace: call.namespace } : {}),
 						input: text,
 						status: "completed",
 					};
@@ -1098,6 +1154,7 @@ export function encodeStream(
 						id: call.itemId,
 						call_id: call.callId ?? "",
 						name: call.customWireName,
+						...(call.namespace ? { namespace: call.namespace } : {}),
 						input: text,
 						status: "completed",
 					});
@@ -1107,6 +1164,7 @@ export function encodeStream(
 						id: call.itemId,
 						call_id: call.callId ?? "",
 						name: call.name ?? "",
+						...(call.namespace ? { namespace: call.namespace } : {}),
 						arguments: text,
 						status: "completed",
 					};
@@ -1116,6 +1174,7 @@ export function encodeStream(
 						id: call.itemId,
 						call_id: call.callId ?? "",
 						name: call.name ?? "",
+						...(call.namespace ? { namespace: call.namespace } : {}),
 						arguments: text,
 						status: "completed",
 					});
@@ -1331,6 +1390,7 @@ export function encodeStream(
 							}
 							// Promote possibly-late info from the canonical ToolCall.
 							if (tc.customWireName && !cur.customWireName) cur.customWireName = tc.customWireName;
+							if (tc.namespace) cur.namespace = tc.namespace;
 							if (tc.thoughtSignature) cur.itemId = tc.thoughtSignature;
 							cur.callId = wireCallId(tc.id);
 							cur.name = cur.customWireName ?? tc.name;

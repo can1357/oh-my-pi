@@ -3,13 +3,9 @@ import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import {
-	getLatestTodoPhasesFromEntries,
-	type TodoPhase,
-	todoToolRenderer,
-	USER_TODO_EDIT_CUSTOM_TYPE,
-} from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { type TodoPhase, todoToolRenderer } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildSessionContext } from "../src/session/session-context";
 import type { SessionEntry } from "../src/session/session-entries";
 
@@ -33,10 +29,8 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 		cwd: "/tmp",
 		tools: new Map(),
 		getTodoPhases: () => phases,
-		setTodoPhases: next => {
+		commitTodoPhases: next => {
 			phases = next;
-		},
-		persistTodoPhases: next => {
 			entries.push({
 				type: "custom",
 				customType: USER_TODO_EDIT_CUSTOM_TYPE,
@@ -65,6 +59,20 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 		},
 	};
 }
+
+describe("todo snapshots saved with the retired blocked status", () => {
+	it("read back as pending, in both user-edit and tool-result entries", () => {
+		const saved = [{ name: "Work", tasks: [{ content: "wait", status: "blocked", blocker: "approval" }] }];
+		const userEdit = { type: "custom", customType: USER_TODO_EDIT_CUSTOM_TYPE, data: { phases: saved } };
+		const toolResult = {
+			type: "message",
+			message: { role: "toolResult", toolName: "todo", details: { op: "append", phases: saved } },
+		};
+		const expected: TodoPhase[] = [{ name: "Work", tasks: [{ content: "wait", status: "pending" }] }];
+		expect(getLatestTodoPhasesFromEntries([userEdit as SessionEntry])).toEqual(expected);
+		expect(getLatestTodoPhasesFromEntries([toolResult as SessionEntry])).toEqual(expected);
+	});
+});
 
 describe("cursor todo persistence", () => {
 	// The replay test drives the real todo renderer, which reads theme + settings.
@@ -171,25 +179,6 @@ describe("cursor todo persistence", () => {
 		expect(h.reload()[0].tasks.every(task => task.status === "pending")).toBe(true);
 	});
 
-	it("writes nothing when the session exposes no todo state", () => {
-		const entries: SessionEntry[] = [];
-		const handlers = new CursorExecHandlers({
-			cwd: "/tmp",
-			tools: new Map(),
-			persistTodoPhases: next => {
-				entries.push({
-					type: "custom",
-					customType: USER_TODO_EDIT_CUSTOM_TYPE,
-					data: { phases: next },
-				} as SessionEntry);
-			},
-		});
-
-		handlers.todoSync({ merged: false, todos: [{ content: "a", status: "pending" }] }, "call-1");
-
-		expect(entries).toEqual([]);
-	});
-
 	it("refreshes the interactive todo panel, which only reacts to tool_execution_end", () => {
 		// Cursor's todo call is resolved server-side and runs no local tool, so
 		// without a synthesized event the visible panel stays stale until reload.
@@ -223,6 +212,41 @@ describe("cursor todo persistence", () => {
 
 		expect(h.uiTodos()).toEqual(h.current());
 		expect(h.reload()).toEqual(h.current());
+	});
+
+	it("keeps an unchanged read snapshot from replacing dismissed HUD state", () => {
+		const h = newHarness([{ name: "Auth", tasks: [{ content: "oauth", status: "completed" }] }]);
+		const before = h.current();
+
+		const result = h.handlers.todoSync(
+			{ merged: false, todos: [{ content: "oauth", status: "completed" }] },
+			"read-call",
+			null,
+			"read",
+		);
+
+		expect(h.current()).toBe(before);
+		expect(h.entries).toEqual([]);
+		expect(h.uiTodos()).toBeNull();
+		expect(result.details).toBeUndefined();
+	});
+
+	it("still replaces and persists a changed read snapshot", () => {
+		const h = newHarness([{ name: "Auth", tasks: [{ content: "oauth", status: "pending" }] }]);
+		const before = h.current();
+
+		const result = h.handlers.todoSync(
+			{ merged: false, todos: [{ content: "oauth", status: "completed" }] },
+			"read-call",
+			null,
+			"read",
+		);
+
+		expect(h.current()).not.toBe(before);
+		expect(h.entries).toHaveLength(1);
+		expect(h.reload()).toEqual(h.current());
+		expect(h.uiTodos()).toEqual(h.current());
+		expect(result.details).toEqual({ phases: h.current(), storage: "session" });
 	});
 
 	it("settles the call without phases when the session exposes no todo state", () => {

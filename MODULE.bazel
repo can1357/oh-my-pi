@@ -1,8 +1,8 @@
-"""oh-my-pi — Bazel build for the native (Rust) side of the workspace.
+"""omp — Bazel build for the native (Rust) side of the workspace.
 
 Builds the pi_natives NAPI cdylib for every shipped target with hermetic
 toolchains, replacing cargo-zigbuild/cargo-xwin/sccache plus the hand-rolled
-CI caches with Bazel's content-addressed action cache (see infra/bazel-remote.yaml).
+CI caches with Bazel's content-addressed action cache (see infra/docs/03-caching.md).
 
 Layout:
   //:natives-<target>      release-grade renamed .node artifacts (root BUILD.bazel)
@@ -12,31 +12,59 @@ Layout:
 
 The cargo workspace stays authoritative for local iteration (rust-analyzer,
 `cargo nextest`, napi typedef regeneration); Bazel is the artifact and CI
-pipeline. `crate_universe` derives the Bazel dependency graph directly from
-Cargo.toml/Cargo.lock and the module annotations; no separate repin step is required.
+pipeline. `crate_universe` derives @crates from Cargo.toml/Cargo.lock; its result is cached in
+MODULE.bazel.lock, which must be refreshed with them: `bun run gen:bazel-lock`.
 """
 
-module(name = "oh-my-pi")
+module(name = "omp")
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_rust", version = "0.71.3")
 bazel_dep(name = "hermetic_cc_toolchain", version = "4.2.0")
 
-# zig 0.14's cache corrupts under concurrent `zig cc` (ziglang/zig#18763);
-# the patch gives compile-only steps private throwaway caches while links
-# keep the shared cache. See the patch header for measurements.
+# zig-wrapper patches (rationale in each patch header):
+# - zig 0.14's cache corrupts under concurrent `zig cc` (ziglang/zig#18763);
+#   compile-only steps get private throwaway caches, links keep the shared one.
+# - rustc's -Wl,--fix-cortex-a53-843419 on aarch64 linux links is dropped;
+#   zig cc rejects it as an unsupported linker arg.
+# - standalone compiler --version probes bypass Zig-only target syntax;
+#   code keeps glibc 2.17, and rustc's deprecated no-op -Wl,-O1 is omitted.
 single_version_override(
     module_name = "hermetic_cc_toolchain",
     patch_strip = 1,
-    patches = ["//bazel/patches:hermetic_cc_toolchain-isolated-compile-cache.patch"],
+    patches = [
+        "//bazel/patches:hermetic_cc_toolchain-isolated-compile-cache.patch",
+        "//bazel/patches:hermetic_cc_toolchain-drop-cortex-a53-link-arg.patch",
+        "//bazel/patches:hermetic_cc_toolchain-authoritative-target.patch",
+    ],
+)
+
+# rules_rust 0.71.3 writes `DEP_<links>_*` paths into a build script's out_dir
+# with an `${out_dir}` token that dependents' build scripts never resolve, so
+# e.g. tree-sitter's `DEP_WASMTIME_C_API_INCLUDE` pointed nowhere. The patch
+# keeps those paths exec-root relative (`${pwd}/bazel-out/.../_bs.out_dir/...`);
+# dependents already receive the out_dir as an input.
+single_version_override(
+    module_name = "rules_rust",
+    patch_strip = 1,
+    patches = ["//bazel/patches:rules_rust-dep-env-exec-root-paths.patch"],
 )
 
 # --- Rust toolchains ----------------------------------------------------------
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
-    versions = ["nightly/2026-04-29"],
+    extra_target_triples = [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+    ],
     # Pinned archive checksums for every toolchain component. Not (only) a
     # supply-chain nicety: rules_rust marks a toolchain-tools repo as
     # reproducible — and therefore eligible for Bazel's repo contents cache —
@@ -47,44 +75,40 @@ rust.toolchain(
     # version bump: for each `<tool>-nightly-<triple>` below, take the value
     # from https://static.rust-lang.org/dist/<date>/<file>.tar.xz.sha256.
     sha256s = {
-        "2026-04-29/cargo-nightly-aarch64-apple-darwin.tar.xz": "9165010618ad581a90bd3e74a36cab092e6f509c8e7ffdcfe00293257cafabb7",
-        "2026-04-29/cargo-nightly-aarch64-unknown-linux-gnu.tar.xz": "f9b463c3eadaf040b5028590c3d3072c8b0893f9863ed25138dfc54c254388e1",
-        "2026-04-29/cargo-nightly-x86_64-apple-darwin.tar.xz": "03cf3edb1d0b9564fd466553092ccec5c37be729c35df1d77f7c5a9206801638",
-        "2026-04-29/cargo-nightly-x86_64-unknown-linux-gnu.tar.xz": "0ae6ed5a9e262d082003d5804cd7fc6977057cfa3df721451e356347962f391f",
-        "2026-04-29/clippy-nightly-aarch64-apple-darwin.tar.xz": "84b933f8a2837c81adca3e3a44fed971ec0de27673e2c56f122f6d2b35ef9371",
-        "2026-04-29/clippy-nightly-aarch64-unknown-linux-gnu.tar.xz": "827c90b264a716475e85f51bd1999344af14648882cdd5a6d517a73c7e4c02c4",
-        "2026-04-29/clippy-nightly-x86_64-apple-darwin.tar.xz": "2c749f10bb18c752323b489e056c55f2e6e04ff3939d16444f4f0d960463d2d2",
-        "2026-04-29/clippy-nightly-x86_64-unknown-linux-gnu.tar.xz": "36a9409a58b3ac16ce9823d4e705055cad8144dd7f18464c028e3a06ae5d87c8",
-        "2026-04-29/llvm-tools-nightly-aarch64-apple-darwin.tar.xz": "c6a5cfd0c6133e1fae913a624bef2387a1b9c1e2e75316f9d9b6872a592a8b2c",
-        "2026-04-29/llvm-tools-nightly-aarch64-unknown-linux-gnu.tar.xz": "7e51dc58df2d0d9e263d629e6b149785bb61b716e267cc841556a4641ed52a50",
-        "2026-04-29/llvm-tools-nightly-x86_64-apple-darwin.tar.xz": "ab6cd3bae1c979fd807982b8c39e911227f9344dab5051d45f612b440dad13ff",
-        "2026-04-29/llvm-tools-nightly-x86_64-unknown-linux-gnu.tar.xz": "0fb4bed6714359d9505b870c8bd67c722266c5a3894f66523bc231b9c479db31",
-        "2026-04-29/rust-src-nightly.tar.xz": "2a9c5ae7696a808e30fc5169ddfea20d69571a11997f142944c022a0d30af48b",
-        "2026-04-29/rust-std-nightly-aarch64-apple-darwin.tar.xz": "cd9e231f3e343b4ed5cff5c384c813cecba13fca94ef767fa8dc4aa0ff58a171",
-        "2026-04-29/rust-std-nightly-aarch64-unknown-linux-gnu.tar.xz": "80dceec313e144e3cfc5d67326826d85c664e762a27b53fea018a96d537a2942",
-        "2026-04-29/rust-std-nightly-aarch64-unknown-linux-musl.tar.xz": "9d5cb99d5678b2310bd69b2b654e9dcbbc3c5a50f9b66d03a21745cff4444927",
-        "2026-04-29/rust-std-nightly-x86_64-apple-darwin.tar.xz": "4992887472dfdea66a7f96c85b81104b543974204f91722742bbe5453bce8ec1",
-        "2026-04-29/rust-std-nightly-x86_64-pc-windows-msvc.tar.xz": "890d91c1b86e482aaee32d793b366ee3889a9326143cd7f82a2b7507a4f4d592",
-        "2026-04-29/rust-std-nightly-x86_64-unknown-linux-gnu.tar.xz": "09774060c01c82005a2ae4e4b46a899c5e6157d6cc7188dfbb750c0a0f7c52cf",
-        "2026-04-29/rust-std-nightly-x86_64-unknown-linux-musl.tar.xz": "de5936933a2994ebff227b62fe41fca5707496d13da33563f2bfee3049e7b122",
-        "2026-04-29/rustc-nightly-aarch64-apple-darwin.tar.xz": "61fc2a3fd11637fbe9f961319aa16d84615d2a033de46909742000448290c687",
-        "2026-04-29/rustc-nightly-aarch64-unknown-linux-gnu.tar.xz": "d8c9d9117a0499b6891e4622c55c7be9568e6b0cbed4f53540e51459ab514633",
-        "2026-04-29/rustc-nightly-x86_64-apple-darwin.tar.xz": "66efb8a2fb4155cd010bafda3382f643d87f337b646542f7830eda36cf1571a4",
-        "2026-04-29/rustc-nightly-x86_64-unknown-linux-gnu.tar.xz": "b0db9dc4957c0f12ff8be0a30d22b411d4e2a7f434d747d767156be80d782f1d",
-        "2026-04-29/rustfmt-nightly-aarch64-apple-darwin.tar.xz": "56dcf5ac72bcf663687273b0b9cdf953537081f38a4592d3577e9a6502707b4b",
-        "2026-04-29/rustfmt-nightly-aarch64-unknown-linux-gnu.tar.xz": "b495726b0f311dcb53a8cf5325c61ef321f110a3739247536bc87109d428a3cc",
-        "2026-04-29/rustfmt-nightly-x86_64-apple-darwin.tar.xz": "9c64403758b4b631b60057f6ed4a93b02f19286a59a60f8ea235b4f7d4e1ba4c",
-        "2026-04-29/rustfmt-nightly-x86_64-unknown-linux-gnu.tar.xz": "397e4ead440f29a1fc10903388a377f5607a1d404c29dc3e3a979d2bc813a801",
+        "2026-11-08/cargo-nightly-aarch64-apple-darwin.tar.xz": "a6830e8340f7076be4f07412a4e40aa210c4226f13a89a3ebe4dc724f101f1fc",
+        "2026-11-08/cargo-nightly-aarch64-unknown-linux-gnu.tar.xz": "c419030d0b5fefcfc6a587633c975d0c13bbe27a69051a5057aa601fa97fce25",
+        "2026-11-08/cargo-nightly-x86_64-apple-darwin.tar.xz": "9abf042effbd4877c8e706ed16ece07926edae75510b9f4128f992e87308bba9",
+        "2026-11-08/cargo-nightly-x86_64-unknown-linux-gnu.tar.xz": "933f57c1ca9ab478f29b04ed536a3c12ec500124165b2865b4de551aaa35e8a2",
+        "2026-11-08/clippy-nightly-aarch64-apple-darwin.tar.xz": "21a27c0db5589324ee7a8d123fc628d412f000a81548fb9f74ff7f43656d7886",
+        "2026-11-08/clippy-nightly-aarch64-unknown-linux-gnu.tar.xz": "fdaebed71e8f9a78486c80ef72216571d01317044b515814ddc8f1be52ecca4d",
+        "2026-11-08/clippy-nightly-x86_64-apple-darwin.tar.xz": "4af645bb989689427b99f6c01d7c171bf46c160d98b02d18489913e487a0995f",
+        "2026-11-08/clippy-nightly-x86_64-unknown-linux-gnu.tar.xz": "380a5f277e882e9cc095a85183f924babce167b54ad8b87f52726ce92a3bea2c",
+        "2026-11-08/llvm-tools-nightly-aarch64-apple-darwin.tar.xz": "82deac4f030550078a346d0c08e87e66130cde150275ac9548afbf0195febaa8",
+        "2026-11-08/llvm-tools-nightly-aarch64-unknown-linux-gnu.tar.xz": "1af51afec11bece5554bc60941b1d7dcbc9581ad27e5c4abf3e2dc850f95106c",
+        "2026-11-08/llvm-tools-nightly-x86_64-apple-darwin.tar.xz": "28e47e4a116aad9c09ffe30322e33971a53fc74cbea566030baeb5d2eeaa200c",
+        "2026-11-08/llvm-tools-nightly-x86_64-unknown-linux-gnu.tar.xz": "18f2eb0b8f48c85eb9104996f43d25ca9d632581fb9fae9d70f1d806091621ce",
+        "2026-11-08/rust-src-nightly.tar.xz": "141d8e767382cd839feff84c7cf6937656c53de8997a313c3bbf56b03cae3c45",
+        "2026-11-08/rust-std-nightly-aarch64-pc-windows-msvc.tar.xz": "76c1a9ab1e9efbbb77bd179f1fe365952daecfbc1796bbb19ee90754221bfcfb",
+        "2026-11-08/rust-std-nightly-aarch64-apple-darwin.tar.xz": "b281bdc8c8d0217d3d8aafbe77f763246014fd925068f41c20a6efed57e62b8c",
+        "2026-11-08/rust-std-nightly-aarch64-unknown-linux-gnu.tar.xz": "dccff165f3cbb7fe622c11c6efdb9b18a37d38eaf2663d8c402e321f301dc178",
+        "2026-11-08/rust-std-nightly-aarch64-unknown-linux-musl.tar.xz": "3af90e6db4580f3b9d526cf5ee76d9cd231dc26984c9227678bbdbd8ffd2de19",
+        "2026-11-08/rust-std-nightly-x86_64-apple-darwin.tar.xz": "6b459120e0d47e01729bb91c63492c07e70ef6f6fe081721a09d8c4886e5f16c",
+        "2026-11-08/rust-std-nightly-x86_64-pc-windows-msvc.tar.xz": "d1d26602d89f981f07e0607be5b4f35764e0f8b2413801c294f4b682b335d314",
+        "2026-11-08/rust-std-nightly-x86_64-unknown-linux-gnu.tar.xz": "db82d4ea1684d490eb3a49666676e9a8793d271dfeb8c2998342f4b41d16c46d",
+        "2026-11-08/rust-std-nightly-x86_64-unknown-linux-musl.tar.xz": "a603626f29e4e338c2a7ed4ecc7f5ee04271274d7f5f78a87ce6bc64367001bb",
+        "2026-11-08/rustc-nightly-aarch64-apple-darwin.tar.xz": "c47e0efb800c2f19ead41dc57b4c09f3a708d9d260a7e498ef10124415cd8150",
+        "2026-11-08/rustc-nightly-aarch64-unknown-linux-gnu.tar.xz": "9d9017dced5afaf38cbcb1ee875372b9e3fa527f56879b700542b2e08ada15e8",
+        "2026-11-08/rustc-nightly-x86_64-apple-darwin.tar.xz": "e4a52857f7e205e17f91a1d13e0ee9132c23b2c9e0950f91fbe71cb4886f55fe",
+        "2026-11-08/rustc-nightly-x86_64-unknown-linux-gnu.tar.xz": "9c7cf72535dd83b68e920ff9235466dd613d844f531f41b6478175491315d4a7",
+        "2026-11-08/rustfmt-nightly-aarch64-apple-darwin.tar.xz": "c1007e511d6c2910bd81ad0bf3fd7da5fdd1eb751f15ebaf65078c0068f09012",
+        "2026-11-08/rustfmt-nightly-aarch64-unknown-linux-gnu.tar.xz": "eba54ca81357c3b75589a71a814e70909de22ec38628b4dc94912c9c32be9c41",
+        "2026-11-08/rustfmt-nightly-x86_64-apple-darwin.tar.xz": "a583905d6499432c53f58ab42ce057539cb43a8f2abf326a6841dd4b070c972e",
+        "2026-11-08/rustfmt-nightly-x86_64-unknown-linux-gnu.tar.xz": "b3bd6de853e05c30a3803e2e3b06660a3d20e2195cd419ddc7df3ef70ee99b16",
     },
-    extra_target_triples = [
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-        "aarch64-unknown-linux-musl",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-pc-windows-msvc",
-    ],
+    # rules_rust otherwise fetches rustfmt at its own DEFAULT_NIGHTLY_VERSION,
+    # which drifts from the toolchain (and from `cargo fmt`) on every bump.
+    rustfmt_version = "nightly/2026-11-08",
+    versions = ["nightly/2026-11-08"],
 )
 use_repo(
     rust,
@@ -93,27 +117,31 @@ use_repo(
     # explicit @zig_sdk//libc:musl constraint: rules_rust's generated gnu and
     # musl toolchains share (os, cpu) constraints, so without the extra
     # constraint whichever registers first would win for both libcs.
-    "rust_linux_x86_64__x86_64-unknown-linux-musl__nightly_tools",
-    "rust_linux_x86_64__aarch64-unknown-linux-musl__nightly_tools",
-    "rust_macos_aarch64__x86_64-unknown-linux-musl__nightly_tools",
-    "rust_macos_aarch64__aarch64-unknown-linux-musl__nightly_tools",
     "rust_linux_aarch64__aarch64-unknown-linux-musl__nightly_tools",
     "rust_linux_aarch64__x86_64-unknown-linux-musl__nightly_tools",
+    "rust_linux_x86_64__aarch64-unknown-linux-musl__nightly_tools",
+    "rust_linux_x86_64__x86_64-unknown-linux-musl__nightly_tools",
+    "rust_macos_aarch64__aarch64-unknown-linux-musl__nightly_tools",
+    "rust_macos_aarch64__x86_64-unknown-linux-musl__nightly_tools",
 )
 
 # Order matters: repo-local toolchains (musl disambiguation wrappers, msvc
 # cross cc toolchain) MUST resolve before the generated @rust_toolchains set.
 register_toolchains("//bazel/toolchains:all")
+
 register_toolchains("@rust_toolchains//:all")
 
 # --- C/C++ toolchains ---------------------------------------------------------
 # zig cc provides hermetic linux-gnu (pinned glibc 2.17 portability floor, same
 # floor cargo-zigbuild used) and linux-musl cross toolchains, executable from
-# both linux-x64 CI pods and darwin dev hosts. darwin targets use the host
-# Xcode toolchain (Apple frameworks are not redistributable); win32-msvc uses
-# the hermetic clang-cl+xwin toolchain in //bazel/toolchains/msvc.
+# both linux-x64 CI pods and darwin dev hosts. darwin targets use the hermetic
+# clang + ld64.lld + Command Line Tools SDK toolchain in
+# //bazel/toolchains/darwin from linux hosts and the host Xcode toolchain on mac
+# hosts; win32-msvc uses the hermetic clang-cl+xwin toolchain in
+# //bazel/toolchains/msvc.
 zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
 use_repo(zig, "zig_sdk")
+
 register_toolchains(
     "@zig_sdk//libc_aware/toolchain:linux_amd64_gnu.2.17",
     "@zig_sdk//libc_aware/toolchain:linux_arm64_gnu.2.17",
@@ -128,7 +156,7 @@ register_toolchains(
 rust_host_tools = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
 rust_host_tools.host_tools(
     name = "rust_host_tools_nightly",
-    version = "nightly/2026-04-29",
+    version = "nightly/2026-11-08",
 )
 use_repo(rust_host_tools, "rust_host_tools_nightly")
 
@@ -145,6 +173,10 @@ crate.from_cargo(
     # Nightly host tools (see the rust_host_tools extension above): the
     # splice's rustc probe must accept user-level -Z RUSTFLAGS.
     host_tools = "@rust_host_tools_nightly",
+    # The root manifest covers all workspace members, including the vendored
+    # crates (members so their sources render hermetically; the
+    # [patch.crates-io] entries redirect registry deps to them).
+    manifests = ["//:Cargo.toml"],
     # Exactly the shipped addon triples: crate BUILD files get
     # target_compatible_with selects over this set (defaults omit darwin-x64
     # and musl), and features/deps resolve per-triple from Cargo.lock.
@@ -156,88 +188,112 @@ crate.from_cargo(
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
         "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
     ],
-    # The root manifest covers all workspace members, including the vendored
-    # brush fork (members so their sources render hermetically; the
-    # [patch.crates-io] entry redirects brush-core's registry dep to it).
-    manifests = ["//:Cargo.toml"],
 )
 
-# audiopus_sys builds its vendored opus via the `cmake` crate: give the build
-# script a PATH that resolves cmake/make (runner image, GH runners, NixOS, and
-# other dev hosts) and the policy override its old CMakeLists needs under CMake
-# 4.x. The patch pins CMAKE_INSTALL_LIBDIR=lib because the crate always links
-# from <prefix>/lib while CMake uses lib64 on some aarch64 systems. The cmake
-# crate picks up CC/CFLAGS from the Bazel cc toolchain on its own.
+# opusic-sys builds its bundled Opus via `cmake` and selects Ninja from PATH.
+# The target-specific toolchain keeps MSVC cross builds on the wrapper
+# compiler/linker; CFLAGS keeps Zig cross builds free of host UBSan links.
 crate.annotation(
-    crate = "audiopus_sys",
-    patches = ["//bazel/patches:audiopus-sys-libdir.patch"],
-    patch_args = ["-p1"],
     build_script_env = {
-        "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
-        # Release artifacts must use the vendored Opus rather than a host
-        # pkg-config result whose library may not exist on the target system.
-        "OPUS_NO_PKG": "1",
-        # msvc cross only (cmake-rs reads VAR_<triple> before VAR; the key is
-        # inert for every other target): without a generator override cmake-rs
-        # insists on a Visual Studio generator for msvc targets, which cannot
-        # exist on linux/mac hosts. Ninja must be on the PATH below.
-        "CMAKE_GENERATOR_x86_64_pc_windows_msvc": "Ninja",
-        # msvc cross only: cmake's vs_link_exe insists on rc/mt tools for
-        # MSVC-ABI exe links (try_compile), which find_program can't locate on
-        # linux/mac PATH. @msvc_cc's toolchain.cmake pins compiler/linker/
-        # rc/mt to the wrapper dir (self-locating via CMAKE_CURRENT_LIST_DIR).
-        # $${pwd} → exec root in the rules_rust runner; the canonical repo
-        # path must track the repo rule/name in the msvc section below.
         "CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc/toolchain.cmake",
-        # zig cc enables UBSan by default; cmake's try-compile links a test
-        # exe with the raw wrapper (no toolchain features), which would demand
-        # the UBSan runtime. Opus shipped without sanitizers under
-        # cargo-zigbuild too.
+        "CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/toolchain.cmake",
         "CFLAGS": "-fno-sanitize=undefined",
         "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
     },
+    crate = "opusic-sys",
+    patch_args = ["-p1"],
+    # CMake explicitly installs to lib; the upstream host-Linux lib64 search
+    # points at a nonexistent directory even when cross-compiling for macOS.
+    patches = ["//bazel/patches:opusic-sys-install-libdir.patch"],
+    version = "0.7.5",
+)
+
+# wasmtime-c-api-impl (tree-sitter's `wasm` feature) runs `cmake -P` to install
+# the C API headers tree-sitter compiles against; same host PATH as opusic-sys.
+crate.annotation(
+    build_script_env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
+    },
+    crate = "wasmtime-c-api-impl",
+)
+
+# The bundled Wasmtime C API is static. wasm.h otherwise declares Windows
+# imports, which is incompatible with the static archive tree-sitter links.
+crate.annotation(
+    build_script_env = {
+        "CFLAGS_x86_64_pc_windows_msvc": "/DLIBWASM_STATIC",
+        "CFLAGS_aarch64_pc_windows_msvc": "/DLIBWASM_STATIC",
+    },
+    crate = "tree-sitter",
+)
+
+# cargo-bazel omits workspace-local build dependencies from generated registry
+# build scripts; restore nix 0.28's edge to the patched cfg_aliases crate.
+crate.annotation(
+    build_script_deps = ["@@//crates/vendor/cfg_aliases:cfg_aliases"],
+    crate = "nix",
+    version = "0.28.0",
+)
+
+# Same for normal dependencies: grep-printer's edge to the vendored
+# grep-searcher (a workspace member via [patch.crates-io]) is dropped, so its
+# rustc invocation has no `--extern grep_searcher`.
+crate.annotation(
+    crate = "grep-printer",
+    deps = ["@@//crates/vendor/grep-searcher:grep-searcher"],
 )
 
 # Release addons must never pick up a host libpcre2 (Homebrew paths leaked into
 # shipped dylibs before); always build the vendored static copy.
 crate.annotation(
-    crate = "pcre2-sys",
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
+    crate = "pcre2-sys",
 )
-
-# tree-sitter-just's scanner.c hard-errors when NDEBUG is set (opt-mode cc
-# default). cc-rs appends env CFLAGS after its computed flags, so -UNDEBUG wins.
-crate.annotation(
-    crate = "tree-sitter-just",
-    build_script_env = {"CFLAGS": "-UNDEBUG"},
-)
-
 use_repo(crate, "crates")
-
 
 # --- msvc cross toolchain (owned by bazel/toolchains/msvc) ---------------------
 # Hermetic clang-cl + lld-link + xwin CRT/SDK toolchain for x86_64-pc-windows-msvc
 # (replaces cargo-xwin). Three repos so flag iteration in cc.bzl never
 # invalidates the ~2 GiB LLVM download or the ~1 GiB xwin splat:
 #   @llvm_msvc_tools  pruned LLVM 20.1.7 release binaries for the exec host
+#                     (//bazel/toolchains:llvm.bzl)
 #   @xwin_sysroot     MSVC CRT + Windows SDK splatted by pinned xwin 0.6.5
 #   @msvc_cc          wrappers + MSVC-flavored cc_toolchain (rules_cc config)
 # toolchain() registrations live in //bazel/toolchains (one per exec host).
 # rules_cc pin matches Bazel 9.2's own builtin dependency.
 bazel_dep(name = "rules_cc", version = "0.2.17")
 
-llvm_msvc_tools = use_repo_rule("//bazel/toolchains/msvc:llvm.bzl", "llvm_msvc_tools_repository")
+llvm_msvc_tools = use_repo_rule("//bazel/toolchains:llvm.bzl", "llvm_msvc_tools_repository")
 
 llvm_msvc_tools(name = "llvm_msvc_tools")
 
 xwin_sysroot = use_repo_rule("//bazel/toolchains/msvc:sysroot.bzl", "xwin_sysroot_repository")
 
-xwin_sysroot(name = "xwin_sysroot")
+# Pinned like the arm64 splat below: the manifest's latest SDK (10.0.26100)
+# no longer resolves x86_64 headers ("unable to find x86_64 headers").
+xwin_sysroot(
+    name = "xwin_sysroot",
+    sdk_version = "10.0.22621",
+)
+
+xwin_sysroot(
+    name = "xwin_sysroot_arm64",
+    arch = "aarch64",
+    sdk_version = "10.0.22621",
+)
 
 msvc_cc = use_repo_rule("//bazel/toolchains/msvc:cc.bzl", "msvc_cc_repository")
 
 msvc_cc(name = "msvc_cc")
+
+# aarch64-pc-windows-msvc variant (//:natives-win32-arm64).
+msvc_cc(
+    name = "msvc_cc_arm64",
+    arch = "aarch64",
+    xwin_repo = "@xwin_sysroot_arm64//:BUILD.bazel",
+)
 
 # blake3 assembles MASM .asm for x64 msvc targets; cc-rs resolves `ml64.exe`
 # from the build-script PATH on non-windows hosts. Prepend @msvc_cc's wrapper
@@ -246,11 +302,76 @@ msvc_cc(name = "msvc_cc")
 # rules_rust build-script runner. The leading entry is the canonical repo path
 # of @msvc_cc (`+<repo rule>+<name>`) — keep in sync if the rule or repo in
 # this section is ever renamed. On non-msvc targets the dir simply does not
-# exist and the rest of the PATH matches the audiopus_sys annotation above.
+# exist and the rest of the PATH matches the opusic-sys annotation above.
 crate.annotation(
-    crate = "blake3",
     build_script_env = {
         "PATH": "$${pwd}/external/+msvc_cc_repository+msvc_cc/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
     },
+    crate = "blake3",
+)
+# ring 0.17 compiles windows-aarch64 C/asm with GNU-driver `clang` from PATH
+# (never clang-cl); @msvc_cc_arm64's bin/clang wrapper translates the toolchain
+# CFLAGS and adds the xwin includes. Absent (and unused) for other targets.
+crate.annotation(
+    build_script_env = {
+        "PATH": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+    },
+    crate = "ring",
+)
+# psm (via wasmtime and stacker) assembles windows-aarch64 from its GAS source
+# off a Windows host, but preprocesses that source only for GNU-style
+# compilers; under clang-cl its GLOBL/FUNCTION macros stay unexpanded. Hand it
+# @msvc_cc_arm64's GNU-driver clang (see the ring note). Absent elsewhere.
+crate.annotation(
+    build_script_env = {
+        "CC_aarch64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/bin/clang",
+    },
+    crate = "psm",
 )
 # --- end msvc cross toolchain ---------------------------------------------------
+
+# --- darwin cross toolchain (owned by bazel/toolchains/darwin) -----------------
+# Hermetic clang + ld64.lld cc toolchain for {arm64,x86_64}-apple-darwin from
+# linux exec hosts, against the macOS SDK Apple ships in its Command Line Tools
+# package. Mac hosts never fetch these (the toolchain()s are exec-gated on
+# linux). Split like the msvc toolchain so flag iteration in cc.bzl never
+# invalidates the downloads:
+#   @llvm_darwin_tools      pruned LLVM 23.1.3 (clang, ld64.lld, llvm-ar, ...)
+#   @macos_sdk              MacOSX27.0.sdk from Apple's software update CDN
+#   @darwin_cc_{arm64,x64}  wrappers + macOS-flavored cc_toolchain
+llvm_darwin_tools = use_repo_rule("//bazel/toolchains:llvm.bzl", "llvm_darwin_tools_repository")
+
+llvm_darwin_tools(name = "llvm_darwin_tools")
+
+macos_sdk = use_repo_rule("//bazel/toolchains/darwin:sdk.bzl", "macos_sdk_repository")
+
+macos_sdk(name = "macos_sdk")
+
+darwin_cc = use_repo_rule("//bazel/toolchains/darwin:cc.bzl", "darwin_cc_repository")
+
+darwin_cc(
+    name = "darwin_cc_arm64",
+    arch = "arm64",
+)
+
+darwin_cc(
+    name = "darwin_cc_x64",
+    arch = "x86_64",
+)
+
+# Swift toolchains for the Apple Foundation Models bridge in omp-natives: the
+# host probe for mac exec hosts, the pinned swift.org release for linux ones.
+applefm_swift = use_repo_rule("//bazel/toolchains/swift:applefm.bzl", "applefm_swift_repository")
+
+applefm_swift(name = "applefm_swift")
+
+swift_linux = use_repo_rule("//bazel/toolchains/swift:linux.bzl", "swift_linux_repository")
+
+swift_linux(name = "swift_linux")
+
+# Cheap host-path overlay; unlike the pinned Swift download it must not be
+# repo-content-cached because its symlinks point into other repositories.
+swift_darwin_resources = use_repo_rule("//bazel/toolchains/swift:linux.bzl", "swift_darwin_resources_repository")
+
+swift_darwin_resources(name = "swift_darwin_resources")
+# --- end darwin cross toolchain -------------------------------------------------

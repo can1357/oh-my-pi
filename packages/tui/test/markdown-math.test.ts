@@ -1,7 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Markdown, renderInlineMarkdown } from "../src/components/markdown";
+import { setTerminalTextSizing, TERMINAL } from "../src/terminal-capabilities";
 import { defaultMarkdownTheme } from "./test-themes.js";
+
+const originalTrueColor = TERMINAL.trueColor;
+const originalTextSizing = TERMINAL.textSizing;
+
+afterEach(() => {
+	Object.assign(TERMINAL, { trueColor: originalTrueColor });
+	setTerminalTextSizing(originalTextSizing);
+});
 
 /** Render markdown and return non-empty, ANSI-stripped, right-trimmed lines. */
 function renderLines(md: string, width = 100): string[] {
@@ -75,6 +84,15 @@ describe("Markdown math rendering", () => {
 		expect(line).toBe("it costs $5 and $10 total");
 	});
 
+	it("closes a span at the first unescaped delimiter", () => {
+		// `\\` is a TeX row break, so that `)` is body text, not the closer.
+		const [paren] = renderLines(String.raw`prose \(x \\) y\) end`);
+		expect(paren).toBe("prose x  ) y end");
+		// An escaped dollar cannot end display math either.
+		const [dollar] = renderLines(String.raw`$$a \$$ b$$`);
+		expect(dollar).toBe("a $ b");
+	});
+
 	it("renderInlineMarkdown converts inline math", () => {
 		const out = stripVTControlCharacters(renderInlineMarkdown("energy $E=mc^2$ here", defaultMarkdownTheme));
 		expect(out).toBe("energy E=mc² here");
@@ -102,5 +120,31 @@ describe("Markdown math rendering", () => {
 		expect(lines[barRow]).toContain("x =");
 		expect(lines[barRow - 1]).toContain("a+b");
 		expect(lines[barRow + 1]).toContain("c");
+	});
+
+	it("preserves ANSI styles through Markdown math wrappers", () => {
+		Object.assign(TERMINAL, { trueColor: true });
+		const markdown = String.raw`$\boxed{\textcolor{red}{x}}+y_{\textit{word}}+\textcolor{red}{\sqrt[n]{x}}$
+
+$$\textbf{\frac{a}{b}}$$`;
+		const rendered = new Markdown(markdown, 0, 0, defaultMarkdownTheme).render(100).join("\n");
+		const red = Bun.color("#ff0000", "ansi-16m") ?? "";
+
+		expect(rendered).toContain(`[${red}x\x1b[39m]`);
+		expect(rendered).toContain(`y_(\x1b[3mword\x1b[23m)`);
+		expect(rendered).toContain(`${red}ⁿ√x\x1b[39m`);
+		expect(rendered).toContain("\x1b[1ma\x1b[22m");
+		expect(rendered).toContain("\x1b[1mb\x1b[22m");
+	});
+
+	it("sized headings draw the same bytes for styled and plain inline math", () => {
+		Object.assign(TERMINAL, { trueColor: true });
+		setTerminalTextSizing(true);
+		const plain = new Markdown("# x", 0, 0, defaultMarkdownTheme).render(100).join("\n");
+		const styled = new Markdown(String.raw`# $\textcolor{red}{x}$`, 0, 0, defaultMarkdownTheme)
+			.render(100)
+			.join("\n");
+
+		expect(styled).toBe(plain);
 	});
 });

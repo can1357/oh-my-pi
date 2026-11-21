@@ -1,0 +1,80 @@
+// Provider-wire compat for "moonshot"; regenerated from the frozen census using deployment contract selectors.
+
+provider "moonshot" {
+	default-model "kimi-k2.7-code"
+	// KIMI_API_KEY is the most intuitive name for a Kimi/Moonshot key; accept it
+	// as a fallback so China users need not learn MOONSHOT_API_KEY. (#2883)
+	env "MOONSHOT_API_KEY" "KIMI_API_KEY"
+	discovery label="Moonshot"
+	// Moonshot's China platform, selected with MOONSHOT_BASE_URL (#2883).
+	endpoint-hosts "api.moonshot.cn"
+
+	class "kimi" {
+		// Replaces the Moonshot Kimi thinking-format branch.
+		thinking-format "zai"
+		family "k3" {
+			thinking-format "openai"
+			// K3 and K3.1 Pro default `max_completion_tokens` to 131072 and
+			// accept up to the whole 1M window; the shared catalog reports that
+			// ceiling as the output limit, leaving no room for input. Pin the
+			// documented default, as `model-limits` does for /models rows.
+			// https://platform.kimi.ai/docs/guide/kimi-k3-1-pro-quickstart
+			max-tokens-ceiling 131072
+		}
+		thinking-mode "effort"
+	}
+	// Bundled census: the dotted K2.5+ generations and K3 are multimodal;
+	// legacy `kimi-k2-*` previews and the thinking lane stay text-only.
+	class "kimi" {
+		family "k2.5" {
+			input-modalities "text" "image"
+		}
+		family "k2.6" {
+			input-modalities "text" "image"
+		}
+		family "k2.7-code" {
+			input-modalities "text" "image"
+		}
+		family "k3" {
+			input-modalities "text" "image"
+		}
+	}
+	// Official K3 rates: cache write is billed separately by TTL ($3 for the
+	// default 5min tier, $6 for 1h). omp sends no TTL, so the 5min rate applies.
+	// https://platform.moonshot.ai/docs/pricing/chat-k3
+	models "kimi-k3" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 3.0
+		}
+	}
+	// Official K3.1 Pro rates. The discovery mapper seeds K3 list pricing on
+	// every $0 K3-family row, so these must patch rather than fall back.
+	// https://platform.kimi.ai/docs/pricing/chat
+	models "kimi-k3.1-pro" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 2.0
+		}
+	}
+	models "kimi-k3.1-pro-highspeed" {
+		cost-patch {
+			input 4.0
+			output 20.0
+			cache-read 0.2
+			cache-write 4.0
+		}
+	}
+	// The /models roster carries no modality metadata for the named vision/vl
+	// SKUs; the bounded id token is the census signal.
+	models token="vision" {
+		input-modalities "text" "image"
+	}
+	models token="vl" {
+		input-modalities "text" "image"
+	}
+}

@@ -3,11 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { listAllSessions, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, refreshDirsFromEnv, setAgentDir } from "@oh-my-pi/pi-utils";
 
 let tempDir: string;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -39,6 +39,27 @@ async function writeSession(
 		sessionPath,
 		`${JSON.stringify({ type: "session", id, timestamp: "2026-01-01T00:00:00.000Z", cwd })}\n`,
 	);
+	return sessionPath;
+}
+
+/** The sibling a session moves to when it cannot keep writing `parentId`'s file. */
+async function writeContinuation(parentId: string, id: string, sessionDir: string, cwd = tempDir): Promise<string> {
+	const sessionPath = path.join(sessionDir, `2026-01-02T00-00-00-000Z_${id}.jsonl`);
+	const header = {
+		type: "session",
+		id,
+		timestamp: "2026-01-02T00:00:00.000Z",
+		cwd,
+		parentSession: parentId,
+		continuationOf: parentId,
+	};
+	const turn = {
+		type: "message",
+		id: `${id}-turn`,
+		timestamp: "2026-01-02T00:00:01.000Z",
+		message: { role: "user", content: "after the move-off", timestamp: 1 },
+	};
+	await Bun.write(sessionPath, `${JSON.stringify(header)}\n${JSON.stringify(turn)}\n`);
 	return sessionPath;
 }
 
@@ -106,7 +127,7 @@ describe("/resume slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 		expect(harness.showSessionSelector).not.toHaveBeenCalled();
 		expect(harness.showError).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath, { continuation: undefined });
 	});
 
 	it("checks the active session directory before global cwd buckets", async () => {
@@ -120,7 +141,7 @@ describe("/resume slash command", () => {
 
 		expect(handled).toBe(true);
 		expect(harness.showError).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath, { continuation: undefined });
 	});
 
 	it("resumes a matching session id prefix from another cwd", async () => {
@@ -137,7 +158,46 @@ describe("/resume slash command", () => {
 
 		expect(handled).toBe(true);
 		expect(harness.showError).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath, { continuation: undefined });
+	});
+
+	it("resumes the continuation of an id whose file no longer reads as a session", async () => {
+		const id = "019eda11-02fb-7000-8dac-396e2f84d484";
+		const sessionDir = computeDefaultSessionDir(tempDir, storage);
+		const replaced = await writeSession(id, tempDir, sessionDir);
+		const continuation = await writeContinuation(id, "019eda22-02fb-7000-8dac-396e2f84d484", sessionDir);
+		// Conflict recovery leaves a file that no longer reads as its session as it found it.
+		await Bun.write(replaced, "not a session journal\n");
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/resume 019eda11", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(continuation, {
+			continuation: expect.objectContaining({ from: replaced, copies: 2 }),
+		});
+	});
+
+	it("resumes the continuation of an id whose file now holds another session", async () => {
+		const id = "019edb11-02fb-7000-8dac-396e2f84d484";
+		const sessionDir = computeDefaultSessionDir(tempDir, storage);
+		const replaced = await writeSession(id, tempDir, sessionDir);
+		const continuation = await writeContinuation(id, "019edb22-02fb-7000-8dac-396e2f84d484", sessionDir);
+		const other = "019edb33-02fb-7000-8dac-396e2f84d484";
+		await Bun.write(
+			replaced,
+			`${JSON.stringify({ type: "session", id: other, timestamp: "2026-01-01T00:00:00.000Z", cwd: tempDir })}\n`,
+		);
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/resume 019edb11", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(continuation, {
+			continuation: expect.objectContaining({ from: replaced, copies: 2 }),
+		});
 	});
 
 	it("keeps explicit session directories scoped unless global fallback is enabled", async () => {
@@ -168,5 +228,43 @@ describe("/resume slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 		expect(harness.showError).toHaveBeenCalledWith('Session "missing-session" not found');
 		expect(harness.handleResumeSession).not.toHaveBeenCalled();
+	});
+
+	it.skipIf(process.platform === "win32")("lists and resumes sessions stored in XDG_DATA_HOME", async () => {
+		const xdgDataDir = path.join(tempDir, "xdg-data");
+		const xdgOmpDir = path.join(xdgDataDir, "omp");
+		await fs.mkdir(xdgOmpDir, { recursive: true });
+
+		const originalXdgData = process.env.XDG_DATA_HOME;
+		const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+		delete process.env.PI_CODING_AGENT_DIR;
+		process.env.XDG_DATA_HOME = xdgDataDir;
+		refreshDirsFromEnv();
+
+		try {
+			const projA = path.join(tempDir, "projA");
+			const projB = path.join(tempDir, "projB");
+			await fs.mkdir(projA, { recursive: true });
+			await fs.mkdir(projB, { recursive: true });
+
+			const sessionDirA = computeDefaultSessionDir(projA, storage);
+			const sessionPathA = await writeSession("019ed999-02fb-7000-8dac-396e2f84d484", projA, sessionDirA);
+
+			expect(sessionPathA.startsWith(xdgOmpDir)).toBe(true);
+
+			const allSessions = await listAllSessions(storage);
+			expect(allSessions.some(s => s.id === "019ed999-02fb-7000-8dac-396e2f84d484")).toBe(true);
+
+			const harness = createRuntime(projB);
+			const handled = await executeBuiltinSlashCommand("/resume 019ed999", harness.runtime);
+			expect(handled).toBe(true);
+			expect(harness.showError).not.toHaveBeenCalled();
+			expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPathA, { continuation: undefined });
+		} finally {
+			if (originalXdgData !== undefined) process.env.XDG_DATA_HOME = originalXdgData;
+			else delete process.env.XDG_DATA_HOME;
+			if (originalPiCodingAgentDir !== undefined) process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
+			refreshDirsFromEnv();
+		}
 	});
 });

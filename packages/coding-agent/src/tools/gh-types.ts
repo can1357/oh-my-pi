@@ -336,6 +336,15 @@ export interface GhActionsJobsResponse {
 	jobs?: GhActionsJobApi[];
 }
 
+export interface GhActionsStepApi {
+	number?: number | null;
+	name?: string | null;
+	status?: string | null;
+	conclusion?: string | null;
+	started_at?: string | null;
+	completed_at?: string | null;
+}
+
 export interface GhActionsJobApi {
 	id?: number;
 	name?: string | null;
@@ -344,36 +353,5 @@ export interface GhActionsJobApi {
 	started_at?: string | null;
 	completed_at?: string | null;
 	html_url?: string | null;
-}
-
-export interface GhRunJobSnapshot {
-	id: number;
-	name: string;
-	status?: string;
-	conclusion?: string;
-	startedAt?: string;
-	completedAt?: string;
-	url?: string;
-}
-
-export interface GhRunSnapshot {
-	id: number;
-	workflowName?: string;
-	displayTitle?: string;
-	status?: string;
-	conclusion?: string;
-	branch?: string;
-	headSha?: string;
-	createdAt?: string;
-	updatedAt?: string;
-	url?: string;
-	jobs: GhRunJobSnapshot[];
-}
-
-export interface GhFailedJobLog {
-	run: GhRunSnapshot;
-	job: GhRunJobSnapshot;
-	full?: string;
-	tail?: string;
-	available: boolean;
+	steps?: GhActionsStepApi[] | null;
 }

@@ -136,6 +136,8 @@ export type IR = IRAnalysis &
 				k: "refine";
 				base: IR;
 				pred: (value: unknown) => boolean | OmpErrors;
+				/** Allocation-free equivalent of `pred(value) === true` for boolean-only paths (`allows`, unions). */
+				check?: (value: unknown) => boolean;
 				expected: string;
 				json?: Record<string, unknown>;
 				desc?: string;

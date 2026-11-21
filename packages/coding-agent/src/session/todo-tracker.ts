@@ -5,13 +5,32 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
-import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import { toolWireName } from "../tools/builtin-names";
+import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
+import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
+import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
+import {
+	cfgTodoEager,
+	cfgTodoEnabled,
+	cfgTodoMidRunNudges,
+	cfgTodoReminders,
+	cfgTodoRemindersMax,
+} from "../tools/settings";
+
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
+/** `todo.midRunNudges: capped` — unanswered nudges allowed before going silent until the next reset. */
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
+/**
+ * `todo.midRunNudges: backoff` — how many times the threshold may double while
+ * nudges go unanswered. A model that keeps working without touching `todo`
+ * still gets reminded — at 12, 24, 48, 96, then every 192 mutating results —
+ * instead of falling silent after the second reminder for the rest of the turn.
+ */
+const MID_RUN_NUDGE_BACKOFF_DOUBLINGS = 4;
 const MUTATING_TOOLS: Record<string, true> = {
 	bash: true,
 	eval: true,
@@ -20,13 +39,27 @@ const MUTATING_TOOLS: Record<string, true> = {
 	ast_edit: true,
 };
 const MID_RUN_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
+/** Message type of the hidden first-turn reminder {@link TodoTracker.createEagerTodoPrelude} builds. */
+export const EAGER_TODO_PRELUDE_MESSAGE_TYPE = "eager-todo-prelude";
 const MARKDOWN_PROMPT_PREFIX_RE = /^(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)*/;
 const PROMPT_LABEL_RE = /^(?:q(?:uestion)?|ask)\s*\d*\s*[:.)-]\s*/i;
+const INLINE_EMPHASIS_RE = /(\*\*|__)(.*?)\1/g;
+const OPTION_LINE_RE = /^(?:[-*+]|\d+[.)])\s+\S/;
+const RECOMMENDATION_RE = /^(?:i(?:'d| would)?\s+recommend|(?:my\s+)?recommendation)\b/i;
+const CHOICE_CONFIRMATION_RE = /^(?:go|proceed|continue|stick)\s+with\b/i;
 const QUESTION_PROMPT_RE =
 	/^(?:what|which|when|where|why|how|who|whom|whose|do|does|did|can|could|would|will|should|is|are|am|may|shall)\b/i;
 const USER_DIRECTED_PROMPT_RE = /\b(?:you|your|we|our)\b/i;
+const ADDRESSEE_RE = /\b(?:you|your)\b/i;
+// Imperatives ("tell me", "message me") and conditional permission ("If you confirm, I'll…").
 const USER_RESPONSE_CUE_RE =
-	/^(?:please\s+)?(?:confirm|reply|choose|pick|decide|advise)\b|^(?:please\s+)?answer\b|^(?:please\s+)?(?:let\s+me\s+know|tell\s+me)\b/i;
+	/^(?:please\s+)?(?:confirm|reply|choose|pick|decide|advise|answer|approve)\b|^(?:please\s+)?(?:let\s+me\s+know|(?:tell|message|ping)\s+me)\b|^(?:if|once|when)\s+you\s+(?:confirm|approve|agree|allow|okay|ok|give)\b/i;
+// Strip a connective only before an explicit address/permission cue; bare response
+// words can be nouns ("Finally, answer validation is complete.").
+const LEADING_CONNECTIVE_RE =
+	/^(?:and|or|so|then|also|otherwise|alternatively|separately|finally)\b,?\s*(?=(?:please\b|let\s+me\s+know\b|(?:tell|message|ping)\s+me\b|(?:if|once|when)\s+you\b))/i;
+// Western terminators need trailing whitespace (so `foo?: string` stays whole); CJK ones do not.
+const SENTENCE_BREAK_RE = /(?<=[.!?…])\s+|(?<=[。！？])/;
 /**
  * A trailing question mark is the universal signal that a line is a question, but
  * the English word/pronoun gates above exist to filter incidental "?" out of prose
@@ -36,6 +69,13 @@ const USER_RESPONSE_CUE_RE =
  * as a real user-directed question. Fixes non-Latin prompts going undetected (#7803).
  */
 const NON_ASCII_TEXT_RE = /[^\x00-\x7F]/;
+
+// A question wrapped whole in italics (`*…*`, `_…_`) — or the `*…*` that
+// INLINE_EMPHASIS_RE leaves of `***…***` — must still match the ^-anchored
+// QUESTION_PROMPT_RE. Strikethrough is deliberately absent: `~~…~~` marks the
+// author as having discarded the span, so unwrapping it would promote a retracted
+// question back to a live one and idle the session waiting for an answer nobody is going to give.
+const WRAPPED_EMPHASIS_RE = /^(\*\*\*|\*\*|\*|___|__|_)([\s\S]+)\1$/;
 
 interface PromptLine {
 	text: string;
@@ -50,13 +90,16 @@ export interface TodoTrackerHost {
 	model(): Model | undefined;
 	agentKind(): "main" | "sub";
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { generation?: number }): void;
+	scheduleAgentContinue(options: { source: string; generation?: number }): void;
 	promptGeneration(): number;
-	hasPendingAsyncWake(): boolean;
+	/** Something outside the model (a background job, child agent or queued peer message) will resume the run. */
+	hasWakeSources(): boolean;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
+	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
+	prewalkWillHandoff(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
 }
 
@@ -81,6 +124,10 @@ export class TodoTracker {
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
 		this.#phases = this.#clonePhases(phases);
+		// Every state write lands here — the native tool, a Cursor sync, or a
+		// bridged call — so the nudge budget re-arms on the progress it
+		// rations. Views, failed batches, and unchanged reads never arrive.
+		this.#midRunNudgeCount = 0;
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
@@ -131,9 +178,12 @@ export class TodoTracker {
 	createEagerTodoPrelude(
 		promptText: string | undefined,
 	): { message: AgentMessage; toolChoice?: ToolChoice } | undefined {
-		const mode = this.#host.settings.get("todo.eager");
-		if (mode === "default" || !this.#host.settings.get("todo.enabled")) return undefined;
+		const mode = cfgTodoEager.get(this.#host.settings);
+		if (mode === "default" || !cfgTodoEnabled.get(this.#host.settings)) return undefined;
 		if (this.#host.planModeEnabled() || this.#phases.length > 0) return undefined;
+		// An actionable prewalk drives todo creation in a plan-first-then-todo order;
+		// the forced eager prelude's "call todo first this turn" contradicts it (#10510).
+		if (this.#host.prewalkWillHandoff()) return undefined;
 		if (promptText !== undefined) {
 			if (this.#host.agent.state.messages.some(message => message.role === "user")) return undefined;
 			const trimmedPromptText = promptText.trimEnd();
@@ -146,7 +196,7 @@ export class TodoTracker {
 		}
 		const message: AgentMessage = {
 			role: "custom",
-			customType: "eager-todo-prelude",
+			customType: EAGER_TODO_PRELUDE_MESSAGE_TYPE,
 			content: prompt.render(eagerTodoPrompt, { ...this.#buildEagerPreludeContext(), forced: mode === "always" }),
 			display: false,
 			attribution: "agent",
@@ -167,7 +217,7 @@ export class TodoTracker {
 
 	/** Builds the first-turn eager task-delegation prelude. */
 	createEagerTaskPrelude(promptText: string | undefined): AgentMessage | undefined {
-		if (this.#host.settings.get("task.eager") !== "always") return undefined;
+		if (cfgTaskEager.get(this.#host.settings) !== "always") return undefined;
 		if (this.#host.agentKind() === "sub" || this.#host.planModeEnabled()) return undefined;
 		if (promptText !== undefined) {
 			if (this.#host.agent.state.messages.some(message => message.role === "user")) return undefined;
@@ -205,12 +255,16 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		if (!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled")) {
+		if (
+			!cfgTodoReminders.get(this.#host.settings) ||
+			!cfgTodoEnabled.get(this.#host.settings) ||
+			!this.#host.getActiveToolNames().includes("todo")
+		) {
 			this.#reminderCount = 0;
 			this.#reminderAwaitingProgress = false;
 			return false;
 		}
-		const remindersMax = this.#host.settings.get("todo.remindersMax");
+		const remindersMax = cfgTodoRemindersMax.get(this.#host.settings);
 		if (this.#reminderCount >= remindersMax) {
 			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
 			return false;
@@ -244,8 +298,8 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		if (this.#host.hasPendingAsyncWake()) {
-			logger.debug("Todo completion: async jobs in flight will re-wake the loop; skipping reminder", {
+		if (this.#host.hasWakeSources()) {
+			logger.debug("Todo completion: background work or child agents will resume the run; skipping reminder", {
 				incomplete: incomplete.length,
 			});
 			return false;
@@ -280,15 +334,26 @@ export class TodoTracker {
 		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
 		this.#host.sessionManager.appendMessage(reminderMessage);
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "todo-reminder",
+			generation: this.#host.promptGeneration(),
+		});
 		return true;
 	}
 
 	/** Takes the next hidden mid-run reconciliation nudge, if its budget and guards allow. */
 	takeMidRunNudge(): AgentMessage | null {
-		if (this.#mutationsSinceLastTouch < MID_RUN_NUDGE_MUTATION_THRESHOLD) return null;
-		if (this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
-		if (!this.#host.settings.get("todo.enabled") || !this.#host.settings.get("todo.reminders")) return null;
+		const mode = cfgTodoMidRunNudges.get(this.#host.settings);
+		if (mode === "off") return null;
+		if (mode === "capped" && this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		// Backoff: an ignored nudge doubles the runway before the next one, capped
+		// so a long turn still gets a reminder without nudging on every threshold.
+		const threshold =
+			mode === "backoff"
+				? MID_RUN_NUDGE_MUTATION_THRESHOLD * 2 ** Math.min(this.#midRunNudgeCount, MID_RUN_NUDGE_BACKOFF_DOUBLINGS)
+				: MID_RUN_NUDGE_MUTATION_THRESHOLD;
+		if (this.#mutationsSinceLastTouch < threshold) return null;
+		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) return null;
 		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) return null;
 		const incomplete = this.#phases
 			.flatMap(phase => phase.tasks)
@@ -317,24 +382,17 @@ export class TodoTracker {
 	}
 
 	#buildEagerPreludeContext(): { toolRefs: Record<string, string>; taskBatch: boolean } {
-		const wireName = (name: string): string => {
-			const tool = this.#host.toolRegistry().get(name);
-			return typeof tool?.customWireName === "string" ? tool.customWireName : name;
-		};
+		const registry = this.#host.toolRegistry();
 		return {
-			toolRefs: { task: wireName("task"), todo: wireName("todo") },
-			taskBatch: this.#host.settings.get("task.batch"),
+			toolRefs: { task: toolWireName(registry, "task"), todo: toolWireName(registry, "todo") },
+			taskBatch: cfgTaskBatch.get(this.#host.settings),
 		};
 	}
 
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task =>
-				task.blocker !== undefined
-					? { content: task.content, status: task.status, blocker: task.blocker }
-					: { content: task.content, status: task.status },
-			),
+			tasks: phase.tasks.map(task => ({ content: task.content, status: task.status })),
 		}));
 	}
 }
@@ -357,10 +415,15 @@ function assistantText(message: AssistantMessage): string {
 }
 
 function promptLine(line: string): PromptLine {
-	const withoutMarkdownPrefix = line.trim().replace(MARKDOWN_PROMPT_PREFIX_RE, "").trim();
+	const withoutMarkdownPrefix = line
+		.trim()
+		.replace(INLINE_EMPHASIS_RE, "$2")
+		.replace(MARKDOWN_PROMPT_PREFIX_RE, "")
+		.trim();
 	const withoutPromptLabel = withoutMarkdownPrefix.replace(PROMPT_LABEL_RE, "").trim();
+	const withoutEmphasis = withoutPromptLabel.replace(WRAPPED_EMPHASIS_RE, "$2").trim();
 	return {
-		text: withoutPromptLabel,
+		text: withoutEmphasis,
 		hadPromptLabel: withoutPromptLabel !== withoutMarkdownPrefix,
 	};
 }
@@ -371,6 +434,7 @@ function isQuestionPromptLine(line: string): boolean {
 	return (
 		candidate.hadPromptLabel ||
 		QUESTION_PROMPT_RE.test(candidate.text) ||
+		CHOICE_CONFIRMATION_RE.test(candidate.text) ||
 		USER_DIRECTED_PROMPT_RE.test(candidate.text) ||
 		NON_ASCII_TEXT_RE.test(candidate.text)
 	);
@@ -379,13 +443,102 @@ function isQuestionPromptLine(line: string): boolean {
 function isResponseCueLine(line: string): boolean {
 	const candidate = promptLine(line)
 		.text.replace(/[.!?。！？]+$/, "")
+		.replace(LEADING_CONNECTIVE_RE, "")
 		.trim();
 	return USER_RESPONSE_CUE_RE.test(candidate);
+}
+
+/**
+ * How a closing span hands control back, strongest first: `cue` instructs the user
+ * ("tell me…", "If you confirm, I'll…") and no later prose can answer it; `request`
+ * asks outright (labelled, user-addressed, or non-English question) but the agent may
+ * still answer it itself; `question` is only question-shaped ("What's next?") and may
+ * be a heading.
+ */
+type ClosingAsk = "none" | "question" | "request" | "cue";
+
+function askOf(span: string): ClosingAsk {
+	if (isResponseCueLine(span)) return "cue";
+	if (!isQuestionPromptLine(span)) return "none";
+	const candidate = promptLine(span);
+	return candidate.hadPromptLabel || ADDRESSEE_RE.test(candidate.text) || NON_ASCII_TEXT_RE.test(candidate.text)
+		? "request"
+		: "question";
+}
+
+/** The last two sentences of the prose lines closing `paragraph`; a list item ends the walk. */
+function closingSentences(paragraph: string): string[] {
+	const sentences: string[] = [];
+	const lines = paragraph.split(/\r?\n/);
+	for (let index = lines.length - 1; index >= 0 && sentences.length < 2; index--) {
+		const line = lines[index].trim();
+		if (OPTION_LINE_RE.test(line)) break;
+		const lineSentences = line.split(SENTENCE_BREAK_RE).filter(Boolean);
+		sentences.unshift(...lineSentences.slice(sentences.length - 2));
+	}
+	return sentences;
+}
+
+function closingAsk(paragraph: string): ClosingAsk {
+	const lastLine = paragraph.slice(paragraph.lastIndexOf("\n") + 1).trim();
+	const sentences = closingSentences(paragraph);
+	const asks = [askOf(lastLine), ...sentences.slice(-1).map(askOf)];
+	// No lexicon recognizes a non-English follow-up ("…? Отдельно скажите, …"), and none
+	// recognizes a non-English self-answer either; an open request is the costlier miss.
+	const foreignQuestion =
+		sentences.length === 2 && NON_ASCII_TEXT_RE.test(sentences[0]) && isQuestionPromptLine(sentences[0]);
+	if (asks.includes("cue")) return "cue";
+	if (foreignQuestion || asks.includes("request")) return "request";
+	return asks.includes("question") ? "question" : "none";
 }
 
 function isAwaitingUserAnswer(message: AssistantMessage): boolean {
 	const text = assistantText(message);
 	if (!text) return false;
-	const lastLine = text.split(/\r?\n/).at(-1)?.trim();
-	return lastLine !== undefined && (isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine));
+	const paragraphs = text.split(/\r?\n\s*\r?\n/);
+	const lastParagraph = paragraphs.at(-1)?.trim() ?? "";
+	if (closingAsk(lastParagraph) !== "none") return true;
+	// A one-line closing note ("Repository unchanged, no commits.") does not withdraw an
+	// instruction in the paragraph before it. A question there may be self-answered by
+	// that note ("Do you need…?\n\nNo, …"), so it does not count.
+	const previousParagraph = paragraphs.at(-2)?.trim();
+	if (
+		previousParagraph &&
+		!lastParagraph.includes("\n") &&
+		!OPTION_LINE_RE.test(lastParagraph) &&
+		closingAsk(previousParagraph) === "cue"
+	) {
+		return true;
+	}
+	const lines = text.split(/\r?\n/);
+
+	// Options and a recommendation do not answer the question on the user's behalf.
+	// Stop at other prose so self-answered questions still allow unfinished work to resume.
+	let optionCount = 0;
+	let hasRecommendation = false;
+	for (let index = lines.length - 1; index >= 0; index--) {
+		const line = lines[index].trim();
+		if (!line) continue;
+		if (OPTION_LINE_RE.test(line)) {
+			optionCount++;
+			continue;
+		}
+		const candidate = promptLine(line);
+		if (optionCount > 0) {
+			return (
+				optionCount >= 2 &&
+				isQuestionPromptLine(line) &&
+				(hasRecommendation ||
+					candidate.hadPromptLabel ||
+					USER_DIRECTED_PROMPT_RE.test(candidate.text) ||
+					CHOICE_CONFIRMATION_RE.test(candidate.text))
+			);
+		}
+		if (RECOMMENDATION_RE.test(candidate.text)) {
+			hasRecommendation = true;
+			continue;
+		}
+		return false;
+	}
+	return false;
 }

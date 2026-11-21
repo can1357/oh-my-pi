@@ -14,7 +14,9 @@ import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import * as memoryBackendModule from "@oh-my-pi/pi-coding-agent/memory-backend";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import {
 	type CreateAgentSessionOptions,
@@ -26,7 +28,11 @@ import {
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
+import { resetYieldTurnState } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+
+import { cfgExternalThinking } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgToolsCommands } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -125,6 +131,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	});
 
 	afterAll(() => {
+		// The discovered auth DB lives in registryAuthDir; Windows cannot delete it while open.
+		modelRegistry.authStorage.close();
 		removeSyncWithRetries(registryAuthDir);
 	});
 
@@ -140,14 +148,41 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toEqual(
 				expect.arrayContaining(["default_active_tool", "default_inactive_tool"]),
 			);
-			// Discoverable extension tools mount as xd:// devices, not top-level active tools.
-			const deviceNames = session.getXdevToolEntries().map(entry => entry.name);
-			expect(deviceNames).toContain("default_active_tool");
+			// Discoverable extension tools mount as bash commands, not top-level active tools.
+			const mountedNames = session.getToolCommandEntries().map(entry => entry.name);
+			expect(mountedNames).toContain("default_active_tool");
 			expect(session.getActiveToolNames()).not.toContain("default_active_tool");
-			expect(deviceNames).not.toContain("default_inactive_tool");
+			expect(mountedNames).not.toContain("default_inactive_tool");
 			expect(session.getActiveToolNames()).not.toContain("default_inactive_tool");
 			expect(session.systemPrompt.join("\n")).toContain("default_active_tool");
 			expect(session.systemPrompt.join("\n")).not.toContain("default_inactive_tool");
+
+			// Re-pinning the mount set top-level drops it from the live mounts.
+			await session.setActiveToolPresentation(session.getActiveToolNames(), []);
+			expect(session.getMountedToolCommandNames()).not.toContain("default_active_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps discoverable tools top-level when an explicit tool list omits bash", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "grep", "glob"],
+			extensions: [toolActivationExtension],
+		});
+
+		try {
+			// Without bash the command transport is inactive, so a discoverable
+			// extension tool stays top-level and no write transport is granted.
+			expect(session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["read", "grep", "glob", "default_active_tool"]),
+			);
+			expect(session.getActiveToolNames()).not.toContain("write");
+			expect(session.getActiveToolNames()).not.toContain("default_inactive_tool");
+			expect(session.getToolCommandEntries()).toEqual([]);
 		} finally {
 			await session.dispose();
 		}
@@ -166,15 +201,19 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getToolByName("think")).toBeUndefined();
 			expect(session.getActiveToolNames()).not.toContain("think");
 
-			settings.set("externalThinking", true);
-			await session.setThinkToolEnabled(true);
+			// The setting watch fires on the next microtask and queues the tool-registry
+			// mutation; a prompt refresh serializes behind it.
+			cfgExternalThinking.set(settings, true);
+			await Promise.resolve();
+			await session.refreshBaseSystemPrompt();
 
 			expect(session.getToolByName("think")).toBeDefined();
 			expect(session.getActiveToolNames()).toContain("think");
-			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("think");
+			expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain("think");
 
-			settings.set("externalThinking", false);
-			await session.setThinkToolEnabled(false);
+			cfgExternalThinking.set(settings, false);
+			await Promise.resolve();
+			await session.refreshBaseSystemPrompt();
 			expect(session.getActiveToolNames()).not.toContain("think");
 		} finally {
 			await session.dispose();
@@ -195,10 +234,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			model: unsupported,
 		});
 		const authStorage = session.modelRegistry.authStorage;
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		authStorage.setRuntimeApiKey("openai", "test-key");
-		authStorage.setRuntimeApiKey("google", "test-key");
-		authStorage.setRuntimeApiKey("xai", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
+		authStorage.keys.setRuntime("google", "test-key");
+		authStorage.keys.setRuntime("xai", "test-key");
 
 		try {
 			expect(session.getActiveToolNames()).not.toContain("think");
@@ -302,7 +341,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const model = requireBundledModel("openai", "gpt-5");
 		// The prompt preflight validates the key through the registry (not the
 		// per-request `getApiKey` override), so seed it for keyless CI runners.
-		modelRegistry.authStorage.setRuntimeApiKey("openai", "test-key");
+		modelRegistry.authStorage.keys.setRuntime("openai", "test-key");
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
 			settings,
@@ -390,7 +429,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toEqual(expect.arrayContaining(["late_active_tool", "late_inactive_tool"]));
 			expect(session.getEnabledToolNames()).toContain("late_active_tool");
 			expect(session.getEnabledToolNames()).not.toContain("late_inactive_tool");
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("late_active_tool");
+			expect(session.getToolCommandEntries().map(entry => entry.name)).toContain("late_active_tool");
 			expect(session.getActiveToolNames()).not.toContain("late_active_tool");
 			expect(session.systemPrompt.join("\n")).toContain("late_active_tool");
 			expect(session.systemPrompt.join("\n")).not.toContain("late_inactive_tool");
@@ -431,7 +470,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toContain("late_requested_tool");
 			expect(session.getEnabledToolNames()).toContain("late_requested_tool");
 			expect(session.getActiveToolNames()).toContain("late_requested_tool");
-			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("late_requested_tool");
+			expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain("late_requested_tool");
 			expect(session.systemPrompt.join("\n")).toContain("late_requested_tool");
 		} finally {
 			await session.dispose();
@@ -471,7 +510,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.hasBuiltInTool("bash")).toBe(false);
 			expect(session.getEnabledToolNames()).not.toContain("bash");
 			expect(session.getActiveToolNames()).not.toContain("bash");
-			expect(session.getMountedXdevToolNames()).not.toContain("bash");
+			expect(session.getMountedToolCommandNames()).not.toContain("bash");
 		} finally {
 			await session.dispose();
 		}
@@ -1022,15 +1061,15 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			expect(session.getActiveToolNames()).toContain("late_becomes_discoverable");
-			expect(session.getMountedXdevToolNames()).toContain("late_becomes_essential");
+			expect(session.getMountedToolCommandNames()).toContain("late_becomes_essential");
 			const runner = session.extensionRunner;
 			if (!runner) throw new Error("expected extension runner");
 			await runner.emit({ type: "session_start" });
 
 			expect(session.getActiveToolNames()).not.toContain("late_becomes_discoverable");
-			expect(session.getMountedXdevToolNames()).toContain("late_becomes_discoverable");
+			expect(session.getMountedToolCommandNames()).toContain("late_becomes_discoverable");
 			expect(session.getActiveToolNames()).toContain("late_becomes_essential");
-			expect(session.getMountedXdevToolNames()).not.toContain("late_becomes_essential");
+			expect(session.getMountedToolCommandNames()).not.toContain("late_becomes_essential");
 		} finally {
 			await session.dispose();
 		}
@@ -1113,7 +1152,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			const enabledBefore = session.getEnabledToolNames();
-			const mountedBefore = session.getMountedXdevToolNames();
+			const mountedBefore = session.getMountedToolCommandNames();
 			const promptBefore = session.systemPrompt;
 			const originalTool = session.getToolByName("bash");
 			expect(session.hasBuiltInTool("bash")).toBe(true);
@@ -1135,7 +1174,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getToolByName("bash")).toBe(originalTool);
 			expect(session.hasBuiltInTool("bash")).toBe(true);
 			expect(session.getEnabledToolNames()).toEqual(enabledBefore);
-			expect(session.getMountedXdevToolNames()).toEqual(mountedBefore);
+			expect(session.getMountedToolCommandNames()).toEqual(mountedBefore);
 			expect(session.systemPrompt).toEqual(promptBefore);
 		} finally {
 			releaseHandler.resolve();
@@ -1298,7 +1337,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getAllToolNames()).toContain("register_then_select_tool");
 			expect(session.getEnabledToolNames()).toContain("read");
 			expect(session.getEnabledToolNames()).not.toContain("register_then_select_tool");
-			expect(session.getMountedXdevToolNames()).not.toContain("register_then_select_tool");
+			expect(session.getMountedToolCommandNames()).not.toContain("register_then_select_tool");
 		} finally {
 			await session.dispose();
 		}
@@ -1477,7 +1516,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("forwards built-in and external xd:// devices to Cursor provider contexts", async () => {
+	it("forwards built-in and external tool commands to Cursor provider contexts", async () => {
 		const tempDir = makeTempDir();
 		const cursorModel = getBundledModel("cursor", "composer-1.5");
 		if (!cursorModel) throw new Error("expected bundled Cursor model");
@@ -1500,13 +1539,94 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			await session.refreshMCPTools([externalMcpTool]);
-			const deviceNames = session.getXdevToolEntries().map(entry => entry.name);
-			expect(deviceNames).toEqual(expect.arrayContaining(["ast_edit", "mcp__fixture_report"]));
+			const mountedNames = session.getToolCommandEntries().map(entry => entry.name);
+			expect(mountedNames).toEqual(expect.arrayContaining(["ast_edit", "mcp__fixture_report"]));
 			expect(session.getActiveToolNames()).not.toContain("mcp__fixture_report");
 
 			const context = await session.agent.buildSideRequestContext([]);
 			const providerToolNames = context.tools?.map(tool => tool.name);
 			expect(providerToolNames).toEqual(expect.arrayContaining(["ast_edit", "mcp__fixture_report"]));
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("excludes hidden custom tools from the parent active set unless listed", async () => {
+		const tempDir = makeTempDir();
+		const hiddenTool = {
+			...sdkCustomTool,
+			name: "hidden_custom_tool",
+			hidden: true,
+		} satisfies CustomTool;
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [hiddenTool],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toContain("hidden_custom_tool");
+			expect(session.getActiveToolNames()).not.toContain("hidden_custom_tool");
+			expect(session.getToolCommandEntries().map(e => e.name)).not.toContain("hidden_custom_tool");
+			expect(session.systemPrompt.join("\n")).not.toContain("hidden_custom_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps a hidden custom-tool winner inactive after a visible extension name collision", async () => {
+		const tempDir = makeTempDir();
+		const hiddenTool = {
+			...sdkCustomTool,
+			name: "colliding_hidden_tool",
+			label: "Hidden SDK Winner",
+			hidden: true,
+		} satisfies CustomTool;
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [
+				pi => {
+					pi.registerTool({
+						name: hiddenTool.name,
+						label: "Visible Extension Loser",
+						description: "Visible definition that loses registry precedence.",
+						parameters: type({}),
+						async execute() {
+							return { content: [{ type: "text", text: "visible" }] };
+						},
+					});
+				},
+			],
+			customTools: [hiddenTool],
+		});
+
+		try {
+			expect(session.getToolByName(hiddenTool.name)?.label).toBe(hiddenTool.label);
+			expect(session.getActiveToolNames()).not.toContain(hiddenTool.name);
+			expect(session.getToolCommandEntries().map(entry => entry.name)).not.toContain(hiddenTool.name);
+			expect(session.systemPrompt.join("\n")).not.toContain(hiddenTool.name);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("activates a hidden custom tool when an agent lists it", async () => {
+		const tempDir = makeTempDir();
+		const hiddenTool = {
+			...sdkCustomTool,
+			name: "hidden_custom_tool",
+			hidden: true,
+		} satisfies CustomTool;
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [hiddenTool],
+			toolNames: ["read", "hidden_custom_tool"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("hidden_custom_tool");
 		} finally {
 			await session.dispose();
 		}
@@ -1525,10 +1645,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getActiveToolNames()).toEqual(
 				expect.arrayContaining(["read", "default_inactive_tool", "default_active_tool"]),
 			);
-			// No granted write tool → no xd:// transport: extension tools surface
-			// top-level instead of mounting with an auto-granted write.
+			// Without bash both the explicitly requested inactive tool and the
+			// ambient default-active tool present top-level.
 			expect(session.getActiveToolNames()).not.toContain("write");
-			expect(session.getXdevToolEntries()).toEqual([]);
+			expect(session.getToolCommandEntries()).toEqual([]);
 			expect(session.systemPrompt.join("\n")).toContain("default_inactive_tool");
 		} finally {
 			await session.dispose();
@@ -1555,12 +1675,36 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("resets reused yield state through the SDK extension wrapper", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			requireYieldTool: true,
+			toolNames: ["yield"],
+		});
+
+		try {
+			const yieldTool = session.getToolByName("yield");
+			if (!yieldTool) throw new Error("expected wrapped yield tool");
+			expect(yieldTool).toBeInstanceOf(ExtensionToolWrapper);
+
+			await yieldTool.execute("run1-section", { type: ["findings"], data: "one finding" });
+			const keptWithinRun = await yieldTool.execute("run1-finalize", { type: "result" });
+			expect(keptWithinRun.content).toEqual([{ type: "text", text: "Result submitted." }]);
+
+			resetYieldTurnState(yieldTool);
+			await expect(yieldTool.execute("run2-empty", { type: "result" })).rejects.toThrow(/none were submitted/);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("normalizes legacy builtin toolNames before selecting the active SDK tools", async () => {
 		const tempDir = makeTempDir();
 
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			toolNames: ["read", "search", "find"],
+			toolNames: ["read", "search", "glob"],
 		});
 
 		try {
@@ -1570,48 +1714,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(activeToolNames).toContain("grep");
 			expect(activeToolNames).toContain("glob");
 			expect(activeToolNames).not.toContain("search");
-			expect(activeToolNames).not.toContain("find");
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("keeps the write tool registered for plan mode even when no deferrable tool is requested", async () => {
-		// Regression for #1428 (adapted to the xd://propose device): plan mode
-		// submits its finalized plan by writing the chosen slug/title to
-		// xd://propose, dispatched through the plan-proposal handler
-		// (interactive-mode.ts: `setPlanProposalHandler`). With an explicit
-		// read-only `toolNames` (e.g. `read`, `search`, `find`, `web_search`)
-		// the registry has no `write` and no `deferrable` tool; dropping it would
-		// silently activate plan mode with no way to submit the plan.
-		const tempDir = makeTempDir();
-
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			toolNames: ["read", "grep", "glob", "web_search"],
-		});
-
-		try {
-			expect(session.getToolByName("write")).toBeDefined();
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("does not force write into the registry when neither a deferrable tool nor plan mode needs it", async () => {
-		const tempDir = makeTempDir();
-
-		const settings = Settings.isolated();
-		settings.set("plan.enabled", false);
-
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			settings,
-			toolNames: ["read", "grep", "glob", "web_search"],
-		});
-
-		try {
-			expect(session.getToolByName("write")).toBeUndefined();
 		} finally {
 			await session.dispose();
 		}
@@ -1632,21 +1734,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("preserves write explicitly selected by a runtime caller", async () => {
-		const tempDir = makeTempDir();
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			toolNames: ["read"],
-		});
-
-		try {
-			await session.setActiveToolsByName(["read", "write"]);
-			await session.refreshMCPTools([]);
-			expect(session.getActiveToolNames()).toContain("write");
-		} finally {
-			await session.dispose();
-		}
-	});
 	it("registers vibe tools only during explicit vibe activation and exposes parent Todo bookkeeping", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession(baseOptions(tempDir));
@@ -1683,6 +1770,38 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				expect(session.getToolByName(name)).toBeUndefined();
 			}
 			expect(session.getActiveToolNames()).toEqual(previousActiveToolNames);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps MCP refreshes out of the vibe director toolset and applies them on exit", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+		const previousEnabledToolNames = session.getEnabledToolNames();
+		const mcpTool = {
+			name: "mcp__vibe_refresh_lookup",
+			label: "vibe_refresh/lookup",
+			description: "MCP tool connected while vibe mode is active.",
+			parameters: type({}),
+			mcpServerName: "vibe_refresh",
+			mcpToolName: "lookup",
+			async execute() {
+				return { content: [{ type: "text", text: "mcp" }] };
+			},
+		} satisfies CustomTool;
+
+		try {
+			await session.activateVibeTools(["read"]);
+			const directorToolNames = session.getEnabledToolNames();
+			await session.refreshMCPTools([mcpTool]);
+			expect(session.getToolByName(mcpTool.name)).toBeDefined();
+			expect(session.getEnabledToolNames()).toEqual(directorToolNames);
+
+			await session.deactivateVibeTools(previousEnabledToolNames);
+			expect(session.getEnabledToolNames()).toEqual(
+				expect.arrayContaining([...previousEnabledToolNames, mcpTool.name]),
+			);
 		} finally {
 			await session.dispose();
 		}
@@ -1763,8 +1882,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			expect(session.getToolByName("tts")).toBeDefined();
-			// tts is a discoverable custom tool → mounted as an xd:// device, not top-level.
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("tts");
+			// tts is a discoverable custom tool → mounted as a bash command, not top-level.
+			expect(session.getToolCommandEntries().map(entry => entry.name)).toContain("tts");
 			expect(session.getActiveToolNames()).not.toContain("tts");
 		} finally {
 			await session.dispose();
@@ -1810,7 +1929,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const normalDir = makeTempDir();
 		const configuredSettings = () =>
 			Settings.isolated({
-				"providers.imageOrder": ["openai"],
+				modelRoles: { image: "openai/gpt-image-1" },
 				"generate_image.enabled": true,
 				"speechgen.enabled": true,
 				"memory.backend": "hindsight",
@@ -1841,7 +1960,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			settings: configuredSettings(),
 			extensions: [toolActivationExtension, restrictedLateExtension],
 			customTools: [sdkCustomTool],
-			toolNames: ["read", "lsp", "hub"],
+			toolNames: ["read", "lsp"],
 			requireYieldTool: true,
 			restrictToolNames: true,
 			enableMCP: true,
@@ -1869,11 +1988,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				"default_inactive_tool",
 				"sdk_custom_tool",
 				"restricted_late_extension_tool",
-				"hub",
 			]) {
 				expect(restricted.getToolByName(name)).toBeUndefined();
 			}
-			expect(restricted.getXdevToolEntries()).toEqual([]);
+			expect(restricted.getToolCommandEntries()).toEqual([]);
 			expect(restricted.systemPrompt.join("\n")).not.toContain("private-server");
 			expect(restricted.systemPrompt.join("\n")).not.toContain("MCP Server Instructions");
 		} finally {
@@ -1904,10 +2022,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					"sdk_custom_tool",
 				]),
 			);
-			// Without a granted write tool the session allocates no xd:// state;
-			// SDK custom and extension capabilities surface top-level instead.
+			// Without bash, ambient custom and extension capabilities present
+			// top-level rather than mounting as commands.
 			expect(activeToolNames).not.toContain("write");
-			expect(normal.getXdevToolEntries()).toEqual([]);
+			expect(normal.getToolCommandEntries()).toEqual([]);
 			expect(normal.getAllToolNames()).toEqual(
 				expect.arrayContaining([
 					"generate_image",
@@ -1959,8 +2077,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			expect(normal.systemPrompt.join("\n")).toContain("xd://report_issue");
-			expect(restricted.systemPrompt.join("\n")).not.toContain("xd://report_issue");
+			expect(normal.systemPrompt.join("\n")).toContain("report_issue");
+			expect(restricted.systemPrompt.join("\n")).not.toContain("report_issue");
 		} finally {
 			await Promise.all([normal.dispose(), restricted.dispose()]);
 		}
@@ -2022,11 +2140,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	// env var — an env mutation would outlive this file — and removed after,
 	// since the storage is shared by every test here.
 	const withProviderAuth = async (providers: string[], run: () => Promise<void>): Promise<void> => {
-		for (const provider of providers) modelRegistry.authStorage.setRuntimeApiKey(provider, "test-key");
+		for (const provider of providers) modelRegistry.authStorage.keys.setRuntime(provider, "test-key");
 		try {
 			await run();
 		} finally {
-			for (const provider of providers) modelRegistry.authStorage.removeRuntimeApiKey(provider);
+			for (const provider of providers) modelRegistry.authStorage.keys.removeRuntime(provider);
 		}
 	};
 
@@ -2101,6 +2219,88 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 	});
 
+	it("revokes native Cursor mutations when runtime write is deactivated", async () => {
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+		const allowedTarget = path.join(tempDir, "allowed.txt");
+		const revokedTarget = path.join(tempDir, "revoked.txt");
+		fs.writeFileSync(allowedTarget, "remove me");
+		fs.writeFileSync(revokedTarget, "keep me");
+
+		await withProviderAuth(["cursor"], async () => {
+			const { session } = await createAgentSession(baseOptions(tempDir));
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+				const fullWriteDescription = session.getToolByName("write")?.description;
+				expect(fullWriteDescription).toBeDefined();
+
+				const allowed = await handlers.delete({
+					toolCallId: "sdk-write-active",
+					path: allowedTarget,
+				} as never);
+				expect(allowed.isError).toBe(false);
+				expect(fs.existsSync(allowedTarget)).toBe(false);
+
+				await session.setActiveToolsByName(["read"]);
+				expect(session.getActiveToolNames()).not.toContain("write");
+				const revoked = await handlers.delete({
+					toolCallId: "sdk-write-revoked",
+					path: revokedTarget,
+				} as never);
+				expect(revoked.isError).toBe(true);
+				expect(fs.existsSync(revokedTarget)).toBe(true);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("revokes native Cursor mutations before a removal rebuild commits", async () => {
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+		const target = path.join(tempDir, "revoked-during-rebuild.txt");
+		fs.writeFileSync(target, "keep me");
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+
+		await withProviderAuth(["cursor"], async () => {
+			const { session } = await createAgentSession(baseOptions(tempDir));
+			let deactivation: Promise<void> | undefined;
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+				vi.spyOn(memoryBackendModule, "resolveMemoryBackend").mockResolvedValue({
+					buildDeveloperInstructions: async () => {
+						rebuildStarted.resolve();
+						await releaseRebuild.promise;
+						return undefined;
+					},
+				} as never);
+
+				deactivation = session.setActiveToolsByName(["read"]);
+				try {
+					await rebuildStarted.promise;
+					expect(session.getActiveToolNames()).toContain("write");
+					const revoked = await handlers.delete({
+						toolCallId: "sdk-write-revoked-during-rebuild",
+						path: target,
+					} as never);
+					expect(revoked.isError).toBe(true);
+					expect(fs.existsSync(target)).toBe(true);
+				} finally {
+					releaseRebuild.resolve();
+				}
+				await deactivation;
+				expect(session.getActiveToolNames()).not.toContain("write");
+			} finally {
+				releaseRebuild.resolve();
+				await deactivation?.catch(() => undefined);
+				await session.dispose();
+			}
+		});
+	});
+
 	it("resolves bridge frame paths through the session's live cwd", async () => {
 		// The bridge is built once, at session creation, while the session's cwd
 		// moves under it (`/cd`, resume, branch restore). The path-confining
@@ -2136,10 +2336,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	});
 
 	it("does not execute an unadvertised edit call through the fallback resolver", async () => {
-		// One resolver serves two roles: the session's device resolver is passed
-		// to the bridge as `getTool` AND installed as the agent loop's
+		// One resolver serves two roles: the session's tool-command resolver is
+		// passed to the bridge as `getTool` AND installed as the agent loop's
 		// `resolveFallbackTool`, which runs for ANY call the advertised set does
-		// not contain. It must stay device-only: routing `edit` through it would
+		// not contain. It must stay tool-command-only: routing `edit` through it would
 		// execute a replace-mode edit for a call the model was never offered —
 		// a hallucinated one, or a tool the session deselected after startup.
 		// `pi_edit` gets its instance from `getEditReplaceTool` instead.
@@ -2195,6 +2395,71 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 	});
 
+	it("routes a Claude Code MCP spelling when no toolCommands state exists", async () => {
+		// `createTools` allocates `session.toolCommands` only when `tools.commands` is on and
+		// the session is unrestricted, so alias recovery cannot live in the mounted
+		// command resolver alone: with the setting off, an advertised MCP tool called
+		// under the doubled separator this harness primes would still dead-end.
+		// Driven through the real SDK session rather than a fabricated ToolCommandState,
+		// because the absence of that state is precisely what is under test.
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated();
+		cfgToolsCommands.set(settings, false);
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({ ...baseOptions(tempDir), settings });
+			try {
+				let executed = 0;
+				await session.refreshMCPTools([
+					{
+						// Exactly what `createMCPToolName("seedpatch-client", "bank")` mints.
+						name: "mcp__seedpatch_client_bank",
+						label: "seedpatch-client/bank",
+						description: "Read the bank",
+						parameters: type({}),
+						mcpServerName: "seedpatch-client",
+						mcpToolName: "bank",
+						async execute() {
+							executed += 1;
+							return { content: [{ type: "text", text: "bank contents" }] };
+						},
+					} satisfies CustomTool,
+				]);
+
+				// The configuration under test: advertised top-level, nothing mounted.
+				expect(session.getActiveToolNames()).toContain("mcp__seedpatch_client_bank");
+				expect(session.getMountedToolCommandNames()).toHaveLength(0);
+
+				const toolCallId = "claude-code-spelling-1";
+				const mock = createMockModel({
+					responses: [
+						{
+							content: [
+								// Raw server name plus the doubled separator: the Claude
+								// Code convention the identity prompt primes.
+								{ type: "toolCall", id: toolCallId, name: "mcp__seedpatch-client__bank", arguments: {} },
+							],
+						},
+						{ content: [{ type: "text", text: "done" }] },
+					],
+				});
+				vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+
+				await session.prompt("hi");
+
+				const result = session.messages.find(
+					(message): message is ToolResultMessage =>
+						message.role === "toolResult" && message.toolCallId === toolCallId,
+				);
+				expect(result?.isError).toBeFalsy();
+				expect(JSON.stringify(result?.content)).toContain("bank contents");
+				expect(executed).toBe(1);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
 	it("runs advisor tools through the approval gate", async () => {
 		// The advisor's tools are built straight from `BUILTIN_TOOLS`, outside
 		// the registry loop that wraps everything else. Its own loop and its
@@ -2234,6 +2499,38 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					} as never),
 				).rejects.toThrow(/blocked by user policy/);
 				expect(fs.existsSync(target)).toBe(false);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("keeps advisor write full-access when the primary omits write", async () => {
+		const tempDir = makeTempDir();
+		const target = path.join(tempDir, "advisor-full-write.txt");
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "allow" } }),
+				toolNames: ["read"],
+			});
+			try {
+				session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
+				const advisor = session.getAdvisorAgent();
+				if (!advisor) throw new Error("expected an advisor agent");
+				const writeTool = advisor.state.tools?.find(tool => tool.name === "write");
+				if (!writeTool) throw new Error("expected the advisor to hold a write tool");
+
+				const result = await writeTool.execute(
+					"advisor-full-write",
+					{ path: target, content: "written\n" },
+					undefined,
+					undefined,
+					{ settings: session.settings } as never,
+				);
+				expect(result.isError).toBeUndefined();
+				expect(fs.readFileSync(target, "utf8")).toBe("written\n");
 			} finally {
 				await session.dispose();
 			}

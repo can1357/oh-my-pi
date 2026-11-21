@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentOutputManager, PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // Contract: subagent output ids are the requested name, used verbatim the first
@@ -19,14 +20,16 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Bob")).toBe("Bob");
 	});
 
-	it("de-duplicates repeated names while preserving order", async () => {
-		const mgr = new AgentOutputManager(() => null);
+	it("reserves numeric names for PIDs only when cross-instance messaging is enabled", async () => {
+		using tmp = TempDir.createSync("@omp-output-manager-");
+		await Bun.write(path.join(tmp.path(), "Agent123.md"), "prior output");
+		const local = new AgentOutputManager(() => tmp.path(), { settings: Settings.isolated() });
+		const sharing = new AgentOutputManager(() => tmp.path(), {
+			settings: Settings.isolated({ "task.crossInstance": true }),
+		});
 
-		const ids: string[] = [];
-		for (const name of ["Auth", "Auth", "Api", "Auth"]) {
-			ids.push(await mgr.allocate(name));
-		}
-		expect(ids).toEqual(["Auth", "Auth-2", "Api", "Auth-3"]);
+		expect(await local.allocate("123")).toBe("123");
+		expect(await sharing.allocate("123")).toBe("Agent123-2");
 	});
 
 	it("nests ids under a parent prefix and still suffixes repeats", async () => {
@@ -91,5 +94,14 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("__advisor")).toBe("__advisor-2");
 		// Unrelated names sharing the prefix are unaffected.
 		expect(await mgr.allocate("__advisor-notes")).toBe("__advisor-notes");
+	});
+
+	it("reserves the pinned-HUD toggle sentinel so a task can't collide with it", async () => {
+		const mgr = new AgentOutputManager(() => null);
+		// A subagent allocated the sentinel id would be indistinguishable from
+		// the jump-list expander row in click routing; it bumps to a suffix.
+		expect(await mgr.allocate(PINNED_HUD_TOGGLE_ID)).toBe(`${PINNED_HUD_TOGGLE_ID}-2`);
+		// Unrelated names sharing the prefix are unaffected.
+		expect(await mgr.allocate("@omp:other")).toBe("@omp:other");
 	});
 });

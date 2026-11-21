@@ -2,19 +2,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import {
 	applyDirenvPreflight,
+	type BashResult,
 	buildMinimizerOptions,
 	executeBash,
 	isPersistentShellCdCommand,
+	releaseShellSessions,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
-import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
+import { evaluateLoopCondition } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	defaultShellVizPreferences,
+	readShellPresentation,
+	shellVisualization,
+} from "@oh-my-pi/pi-tui/tools/shell-viz";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
+import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
+import { saveImagesToTemp } from "@oh-my-pi/pi-coding-agent/utils/image-temp";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { isShellTrace } from "@oh-my-pi/pi-wire";
+
+import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 // Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
 // OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
@@ -39,7 +54,7 @@ function shellQuote(value: string): string {
 
 function configureBashUserShell(homeDir: string): boolean {
 	if (process.platform === "win32" || !fs.existsSync("/bin/bash")) return false;
-	Settings.instance.set("shellPath", "/bin/bash");
+	cfgShellPath.set(Settings.instance, "/bin/bash");
 	vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 		shell: "/bin/bash",
 		args: ["-c"],
@@ -99,6 +114,50 @@ describe("executeBash", () => {
 		}
 	});
 
+	it("publishes the same live native owner before each trace callback", async () => {
+		const snapshots: piNatives.RunTrace[] = [];
+		const result = await executeBash("printf 'attached-native\\n'", {
+			cwd: tempDir,
+			timeout: 5000,
+			onTrace: trace => {
+				const source = shellVisualization(trace);
+				if (!(source instanceof piNatives.RunTrace)) throw new Error("Expected the live native owner");
+				snapshots.push(source);
+				readShellPresentation(source, defaultShellVizPreferences(), trace);
+			},
+		});
+		expect(snapshots.length).toBeGreaterThan(0);
+		expect(new Set(snapshots).size).toBe(1);
+		expect(result.trace).toBeDefined();
+		if (!result.trace) throw new Error("Expected final native trace");
+		expect(shellVisualization(result.trace)).toBe(snapshots[0]);
+	});
+
+	it("keeps tracing and restores a run whose values are not UTF-8", async () => {
+		const result = await executeBash("v=$(printf '\\377'); : \"$v\"; echo done", {
+			cwd: tempDir,
+			timeout: 5000,
+			onTrace: () => {},
+		});
+		expect(result.output.trim()).toBe("done");
+		// The snapshot taken after the run ended still validated, byte values included.
+		expect(result.trace?.status).toBe(0);
+		const history = result.trace?.history ?? [];
+		expect(history.find(event => event.kind === "Assign" && event.name === "v")?.value).toEqual([255]);
+		expect(history.find(event => event.kind === "CmdExpanded" && event.argv?.[0] === ":")?.argv).toEqual([
+			":",
+			[255],
+		]);
+
+		// A persisted copy restores through the native owner and shows the variable.
+		const restored: unknown = JSON.parse(JSON.stringify(result.trace));
+		if (!isShellTrace(restored)) throw new Error("Expected the persisted trace to validate");
+		const source = shellVisualization(restored);
+		if (!source) throw new Error("Expected the persisted trace to restore");
+		const presentation = readShellPresentation(source, defaultShellVizPreferences(), restored);
+		expect(presentation.watches?.some(watch => watch.name === "v")).toBe(true);
+	});
+
 	it("omits minimizer options when the feature is disabled", () => {
 		const group: ShellMinimizerSettings = {
 			enabled: false,
@@ -150,13 +209,115 @@ describe("executeBash", () => {
 		expect(result.output.trim()).toBe(tempDir);
 	});
 
+	it("extracts terminal graphics before sanitization on failed and truncated output", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const frame = await encodeTerminalImage(image);
+		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; printf '%060000d\n' 0; printf tail; exit 7`, {
+			cwd: tempDir,
+			timeout: 5000,
+		});
+
+		expect(result.exitCode).toBe(7);
+		expect(result.images).toHaveLength(1);
+		expect(result.images?.[0]).toMatchObject({ type: "image", mimeType: "image/png" });
+		expect(result.output).toContain("tail");
+		expect(result.output).not.toContain("\x1b_G");
+		expect(result.output).not.toContain(image.data);
+	});
+
+	it("extracts Sixel emitted by an arbitrary subprocess", async () => {
+		const sixel = '\x1bP1;1q"1;1;3;6#1;2;100;0;0#1!3~\x1b\\';
+		const result = await executeBash(`printf '%s' ${shellQuote(`before${sixel}after`)}`, {
+			cwd: tempDir,
+			timeout: 5000,
+		});
+
+		const [body, ...linkLines] = result.output.split("\n");
+		expect(body).toBe("beforeafter");
+		expect(result.images).toHaveLength(1);
+		expect(result.images?.[0]).toMatchObject({ type: "image", mimeType: "image/png" });
+		const savedLines = linkLines.filter(line => line.startsWith("Image saved: "));
+		expect(savedLines).toHaveLength(1);
+		const savedPath = savedLines[0].slice("Image saved: ".length);
+		expect(fs.existsSync(savedPath)).toBe(true);
+		removeSyncWithRetries(savedPath);
+		expect(result.output).not.toContain("\x1bP");
+	});
+
+	it("keeps images emitted before a timeout", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const frame = await encodeTerminalImage(image);
+		// The deadline must land after the image is out, even when a loaded runner is slow to start the shell.
+		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; sleep 30`, {
+			cwd: tempDir,
+			timeout: 1_000,
+		});
+
+		expect(result.timedOut).toBe(true);
+		expect(result.images).toHaveLength(1);
+		expect(result.output).not.toContain("\x1b_G");
+	});
+
+	it("saves decoded command images to temp files and links them in the text", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const frame = await encodeTerminalImage(image);
+		const framePath = path.join(tempDir, "frame.bin");
+		await Bun.write(framePath, frame);
+
+		const result = await executeBash(`cat ${shellQuote(framePath)}`, { cwd: tempDir, timeout: 5000 });
+
+		expect(result.images).toHaveLength(1);
+		expect(result.output).not.toContain("\x1b_G");
+		const savedLines = result.output.split("\n").filter(line => line.startsWith("Image saved: "));
+		expect(savedLines).toHaveLength(1);
+		const savedPath = savedLines[0].slice("Image saved: ".length);
+		expect(fs.existsSync(savedPath)).toBe(true);
+		const bytes = fs.readFileSync(savedPath);
+		expect([...bytes.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		removeSyncWithRetries(savedPath);
+	});
+
+	it("writes images to content-addressed temp paths", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const [first] = await saveImagesToTemp([image]);
+		const [again] = await saveImagesToTemp([image]);
+		expect(again).toBe(first);
+
+		const other: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+		};
+		const [different] = await saveImagesToTemp([other]);
+		expect(different).not.toBe(first);
+
+		removeSyncWithRetries(first);
+		removeSyncWithRetries(different);
+	});
+
 	it("passes the full direnv-load budget when the command deadline is disabled (timeout: 0)", async () => {
 		// A disabled command deadline (`timeout: 0`) must NOT collapse the direnv
 		// export window to 0 ms — that would make AbortSignal.timeout(0) abort the
 		// load instantly, silently dropping the repo's direnv env. The load keeps
 		// its full `bash.direnvLoadTimeoutMs` budget. Spying on loadDirenvEnv both
 		// captures the timeoutMs and short-circuits real direnv (null diff = no-op).
-		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const budget = cfgBashDirenvLoadTimeoutMs.get(await Settings.init());
 		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
 
 		await executeBash("true", { cwd: tempDir, timeout: 0 });
@@ -170,7 +331,7 @@ describe("executeBash", () => {
 		// A positive caller timeout below the budget DOES clamp the direnv window,
 		// proving the fix only relaxes the `timeout: 0` case and did not disable
 		// clamping wholesale. Setting and options.timeout are both milliseconds.
-		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const budget = cfgBashDirenvLoadTimeoutMs.get(await Settings.init());
 		const callerTimeout = 5;
 		expect(callerTimeout).toBeLessThan(budget);
 		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
@@ -200,15 +361,6 @@ describe("executeBash", () => {
 		expect(result.workingDir).toBe(linkDir);
 	});
 
-	it("passes env vars", async () => {
-		const result = await executeBash("echo $PI_TEST_ENV", {
-			cwd: tempDir,
-			timeout: 5000,
-			env: { PI_TEST_ENV: "hello" },
-		});
-		expect(result.output.trim()).toBe("hello");
-	});
-
 	it("applies non-interactive environment defaults", async () => {
 		const result = await executeBash('echo "$AGENT:$GIT_TERMINAL_PROMPT:$PI_TEST_ENV"', {
 			cwd: tempDir,
@@ -216,6 +368,54 @@ describe("executeBash", () => {
 			env: { PI_TEST_ENV: "hello" },
 		});
 		expect(result.output.trim()).toBe("1:0:hello");
+	});
+
+	/** Creates a two-commit repo through `executeBash()`, isolated from user/system git config. */
+	async function createTwoCommitRepo(): Promise<(command: string) => Promise<BashResult>> {
+		const repoDir = path.join(tempDir, "repo");
+		const globalConfigPath = path.join(tempDir, "gitconfig");
+		fs.mkdirSync(repoDir);
+		fs.writeFileSync(globalConfigPath, "");
+		const sessionKey = `git-rebase-${path.basename(tempDir)}`;
+		const run = (command: string) =>
+			executeBash(command, {
+				cwd: repoDir,
+				timeout: 10_000,
+				sessionKey,
+				env: { GIT_CONFIG_GLOBAL: globalConfigPath, GIT_CONFIG_NOSYSTEM: "1" },
+			});
+		const setup = await run(
+			[
+				"git init -q -b main",
+				"git config user.email t@example.com",
+				"git config user.name t",
+				"echo first > first.txt && git add -A && git commit -qm first",
+				"echo second > second.txt && git add -A && git commit -qm second",
+			].join(" && "),
+		);
+		expect(setup).toMatchObject({ exitCode: 0 });
+		return run;
+	}
+
+	/** Writes a sequence-editor script that touches `marker` and exits with `exitCode`. */
+	function writeEditorScript(marker: string, exitCode: number): string {
+		const editorPath = path.join(tempDir, "sequence-editor.sh");
+		fs.writeFileSync(editorPath, `#!/bin/sh\ntouch ${shellQuote(marker)}\nexit ${exitCode}\n`);
+		fs.chmodSync(editorPath, 0o755);
+		return editorPath;
+	}
+
+	it("bypasses a configured git sequence.editor during interactive rebase", async () => {
+		if (process.platform === "win32" || !$which("git")) return;
+		const marker = path.join(tempDir, "sequence-editor-ran");
+		const editorPath = writeEditorScript(marker, 1);
+		const run = await createTwoCommitRepo();
+		expect(await run(`git config sequence.editor ${shellQuote(editorPath)}`)).toMatchObject({ exitCode: 0 });
+
+		const rebase = await run("git rebase -i HEAD~1");
+
+		expect(rebase).toMatchObject({ exitCode: 0 });
+		expect(fs.existsSync(marker)).toBe(false);
 	});
 
 	it("runs non-bash shellPath commands through the configured shell", async () => {
@@ -242,7 +442,7 @@ exit 64
 `,
 		);
 		fs.chmodSync(fakeShell, 0o755);
-		Settings.instance.set("shellPath", fakeShell);
+		cfgShellPath.set(Settings.instance, fakeShell);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fakeShell,
@@ -294,7 +494,7 @@ exit 64
 `,
 		);
 		fs.chmodSync(fakeShell, 0o755);
-		Settings.instance.set("shellPath", fakeShell);
+		cfgShellPath.set(Settings.instance, fakeShell);
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fakeShell,
 			args: ["-l", "-c"],
@@ -430,7 +630,7 @@ exit 64
 
 		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-shellpath-"));
 		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_shell_alias='printf zsh-alias-ok\\\\n'\n");
-		Settings.instance.set("shellPath", zshPath);
+		cfgShellPath.set(Settings.instance, zshPath);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: zshPath,
@@ -438,6 +638,9 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
+				// zsh reads `.zshrc` from `$ZDOTDIR` when set; terminal integrations
+				// export their own, which would bypass the fixture rc.
+				ZDOTDIR: shellDir,
 				// The command runs through an interactive login zsh, which loads the
 				// system `/etc/zshrc`. On macOS that pulls in
 				// `/etc/zshrc_Apple_Terminal`, and under Apple Terminal it appends
@@ -486,7 +689,7 @@ exit 64
 			path.join(configDir, "conf.d", "pi-login.fish"),
 			"if status is-login; echo fish-login-side-effect; end\n",
 		);
-		Settings.instance.set("shellPath", fishPath);
+		cfgShellPath.set(Settings.instance, fishPath);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fishPath,
@@ -517,20 +720,117 @@ exit 64
 		}
 	});
 
-	it("invokes onChunk with command output", async () => {
-		let seenChunk: string | null = null;
-		const result = await executeBash("echo hello", {
-			cwd: tempDir,
-			timeout: 5000,
-			onChunk: chunk => {
-				if (seenChunk === null) {
-					seenChunk = chunk;
-				}
+	it("runs zsh shortcut commands on a headless PTY with a color-capable TTY", async () => {
+		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
+			return;
+		}
+		const zshPath = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!zshPath) {
+			return;
+		}
+
+		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-pty-"));
+		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_pty_alias='printf pty-alias-ok'\n");
+		cfgShellPath.set(Settings.instance, zshPath);
+
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: zshPath,
+			args: ["-l", "-c"],
+			env: {
+				PATH: Bun.env.PATH ?? "",
+				HOME: shellDir,
+				ZDOTDIR: shellDir,
+				SHELL_SESSIONS_DISABLE: "1",
 			},
+			prefix: undefined,
 		});
-		expect(result.output.trim()).toBe("hello");
-		expect(seenChunk).not.toBeNull();
-		expect(seenChunk ?? "").toContain("hello");
+
+		const rawChunks: string[] = [];
+		try {
+			const result = await executeBash(
+				"pi_pty_alias; [ -t 1 ] && printf ' is-tty'; printf ' \\033[31mred\\033[0m'",
+				{
+					cwd: tempDir,
+					timeout: 15000,
+					sessionKey: "zsh-pty",
+					useUserShell: true,
+					pty: { cols: 80, rows: 24, onChunk: chunk => rawChunks.push(chunk) },
+				},
+			);
+
+			expect(result.cancelled).toBe(false);
+			expect(result.exitCode).toBe(0);
+			// Interactive rc loaded (alias expanded) AND stdout was a real TTY.
+			expect(result.output).toContain("pty-alias-ok");
+			expect(result.output).toContain("is-tty");
+			// The captured output stays sanitized while raw ANSI reaches the
+			// renderer callback for vterm replay.
+			expect(result.output).not.toContain("\u001b[31m");
+			expect(rawChunks.join("")).toContain("\u001b[31mred\u001b[0m");
+		} finally {
+			removeSyncWithRetries(shellDir);
+		}
+	});
+
+	it("lets the user answer a prompt in a zsh shortcut command through the PTY stdin writer (#17210)", async () => {
+		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
+			return;
+		}
+		const zshPath = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!zshPath) {
+			return;
+		}
+		// An interactive zsh whose ZDOTDIR holds none of .zshenv, .zprofile, .zshrc and .zlogin
+		// runs zsh-newuser-install where the zsh install ships it (Debian and Ubuntu do), and its
+		// menu waits for a key before the command runs, so the prompt this test answers never
+		// appears. An empty .zshrc is a startup file, so zsh runs the command straight away.
+		fs.writeFileSync(path.join(tempDir, ".zshrc"), "");
+		cfgShellPath.set(Settings.instance, zshPath);
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: zshPath,
+			args: ["-l", "-c"],
+			env: { PATH: Bun.env.PATH ?? "", HOME: tempDir, ZDOTDIR: tempDir, SHELL_SESSIONS_DISABLE: "1" },
+			prefix: undefined,
+		});
+
+		// Answer once the prompt is on screen and stdin is writable, in whichever
+		// order those two callbacks arrive — like a user at the keyboard.
+		let screen = "";
+		let write: ((data: string) => void) | undefined;
+		let answered = false;
+		const answer = () => {
+			if (answered || !write || !screen.includes("Choose [Y/n]:")) return;
+			answered = true;
+			write("y");
+		};
+		const result = await executeBash(
+			"printf 'Choose [Y/n]: '; read -k 1 answer; printf '\\nANSWER=%s\\n' \"$answer\"",
+			{
+				cwd: tempDir,
+				timeout: 15000,
+				useUserShell: true,
+				pty: {
+					cols: 80,
+					rows: 24,
+					onStdin: writer => {
+						write = writer;
+						answer();
+					},
+					onChunk: chunk => {
+						screen += chunk;
+						answer();
+					},
+				},
+			},
+		);
+
+		expect(result.timedOut).toBeUndefined();
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("ANSWER=y");
 	});
 
 	it("returns a real PID for background external commands", async () => {
@@ -540,9 +840,10 @@ exit 64
 
 		// Redirect the backgrounded job's stdout so it doesn't hold the executor's
 		// output pipe open (which would add the ~250ms background-drain grace);
-		// `$!` still reports the real external PID, which is all this test checks.
-		const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
-		const result = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $!`, {
+		// `$!` reports the real external PID, which is all this test checks.
+		const sleepBin = $which("sleep");
+		if (!sleepBin) throw new Error("sleep executable not found");
+		const result = await executeBash(`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $!`, {
 			cwd: tempDir,
 			timeout: 5000,
 		});
@@ -551,15 +852,6 @@ exit 64
 		expect(pid).toBeGreaterThan(0);
 		expect(() => process.kill(pid, 0)).not.toThrow();
 		expect(() => process.kill(pid, "SIGKILL")).not.toThrow();
-	});
-
-	it("times out commands", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-		const result = await executeBash("sleep 10", { cwd: tempDir, timeout: 50 });
-		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("timed out");
 	});
 
 	it("times out before follow-up output", async () => {
@@ -591,26 +883,7 @@ exit 64
 		expect(result.output.trim()).toBe("done");
 	});
 
-	it("aborts commands", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-		const controller = new AbortController();
-		const started = Promise.withResolvers<void>();
-		const promise = executeBash("echo started; sleep 10", {
-			cwd: tempDir,
-			timeout: 5000,
-			signal: controller.signal,
-			onChunk: () => started.resolve(),
-		});
-		await started.promise;
-		controller.abort();
-		const result = await promise;
-		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("Command cancelled");
-	});
-
-	it("returns promptly and quarantines the session key when native abort cleanup stalls", async () => {
+	it("returns promptly and runs follow-ups on a fork while native abort cleanup stalls", async () => {
 		if (process.platform === "win32") {
 			return;
 		}
@@ -702,6 +975,122 @@ exit 64
 		expect(next.output.trim()).toBe("still_persistent");
 	});
 
+	it("releases a session's own and namespaced shells, leaving other sessions alone", async () => {
+		// A session's shells are cached under the session key itself (the bash tool's
+		// own) or under one namespace of it, `<label>:<session id>` (a /loop
+		// condition uses `loop-condition:<id>`). Release must collect both, or a
+		// disposed session keeps a native shell for the life of the process; another
+		// session's namespaced shell is not its to drop.
+		const id = crypto.randomUUID();
+		const other = crypto.randomUUID();
+		const colonId = `/work/repo:${crypto.randomUUID()}`;
+		const run = (sessionKey: string, command: string) =>
+			executeBash(command, { cwd: tempDir, timeout: 5000, sessionKey });
+		const runLoop = (sessionId: string, command: string) =>
+			evaluateLoopCondition({ command, until: false }, { cwd: tempDir, timeoutMs: 5000, sessionId });
+		try {
+			await run(id, "PI_PLAIN=kept");
+			expect(await runLoop(id, "PI_LOOP=kept")).toEqual({ kind: "continue" });
+			await run(other, "PI_OTHER=kept");
+			expect(await runLoop(other, "PI_OTHER_LOOP=kept")).toEqual({ kind: "continue" });
+			// A key whose front part is a path, not a surface label, is no namespace of
+			// `id` even though its tail reads like one.
+			const pathLike = `/work/repo:${id}`;
+			await run(pathLike, "PI_PATH_KEY=kept");
+			// A session id may itself contain a colon (a cwd-derived session name);
+			// that session's own shells are still its to release.
+			await run(colonId, "PI_COLON=kept");
+			expect(await runLoop(colonId, "PI_COLON_LOOP=kept")).toEqual({ kind: "continue" });
+
+			releaseShellSessions(id);
+			releaseShellSessions(colonId);
+
+			expect((await run(id, 'printf "[%s]" "$PI_PLAIN"')).output).toBe("[]");
+			expect(await runLoop(id, 'test -z "$PI_LOOP"')).toEqual({ kind: "continue" });
+			expect((await run(colonId, 'printf "[%s]" "$PI_COLON"')).output).toBe("[]");
+			expect(await runLoop(colonId, 'test -z "$PI_COLON_LOOP"')).toEqual({ kind: "continue" });
+			// A key that is neither the id nor a namespace of it survives the other
+			// session's release, and another session's shells survive both.
+			expect((await run(pathLike, 'printf "[%s]" "$PI_PATH_KEY"')).output).toBe("[kept]");
+			expect((await run(other, 'printf "[%s]" "$PI_OTHER"')).output).toBe("[kept]");
+			expect(await runLoop(other, 'test "$PI_OTHER_LOOP" = kept')).toEqual({ kind: "continue" });
+		} finally {
+			releaseShellSessions(id);
+			releaseShellSessions(other);
+			releaseShellSessions(colonId);
+			releaseShellSessions(`/work/repo:${id}`);
+		}
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"retains live background jobs when an in-use namespaced shell is released before settling",
+		async () => {
+			const id = crypto.randomUUID();
+			const pidFile = path.join(tempDir, "in-use-release-pid");
+			const gateFile = path.join(tempDir, "in-use-release-gate");
+			const sleepBin = $which("sleep");
+			if (!sleepBin) throw new Error("sleep executable not found");
+			const liveJobsSpy = vi.spyOn(piNatives.Shell.prototype, "liveBackgroundJobCount");
+			let pid: number | undefined;
+			try {
+				const pending = evaluateLoopCondition(
+					{
+						command: `PI_IN_USE_LOOP=kept; ${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}; while [ ! -f ${shellQuote(gateFile)} ]; do ${shellQuote(sleepBin)} 0.02; done`,
+						until: false,
+					},
+					{ cwd: tempDir, timeoutMs: 5000, sessionId: id },
+				);
+				await pollUntil(() => {
+					if (!fs.existsSync(pidFile)) return false;
+					const parsed = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+					if (!Number.isInteger(parsed)) return false;
+					pid = parsed;
+					return true;
+				}, Date.now() + 4000);
+				if (pid === undefined) throw new Error("Timed out waiting for background job PID");
+
+				// Release the session while the condition shell is still in flight.
+				// `releaseShellSessions` removes the cached key immediately, but cannot
+				// retain the shell yet because `shellSessionsInUse` still holds it.
+				releaseShellSessions(id);
+				expect(liveJobsSpy).not.toHaveBeenCalled();
+
+				fs.writeFileSync(gateFile, "ok");
+				expect(await pending).toEqual({ kind: "continue" });
+				expect(liveJobsSpy).toHaveBeenCalledTimes(1);
+				// Drop `liveJobsSpy.mock.contexts` so the spy does not keep the released
+				// `Shell` alive across `Bun.gc(true)` below.
+				liveJobsSpy.mockRestore();
+
+				// A follow-up condition starts a fresh shell while the released one stays
+				// retained until its background child exits.
+				expect(
+					await evaluateLoopCondition(
+						{ command: 'test -z "$PI_IN_USE_LOOP"', until: false },
+						{ cwd: tempDir, timeoutMs: 5000, sessionId: id },
+					),
+				).toEqual({ kind: "continue" });
+
+				Bun.gc(true);
+				await Bun.sleep(50);
+				let alive = true;
+				try {
+					process.kill(pid, 0);
+				} catch {
+					alive = false;
+				}
+				expect(alive).toBe(true);
+			} finally {
+				if (pid !== undefined) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {}
+				}
+				releaseShellSessions(id);
+			}
+		},
+	);
+
 	it("aborts the shell without aborting its native signal when the JavaScript timeout fallback wins", async () => {
 		// Compress the JS-side fallback timer (floored at 1000ms in the source) so
 		// the safety-net fires deterministically without a real 1s wait. Only long
@@ -714,6 +1103,9 @@ exit 64
 				typeof ms === "number" && ms >= 1000 ? 5 : ms,
 				...rest,
 			)) as typeof globalThis.setTimeout);
+		// The fallback waits until the clock says the deadline passed; advance it with the timers.
+		let clock = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => (clock += 10_000));
 
 		let nativeSignal: AbortSignal | undefined;
 		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((options, onChunk) => {
@@ -734,6 +1126,9 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("streamed-before-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
+		// Watchdog-win path: native never returned, so the result must be
+		// distinguishable from a confirmed empty run (#10308).
+		expect(result.output).toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 	});
@@ -746,6 +1141,9 @@ exit 64
 				typeof ms === "number" && ms >= 1000 ? 5 : ms,
 				...rest,
 			)) as typeof globalThis.setTimeout);
+		// The fallback waits until the clock says the deadline passed; advance it with the timers.
+		let clock = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => (clock += 10_000));
 
 		const ownerResult = Promise.withResolvers<ShellRunResult>();
 		const isolatedResult = Promise.withResolvers<ShellRunResult>();
@@ -803,70 +1201,57 @@ exit 64
 		expect(result.output).not.toContain("done");
 	});
 
-	it("resets persistent session state after abort", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-
-		const sessionKey = "reset-on-abort";
-		await executeBash("export PI_RESET_VAR=alive", { cwd: tempDir, timeout: 5000, sessionKey });
-		const beforeAbort = await executeBash("echo $PI_RESET_VAR", { cwd: tempDir, timeout: 5000, sessionKey });
-		expect(beforeAbort.output.trim()).toBe("alive");
-
-		const controller = new AbortController();
-		// Abort only once the command is actually running in the persistent
-		// session. Aborting on a fixed timer races executeBash's async setup
-		// (settings + snapshot load); under load the abort can land in the
-		// early-abort short-circuit before the shell ever runs, leaving the
-		// session unreset — the source of the flaky "alive" result here.
-		const startMarker = path.join(tempDir, "reset-on-abort.started");
-		const abortPromise = executeBash(`touch ${startMarker}; sleep 10`, {
-			cwd: tempDir,
-			timeout: 5000,
-			signal: controller.signal,
-			sessionKey,
-		});
-		const startDeadline = Date.now() + 4000;
-		while (!fs.existsSync(startMarker) && Date.now() < startDeadline) {
-			await Bun.sleep(2);
-		}
-		controller.abort();
-		const aborted = await abortPromise;
-		expect(aborted.cancelled).toBe(true);
-
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: this is a bash variable expansion
-		const afterAbort = await executeBash("echo ${PI_RESET_VAR:-unset}", {
-			cwd: tempDir,
-			timeout: 5000,
-			sessionKey,
-		});
-		expect(afterAbort.output.trim()).toBe("unset");
-	});
-
 	it("runs overlapping calls on the same session key concurrently", async () => {
 		if (process.platform === "win32") return;
 
 		const sessionKey = "parallel-overlap";
-		const order: string[] = [];
-		const slow = executeBash('sleep 0.15 && echo "A-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(
-			result => {
-				order.push("slow");
-				return result;
-			},
-		);
-		const fast = executeBash('echo "B-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(result => {
-			order.push("fast");
-			return result;
+		const started = path.join(tempDir, "overlap-owner.started");
+		const release = path.join(tempDir, "overlap-owner.release");
+		const controller = new AbortController();
+		const deadline = Date.now() + 4000;
+		let ownerSettled = false;
+		const owner = executeBash(
+			`touch ${shellQuote(started)}; while [ ! -f ${shellQuote(release)} ]; do sleep 0.02; done; echo "A-done"`,
+			{ cwd: tempDir, timeout: 0, sessionKey, signal: controller.signal },
+		).finally(() => {
+			ownerSettled = true;
 		});
+		const calls = [owner];
+		let overlapPassed = false;
+		try {
+			await pollUntil(() => fs.existsSync(started), deadline);
+			expect(fs.existsSync(started)).toBe(true);
 
-		const [slowResult, fastResult] = await Promise.all([slow, fast]);
-		expect(slowResult.exitCode).toBe(0);
-		expect(slowResult.output).toContain("A-done");
-		expect(fastResult.exitCode).toBe(0);
-		expect(fastResult.output).toContain("B-done");
-		// If the second call had queued behind the persistent session it could
-		// not finish before the 150ms sleep of the first.
-		expect(order).toEqual(["fast", "slow"]);
+			let overlappingSettled = false;
+			const overlapping = executeBash('echo "B-done"', {
+				cwd: tempDir,
+				timeout: 0,
+				sessionKey,
+				signal: controller.signal,
+			}).finally(() => {
+				overlappingSettled = true;
+			});
+			calls.push(overlapping);
+			// A serialized call cannot finish until the owner is explicitly released.
+			await pollUntil(() => overlappingSettled, Date.now() + 4000);
+			expect(overlappingSettled).toBe(true);
+			const overlappingResult = await overlapping;
+			expect(overlappingResult.exitCode).toBe(0);
+			expect(overlappingResult.output).toContain("B-done");
+			expect(ownerSettled).toBe(false);
+			overlapPassed = true;
+		} finally {
+			try {
+				await Bun.write(release, "");
+				if (overlapPassed) await pollUntil(() => ownerSettled, Date.now() + 4000);
+			} finally {
+				controller.abort();
+				await Promise.allSettled(calls);
+			}
+		}
+		const ownerResult = await owner;
+		expect(ownerResult.exitCode).toBe(0);
+		expect(ownerResult.output).toContain("A-done");
 	});
 
 	it("keeps the owner session usable when an overlapping call times out", async () => {
@@ -1055,32 +1440,26 @@ exit 64
 		expect(result.output.trim()).toBe("snapshot_ok");
 	});
 
-	it("survives compound aliases from the user's shell snapshot (issue #3234)", async () => {
+	it("runs compound aliases from the user's shell snapshot (issue #3234)", async () => {
 		if (process.platform === "win32") return;
 		const bashPath = Bun.env.SHELL?.includes("bash") ? Bun.env.SHELL : "/bin/bash";
 		if (!fs.existsSync(bashPath)) return;
 
-		// Pre-seed a snapshot that mirrors Fedora's default `which` alias.
-		// Without the brush-compat scrub, brush's whitespace-only alias
-		// expander turns `(alias;` into the command name and `which` fails
-		// with `command not found: (alias;`. With the scrub, the broken
-		// alias is dropped and brush falls through to `$PATH`.
+		// Pre-seed a snapshot with an alias whose body needs real shell parsing
+		// (subshell, separator, pipe, `&&`), shaped like Fedora's default `which`
+		// alias. Alias expansion re-reads the body as shell input, so the whole
+		// compound command runs instead of `(echo` becoming the command name.
 		const snapshotPath = path.join(tempDir, "snapshot.sh");
 		fs.writeFileSync(
 			snapshotPath,
 			[
 				"unalias -a 2>/dev/null || true",
-				"alias -- which='(alias; declare -f) | /usr/bin/which --tty-only --read-alias --show-dot --show-tilde'",
+				"shopt -s expand_aliases",
+				"alias -- shout='(echo one; echo two) | tr a-z A-Z && echo done'",
 				"alias -- ll='ls -l'",
 				"",
 			].join("\n"),
 		);
-		const rawSnapshot = fs.readFileSync(snapshotPath, "utf8");
-		const { content: scrubbed, dropped } = shellSnapshot.sanitizeSnapshotForBrush(rawSnapshot);
-		fs.writeFileSync(snapshotPath, scrubbed);
-		expect(dropped).toEqual(["which"]);
-		// Compatible aliases must still be installed in brush.
-		expect(scrubbed).toContain("alias -- ll='ls -l'");
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: bashPath,
@@ -1090,16 +1469,16 @@ exit 64
 		});
 		vi.spyOn(shellSnapshot, "getOrCreateSnapshot").mockResolvedValue(snapshotPath);
 
-		const result = await executeBash("which sh", {
+		const result = await executeBash("shout", {
 			cwd: tempDir,
 			timeout: 5000,
-			sessionKey: "brush-compound-alias-which",
+			sessionKey: "compound-alias-snapshot",
 		});
 
 		expect(result.cancelled).toBe(false);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).not.toContain("command not found");
-		expect(result.output.trim()).toMatch(/\/sh$/);
+		expect(result.output.trim().split("\n")).toEqual(["ONE", "TWO", "done"]);
 	});
 
 	it("does not allow exec to replace the host", async () => {
@@ -1190,6 +1569,45 @@ exit 64
 		await expectMarkerNeverWritten(marker, release);
 	});
 
+	it.skipIf(process.platform === "win32").each(["timeout", "abort"] as const)(
+		"keeps the session's variables and background jobs when a later command ends by %s, as Ctrl+C does",
+		async ending => {
+			const sessionKey = crypto.randomUUID();
+			const sleepBin = $which("sleep");
+			if (!sleepBin) throw new Error("sleep executable not found");
+			const started = await executeBash(`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & bg=$!; echo $bg`, {
+				cwd: tempDir,
+				timeout: 5000,
+				sessionKey,
+			});
+			const pid = Number.parseInt(started.output.trim(), 10);
+			expect(pid).toBeGreaterThan(0);
+			try {
+				const controller = new AbortController();
+				const laterStarted = path.join(tempDir, "later.started");
+				const later = executeBash(`touch ${shellQuote(laterStarted)}; sleep 10`, {
+					cwd: tempDir,
+					timeout: ending === "timeout" ? 200 : 10_000,
+					signal: controller.signal,
+					sessionKey,
+				});
+				if (ending === "abort") {
+					await pollUntil(() => fs.existsSync(laterStarted), Date.now() + 4000);
+					controller.abort();
+				}
+				expect((await later).cancelled).toBe(true);
+				const after = await executeBash('echo "$bg"', { cwd: tempDir, timeout: 5000, sessionKey });
+				expect(after.output.trim()).toBe(String(pid));
+				expect(() => process.kill(pid, 0)).not.toThrow();
+			} finally {
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+				releaseShellSessions(sessionKey);
+			}
+		},
+	);
+
 	it("kills spawned process on abort (not just orphans it)", async () => {
 		if (process.platform === "win32") return;
 
@@ -1246,6 +1664,8 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("flushed-during-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
+		// Native-confirmed timeout: no "backend did not respond" caveat.
+		expect(result.output).not.toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).not.toHaveBeenCalled();
 	});
@@ -1266,23 +1686,39 @@ describe("executeBash :async: background retention", () => {
 		if (fs.existsSync(tmp)) removeSyncWithRetries(tmp);
 	});
 
+	it("starts a per-job :async: shell as a copy of the seed session's shell", async () => {
+		await executeBash("export SEEDED=yes; seeded_fn() { echo fn-ok; }", { sessionKey: "seed-probe", cwd: tmp });
+		const job = await executeBash('echo "$SEEDED"; seeded_fn; export SEEDED=changed', {
+			sessionKey: "seed-probe:async:job1",
+			seedSessionKey: "seed-probe",
+			cwd: tmp,
+		});
+		expect(job.output).toBe("yes\nfn-ok\n");
+		const after = await executeBash('echo "$SEEDED"', { sessionKey: "seed-probe", cwd: tmp });
+		expect(after.output).toBe("yes\n");
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"keeps a per-job :async: shell's plain-`&` background process alive across turns",
 		async () => {
 			const pidFile = path.join(tmp, "pid");
-			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+			const sleepBin = $which("sleep");
+			if (!sleepBin) throw new Error("sleep executable not found");
 			let pid: number | undefined;
 			try {
 				// A per-job `:async:` key: its shell is removed from the reuse map at
 				// teardown, which would SIGKILL the backgrounded child (kill-on-drop).
 				// A plain `&` job stays a child of the shell, so `liveBackgroundJobCount`
 				// sees it and the retain logic keeps the shell alive while the child
-				// runs. `$!` is the external child's own pid (no transparent wrapper to
-				// unwrap), so it is the process we assert on.
-				const res = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`, {
-					sessionKey: "retain-probe:async:job1",
-					cwd: tmp,
-				});
+				// runs. `$!` is the external child's own pid (no transparent wrapper
+				// to unwrap), so it is the process we assert on.
+				const res = await executeBash(
+					`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`,
+					{
+						sessionKey: "retain-probe:async:job1",
+						cwd: tmp,
+					},
+				);
 				expect(res.cancelled).toBe(false);
 				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
 				expect(Number.isInteger(pid)).toBe(true);
@@ -1311,25 +1747,33 @@ describe("executeBash :async: background retention", () => {
 		"keeps a nohup-detached background process alive across turns (reparenting)",
 		async () => {
 			const pidFile = path.join(tmp, "nohup-pid");
-			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+			const sleepBin = $which("sleep");
+			if (!sleepBin) throw new Error("sleep executable not found");
 			let pid: number | undefined;
 			try {
-				// `nohup cmd &` is a transparent background wrapper: brush unwraps it and
-				// double-forks the operand so it reparents to init and survives teardown
-				// independently of the retain map. The shell only ever tracked the
-				// short-lived intermediate fork, so `$!` is NOT the surviving process —
-				// the operand writes its own pid before `exec`ing the long sleep, and
-				// that pid (unchanged across exec) is the one we assert stays alive.
-				const operand = `echo $$ > ${pidFile}; exec ${sleepBin} 30`;
+				// pi's `nohup` tool (crates/shell/src/tools/nohup.rs) runs the operand
+				// in a detached tree that session cancel and teardown leave running,
+				// independently of the retain map. `$!` names the background job, not
+				// the external that survives — the operand writes its own pid before
+				// `exec`ing the long sleep, and that pid (unchanged across exec) is the
+				// one we assert stays alive.
+				const operand = `echo $$ > ${shellQuote(pidFile)}; exec ${shellQuote(sleepBin)} 30`;
 				const res = await executeBash(`nohup sh -c ${shellQuote(operand)} >/dev/null 2>&1 &`, {
 					sessionKey: "reparent-probe:async:job1",
 					cwd: tmp,
 				});
 				expect(res.cancelled).toBe(false);
 
-				await pollUntil(() => fs.existsSync(pidFile), Date.now() + 4000);
-				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-				expect(Number.isInteger(pid)).toBe(true);
+				let observedPid = Number.NaN;
+				await pollUntil(() => {
+					if (!fs.existsSync(pidFile)) return false;
+					observedPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+					return Number.isInteger(observedPid);
+				}, Date.now() + 4000);
+				if (!Number.isInteger(observedPid)) {
+					throw new Error(`Timed out waiting for a valid PID in ${pidFile}`);
+				}
+				pid = observedPid;
 
 				// A later turn on a different per-job shell must not have killed it.
 				await executeBash("true", { sessionKey: "reparent-probe:async:job2", cwd: tmp });

@@ -42,6 +42,7 @@ const compat: ResolvedOpenAICompat = {
 	maxTokensField: "max_completion_tokens",
 	requiresToolResultName: false,
 	requiresAssistantAfterToolResult: false,
+	foldUserAfterToolResult: false,
 	requiresThinkingAsText: false,
 	requiresMistralToolIds: false,
 	thinkingFormat: "openai",
@@ -68,6 +69,13 @@ const compat: ResolvedOpenAICompat = {
 	emptyLengthFinishIsContextError: false,
 	usesOpenAIToolCallIdLimit: false,
 	dropThinkingWhenReasoningEffort: false,
+	nativeKimiK3Reasoning: false,
+	zaiReasoningEffortDialect: false,
+	clampOutputToModelMax: false,
+	stripImageInput: false,
+	rejectRootObjectUnion: false,
+	retryWithoutStrictOnGrammarError: false,
+	supportsPromptCacheKey: false,
 };
 
 function makeModel<TApi extends Api>(api: TApi, provider: Model["provider"]): Model<TApi> {

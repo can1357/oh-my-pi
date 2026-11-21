@@ -160,17 +160,44 @@ describe("managed-skills primitives", () => {
 			).rejects.toThrow(/non-empty body/);
 		});
 
-		it("refuses to write when the managed-skills root itself is a symlink", async () => {
+		it("writes through a symlinked root into its target directory", async () => {
 			const realRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-realroot-"));
 			try {
 				await fs.mkdir(path.dirname(getManagedSkillsDir()), { recursive: true });
 				await fs.symlink(realRoot, getManagedSkillsDir());
-				await expect(
-					writeManagedSkill({ action: "create", name: "demo", description: "d", body: "b" }),
-				).rejects.toThrow(/managed-skills root is a symlink/);
+				await writeManagedSkill({
+					action: "create",
+					name: "demo",
+					description: "d",
+					body: "b",
+				});
+				expect(await Bun.file(path.join(realRoot, "demo", "SKILL.md")).exists()).toBe(true);
+				await deleteManagedSkill("demo");
 				expect(await Bun.file(path.join(realRoot, "demo", "SKILL.md")).exists()).toBe(false);
 			} finally {
 				await removeWithRetries(realRoot);
+			}
+		});
+
+		it("refuses to write through a broken symlinked root", async () => {
+			await fs.mkdir(path.dirname(getManagedSkillsDir()), { recursive: true });
+			await fs.symlink(path.join(os.tmpdir(), "omp-no-such-root"), getManagedSkillsDir());
+			await expect(
+				writeManagedSkill({ action: "create", name: "demo", description: "d", body: "b" }),
+			).rejects.toThrow(/broken symlink/);
+		});
+
+		it("refuses to write through a root that links to a file", async () => {
+			const file = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "omp-realroot-file-")), "notadir");
+			await Bun.write(file, "x");
+			try {
+				await fs.mkdir(path.dirname(getManagedSkillsDir()), { recursive: true });
+				await fs.symlink(file, getManagedSkillsDir());
+				await expect(
+					writeManagedSkill({ action: "create", name: "demo", description: "d", body: "b" }),
+				).rejects.toThrow(/non-directory/);
+			} finally {
+				await removeWithRetries(path.dirname(file));
 			}
 		});
 

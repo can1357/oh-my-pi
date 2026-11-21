@@ -1,0 +1,47 @@
+// Provider-wire compat for "google"; regenerated from the frozen census using deployment contract selectors.
+
+provider "google" {
+	default-model "gemini-3.1-pro-preview"
+	env "GEMINI_API_KEY"
+	kind-apis {
+		image "google-generative-ai"
+	}
+	web-search "gemini"
+	image-count-budget 200
+
+	// Decisions API (`POST /v1beta/decisions`, Gemini Developer API only,
+	// aistudio.google.com/docs/decisions-api) answers typed questions with
+	// Gemini Decision 1 over text and image input. Billed $0.10 per 1M input
+	// tokens, no output charge; 262,144-token window across input and questions.
+	seed api="google-decisions" base-url="https://generativelanguage.googleapis.com/v1beta" bundle="always" {
+		model "gemini-decision-1" name="Gemini Decision 1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.1 output=0 cache-read=0 cache-write=0
+			limits context=262144
+			supports-tools #false
+		}
+	}
+
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*latest" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gemini-2.5-computer-use-preview-10-2025" "gemini-robotics-er-1.6-preview" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// The proxy conservatively classifies tool-capable text+image output as chat;
+	// this SKU is a native image generator on the Gemini image transport.
+	models "gemini-3.1-flash-lite-image" {
+		kind "image"
+	}
+	models "gemini-decision-1" {
+		kind "judge"
+	}
+}

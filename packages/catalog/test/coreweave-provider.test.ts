@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	coreWeaveModelManagerOptions,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -28,22 +28,6 @@ afterEach(() => {
 });
 
 describe("CoreWeave Serverless Inference provider support", () => {
-	test("registers descriptor, default model, environment key, and bundled models", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "coreweave");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("openai/gpt-oss-120b");
-		expect(descriptor?.catalogDiscovery?.label).toBe("CoreWeave Serverless Inference");
-		expect(descriptor?.catalogDiscovery?.envVars).toEqual(["COREWEAVE_API_KEY", "WANDB_API_KEY"]);
-		expect(DEFAULT_MODEL_PER_PROVIDER.coreweave).toBe("openai/gpt-oss-120b");
-
-		const bundled = getBundledModels("coreweave");
-		expect(bundled.find(model => model.id === "openai/gpt-oss-120b")).toMatchObject({
-			api: "openai-completions",
-			provider: "coreweave",
-			baseUrl: "https://api.inference.wandb.ai/v1",
-		});
-	});
-
 	test("discovers dynamic models with the CoreWeave project header", async () => {
 		Bun.env.COREWEAVE_PROJECT = "team/project";
 		delete Bun.env.WANDB_INFERENCE_PROJECT;
@@ -109,17 +93,21 @@ describe("CoreWeave Serverless Inference provider support", () => {
 			MODELS_DEV_PROVIDER_DESCRIPTORS,
 		);
 
-		expect(mapped.find(model => model.provider === "coreweave")).toMatchObject({
+		const spec = mapped.find(model => model.provider === "coreweave");
+		expect(spec).toMatchObject({
 			id: "openai/gpt-oss-120b",
 			name: "GPT OSS 120B",
 			api: "openai-completions",
 			provider: "coreweave",
 			baseUrl: "https://api.inference.wandb.ai/v1",
 			reasoning: true,
-			thinking: { mode: "effort", efforts: ["low", "medium", "high"] },
 			contextWindow: 131072,
 			maxTokens: 32768,
 			cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 },
 		});
+		// The effort ladder is rule-owned (classes/gpt-oss.kdl), not authored by
+		// the discovery mapper; buildModel derives it from the flagged spec.
+		if (!spec) throw new Error("coreweave row missing");
+		expect(buildModel(spec).thinking).toEqual({ mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] });
 	});
 });

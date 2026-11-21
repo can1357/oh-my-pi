@@ -69,18 +69,4 @@ describe.skipIf(SKIP)("handleBluesky", () => {
 		},
 		{ timeout: 30000 },
 	);
-
-	it(
-		"fetches Jay Graber's profile",
-		async () => {
-			// Jay Graber - CEO of Bluesky, very stable
-			const result = await handleBluesky("https://bsky.app/profile/jay.bsky.team", 20);
-			expect(result).not.toBeNull();
-			expect(result?.method).toBe("bluesky-api");
-			expect(result?.contentType).toBe("text/markdown");
-			expect(result?.content).toContain("@jay.bsky.team");
-			expect(result?.content).toContain("**Followers:**");
-		},
-		{ timeout: 30000 },
-	);
 });

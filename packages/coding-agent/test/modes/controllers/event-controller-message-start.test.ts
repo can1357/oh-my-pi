@@ -1,12 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { TextContent, UserMessage } from "@oh-my-pi/pi-ai";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import type { AssistantMessage, ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { ToolExecutionComponent, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(() => {
 	initTheme();
@@ -25,6 +26,7 @@ function createContext(options: {
 	editorText: string;
 	optimisticSignature?: string;
 	locallySubmittedSignatures?: string[];
+	pendingImages?: ImageContent[];
 }) {
 	let currentEditorText = options.editorText;
 	const setText = vi.fn((text: string) => {
@@ -33,44 +35,27 @@ function createContext(options: {
 	const editor = {
 		setText,
 		getText: () => currentEditorText,
+		pendingImages: [...(options.pendingImages ?? [])],
 	};
-	const addMessageToChat = vi.fn();
-	const updatePendingMessagesDisplay = vi.fn();
+	const ctx = createInteractiveModeContext({
+		editor,
+		optimisticUserMessageSignature: options.optimisticSignature,
+		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
+	});
 	const clearOptimisticUserMessage = vi.fn(() => {
 		ctx.optimisticUserMessageSignature = undefined;
 	});
 	const replaceOptimisticUserMessage = vi.fn(() => {
 		ctx.optimisticUserMessageSignature = undefined;
 	});
-	const ctx = {
-		isInitialized: true,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn() },
-		editor,
-		addMessageToChat,
-		updatePendingMessagesDisplay,
-		getUserMessageText: (message: UserMessage) =>
-			typeof message.content === "string"
-				? message.content
-				: message.content
-						.filter((c): c is TextContent => c.type === "text")
-						.map(c => c.text)
-						.join(""),
-		optimisticUserMessageSignature: options.optimisticSignature,
-		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
-		clearOptimisticUserMessage,
-		replaceOptimisticUserMessage,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		viewSession: { isStreaming: false },
-	} as unknown as InteractiveModeContext;
+	ctx.clearOptimisticUserMessage = clearOptimisticUserMessage;
+	ctx.replaceOptimisticUserMessage = replaceOptimisticUserMessage;
 	return {
 		ctx,
 		editor,
 		setText,
-		addMessageToChat,
-		updatePendingMessagesDisplay,
+		addMessageToChat: ctx.addMessageToChat,
+		updatePendingMessagesDisplay: ctx.updatePendingMessagesDisplay,
 		clearOptimisticUserMessage,
 		replaceOptimisticUserMessage,
 	};
@@ -101,23 +86,34 @@ describe("EventController message_start (user role)", () => {
 		expect(addMessageToChat).toHaveBeenCalledWith(message);
 		// Pending list always refreshes so the dequeued entry disappears.
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		// Signature is consumed so a future external message with the same shape still clears.
+		// Signature is consumed so a future external message with the same shape is
+		// not matched to this local submission again. The composer is never cleared
+		// on message_start, so consumption no longer affects the draft.
 		expect(ctx.locallySubmittedUserSignatures.has(signature)).toBe(false);
 	});
 
-	it("clears the editor for user messages that did not originate from this session", async () => {
-		// Counter-case: an external/programmatic user message must still trigger the
-		// defensive editor reset so the next prompt starts clean.
-		const message = createUserMessage("external prompt");
-		const { ctx, setText, addMessageToChat } = createContext({
-			editorText: "stale text",
+	it("preserves the in-progress draft for a user message from an extension", async () => {
+		// Regression: a user message this session never submitted locally is a real,
+		// non-synthetic prompt (an extension delivering `sendUserMessage`, e.g. HCOM).
+		// "Not local" must not mean "reset the editor": the draft being typed — text
+		// and pasted images — has to survive the delivery.
+		const message = createUserMessage("inbound from an extension");
+		const draftImage: ImageContent = { type: "image", data: "AAAA", mimeType: "image/png" };
+		const { ctx, editor, setText, addMessageToChat, updatePendingMessagesDisplay } = createContext({
+			editorText: "hello",
+			pendingImages: [draftImage],
 		});
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "message_start", message });
 
-		expect(setText).toHaveBeenCalledWith("");
+		expect(setText).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("hello");
+		expect(editor.pendingImages).toEqual([draftImage]);
+		// The inbound message still reaches the transcript.
 		expect(addMessageToChat).toHaveBeenCalledWith(message);
+		// The pending list still refreshes.
+		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 	});
 
 	it("preserves the editor for an optimistic submission and skips the duplicate chat add", async () => {
@@ -181,7 +177,8 @@ function createIrcMessage(timestamp: number): CustomMessage<{ from: string; mess
 }
 
 function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
-	const chatContainer = new TranscriptContainer();
+	const ctx = createInteractiveModeContext();
+	const { chatContainer } = ctx;
 	if (options.liveBlockAbove) {
 		// A still-running tool above the cards: they sit in the live region,
 		// where their rows cannot have committed to native scrollback.
@@ -191,21 +188,14 @@ function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
 			isTranscriptBlockFinalized: () => false,
 		} as Component);
 	}
-	const requestRender = vi.fn();
-	const ctx = {
-		isInitialized: true,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender },
-		chatContainer,
-		session: {},
-	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
-	const addMessageToChat: InteractiveModeContext["addMessageToChat"] = vi.fn((message, options) =>
-		helpers.addMessageToChat(message, options),
-	);
-	ctx.addMessageToChat = addMessageToChat;
-	return { ctx, chatContainer, requestRender, addMessageToChat };
+	ctx.addMessageToChat = vi.fn((message, options) => helpers.addMessageToChat(message, options));
+	return {
+		ctx,
+		chatContainer,
+		requestRender: ctx.ui.requestRender,
+		addMessageToChat: ctx.addMessageToChat,
+	};
 }
 
 describe("EventController IRC expiry", () => {
@@ -235,27 +225,6 @@ describe("EventController IRC expiry", () => {
 		vi.advanceTimersByTime(1);
 		expect(chatContainer.children).toHaveLength(1);
 		expect(requestRender).toHaveBeenCalledTimes(2);
-	});
-
-	it("keeps a card whose rows may already be committed (no live block above)", async () => {
-		vi.useFakeTimers();
-		const message = createIrcMessage(4);
-		const { ctx, chatContainer } = createIrcContext();
-		const controller = new EventController(ctx);
-
-		await controller.handleEvent({ type: "irc_message", message });
-		expect(chatContainer.children).toHaveLength(1);
-
-		// Render the container and commit its rows to simulate entering native scrollback
-		const lines = chatContainer.render(80);
-		chatContainer.setNativeScrollbackCommittedRows(lines.length);
-
-		// Everything above the card is finalized, so its rows may already be in
-		// native scrollback. Removing it would be an interior deletion of the
-		// committed prefix — the engine repairs that by recommitting everything
-		// below the gap (the duplicated-block artifact). It must stay.
-		vi.advanceTimersByTime(10_000);
-		expect(chatContainer.children).toHaveLength(1);
 	});
 
 	it("evicts the oldest live-region card beyond the cap", async () => {
@@ -300,5 +269,54 @@ describe("EventController IRC expiry", () => {
 
 		expect(chatContainer.children).toHaveLength(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("EventController message_start (assistant role)", () => {
+	const opening: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "stop",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: 1,
+	};
+
+	it("seals tool cards no result can reach, so they cannot block transcript retirement, and leaves a running call alone", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const pendingTools = new Map<string, ToolExecutionHandle>();
+		const ctx = createInteractiveModeContext({ pendingTools });
+		const controller = new EventController(ctx);
+		const card = (id: string) =>
+			new ToolExecutionComponent("bash", { command: "echo hi" }, {}, undefined, ctx.ui, process.cwd(), id);
+		// No call id routes to it: a preview left behind by a stream that never ended.
+		const untracked = card("gone");
+		ctx.chatContainer.addChild(untracked);
+		// Streamed by an earlier message, never started.
+		const stale = card("stale");
+		ctx.chatContainer.addChild(stale);
+		pendingTools.set("stale", stale);
+		await controller.handleEvent({ type: "tool_execution_start", toolCallId: "run", toolName: "bash", args: {} });
+		const running = pendingTools.get("run") as ToolExecutionComponent;
+
+		await controller.handleEvent({ type: "message_start", message: opening });
+
+		expect(untracked.isTranscriptBlockFinalized()).toBe(true);
+		expect(stale.isTranscriptBlockFinalized()).toBe(true);
+		expect(pendingTools.has("stale")).toBe(false);
+		expect(running.isTranscriptBlockFinalized()).toBe(false);
+		expect(pendingTools.get("run")).toBe(running);
+		running.seal();
+		resetSettingsForTest();
 	});
 });

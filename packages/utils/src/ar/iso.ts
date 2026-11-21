@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { bytesMatchAscii, readUInt16BE, readUInt16LE, readUInt32BE, readUInt32LE } from "./bytes";
 import { upsertArchiveEntry } from "./entries";
 import { ArchiveError } from "./error";
-import { type ArchiveLimits, assertArchiveMemberSize, assertEntryCount, assertIndexSize } from "./limits";
+import { type ArchiveLimits, assertArchiveMemberSizeField, assertEntryCount, assertIndexSize } from "./limits";
 import { assertArchivePathBytes, normalizeArchiveEntryPath, normalizeArchiveLookupPath } from "./paths";
 import type { ByteSource } from "./source";
 import type { ArchiveIndexEntry, FormatReader, MemberSource } from "./types";
@@ -324,7 +324,7 @@ function decodeIdentifier(identifier: Uint8Array, joliet: boolean): string {
 
 function findSuspSkip(record: IsoRecord): number | undefined {
 	const bytes = record.systemUse;
-	for (let offset = 0; offset + 7 <= bytes.byteLength; ) {
+	for (let offset = 0; offset + 7 <= bytes.byteLength;) {
 		const length = bytes[offset + 2]!;
 		if (length < 4 || offset + length > bytes.byteLength) return undefined;
 		if (
@@ -359,7 +359,7 @@ async function parseSusp(
 	let relocation: SuspData["relocation"];
 	for (let queueIndex = 0; queueIndex < queue.length; queueIndex++) {
 		const area = queue[queueIndex]!;
-		for (let offset = 0; offset + 4 <= area.byteLength; ) {
+		for (let offset = 0; offset + 4 <= area.byteLength;) {
 			const signature = String.fromCharCode(area[offset]!, area[offset + 1]!);
 			const length = area[offset + 2]!;
 			const version = area[offset + 3]!;
@@ -466,7 +466,7 @@ async function readDirectoryRecords(
 	const end = safeAdd(start, record.size, "directory extent range");
 	const bytes = await budget.read(source, start, end, "directory extent");
 	const records: IsoRecord[] = [];
-	for (let offset = 0; offset < bytes.byteLength; ) {
+	for (let offset = 0; offset < bytes.byteLength;) {
 		const sectorRemaining = blockSize - (offset % blockSize);
 		const length = bytes[offset]!;
 		if (length === 0) {
@@ -586,7 +586,7 @@ async function readIsoImpl(source: ByteSource, options: Parameters<FormatReader>
 		) {
 			suspSkip = findSuspSkip(records[0]!);
 		}
-		for (let index = 0; index < records.length; ) {
+		for (let index = 0; index < records.length;) {
 			const record = records[index]!;
 			if (record.identifier.byteLength === 1 && (record.identifier[0] === 0 || record.identifier[0] === 1)) {
 				index++;
@@ -666,7 +666,7 @@ async function readIsoImpl(source: ByteSource, options: Parameters<FormatReader>
 			}
 			let totalSize = 0;
 			for (const part of parts) totalSize = safeAdd(totalSize, part.size, "multi-extent member size");
-			assertArchiveMemberSize(totalSize, normalizedPath, options.limits);
+			assertArchiveMemberSizeField(totalSize, normalizedPath);
 			// Zero-length members never read their extents, and writers record
 			// junk locations for them (bsdtar's Joliet records for Rock Ridge
 			// symlinks, empty files at unallocated blocks) — 7-Zip and bsdtar

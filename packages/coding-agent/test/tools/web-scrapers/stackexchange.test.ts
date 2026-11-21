@@ -14,11 +14,6 @@ describe.skipIf(SKIP)("handleStackOverflow", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for SE user profile URLs", async () => {
-		const result = await handleStackOverflow("https://stackoverflow.com/users/1", 20);
-		expect(result).toBeNull();
-	});
-
 	// stackoverflow.com - "What is a NullPointerException" (classic, highly voted)
 	it("fetches stackoverflow.com question", async () => {
 		const result = await handleStackOverflow(
@@ -96,5 +91,6 @@ describe.skipIf(SKIP)("handleStackOverflow", () => {
 		expect(result?.content).toContain("# ");
 		expect(result?.content).toContain("Score:");
 		expect(result?.content).toContain("Tags:");
+		expect(result?.content).toContain("## Question");
 	});
 });

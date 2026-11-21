@@ -34,23 +34,24 @@ const plainTextSchema = type({
 
 const inputImageBlockSchema = type({
 	type: "'input_image'",
-	"detail?": "'auto' | 'low' | 'high' | 'original'",
-	"image_url?": "string",
-	"file_id?": "string",
+	"detail?": "'auto' | 'low' | 'high' | 'original' | null",
+	"image_url?": "string | null",
+	"file_id?": "string | null",
 }).narrow((v, ctx) => {
 	return (
-		typeof v.image_url === "string" ||
-		typeof v.file_id === "string" ||
+		(typeof v.image_url === "string" && v.image_url.length > 0) ||
+		(typeof v.file_id === "string" && v.file_id.length > 0) ||
 		ctx.mustBe("at least one of `image_url` or `file_id` for input_image")
 	);
 });
 
 const inputFileBlockSchema = type({
 	type: "'input_file'",
-	"file_id?": "string",
-	"filename?": "string",
-	"file_data?": "string",
-	"file_url?": "string",
+	"detail?": "'low' | 'high'",
+	"file_id?": "string | null",
+	"filename?": "string | null",
+	"file_data?": "string | null",
+	"file_url?": "string | null",
 });
 
 const outputTextSchema = type({
@@ -77,6 +78,15 @@ const inputContentBlockSchema = inputTextSchema.or(plainTextSchema).or(inputImag
 
 const outputContentBlockSchema = outputTextSchema.or(plainTextSchema).or(outputRefusalSchema);
 
+// The Responses API defines multimodal function output arrays in terms of
+// input text and image content. Keep output text/refusal blocks for
+// compatibility with older Codex clients.
+const functionCallOutputContentBlockSchema = inputTextSchema
+	.or(plainTextSchema)
+	.or(inputImageBlockSchema)
+	.or(outputTextSchema)
+	.or(outputRefusalSchema);
+
 // ─── Input items ────────────────────────────────────────────────────────────
 
 const userMessageItemSchema = type({
@@ -97,7 +107,7 @@ const assistantMessageItemSchema = type({
 	role: "'assistant'",
 	"content?": type("string").or(outputContentBlockSchema.array()),
 	"status?": "'in_progress' | 'completed' | 'incomplete'",
-	"phase?": "'commentary' | 'final_answer' | null",
+	"phase?": "'commentary' | 'final_answer' | 'partial_answer' | null",
 });
 
 const reasoningItemSchema = type({
@@ -112,14 +122,15 @@ const functionCallItemSchema = type({
 	"id?": "string",
 	call_id: "string >= 1",
 	name: "string >= 1",
+	"namespace?": "string >= 1",
 	"arguments?": "string",
 });
 
 const functionCallOutputItemSchema = type({
 	type: "'function_call_output'",
 	call_id: "string >= 1",
-	// Codex CLI replays multimodal tool results in array form (text + refusal).
-	"output?": type("string").or(outputContentBlockSchema.array()),
+	// Function outputs may carry text or image input blocks.
+	"output?": type("string").or(functionCallOutputContentBlockSchema.array()),
 });
 
 const customToolCallItemSchema = type({
@@ -127,6 +138,8 @@ const customToolCallItemSchema = type({
 	"id?": "string",
 	call_id: "string >= 1",
 	name: "string >= 1",
+	"namespace?": "string >= 1",
+	"status?": "string",
 	// Raw input string — NOT JSON.stringified. apply_patch flow streams a
 	// freeform body and reading it as JSON would corrupt it.
 	input: "string",
@@ -134,8 +147,9 @@ const customToolCallItemSchema = type({
 
 const customToolCallOutputItemSchema = type({
 	type: "'custom_tool_call_output'",
+	"id?": "string",
 	call_id: "string >= 1",
-	output: "string",
+	output: type("string").or(functionCallOutputContentBlockSchema.array()),
 });
 
 const computerSafetyCheckSchema = type({
@@ -229,6 +243,13 @@ const computerCallOutputItemSchema = type({
 	"status?": "'in_progress' | 'completed' | 'incomplete' | 'failed' | null",
 });
 
+const additionalToolsItemSchema = type({
+	type: "'additional_tools'",
+	role: "'developer'",
+	tools: type({ type: "string", "[string]": "unknown" }).array(),
+	"id?": "string | null",
+});
+
 const BRIDGED_INPUT_ITEM_TYPES: Record<string, true> = {
 	message: true,
 	reasoning: true,
@@ -238,6 +259,7 @@ const BRIDGED_INPUT_ITEM_TYPES: Record<string, true> = {
 	custom_tool_call_output: true,
 	computer_call: true,
 	computer_call_output: true,
+	additional_tools: true,
 };
 
 const unbridgedInputItemSchema = type({ type: "string" }).narrow((value, ctx) =>
@@ -257,6 +279,7 @@ export const inputItemSchema = userMessageItemSchema
 	.or(customToolCallOutputItemSchema)
 	.or(computerCallItemSchema)
 	.or(computerCallOutputItemSchema)
+	.or(additionalToolsItemSchema)
 	// Tolerated but not bridged (file_search_call, web_search_call, …).
 	.or(unbridgedInputItemSchema);
 
@@ -343,7 +366,7 @@ export const reasoningConfigSchema = type({
 	// `none` maps to hideThinkingSummary; auto/concise/detailed mean "show
 	// summary". pi-ai has no per-level plumbing for the latter — walker logs
 	// once and treats them as default.
-	"summary?": "'auto' | 'concise' | 'detailed' | 'none'",
+	"summary?": "'auto' | 'concise' | 'detailed' | 'none' | null",
 });
 
 // ─── Stop ───────────────────────────────────────────────────────────────────
@@ -358,12 +381,12 @@ export const openaiResponsesRequestSchema = type({
 	"instructions?": "string | null",
 	"tools?": toolSchema.or(computerToolSchema).or(builtinToolSchema).array(),
 	"tool_choice?": toolChoiceSchema,
-	"max_output_tokens?": "number",
-	"temperature?": "number",
-	"top_p?": "number",
+	"max_output_tokens?": "number | null",
+	"temperature?": "number | null",
+	"top_p?": "number | null",
 	"stop?": stopSchema,
 	"stream?": "boolean",
-	"reasoning?": reasoningConfigSchema,
+	"reasoning?": reasoningConfigSchema.or("null"),
 	"store?": "boolean",
 	"previous_response_id?": "string",
 	"parallel_tool_calls?": "boolean",

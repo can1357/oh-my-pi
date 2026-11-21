@@ -1,19 +1,23 @@
 import * as fs from "node:fs/promises";
-import type {
-	Context,
-	ImageContent,
-	Message,
-	Model,
-	OpenAIResponsesHistoryPayload,
-	TextContent,
-} from "@oh-my-pi/pi-ai";
-import { formatBytes, isRecord, logger, readImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
+import {
+	MAX_IMAGE_INPUT_BYTES,
+	SUPPORTED_INPUT_IMAGE_MIME_TYPES,
+	modelLacksWebpSupport,
+	ImageInputTooLargeError,
+	InvalidImageDataError,
+	imageDecodeFailureReason,
+} from "@oh-my-pi/pi-tui/chat/image-loading";
+import * as path from "node:path";
+import type { Context, ImageContent, Message, Model, ProviderPayload, TextContent } from "@oh-my-pi/pi-ai";
+import { rasterizeSvg } from "@oh-my-pi/pi-natives";
+import { $which, isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
+import { decodeStillImageJpeg, VideoError } from "./video";
 
-export const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
-export const SUPPORTED_INPUT_IMAGE_MIME_TYPES = SUPPORTED_IMAGE_MIME_TYPES;
+/** Largest edge rasterized from SVG before it enters the image pipeline. */
+const SVG_IMAGE_MAX_EDGE_PX = 2048;
 const MODEL_BOUNDARY_IMAGE_CACHE_MAX_SIZE = 64 * 1024 * 1024;
 const MODEL_BOUNDARY_IMAGE_CACHE_MAX_ENTRIES = 128;
 type NormalizedImagePayload = Pick<ImageContent, "data" | "mimeType">;
@@ -124,8 +128,8 @@ async function normalizeNativeResponsesItem(item: Record<string, unknown>): Prom
 }
 
 async function normalizeNativeResponsesHistoryPayload(
-	payload: OpenAIResponsesHistoryPayload | undefined,
-): Promise<OpenAIResponsesHistoryPayload | undefined> {
+	payload: ProviderPayload | undefined,
+): Promise<ProviderPayload | undefined> {
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return payload;
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
@@ -135,36 +139,6 @@ async function normalizeNativeResponsesHistoryPayload(
 		items?.push(normalizedItem);
 	}
 	return items ? { ...payload, items } : payload;
-}
-
-/**
- * Ollama and its local-backend family decode image input through llama.cpp /
- * `stb_image`, which is compiled without WebP support, so a WebP upload fails
- * with an opaque HTTP 400. Detect those models so the resize pipeline encodes
- * to PNG/JPEG instead — the automatic equivalent of `OMP_NO_WEBP=1`.
- */
-export function modelLacksWebpSupport(
-	model: Pick<Model, "provider" | "api" | "imageInputDecoder"> | undefined,
-): boolean {
-	if (!model) return false;
-	return (
-		model.imageInputDecoder === "stb" ||
-		model.provider === "ollama" ||
-		model.provider === "ollama-cloud" ||
-		model.provider === "llama.cpp" ||
-		model.provider === "lm-studio" ||
-		model.provider === "local-server" ||
-		model.api === "ollama-chat"
-	);
-}
-
-/**
- * `true` when `model` cannot decode WebP, otherwise `undefined` so the
- * `OMP_NO_WEBP` env fallback in {@link resizeImage} still applies. Feed straight
- * into {@link ImageResizeOptions.excludeWebP}.
- */
-export function webpExclusionForModel(model: Pick<Model, "provider" | "api"> | undefined): true | undefined {
-	return modelLacksWebpSupport(model) ? true : undefined;
 }
 
 export interface LoadImageInputOptions {
@@ -198,34 +172,73 @@ export interface LoadedImageInput {
 	bytes: number;
 }
 
-export class ImageInputTooLargeError extends Error {
-	readonly bytes: number;
-	readonly maxBytes: number;
-
-	constructor(bytes: number, maxBytes: number) {
-		super(`Image file too large: ${formatBytes(bytes)} exceeds ${formatBytes(maxBytes)} limit.`);
-		this.name = "ImageInputTooLargeError";
-		this.bytes = bytes;
-		this.maxBytes = maxBytes;
-	}
+interface LoadInMemoryImageInputOptions {
+	image: ImageContent;
+	/** Raw bytes of `image.data` when the caller already holds them; skips a base64 decode in resize. */
+	bytes?: Uint8Array;
+	resolvedPath: string;
+	textNotePrefix: string;
+	/** Original file type when the display image was rasterized before loading. */
+	sourceMimeType?: string;
+	autoResize: boolean;
+	maxBytes: number;
+	excludeWebP: boolean | undefined;
 }
 
-/** Converts an image to PNG, rejecting when the runtime cannot decode or encode it. */
-export async function convertImageToPng(image: ImageContent): Promise<ImageContent> {
-	const bytes = Buffer.from(image.data, "base64");
-	const data = await new Bun.Image(bytes).png().toBase64();
-	return { ...image, data, mimeType: "image/png" };
-}
+async function loadInMemoryImageInput(options: LoadInMemoryImageInputOptions): Promise<LoadedImageInput> {
+	const inputBytes = Buffer.byteLength(options.image.data, "base64");
+	if (inputBytes > options.maxBytes) {
+		throw new ImageInputTooLargeError(inputBytes, options.maxBytes);
+	}
 
-export async function ensureSupportedImageInput(image: ImageContent): Promise<ImageContent | null> {
-	if (SUPPORTED_INPUT_IMAGE_MIME_TYPES.has(image.mimeType)) {
-		return image;
+	// Decode before anything else: a payload that cannot be decoded is rejected
+	// by the provider for the whole request, so it must fail here — where the
+	// caller still has a path to act on — instead of entering the transcript.
+	const decodeFailure = await imageDecodeFailureReason(options.image);
+	if (decodeFailure !== null) {
+		throw new InvalidImageDataError(options.resolvedPath, options.image.mimeType, decodeFailure);
 	}
-	try {
-		return await convertImageToPng(image);
-	} catch {
-		return null;
+
+	let outputData = options.image.data;
+	let outputMimeType = options.image.mimeType;
+	let outputBytes = inputBytes;
+	let dimensionNote: string | undefined;
+
+	const shouldReencodeWebP = options.excludeWebP === true && options.image.mimeType === "image/webp";
+	if (options.autoResize || shouldReencodeWebP) {
+		try {
+			const resized = await resizeImage(
+				options.bytes
+					? { bytes: options.bytes, mimeType: options.image.mimeType, data: options.image.data }
+					: options.image,
+				{ excludeWebP: options.excludeWebP },
+			);
+			outputData = resized.data;
+			outputMimeType = resized.mimeType;
+			outputBytes = resized.buffer.byteLength;
+			dimensionNote = formatDimensionNote(resized);
+		} catch {
+			// Keep the original image when resize fails.
+		}
 	}
+
+	const sourceMimeType = options.sourceMimeType ?? options.image.mimeType;
+	let textNote = `${options.textNotePrefix} [${sourceMimeType}]`;
+	if (outputMimeType !== sourceMimeType) {
+		textNote += ` (displayed as ${outputMimeType})`;
+	}
+	if (dimensionNote) {
+		textNote += `\n${dimensionNote}`;
+	}
+
+	return {
+		resolvedPath: options.resolvedPath,
+		mimeType: outputMimeType,
+		data: outputData,
+		textNote,
+		dimensionNote,
+		bytes: outputBytes,
+	};
 }
 
 export interface NormalizeModelContextImagesOptions {
@@ -339,89 +352,153 @@ export async function loadImageInput(options: LoadImageInputOptions): Promise<Lo
 	}
 
 	const inputBuffer = await fs.readFile(resolvedPath);
-	if (inputBuffer.byteLength > maxBytes) {
-		throw new ImageInputTooLargeError(inputBuffer.byteLength, maxBytes);
+	return loadInMemoryImageInput({
+		image: { type: "image", data: inputBuffer.toBase64(), mimeType },
+		bytes: inputBuffer,
+		resolvedPath,
+		textNotePrefix: "Read image file",
+		autoResize: options.autoResize,
+		maxBytes,
+		excludeWebP: options.excludeWebP,
+	});
+}
+
+/** Rasterizes an explicitly selected local SVG/SVGZ into a vision-model image input. */
+export async function loadSvgImageInput(options: LoadImageInputOptions): Promise<LoadedImageInput | null> {
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd);
+	const extension = path.extname(resolvedPath).toLowerCase();
+	if (extension !== ".svg" && extension !== ".svgz") return null;
+
+	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
+	const stat = await Bun.file(resolvedPath).stat();
+	if (stat.size > maxBytes) {
+		throw new ImageInputTooLargeError(stat.size, maxBytes);
 	}
 
-	let outputData = Buffer.from(inputBuffer).toBase64();
-	let outputMimeType = mimeType;
-	let outputBytes = inputBuffer.byteLength;
-	let dimensionNote: string | undefined;
+	const source = await fs.readFile(resolvedPath);
+	if (source.byteLength > maxBytes) {
+		throw new ImageInputTooLargeError(source.byteLength, maxBytes);
+	}
 
-	const shouldReencodeWebP = options.excludeWebP === true && mimeType === "image/webp";
-	if (options.autoResize || shouldReencodeWebP) {
-		try {
-			const resized = await resizeImage(
-				{ type: "image", data: outputData, mimeType },
-				{ excludeWebP: options.excludeWebP },
-			);
-			outputData = resized.data;
-			outputMimeType = resized.mimeType;
-			outputBytes = resized.buffer.byteLength;
-			dimensionNote = formatDimensionNote(resized);
-		} catch {
-			// keep original image when resize fails
+	let png: Uint8Array;
+	try {
+		png = await rasterizeSvg(source, SVG_IMAGE_MAX_EDGE_PX, SVG_IMAGE_MAX_EDGE_PX);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Could not rasterize SVG: ${message}`);
+	}
+
+	return loadInMemoryImageInput({
+		image: { type: "image", data: png.toBase64(), mimeType: "image/png" },
+		bytes: png,
+		resolvedPath,
+		textNotePrefix: "Read SVG file",
+		sourceMimeType: "image/svg+xml",
+		autoResize: options.autoResize,
+		maxBytes,
+		excludeWebP: options.excludeWebP,
+	});
+}
+
+/** Decodes a local HEIC, HEIF or AVIF still image with ffmpeg into a vision-model image input. */
+export async function loadHeifImageInput(
+	options: LoadImageInputOptions,
+	signal?: AbortSignal,
+): Promise<LoadedImageInput> {
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd);
+	const sourceMimeType = options.detectedMimeType ?? "image/heif";
+	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
+	const stat = await Bun.file(resolvedPath).stat();
+	if (stat.size > maxBytes) {
+		throw new ImageInputTooLargeError(stat.size, maxBytes);
+	}
+
+	let jpeg: Uint8Array;
+	try {
+		jpeg = await decodeStillImageJpeg(resolvedPath, maxBytes, signal);
+	} catch (error) {
+		if (!(error instanceof VideoError) || signal?.aborted) throw error;
+		const format = sourceMimeType.slice("image/".length).toUpperCase();
+		const cause = $which("ffmpeg") ? error.message : "Decoding it needs ffmpeg 8.1 or newer, which is not on PATH.";
+		throw new Error(
+			`Could not decode ${format} image. Convert it to PNG or JPEG (e.g. \`sips -s format jpeg -Z 4096\` on macOS) and read that file.\n${cause}`,
+		);
+	}
+
+	return loadInMemoryImageInput({
+		image: { type: "image", data: jpeg.toBase64(), mimeType: "image/jpeg" },
+		bytes: jpeg,
+		resolvedPath,
+		textNotePrefix: "Read image file",
+		sourceMimeType,
+		autoResize: options.autoResize,
+		maxBytes,
+		excludeWebP: options.excludeWebP,
+	});
+}
+
+/** BMP DIB header sizes (core, info, v2–v5): a text file starting with `BM` matches none of them. */
+const BMP_DIB_HEADER_SIZES = new Set([12, 40, 52, 56, 64, 108, 124]);
+
+/** `image/bmp` or `image/tiff` from a file header: formats vision models do not take, so reads transcode them. */
+export function parseTranscodedImageMimeType(header: Uint8Array): "image/bmp" | "image/tiff" | null {
+	if (header.length >= 18 && header[0] === 0x42 && header[1] === 0x4d) {
+		const dibSize = header[14]! | (header[15]! << 8) | (header[16]! << 16) | (header[17]! << 24);
+		if (BMP_DIB_HEADER_SIZES.has(dibSize)) return "image/bmp";
+	}
+	if (header.length >= 4) {
+		const [a, b, c, d] = header;
+		if ((a === 0x49 && b === 0x49 && c === 0x2a && d === 0) || (a === 0x4d && b === 0x4d && c === 0 && d === 0x2a)) {
+			return "image/tiff";
 		}
 	}
+	return null;
+}
 
-	let textNote = `Read image file [${outputMimeType}]`;
-	if (dimensionNote) {
-		textNote += `\n${dimensionNote}`;
+/** Decodes a local BMP or TIFF to PNG for a vision-model image input. */
+export async function loadTranscodedImageInput(
+	options: LoadImageInputOptions & { detectedMimeType: string },
+): Promise<LoadedImageInput> {
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd);
+	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
+	const stat = await Bun.file(resolvedPath).stat();
+	if (stat.size > maxBytes) {
+		throw new ImageInputTooLargeError(stat.size, maxBytes);
 	}
-
-	return {
+	let png: Uint8Array;
+	try {
+		png = await new Bun.Image(await Bun.file(resolvedPath).bytes()).png().bytes();
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new InvalidImageDataError(resolvedPath, options.detectedMimeType, reason);
+	}
+	return loadInMemoryImageInput({
+		image: { type: "image", data: png.toBase64(), mimeType: "image/png" },
+		bytes: png,
 		resolvedPath,
-		mimeType: outputMimeType,
-		data: outputData,
-		textNote,
-		dimensionNote,
-		bytes: outputBytes,
-	};
+		textNotePrefix: "Read image file",
+		sourceMimeType: options.detectedMimeType,
+		autoResize: options.autoResize,
+		maxBytes,
+		excludeWebP: options.excludeWebP,
+	});
 }
 
 /** Loads a chat attachment image through the same size and encoder policy as file-backed image inputs. */
 export async function loadImageAttachmentInput(
 	options: LoadImageAttachmentInputOptions,
 ): Promise<LoadedImageInput | null> {
-	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
-	if (!SUPPORTED_INPUT_IMAGE_MIME_TYPES.has(options.image.mimeType)) {
+	const image = { ...options.image, mimeType: options.image.mimeType.toLowerCase() };
+	if (!SUPPORTED_INPUT_IMAGE_MIME_TYPES.has(image.mimeType)) {
 		return null;
 	}
 
-	const inputBytes = Buffer.byteLength(options.image.data, "base64");
-	if (inputBytes > maxBytes) {
-		throw new ImageInputTooLargeError(inputBytes, maxBytes);
-	}
-
-	let outputData = options.image.data;
-	let outputMimeType = options.image.mimeType;
-	let outputBytes = inputBytes;
-	let dimensionNote: string | undefined;
-
-	const shouldReencodeWebP = options.excludeWebP === true && options.image.mimeType === "image/webp";
-	if (options.autoResize || shouldReencodeWebP) {
-		try {
-			const resized = await resizeImage(options.image, { excludeWebP: options.excludeWebP });
-			outputData = resized.data;
-			outputMimeType = resized.mimeType;
-			outputBytes = resized.buffer.byteLength;
-			dimensionNote = formatDimensionNote(resized);
-		} catch {
-			// keep original image when resize fails
-		}
-	}
-
-	let textNote = `Read image attachment ${options.label} [${outputMimeType}]`;
-	if (dimensionNote) {
-		textNote += `\n${dimensionNote}`;
-	}
-
-	return {
+	return loadInMemoryImageInput({
+		image,
 		resolvedPath: options.uri,
-		mimeType: outputMimeType,
-		data: outputData,
-		textNote,
-		dimensionNote,
-		bytes: outputBytes,
-	};
+		textNotePrefix: `Read image attachment ${options.label}`,
+		autoResize: options.autoResize,
+		maxBytes: options.maxBytes ?? MAX_IMAGE_INPUT_BYTES,
+		excludeWebP: options.excludeWebP,
+	});
 }

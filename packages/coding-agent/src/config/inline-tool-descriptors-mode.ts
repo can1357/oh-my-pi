@@ -1,4 +1,4 @@
-import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 
 /**
  * Resolves whether full tool descriptors should be inlined into the system
@@ -21,6 +21,6 @@ export function shouldInlineToolDescriptors(
 		case "off":
 			return false;
 		default:
-			return modelId !== undefined && modelFamilyToken(modelId) === "gemini";
+			return modelId !== undefined && classifyModel("", modelId, { lenient: true }).class === "gemini";
 	}
 }

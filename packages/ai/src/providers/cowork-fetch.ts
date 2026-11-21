@@ -3,8 +3,29 @@ import * as https from "node:https";
 import * as stream from "node:stream";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
+import { logger } from "@oh-my-pi/pi-utils";
+import { ConnectionLostBeforeResponseError } from "../error";
 import type { FetchImpl } from "../types";
-import { connectProxiedSocket } from "../utils/proxy";
+
+/** `host/path` for logging; query strings can carry keys. */
+function logTarget(input: string | URL | Request): string {
+	try {
+		const url = new URL(input instanceof Request ? input.url : input.toString());
+		return `${url.host}${url.pathname}`;
+	} catch {
+		return "<unparseable>";
+	}
+}
+
+/** Proxy host of a request init, or `"none"` when the request goes out direct. */
+function initProxy(init: RequestInit | undefined): string {
+	if (!init || !("proxy" in init) || typeof init.proxy !== "string") return "none";
+	try {
+		return new URL(init.proxy).host;
+	} catch {
+		return "<unparseable>";
+	}
+}
 
 type CoworkTlsOptions = {
 	ca?: string | string[];
@@ -22,13 +43,10 @@ type CoworkRequestInit = RequestInit & {
 
 type RequestBody = string | Uint8Array;
 
-type AgentLease = {
-	agent: https.Agent;
-	release?: () => void;
-};
-
 const directAgent = new https.Agent({ keepAlive: true });
-const fallbackFetch: FetchImpl = globalThis.fetch;
+
+/** Resolved at call time, so a proxy wrapper installed after this module loads is honored. */
+const fallbackFetch: FetchImpl = (input, init) => globalThis.fetch(input, init as RequestInit);
 
 function isHeaderRecord(headers: RequestInit["headers"]): headers is Record<string, string> {
 	return headers !== undefined && !(headers instanceof Headers) && !Array.isArray(headers);
@@ -42,7 +60,7 @@ function resolveBody(body: RequestInit["body"]): RequestBody | undefined {
 function buildOrderedHeaders(
 	url: URL,
 	source: Record<string, string>,
-	body: RequestBody | undefined,
+	bodyBytes: number | undefined,
 ): Record<string, string> {
 	const headers: Record<string, string> = {};
 	let hasHost = false;
@@ -58,8 +76,7 @@ function buildOrderedHeaders(
 		headers[name] = source[name];
 	}
 	if (!hasHost) headers.Host = url.host;
-	const length = typeof body === "string" ? Buffer.byteLength(body) : body?.byteLength;
-	if (!hasContentLength && length !== undefined) headers["Content-Length"] = String(length);
+	if (!hasContentLength && bodyBytes !== undefined) headers["Content-Length"] = String(bodyBytes);
 	return headers;
 }
 
@@ -76,19 +93,6 @@ function resolveTlsOptions(url: URL, options: CoworkTlsOptions | undefined): tls
 	return resolved;
 }
 
-async function acquireAgent(
-	url: URL,
-	proxy: string | undefined,
-	tlsOptions: tls.ConnectionOptions,
-	signal: AbortSignal | undefined,
-): Promise<AgentLease> {
-	if (!proxy) return { agent: directAgent };
-	const socket = await connectProxiedSocket(proxy, url.origin, { signal, tls: tlsOptions });
-	const agent = new https.Agent({ keepAlive: false });
-	agent.createConnection = () => socket;
-	return { agent, release: () => agent.destroy() };
-}
-
 function responseHeaders(message: IncomingMessage): Headers {
 	const headers = new Headers();
 	for (let index = 0; index < message.rawHeaders.length; index += 2) {
@@ -100,30 +104,108 @@ function responseHeaders(message: IncomingMessage): Headers {
 function decodedResponseStream(message: IncomingMessage): stream.Readable {
 	const rawEncoding = message.headers["content-encoding"];
 	const encoding = (Array.isArray(rawEncoding) ? rawEncoding[0] : rawEncoding)?.trim().toLowerCase();
+	let decoder: stream.Transform;
 	switch (encoding) {
 		case "gzip":
-			return message.pipe(zlib.createGunzip());
+			decoder = zlib.createGunzip();
+			break;
 		case "deflate":
-			return message.pipe(zlib.createInflate());
+			decoder = zlib.createInflate();
+			break;
 		case "br":
-			return message.pipe(zlib.createBrotliDecompress());
+			decoder = zlib.createBrotliDecompress();
+			break;
 		case "zstd":
-			return message.pipe(zlib.createZstdDecompress());
+			decoder = zlib.createZstdDecompress();
+			break;
 		default:
 			return message;
 	}
+	// Couple decoded-body cancellation to the source so its keep-alive socket cannot be stranded.
+	return stream.pipeline(message, decoder, () => {});
 }
 
-function createResponse(message: IncomingMessage, method: string): Response {
+/**
+ * Bun's `node:http` shim reports a response body cut off mid-stream (peer reset,
+ * dead connection) as a bare `Error("aborted")` with code `ECONNRESET` — wording
+ * indistinguishable from a cancellation, so retry classification treated every
+ * mid-stream drop on this transport as terminal. Native `fetch` reports the same
+ * failure as "The socket connection was closed unexpectedly", a recognized
+ * transient. Re-raise with that wording, keeping the original as `cause`; a
+ * caller abort keeps its own error.
+ */
+function withFetchParityErrors(
+	body: ReadableStream<Uint8Array>,
+	signal: AbortSignal | undefined,
+): ReadableStream<Uint8Array> {
+	const reader = body.getReader();
+	return new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			try {
+				const chunk = await reader.read();
+				if (chunk.done) controller.close();
+				else controller.enqueue(chunk.value);
+			} catch (error) {
+				const prematureClose =
+					!signal?.aborted &&
+					error instanceof Error &&
+					error.message === "aborted" &&
+					(error as NodeJS.ErrnoException).code === "ECONNRESET";
+				controller.error(
+					prematureClose
+						? Object.assign(
+								new Error("The socket connection was closed unexpectedly before the response completed", {
+									cause: error,
+								}),
+								{ code: "ECONNRESET" },
+							)
+						: error,
+				);
+			}
+		},
+		cancel: reason => reader.cancel(reason),
+	});
+}
+
+function createResponse(message: IncomingMessage, method: string, signal: AbortSignal | undefined): Response {
 	const status = message.statusCode;
 	if (status === undefined) throw new Error("Cowork transport received a response without an HTTP status.");
 	const hasBody = method !== "HEAD" && status !== 204 && status !== 304;
-	const body = hasBody ? stream.Readable.toWeb(decodedResponseStream(message)) : null;
+	const body = hasBody ? withFetchParityErrors(stream.Readable.toWeb(decodedResponseStream(message)), signal) : null;
 	return new Response(body, {
 		status,
 		statusText: message.statusMessage,
 		headers: responseHeaders(message),
 	});
+}
+
+/** Response headers worth naming when a provider rejects a request; `cf-ray` names the edge PoP. */
+const DIAGNOSTIC_HEADERS = ["cf-ray", "cf-mitigated", "server", "request-id", "retry-after", "x-should-retry"];
+
+/** Request body write size; each write waits for the previous one to drain. */
+const BODY_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Writes `body` in chunks, each after the last has drained, then ends the request.
+ * Bun's shim reports `finish` for a single `end(body)` once the whole body sits in
+ * its own buffer, before the socket has taken it; written this way, the request
+ * ends, and `finish` fires, only after the socket has drained every chunk.
+ */
+function writeBody(request: ClientRequest, body: Uint8Array | undefined): void {
+	let offset = 0;
+	const writeNext = (): void => {
+		while (body !== undefined && offset < body.byteLength) {
+			if (request.destroyed) return;
+			const chunk = body.subarray(offset, offset + BODY_CHUNK_BYTES);
+			offset += chunk.byteLength;
+			if (!request.write(chunk)) {
+				request.once("drain", writeNext);
+				return;
+			}
+		}
+		request.end();
+	};
+	writeNext();
 }
 
 async function sendCoworkRequest(
@@ -135,24 +217,27 @@ async function sendCoworkRequest(
 	const method = init.method ?? "GET";
 	const signal = init.signal ?? undefined;
 	const tlsOptions = resolveTlsOptions(url, init.tls);
-	const lease = await acquireAgent(url, init.proxy, tlsOptions, signal);
-	const headers = buildOrderedHeaders(url, sourceHeaders, body);
+	const payload = typeof body === "string" ? Buffer.from(body) : body;
+	const bodyBytes = payload?.byteLength;
+	const headers = buildOrderedHeaders(url, sourceHeaders, bodyBytes);
 	const result = Promise.withResolvers<Response>();
-	let request: ClientRequest | undefined;
+	const startedAt = performance.now();
+	let connected = false;
+	let bodySent = false;
 	const release = (): void => {
 		signal?.removeEventListener("abort", abort);
-		lease.release?.();
 	};
 	const abort = (): void => {
 		const reason = signal?.reason;
-		request?.destroy(reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError"));
+		const error = reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError");
+		request?.destroy(error);
 	};
 	if (signal?.aborted) {
 		release();
 		signal.throwIfAborted();
 	}
 	signal?.addEventListener("abort", abort, { once: true });
-	request = https.request(
+	const request = https.request(
 		{
 			protocol: url.protocol,
 			hostname: url.hostname,
@@ -160,13 +245,26 @@ async function sendCoworkRequest(
 			path: `${url.pathname}${url.search}`,
 			method,
 			headers,
-			agent: lease.agent,
+			agent: directAgent,
 			...tlsOptions,
 		},
 		message => {
 			message.once("close", release);
+			const status = message.statusCode ?? 0;
+			if (status >= 400) {
+				logger.debug("cowork transport rejected", {
+					url: `${url.host}${url.pathname}`,
+					status,
+					headers: Object.fromEntries(
+						DIAGNOSTIC_HEADERS.filter(name => message.headers[name] !== undefined).map(name => [
+							name,
+							String(message.headers[name]),
+						]),
+					),
+				});
+			}
 			try {
-				result.resolve(createResponse(message, method));
+				result.resolve(createResponse(message, method, signal));
 			} catch (error) {
 				message.destroy();
 				release();
@@ -174,28 +272,79 @@ async function sendCoworkRequest(
 			}
 		},
 	);
+	request.once("socket", socket => {
+		// A pooled keep-alive socket is already connected; a fresh one counts once TLS is up.
+		if (socket.connecting) socket.once("secureConnect", () => (connected = true));
+		else connected = true;
+	});
+	request.once("finish", () => (bodySent = true));
 	request.once("error", error => {
 		release();
-		result.reject(error);
+		// Failures before the connection is up keep their own error (DNS, refused, TLS), and
+		// an abort keeps its reason; after a response arrived the promise is already settled.
+		if (!connected || signal?.aborted) {
+			result.reject(error);
+			return;
+		}
+		result.reject(
+			new ConnectionLostBeforeResponseError(error, {
+				bodyBytes: bodyBytes ?? 0,
+				bodySent,
+				elapsedMs: performance.now() - startedAt,
+			}),
+		);
 	});
-	request.end(body);
+	writeBody(request, payload);
 	return result.promise;
 }
 
-/** Sends Cowork-profiled HTTPS requests with stable header order, HTTP/1.1, and streaming decompression. */
+/**
+ * Sends Cowork-profiled HTTPS requests with stable header order, HTTP/1.1, and streaming decompression.
+ *
+ * Proxied requests deliberately leave this transport. It runs on `node:https`,
+ * and Bun's shim ignores both `agent.createConnection` and
+ * `options.createConnection`: a CONNECT tunnel handed to it is silently
+ * discarded and the request dials the provider directly. That turned every
+ * `PI_PROXY` / `HTTPS_PROXY` setting into a no-op for Anthropic inference —
+ * the proxy looked configured, the traffic left on the default route, and a
+ * region-blocked egress answered `403 Request not allowed`. Bun's own `fetch`
+ * honors `init.proxy`, so a configured proxy wins over the Cowork profile.
+ */
 export const coworkFetch: FetchImpl = async (input, init) => {
-	if (input instanceof Request || init === undefined || !isHeaderRecord(init.headers)) {
+	if (
+		init === undefined ||
+		input instanceof Request ||
+		!isHeaderRecord(init.headers) ||
+		("proxy" in init && Boolean(init.proxy))
+	) {
+		// Reason is logged because the switch changes both the TLS fingerprint and
+		// who applies the proxy.
+		const reason =
+			init === undefined
+				? "no-init"
+				: input instanceof Request
+					? "request-object-input"
+					: !isHeaderRecord(init.headers)
+						? "headers-not-record"
+						: "proxy-configured";
+		logger.debug("cowork transport bypassed", { url: logTarget(input), reason, proxy: initProxy(init) });
 		return fallbackFetch(input, init);
 	}
 	let url: URL;
 	try {
 		url = new URL(input);
 	} catch {
+		logger.debug("cowork transport bypassed", { url: "<unparseable>", reason: "unparseable-url" });
 		return fallbackFetch(input, init);
 	}
-	if (url.protocol !== "https:") return fallbackFetch(input, init);
+	if (url.protocol !== "https:") {
+		logger.debug("cowork transport bypassed", { url: `${url.host}${url.pathname}`, reason: "not-https" });
+		return fallbackFetch(input, init);
+	}
 	const body = resolveBody(init.body);
-	if (init.body != null && body === undefined) return fallbackFetch(input, init);
-	const coworkInit: CoworkRequestInit = init;
-	return sendCoworkRequest(url, coworkInit, init.headers, body);
+	if (init.body != null && body === undefined) {
+		logger.debug("cowork transport bypassed", { url: `${url.host}${url.pathname}`, reason: "unsupported-body" });
+		return fallbackFetch(input, init);
+	}
+	return sendCoworkRequest(url, init, init.headers, body);
 };

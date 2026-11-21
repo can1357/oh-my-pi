@@ -1,5 +1,12 @@
+import { type } from "@oh-my-pi/omptype";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 
@@ -11,6 +18,7 @@ export type McpConnectionFailure = {
 
 export type McpConnectionStatusEvent =
 	| { type: "connecting"; serverNames: string[] }
+	| { type: "reconnecting"; serverName: string }
 	| { type: "connected"; serverName: string }
 	| ({ type: "failed" } & McpConnectionFailure);
 
@@ -42,19 +50,6 @@ function formatServerCount(count: number): string {
 }
 function sanitizeMcpStatusError(error: string): string {
 	return sanitizeMcpStatusText(error, TRUNCATE_LENGTHS.CONTENT);
-}
-
-function shortenEmbeddedPaths(text: string): string {
-	return text
-		.split(" ")
-		.map(segment => {
-			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
-			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
-			const end = segment.length - trailing.length;
-			if (leading.length >= end) return segment;
-			return `${leading}${shortenPath(segment.slice(leading.length, end))}${trailing}`;
-		})
-		.join(" ");
 }
 
 export function formatMCPConnectingMessage(serverNames: readonly string[]): string {
@@ -97,13 +92,9 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 	return "";
 }
 
-function isRecord(data: unknown): data is Record<string, unknown> {
-	return typeof data === "object" && data !== null;
-}
-
-function isStringArray(data: unknown): data is string[] {
-	return Array.isArray(data) && data.every(item => typeof item === "string");
-}
+const McpConnectionStatusEventShape = type({ type: "'connecting'", serverNames: "string[]" })
+	.or({ type: "'reconnecting' | 'connected'", serverName: "string" })
+	.or({ type: "'failed'", serverName: "string", error: "string", "sourcePath?": "string | undefined" });
 
 /**
  * Runtime validator for the cross-module event payload. The event bus is
@@ -111,19 +102,5 @@ function isStringArray(data: unknown): data is string[] {
  * rather than trusting a cast — a malformed emit is ignored instead of throwing.
  */
 export function isMcpConnectionStatusEvent(data: unknown): data is McpConnectionStatusEvent {
-	if (!isRecord(data) || typeof data.type !== "string") return false;
-	switch (data.type) {
-		case "connecting":
-			return isStringArray(data.serverNames);
-		case "connected":
-			return typeof data.serverName === "string";
-		case "failed":
-			return (
-				typeof data.serverName === "string" &&
-				typeof data.error === "string" &&
-				(data.sourcePath === undefined || typeof data.sourcePath === "string")
-			);
-		default:
-			return false;
-	}
+	return McpConnectionStatusEventShape.allows(data);
 }

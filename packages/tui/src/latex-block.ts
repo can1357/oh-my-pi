@@ -23,6 +23,8 @@
 // scratch here on this module's ANSI-aware Box model.
 
 import { latexColorScope, latexToUnicode, MATH_FONT_COMMANDS } from "./latex-to-unicode";
+import { node } from "./native/describe";
+import type { NativeNode } from "./native/node";
 import { visibleWidth } from "./utils";
 
 /**
@@ -370,14 +372,14 @@ function binomBox(top: Box, bottom: Box): Box {
  * A drawn radical for a multi-line radicand: overline row on top, bar column
  * on the left, hook at the bottom. Single-line radicands stay flat (`√x̄`).
  */
-function radicalBox(inner: Box, degree: string | null): Box {
+function radicalBox(inner: Box, degree: string | null, wrap: (run: string) => string): Box {
 	const lines: string[] = [` ┌${BAR.repeat(inner.width + 1)}`];
 	for (let y = 0; y < inner.lines.length; y++) {
 		lines.push((y === inner.lines.length - 1 ? "╲│ " : " │ ") + inner.lines[y]);
 	}
 	const box: Box = { lines, baseline: inner.baseline + 1, width: inner.width + 3 };
 	if (!degree) return box;
-	const deg = latexToUnicode(`^{${degree}}`);
+	const deg = latexToUnicode(wrap(`^{${degree}}`));
 	// Degree sits one row above the baseline, at the radical's upper left.
 	return hconcat([{ lines: [deg, spaces(visibleWidth(deg))], baseline: 1, width: visibleWidth(deg) }, box]);
 }
@@ -460,6 +462,7 @@ function gridBox(rows: Box[][], align: (col: number) => CellAlign, gap: (col: nu
 	let ncols = 0;
 	for (const row of rows) ncols = Math.max(ncols, row.length);
 	if (ncols === 0 || rows.length === 0) return textBox("");
+	// oxlint-disable-next-line unicorn/no-new-array -- grid-width allocation
 	const widths = new Array<number>(ncols).fill(0);
 	for (const row of rows) {
 		row.forEach((cell, j) => {
@@ -1017,7 +1020,7 @@ function parseExpr(src: string, ctx: Ctx = ROOT_CTX): Box {
 				// Display style always draws the roof (like LaTeX); inline math
 				// keeps the flat `√(…)` form via latexToUnicode.
 				flush();
-				boxes.push(paint(radicalBox(parseExpr(arg.text, inner()), degree)));
+				boxes.push(paint(radicalBox(parseExpr(arg.text, inner()), degree, ctx.wrap)));
 				i = arg.end;
 				continue;
 			}
@@ -1425,6 +1428,15 @@ function splitLines(src: string): string[] {
 	}
 	lines.push(src.slice(last));
 	return lines;
+}
+
+/**
+ * The native form of {@link latexToBlock}: the TeX source as a `math` node
+ * the terminal typesets (display style by default, `display: false` for
+ * inline `$…$` math).
+ */
+export function describeLatex(src: string, display = true): NativeNode {
+	return node("math", { text: src, display });
 }
 
 /**

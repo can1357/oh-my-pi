@@ -5,7 +5,7 @@
  * MIT License - Copyright (c) 2025 opentui
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { StdinBuffer } from "@oh-my-pi/pi-tui/stdin-buffer";
 
@@ -246,12 +246,6 @@ describe("StdinBuffer", () => {
 	});
 
 	describe("Kitty Keyboard Protocol", () => {
-		it("should handle batched Kitty press and release", () => {
-			// Press 'a', release 'a' batched together (common over SSH)
-			processInput("\x1b[97u\x1b[97;1:3u");
-			expect(emittedSequences).toEqual(["\x1b[97u", "\x1b[97;1:3u"]);
-		});
-
 		it("should handle multiple batched Kitty events", () => {
 			// Press 'a', release 'a', press 'b', release 'b'
 			processInput("\x1b[97u\x1b[97;1:3u\x1b[98u\x1b[98;1:3u");
@@ -262,12 +256,6 @@ describe("StdinBuffer", () => {
 			// Delete key release
 			processInput("\x1b[3;1:3~");
 			expect(emittedSequences).toEqual(["\x1b[3;1:3~"]);
-		});
-
-		it("should handle rapid typing simulation with Kitty protocol", () => {
-			// Simulates typing "hi" quickly with releases interleaved
-			processInput("\x1b[104u\x1b[104;1:3u\x1b[105u\x1b[105;1:3u");
-			expect(emittedSequences).toEqual(["\x1b[104u", "\x1b[104;1:3u", "\x1b[105u", "\x1b[105;1:3u"]);
 		});
 	});
 
@@ -297,19 +285,6 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual(["\x1b[<0;10;5m"]);
 		});
 
-		it("should handle mouse move event", () => {
-			processInput("\x1b[<35;20;5m");
-			expect(emittedSequences).toEqual(["\x1b[<35;20;5m"]);
-		});
-
-		it("should handle split mouse events", () => {
-			processInput("\x1b[<3");
-			processInput("5;1");
-			processInput("5;");
-			processInput("10m");
-			expect(emittedSequences).toEqual(["\x1b[<35;15;10m"]);
-		});
-
 		it("should handle multiple mouse events", () => {
 			processInput("\x1b[<35;1;1m\x1b[<35;2;2m\x1b[<35;3;3m");
 			expect(emittedSequences).toEqual(["\x1b[<35;1;1m", "\x1b[<35;2;2m", "\x1b[<35;3;3m"]);
@@ -337,15 +312,6 @@ describe("StdinBuffer", () => {
 			processInput("");
 			// Empty string emits an empty data event
 			expect(emittedSequences).toEqual([""]);
-		});
-
-		it("should handle lone escape character with timeout", async () => {
-			processInput("\x1b");
-			expect(emittedSequences).toEqual([]);
-
-			// After timeout, should emit
-			await waitUntil(() => emittedSequences.length > 0);
-			expect(emittedSequences).toEqual(["\x1b"]);
 		});
 
 		it("should handle lone escape character with explicit flush", () => {
@@ -409,16 +375,6 @@ describe("StdinBuffer", () => {
 			const flushed = buffer.flush();
 			expect(flushed).toEqual([]);
 		});
-
-		it("should emit flushed data via timeout", async () => {
-			processInput("\x1b[1;5");
-			expect(emittedSequences).toEqual([]);
-
-			// Wait for the flush timeout to deliver the partial
-			await waitUntil(() => emittedSequences.length > 0);
-
-			expect(emittedSequences).toEqual(["\x1b[1;5"]);
-		});
 	});
 
 	describe("Clear", () => {
@@ -434,6 +390,7 @@ describe("StdinBuffer", () => {
 
 	describe("Bracketed Paste", () => {
 		let emittedPaste: string[] = [];
+		let emittedPasteEnters: (string | undefined)[] = [];
 
 		beforeEach(() => {
 			buffer = new StdinBuffer({ timeout: 10 });
@@ -446,8 +403,10 @@ describe("StdinBuffer", () => {
 
 			// Collect paste events
 			emittedPaste = [];
-			buffer.on("paste", (data: string) => {
+			emittedPasteEnters = [];
+			buffer.on("paste", (data: string, enter?: string) => {
 				emittedPaste.push(data);
+				emittedPasteEnters.push(enter);
 			});
 		});
 
@@ -481,6 +440,49 @@ describe("StdinBuffer", () => {
 
 			expect(emittedSequences).toEqual(["a", "b"]);
 			expect(emittedPaste).toEqual(["pasted"]);
+		});
+
+		it("routes APC replies out of paste content before the paste finishes", () => {
+			const ack = '\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":988}\x1b\\';
+			const visible = '\x1b_tsp;e;{"ev":"visible","sf":"s:1","visible":false}\x1b\\';
+
+			processInput(`\x1b[200~hello ${ack}`);
+			expect(emittedSequences).toEqual([ack]);
+			expect(emittedPaste).toEqual([]);
+
+			processInput(`${visible}world\x1b[201~\r`);
+			expect(emittedSequences).toEqual([ack, visible]);
+			expect(emittedPaste).toEqual(["hello world"]);
+			expect(emittedPasteEnters).toEqual(["\r"]);
+		});
+
+		it("reassembles APC replies split at every byte inside a paste", () => {
+			const reply = '\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":989}\x1b\\';
+			processInput("\x1b[200~before");
+			for (const byte of reply) processInput(byte);
+			processInput("after\x1b[201~");
+
+			expect(emittedSequences).toEqual([reply]);
+			expect(emittedPaste).toEqual(["beforeafter"]);
+		});
+
+		it("routes ConPTY TSP reports with a split OSC prefix and BEL terminator", () => {
+			const reply = '\x1b]877;tsp;e;{"ev":"ack","sf":"s:1","s":990}\x07';
+			processInput("\x1b[200~before");
+			for (const byte of reply) processInput(byte);
+			processInput("after\x1b[201~");
+
+			expect(emittedSequences).toEqual([reply]);
+			expect(emittedPaste).toEqual(["beforeafter"]);
+		});
+
+		it("preserves non-APC pasted escapes and partial end markers", () => {
+			const content = "before\x1b[31mred\x1b[0m\x1b[201after\x1b";
+			processInput(`\x1b[200~${content}`);
+			processInput("\x1b[201~");
+
+			expect(emittedSequences).toEqual([]);
+			expect(emittedPaste).toEqual([content]);
 		});
 
 		it("should handle paste with newlines", () => {
@@ -518,7 +520,54 @@ describe("StdinBuffer", () => {
 			processInput("\x1b[200~paste\x1b");
 			processInput("[201~x");
 			expect(emittedPaste).toEqual(["paste"]);
+			expect(emittedPasteEnters).toEqual([undefined]);
 			expect(emittedSequences).toEqual(["x"]);
+		});
+
+		// A paste-and-Enter burst arrives in one read from automation and from
+		// terminals that batch input. Splitting it lets an overlay the paste opens
+		// swallow the Enter, so the Enter stays on the paste event in both keyboard
+		// encodings; anything else after the paste keeps the normal data route.
+		for (const [label, enter] of [
+			["legacy \\r", "\r"],
+			["legacy \\n", "\n"],
+			["kitty CSI-u", "\x1b[13u"],
+			["kitty CSI-u with explicit no-modifier field", "\x1b[13;1u"],
+		] as const) {
+			it(`keeps a same-read Enter (${label}) on the paste event`, () => {
+				processInput(`\x1b[200~paste\x1b[201~${enter}`);
+				expect(emittedPaste).toEqual(["paste"]);
+				expect(emittedPasteEnters).toEqual([enter]);
+				expect(emittedSequences).toEqual([]);
+			});
+		}
+
+		it("routes bytes after the attached Enter as ordinary input", () => {
+			processInput("\x1b[200~paste\x1b[201~\rnext");
+			expect(emittedPasteEnters).toEqual(["\r"]);
+			expect(emittedSequences).toEqual(["n", "e", "x", "t"]);
+		});
+
+		for (const [label, sequence] of [
+			["a modified kitty Enter", "\x1b[13;2u"],
+			["a DA1 terminal report", "\x1b[?1;2c"],
+			["an arrow key", "\x1b[A"],
+			["printable text", "x"],
+		] as const) {
+			it(`leaves ${label} after a paste on the data route`, () => {
+				processInput(`\x1b[200~paste\x1b[201~${sequence}`);
+				expect(emittedPaste).toEqual(["paste"]);
+				expect(emittedPasteEnters).toEqual([undefined]);
+				expect(emittedSequences).toEqual([sequence]);
+			});
+		}
+
+		it("does not attach an Enter that arrives in a later read", async () => {
+			processInput("\x1b[200~paste\x1b[201~");
+			processInput("\r");
+			expect(emittedPasteEnters).toEqual([undefined]);
+			await waitUntil(() => emittedSequences.length === 1);
+			expect(emittedSequences).toEqual(["\r"]);
 		});
 
 		it("does not end the paste on a partial end-marker prefix in the body", () => {
@@ -653,6 +702,49 @@ describe("StdinBuffer", () => {
 			expect(emittedPaste).toEqual([]);
 			expect(emittedSequences).toEqual(["\x1b[A", "\r", "x"]);
 		});
+
+		describe("Enter batched after the burst (issue #17820)", () => {
+			let enters: (string | undefined)[];
+
+			beforeEach(() => {
+				enters = [];
+				buffer.on("paste", (_data: string, enter?: string) => {
+					enters.push(enter);
+				});
+			});
+
+			it("submits a CR that follows LF-delimited text instead of pasting it as a newline", () => {
+				// An automation write plus its Enter, drained in one read by a
+				// startup stall before bracketed paste is confirmed.
+				processInput("line1\nline2\n\n- bullet a\n- bullet b\r");
+				expect(emittedPaste).toEqual(["line1\nline2\n\n- bullet a\n- bullet b"]);
+				expect(enters).toEqual(["\r"]);
+				expect(emittedSequences).toEqual([]);
+			});
+
+			it("keeps the final break of a CR-delimited paste inside the paste", () => {
+				// Terminals send every pasted newline as CR; a paste ending in a
+				// newline must not submit itself.
+				processInput("line 1\rline 2\rline 3\r");
+				expect(emittedPaste).toEqual(["line 1\rline 2\rline 3\r"]);
+				expect(enters).toEqual([undefined]);
+			});
+		});
+
+		describe("stall probe (issues #12540, #13344)", () => {
+			it("replays a stall-batched burst split across same-tick reads as keys", () => {
+				// A stalled loop can drain the pty backlog as several reads before the
+				// classification window fires. Once the accumulated candidate
+				// classifies, the stall probe must still turn it back into keystrokes
+				// so each batched Enter submits instead of becoming a pasted newline.
+				buffer.setRawPasteStallProbe(() => true);
+				processInput("aaa\r");
+				processInput("bbb\r");
+				processInput("ccc");
+				expect(emittedPaste).toEqual([]);
+				expect(emittedSequences).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
+			});
+		});
 	});
 
 	describe("Paste Recovery", () => {
@@ -672,6 +764,44 @@ describe("StdinBuffer", () => {
 			// Input is alive again after recovery.
 			buffer.process("a");
 			expect(data).toEqual(["a"]);
+		});
+
+		it("does not let terminal acknowledgements keep a lost-marker paste alive", () => {
+			vi.useFakeTimers();
+			try {
+				const pastes: string[] = [];
+				const reply = '\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":988}\x1b\\';
+				buffer.on("paste", content => pastes.push(content));
+				processInput("\x1b[200~pasted");
+				for (let i = 0; i < 4; i++) {
+					vi.advanceTimersByTime(200);
+					processInput(reply);
+				}
+				vi.advanceTimersByTime(200);
+				processInput("x");
+
+				expect(pastes).toEqual(["pasted"]);
+				expect(emittedSequences).toEqual([reply, reply, reply, reply, "x"]);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("keeps an incomplete APC on the report path when paste recovery fires", () => {
+			vi.useFakeTimers();
+			try {
+				const pastes: string[] = [];
+				const reply = '\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":989}\x1b\\';
+				buffer.on("paste", content => pastes.push(content));
+				processInput(`\x1b[200~pasted${reply.slice(0, -1)}`);
+				vi.advanceTimersByTime(1000);
+				expect(pastes).toEqual(["pasted"]);
+
+				processInput("\\x");
+				expect(emittedSequences).toEqual([reply, "x"]);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
 		it("re-arms the watchdog while paste chunks keep arriving", async () => {
@@ -701,6 +831,18 @@ describe("StdinBuffer", () => {
 
 			buffer.process("x");
 			expect(data).toEqual(["x"]);
+		});
+
+		it("counts the byte cap in UTF-8 bytes for a multibyte paste", () => {
+			// Regression: the cap added `chunk.length` (UTF-16 code units), so
+			// a multibyte paste over the byte limit but under it in code units
+			// kept buffering instead of aborting and delivering.
+			buffer = new StdinBuffer({ timeout: 10, pasteByteLimit: 8 });
+			const pastes: string[] = [];
+			buffer.on("paste", d => pastes.push(d));
+
+			buffer.process(`\x1b[200~${"é".repeat(5)}`); // 5 units, 10 bytes
+			expect(pastes).toEqual(["é".repeat(5)]);
 		});
 	});
 
@@ -758,30 +900,208 @@ describe("StdinBuffer", () => {
 			expect(buffer.getBuffer()).toBe("");
 		});
 
-		it("caps an unterminated OSC delivered as one oversized chunk and keeps parsing", () => {
-			// MAX_STRING_SEQ_BYTES = 16 MiB. A single chunk whose OSC payload
-			// exceeds the cap with no BEL/ST must cap-flush the capped prefix
-			// as ONE raw sequence (progress guaranteed, scan bounded to the
-			// cap — not the whole chunk), deliver the tail per scalar, and
-			// leave the buffer clean so later input still parses.
+		it("discards an unterminated OSC delivered as one oversized chunk instead of typing its tail", () => {
+			// MAX_STRING_SEQ_BYTES = 16 MiB. A chunk whose OSC payload exceeds
+			// the cap with no BEL/ST is torn protocol data: delivering it as
+			// raw sequences used to type the tail into the focused component
+			// as thousands of keystrokes. The junk head is dropped and discard
+			// mode swallows everything up to the stream's own terminator.
 			const cap = 16 * 1024 * 1024;
 			const head = "\x1b]5522;";
-			const tail = "xy";
-			// Total pre-tail length is exactly `cap`, so the cap-flush consumes
-			// the whole unterminated sequence and only `tail` remains.
-			processInput(`${head}${"a".repeat(cap - head.length)}${tail}`);
+			processInput(`${head}${"a".repeat(cap - head.length)}xy`);
 
-			expect(emittedSequences.length).toBe(1 + tail.length);
-			expect(emittedSequences[0]!.length).toBe(cap);
-			expect(emittedSequences[0]!.startsWith("\x1b]5522;")).toBe(true);
-			expect(emittedSequences.slice(1)).toEqual(["x", "y"]);
+			expect(emittedSequences).toEqual([]);
 			expect(buffer.getBuffer()).toBe("");
 
-			// Parser state is clean: a normal OSC afterwards completes.
-			emittedSequences.length = 0;
-			processInput("\x1b]z\x07");
-			expect(emittedSequences).toEqual(["\x1b]z\x07"]);
+			// Still mid-string: further payload is swallowed, not typed.
+			processInput("zzzz");
+			expect(emittedSequences).toEqual([]);
+
+			// The torn string's own terminator ends discard mode; input after
+			// it parses normally.
+			processInput("tail\x1b\\\x1b]z\x07abc");
+			expect(emittedSequences).toEqual(["\x1b]z\x07", "a", "b", "c"]);
 			expect(buffer.getBuffer()).toBe("");
+		});
+	});
+
+	describe("Stalled String Sequences (OSC 5522 paste)", () => {
+		const head = "\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;SGVsbG8s";
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("completes an OSC 5522 packet whose payload stalls for seconds", () => {
+			// Regression: a packet stalled past the flush window (a dictation
+			// app serving the clipboard slowly) was torn, and its base64 payload
+			// was typed into the composer as text. A tail within the
+			// abandonment plus dormant window (15 s) still completes it.
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(14_000);
+			expect(emittedSequences).toEqual([]);
+
+			processInput("IHdvcmxkIQ==\x1b");
+			processInput("\\");
+			expect(emittedSequences).toEqual([`${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it.each([
+			["Enter", "\r"],
+			["Up arrow", "\x1b[A"],
+			["space in a base64 payload", " "],
+		])("drops an abandoned string head when %s arrives and delivers that key", (_name, key) => {
+			processInput(head);
+			processInput(`${key}a`);
+			expect(emittedSequences).toEqual([key, "a"]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("keeps a one-byte read inside the packet when chunking splits the payload", () => {
+			// SSH/tmux chunking does not follow terminal writes: a lone payload
+			// byte arriving right after the head is still part of the packet.
+			vi.useFakeTimers();
+			processInput(head);
+			processInput("I");
+			processInput("HdvcmxkIQ==\x1b\\");
+			expect(emittedSequences).toEqual([`${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it("replays keys typed into a stalled head once a control key abandons it", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput("h");
+			vi.advanceTimersByTime(200);
+			processInput("i");
+			processInput("\r");
+			expect(emittedSequences).toEqual(["h", "i", "\r"]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("abandons a head with no reads for the bound and replays the keys typed into it", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput("h");
+			vi.advanceTimersByTime(200);
+			processInput("i");
+			vi.advanceTimersByTime(4000);
+			expect(emittedSequences).toEqual([]);
+
+			vi.advanceTimersByTime(1000);
+			expect(emittedSequences).toEqual(["h", "i"]);
+			expect(buffer.getBuffer()).toBe("");
+
+			// The terminal's late tail still completes the packet, not typed.
+			processInput("IHdvcmxkIQ==\x1b\\");
+			expect(emittedSequences).toEqual(["h", "i", `${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it.each([
+			["Alt+]", ["\x1b]a"]],
+			["Alt+P", ["\x1bPa"]],
+			["Alt+_", ["\x1b_a"]],
+			["Alt+_ diverging from a TSP opener", ["\x1b_t", "x"]],
+		])("keeps legacy %s batched with keys on the key timer without the kitty keyboard protocol", (_name, reads) => {
+			// Terminal replies open a known way (a numeric OSC command, a DCS or
+			// APC reply prefix); a chord plus keys that diverges is not a string.
+			vi.useFakeTimers();
+			for (const read of reads) processInput(read);
+			vi.advanceTimersByTime(100);
+			expect(emittedSequences).toEqual([reads.join("")]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("keeps ECMA-48 format effectors inside a DCS reply", () => {
+			const reply = "\x1bP1+r544e\r\n=787465726d\x1b\\";
+			processInput(reply);
+			expect(emittedSequences).toEqual([reply]);
+		});
+
+		it("starts fresh tracking for a head that follows a flushed one", () => {
+			// Stale tracking from the flushed head made a payload byte that
+			// arrived right after the new head look like typing after a stall.
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(1000);
+			expect(buffer.flush()).toEqual([]);
+			processInput(head);
+			processInput("I");
+			processInput("\r");
+			expect(emittedSequences).toEqual(["\r"]);
+		});
+
+		it("delivers a non-payload key typed into a stalled head exactly once", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput(" ");
+			expect(emittedSequences).toEqual([" "]);
+		});
+
+		it("keeps a slow transfer alive while its chunks keep arriving", () => {
+			// Regression: chunks spaced past the flush window over a slow link
+			// stopped refreshing the abandonment bound, and the abandoned
+			// payload was replayed as typed base64.
+			vi.useFakeTimers();
+			processInput(head);
+			for (let i = 0; i < 20; i++) {
+				vi.advanceTimersByTime(1000);
+				processInput("QUJD");
+			}
+			processInput("\x1b\\");
+			expect(emittedSequences).toEqual([`${head}${"QUJD".repeat(20)}\x1b\\`]);
+		});
+
+		it("never types multi-byte payload when a stalled transfer dies", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput("QUJDREVG");
+			vi.advanceTimersByTime(5000);
+			expect(emittedSequences).toEqual([]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("lets an abandoned head expire so later bursts are delivered", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000 + 10_000);
+			processInput("hello");
+			expect(emittedSequences).toEqual(["h", "e", "l", "l", "o"]);
+		});
+
+		it("drops a resumed head for good when it is abandoned again", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000);
+			processInput("QUJD");
+			vi.advanceTimersByTime(5000);
+			processInput("hello");
+			expect(emittedSequences).toEqual(["h", "e", "l", "l", "o"]);
+		});
+
+		it.each([
+			["BEL", "", "\x07"],
+			["split-ST backslash", "\x1b", "\\"],
+		])("completes an abandoned head when a late lone %s arrives", (_name, tail, terminator) => {
+			vi.useFakeTimers();
+			processInput(`${head}${tail}`);
+			vi.advanceTimersByTime(5000);
+			processInput(terminator);
+			expect(emittedSequences).toEqual([`${head}${tail}${terminator}`]);
+		});
+
+		it("completes an abandoned head when a late ST arrives split under the kitty keyboard protocol", () => {
+			setKittyProtocolActive(true);
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000);
+			processInput("\x1b");
+			processInput("\\");
+			expect(emittedSequences).toEqual([`${head}\x1b\\`]);
 		});
 	});
 

@@ -10,6 +10,7 @@ const ACCENT_RAIL = "▎";
 /** Filled composer surface anchored by a single left accent rail. */
 export const railComposerStyle: ComposerStyle = {
 	id: "rail",
+	filledSurface: true,
 	sideBorders: true,
 	verticalChrome: 0,
 	statusAttachment: "none",

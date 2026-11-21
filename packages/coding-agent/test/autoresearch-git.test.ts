@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { ensureAutoresearchBranch } from "../src/autoresearch/git";
 import type { ExtensionAPI } from "../src/extensibility/extensions";
-import * as jj from "../src/utils/jj";
 
 const tempDirs: string[] = [];
 
@@ -41,7 +40,6 @@ async function initGitWithCommit(dir: string): Promise<void> {
 const stubApi = {} as unknown as ExtensionAPI;
 
 afterEach(async () => {
-	jj.repo.clearRootCache();
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
@@ -81,6 +79,30 @@ describe("ensureAutoresearchBranch jj guardrails", () => {
 		if (!result.ok) throw new Error("unreachable");
 		expect(result.created).toBe(true);
 		expect(result.branchName).toMatch(/^autoresearch\/demo-\d{8}$/);
+	});
+
+	it("trims a trailing dash when the goal slug hits the 48-character cap", async () => {
+		const dir = await mkTempDir("omp-ar-capped-goal-");
+		await initGitWithCommit(dir);
+
+		const result = await ensureAutoresearchBranch(stubApi, dir, `${"a".repeat(47)} /tail`);
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error("unreachable");
+		expect(result.created).toBe(true);
+		expect(result.branchName).toMatch(/^autoresearch\/a{47}-\d{8}$/);
+	});
+
+	it("uses session when no characters survive goal sanitization", async () => {
+		const dir = await mkTempDir("omp-ar-empty-goal-");
+		await initGitWithCommit(dir);
+
+		const result = await ensureAutoresearchBranch(stubApi, dir, "!!!");
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error("unreachable");
+		expect(result.created).toBe(true);
+		expect(result.branchName).toMatch(/^autoresearch\/session-\d{8}$/);
 	});
 
 	it("returns the soft no-git warning for directories backed by neither tool", async () => {

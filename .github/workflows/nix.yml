@@ -19,24 +19,16 @@ on:
       - "crates/**"
       - "scripts/**"
       - "docs/**"
+  # PRs only evaluate when nix inputs change; main pushes cover every other
+  # path, and fork PRs would otherwise queue an approval each time.
   pull_request:
     branches: [main]
     paths:
       - ".github/workflows/nix.yml"
-      - ".cargo/**"
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
       - "bun.lock"
-      - "package.json"
-      - "patches/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "packages/**"
-      - "crates/**"
-      - "scripts/**"
-      - "docs/**"
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -57,3 +49,5 @@ jobs:
             accept-flake-config = true
       - name: Evaluate every supported system
         run: nix flake check --all-systems --no-build --show-trace
+      - name: Verify generated Bun dependencies
+        run: nix build --no-link .#checks.x86_64-linux.bun-lock --show-trace

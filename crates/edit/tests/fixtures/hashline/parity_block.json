@@ -1,0 +1,561 @@
+{
+	"source": "packages/hashline/test/block.test.ts",
+	"cases": [
+		{
+			"name": "parses `PUT N*: N:` into a single deferred block edit",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+A\n+B",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "still parses a literal `SWAP N.=M:` range (distinct from `PUT N*:`)",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+A",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "treats a `PUT N*:` hunk with no body row as a delete-only block edit",
+			"parse": [
+				{
+					"input": "PUT 2*:",
+					"expect": {
+						"editCount": 1,
+						"warnings": [
+							"Interpreted an empty `PUT` body as deletion. Use `CUT N.=M` or `CUT N*` for bodyless deletes."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "expands a block edit exactly like the equivalent `SWAP start.=end:`",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+A\n+B",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2-3:\n+A\n+B",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "returns the input untouched when there are no block edits (fast path)",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+X",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "throws (default) when no resolver is wired",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "drops an unresolvable block edit in `drop` mode",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "throws a block-unresolved error in `throw` mode when the resolver returns null",
+			"parse": [
+				{
+					"input": "PUT 7*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "includes a nearby-context preview in the block-unresolved error",
+			"parse": [
+				{
+					"input": "PUT 3*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "suggests the next multi-line opener for a blank anchor without applying it",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+function y() {}",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "suggests both the exact statement range and nearest enclosing block",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+  stop();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "omits the context preview when the anchor line is out of range",
+			"parse": [
+				{
+					"input": "PUT 9*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "fires onResolved with the resolved span for replace and cut blocks",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+A\n+B",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 5*",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "does not fire onResolved for a dropped unresolvable block",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a `PUT N*:` that resolves to a single line",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects an `PUT >N*:` that resolves to a single line",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a single-line block resolution on the lenient preview path",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applyTo resolves a block edit and matches the equivalent `replace`",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+  if (y || z) {\n+  }",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2-3:\n+  if (y || z) {\n+  }",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function x() {\n  if (y) {\n  }\n}\n",
+					"input": "PUT 2-3:\n+  if (y || z) {\n+  }",
+					"path": "x.ts",
+					"expect": {
+						"text": "function x() {\n  if (y || z) {\n  }\n}\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "applyTo throws when a block edit has no resolver",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applyPartialTo drops an unresolvable block edit instead of throwing"
+		},
+		{
+			"name": "applies a block edit on the hash-match path",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+  if (y || z) {\n+  }",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "surfaces the resolved span on the section result (hash-match path)",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+  if (y || z) {\n+  }",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "enriches reversed absolute ranges with the resolved block endpoint without writing",
+			"parse": [
+				{
+					"input": "PUT 195-61:\n+replacement",
+					"error": "InvalidAbsoluteRangeError: line 1: Invalid absolute range: start 195, end 61. The value after `.=` is an absolute source line, not a line count or replacement length. For one line use `PUT 195:`. For 61 lines starting at 195, use `PUT 195.=255:`."
+				}
+			]
+		},
+		{
+			"name": "resolves against the tagged snapshot and recovers onto drifted content",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+NEW",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a block edit whose tag was never recorded for this path",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+NEW",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "throws a block-unresolved error when the resolver returns null",
+			"parse": [
+				{
+					"input": "PUT 2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "parses `CUT N* N` into a cut block edit",
+			"parse": [
+				{
+					"input": "CUT 2*",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects body rows under `CUT N* N`",
+			"parse": [
+				{
+					"input": "CUT 2*\n+X",
+					"error": "Error: line 2: `CUT` deletes (and captures) the named lines and takes no body rows. To write new content, use `PUT N.=M:` with `+TEXT` rows."
+				}
+			]
+		},
+		{
+			"name": "resolveBlockEdits expands a cut block into capture and deletes",
+			"parse": [
+				{
+					"input": "CUT 2*",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applyTo deletes the resolved block span",
+			"parse": [
+				{
+					"input": "CUT 2*",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applyPartialTo drops an unresolvable cut-block edit"
+		},
+		{
+			"name": "Patcher applies a cut-block edit on the hash-match path",
+			"parse": [
+				{
+					"input": "CUT 2*",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "parses `PUT >N*: N:` into a deferred block edit with insert mode",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+A\n+B",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "still parses a literal `PUT > N:` anchor (distinct from `PUT >N*:`)",
+			"parse": [
+				{
+					"input": "PUT >2:\n+A",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects an `PUT >N*: N:` hunk with no body row",
+			"parse": [
+				{
+					"input": "PUT >2*:",
+					"error": "Error: line 1: `PUT <N:` / `PUT >N:` promises body rows and got none. Write `+TEXT` rows, or drop the `:` to paste a register (`PUT >N` = anonymous, `PUT >N @name` = named)."
+				}
+			]
+		},
+		{
+			"name": "resolveBlockEdits expands to the equivalent `insert after end:` lowering",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+A\n+B",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >3:\n+A\n+B",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "fires onResolved with op insert_after",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+A",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "lowers an unresolvable anchor to plain `PUT > N:` with a warning",
+			"parse": [
+				{
+					"input": "PUT >7*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >7:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "lowers `PUT >N*:` even when no resolver is wired",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >2:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "lowers a closing-delimiter anchor to plain `PUT > N:` with a warning",
+			"parse": [
+				{
+					"input": "PUT >3*:\n+  done();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "lowers an unresolvable blank-line anchor to plain `PUT > N:` instead of failing",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+- new entry",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "Patcher surfaces the closer-anchor lowering warning",
+			"parse": [
+				{
+					"input": "PUT >3*:\n+  done();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applyTo inserts the body after the resolved block's last line",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+  done();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "Patcher applies an insert-after-block edit and surfaces the resolution",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+  done();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		}
+	]
+}

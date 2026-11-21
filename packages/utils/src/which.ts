@@ -11,8 +11,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
-type CacheKey = string | bigint | number;
+import { isFullyQualifiedPath } from "./path";
 
 // Tools shipped by Xcode / Command Line Tools that callers actually look up.
 // Keeps the set small so darwinWhich can fast-reject non-Xcode commands without
@@ -148,12 +147,12 @@ function getMacosToolPaths(): Map<string, string> {
 }
 
 // Map: cache key -> resolved binary path or null (not found)
-const toolCache = new Map<CacheKey, string | null>();
+const toolCache = new Map<string, string | null>();
 
 /**
  * Cache policy for which lookups.
  */
-export const enum WhichCachePolicy {
+export enum WhichCachePolicy {
 	/**
 	 * Use cached result if available.
 	 */
@@ -176,9 +175,15 @@ export const enum WhichCachePolicy {
 export interface WhichOptions extends Bun.WhichOptions {
 	/**
 	 * Cache policy for the lookup.
-	 * Defaults to `WhichCachePolicy.Fresh`.
+	 * Defaults to `WhichCachePolicy.Cached`.
 	 */
 	cache?: WhichCachePolicy;
+	/**
+	 * Only search absolute directory entries in PATH, ignoring relative entries
+	 * (e.g. `.` or `./bin`) and empty components to prevent resolving against
+	 * an untrusted working directory.
+	 */
+	requireAbsolutePaths?: boolean;
 }
 
 // Darwin-specific "which" shim: consult Xcode/CLT toolchain directories after $PATH.
@@ -192,17 +197,31 @@ function darwinWhich(command: string, options?: Bun.WhichOptions): string | null
 	return null;
 }
 
-// Which function that incorporates Darwin Xcode logic if platform reports as 'darwin'
-export const whichFresh = os.platform() === "darwin" ? darwinWhich : Bun.which;
+function filterAbsoluteSearchPath(rawPath: string | undefined): string | null {
+	if (!rawPath) return null;
+	const safePath = rawPath
+		.split(path.delimiter)
+		.filter(dir => dir.length > 0 && isFullyQualifiedPath(dir))
+		.join(path.delimiter);
+	return safePath || null;
+}
 
-// Derive stable cache key from command and lookup options
-function cacheKey(command: string, options?: Bun.WhichOptions): CacheKey {
+// Which function that incorporates Darwin Xcode logic if platform reports as 'darwin'.
+// Look `Bun.which` up per call rather than capturing it at import, so a `Bun.which`
+// stub installed later (the per-test seam) is honoured on every platform.
+export const whichFresh =
+	os.platform() === "darwin"
+		? darwinWhich
+		: (command: string, options?: Bun.WhichOptions): string | null => Bun.which(command, options);
+
+// Length-prefixed (command, cwd, PATH) tuple: exact, unlike the 64-bit hash
+// chain it replaced, and the length prefixes keep `("ab", "c")` and
+// `("a", "bc")` distinct without a separator that cwd/PATH could contain.
+function cacheKey(command: string, options?: Bun.WhichOptions): string {
 	if (!options) return command;
-	if (!options.cwd && !options.PATH) return command;
-	let h = Bun.hash(command);
-	if (options.cwd) h = Bun.hash(options.cwd, h);
-	if (options.PATH) h = Bun.hash(options.PATH, h);
-	return h;
+	const cwd = options?.cwd ?? "";
+	const binPath = options?.PATH ?? "";
+	return `${command.length}:${command}${cwd.length}:${cwd}${binPath.length}:${binPath}`;
 }
 
 /**
@@ -214,9 +233,16 @@ function cacheKey(command: string, options?: Bun.WhichOptions): CacheKey {
  */
 export function $which(command: string, options?: WhichOptions): string | null {
 	const cachePolicy = options?.cache ?? WhichCachePolicy.Cached;
-	const lookupOptions =
+	let lookupOptions =
 		options?.PATH !== undefined || process.env.PATH === undefined ? options : { ...options, PATH: process.env.PATH };
-	let key: CacheKey | undefined;
+
+	if (options?.requireAbsolutePaths) {
+		const safePath = filterAbsoluteSearchPath(lookupOptions?.PATH);
+		if (!safePath) return null;
+		lookupOptions = { ...lookupOptions, PATH: safePath };
+	}
+
+	let key: string | undefined;
 
 	if (cachePolicy !== WhichCachePolicy.Bypass) {
 		key = cacheKey(command, lookupOptions);
@@ -227,8 +253,38 @@ export function $which(command: string, options?: WhichOptions): string | null {
 	}
 
 	const result = whichFresh(command, lookupOptions);
+	if (result && options?.requireAbsolutePaths && !isFullyQualifiedPath(result)) {
+		return null;
+	}
 	if (key != null && cachePolicy !== WhichCachePolicy.ReadOnly) {
 		toolCache.set(key, result);
 	}
 	return result;
+}
+
+/**
+ * Locate every match for `command` on PATH, in PATH order, uncached.
+ *
+ * Callers that probe candidates (e.g. the Python eval backend) use this so a broken
+ * first hit — a version-manager shim with no version selected, a Windows Store alias —
+ * does not hide a working binary further down PATH. On macOS the Xcode/CLT toolchain
+ * match is appended last, mirroring {@link $which}'s fallback.
+ *
+ * @param command - Binary name to resolve
+ * @param options - `PATH` (defaults to `process.env.PATH`) and `cwd` for relative entries
+ * @returns Distinct filesystem paths; empty when nothing matches
+ */
+export function $whichAll(command: string, options?: Bun.WhichOptions): string[] {
+	const searchPath = options?.PATH ?? process.env.PATH ?? "";
+	const matches: string[] = [];
+	for (const dir of searchPath.split(path.delimiter)) {
+		if (!dir) continue;
+		const match = Bun.which(command, { cwd: options?.cwd, PATH: dir });
+		if (match && !matches.includes(match)) matches.push(match);
+	}
+	if (os.platform() === "darwin" && isXcodeBin(command)) {
+		const toolchainMatch = getMacosToolPaths().get(command);
+		if (toolchainMatch && !matches.includes(toolchainMatch)) matches.push(toolchainMatch);
+	}
+	return matches;
 }

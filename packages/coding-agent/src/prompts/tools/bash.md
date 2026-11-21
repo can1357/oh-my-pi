@@ -1,23 +1,20 @@
-Runs commands in a persistent shell.
-
-Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort | uniq -c`, `diff`).
-{{#if hasEval}}Inline scripts, heredocs, `$(…)`, complex control flow/quoting, and non-trivial pipelines → `eval`.{{else}}Inline scripts, heredocs, `$(…)`, and complex control flow → a purpose-built tool or checked-in script.{{/if}}
-
-<instruction>
-- Set `cwd` instead of `cd`; use `env: { NAME: "…" }` for multiline/quote-heavy values.
-- `pty: true` only for terminal interaction (`sudo`, `ssh`).
-- Order-dependent commands use `&&` in one call; independent calls may run concurrently.
-- Internal URIs (`skill://`, `agent://`, …) auto-resolve to paths.
-{{#if hasShellBuiltins}}- aux utils available: mkdir, wc, sort, comm, diff, uniq, base64, cmp, md5sum, sha{1,224,256,384,512}sum, b2sum, basename, dirname, readlink, realpath, touch, stat, date, mktemp, seq, yes, printenv, truncate, tac, nproc, uname, whoami, hostname, which, ps, pgrep, pkill, pidwait, top, cut, tee, tr, paste, sed, xargs, jq, rm, mv, ln, ts, sponge, ifne, isutf8, combine{{#unless isWindows}}, errno{{/unless}}{{/if}}
-{{#if asyncEnabled}}- `async: true` defers a finite command's result; it does not extend `timeout`.{{/if}}
-</instruction>
-
-<critical>
-{{#if hasGrep}}- NEVER use shell `grep`/`rg`; use built-in `grep`.{{/if}}
-{{#if hasRead}}{{#if hasGlob}}- List directories with `read` and find paths with `glob`; NEVER use `ls`/`find`.{{/if}}{{/if}}
-- Avoid `head`, `tail`, and redirection: output is captured, truncated, and linked as `artifact://<id>`.
-{{#if hasLaunch}}- Services, watchers, debuggers, and REPLs MUST use `hub` (`op:"start"`).{{/if}}
-</critical>
-
-{{#if autoBackgroundEnabled}}Long foreground calls may auto-background and deliver later. Need inline? Raise `timeout`.{{/if}}
-No truncation footer means the displayed output is complete.
+Persistent bash 5.3.
+cwd will reset after each turn, don't rely on cd{{#if hasPty}}; `pty` = interactive{{/if}}.
+Internal URIs work as paths for builtins/coreutils, redirects, globs.
+In-process builtins, ahead of PATH: {{join builtins ", "}}.
+{{#if asyncEnabled}}
+`async` defers finite results but keeps the deadline (default {{defaultTimeoutSec}}s); `timeout: 0` for watchers and long jobs.
+`notify` (regex; implies `async`) sends each matching output line as a follow-up while the job runs, ahead of its result. Match only lines you'd act on: too many matches switch it off.
+{{/if}}
+Don't trunc output by habit, result will be summarized and saved as an artifact.
+{{#if hasLaunch}}
+Long-lived services:
+- unique name; ready requires name; no async/timeout; pty defaults true.
+- ready needs log regex or port (both if given); host defaults localhost, ready.timeout 30s.
+- `notify` (regex) sends each matching output line as a follow-up while the service runs.
+{{/if}}
+{{#if autoBackgroundEnabled}}
+Non-`pty` calls still running after {{autoBackgroundSeconds}}s (or 1s before `timeout`, if sooner) usually move to background job `bg_N` and keep running to `timeout`.
+No backgrounding when the client terminal runs the command or the job cap is reached.
+The result arrives automatically as a follow-up message. NEVER poll.
+{{/if}}

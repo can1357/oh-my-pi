@@ -1,8 +1,6 @@
 import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
-import type { IsolationContext } from "../task/isolation-runner";
-import { prepareIsolationContext } from "../task/isolation-runner";
 import type { IsolationHandle, WorktreeBaseline } from "../task/worktree";
-import { cleanupIsolation, ensureIsolation } from "../task/worktree";
+import { captureBaseline, cleanupIsolation, ensureIsolation, getRepoRoot } from "../task/worktree";
 
 export interface SecurityRemediationRequest {
 	cwd: string;
@@ -22,8 +20,19 @@ export interface SecurityRemediationWorkspace {
 	cleanup(): Promise<void>;
 }
 
+/** Source checkout a remediation workspace is copied from, with its dirty-state baseline. */
+export interface SecurityRemediationContext {
+	repoRoot: string;
+	baseline: WorktreeBaseline;
+}
+
+async function prepareRemediationContext(cwd: string): Promise<SecurityRemediationContext> {
+	const repoRoot = await getRepoRoot(cwd);
+	return { repoRoot, baseline: await captureBaseline(repoRoot) };
+}
+
 export interface SecurityRemediationDependencies {
-	prepareContext?: (cwd: string) => Promise<IsolationContext>;
+	prepareContext?: (cwd: string) => Promise<SecurityRemediationContext>;
 	createIsolation?: (repositoryRoot: string, id: string, preferred?: IsoBackendKind) => Promise<IsolationHandle>;
 	cleanupIsolation?: (handle: IsolationHandle) => Promise<void>;
 	createId?: () => string;
@@ -68,7 +77,7 @@ export async function prepareSecurityRemediationWorkspace(
 ): Promise<SecurityRemediationWorkspace> {
 	const findingIds = [...new Set(request.findingIds.map(id => id.trim()).filter(Boolean))];
 	if (findingIds.length === 0) throw new Error("Security remediation requires at least one finding id");
-	const prepareContext = dependencies.prepareContext ?? prepareIsolationContext;
+	const prepareContext = dependencies.prepareContext ?? prepareRemediationContext;
 	const createIsolation = dependencies.createIsolation ?? ensureIsolation;
 	const disposeIsolation = dependencies.cleanupIsolation ?? cleanupIsolation;
 	const context = await prepareContext(request.cwd);

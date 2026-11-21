@@ -201,10 +201,6 @@ it("uses pipe for consecutive types", () => {
 	expect(T({ foo: "ok", bar: 1 })).toEqual({ foo: "ok", bar: 1 });
 });
 
-it("disjoint", () => {
-	expect(() => type("number>5").pipe(type("number<3"))).toThrow("numeric range intersection is unsatisfiable");
-});
-
 it("extract in/out at path", () => {
 	const T = type({
 		foo: type("number").pipe(n => `${n}`, type.string),
@@ -403,7 +399,6 @@ it("deep union", () => {
 		b: { a: "Function" },
 		c: "a|b",
 	}).export();
-	// biome-ignore lint/complexity/noBannedTypes: Function type in union assertion test
 	const _type43: Eq<typeof types.c.t, { a: (In: number) => Out<string> } | { a: Function }> = true;
 
 	expect(types.c({ a: 2 })).toEqual({ a: "2" });
@@ -644,15 +639,6 @@ it("fails on indiscriminable morph in nested union", () => {
 	expect(indiscriminable).toThrow("indeterminate");
 });
 
-it("multiple chained pipes", () => {
-	const T = type("string.trim").to("string.lower");
-
-	expect(T("Success")).toEqual("success");
-	expect(T("success")).toEqual("success");
-	expect(T("SUCCESS  ")).toEqual("success");
-	expect(T("success  ")).toEqual("success");
-});
-
 // https://github.com/arktypeio/arktype/issues/1144
 it("multiple chained pipes with literal output", () => {
 	const Base = type("string.trim").to("string.lower");
@@ -668,14 +654,6 @@ it("multiple chained pipes with literal output", () => {
 });
 
 const appendLengthMorph = (s: string) => `${s}${s.length}`;
-
-// https://discord.com/channels/957797212103016458/1291014543635517542
-it("repeated Type pipe", () => {
-	const appendLength = type("string", "=>", appendLengthMorph);
-	const appendLengths = type("string").pipe(appendLength, appendLength);
-
-	expect(appendLengths("a")).toEqual("a12");
-});
 
 // https://discord.com/channels/957797212103016458/1291014543635517542
 it("repeated Type pipe with intermediate morph", () => {

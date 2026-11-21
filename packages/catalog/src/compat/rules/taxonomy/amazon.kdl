@@ -1,0 +1,8 @@
+class "amazon" {
+	bounded "nova"
+	bounded "titan"
+	namespace "amazon" bounded=#true
+
+	family "nova" glob="*nova*"
+	family "titan" glob="*titan*"
+}

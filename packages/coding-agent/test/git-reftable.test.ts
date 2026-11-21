@@ -1,10 +1,10 @@
-import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
-import * as git from "../src/utils/git";
 
 const gitInitHelp = await $`git init -h`.quiet().nothrow().text();
 const supportsReftable = gitInitHelp.includes("--ref-format");
@@ -62,20 +62,21 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 	});
 
 	test("resolves references in a reftable repository", async () => {
-		const repository = await git.repo.resolve(sharedRepoDir);
+		const repository = vcs.git(sharedRepoDir);
 		expect(repository).not.toBeNull();
+		if (!repository) return;
 
-		const currentBranch = await git.branch.current(sharedRepoDir);
+		const currentBranch = await repository.currentBranch();
 		expect(currentBranch).toBe("feature-branch");
 
-		const resolvedHeadSha = await git.head.sha(sharedRepoDir);
+		const resolvedHeadSha = await repository.headSha();
 		expect(resolvedHeadSha).not.toBeNull();
 		expect(resolvedHeadSha).toHaveLength(40);
 		expect(resolvedHeadSha).toBe(headSha);
 
 		// Resolve refs/heads/main and refs/heads/feature-branch
-		const mainSha = await git.ref.resolve(sharedRepoDir, "refs/heads/main");
-		const featureSha = await git.ref.resolve(sharedRepoDir, "refs/heads/feature-branch");
+		const mainSha = await repository.resolveRef("refs/heads/main");
+		const featureSha = await repository.resolveRef("refs/heads/feature-branch");
 		expect(mainSha).not.toBeNull();
 		expect(featureSha).not.toBeNull();
 		expect(mainSha).toHaveLength(40);
@@ -83,74 +84,34 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 		expect(featureSha).toBe(headSha);
 
 		// Test HEAD resolution (object shape)
-		const headState = await git.head.resolve(sharedRepoDir);
+		const headState = await repository.head();
 		expect(headState).not.toBeNull();
 		if (headState?.kind !== "ref") throw new Error("expected ref head");
-		expect(headState.branchName).toBe("feature-branch");
+		expect(headState.branch).toBe("feature-branch");
 		expect(headState.commit).toBe(headSha);
 
 		// Test HEAD resolution sync
-		const headStateSync = git.head.resolveSync(sharedRepoDir);
+		const headStateSync = repository.headSync();
 		expect(headStateSync).not.toBeNull();
 		if (headStateSync?.kind !== "ref") throw new Error("expected ref head sync");
-		expect(headStateSync.branchName).toBe("feature-branch");
+		expect(headStateSync.branch).toBe("feature-branch");
 		expect(headStateSync.commit).toBe(headSha);
 
 		// Test exists check
-		const mainExists = await git.ref.exists(sharedRepoDir, "refs/heads/main");
-		const nonexistentExists = await git.ref.exists(sharedRepoDir, "refs/heads/nonexistent");
+		const mainExists = await repository.refExists("refs/heads/main");
+		const nonexistentExists = await repository.refExists("refs/heads/nonexistent");
 		expect(mainExists).toBe(true);
 		expect(nonexistentExists).toBe(false);
 	});
 
-	// #6169: the sync reftable ref readers spawn `git symbolic-ref`/`rev-parse`.
-	// When git is absent from PATH the spawn throws ENOENT synchronously; the
-	// readers must degrade (HEAD resolves as detached with no commit) instead of
-	// letting the raw ENOENT escape during a TUI render.
-	test("head.resolveSync degrades when the git binary is missing", () => {
-		const err = new Error('Executable not found in $PATH: "git"');
-		(err as NodeJS.ErrnoException).code = "ENOENT";
-		vi.spyOn(Bun, "spawnSync").mockImplementation(() => {
-			throw err;
-		});
-		try {
-			const headStateSync = git.head.resolveSync(sharedRepoDir);
-			expect(headStateSync).not.toBeNull();
-			expect(headStateSync?.kind).toBe("detached");
-			expect(headStateSync?.commit).toBeNull();
-		} finally {
-			vi.restoreAllMocks();
-		}
-	});
-
-	test("head.resolveSync treats Bun's timeout marker as a failed symbolic-ref even with exit code zero", () => {
-		const baseResult = Bun.spawnSync(["true"], { stdout: "pipe", stderr: "pipe" });
-		const timedOutSymbolicRef = {
-			...baseResult,
-			exitCode: 0,
-			exitedDueToTimeout: true,
-			stdout: Buffer.from("refs/heads/feature-branch\n"),
-		} satisfies Bun.ReadableSyncSubprocess;
-		const successfulRevParse = {
-			...baseResult,
-			exitCode: 0,
-			stdout: Buffer.from(`${headSha}\n`),
-		} satisfies Bun.ReadableSyncSubprocess;
-		vi.spyOn(Bun, "spawnSync").mockReturnValueOnce(timedOutSymbolicRef).mockReturnValueOnce(successfulRevParse);
-
-		const headState = git.head.resolveSync(sharedRepoDir);
-		expect(headState?.kind).toBe("detached");
-		expect(headState?.commit).toBe(headSha);
-	});
-
 	test("handles git config trailing comments correctly", async () => {
-		const repository = await git.repo.resolve(configRepoDir);
+		const repository = vcs.git(configRepoDir);
 		expect(repository).not.toBeNull();
 		if (!repository) return;
-		expect(await git.repo.isReftable(repository)).toBe(true);
+		expect(repository.info().isReftable).toBe(true);
 
 		// Now let's manually write to .git/config with comments and test
-		const configPath = path.join(repository.commonDir, "config");
+		const configPath = path.join(repository.info().commonDir, "config");
 		const baseConfig = await fs.readFile(configPath, "utf8");
 
 		// Test trailing semicolon comment
@@ -160,34 +121,34 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 		);
 		await fs.writeFile(configPath, newConfigWithSemicolon);
 
-		const repository2 = await git.repo.resolve(configRepoDir);
+		const repository2 = vcs.git(configRepoDir);
 		expect(repository2).not.toBeNull();
 		if (repository2) {
-			expect(await git.repo.isReftable(repository2)).toBe(true);
-			expect(git.repo.isReftableSync(repository2)).toBe(true);
+			expect(repository2.info().isReftable).toBe(true);
+			expect(repository2.info().isReftable).toBe(true);
 		}
 
 		// Test trailing hash comment
 		const newConfigWithHash = baseConfig.replace("refstorage = reftable", "refstorage = reftable # trailing hash");
 		await fs.writeFile(configPath, newConfigWithHash);
 
-		const repository3 = await git.repo.resolve(configRepoDir);
+		const repository3 = vcs.git(configRepoDir);
 		expect(repository3).not.toBeNull();
 		if (repository3) {
-			expect(await git.repo.isReftable(repository3)).toBe(true);
-			expect(git.repo.isReftableSync(repository3)).toBe(true);
+			expect(repository3.info().isReftable).toBe(true);
+			expect(repository3.info().isReftable).toBe(true);
 		}
 
 		// Test double-quoted value containing semicolon (not a comment)
 		const newConfigWithQuotes = baseConfig.replace("refstorage = reftable", 'refstorage = "reftable ; not comment"');
 		await fs.writeFile(configPath, newConfigWithQuotes);
 
-		const repository4 = await git.repo.resolve(configRepoDir);
+		const repository4 = vcs.git(configRepoDir);
 		expect(repository4).not.toBeNull();
 		if (repository4) {
 			// This value would be "reftable ; not comment", which shouldn't match "reftable"
-			expect(await git.repo.isReftable(repository4)).toBe(false);
-			expect(git.repo.isReftableSync(repository4)).toBe(false);
+			expect(repository4.info().isReftable).toBe(false);
+			expect(repository4.info().isReftable).toBe(false);
 		}
 
 		// Test adjacent hash comment (no preceding space)
@@ -197,11 +158,11 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 		);
 		await fs.writeFile(configPath, newConfigWithAdjacentHash);
 
-		const repository5 = await git.repo.resolve(configRepoDir);
+		const repository5 = vcs.git(configRepoDir);
 		expect(repository5).not.toBeNull();
 		if (repository5) {
-			expect(await git.repo.isReftable(repository5)).toBe(true);
-			expect(git.repo.isReftableSync(repository5)).toBe(true);
+			expect(repository5.info().isReftable).toBe(true);
+			expect(repository5.info().isReftable).toBe(true);
 		}
 
 		// Test adjacent semicolon comment (no preceding space)
@@ -211,11 +172,11 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 		);
 		await fs.writeFile(configPath, newConfigWithAdjacentSemicolon);
 
-		const repository6 = await git.repo.resolve(configRepoDir);
+		const repository6 = vcs.git(configRepoDir);
 		expect(repository6).not.toBeNull();
 		if (repository6) {
-			expect(await git.repo.isReftable(repository6)).toBe(true);
-			expect(git.repo.isReftableSync(repository6)).toBe(true);
+			expect(repository6.info().isReftable).toBe(true);
+			expect(repository6.info().isReftable).toBe(true);
 		}
 
 		// Test section header with trailing comment
@@ -225,31 +186,31 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 		);
 		await fs.writeFile(configPath, newConfigWithSectionComment);
 
-		const repository7 = await git.repo.resolve(configRepoDir);
+		const repository7 = vcs.git(configRepoDir);
 		expect(repository7).not.toBeNull();
 		if (repository7) {
-			expect(await git.repo.isReftable(repository7)).toBe(true);
-			expect(git.repo.isReftableSync(repository7)).toBe(true);
+			expect(repository7.info().isReftable).toBe(true);
+			expect(repository7.info().isReftable).toBe(true);
 		}
 	});
 
 	test("resolves references in a reftable worktree", async () => {
 		// Resolve the repository for the worktree (built in beforeAll)
-		const repository = await git.repo.resolve(worktreeDir);
+		const repository = vcs.git(worktreeDir);
 		expect(repository).not.toBeNull();
 		if (!repository) return;
 
-		expect(repository.gitDir).not.toBe(repository.commonDir);
-		expect(await git.repo.isReftable(repository)).toBe(true);
+		expect(repository.info().gitDir).not.toBe(repository.info().commonDir);
+		expect(repository.info().isReftable).toBe(true);
 
 		// Check current branch on worktree
-		const currentBranch = await git.branch.current(worktreeDir);
+		const currentBranch = await repository.currentBranch();
 		expect(currentBranch).toBe("wt-branch");
 
 		// Check that HEAD resolves correctly in the worktree
-		const headState = await git.head.resolve(worktreeDir);
+		const headState = await repository.head();
 		expect(headState).not.toBeNull();
 		if (headState?.kind !== "ref") throw new Error("expected ref head in worktree");
-		expect(headState.branchName).toBe("wt-branch");
+		expect(headState.branch).toBe("wt-branch");
 	});
 });

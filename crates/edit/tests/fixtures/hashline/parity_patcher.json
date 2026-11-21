@@ -1,0 +1,503 @@
+{
+	"source": "packages/hashline/test/patcher.test.ts",
+	"cases": [
+		{
+			"name": "applies when the section tag is the live file's content hash",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+after",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "before\n",
+					"input": "PUT 1-1:\n+after",
+					"path": "a.ts",
+					"expect": {
+						"text": "after\n",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "restores a UTF-8 BOM hidden by Bun text decoding",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+using B;",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "using A;\n",
+					"input": "PUT 1-1:\n+using B;",
+					"path": "/var/folders/06/v170cl6d5gjftkvfr7hzxynw0000gn/T/hashline-bom-jpU8nf/Program.cs",
+					"expect": {
+						"text": "using B;\n",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "validates any anchor purely from the content hash, even with no recorded snapshot",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+L3",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\nl4\nl5\n",
+					"input": "PUT 3-3:\n+L3",
+					"path": "a.ts",
+					"expect": {
+						"text": "l1\nl2\nL3\nl4\nl5\n",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "refuses with mismatch when the recorded version no longer matches live content",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+after",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "refuses with a 'not from this session' diagnostic when the tag was never recorded for this path",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+after",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applies onto live content when the tag matches, even against a retained colliding snapshot",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+edited live",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "line one 410\nline two 6970\n",
+					"input": "PUT 2-2:\n+edited live",
+					"path": "a.ts",
+					"expect": {
+						"text": "line one 410\nedited live\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "keys the returned snapshot tag on what the Filesystem actually persisted, not the pre-write content",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+    return 2;",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 1-1:\n+function g() {",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    return 1;\n}\n",
+					"input": "PUT 2-2:\n+    return 2;",
+					"path": "a.ts",
+					"expect": {
+						"text": "function f() {\n    return 2;\n}\n",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "function f() {\n\treturn 2;\n}\n",
+					"input": "PUT 1-1:\n+function g() {",
+					"path": "a.ts",
+					"expect": {
+						"text": "function g() {\n\treturn 2;\n}\n",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a hashless head/tail insert — the tag is required on every section",
+			"parse": [
+				{
+					"input": "PUT >$:\n+c",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "still hard-rejects an anchored edit that omits the snapshot tag",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+X",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a tagged edit whose target file does not exist (create with write instead)",
+			"parse": [
+				{
+					"input": "PUT >$:\n+c",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applies a head/tail insert with a stale tag and warns instead of hard-failing",
+			"parse": [
+				{
+					"input": "PUT >$:\n+c",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\n",
+					"input": "PUT >$:\n+c",
+					"path": "a.ts",
+					"expect": {
+						"text": "a\nb\nc\n",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "does not warn when a head/tail insert carries the live tag",
+			"parse": [
+				{
+					"input": "PUT >$:\n+c",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\n",
+					"input": "PUT >$:\n+c",
+					"path": "a.ts",
+					"expect": {
+						"text": "a\nb\nc\n",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects an edit anchored on a line the read never displayed",
+			"parse": [
+				{
+					"input": "PUT 4-4:\n+L4",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applies an edit anchored on a displayed line",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+L2",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\nl4\nl5\n",
+					"input": "PUT 2-2:\n+L2",
+					"path": "a.ts",
+					"expect": {
+						"text": "l1\nL2\nl3\nl4\nl5\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "widens coverage when more of the same content is re-read (read fusion)",
+			"parse": [
+				{
+					"input": "PUT 4-4:\n+L4",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\nl4\nl5\n",
+					"input": "PUT 4-4:\n+L4",
+					"path": "a.ts",
+					"expect": {
+						"text": "l1\nl2\nl3\nL4\nl5\n",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		},
+		{
+			"name": "reveals the actual line content in the rejection and unblocks a same-tag retry",
+			"parse": [
+				{
+					"input": "PUT 4-4:\n+L4",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 4-4:\n+L4",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\nl4\nl5\n",
+					"input": "PUT 4-4:\n+L4",
+					"path": "a.ts",
+					"expect": {
+						"text": "l1\nl2\nl3\nL4\nl5\n",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		},
+		{
+			"name": "truncates the reveal at the cap and directs the tail back to a range re-read",
+			"parse": [
+				{
+					"input": "CUT 100\nCUT 101\nCUT 102\nCUT 103\nCUT 104\nCUT 105\nCUT 106\nCUT 107\nCUT 108\nCUT 109\nCUT 110\nCUT 111\nCUT 112\nCUT 113\nCUT 114\nCUT 115\nCUT 116\nCUT 117\nCUT 118\nCUT 119\nCUT 120\nCUT 121\nCUT 122\nCUT 123\nCUT 124\nCUT 125\nCUT 126\nCUT 127\nCUT 128\nCUT 129\nCUT 130\nCUT 131\nCUT 132\nCUT 133\nCUT 134\nCUT 135\nCUT 136\nCUT 137\nCUT 138\nCUT 139\nCUT 140\nCUT 141\nCUT 142\nCUT 143\nCUT 144\nCUT 145\nCUT 146\nCUT 147\nCUT 148\nCUT 149\nCUT 150\nCUT 151\nCUT 152\nCUT 153\nCUT 154\nCUT 155\nCUT 156\nCUT 157\nCUT 158\nCUT 159",
+					"expect": {
+						"editCount": 120,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 100\nCUT 101\nCUT 102\nCUT 103\nCUT 104\nCUT 105\nCUT 106\nCUT 107\nCUT 108\nCUT 109\nCUT 110\nCUT 111\nCUT 112\nCUT 113\nCUT 114\nCUT 115\nCUT 116\nCUT 117\nCUT 118\nCUT 119\nCUT 120\nCUT 121\nCUT 122\nCUT 123\nCUT 124\nCUT 125\nCUT 126\nCUT 127\nCUT 128\nCUT 129\nCUT 130\nCUT 131\nCUT 132\nCUT 133\nCUT 134\nCUT 135\nCUT 136\nCUT 137\nCUT 138\nCUT 139\nCUT 140\nCUT 141\nCUT 142\nCUT 143\nCUT 144\nCUT 145\nCUT 146\nCUT 147\nCUT 148\nCUT 149\nCUT 150\nCUT 151\nCUT 152\nCUT 153\nCUT 154\nCUT 155\nCUT 156\nCUT 157\nCUT 158\nCUT 159",
+					"expect": {
+						"editCount": 120,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "column-clips wide revealed lines, keeps the merge gate closed, and stays anchored across retries",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+X\n+Y",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2-3:\n+X\n+Y",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "skips the check when no seen lines were recorded (absent → allow)",
+			"parse": [
+				{
+					"input": "PUT 4-4:\n+L4",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\nl4\nl5\n",
+					"input": "PUT 4-4:\n+L4",
+					"path": "a.ts",
+					"expect": {
+						"text": "l1\nl2\nl3\nL4\nl5\n",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		},
+		{
+			"name": "redirects a bare filename to the full path of the file its tag names",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+TWO",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "one\ntwo\nthree\n",
+					"input": "PUT 2-2:\n+TWO",
+					"path": "pkg/test/file.ts",
+					"expect": {
+						"text": "one\nTWO\nthree\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "declines recovery when the filename does not match the recorded file",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+TWO",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "declines recovery when the tag matches no retained snapshot",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+TWO",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "declines recovery when two retained files share the filename and tag",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+TWO",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "respects a filesystem that refuses path recovery",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+TWO",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "runs the write gate on the recovered path, not the authored bare path",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+TWO",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "one\ntwo\nthree\n",
+					"input": "PUT 2-2:\n+TWO",
+					"path": "pkg/test/file.ts",
+					"expect": {
+						"text": "one\nTWO\nthree\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "runs the write gate on an unrecoverable authored path (gate wins over not-found)",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+X",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		}
+	],
+	"skipped": [
+		{
+			"name": "requires a snapshot store at construction",
+			"reason": "Rust patch staging requires &EditStore in its type-level API, so the JavaScript runtime missing-constructor-argument state is unrepresentable."
+		}
+	]
+}

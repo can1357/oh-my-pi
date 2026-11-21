@@ -39,6 +39,10 @@ export class GemmaInbandScanner implements InbandScanner {
 	#buffer = "";
 	#state: State = "outside";
 	#thinking = "";
+	/** Resume offset into `#buffer` for the in-tool close scan; everything before it is known not to close the call. */
+	#closeScan = 0;
+	/** Whether `#closeScan` sits inside a `<|"|>` string span. */
+	#inString = false;
 	readonly #parseThinking: boolean;
 
 	constructor(options: InbandScannerOptions = {}) {
@@ -132,11 +136,12 @@ export class GemmaInbandScanner implements InbandScanner {
 	}
 
 	#consumeTool(final: boolean, events: InbandScanEvent[]): void {
-		const close = findCallClose(this.#buffer);
+		const close = this.#findCallClose();
 		if (close === -1) {
 			if (final) {
 				this.#buffer = "";
 				this.#state = "outside";
+				this.#resetCloseScan();
 			}
 			return;
 		}
@@ -155,6 +160,47 @@ export class GemmaInbandScanner implements InbandScanner {
 		}
 		this.#buffer = this.#buffer.slice(close + CALL_CLOSE.length);
 		this.#state = "outside";
+		this.#resetCloseScan();
+	}
+
+	/**
+	 * Index of the `<tool_call|>` closing the open call, skipping `<|"|>` string
+	 * spans. Resumes from where the previous feed stopped so a long body is scanned
+	 * once overall; it stops short of any position where a token could still be
+	 * completed by the next chunk.
+	 */
+	#findCallClose(): number {
+		const text = this.#buffer;
+		const lastClose = text.length - CALL_CLOSE.length;
+		let i = this.#closeScan;
+		while (true) {
+			if (this.#inString) {
+				const end = text.indexOf(STRING, i);
+				if (end === -1) {
+					this.#closeScan = Math.max(i, text.length - STRING.length + 1);
+					return -1;
+				}
+				i = end + STRING.length;
+				this.#inString = false;
+			}
+			// Past `lastClose` no complete close token fits; resume here once more text arrives.
+			if (i > lastClose) {
+				this.#closeScan = i;
+				return -1;
+			}
+			if (text.startsWith(STRING, i)) {
+				this.#inString = true;
+				i += STRING.length;
+				continue;
+			}
+			if (text.startsWith(CALL_CLOSE, i)) return i;
+			i++;
+		}
+	}
+
+	#resetCloseScan(): void {
+		this.#closeScan = 0;
+		this.#inString = false;
 	}
 }
 
@@ -214,20 +260,6 @@ function parseGemmaValue(raw: string): unknown {
 function skipGemmaString(text: string, i: number): number {
 	const close = text.indexOf(STRING, i + STRING.length);
 	return close === -1 ? text.length : close + STRING.length;
-}
-
-function findCallClose(text: string): number {
-	let i = 0;
-	const n = text.length;
-	while (i < n) {
-		if (text.startsWith(STRING, i)) {
-			i = skipGemmaString(text, i);
-			continue;
-		}
-		if (text.startsWith(CALL_CLOSE, i)) return i;
-		i++;
-	}
-	return -1;
 }
 
 /** Index of the `close` delimiter matching `open` at `openIndex`, skipping strings. */
@@ -320,7 +352,7 @@ function renderThinking(text: string): string {
 function renderTranscript(messages: readonly Message[], options: DialectRenderOptions = {}): string {
 	if (messages.length === 0) return "";
 	let out = "<bos>";
-	for (let i = 0; i < messages.length; ) {
+	for (let i = 0; i < messages.length;) {
 		const message = messages[i]!;
 		if (message.role === "assistant") {
 			const parts = assistantTranscriptParts(message);

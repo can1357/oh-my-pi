@@ -143,9 +143,8 @@ describe("transformMessages cross-provider thinking demotion → canonical diale
 			{ name: "Claude Haiku", id: "claude-haiku-4-5" },
 			{ name: "Claude Fable", id: "claude-fable-5" },
 			{ name: "Claude Mythos", id: "claude-mythos-5" },
-			// Bedrock cross-region inference profiles. `parseAnthropicModel`
-			// doesn't enumerate `haiku`, so this exercises the isClaudeModelId
-			// dotted-prefix fallback specifically.
+			// Bedrock cross-region inference profiles exercise dotted-prefix
+			// structured identity classification.
 			{ name: "Claude Haiku (Bedrock US)", id: "us.anthropic.claude-haiku-4-5-20251001-v1:0" },
 			{ name: "Claude Haiku (Bedrock EU)", id: "eu.anthropic.claude-haiku-4-5-20251001-v1:0" },
 			{ name: "Claude Opus (Bedrock Global)", id: "global.anthropic.claude-opus-4-8" },

@@ -1,0 +1,1436 @@
+/**
+ * Tern Surface Protocol (TSP) wire shapes.
+ *
+ * A TSP program describes its UI as a tree of semantic components and the
+ * terminal lays it out, draws and animates it natively. Messages travel
+ * in-band as APC strings on the pty:
+ *
+ *     ESC _ tsp ; <verb> [; <key>=<value>]* ; <body> ESC \
+ *
+ * `body` is UTF-8 JSON (base64 for blob chunks). Program → terminal verbs:
+ * `q` query, `o` open, `f` frame, `b` blob, `t` palette, `x` close. Terminal →
+ * program: `r` reply, `e` event (on the pty's input side).
+ *
+ * The normative spec is the Tern SDK's Surface Protocol and Elements reference
+ * (`docs/sdk/src/protocol` and `docs/sdk/src/elements` in the Stencil
+ * repository, https://docs.stencil.so/tern/protocol/); these types mirror it.
+ * Unknown fields and verbs are ignored in both directions, so every addition
+ * here is optional.
+ */
+
+import type { ShellVizPresentation } from "./shell-viz";
+
+/** Protocol version this build speaks. */
+export const TSP_VERSION = 1;
+/** APC identifier: every TSP message body starts with `tsp;`. */
+export const TSP_APC_ID = "tsp";
+/** Largest APC body a sender emits before chunking unless the hello reply says otherwise. */
+export const TSP_DEFAULT_APC_LIMIT = 65_536;
+/** Unacknowledged frames a sender may have in flight unless the hello reply says otherwise. */
+export const TSP_DEFAULT_CREDITS = 2;
+
+/** One-letter message verb. */
+export type TspVerb = "q" | "o" | "f" | "b" | "x" | "r" | "e";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Vocabulary
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Every component kind in the v1 vocabulary. */
+export const TSP_KINDS = [
+	"col",
+	"row",
+	"card",
+	"section",
+	"rule",
+	"spacer",
+	"text",
+	"md",
+	"code",
+	"diff",
+	"ansi",
+	"math",
+	"image",
+	"media",
+	"web",
+	"kv",
+	"table",
+	"tree",
+	"json",
+	"badge",
+	"kbd",
+	"icon",
+	"spinner",
+	"shimmer",
+	"elapsed",
+	"progress",
+	"rate",
+	"list",
+	"item",
+	"tabs",
+	"editor",
+	"input",
+	"button",
+	"buttons",
+	"menu",
+	"doc",
+	"status",
+	"seg",
+	"overlay",
+	"toast",
+	"rows",
+	"picker",
+	"prefs",
+	"tool",
+	"checklist",
+	"agent",
+	"chart",
+	"meter",
+	"effort",
+	"shell",
+] as const;
+
+export type TspKind = (typeof TSP_KINDS)[number];
+
+/** Semantic colour of a node's chrome. */
+export type TspTone = "neutral" | "accent" | "info" | "success" | "warning" | "error" | "pending" | "muted" | "user";
+
+/** Spacing step for `gap`/`size`. */
+export type TspSpace = "none" | "xs" | "sm" | "md" | "lg";
+
+/**
+ * Size bound: `"40ch"`, `"10lines"`, or a fraction of the available extent
+ * (`0.4`). Never pixels or cells.
+ */
+export type TspExtent = `${number}ch` | `${number}lines` | number;
+
+/** Per-span visual effect, clocked by the terminal. */
+export type TspEffect = "shimmer" | "pulse" | "none";
+
+/**
+ * One styled run of text. `s` holds space-separated semantic tokens
+ * (`muted`, `dim`, `strong`, `em`, `accent`, `success`, `warning`, `error`,
+ * `info`, `code`, `mono`, `path`, `key`, `link`, `num`, `ins`, `del`, `mark`,
+ * `typo`, `icon`, `hide`) or omp theme token names (`thinkingText`,
+ * `toolTitle`, …). `mark` highlights (a match, the selected row); `typo` is a
+ * misspelled word, which the terminal underlines as its own spell checker does.
+ * `icon` marks a run of icon glyphs (Nerd Font / Private Use Area codepoints):
+ * the terminal draws it in its icon face and spaces it from neighbouring text
+ * itself, so senders omit padding spaces around icons. `hide` takes the run
+ * out of the drawing (an editor's mode sigil a chip stands in for).
+ */
+export interface TspSpan {
+	t: string;
+	s?: string;
+	fx?: TspEffect;
+	href?: string;
+}
+
+/** Text given either as one plain string or as styled spans. */
+export type TspText = string | readonly TspSpan[];
+
+/**
+ * What a pointer gesture on a node does. `zoom` shows an `image` (and the images
+ * beside it) large in the terminal's viewer; it is an image's click by default.
+ */
+export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
+
+/**
+ * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
+ * `{ header }`, or a row running action `id`, with its `label`, `icon` and `detail` (the hold menu shows it dim
+ * at the row's end).
+ */
+export type TspMenuEntry =
+	| TspAction
+	| { header: string }
+	| {
+			id: TspAction;
+			label?: string;
+			icon?: string;
+			detail?: string;
+			disabled?: boolean | string;
+			danger?: boolean;
+	  };
+
+/** Props every node accepts. */
+export interface TspCommonProps {
+	role?: string;
+	key?: string;
+	tone?: TspTone;
+	hidden?: boolean;
+	grow?: number;
+	shrink?: number;
+	basis?: "auto" | "content" | number;
+	min?: { w?: TspExtent; h?: TspExtent };
+	max?: { w?: TspExtent; h?: TspExtent };
+	/**
+	 * What a pointer does: `menu` lists what a right-click offers; `hold` what a long press on a touch screen
+	 * offers (a phone's hold menu over the lifted node), which a desktop ignores.
+	 */
+	actions?: {
+		click?: TspAction;
+		dblclick?: TspAction;
+		menu?: readonly TspMenuEntry[];
+		hold?: readonly TspMenuEntry[];
+	};
+	title?: string;
+	/** Accessible name for icon-only or visual-only nodes. */
+	aria?: string;
+	/** Target of an `open` action on this node (a URL or `file://` path). */
+	href?: string;
+	/**
+	 * Transient selection state drawn over the node without restyling it (the
+	 * rewind page): `pick` marks the chosen point (adjacent picks read as one
+	 * run), `drop` dims what the choice discards.
+	 */
+	mark?: TspMark;
+	/**
+	 * A floating card shown when the pointer rests on the node (~350 ms; ~200 ms
+	 * right after another tooltip or card), anchored below it (above without
+	 * room) and clamped to the window. It stays open while the pointer is over
+	 * the node or the card, closes on leave (short grace), press, key or scroll,
+	 * and replaces the node's `title` tooltip while open. A lone `md` card is a
+	 * wide read-only preview the pointer passes through (open only over the
+	 * node). On an `agent` it opens over the row, not the children. Terminals
+	 * that don't know it ignore it and keep showing `title`.
+	 */
+	hovercard?: TspPropNode;
+	/**
+	 * `layout` makes the node a layout-transition container: descendants carrying a {@link motionKey} glide to
+	 * their new place and size when an update moves, resizes, adds or removes them; new keys fade in, leaving
+	 * ones fade out. Reduced motion turns it off.
+	 */
+	transition?: "layout";
+	/** A `transition` container's duration in ms (200 by default, at most 1000; 0 snaps). */
+	transitionMs?: number;
+	/**
+	 * The node's identity in its nearest `transition` container. Unlike `key`, it survives a move to another
+	 * parent, so the node glides there; give two shapes of one thing (a folded and an open question) the
+	 * same one so it resizes instead of swapping.
+	 */
+	motionKey?: string;
+}
+
+/** A {@link TspCommonProps.mark}. */
+export type TspMark = "pick" | "drop";
+
+export type TspWrap = "word" | "char" | "none";
+export type TspTruncate = "end" | "start" | "middle";
+export type TspCardStatus = "pending" | "running" | "done" | "error" | "cancelled";
+export type TspPreview = { lines: number } | "auto";
+
+export interface TspColProps {
+	gap?: TspSpace;
+	align?: "start" | "center" | "end" | "stretch";
+	/**
+	 * On a dock composer's container: fold it to its compact row now, as an unfocused pane's composer folds,
+	 * while the keys are elsewhere in the document (a question above it).
+	 */
+	folded?: boolean;
+	/** On `omp.tray`: a counter the program bumps to move keyboard focus into the tray (acted on a change, never on first sight). */
+	focus?: number;
+	/** On `omp.tray`: the `ref` of the card its `omp.tray.peek` child belongs to. */
+	peek?: string;
+	/** On `omp.tray` (sent while it has cards): what the main agent is doing. */
+	main?: TspTrayMain;
+	/**
+	 * On `omp.tray`: it holds only finished work (nothing queued, running or failed). The host keeps a
+	 * quiet tray out of sight until the user asks for it.
+	 */
+	quiet?: boolean;
+	/** On `omp.tray.card`: what the card stands for. */
+	item?: TspTrayItem;
+	/** On `omp.tray.card` and `omp.tray.peek`: the item's id (an agent id, a job id, or `done`). */
+	ref?: string;
+	/** On `omp.tray.card`: the item's state. */
+	status?: TspTrayStatus;
+	/** On an agent's `omp.tray.card`: epoch ms of its last operation (its latest tool call start, or when it settled). */
+	acted?: number;
+	/** On `omp.tray.card`: `false` when its closer look would add nothing to its face (`tray.peek` on it is ignored). */
+	look?: boolean;
+}
+/** What an `omp.tray.card` stands for. */
+export type TspTrayItem = "agent" | "job" | "done";
+/** The state of an `omp.tray.card`. */
+export type TspTrayStatus = "queued" | "running" | "done" | "failed" | "stopped";
+/**
+ * The main agent on `omp.tray`: `idle` once it has yielded (no turn runs, or the run waits only on
+ * outside work); `waiting` while every call it executes only blocks on its agents or jobs (a `wait`,
+ * a `vibe_wait`, a `task` call running an agent inline), or its last calls were such and it has
+ * started nothing else since; `working` otherwise.
+ */
+export type TspTrayMain = "idle" | "working" | "waiting";
+export interface TspRowProps {
+	gap?: TspSpace;
+	align?: "start" | "center" | "baseline" | "end" | "stretch";
+	justify?: "start" | "between" | "end";
+	wrap?: boolean;
+	/** On `omp.tray.ev`: how the operation went, or `run` while it is in flight. */
+	state?: "ok" | "err" | "run";
+	/** On `omp.tray.done.item`: the finished agent's id. */
+	ref?: string;
+	/** On `omp.tray.done.item`: how the agent ended, which colors its dot. */
+	status?: "done" | "failed" | "stopped";
+}
+export interface TspCardProps {
+	/** Header content, inline. */
+	head?: TspText;
+	status?: TspCardStatus;
+	collapsible?: boolean;
+	collapsed?: boolean;
+	/** Body clamp while collapsed. */
+	preview?: TspPreview;
+	selected?: boolean;
+	inset?: boolean;
+	/** `bare`: no ring, fill or insets — a plain head row over the body, for grouped/compact presentations inside another frame. */
+	variant?: "bare";
+}
+export interface TspSectionProps {
+	head?: TspText;
+	collapsible?: boolean;
+	collapsed?: boolean;
+	/** A finished thinking section (`omp.thinking*`): how long it thought, in ms, like a tool card's `took`. */
+	took?: number;
+}
+export interface TspRuleProps {
+	label?: TspText;
+}
+export interface TspSpacerProps {
+	size?: TspSpace;
+}
+export interface TspTextProps {
+	text?: string;
+	spans?: readonly TspSpan[];
+	wrap?: TspWrap;
+	truncate?: TspTruncate;
+	lines?: number;
+	measure?: "prose" | "fill";
+}
+export interface TspMarkdownProps {
+	text?: string;
+	/** The tail is still arriving. */
+	stream?: boolean;
+	/** Literal runs drawn as these spans wherever they occur in prose (a sent prompt's chip tokens). */
+	marks?: readonly TspSpan[];
+}
+/** A comment drawn on a {@link TspDocProps} document, anchored to a quote of its source. */
+export interface TspDocComment {
+	/** The program's comment id; `comment`/`uncomment` events name it. */
+	id: string;
+	/** The commented source text. */
+	quote: string;
+	/** UTF-16 offset of the quote's first char in `text`; the first occurrence of `quote` when it doesn't match there. */
+	at?: number;
+	note: string;
+}
+/**
+ * A rich Markdown document the user reads, selects, edits in place (double-click, `edit`) and comments on
+ * (`comment`): edits arrive as `change` events with the full source, comments as `comment`/`uncomment`.
+ */
+export interface TspDocProps {
+	/** Markdown source in omp's dialect; the document's own current source is a no-op. */
+	text?: string;
+	/** Double-click enters in-place editing; Esc or a press outside leaves it. */
+	edit?: boolean;
+	/** A still, non-empty selection offers a Comment bubble. */
+	comment?: boolean;
+	comments?: readonly TspDocComment[];
+	/** Scroll heading number `heading` (0-based, document order, all levels) to the top; each new `n` scrolls again. */
+	jump?: { heading: number; n: number };
+}
+/** One marked line of a {@link TspCodeProps.marks}. */
+export interface TspCodeMark {
+	line: number;
+	tone?: TspTone;
+	heat?: number;
+	/**
+	 * Scores in [0, 1] washing the row on the `heat` ramp in place of `heat`'s wash: one flat, several a gradient across
+	 * the row, an evenly spaced stop per score from left to right. `heat` still sizes the line's overview bar.
+	 */
+	wash?: readonly number[];
+}
+/** A run of lines a {@link TspCodeProps} draws as one row until it is opened. */
+export interface TspCodeFold {
+	/** First and last folded line, in the gutter's numbering. */
+	from: number;
+	to: number;
+	/** The folded row's text, in the code's face (default `… [lines {from}-{to}]`, `… [line {from}]` for one line). */
+	label?: string;
+	/** What the fold hides, after a sparkline of its lines' mark `heat`. */
+	note?: TspText;
+	/** `error` tints the row; any tone colors the note. */
+	tone?: TspTone;
+	/** Drawn open; a click on the folded row (or on an open fold's head) toggles it in place. */
+	open?: boolean;
+	/** A card shown while the pointer rests on the folded row, as the common {@link TspCommonProps.hovercard}. */
+	hovercard?: TspPropNode;
+}
+export interface TspCodeProps {
+	text?: string;
+	/** The language of text that is no file's (`bash`, `json`); wins over `path`. */
+	lang?: string;
+	/** The file the text comes from: the terminal picks the grammar from it (and heads a block outside a tool card with it). */
+	path?: string;
+	/** The first line's number; later lines count up from it. */
+	start?: number;
+	/**
+	 * Each line's number (one per line of `text`, strictly ascending), for non-contiguous lines: replaces counting from
+	 * `start`, and a `…` gap row is drawn before every line whose number is not the previous one's + 1. Marks' `line` and
+	 * folds' `from`/`to` are in this numbering. Ignored (numbers count from `start`) when its length differs from the
+	 * text's line count or it is not strictly ascending.
+	 */
+	nums?: readonly number[];
+	numbers?: boolean;
+	/**
+	 * Marked lines (`line` is the drawn line number). `heat` in [0, 1] washes the row in a heat ramp, `wash` runs that
+	 * ramp across it; `tone` draws a bar, and any tone but `accent` also tints an unwashed row. A mark without `heat`
+	 * or `wash` has tone `accent` by default; one with only those draws no bar.
+	 */
+	marks?: readonly TspCodeMark[];
+	wrap?: boolean;
+	/** Clamp to the first `lines` drawn lines under a "N more lines" button; gives way inside an open disclosure. */
+	preview?: TspPreview;
+	/** Runs of lines drawn folded: sorted, not overlapping; marks inside apply once a fold is open. */
+	folds?: readonly TspCodeFold[];
+	/**
+	 * An overview strip above the lines: one bar per line (its height the mark's `heat`, its color the mark's tone),
+	 * a band under it over the lines outside folds, and a bracket over the lines in view. A click or drag on it
+	 * scrolls the code there.
+	 */
+	overview?: boolean;
+}
+export interface TspDiffHunk {
+	oldStart: number;
+	newStart: number;
+	lines: readonly string[];
+}
+export interface TspDiffProps {
+	/** Unified diff text (or give `hunks`). */
+	text?: string;
+	hunks?: readonly TspDiffHunk[];
+	/** The file the diff changes: the terminal picks the grammar from it. Not drawn. */
+	path?: string;
+	/** A language overriding the one `path` gives. */
+	lang?: string;
+	mode?: "unified" | "split" | "auto";
+	/** Long lines wrap inside their rows (absent: `true`); `false` keeps a line per row, scrolled sideways together. */
+	wrap?: boolean;
+}
+export interface TspAnsiProps {
+	/** Raw terminal output (SGR, OSC 8, `\r`, `\b` allowed). */
+	text?: string;
+	/** Keep the tail in view as text arrives. */
+	follow?: boolean;
+	preview?: TspPreview;
+	/** Wrap hint in cells. */
+	cols?: number;
+}
+export interface TspMathProps {
+	text?: string;
+	display?: boolean;
+}
+/** Images the terminal ships (`image.p.builtin`): `omp` is omp's gradient mark. */
+export type TspBuiltinImage = "omp";
+export interface TspImageProps {
+	/** Content address (sha256 hex) of a blob sent with verb `b`. */
+	blob?: string;
+	/** An image the terminal ships, drawn instead of any blob. */
+	builtin?: TspBuiltinImage;
+	alt?: string;
+	w?: number;
+	h?: number;
+	max?: { w?: TspExtent; h?: TspExtent };
+}
+/**
+ * A file the terminal loads by path and shows in its media viewer (pictures, SVG, 3D models,
+ * PDF/video/audio, else a card). Programs check `cx.supports("media")` first.
+ */
+export interface TspMediaProps {
+	/** The file: absolute, or relative to the pane's working directory. */
+	path: string;
+	/** Git revision to read instead of the disk file: a commit-ish (`HEAD`, a sha) or `:0` for the index. */
+	rev?: string;
+	/** `media` nodes of one surface sharing this name pan and zoom together (before/after compare). */
+	link?: string;
+	/** Size cap; the node otherwise fills its container. */
+	max?: { w?: TspExtent; h?: TspExtent };
+}
+/**
+ * A live web page shown inline (an `<iframe>` of a reply): passive until clicked, focused by a
+ * click, left with Escape, and replaced by a still of itself once idle. Programs check
+ * `cx.supports("web")` first.
+ */
+export interface TspWebProps {
+	/** The page: an `http(s)` or `file://` URL. */
+	url: string;
+	/** What the page is, until it reports its own title. */
+	title?: string;
+	/** Width as a CSS length (`"50%"`, `"400px"`, `"60vw"`, `"80ch"`, `"30em"`); default: the column's. */
+	w?: string;
+	/** Height as a CSS length; default: a 16:10 box of the width. */
+	h?: string;
+}
+export interface TspKvProps {
+	items: readonly { k: TspText; v: TspText }[];
+	layout?: "grid" | "inline";
+}
+export interface TspTableColumn {
+	id: string;
+	head?: TspText;
+	align?: "start" | "center" | "end";
+	truncate?: TspTruncate;
+	/** Lower priorities hide first when narrow. */
+	priority?: number;
+	grow?: number;
+}
+export interface TspTableProps {
+	cols: readonly TspTableColumn[];
+	rows: readonly { id: string; cells: Readonly<Record<string, TspText>> }[];
+}
+export interface TspTreeNode {
+	id: string;
+	label: TspText;
+	icon?: string;
+	open?: boolean;
+	children?: readonly TspTreeNode[];
+}
+export interface TspTreeProps {
+	nodes: readonly TspTreeNode[];
+}
+/**
+ * A raw JSON value the terminal draws as an interactive tree: small containers
+ * whole on one row, larger ones folded to a preview that expands on click.
+ * Folding is local to the terminal and sends no events.
+ */
+export interface TspJsonProps {
+	/** Any JSON value; absent reads as null. */
+	value: unknown;
+	/**
+	 * Levels of containers expanded below the top-level entries (default 0:
+	 * the root's entries listed, every container among them folded).
+	 */
+	open?: number;
+}
+export interface TspBadgeProps {
+	text: string;
+}
+export interface TspKbdProps {
+	keys: readonly string[];
+}
+export interface TspIconProps {
+	name: string;
+}
+export interface TspSpinnerProps {
+	style?: "dots" | "braille" | "starburst" | "orbit";
+	label?: TspText;
+}
+export interface TspShimmerProps {
+	text?: string;
+	spans?: readonly TspSpan[];
+	mode?: "classic" | "kitt";
+	palette?: { low?: string; mid?: string; high?: string };
+}
+export interface TspElapsedProps {
+	/** Milliseconds already elapsed when the frame was written. */
+	age: number;
+	/** Freeze at this many milliseconds. */
+	stopped?: number;
+	format?: "short" | "clock";
+}
+export interface TspProgressProps {
+	/** 0–1, or null for indeterminate. */
+	value: number | null;
+	label?: TspText;
+}
+export interface TspRateProps {
+	value: number;
+	unit?: string;
+}
+export interface TspListProps {
+	selected?: string | null;
+	filter?: string;
+	empty?: TspText;
+	max?: { lines: number } | number;
+	virtual?: boolean;
+}
+export interface TspItemProps {
+	label: TspText;
+	detail?: TspText;
+	icon?: string;
+	hint?: readonly string[];
+	disabled?: boolean;
+	value?: TspText;
+}
+/**
+ * One row of a {@link TspMenuProps} menu: `"-"` a separator, `{ header }` a dim section title, an action id
+ * (labeled from it), or an item sending its `id` as an `action` event's `act`.
+ */
+export type TspMenuItem =
+	| string
+	| { header: string }
+	| {
+			id: string;
+			label?: string;
+			icon?: string;
+			/** Shortcut keys drawn at the row's right (display only). */
+			keys?: string | readonly string[];
+			/** A second line under the label (a rich row). */
+			detail?: string;
+			/** A check row, checked while true. */
+			checked?: boolean;
+			/** A radio row of this group. */
+			radio?: string;
+			/** Dimmed, not choosable; a string is the reason. */
+			disabled?: boolean | string;
+			danger?: boolean;
+			/** A submenu; the row itself sends nothing. */
+			items?: readonly TspMenuItem[];
+	  };
+/**
+ * A button opening a dropdown of commands. Choosing a row sends `action` (`act` = the row's id, `checked` for
+ * check/radio rows); opening or closing it sends `toggle` with `open`. As the last child of a split
+ * {@link TspButtonsProps} group it draws as the split's menu part. Pointer-only: it never takes focus.
+ */
+export interface TspMenuProps {
+	items?: readonly TspMenuItem[];
+	/** The trigger's label; without `text` and `icon` the trigger is a square … button. */
+	text?: string;
+	icon?: string;
+	trigger?: "default" | "quiet" | "primary";
+	/** A chevron after the label. */
+	caret?: boolean;
+	size?: "sm" | "md";
+	variant?: "default" | "dense";
+	/** Whether the menu shows; a change wins over the user's local open/close. */
+	open?: boolean;
+	/** The highlighted row's id (the program's keyboard cursor). */
+	active?: string;
+	/** Which trigger edge the menu lines up with. */
+	align?: "start" | "end";
+	/** The trigger is dimmed and does not open; a string is the reason. */
+	disabled?: boolean | string;
+}
+/** `button` children drawn as one control: joined, an action with its menu part (`split`), or a toolbar well. */
+export interface TspButtonsProps {
+	variant?: "joined" | "split" | "toolbar";
+	/** The children's size, winning over their own. */
+	size?: "sm" | "md";
+	/** Accessible name of the group. */
+	label?: string;
+}
+export interface TspTabsProps {
+	items: readonly { id: string; label: TspText }[];
+	active?: string;
+	/** `underline` (default): an accent underline under the active tab; `segmented`: a well with a raised thumb. */
+	variant?: "underline" | "segmented";
+}
+/**
+ * A push button. A click sends an `action` event with `actions.click` (else
+ * `click`); a disabled or busy button sends nothing. It never takes focus.
+ */
+export interface TspButtonProps {
+	/** Label; empty with an `icon` draws an icon-only button (give it a `title` or `aria`). */
+	text?: string;
+	/** Leading icon name. */
+	icon?: string;
+	/** Keycaps drawn after the label (the key names of `kbd`); display only. */
+	keys?: readonly string[];
+	variant?: "default" | "primary" | "quiet" | "danger";
+	/** `md` 28px (bars, heads, forms), `sm` 22px (inline, rows). */
+	size?: "sm" | "md";
+	/** A pressed toggle. */
+	on?: boolean;
+	/** Dimmed and inert; a string is the reason, shown as the tooltip. */
+	disabled?: boolean | string;
+	/** A spinner in the icon's place; inert. */
+	busy?: boolean;
+}
+export interface TspEditorDecoration {
+	from: number;
+	to: number;
+	s: string;
+	fx?: TspEffect;
+	/** An image blob the range stands for (an attachment token): copying the range copies the image. */
+	blob?: string;
+}
+export interface TspEditorProps {
+	text?: string;
+	/** Caret as a UTF-16 offset into `text`. */
+	cursor?: number;
+	/** Selection anchor, or null for none. */
+	anchor?: number | null;
+	decor?: readonly TspEditorDecoration[];
+	/** Inline completion suffix drawn after the caret. */
+	ghost?: string;
+	/** Dim text while `text` is empty; spans style it (`em` for italics). */
+	placeholder?: TspText;
+	prompt?: TspText;
+	/** Mode label (vim). */
+	mode?: string;
+	/** The text is code in this language (`python`, `bash`): highlighted, in the mono face. */
+	lang?: string;
+	readonly?: boolean;
+	/** Ready to accept an atomic `send` when advertised in `hello.features`.
+	 *  Independent of text editability or keyboard focus; absent or false is not ready. */
+	sendable?: boolean;
+	maxLines?: number;
+	/** The program cannot read input yet: while the field has the focus, the terminal keeps
+	 *  what is typed into it, draws it at the caret, and sends it once this clears. */
+	typeahead?: boolean;
+}
+export type TspInputProps = Omit<TspEditorProps, "maxLines">;
+export interface TspStatusProps {
+	transparent?: boolean;
+}
+export interface TspSegProps {
+	spans?: readonly TspSpan[];
+	icon?: string;
+	/** Higher priorities stay longer when space runs out. */
+	priority?: number;
+	min?: { w?: TspExtent; h?: TspExtent };
+	/** Which side of the status bar the segment sits on. */
+	side?: "left" | "right";
+}
+export type TspOverlayAnchor =
+	| "center"
+	| "top"
+	| "bottom"
+	| { node: string; side: "above" | "below" }
+	| { caret: string };
+export interface TspOverlayProps {
+	anchor?: TspOverlayAnchor;
+	size?: "sm" | "md" | "lg" | "full";
+	modal?: boolean;
+	head?: TspText;
+}
+export interface TspToastProps {
+	text: string;
+	sub?: string;
+	ttl?: number;
+	/** A button after the text (Undo): clicking it takes the toast down and sends this action for the node. */
+	action?: TspAction;
+	/** The button's text; defaults to the action's name labeled (`undo` → Undo). */
+	label?: string;
+}
+export interface TspRowsProps {
+	/** Width the rows were rendered at. */
+	cols: number;
+	/** Pre-rendered ANSI rows (migration fallback only). */
+	lines: readonly string[];
+}
+
+// ─── Data-first kinds (crates/tern/NATIVE_REDESIGN.md §3–§5) ─────────────
+
+/** One selectable picker row. Every field but `id` and `label` is optional. */
+export interface TspPickerItem {
+	id: string;
+	label: TspText;
+	/** Second line (`cards`) or trailing dim text (`rows`). */
+	detail?: TspText;
+	/** Leading visual: a named icon, a provider/avatar mark, or a status dot. */
+	icon?: string;
+	mark?: TspPickerMark;
+	dot?: TspTone;
+	/** Label is a machine string (model id, path): mono, dim prefix and strong tail by the `/`. */
+	mono?: boolean;
+	/** Values for `columns`, by column id. `bar` columns take a number 0–1. */
+	facts?: Readonly<Record<string, TspText | number>>;
+	badges?: readonly { text: string; tone?: TspTone; title?: string }[];
+	/** Role-style chips after the label (`dot` = a thinking-level or state colour token). */
+	chips?: readonly { text: string; on?: boolean; auto?: boolean; dot?: string }[];
+	tone?: TspTone;
+	/** Disabled, with the reason as tooltip. */
+	disabled?: string | true;
+	/** Search hits in the label as UTF-16 [from, to) ranges. */
+	hits?: readonly (readonly [number, number])[];
+	/** `timeline`: node style; `tree`: nesting. */
+	node?: "user" | "assistant" | "tool" | "marker";
+	depth?: number;
+	open?: boolean;
+	/** Leading glyph slot for tree/timeline rows (omp role → icon, e.g. `omp.tool.grep`). */
+	role?: string;
+	title?: string;
+}
+
+/**
+ * A picker avatar: the `icon` when the terminal has it (`provider:<id>` names a
+ * model provider's logo by its id), else up to two initials of `text` on a
+ * gradient picked by `seed` (default `text`).
+ */
+export interface TspPickerMark {
+	text: string;
+	seed?: string;
+	icon?: string;
+}
+
+/** A right-aligned fact column in a picker. */
+export interface TspPickerColumn {
+	id: string;
+	head?: string;
+	/** `elapsed`: the value is an age in ms at send; Tern clocks it. */
+	format?: "text" | "num" | "price" | "bar" | "time" | "elapsed" | "dim";
+	/** Lower priorities hide first when narrow. */
+	priority?: number;
+	/** Minimum width in ch. */
+	min?: number;
+}
+
+/** A row of a picker's scope column. */
+export interface TspPickerScope {
+	id: string;
+	label: TspText;
+	icon?: string;
+	mark?: TspPickerMark;
+	count?: number;
+	/** Group heading this scope sits under (consecutive scopes with the same group share a head). */
+	group?: string;
+	disabled?: string | true;
+	/** Status dot: `success` ok, `warning` cached/empty, `error` unavailable, `muted` signed out. */
+	dot?: TspTone;
+}
+
+/** A button of a picker's action bar. */
+export interface TspPickerAction {
+	/** Sent back as `action.act`. */
+	id: string;
+	label: string;
+	/** Keycap(s) the program binds to it, shown in the button (`["enter"]`, `["alt","enter"]`). */
+	keys?: readonly string[];
+	primary?: boolean;
+	danger?: boolean;
+	/** Right-aligned group (close, help). */
+	end?: boolean;
+	/** A toggle's state (`Task model ⌥P`): drawn pressed when true. */
+	on?: boolean;
+	/** Drawn in the head as an icon-only button before its esc keycap (`icon`, else the label's initial), its label and keys as tooltip; `on` tints it. */
+	head?: boolean;
+	/** A head action's icon name. */
+	icon?: string;
+	disabled?: string | true;
+}
+
+/** A picker's stepped slider. */
+export interface TspPickerLevel {
+	/** What it sets ("Thinking"): shown, or with `icon` its tooltip and accessible name. */
+	label: string;
+	/** An icon drawn in place of the label. */
+	icon?: string;
+	/** A dim note after the value in its chip (the model switcher: the highlighted model's provider). */
+	detail?: string;
+	/** Its steps, low to high: the terminal heats the track up the ladder (color, then motion). */
+	steps: readonly { id: string; label: string }[];
+	/** The current step's id. */
+	value: string;
+	/** The keys the program binds to step it, shown in its tooltip (`["alt", "left", "right"]`). */
+	keys?: readonly string[];
+	/** Drawn but frozen, the reason as its tooltip. */
+	disabled?: string | true;
+}
+
+/** A group header inside a picker's `order`. */
+export interface TspPickerGroup {
+	group: string;
+	label: TspText;
+	count?: number;
+}
+
+/**
+ * A data-first picker sheet (models, sessions, rewind, …). Children are the
+ * selected item's preview. A picker under `layer` is itself the modal sheet.
+ */
+export interface TspPickerProps {
+	/**
+	 * What is being picked, e.g. "Models" (plain: it is also the common `title` prop, which a picker does not use as a
+	 * tooltip). Absent: the head is the icon and the search, and the placeholder names the sheet.
+	 */
+	title?: string;
+	subtitle?: TspText;
+	icon?: string;
+	/** Plural noun for counts and empty copy ("models", "sessions"). */
+	noun?: string;
+	size?: "md" | "lg" | "screen";
+	/**
+	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
+	 * (its `composerPart: "composer"` column), left edges aligned — a drop-up for a picker acting on the draft, such as
+	 * the model switcher. Placed as if absent while no composer is drawn, and on a phone.
+	 */
+	anchor?: "composer";
+	/**
+	 * Where the search sits: the head (default), or `"list"`: no head row, the query leading the column heads' row
+	 * (count and esc gone), head actions atop a `rail`. Ignored on a phone.
+	 */
+	search?: "head" | "list";
+	/** How tall rows run: regular (default), or `"snug"`: 30px rows and 26px group headers, the chrome tightened to match. Ignored on a phone. */
+	density?: "regular" | "snug";
+	layout?: "rows" | "cards" | "timeline" | "tree";
+	/** The program's search text (keys stay the program's); `null` hides the field. */
+	query?: string | null;
+	/** Caret as a UTF-16 offset into `query`; absent puts it at the end. */
+	cursor?: number;
+	placeholder?: string;
+	scopes?: readonly TspPickerScope[];
+	scope?: string;
+	/** How `scopes` draw: a labeled column (default), or `"rail"`: icons only, label and count as the tooltip, kept on narrow sheets. A `group` change draws a separator. */
+	scopeStyle?: "column" | "rail";
+	tabs?: readonly { id: string; label: TspText; count?: number }[];
+	tab?: string;
+	columns?: readonly TspPickerColumn[];
+	/** The catalogue, sent once and patched by id through `itemsAdd`/`itemsDel`. */
+	items?: readonly TspPickerItem[];
+	/** Upserts applied to `items`. */
+	itemsAdd?: readonly TspPickerItem[];
+	/** Removals applied to `items`. */
+	itemsDel?: readonly string[];
+	/** What to show, in order, after the program's filtering: item ids and group headers. Absent = `items` order. */
+	order?: readonly (string | TspPickerGroup)[];
+	/** Hit ranges per item id for the current query (kept apart so `items` never changes while typing). */
+	hits?: Readonly<Record<string, readonly (readonly [number, number])[]>>;
+	selected?: string | null;
+	/** Items in use now (current model, current session). */
+	current?: readonly string[];
+	/** Total before filtering, for the head count ("12 of 1,604"). */
+	total?: number;
+	preview?: "side" | "below" | "none";
+	actions?: readonly TspPickerAction[];
+	/** A chip strip docked above the action bar (the model hub's role assignment). */
+	strip?: {
+		label?: TspText;
+		items: readonly { id: string; label: TspText; on?: boolean; dot?: string }[];
+		selected?: string;
+	} | null;
+	/** A stepped slider docked above the action bar (the model switcher's thinking effort). A press or drag ending on another step sends `action {act:"level", value: <step id>}`. */
+	level?: TspPickerLevel | null;
+	state?: "ready" | "loading" | "error";
+	message?: TspText;
+	empty?: TspText;
+	confirm?: { text: TspText; act: string; label?: string } | null;
+	/** Which region owns the keyboard now: the terminal draws the focus ring there. */
+	focus?: "list" | "scopes" | "tabs" | "strip" | "preview";
+}
+
+/** A settings row's typed control. */
+export type TspPrefsControl =
+	| { k: "switch"; on: boolean }
+	| {
+			k: "choice";
+			value: string;
+			options: readonly { value: string; label: string; detail?: string }[];
+			style?: "auto" | "segmented" | "menu";
+			mono?: boolean;
+	  }
+	| {
+			k: "number";
+			value: number;
+			min?: number;
+			max?: number;
+			step?: number;
+			unit?: string;
+			labels?: Readonly<Record<string, string>>;
+	  }
+	| { k: "text"; value: string; placeholder?: string; secret?: boolean; mono?: boolean }
+	| { k: "keys"; keys: readonly (readonly string[])[] }
+	| {
+			k: "multi";
+			values: readonly string[];
+			options: readonly { value: string; label: string; detail?: string }[];
+			ordered?: boolean;
+	  }
+	| { k: "action"; label: string; act: string };
+
+/** One settings row. */
+export interface TspPrefsRow {
+	/** The setting path (`theme.dark`); sent back as `item`. */
+	id: string;
+	label: string;
+	hint?: string;
+	warning?: string;
+	/** Differs from the default. */
+	changed?: boolean;
+	/** Default shown in the changed dot's title. */
+	defaultLabel?: string;
+	disabled?: string;
+	control: TspPrefsControl;
+}
+
+/** A titled group of settings rows. */
+export interface TspPrefsSection {
+	id: string;
+	title: string;
+	/** Search results: the page this section belongs to. */
+	page?: string;
+	rows: readonly TspPrefsRow[];
+}
+
+/** A data-first settings page set (the terminal draws a native settings window). Children are previews placed by `role`. */
+export interface TspPrefsProps {
+	title: string;
+	pages: readonly {
+		id: string;
+		label: string;
+		icon?: string;
+		changed?: number;
+		group?: string;
+		disabled?: string;
+	}[];
+	page: string;
+	/** Lead text of the current page. */
+	lead?: string;
+	/** The program's search text; non-empty switches the page to search results. */
+	query?: string;
+	/** Caret as a UTF-16 offset into `query` while the program's search field has it; absent: no caret. */
+	cursor?: number;
+	sections: readonly TspPrefsSection[];
+	/** Row with keyboard focus (the program's selection). */
+	focus?: string | null;
+	/** Row whose control the program has open for editing, with its draft (and its caret, a UTF-16 offset) for text rows. */
+	editing?: { row: string; draft?: string; cursor?: number; option?: string } | null;
+}
+
+/**
+ * One tool call (NATIVE_REDESIGN §7.2): data for the head plus generic
+ * children for the body. The terminal draws the head, the single frame (or
+ * none) and the status motion, and flattens nested `card`/`tool` children
+ * into borderless sections.
+ */
+export interface TspToolProps {
+	/** Tool name (`bash`, `edit`, `mcp__github__search`): icon, role styles. */
+	name: string;
+	/** The verb as users read it ("Bash", "Edit", "Read"; eval uses the model's title). */
+	title: TspText;
+	/** The primary argument, shown once: command, path, pattern, query. Mono. */
+	target?: TspText;
+	/** How to draw `target`: a shell command (highlighted), a path (dim dir, strong name), a pattern/query (quoted accent-ink). */
+	targetKind?: "command" | "path" | "pattern" | "query" | "text";
+	/** Language for `command` highlighting (`bash`, `python`, `js`). */
+	lang?: string;
+	/** The raw command line the head's Copy command button copies; a `command` target sets it implicitly. */
+	command?: string;
+	/** `file://` link for path targets (⌘-click opens). */
+	href?: string;
+	/** Short facts after the target: `+8 −1`, `5 matches · 2 files`, `22 lines`. */
+	meta?: readonly TspText[];
+	/** Badges in the head (`you`, `background`, `new file`, `python`). */
+	badges?: readonly { text: string; tone?: TspTone; title?: string }[];
+	status: TspCardStatus;
+	/** Running: ms already elapsed when sent. Done: total duration. */
+	age?: number;
+	took?: number;
+	/** Non-zero exit renders as an error chip `exit 1`. */
+	exit?: number | null;
+	/** A one-word state note: "timed out", "cancelled", "partial". */
+	note?: TspText;
+	/** The model's intent line (`i` arg): shown in the working row while running, as the head's tooltip after. */
+	intent?: string;
+	/** `card`: one frame. `inline`: no ring, a head line plus a disclosed body. */
+	frame?: "card" | "inline";
+	collapsible?: boolean;
+	collapsed?: boolean;
+	/**
+	 * Body clamp while collapsed: `{lines}` shows the head of the body, `{tail}` the end (bash output).
+	 * `children`: the collapsed body stays whole and the children's own previews (`ansi`, `code`) clamp instead.
+	 */
+	preview?: { lines: number } | { tail: number } | "none" | "children";
+	/** Actions offered in the head on hover (`copy`, `rerun`, `open`). */
+	tools?: readonly TspPickerAction[];
+}
+
+/** One checklist item (§7.5). */
+export interface TspChecklistItem {
+	id: string;
+	text: TspText;
+	status: "pending" | "active" | "done" | "dropped" | "blocked";
+	/** Blocker or note, shown under the item in `--t3` (blocked: `--warn`). */
+	note?: TspText;
+}
+/** A checklist phase (§7.5). */
+export interface TspChecklistPhase {
+	id: string;
+	title: TspText;
+	items: readonly TspChecklistItem[];
+	/** Completed phases fold to one line unless expanded. */
+	collapsed?: boolean;
+}
+/** A todo list: the todo tool body, the dock HUD, or the reminder notice (§7.5). */
+export interface TspChecklistProps {
+	phases: readonly TspChecklistPhase[];
+	/** `full` (the todo tool body), `hud` (dock pill + popover), `reminder` (inline notice listing open items). */
+	mode?: "full" | "hud" | "reminder";
+	/** Reminder count text ("reminder 1/3"). */
+	note?: TspText;
+}
+
+/** One subagent as live data (§7.6). Children are the expanded content. */
+export interface TspAgentProps {
+	/** Display id ("SeqAudit"). */
+	name: string;
+	/** Agent type ("task", "explore") as a badge. */
+	agent?: string;
+	/** One-line task description (the assignment summary, never the raw "Complete assignment thoroughly:" prefix). */
+	task?: TspText;
+	status: "pending" | "running" | "done" | "failed" | "aborted" | "idle" | "parked";
+	model?: string;
+	/** Thinking level token (`thinkingLow`) for the model chip's dot. */
+	thinking?: string;
+	/** The tool running now, with its intent and age. */
+	tool?: { name: string; intent?: TspText; age?: number } | null;
+	stats?: {
+		tools?: number;
+		requests?: number;
+		tokens?: number;
+		context?: number;
+		contextLabel?: string;
+		/** The agent's own completion estimate, 0–1; drawn while running. */
+		done?: number;
+		cost?: number;
+		age?: number;
+		took?: number;
+	};
+	retry?: { attempt: number; max: number; age: number; delay: number; error?: string } | null;
+	/** `background`, `read-only`, `isolated`. */
+	badges?: readonly { text: string; tone?: TspTone }[];
+	/** Nesting depth in a tree of agents. */
+	depth?: number;
+	collapsible?: boolean;
+	collapsed?: boolean;
+}
+
+/**
+ * A thinking-effort glyph: a small ring that fills rung by rung with the level and
+ * turns into a flickering fireball at `max`. Leaf; the terminal draws everything.
+ */
+export interface TspEffortProps {
+	/** `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; anything else (e.g. `auto`) draws an empty dashed ring. */
+	level: string;
+}
+
+/**
+ * A tick on a meter's track (compaction threshold, speculation point). A bar mark's `icon`
+ * (a symbol name, e.g. `context.compaction`) sits on the track, which breaks for it.
+ */
+export interface TspMeterMark {
+	/** Position, 0–1. */
+	at: number;
+	tone?: TspTone;
+	title?: string;
+	icon?: string;
+}
+
+/** A value drawn as a bar, ring or block grid (§8.2): context %, usage windows, agent context. */
+export interface TspMeterProps {
+	/** 0–1, or null for unknown. */
+	value: number | null;
+	style?: "bar" | "ring" | "blocks";
+	/** `blocks` only: exactly this many cells in one row, `round(value × steps)` of them filled (e.g. the effort chip's fallback meter). */
+	steps?: number;
+	/** Stacked parts instead of one fill (context breakdown); values sum to ≤ 1. */
+	parts?: readonly { value: number; token?: string; label?: string; hatch?: boolean }[];
+	marks?: readonly TspMeterMark[];
+	/** Tone switches: at or above `warn` → warning, `bad` → error. */
+	thresholds?: { warn?: number; bad?: number };
+	/** The value as text (`74%`). */
+	label?: TspText;
+	/** The whole the track spans as text (a context window's `200K`). */
+	total?: TspText;
+	size?: "sm" | "md" | "lg";
+}
+/** A horizontal reference line across a bars/spark chart (a target, a baseline). */
+export interface TspChartMark {
+	/** Position in the series' value units. */
+	value: number;
+	tone?: TspTone;
+	/** Tooltip of the line (`target 200 tok/s`). */
+	title?: string;
+}
+
+/** Series data drawn natively: the usage heatmap, app dashboards (§9.2). */
+export interface TspChartProps {
+	kind: "heatmap" | "bars" | "spark";
+	/** heatmap: rows × columns of 0–1 intensities (null = no data). */
+	cells?: readonly (readonly (number | null)[])[];
+	/** Column labels placed at column indexes (months). */
+	cols?: readonly { at: number; label: string }[];
+	/** Row labels (weekdays); empty strings skip a label. */
+	rows?: readonly string[];
+	/** Per-cell tooltips, same shape as `cells` (omit for none). */
+	tips?: readonly (readonly (string | null)[])[];
+	/** bars/spark: one series; `tone` fills that one column instead of `token`. */
+	series?: readonly { label?: string; value: number; title?: string; tone?: TspTone }[];
+	/**
+	 * bars/spark: fixed value domain. Without them the low end is 0 and the
+	 * high end the largest series or mark value.
+	 */
+	min?: number;
+	max?: number;
+	/** bars/spark: dashed horizontal reference lines, in value units. */
+	marks?: readonly TspChartMark[];
+	/** Colour token of the fill (`accent`, `statusLineCost`). */
+	token?: string;
+	summary?: TspText;
+	/** Pixel-free size hint: cell size step for heatmaps, height in lines for bars/spark. */
+	size?: "sm" | "md" | "lg";
+}
+
+/** Engine-produced shell presentation; hosts render rows and forward controls, never syntax or history. */
+export interface TspShellProps {
+	/** Canonical semantic presentation, shared with the ANSI inspector. */
+	presentation: ShellVizPresentation;
+	/** Show replay controls only in the explicitly opened inspector. */
+	inspector?: boolean;
+	/** Changed only by explicit seek/reset/live-mode transitions, clearing native highlight trails. */
+	replayEpoch?: number;
+	/** This mounted call received a real execution-start event, not a settled historical load. */
+	liveOrigin?: boolean;
+	/** The command text is still streaming in: the host marks its write head and the preview follows it. */
+	stream?: boolean;
+	/** Working directory shown ahead of the script when it differs from the project's. */
+	cwd?: string;
+	lang?: "bash" | "zsh";
+	/**
+	 * Clamp the command to `lines` drawn lines under an Expand button, the window following the write head
+	 * (`stream`), then the playhead, with the enclosing scope heads pinned; gives way inside an open
+	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first visible line.
+	 */
+	preview?: { lines: number };
+	/**
+	 * Step mode: every segment with an execution node (`executionNode ?? node ?? row.node`) is a click target
+	 * (pointer, `role=button`, Enter/Space) sending the `shell-viz` action `select:<executionNode>`; hovering one
+	 * highlights every segment of that step. Chips with `expanded` keep sending `expand:<node>` only. No details
+	 * panel and no gutter Inspect command button; effect chips and annotations keep their text as a tooltip.
+	 */
+	steps?: boolean;
+	/**
+	 * Execution-node keys of the step whose output the host shows now: every segment drawn under one of them is
+	 * marked focused, re-applied whenever this changes even when the rows did not.
+	 */
+	focus?: readonly string[];
+}
+
+/** Kind-specific props, indexed by kind. */
+export interface TspPropsByKind {
+	col: TspColProps;
+	row: TspRowProps;
+	card: TspCardProps;
+	section: TspSectionProps;
+	rule: TspRuleProps;
+	spacer: TspSpacerProps;
+	text: TspTextProps;
+	md: TspMarkdownProps;
+	code: TspCodeProps;
+	diff: TspDiffProps;
+	ansi: TspAnsiProps;
+	math: TspMathProps;
+	image: TspImageProps;
+	media: TspMediaProps;
+	web: TspWebProps;
+	kv: TspKvProps;
+	table: TspTableProps;
+	tree: TspTreeProps;
+	json: TspJsonProps;
+	badge: TspBadgeProps;
+	kbd: TspKbdProps;
+	icon: TspIconProps;
+	spinner: TspSpinnerProps;
+	shimmer: TspShimmerProps;
+	elapsed: TspElapsedProps;
+	progress: TspProgressProps;
+	rate: TspRateProps;
+	list: TspListProps;
+	item: TspItemProps;
+	tabs: TspTabsProps;
+	editor: TspEditorProps;
+	input: TspInputProps;
+	button: TspButtonProps;
+	buttons: TspButtonsProps;
+	menu: TspMenuProps;
+	doc: TspDocProps;
+	status: TspStatusProps;
+	seg: TspSegProps;
+	overlay: TspOverlayProps;
+	toast: TspToastProps;
+	rows: TspRowsProps;
+	picker: TspPickerProps;
+	prefs: TspPrefsProps;
+	tool: TspToolProps;
+	checklist: TspChecklistProps;
+	agent: TspAgentProps;
+	chart: TspChartProps;
+	meter: TspMeterProps;
+	effort: TspEffortProps;
+	shell: TspShellProps;
+}
+
+/**
+ * Props of a node of kind `K`: its kind-specific props plus the common ones.
+ * A chart's numeric `min`/`max` (its value domain) take the place of the
+ * common layout `min`/`max` extents.
+ */
+export type TspProps<K extends TspKind = TspKind> = [K] extends ["chart"]
+	? TspChartProps & Omit<TspCommonProps, "min" | "max">
+	: TspPropsByKind[K] & TspCommonProps;
+
+/**
+ * A node tree carried inside a prop (a {@link TspCommonProps.hovercard}): a
+ * wire node without ids, mounted by the terminal on demand. `key` is ignored.
+ */
+export type TspPropNode = {
+	[K in TspKind]: { k: K; p?: TspProps<K>; c?: readonly TspPropNode[]; key?: string };
+}[TspKind];
+
+/** Kinds whose primary text the `text` and `splice` ops address (the `text` prop). */
+export const TSP_TEXT_KINDS = ["text", "md", "code", "ansi", "math", "editor", "input", "shimmer", "doc"] as const;
+
+/** A node on the wire. */
+export type TspNode = {
+	[K in TspKind]: { id: string; k: K; p?: TspProps<K>; c?: readonly TspNode[] };
+}[TspKind];
+
+/** Fixed ids of a surface's three regions. */
+export const TSP_REGION_IDS = { main: "main", dock: "dock", layer: "layer" } as const;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Ops and messages
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type TspOp =
+	| readonly [op: "add", id: string, parent: string, before: string | null, node: TspNode]
+	| readonly [op: "set", id: string, props: Readonly<Record<string, unknown>>]
+	| readonly [op: "text", id: string, mode: "append" | "replace", text: string]
+	| readonly [op: "splice", id: string, at: number, del: number, text: string]
+	| readonly [op: "move", id: string, parent: string, before: string | null]
+	| readonly [op: "del", id: string]
+	| readonly [op: "settle", id: string]
+	| readonly [op: "focus", id: string | null]
+	| readonly [op: "reveal", id: string, where: "start" | "end" | "nearest"]
+	| readonly [op: "scroll", id: string, by: TspScrollBy]
+	| readonly [op: "suspend"]
+	| readonly [op: "resume"];
+
+/**
+ * How far a `scroll` op moves the scroller holding a node: a line, a
+ * viewport less a line, or to an end (`end` makes a following `ansi` block
+ * follow again). Sent only when `hello.features` lists `scroll`.
+ */
+export type TspScrollBy = "line-up" | "line-down" | "page-up" | "page-down" | "start" | "end";
+
+/** Verb `f`: an atomic batch of ops for one surface. */
+export interface TspFrame {
+	/** Surface id. */
+	sf: string;
+	/** Monotonic per-surface sequence number. */
+	s: number;
+	ops: readonly TspOp[];
+}
+
+/** Verb `o`: open (or adopt) a surface. */
+export interface TspOpen {
+	id: string;
+	mode: "inline" | "screen";
+	title?: string;
+	role?: string;
+	adopt?: boolean;
+}
+
+/** Verb `x`: close a surface. */
+export interface TspClose {
+	id: string;
+	/** Keep `main` in scrollback (true) or remove the surface (false). */
+	keep: boolean;
+}
+
+/** Verb `q`. */
+export type TspQuery =
+	| { q: "hello"; v: readonly number[]; app: string; ver?: string; features?: readonly string[] }
+	| { q: "blobs"; ids: readonly string[] };
+
+/** Verb `r`. */
+export type TspReply =
+	| {
+			r: "hello";
+			v: number;
+			term: string;
+			ver?: string;
+			kinds: readonly string[];
+			features?: readonly string[];
+			apc?: number;
+			credits?: number;
+			cols?: number;
+			cell?: { w: number; h: number };
+			dark?: boolean;
+			reduceMotion?: boolean;
+			/** The user's system reads a 12-hour clock (`false`: 24-hour); absent from older terminals. */
+			hour12?: boolean;
+	  }
+	| { r: "blobs"; have: readonly string[] };
+
+/** Verb `e`: terminal → program events. */
+export type TspEvent =
+	| { ev: "ack"; sf: string; s: number }
+	| { ev: "resize"; sf?: string; cols: number; cell?: { w: number; h: number }; visible?: boolean }
+	| { ev: "theme"; dark: boolean }
+	| { ev: "motion"; reduce: boolean }
+	/** The terminal's features changed (a setting: Tern's Agents tray drops `tray`); the list replaces `hello.features`. */
+	| { ev: "features"; features: readonly string[] }
+	| { ev: "visible"; sf?: string; visible: boolean }
+	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
+	| { ev: "select"; sf: string; id: string; item: string }
+	| { ev: "activate"; sf: string; id: string; item: string }
+	/** A click action; a `menu` check or radio row adds its new `checked` state. */
+	| {
+			ev: "action";
+			sf: string;
+			id: string;
+			act: string;
+			value?: string;
+			mods?: readonly string[];
+			checked?: boolean;
+	  }
+	/** A typed value changed by pointer (prefs rows, picker toggles); `null` resets to the default. */
+	| {
+			ev: "change";
+			sf: string;
+			id: string;
+			item: string;
+			value: boolean | number | string | readonly string[] | null;
+	  }
+	/** The user edited a `doc` (~300 ms after typing pauses, and when editing ends): `text` is its full new source. */
+	| { ev: "change"; sf: string; id: string; text: string }
+	/**
+	 * A comment on a `doc`: a new one on `quote` (`at` its UTF-16 offset in the source the user saw), or the
+	 * edited `note` of existing comment `comment`.
+	 */
+	| { ev: "comment"; sf: string; id: string; quote: string; at: number; note: string }
+	| { ev: "comment"; sf: string; id: string; comment: string; note: string }
+	/** Comment `comment` of a `doc` deleted. */
+	| { ev: "uncomment"; sf: string; id: string; comment: string }
+	/** In-place editing of a `doc` started (`on`) or ended. */
+	| { ev: "editing"; sf: string; id: string; on: boolean }
+	/**
+	 * An edit over the terminal's selection in an `editor`/`input` node: replace
+	 * `[from, to)` with `text`, caret to `cursor` (UTF-16 offsets; `len` is the
+	 * text length the terminal saw, a mismatch makes the edit stale).
+	 */
+	| { ev: "edit"; sf: string; id: string; from: number; to: number; text: string; cursor: number; len: number }
+	/**
+	 * Undo the last change to the text of `editor`/`input` node `id` through the
+	 * program's own undo history (an applied `edit` is one unit, as typing is); a
+	 * no-op when there is nothing to undo. Sent only when `hello` lists `"undo"`.
+	 */
+	| { ev: "undo"; sf: string; id: string }
+	/**
+	 * Submit `text` as one prompt through the addressed composer's ordinary
+	 * submission path, without paste or keyboard simulation. Sent only when
+	 * the program's `hello.features` includes `"send"` and `sf`/`id` identify
+	 * a live editable composer whose `sendable` is exactly true. Writable text
+	 * or keyboard focus alone does not imply submission readiness. Blank text is
+	 * a no-op; an existing draft is retained for local recall, not appended to
+	 * the supplied prompt.
+	 */
+	| { ev: "send"; sf: string; id: string; text: string }
+	/**
+	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
+	 * a `prefs` sheet while the focus is outside it): the program moves its
+	 * keyboard focus there, or ignores it (a modal overlay keeps the keys).
+	 */
+	| { ev: "focus"; sf: string; id: string }
+	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
+	| { ev: "gone"; sf?: string; ids: readonly string[] };

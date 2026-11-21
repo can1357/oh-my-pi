@@ -1,26 +1,24 @@
+import { type UpdateNotesDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { updateNotesToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import { type } from "@oh-my-pi/omptype";
-import { Text } from "@oh-my-pi/pi-tui";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+
 import type { ToolDefinition } from "../../extensibility/extensions";
-import type { Theme } from "../../modes/theme/theme";
-import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
-import * as git from "../../utils/git";
+
 import { buildExperimentState } from "../state";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
 
 const updateNotesSchema = type({
-	body: type("string").describe("replacement notes body"),
+	"body?": type("string").describe("replacement notes body"),
 	"append_idea?": type("string").describe("append as bullet under Ideas instead of replacing body"),
 });
-
-interface UpdateNotesDetails {
-	notes: string;
-}
 
 export function createUpdateNotesTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof updateNotesSchema, UpdateNotesDetails> {
 	return {
+		...updateNotesToolRenderer,
 		name: "update_notes",
 		label: "Update Notes",
 		description:
@@ -29,7 +27,7 @@ export function createUpdateNotesTool(
 		defaultInactive: true,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const storage = await openAutoresearchStorageIfExists(ctx.cwd);
-			const currentBranch = (await git.branch.current(ctx.cwd)) ?? null;
+			const currentBranch = (await vcs.git(ctx.cwd)?.currentBranch()) ?? null;
 			const session = storage?.getActiveSessionForBranch(currentBranch) ?? null;
 			if (!storage || !session) {
 				return {
@@ -42,10 +40,18 @@ export function createUpdateNotesTool(
 				};
 			}
 
-			const nextNotes =
-				params.append_idea !== undefined && params.append_idea.trim().length > 0
-					? appendIdea(session.notes, params.append_idea.trim())
-					: params.body;
+			const trimmedIdea = params.append_idea?.trim() ?? "";
+			const nextNotes = trimmedIdea.length > 0 ? appendIdea(session.notes, trimmedIdea) : params.body;
+			if (nextNotes === undefined) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: pass `body` to replace notes or `append_idea` to add an idea.",
+						},
+					],
+				};
+			}
 
 			storage.updateSession(session.id, { notes: nextNotes });
 			const refreshed = storage.getSessionById(session.id);
@@ -61,25 +67,13 @@ export function createUpdateNotesTool(
 					{
 						type: "text",
 						text:
-							params.append_idea !== undefined
+							trimmedIdea.length > 0
 								? `Appended idea (${nextNotes.length} chars total).`
 								: `Notes updated (${nextNotes.length} chars).`,
 					},
 				],
 				details: { notes: nextNotes },
 			};
-		},
-		renderCall(args, _options, theme): Text {
-			const preview = args.append_idea ?? args.body.slice(0, 100);
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("update_notes"))} ${theme.fg("muted", truncateToWidth(replaceTabs(preview), 100))}`,
-				0,
-				0,
-			);
-		},
-		renderResult(result, _options, theme: Theme): Text {
-			const text = replaceTabs(result.content.find(part => part.type === "text")?.text ?? "");
-			return new Text(theme.fg("muted", text), 0, 0);
 		},
 	};
 }
@@ -91,9 +85,9 @@ function appendIdea(currentNotes: string, idea: string): string {
 	if (trimmed.length === 0) {
 		return `${IDEAS_HEADING}\n- ${idea}\n`;
 	}
-	if (trimmed.includes(IDEAS_HEADING)) {
-		const lines = trimmed.split("\n");
-		const ideasIndex = lines.findIndex(line => line.trim() === IDEAS_HEADING);
+	const lines = trimmed.split("\n");
+	const ideasIndex = lines.findIndex(line => line.trim() === IDEAS_HEADING);
+	if (ideasIndex >= 0) {
 		// find end of ideas section (next heading or end of file)
 		let insertAt = lines.length;
 		for (let i = ideasIndex + 1; i < lines.length; i += 1) {

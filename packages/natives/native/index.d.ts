@@ -31,16 +31,85 @@ export declare class AudioPlayback {
 /** Persistent, serialized native desktop capture/input/accessibility session. */
 export declare class DesktopSession {
   constructor(options?: DesktopSessionOptions | undefined | null)
+  /**
+   * Asks the worker when it is idle, so permissions are read live. While
+   * another operation holds the worker, answers from the snapshot of the
+   * latest capabilities read or capture instead of blocking the JS thread
+   * behind it.
+   */
   get capabilities(): DesktopCapabilities
+  /**
+   * Lock and display-sleep state read on the calling thread, never queued
+   * behind the worker, so it answers at once even while a request is stuck.
+   */
+  get screenState(): DesktopScreenState
+  /**
+   * Keeps the display awake from the next activity request until
+   * `releaseDisplayAwake()`, however long the session sits idle in between,
+   * instead of for the grace period after the last request. An agent calls
+   * this when it acts inside a turn.
+   */
+  holdDisplayUntilReleased(): void
+  /**
+   * Lets the display sleep now if a turn holds it, without waiting behind
+   * queued requests, and returns later activity to the grace period. Activity
+   * outside a turn keeps its grace. An agent calls this when its turn ends.
+   */
+  releaseDisplayAwake(): void
+  /**
+   * How many times the user's physical Escape has stopped takeover input in
+   * this session, or under its `escapeStopKey`. Host cancels, retirement and
+   * release never count, so a rise tells the host the user stopped the work.
+   */
+  get escapeStops(): number
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
+  listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>
+  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<OpenedApplication>
+  /**
+   * Capture and accessibility share one serialized request. Neither a failed
+   * snapshot nor an abandoned reply replaces the last delivered input frame.
+   */
+  observe(target: string, caps?: CaptureCaps | undefined | null, axOptions?: AxSnapshotOptions | undefined | null): Promise<DesktopObservation>
+  menuItems(target: string, path?: Array<string> | undefined | null): Promise<Array<DesktopMenuItem>>
+  menuSelect(target: string, path: Array<string>): Promise<undefined>
+  bringToCurrentSpace(windowId: string): Promise<undefined>
+  holdKeys(target: string, keys: Array<string>, options: HoldOptions): Promise<DesktopFocusReturn | undefined | null>
+  holdMouse(target: string, x: number, y: number, options: HoldOptions): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Native ownership only. Human approval is required by the host before
+   * calling this method.
+   */
+  acquireControl(): Promise<DesktopControlState>
+  releaseControl(): void
+  controlState(): DesktopControlState
+  /** Retire queued work from a completed helper without revoking task control. */
+  retire(): void
+  /**
+   * Sets when the current run ends, `remaining_ms` from now; each run sets
+   * it before its first call. Input waiting for the user to pause in its app
+   * (macOS), for a Wayland permission prompt or for another session's input
+   * lock gives up shortly before it.
+   */
+  setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
-  click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<undefined>
-  scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<undefined>
-  keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<undefined>
+  /**
+   * Capture a fresh native-detail region without replacing the full input
+   * coordinate frame.
+   */
+  captureRegion(target: string, region: CaptureRegion, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
+  click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Drags along `path`. A macOS background left drag across the text of one
+   * native text element is made as that element's selection through
+   * accessibility, with no mouse event, and resolves to the selection read
+   * back; a drag posted as input resolves to where a takeover left focus.
+   */
+  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopDragResult>
+  scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopTypeResult>
+  keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   raiseWindow(windowId: string): Promise<undefined>
   axSnapshot(target: string, opts?: AxSnapshotOptions | undefined | null): Promise<AxSnapshot>
   axQuery(target: string, query: AxQuery): Promise<Array<AxNode>>
@@ -54,11 +123,185 @@ export declare class DesktopSession {
   axAttributes(reference: string): Promise<Array<[string, string]>>
   axChildren(reference: string): Promise<Array<AxNode>>
   axParent(reference: string): Promise<AxNode | undefined | null>
-  axPerform(reference: string, action: string): Promise<undefined>
+  /**
+   * Performs `action` on the element; with `menu`, chooses that item path
+   * in the menu the action opens, which closes it.
+   */
+  axPerform(reference: string, action: string, menu?: Array<string> | undefined | null): Promise<undefined>
   axSetValue(reference: string, value: string): Promise<undefined>
+  /**
+   * Selects `text` in the element's value by accessibility, or places a
+   * caret at its start or end, without focus change or keystrokes.
+   */
+  axSelectText(reference: string, text: string, opts?: AxSelectTextOptions | undefined | null): Promise<AxTextSelection>
   axFocus(reference: string): Promise<undefined>
-  axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<undefined>
+  axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Types `text` into the element: native text fields take it by AX
+   * insertion, other elements as keystrokes once they hold keyboard focus.
+   */
+  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopTypeResult>
+  /** Presses a key chord in the element once it holds keyboard focus. */
+  axKeyChord(reference: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Immediately cancel operations submitted before this call. Later
+   * operations may proceed.
+   */
+  cancel(): void
   close(): Promise<undefined>
+}
+
+/**
+ * Incrementally ingests old/new text and computes an exact line diff on a
+ * worker thread once both sides finish.
+ *
+ * Complete lines are observable during ingestion. Only equal leading lines
+ * are declared stable before EOF; future input can change Myers alignment
+ * after the first mismatch.
+ */
+export declare class DiffStream {
+  /** Create an empty two-sided stream. */
+  constructor()
+  /** Append a JavaScript text chunk to one side. */
+  push(side: DiffSide, chunk: string): DiffStreamProgress
+  /** Append a UTF-8 subprocess/file chunk without a JS string conversion. */
+  pushBytes(side: DiffSide, chunk: Uint8Array): DiffStreamProgress
+  /** Mark one side complete; an unfinished final line then becomes visible. */
+  finishSide(side: DiffSide): DiffStreamProgress
+  /** Mark one side too large and complete without further ingestion. */
+  markTooLarge(side: DiffSide): DiffStreamProgress
+  /** Current ingestion state. */
+  progress(): DiffStreamProgress
+  /** Complete display lines from `from`, excluding newline terminators. */
+  lines(side: DiffSide, from: number, limit?: number | undefined | null): Array<string>
+  /** Snapshot all ingested text for one side. */
+  text(side: DiffSide): string
+  /**
+   * Read a filesystem path directly into one side on the native worker pool.
+   *
+   * JavaScript can poll [`DiffStream::progress`] and [`DiffStream::lines`]
+   * while this promise is pending; file bytes never need to cross into JS
+   * and back into the differ.
+   */
+  openFile(side: DiffSide, path: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<DiffStreamProgress>
+  /** Compute exact Myers runs and unified hunks off the JavaScript thread. */
+  finish(context?: number | undefined | null): Promise<DiffStreamResult>
+}
+
+/** Watches one directory for changes until closed. */
+export declare class DirectoryWatcher {
+  /**
+   * Start watching `dir`, its whole subtree when `recursive`. Changes that
+   * happen once the promise resolves are reported. Opening the directory and
+   * arming the first read run off the JS thread (each is a round trip on a
+   * network share). Rejects when the directory cannot be opened or watched;
+   * on platforms other than Windows, always.
+   */
+  static start(dir: string, recursive: boolean, callback: (err: null | Error, changes: DirectoryChanges) => void): Promise<DirectoryWatcher>
+  /**
+   * Stop watching without waiting: the reader thread cancels its pending
+   * reads (a round trip on a network share) and exits on its own. Batches or
+   * an error it queued before stopping may still reach the callback
+   * afterwards; ignore them.
+   */
+  close(): void
+}
+
+/** One edit tool call's streaming session. */
+export declare class EditSession {
+  /**
+   * Open a session. `onPreview` (optional) receives every settled preview
+   * batch; batches are delivered one at a time, in generation order.
+   * `resolveUrl` (optional) maps an internal URL target to its backing
+   * file; without it such targets fail as unresolved.
+   */
+  constructor(store: EditStore, policy: EditPolicy, onPreview?: ((error: Error | null, batch: EditPreviewBatch) => void) | undefined | null, resolveUrl?: ((error: Error | null, url: string) => Promise<EditUrlResolution>) | undefined | null)
+  /** Append a raw streamed argument fragment. */
+  push(delta: string): void
+  /** Replace the buffer with the complete argument JSON (no-delta path). */
+  setArgsJson(argsJson: string): void
+  /** Arguments are complete; triggers the final untrimmed preview. */
+  finish(): void
+  /**
+   * Stage and apply the finished edit through `writer`. Never rejects for
+   * engine failures: those come back as `isError` outcomes carrying the
+   * model-facing message.
+   */
+  apply(request: EditApplyRequest, writer: (error: Error | null, request: EditWriteRequest) => Promise<EditWriteResponse>): Promise<EditApplyOutcome>
+  /** Stop the preview pump and release buffers. */
+  close(): void
+}
+
+/** Session-scoped snapshots, clipboard registers, and the no-op loop guard. */
+export declare class EditStore {
+  constructor()
+  /**
+   * Record `text` (any line endings) as the current snapshot of
+   * `absolutePath` and return its 4-hex tag.
+   */
+  recordSnapshot(absolutePath: string, text: string, seenLines?: Array<number> | undefined | null): string
+  /**
+   * Read `absolutePath` from disk and record it; null when the file is
+   * unreadable or larger than 64 MiB. Past 4 MiB only the tag is returned:
+   * no snapshot is retained.
+   */
+  recordSnapshotFile(absolutePath: string, seenLines?: Array<number> | undefined | null): string | null
+  /** Merge displayed lines into the snapshot tagged `tag`. */
+  recordSeenLines(absolutePath: string, tag: string, lines: Array<number>): void
+  /**
+   * Merge the lines a hashline-formatted `body` displays into the
+   * snapshot tagged `tag`.
+   */
+  recordSeenLinesFromBody(absolutePath: string, tag: string, body: string): void
+  /** Latest recorded text for `absolutePath`. */
+  headText(absolutePath: string): string | null
+  /** Latest recorded tag for `absolutePath`. */
+  headHash(absolutePath: string): string | null
+  /** Recorded text of `absolutePath` tagged `hash`. */
+  byHashText(absolutePath: string, hash: string): string | null
+  /**
+   * Displayed lines recorded for the snapshot tagged `hash`; null when no
+   * provenance was recorded.
+   */
+  seenLines(absolutePath: string, hash: string): Array<number> | null
+  invalidate(absolutePath: string): void
+  relocate(from: string, to: string): void
+  clear(): void
+}
+
+/** Async reader/writer over a raw fd (pipe end). */
+export declare class FdStream {
+  /** Take ownership of `fd` (Windows: a pipe handle value). */
+  constructor(fd: number)
+  /**
+   * Begin reading: every chunk goes to `onChunk`, then `onClose` fires once
+   * with `null` on EOF/`close()` or an error message.
+   */
+  start(onChunk: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void
+  /**
+   * Stop reading without closing the fd. Resolves once every chunk read
+   * before the pause has been delivered to `onChunk`; unread bytes stay in
+   * the kernel buffer. Writes are unaffected. No-op (resolved) when not
+   * reading (not started, already paused, or closed).
+   *
+   * Windows: the blocking pipe read cannot be interrupted without losing its
+   * bytes, so this resolves immediately and reading continues.
+   */
+  pause(): Promise<void>
+  /**
+   * Restart the read loop after `pause()` with the callbacks given to
+   * `start`. No-op when not paused.
+   */
+  resume(): void
+  /**
+   * Queue `data`; false once more than 1 MiB is unwritten (or the stream is
+   * closed).
+   */
+  write(data: string | Uint8Array): boolean
+  /** Resolve once every queued byte was written or the stream closed. */
+  drained(): Promise<void>
+  /** Stop reading and writing, drop queued bytes, and close the fd. */
+  close(): void
 }
 
 /**
@@ -71,10 +314,175 @@ export declare class DesktopSession {
 export declare class FileLock {
   /** Try to acquire `path` without blocking. */
   static tryAcquire(path: string): FileLock
+  /**
+   * Whether any handle, in any process including this one, holds `path`.
+   *
+   * Observes without taking the lock: an `F_OFD_GETLK` query plus a
+   * `connect(2)` probe of the older abstract-socket name on Linux, an
+   * `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects` directory
+   * listing on Windows. A concurrent `tryAcquire()` never meets it.
+   */
+  static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */
   get acquired(): boolean
   /** Release this handle's ownership without affecting a successor. */
   release(): void
+}
+
+/**
+ * Stateful incremental syntax highlighter for streamed code.
+ *
+ * Carries syntect parser state across [`HighlightStream::push`] calls so
+ * chunked highlighting of a growing buffer is byte-identical to highlighting
+ * the concatenated text in one call. Feed newline-terminated complete lines;
+ * only the final push may omit the trailing newline. An unresolved language
+ * echoes input unchanged.
+ */
+export declare class HighlightStream {
+  /** Create a stream for `lang`; an unknown language yields a passthrough. */
+  constructor(lang: string | undefined | null, colors: HighlightColors)
+  /** Whether the language resolved to a grammar; `false` means passthrough. */
+  get supported(): boolean
+  /** Highlight the next chunk and advance parser state. */
+  push(chunk: string): string
+}
+
+/** One accepted or dialed IPC connection. */
+export declare class IpcConnection {
+  /**
+   * Dial `endpoint`. Rejects with code ENOENT (no endpoint), ECONNREFUSED
+   * (stale socket / no listener), ETIMEDOUT, EACCES (peer owned by another
+   * user, or permission), or the OS errno name.
+   */
+  static connect(endpoint: string, options: IpcConnectOptions): Promise<IpcConnection>
+  /**
+   * Dial TCP `host:port` (`TCP_NODELAY` set; no peer-credential check:
+   * authenticate in-band). Rejects with code ECONNREFUSED, ETIMEDOUT
+   * (`timeoutMs` expired), EADDRNOTAVAIL, or the OS errno name.
+   */
+  static connectTcp(host: string, port: number, options: IpcConnectOptions): Promise<IpcConnection>
+  /**
+   * Begin delivery on a `lines` connection (throws `TypeError` on a `raw`
+   * one). Call `start`/`startRaw` exactly once. Frames received before
+   * start are buffered, never dropped. `onLine` gets each non-empty line
+   * (one trailing CR stripped, invalid UTF-8 replaced lossily). `onClose`
+   * fires exactly once, after the last frame — including after local
+   * `end()`/`destroy()`: `null` for an orderly close, otherwise
+   * `"<CODE>: <message>"`.
+   */
+  start(onLine: (line: string) => void, onClose: (reason: string | null) => void): void
+  /**
+   * Same as `start()` for a `raw` connection (throws `TypeError` on a
+   * `lines` one): `onChunk` gets each received chunk.
+   */
+  startRaw(onChunk: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void
+  /**
+   * On a started `lines` connection: stop line framing. Bytes received
+   * past the last line already passed to `onLine` — including the rest of
+   * the batch when called from inside `onLine` — and every later byte go to
+   * `onChunk`, in order, nothing lost or reframed. `send()` then takes raw
+   * strings (UTF-8) / `Uint8Array` written as-is, without an LF. The
+   * `onClose` given to `start` still fires exactly once, last.
+   * `maxFrameBytes` stops applying once the switch reaches the reader. Throws
+   * `TypeError` on a `raw` connection, `ERR_INVALID_STATE` before `start` or
+   * when already upgraded.
+   */
+  upgradeRaw(onChunk: (chunk: Uint8Array) => void): void
+  /**
+   * Send one frame. lines: a string without LF (`TypeError` otherwise);
+   * LF is appended. raw (or after `upgradeRaw`): string (UTF-8) or
+   * `Uint8Array` written as-is.
+   * Frames sent during one JS task are written together when it ends (a
+   * microtask), in order; `end()` writes them first. Returns false once
+   * unwritten bytes exceed 1 MiB (await `drained()` before sending more).
+   * After close: returns false and drops the frame.
+   */
+  send(frame: string | Uint8Array): boolean
+  /** Resolves when the write queue is empty, or the connection closed. */
+  drained(): Promise<void>
+  /**
+   * Graceful: write everything queued, then shut the write half (Unix) /
+   * close the pipe (Windows); onClose follows when the read side ends.
+   */
+  end(): void
+  /**
+   * Immediate close; queued writes are dropped; onClose(null) follows.
+   * Idempotent.
+   */
+  destroy(): void
+  /** Keep the event loop alive while delivering (default). */
+  ref(): void
+  /** Let the event loop exit while this connection is open. */
+  unref(): void
+  /** Whether the connection is closed (or `destroy()` was called). */
+  get closed(): boolean
+}
+
+/** Listening IPC endpoint. */
+export declare class IpcServer {
+  /**
+   * Bind and listen.
+   *
+   * Unix: creates the parent dir (0700) if missing; under an exclusive flock
+   * on `<path>.bind.lock`, rejects EADDRINUSE when a live server answers,
+   * otherwise replaces the stale socket file; the socket is chmod 0600 before
+   * `listen()`. Windows: first pipe instance (exists → EADDRINUSE), remote
+   * clients rejected, DACL granting only the current user.
+   * `onConnection` receives each accepted, peer-verified connection (not yet
+   * started).
+   */
+  static listen(endpoint: string, options: IpcListenOptions, onConnection: (connection: IpcConnection) => void): Promise<IpcServer>
+  /**
+   * Bind and listen on TCP `host:port`; `port` 0 picks an ephemeral port
+   * (read it back from `port`). Loopback and non-loopback hosts are both
+   * allowed. No peer-credential check: authenticate in-band. Accepted
+   * sockets have `TCP_NODELAY` set. `onConnection` receives each accepted
+   * connection (not yet started). Rejects with code EADDRINUSE,
+   * EADDRNOTAVAIL, EACCES, or the OS errno name.
+   */
+  static listenTcp(host: string, port: number, options: IpcListenOptions, onConnection: (connection: IpcConnection) => void): Promise<IpcServer>
+  /**
+   * The endpoint this server listens on: the socket path / pipe name, or
+   * `"<ip>:<port>"` for TCP.
+   */
+  get endpoint(): string
+  /**
+   * The bound TCP port (the real one when listening on port 0); `null` for
+   * Unix-socket / named-pipe servers.
+   */
+  get port(): number | null
+  /**
+   * Stop accepting. Unix: unlink the socket file if it is still the inode
+   * this server bound. Accepted connections are untouched. Idempotent.
+   */
+  close(): Promise<void>
+  /** Keep the event loop alive while listening (default). */
+  ref(): void
+  /** Let the event loop exit while listening. */
+  unref(): void
+}
+
+/** Native multi-pattern line matcher returning named captures per line. */
+export declare class LineMatcher {
+  /**
+   * Throws when a pattern fails to compile; message names the failing index
+   * and the regex error, e.g. `pattern 2: regex parse error: ...`.
+   *
+   * # Errors
+   * Returns an error when any pattern fails to compile.
+   */
+  constructor(patterns: Array<string>)
+  /**
+   * Named groups of each pattern, in pattern order: the layout of a match's
+   * `start, end` pairs in [`LineMatches::spans`].
+   */
+  groupNames(): Array<Array<string>>
+  /**
+   * Matches every line (split on `
+  `) against every pattern; first match
+   * per line per pattern; ordered by line then pattern index.
+   */
+  matchLines(text: string): LineMatches
 }
 
 /** WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio. */
@@ -119,20 +527,104 @@ export declare class MacAppearanceObserver {
   stop(): void
 }
 
-/**
- * Long-lived macOS power assertion.
- *
- * On macOS this acquires one or more `IOKit` assertions that prevent the
- * requested sleep modes until the handle is stopped or dropped. On other
- * platforms it is a no-op handle so the caller can keep one cross-platform
- * code path.
- */
-export declare class MacOSPowerAssertion {
+/** The app the user had in front when `macOSFrontApp()` read it. */
+export declare class MacOSFrontApp {
   /**
-   * Acquire a macOS power assertion. On non-macOS platforms returns a
-   * no-op handle so callers can stay cross-platform.
+   * Puts this app back in front, without raising its windows, each time the
+   * app that took the front from it takes it again during the next
+   * `durationMs`. Ends early once a hardware mouse button or ⌘/⌃ is used
+   * after the app was read, the app came from a launcher or Spotlight panel,
+   * or a different app comes forward: that is the user picking an app.
+   * Typing does not end it, and a hand-back macOS refuses for a key typed
+   * meanwhile is asked again. Holds nothing when called over a second after
+   * the latest read, as picks made since then went unwatched. Owns desktop
+   * input/focus control only for each hand-back, and rejects if another
+   * operation owns it then. Resolves how many times it put the app back.
    */
-  static start(options?: MacOSPowerAssertionOptions | undefined | null): MacOSPowerAssertion
+  keepInFront(durationMs: number): Promise<number>
+}
+export type MacosFrontApp = MacOSFrontApp
+
+/** A transactional, process-owned native OAuth callback receiver. */
+export declare class NativeOAuthCallback {
+  /** Create a receiver without touching the filesystem or OS registration. */
+  constructor(options: NativeOAuthCallbackOptions)
+  /**
+   * Register the scheme transactionally. Returns false on unsupported or
+   * remote sessions.
+   */
+  start(): Promise<boolean>
+  /** Cancel an in-progress start and every pending callback wait. */
+  cancel(): void
+  /** Wait for and atomically claim the callback URL. */
+  waitForCallback(timeoutMs?: number | undefined | null): Promise<string>
+  /** Restore prior OS state and release ownership. Safe to call repeatedly. */
+  dispose(): Promise<undefined>
+}
+
+/** One loaded Phonon checkpoint, English normalization, CPU inference. */
+export declare class PhononTts {
+  /**
+   * Load the checkpoint in `modelDir`: `config.json`, `tokenizer.json`,
+   * `model.q8.gguf`, and voice embeddings under `voices/` (registered by
+   * file stem) plus `default-voice.safetensors` (registered as `default`).
+   *
+   * # Errors
+   * Rejects when a required file is missing or the weights fail to load.
+   */
+  static load(modelDir: string): Promise<PhononTts>
+  /** PCM sample rate of every synthesized buffer, in Hz. */
+  get sampleRate(): number
+  /** Registered voice names, sorted. */
+  get voices(): Array<string>
+  /**
+   * Synthesize `text` as mono `f32` PCM at [`Self::sample_rate`].
+   * Requests run one at a time; a concurrent call waits for the previous one.
+   *
+   * # Errors
+   * Rejects for an unregistered voice, a `durationDelta` the conditioner
+   * rejects, or a generation failure.
+   */
+  synthesize(text: string, options?: PhononSpeechOptions | undefined | null): Promise<Float32Array>
+}
+
+/**
+ * The output of one shell run that never reaches its own stdout, during and
+ * after the run: the bytes crossing its pipeline pipes, and the files its
+ * commands redirect their output into.
+ *
+ * For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
+ * so far while `tail` still holds it back; for `cargo build > build.log`,
+ * stream 1 reads `build.log`. Create one per run and pass it as
+ * [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
+ * run opened them; each keeps (a file: reads) its most recent 1 MiB, and a
+ * run keeps its 4 newest finished pipes and its 8 newest files.
+ */
+export declare class PipeStreams {
+  constructor()
+  /** The run's retained streams, oldest first. */
+  list(): Array<PipeStreamInfo>
+  /**
+   * Retained bytes of stream `id` from stream offset `from` on (all of them
+   * without it), or `null` for a stream the run never opened or no longer
+   * keeps.
+   */
+  read(id: number, from?: number | undefined | null): PipeStreamChunk | null
+}
+
+/**
+ * Long-lived cross-platform power assertion.
+ *
+ * macOS uses `IOKit`, Linux holds login1 and desktop `ScreenSaver` inhibitors,
+ * and Windows holds thread-affine execution state until the handle is stopped
+ * or dropped. Other platforms return a no-op handle.
+ */
+export declare class PowerAssertion {
+  /**
+   * Acquire a power assertion. Unsupported platforms return a no-op handle
+   * so callers can stay cross-platform.
+   */
+  static start(options?: PowerAssertionOptions | undefined | null): PowerAssertion
   /**
    * Release every assertion held by this handle. Safe to call multiple
    * times; subsequent calls are a no-op.
@@ -180,11 +672,37 @@ export declare class Process {
   children(): Array<Process>
   /** Current status of this process reference. */
   status(): ProcessStatus
+  /**
+   * Process start time in milliseconds since the Unix epoch, when the
+   * platform reports it; a pid-reuse guard for re-adopting processes.
+   */
+  startTime(): number | null
 }
 
 /** Stateful PTY session for interactive stdin/stdout passthrough. */
 export declare class PtySession {
   constructor()
+  /**
+   * Wrap an inherited pty master fd and its child pid (e.g. kept across
+   * `execReplace`); call `resume` to drive it like a started session.
+   */
+  static adopt(masterFd: number, pid: number): PtySession
+  /** Unix pty master fd of the running session, for `execReplace` keepFds. */
+  masterFd(): number | null
+  /** Process id of the running session's child. */
+  pid(): number | null
+  /**
+   * Whether the program in the terminal waits on the user's keys.
+   *
+   * `true` while echo is off (a password prompt such as `sudo`'s, or a
+   * full-screen program like `less`) or, on Linux, while a foreground
+   * process is blocked reading the terminal (a `[y/N]` prompt). `false` when
+   * no session runs or, on Linux, no foreground process reads the terminal.
+   * `null` when an echoing line prompt cannot be told from a busy program:
+   * always on macOS and Windows, and on Linux when a foreground process
+   * cannot be inspected (one running setuid).
+   */
+  awaitsInput(): boolean | null
   /**
    * Start a shell command, stream output chunks, and report the spawned child
    * PID.
@@ -195,15 +713,75 @@ export declare class PtySession {
    * report the spawned child PID.
    */
   startArgv(options: PtyArgvStartOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null, onStart?: ((error: Error | null, pid: number) => void) | undefined | null): Promise<PtyRunResult>
+  /**
+   * Drive an adopted session: stream output chunks and resolve when the
+   * child exits (exit code via `waitpid`).
+   */
+  resume(onChunk: (error: Error | null, chunk: string) => void): Promise<PtyRunResult>
   /** Write raw input bytes to PTY stdin. */
   write(data: string): void
   /** Resize the active PTY. */
   resize(cols: number, rows: number): void
   /** Force-kill the active PTY command. */
   kill(): void
+  /**
+   * Stop reading output without closing the master. Resolves once every
+   * chunk read before the pause has been delivered to `onChunk`, including
+   * partial UTF-8 held by the decoder (flushed lossily); unread bytes stay in
+   * the kernel buffer. Input, resize, kill and child-exit handling keep
+   * working. No-op (resolved) when no session runs or output is already
+   * paused. A run whose child exits while paused stops waiting for output
+   * as for a slave held open elsewhere, leaving the unread bytes unread.
+   *
+   * Windows: `ConPTY` output is a blocking pipe read that cannot be
+   * interrupted without losing its bytes, so this resolves immediately and
+   * reading continues.
+   */
+  pauseOutput(): Promise<void>
+  /** Restart reading output after `pauseOutput()`. No-op when not paused. */
+  resumeOutput(): void
 }
 
-/** Persistent brush-core shell session. */
+/**
+ * Actual command state, source units and bounded history for one shell run,
+ * including observed assignments and producer-attributed output.
+ *
+ * Create one over the command text and
+ * pass it as [`ShellRunOptions::trace`]; poll [`RunTrace::version`] while the
+ * run is in flight and take [`RunTrace::snapshot`] when it changed.
+ */
+export declare class RunTrace {
+  /** A trace of `script`, the exact command text about to run. */
+  constructor(script: string)
+  /**
+   * Revision of semantic events, assignments and visible output; unchanged
+   * means `snapshot()` is unchanged, even when adjacent output coalesces.
+   */
+  version(): number
+  /**
+   * The `ShellTrace` JSON with byte-offset layout, current node states and
+   * ordered replay `history`. The newest 20,000 records retain at most
+   * 2 MiB visible output and 8 MiB payload; `historyTruncated` explicitly
+   * reports eviction. History timestamps are measured ns since `RunStart`;
+   * output identifies its real producer (`u`, `n`, `command`) when known.
+   * Semantic entries carry their actual `vpid`; `rootVpid` distinguishes
+   * root lifecycle from owned tool children even after journal trimming.
+   * A UTF-8 scalar spanning producers has exact byte `contributors`
+   * instead of an invented primary producer. Decoding ends at capture EOF.
+   * Segmented minimizer submissions share one epoch and final status;
+   * their history carries `segment`, with `logicalEnd`/`logicalStatus`
+   * finalizing the last actual root `RunEnd` after output draining.
+   * Serialization borrows the locked model rather than cloning its history.
+   */
+  snapshot(): string
+  /**
+   * Render directly over the borrowed native state; no snapshot or syntax
+   * roundtrip.
+   */
+  present(options: ShellVizOptions): string
+}
+
+/** Persistent embedded bash engine shell session. */
 export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
@@ -211,6 +789,26 @@ export declare class Shell {
    * The options set session-scoped environment variables and a snapshot path.
    */
   constructor(options?: ShellOptions | undefined | null)
+  /**
+   * A new shell with this one's options whose session starts from this
+   * session's state (variables, functions, aliases, options, working
+   * directory) as of its last command boundary: while a command runs, the
+   * state that command started from. What the fork sets stays in the
+   * fork until `adopt()` carries it back. Never waits for the running
+   * command.
+   */
+  fork(): Shell
+  /**
+   * Carry what `fork` (a `fork()` of this shell whose `run` settled)
+   * changed, its variables, functions, aliases, options and traps, into
+   * this shell's session: at the end of the command it runs now, or at
+   * once between commands, and into every fork taken from here on. A name
+   * both changed keeps the value of the command that ended last. Returns
+   * `false` when there is nothing to carry from or into: the fork did not
+   * start from a session's state or lost its session, or this shell has
+   * none.
+   */
+  adopt(fork: Shell): boolean
   /**
    * Run a shell command using the provided options.
    *
@@ -232,6 +830,324 @@ export declare class Shell {
    * dropping it (which would SIGKILL them via kill-on-drop).
    */
   liveBackgroundJobCount(): Promise<number>
+  /**
+   * Pids of the still-alive processes spawned by this session's in-flight
+   * `run`, in spawn order: foreground commands, pipeline stages, and `&`
+   * jobs started by that run. Builtins run in-process and never appear.
+   * Empty when no run is executing; children that outlive their run are no
+   * longer reported once it returns. Synchronous and never waits on the
+   * running command.
+   */
+  pids(): Array<number>
+}
+
+/**
+ * Persisted native visualization, restored once rather than reparsed on each
+ * frame.
+ */
+export declare class ShellVisualization {
+  constructor(snapshot: string)
+  present(options: ShellVizOptions): string
+}
+
+/** One word-completion engine running on its own thread. */
+export declare class TextPredictor {
+  /**
+   * Spawn the engine thread and start opening the engine; load errors
+   * surface from [`TextPredictor::ready`] and every later call.
+   *
+   * # Errors
+   * Returns an error when the engine thread cannot be spawned.
+   */
+  constructor(options: TextPredictorOptions)
+  /**
+   * Resolve once the engine has loaded.
+   *
+   * # Errors
+   * Rejects with the engine's load error (missing weights, corrupt state).
+   */
+  ready(): Promise<void>
+  /**
+   * Ghost text for `prefix` typed after `before`, or `null`.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  complete(before: string, prefix: string): Promise<PredictedWord | null>
+  /**
+   * Learn from submitted prompts, in submission order.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  observe(prompts: Array<string>): Promise<void>
+  /**
+   * Learn from a suggestion the user accepted (`true`) or typed past.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  feedback(before: string, prefix: string, suggestion: string, accepted: boolean): Promise<void>
+  /**
+   * Flush learned state to the state directory.
+   *
+   * # Errors
+   * Rejects when the engine failed to load or the state cannot be written.
+   */
+  persist(): Promise<void>
+}
+
+/**
+ * Dedicated, cancellable terminal writer.
+ *
+ * The destination must be a TTY (reopened independently when possible, else
+ * duplicated) on unix or a console on Windows; pipes and files are
+ * deliberately rejected.
+ */
+export declare class TtyWriter {
+  /**
+   * Start a writer on its own handle to the terminal. onDrain runs when the
+   * pending bound crosses from above drainThreshold to at/below it, and on
+   * fatal writes even below the threshold. It does not retain the event loop.
+   */
+  constructor(fd: number, drainThreshold: number, onDrain: () => void)
+  /**
+   * Copy UTF-16 into pooled storage without UTF-8 sizing or transcoding on
+   * JS's thread. Returns a conservative pending UTF-8 byte upper bound.
+   */
+  write(data: string): number
+  /** Conservative UTF-8 bytes not yet written (tightened by the worker). */
+  pending(): number
+  /** True after a terminal write failed; all pending output is dropped. */
+  get dead(): boolean
+  /** Wait for queued output until the deadline. False on timeout or failure. */
+  flushSync(timeoutMs: number): boolean
+  /**
+   * Drain until the deadline, then cancel and join. Nothing is written after
+   * return, except one chunk whose write could not be aborted (a Windows
+   * console refusing to, a blocking duplicate on unix). Already
+   * queued JS callbacks may still run; callers must ignore callbacks from a
+   * stopped writer.
+   */
+  stop(flushTimeoutMs: number): void
+}
+
+/** In-process Git repository handle. */
+export declare class VcsGitRepo {
+  /** Repository metadata. */
+  info(): VcsGitRepoInfo
+  /** Primary checkout root. */
+  primaryRoot(): string
+  /** Linked-worktree metadata. */
+  linkedWorktree(): VcsLinkedWorktree | null
+  /** Resolve HEAD synchronously. */
+  headSync(): VcsHeadState
+  /** Worktree-relative prefix of a directory. */
+  prefixOf(dir: string): string | null
+  /** Resolve HEAD. */
+  head(signal?: unknown | undefined | null): Promise<VcsHeadState>
+  /** Resolve HEAD SHA. */
+  headSha(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Current branch. */
+  currentBranch(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Default remote branch. */
+  defaultBranch(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Resolve a revision. */
+  resolveRef(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Test revision existence. */
+  refExists(name: string, signal?: unknown | undefined | null): Promise<boolean>
+  /** Tags pointing at a revision. */
+  tagsAt(rev: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List branches. */
+  listBranches(all: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /**
+   * Whether default porcelain status reports a staged, unstaged, or untracked
+   * change.
+   */
+  isDirty(signal?: unknown | undefined | null): Promise<boolean>
+  /**
+   * Operation underway, including unresolved index conflicts without state
+   * files.
+   */
+  operationKind(signal?: unknown | undefined | null): Promise<"merge" | "cherry-pick" | "revert" | "rebase" | "am" | "unmerged-index" | null>
+  /** Porcelain status. */
+  statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Read config. */
+  configGet(key: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Set config. */
+  configSet(key: string, value: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** List remotes. */
+  remoteList(signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Remote URL. */
+  remoteUrl(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Add remote. */
+  remoteAdd(name: string, url: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** List worktrees. */
+  worktrees(signal?: unknown | undefined | null): Promise<Array<VcsWorktreeEntry>>
+  /** Add worktree. */
+  worktreeAdd(path: string, refName: string, options: VcsWorktreeAddOptions, signal?: unknown | undefined | null): Promise<VcsWorktreeAddResult>
+  /** Remove worktree. */
+  worktreeRemove(path: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Prune worktrees. */
+  worktreePrune(signal?: unknown | undefined | null): Promise<undefined>
+  /** Recent subjects. */
+  logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Recent one-line commits. */
+  logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commits in a range. */
+  revListRange(base: string, head: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Best common ancestor of two revisions. */
+  mergeBase(a: string, b: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Commits touching a file. */
+  revListTouching(rev: string, file: string, limit: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commit details. */
+  commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
+  /** List index or untracked paths. */
+  lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List a tree's blobs and symlinks recursively with their modes. */
+  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<VcsTreeEntry>>
+  /** List submodule paths. */
+  submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Read blob bytes. */
+  showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /**
+   * Convert worktree content to the blob `git add` would store per path
+   * (EOL/`text` attributes, `core.autocrlf`, `ident`, clean filters such as
+   * Git LFS), in input order.
+   */
+  worktreeToGit(entries: Array<VcsWorktreeContent>, signal?: unknown | undefined | null): Promise<Array<Buffer>>
+  /** Read commit and patch bytes. */
+  showCommit(rev: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Local LFS media directory. */
+  lfsMediaDir(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Render a patch. */
+  diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Render a no-index patch between two filesystem paths. */
+  diffNoIndex(left: string, right: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** Changed paths. */
+  changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Per-file line counts. */
+  numstat(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<VcsNumstatEntry>>
+  /** Test for a diff. */
+  hasDiff(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<boolean>
+  /** Diff two trees. */
+  diffTree(base: string, head: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** Stage paths. */
+  stageFiles(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /** Unstage paths. */
+  unstage(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /** Stage selected hunks. */
+  stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Create commit. */
+  commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /**
+   * Write a commit object for `tree` on `parents` without moving any ref or
+   * touching the index/worktree (`git commit-tree`).
+   */
+  commitTree(tree: string, parents: Array<string>, message: string, author?: VcsCommitAuthor | undefined | null, signal?: unknown | undefined | null): Promise<string>
+  /** Checkout revision. */
+  checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Create branch. */
+  createBranch(name: string, start: string, force: boolean, signal?: unknown | undefined | null): Promise<undefined>
+  /** Delete branch. */
+  deleteBranch(name: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Create and checkout branch. */
+  checkoutNewBranch(name: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Restore paths. */
+  restore(options: VcsRestoreOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Reset repository state. */
+  reset(mode: string, target?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Clean untracked paths. */
+  clean(options: VcsCleanOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Read tree into index. */
+  readTree(treeish: string, indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /**
+   * Read a tree into a private index while preserving sparse-checkout
+   * exclusions.
+   */
+  readTreeKeepingSparse(treeish: string, indexPath: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Write index tree. */
+  writeTree(indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<string>
+  /** Apply patch. */
+  applyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Check patch applicability. */
+  canApplyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<boolean>
+  /** Cherry-pick commit. */
+  cherryPick(rev: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Abort cherry-pick. */
+  cherryPickAbort(signal?: unknown | undefined | null): Promise<undefined>
+  /** Skip cherry-pick. */
+  cherryPickSkip(signal?: unknown | undefined | null): Promise<undefined>
+  /** Push stash. */
+  stashPush(message?: string | undefined | null, signal?: unknown | undefined | null): Promise<boolean>
+  /** Pop stash if cleanly applicable. */
+  stashTryPop(reinstateIndex: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Push via Git CLI. */
+  push(options: VcsPushOptions, signal?: unknown | undefined | null): Promise<void>
+  /** Fetch a refspec via Git CLI. */
+  fetch(remote: string, source: string, target: string, timeoutMs?: number | undefined | null, signal?: unknown | undefined | null): Promise<void>
+}
+
+/** In-process Jujutsu workspace handle. */
+export declare class VcsJjWorkspace {
+  /** Workspace root. */
+  root(): string
+  /** Shared store directory. */
+  storeDir(): string
+  /** Working-copy label. */
+  workingCopyLabel(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Render working-copy patch. */
+  diffText(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** List changed paths. */
+  changedFiles(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+}
+
+/** Backend-agnostic repository handle for portable VCS reads. */
+export declare class VcsRepo {
+  /** Backend kind (`"git"` or `"jj"`). */
+  kind(): string
+  /** Checkout or workspace root. */
+  root(): string
+  /** Primary checkout or default workspace root. */
+  primaryRoot(): string
+  /** Worktree-relative prefix of a directory. */
+  prefixOf(dir: string): string | null
+  /** Filesystem target to watch for repository-head changes. */
+  watchTarget(): string
+  /** Whether this backend implements a portable feature. */
+  supports(feature: string): boolean
+  /** Git-specific handle when this repository is backed by Git. */
+  asGit(): VcsGitRepo | null
+  /** Jujutsu-specific handle when this repository is backed by Jujutsu. */
+  asJj(): VcsJjWorkspace | null
+  /** Human label for the working copy. */
+  label(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Working-copy commit id. */
+  headId(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Porcelain status. */
+  statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Render a patch. */
+  diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Changed paths. */
+  changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Per-file line counts. */
+  numstat(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<VcsNumstatEntry>>
+  /** Every working-copy change since the last commit. */
+  uncommittedDiff(files: Array<string>, signal?: unknown | undefined | null): Promise<string>
+  /** Recent subjects. */
+  logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Recent one-line commits. */
+  logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commit details. */
+  commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
+  /** List tracked or untracked paths. */
+  lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
 }
 
 /**
@@ -262,24 +1178,81 @@ export declare class Shell {
 export declare function __ompInstallTokioRuntime(): void
 
 /**
- * Version sentinel — exists solely so the JS loader can prove at load time
- * that the `.node` file on disk is from the same package release as the
- * `index.js` ESM wrapper invoking it.
- *
- * The `js_name` is bumped by `scripts/release.ts` to match the new
- * `Cargo.toml` / `package.json` version on every release. The JS loader
- * computes the expected name from `package.json#version` and refuses to use
- * a `.node` that doesn't expose it, turning the silent
- * `<sym> is not a function` crash from a locked-file update (the canonical
- * Windows `bun install -g` failure mode) into a clear load-time error.
- *
- * Bump policy: `__piNativesV{major}_{minor}_{patch}` — non-alphanumerics in
- * the version string are mapped to `_` to keep it a valid JS identifier.
- * MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
- * `packages/natives/native/index.js` (which derives the name from
- * `package.json#version`).
+ * Points the addon at the directory holding downloaded wasm grammars
+ * (`<dir>/<file>`). The loader (`native/loader-state.js`) calls this once
+ * with `<natives dir>/grammars`; grammars then load lazily from it.
  */
-export declare function __piNativesV17_4_3(): void
+export declare function __ompSetGrammarDir(dir: string): void
+
+/**
+ * Release version stamped into this `.node` after linking.
+ *
+ * `None` for an unstamped build. The JS loader compares it against
+ * `package.json#version` so a `.node` from another release fails at load time
+ * with an actionable error instead of a later `<sym> is not a function` crash.
+ */
+export declare function __piNativesBuildVersion(): string | null
+
+/**
+ * Reports whether the on-device model can generate, as an `availability`
+ * event JSON: `{available, reason?, contextSize?, variant?, vision?,
+ * toolCalling?}`.
+ */
+export declare function appleFmAvailability(): Promise<string>
+
+/**
+ * Cancels a generation; its stream then ends with a `cancelled` error event.
+ * Unknown or finished handles are ignored.
+ */
+export declare function appleFmCancel(handle: number): void
+
+/**
+ * Starts one model turn for a JSON request and streams JSON events to
+ * `on_event` until a terminal `done` or `error` event. Returns a handle for
+ * [`apple_fm_cancel`].
+ */
+export declare function appleFmGenerate(request: string, onEvent: (err: null | Error, event: string) => void): number
+
+/**
+ * Installed application identity with currently observable process
+ * information.
+ */
+export interface Application {
+  id: string
+  name: string
+  path: string
+  running: boolean
+  pid?: number
+}
+
+/**
+ * How `apps.open` opens its target.
+ *
+ * `activate` deliberately brings the application forward. On macOS a file,
+ * folder or URL target opens in its default application, or in `app` (an
+ * application ID, name or path); `reveal` instead shows the file or folder
+ * selected in Finder, which comes to the front.
+ */
+export interface ApplicationOpenOptions {
+  activate?: boolean
+  reveal?: boolean
+  app?: string
+}
+
+/** Filters the native application inventory without requiring screen access. */
+export interface ApplicationQuery {
+  query?: string
+  runningOnly?: boolean
+}
+
+/**
+ * Applies an `HDiffPatch` single-stream patch to `oldPath`, writing `outPath`.
+ *
+ * Accepts HDIFFSF20 patches, zstd-compressed or uncompressed; `outPath` is
+ * created or truncated. Resolves to the result's size in bytes. Rejects on I/O
+ * failure, a damaged or unsupported patch, or a patch made for other old data.
+ */
+export declare function applyBinaryPatch(oldPath: string, patchPath: string, outPath: string): Promise<number>
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -315,7 +1288,10 @@ export interface AstFindOptions {
   patterns?: Array<string>
   /** Language override; otherwise inferred from file extension per candidate. */
   lang?: string
-  /** Single file or directory to scan (combined with `glob` when set). */
+  /**
+   * Single file or directory to scan (combined with `glob` when set): a
+   * host path or an absolute `scheme://` URL.
+   */
   path?: string
   /** Optional glob filter relative to the search root. */
   glob?: string
@@ -338,6 +1314,11 @@ export interface AstFindOptions {
   signal?: unknown
   /** Wall-clock timeout for the worker task in milliseconds. */
   timeoutMs?: number
+  /**
+   * Filesystem candidates are resolved, walked, and read through (native
+   * when absent).
+   */
+  filesystem?: ShellFilesystem
 }
 
 /** Aggregated search statistics and any parse or compile diagnostics. */
@@ -354,6 +1335,11 @@ export interface AstFindResult {
   limitReached: boolean
   /** Non-fatal parse or pattern errors collected during the run. */
   parseErrors?: Array<string>
+  /**
+   * Languages whose on-demand grammar is not installed; their files were
+   * skipped (see `wasmGrammarFor`).
+   */
+  missingGrammars?: Array<string>
 }
 
 /**
@@ -478,7 +1464,10 @@ export interface AstReplaceOptions {
    * mixed-language paths rewrite each file in its own language.
    */
   lang?: string
-  /** Single file or directory to rewrite. */
+  /**
+   * Single file or directory to rewrite: a host path or an absolute
+   * `scheme://` URL.
+   */
   path?: string
   /** Optional glob filter within the search root. */
   glob?: string
@@ -498,6 +1487,11 @@ export interface AstReplaceOptions {
   signal?: unknown
   /** Wall-clock timeout for the worker task in milliseconds. */
   timeoutMs?: number
+  /**
+   * Filesystem candidates are resolved, walked, read, and written through
+   * (native when absent).
+   */
+  filesystem?: ShellFilesystem
 }
 
 /** Summary of an ast-grep rewrite pass, including whether disk writes occurred. */
@@ -518,6 +1512,11 @@ export interface AstReplaceResult {
   limitReached: boolean
   /** Parse or pattern errors when not failing the whole operation. */
   parseErrors?: Array<string>
+  /**
+   * Languages whose on-demand grammar is not installed; their files were
+   * skipped (see `wasmGrammarFor`).
+   */
+  missingGrammars?: Array<string>
 }
 
 export interface AxNode {
@@ -544,16 +1543,54 @@ export interface AxQuery {
   limit?: number
 }
 
+/** Where `axSelectText` looks for its text and what it selects there. */
+export interface AxSelectTextOptions {
+  /** Text that must directly precede the match. */
+  prefix?: string
+  /** Text that must directly follow the match. */
+  suffix?: string
+  /** `text` (default) selects the match; `start` and `end` place a caret. */
+  select?: string
+}
+
 export interface AxSnapshot {
   text: string
   nodeCount: number
   truncated: boolean
+  /**
+   * The window appeared fully covered around the read, and its app can stop
+   * updating its tree while covered (Chromium on Windows), so the tree may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface AxSnapshotOptions {
   maxDepth?: number
   maxNodes?: number
   all?: boolean
+}
+
+/** The selection read back after `axSelectText`, in UTF-16 code units. */
+export interface AxTextSelection {
+  start: number
+  length: number
+  /** The selected text, empty for a caret. */
+  text: string
+  /**
+   * Whether the element is focused in its app: typing and AX insertion
+   * act on the focused element.
+   */
+  focused: boolean
+}
+
+export interface BlockParseOptions {
+  /** Source code to parse. */
+  code: string
+  /** Language alias (e.g. "rust", "typescript") used before path inference. */
+  lang?: string
+  /** File path used to infer language by extension when `lang` is omitted. */
+  path?: string
 }
 
 export interface BlockRange {
@@ -588,6 +1625,14 @@ export interface CaptureCaps {
   maxHeight?: number
 }
 
+/** Rectangle in pixels of the most recent full screenshot of the same target. */
+export interface CaptureRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 /** Clipboard image payload encoded as PNG bytes. */
 export interface ClipboardImage {
   /** PNG-encoded image bytes. */
@@ -595,6 +1640,16 @@ export interface ClipboardImage {
   /** MIME type for the encoded image payload. */
   mimeType: string
 }
+
+/**
+ * Invalidates this process's event taps before it exits.
+ *
+ * No desktop session here sees the user's input again afterwards. A macOS tap
+ * that dies with its process while the user types makes `WindowServer`
+ * deliver their key again; Bun's `process.exit` runs no native exit hook, so
+ * the host calls this from its exit handler.
+ */
+export declare function closeDesktopEventTaps(): void
 
 /** A context line (before or after a match). */
 export interface ContextLine {
@@ -638,9 +1693,23 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
  * use ordinary encoding (no special-token handling) and the Claude
  * encodings count message content without the fixed per-message frame.
  * Defaults to `o200k_base`; pass a `Claude*` encoding for exact Claude
- * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM.
+ * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM/Jev.
  */
 export declare function countTokens(input: string | string[], encoding?: Encoding | undefined | null): number
+
+/**
+ * Decode one complete SIXEL control string into a PNG on the calling thread.
+ *
+ * Raster declarations, repeats, and row advances are bounded before allocating
+ * the decoded RGBA buffer.
+ */
+export declare function decodeSixelToPng(bytes: Uint8Array): Uint8Array
+
+/**
+ * Same result as [`decode_sixel_to_png`], but the decode runs on the native
+ * blocking pool instead of the JS thread.
+ */
+export declare function decodeSixelToPngAsync(bytes: Uint8Array): Promise<Uint8Array>
 
 export interface DesktopCapabilities {
   backend: string
@@ -649,11 +1718,45 @@ export interface DesktopCapabilities {
   input: boolean
   ax: boolean
   backgroundWindowInput: boolean
-  deliveryModes: Array<string>
+  /**
+   * Whether window input accepts `takeover: true` (briefly activate the
+   * target and post real input).
+   */
+  takeover: boolean
+  applications: boolean
+  menus: boolean
+  heldInput: boolean
+  spaces: boolean
+  /**
+   * Native global Escape cancellation of takeover input (`takeover: true`,
+   * held control, desktop/display-level input, raises, activating launches).
+   * Without held control, background window input never watches the user's
+   * keys; it and Wayland stop only through the host interrupt. False on
+   * macOS while `secureInput` holds: the Escape monitor then sees no keys.
+   */
+  globalEscape: boolean
+  /**
+   * Secure Event Input is on (a focused password field, or a terminal's
+   * secure keyboard entry): macOS hides every key from event monitors, so
+   * the user's Escape and typing go unseen. Only macOS detects this.
+   */
+  secureInput: boolean
+  /** The app holding secure input, when macOS names its process. */
+  secureInputApp?: string
   capturePermission: string
   inputPermission: string
   axPermission: string
   displayCount: number
+  /**
+   * The session is locked, or on Windows disconnected or on a secure
+   * desktop. Linux reports `false`.
+   */
+  screenLocked: boolean
+  /**
+   * The display is asleep, so nothing can be captured until it wakes. Only
+   * macOS detects this; other backends report `false`.
+   */
+  displayAsleep: boolean
 }
 
 export interface DesktopCapture {
@@ -667,10 +1770,34 @@ export interface DesktopCapture {
    * unscaled.
    */
   sourceHeight: number
+  /** Dimensions of the full screenshot coordinate frame used by pointer input. */
+  coordinateWidth: number
+  coordinateHeight: number
+  /**
+   * Region in the full screenshot's coordinates; zoom pixels are not input
+   * coordinates.
+   */
+  region?: CaptureRegion
   target: string
   displays: Array<DesktopDisplay>
   backend: string
   displayServer?: string
+  /**
+   * The user session was unavailable when this frame was taken. On macOS,
+   * a display capture shows the lock screen and a window capture its last
+   * frame. Windows also detects disconnected sessions and secure desktops.
+   */
+  screenLocked: boolean
+  /**
+   * The target window appeared fully covered around this frame, and its app
+   * can stop drawing while covered (Chromium on Windows), so the frame may
+   * be stale.
+   */
+  covered: boolean
+}
+
+export interface DesktopControlState {
+  active: boolean
 }
 
 /**
@@ -692,13 +1819,169 @@ export interface DesktopDisplay {
   isPrimary: boolean
 }
 
+/** What a drag call did: made a text selection, or posted input. */
+export interface DesktopDragResult {
+  /**
+   * The selection a macOS background left drag across the text of one
+   * native text element made through accessibility, read back; absent when
+   * the drag was posted as input.
+   */
+  selection?: AxTextSelection
+  /**
+   * Where focus ended when the drag ran in takeover; see
+   * [`DesktopFocusReturn`].
+   */
+  focusReturn?: DesktopFocusReturn
+}
+
+/**
+ * Physical-Escape stops counted under `key` by every desktop session created
+ * with it, including closed ones, until the key is forgotten.
+ */
+export declare function desktopEscapeStops(key: string): number
+
+/**
+ * Where focus ended after a takeover input call.
+ *
+ * Input calls resolve to it on macOS and Windows when they took over, as
+ * the window server reports it; other backends and background delivery
+ * resolve to `null`.
+ */
+export interface DesktopFocusReturn {
+  /** Whether the takeover handed the front back to the app front before it. */
+  handedBack: boolean
+  /** The process front before the takeover. */
+  previousPid?: number
+  /** The process front once the takeover ended; absent when unreadable. */
+  frontPid?: number
+  /**
+   * What a macOS takeover did with the user's keyboard; absent elsewhere and
+   * when it did not reach the hand-back.
+   */
+  keyboard?: DesktopKeyboardReturn
+}
+
+/**
+ * What a macOS takeover did to give the user back their keyboard. Nothing
+ * outside an app can see which of its windows is key, so these name what was
+ * sent, not a key state that was observed.
+ */
+export declare enum DesktopKeyboardReturn {
+  /** The window that was key when the takeover began was made key again. */
+  HandedBack = 'handedBack',
+  /**
+   * The user clicked, used a shortcut or switched during the takeover, so
+   * nothing was sent over their choice.
+   */
+  LeftAsChosen = 'leftAsChosen',
+  /**
+   * The user's app never left the front (the target was another of its
+   * windows) and still reported its key window, so nothing was sent.
+   */
+  Kept = 'kept',
+  /** The user's app showed no window: only its front status came back. */
+  FrontOnly = 'frontOnly',
+  /**
+   * macOS refused the hand-back or the user's last input was still being
+   * read, so their window was not made key.
+   */
+  NotSent = 'notSent'
+}
+
+/**
+ * One immediate child of a native application menu. Paths contain the actual
+ * native labels, including ellipses; selection accepts normalized labels.
+ */
+export interface DesktopMenuItem {
+  title: string
+  path: Array<string>
+  enabled: boolean
+  checked: boolean
+  hasSubmenu: boolean
+  shortcut?: string
+}
+
+export interface DesktopObservation {
+  capture: DesktopCapture
+  accessibility: AxSnapshot
+}
+
 export interface DesktopPoint {
   x: number
   y: number
 }
 
+/**
+ * One on-screen window from the unfiltered roster. Unlike
+ * [`super::DesktopWindow`] it keeps popup menus, pickers and system panels,
+ * which publish no title or sharing state and sit above layer 0.
+ */
+export interface DesktopRosterWindow {
+  /** `kCGWindowNumber`, decimal; the same id `listWindows` reports. */
+  id: string
+  /** Owning process id. */
+  pid: number
+  /** Owning process name. */
+  app: string
+  /**
+   * Window title; empty without Screen Recording permission and for
+   * windows that publish none.
+   */
+  title: string
+  x: number
+  y: number
+  width: number
+  height: number
+  /**
+   * `kCGWindowLayer`: 0 for ordinary windows, 3 for floating panels, 101
+   * for popup menus, higher for system panels.
+   */
+  layer: number
+  /** `kCGWindowAlpha`; 0 is an invisible overlay. */
+  alpha: number
+  /**
+   * Whether `listWindows` reports this window, so `computer.window(id)`
+   * resolves it.
+   */
+  listed: boolean
+}
+
+/**
+ * Lock and display-sleep state of the user session, read live per call.
+ * macOS detects both; Windows detects lock state; Linux reports both false.
+ */
+export interface DesktopScreenState {
+  screenLocked: boolean
+  displayAsleep: boolean
+}
+
 export interface DesktopSessionOptions {
   display?: string
+  /**
+   * Sessions created with the same key share one physical-Escape stop
+   * count, which `desktopEscapeStops` reads after they close.
+   */
+  escapeStopKey?: string
+  /**
+   * The registry id of the agent this session acts for, named to other
+   * sessions that wait for its input/focus control.
+   */
+  agentId?: string
+}
+
+/** What a typing call did. */
+export interface DesktopTypeResult {
+  /**
+   * Why the text was sent but the target was not seen reading it before
+   * focus went back; absent when it was, or the backend does not wait for
+   * it (only Windows takeover typing does).
+   */
+  unconfirmed?: string
+  /**
+   * Where focus ended when typing ran in takeover; see
+   * [`DesktopFocusReturn`].
+   */
+  focusReturn?: DesktopFocusReturn
 }
 
 /** One capturable top-level window in global logical desktop coordinates. */
@@ -723,6 +2006,12 @@ export interface DesktopWindow {
   /** Whether the window currently holds input focus. */
   focused: boolean
 }
+
+/**
+ * Samples every on-screen window, front to back, in one `WindowServer` pass,
+ * with no desktop session and no permission prompt. Empty off macOS.
+ */
+export declare function desktopWindowRoster(): Array<DesktopRosterWindow>
 
 /**
  * Detect macOS system appearance via CoreFoundation.
@@ -779,6 +2068,16 @@ export interface DiffChange {
 export declare function diffLineRuns(oldText: string, newText: string): Array<DiffRun>
 
 /**
+ * [`diff_line_runs`] bounded to `max_edits` added or removed lines.
+ *
+ * Returns `null` once the edit script needs more. An exact diff of a
+ * wholesale rewrite takes time quadratic in its size; this one stops after
+ * `O((N + M) · max_edits)`, for callers that can treat such a rewrite as one
+ * replaced block.
+ */
+export declare function diffLineRunsWithin(oldText: string, newText: string, maxEdits: number): Array<DiffRun> | null
+
+/**
  * Line diff with jsdiff `diffLines(oldText, newText)` semantics (default
  * options). Change values keep line terminators, and common runs are joined
  * from the new text.
@@ -795,6 +2094,44 @@ export interface DiffRun {
   removed: boolean
 }
 
+/** One side of a streamed line diff. */
+export declare enum DiffSide {
+  /** Original/base text. */
+  Old = 'Old',
+  /** Updated/target text. */
+  New = 'New'
+}
+
+/** Observable ingestion state for [`DiffStream`]. */
+export interface DiffStreamProgress {
+  /** Complete old-side lines available for rendering. */
+  oldLines: number
+  /** Complete new-side lines available for rendering. */
+  newLines: number
+  /** Leading complete lines proven equal on both sides. */
+  stableCommonLines: number
+  /** Whether old-side ingestion has finished. */
+  oldDone: boolean
+  /** Whether new-side ingestion has finished. */
+  newDone: boolean
+  /** Whether either side contains a NUL byte/code unit. */
+  binary: boolean
+  /** Whether either native file exceeded its caller-provided size limit. */
+  tooLarge: boolean
+}
+
+/** Exact line-diff output produced when a [`DiffStream`] finishes. */
+export interface DiffStreamResult {
+  /** Line-token Myers runs used to align the complete files. */
+  runs: Array<DiffRun>
+  /** Unified hunks for the requested context. */
+  hunks: Array<PatchHunk>
+  /** Whether the old text ends in a newline. */
+  oldEndsNewline: boolean
+  /** Whether the new text ends in a newline. */
+  newEndsNewline: boolean
+}
+
 /**
  * Word diff with jsdiff `diffWords(oldText, newText)` semantics (default
  * options).
@@ -803,6 +2140,217 @@ export interface DiffRun {
  * post-pass dedupes whitespace across change boundaries.
  */
 export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
+
+/** One change below the watched directory. */
+export interface DirectoryChange {
+  /** Path relative to the watched directory, with the platform's separators. */
+  path: string
+  action: DirectoryChangeAction
+  /**
+   * The entry is a directory. Always false for `modified`, which may also
+   * name a directory whose entries changed.
+   */
+  directory: boolean
+}
+
+/** What happened to an entry, as reported by the file system. */
+export declare enum DirectoryChangeAction {
+  Added = 'added',
+  Removed = 'removed',
+  Modified = 'modified',
+  /** The entry's old name in a rename. */
+  RenamedFrom = 'renamedFrom',
+  /** The entry's new name in a rename. */
+  RenamedTo = 'renamedTo'
+}
+
+/** Changes gathered by one read, in the order they happened. */
+export interface DirectoryChanges {
+  changes: Array<DirectoryChange>
+  /** Changes were lost (the change buffer overflowed); rescan the directory. */
+  overflow: boolean
+}
+
+/**
+ * Whole-call apply outcome. `is_error` carries the model-facing failure in
+ * `text` with no files, and `error_kind` its class (`EditError::kind`).
+ */
+export interface EditApplyOutcome {
+  text: string
+  files: Array<EditFileOutcome>
+  isError: boolean
+  errorKind?: string
+}
+
+/** Apply-time knobs. */
+export interface EditApplyRequest {
+  lspBatchId?: string
+  lspFlush: boolean
+}
+
+/**
+ * Auto-generated-file guard: the rejection message when `absolutePath`
+ * (displayed as `displayPath`) must not be edited, else null. Missing or
+ * unreadable files are editable.
+ */
+export declare function editAutoGeneratedMessage(absolutePath: string, displayPath: string): string | null
+
+/** Tool description markdown for `mode`. */
+export declare function editDescription(mode: string): string
+
+/** Numbered unified diff plus the first changed line. */
+export interface EditDiffResult {
+  diff: string
+  firstChangedLine?: number
+}
+
+/** Numbered unified diff between two texts (`generateDiffString`). */
+export declare function editDiffString(oldText: string, newText: string, path?: string | undefined | null): EditDiffResult
+
+/** Every `errorKind` a failed apply outcome can carry. */
+export declare function editErrorKinds(): Array<string>
+
+/** A destructive file operation a payload declares. */
+export interface EditFileOpIntent {
+  /** `delete` | `move`. */
+  kind: string
+  path: string
+  to?: string
+}
+
+/** One file's apply outcome. */
+export interface EditFileOutcome {
+  /** Absolute path. */
+  path: string
+  displayPath: string
+  /** `create` | `update` | `delete`. */
+  op: string
+  moveTo?: string
+  diff: string
+  firstChangedLine?: number
+  oldText?: string
+  newText?: string
+  snapshotsPruned: boolean
+  diagnosticsJson?: string
+  /** Engine warnings (already rendered into `text`). */
+  warnings: Array<string>
+  /** Model-facing text for this file. */
+  text: string
+  /** The file parsed before the edit and no longer does. */
+  parseRegressed: boolean
+}
+
+/** One file's streamed diff preview. */
+export interface EditFilePreview {
+  /** Display path as authored (after suffix recovery). */
+  path: string
+  /** Numbered unified diff; mutually exclusive with `error`. */
+  diff?: string
+  firstChangedLine?: number
+  /** Model-facing error text. */
+  error?: string
+  /** `create` | `update` | `delete`. */
+  op?: string
+  rename?: string
+}
+
+/** Lark grammar for `mode`, when it has a custom wire format. */
+export declare function editGrammar(mode: string): string | null
+
+/**
+ * Inspect `argsJson` (the JSON-serialized, possibly partial tool args)
+ * without touching the filesystem.
+ */
+export declare function editInspect(mode: string, argsJson: string): EditInspection
+
+/**
+ * Static projection of a payload: target paths, per-file digests, and
+ * delete/move intents.
+ */
+export interface EditInspection {
+  paths: Array<string>
+  entries: Array<EditMatcherEntry>
+  fileOps: Array<EditFileOpIntent>
+}
+
+/** `(path, added-lines digest)` for stream matchers. */
+export interface EditMatcherEntry {
+  path: string
+  digest: string
+}
+
+/** Session-wide policy; TypeScript builds it once per tool call. */
+export interface EditPolicy {
+  cwd: string
+  /** `replace` | `patch` | `apply_patch` | `hashline` | `sloppy`. */
+  mode: string
+  allowFuzzy: boolean
+  fuzzyThreshold: number
+  enforceSeenLines: boolean
+  /**
+   * Narrowest per-line display cap any tool applies, in UTF-8 bytes (0: no
+   * tool cuts lines). Without recorded read provenance, hashline anchors on
+   * longer lines are rejected.
+   */
+  maxColumns: number
+  blockAutoGenerated: boolean
+  planActive: boolean
+  /** Registered internal URL schemes (router spec keys). */
+  urlSchemes: Array<string>
+  /**
+   * The `urlSchemes` whose single-slash `scheme:/x` spelling aliases
+   * `scheme://x` (spec `singleSlashAlias`).
+   */
+  urlAliasSchemes: Array<string>
+  /** Plain-path roots writable in plan mode. */
+  planWritableRoots: Array<string>
+  homeDir: string
+  /** The payload is a verbatim custom-format string, not JSON. */
+  rawInput: boolean
+}
+
+/** A batch of previews for one session generation. */
+export interface EditPreviewBatch {
+  /** Monotonically increasing per session. */
+  generation: number
+  /** False for the final untrimmed pass after `finish()`. */
+  streaming: boolean
+  files: Array<EditFilePreview>
+}
+
+/** Host answer for one internal URL (`resolveUrl`). */
+export interface EditUrlResolution {
+  /** Absolute backing file; null when no local file backs the URL. */
+  path?: string
+  /** Model-facing refusal (read-only, disabled…); wins over `path`. */
+  error?: string
+  /** Writable while plan mode is active (sandbox-scoped scheme). */
+  planWritable: boolean
+}
+
+/** Host write request; the host owns the bytes. */
+export interface EditWriteRequest {
+  /** Absolute path. */
+  path: string
+  displayPath: string
+  /** `create` | `update` | `delete` | `move`. */
+  op: string
+  /** Absolute destination for `move` (write `content` there, delete `path`). */
+  moveTo?: string
+  /** Final bytes as text; null for `delete`. */
+  content?: string
+  /** Last write of this call and the LSP batch requested a flush. */
+  flushLsp: boolean
+  lspBatchId?: string
+}
+
+/** Host write response. */
+export interface EditWriteResponse {
+  /** Text actually persisted (a bridge may reformat); empty for deletes. */
+  written: string
+  /** `FileDiagnosticsResult` serialized by the host; opaque here. */
+  diagnosticsJson?: string
+}
 
 /** Ellipsis strategy for [`truncate_to_width`]. */
 export declare enum Ellipsis {
@@ -813,6 +2361,15 @@ export declare enum Ellipsis {
   /** Omit ellipsis entirely. */
   Omit = 2
 }
+
+/**
+ * Add `ENABLE_VIRTUAL_TERMINAL_INPUT` to the stdin console's mode.
+ *
+ * Call after entering raw mode, which clears it. Returns the mode found, for
+ * `restoreConsoleInputMode`; `null` when stdin is not a console or the
+ * console refuses VT input, and always off Windows.
+ */
+export declare function enableConsoleVtInput(): number | null
 
 /**
  * Matching-bracket context for an arbitrary tree-sitter language.
@@ -840,15 +2397,30 @@ export interface EnclosingBoundaryOptions {
 }
 
 /**
- * Encode image bytes into a SIXEL escape sequence for terminal rendering.
+ * Encode image bytes into a SIXEL escape sequence for terminal rendering, on
+ * the calling thread.
  *
  * The input image is decoded and resized to the requested pixel dimensions
- * before encoding.
+ * (not resampled when it already has them), then partial alpha is composited
+ * against `background_rgb` (packed `0xRRGGBB`). Fully transparent pixels
+ * remain transparent. Encoding uses whole 6-pixel bands: a partial last band
+ * is dropped, see [`band_rows`]. Prefer
+ * [`encode_sixel_async`] unless the caller cannot wait: the decode, resize
+ * and dither block the JS thread.
  *
  * # Errors
  * Returns an error if decoding, resizing, or SIXEL encoding fails.
  */
-export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number): string
+export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number, backgroundRgb: number): string
+
+/**
+ * Same result as [`encode_sixel`], but the decode, resize and dither run on
+ * the native blocking pool, so they never stall the JavaScript event loop.
+ *
+ * # Errors
+ * Rejects if decoding, resizing, or SIXEL encoding fails.
+ */
+export declare function encodeSixelAsync(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number, backgroundRgb: number): Promise<string>
 
 /** Tokenizer encoding to use. */
 export declare enum Encoding {
@@ -871,17 +2443,36 @@ export declare enum Encoding {
   /** Kimi K2 … K3. */
   KimiK2 = 'KimiK2',
   /** GLM-5.x exact; GLM-4.x near-exact. */
-  Glm5 = 'Glm5'
+  Glm5 = 'Glm5',
+  /** `TypeSafe` Jev 1.13 judgment `state` (request frame excluded). */
+  Jev = 'Jev'
 }
 
 /**
- * Execute a brush shell command.
+ * execve in place: clears CLOEXEC on keepFds, replaces the image, same PID.
+ * Throws ENOSYS on Windows.
+ *
+ * On success this never returns: no JS or native cleanup runs afterwards, so
+ * callers flush logs and restore the terminal first. On failure the
+ * `CLOEXEC` flags are restored and a JS error whose `code` is the errno name
+ * is thrown.
+ */
+export declare function execReplace(path: string, argv: Array<string>, env: Record<string, string>, keepFds: Array<number>): never
+
+/**
+ * Execute a command in the embedded bash engine.
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
  * streamed stdout/stderr output. Returns the exit code when the command
  * completes, or flags when cancelled or timed out.
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
+
+/** Expand Windows 8.3 components without resolving symlinks or junctions. */
+export declare function expandWindowsLongPath(path: string): string
+
+/** Locate `*** Edit File: path` payloads the model emitted as plain text. */
+export declare function extractInlineSloppyRegions(text: string): Array<InlineSloppyRegion>
 
 /**
  * Extract the before/after slices around an overlay region.
@@ -913,6 +2504,9 @@ export declare enum FileType {
   Symlink = 3
 }
 
+/** Drops the stop count kept under `key` once no session will use it again. */
+export declare function forgetDesktopEscapeStops(key: string): void
+
 /** Fuzzy file path search for autocomplete. */
 export declare function fuzzyFind(options: FuzzyFindOptions): Promise<FuzzyFindResult>
 
@@ -936,7 +2530,7 @@ export interface FuzzyFindOptions {
   hidden?: boolean
   /** Respect .gitignore (default: true). */
   gitignore?: boolean
-  /** Enable walker scan caching (default: false). */
+  /** Reuse unchanged directory listings across calls (default: false). */
   cache?: boolean
   /** Maximum number of matches to return (default: 100). */
   maxResults?: number
@@ -957,6 +2551,9 @@ export interface FuzzyFindResult {
 /** Get list of supported languages. */
 export declare function getSupportedLanguages(): Array<string>
 
+/** Get the existing Windows 8.3 spelling; preserve the input when unavailable. */
+export declare function getWindowsShortPath(path: string): string
+
 /**
  * Get work profile data from the last N seconds.
  *
@@ -968,12 +2565,8 @@ export declare function getWorkProfile(lastSeconds: number): WorkProfile
 /**
  * Find filesystem entries matching a glob pattern.
  *
- * Resolves the search root, scans entries, applies glob and optional file-type
- * filters, and optionally streams each accepted match through `on_match`.
- *
- * When `sortByMtime` is enabled, the walker ranks matches by mtime before the
- * native layer applies final symlink-aware file-type filtering and callback
- * emission.
+ * Resolves the search root, runs the glob search, and optionally streams each
+ * returned match through `on_match`.
  *
  * # Errors
  * Returns an error when the search path cannot be resolved, the path is not a
@@ -998,7 +2591,7 @@ export interface GlobMatch {
 export interface GlobOptions {
   /** Glob pattern to match (e.g., "*.ts"). */
   pattern: string
-  /** Directory to search. */
+  /** Directory to search: a host path or an absolute `scheme://` URL. */
   path: string
   /**
    * Filter by file type: "file", "dir", or "symlink". Symlinks are
@@ -1007,13 +2600,18 @@ export interface GlobOptions {
   fileType?: FileType
   /** Match simple patterns recursively by default (`*.ts` -> recursive). */
   recursive?: boolean
+  /**
+   * Follow descendant symbolic links with cycle detection (default: false).
+   * The filesystem provider is responsible for enforcing mount containment.
+   */
+  followLinks?: boolean
   /** Include hidden files (default: false). */
   hidden?: boolean
   /** Maximum number of results to return. */
   maxResults?: number
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
-  /** Enable walker scan caching (default: false). */
+  /** Reuse unchanged directory listings across calls (default: false). */
   cache?: boolean
   /** Sort results by mtime (most recent first) before applying limit. */
   sortByMtime?: boolean
@@ -1026,6 +2624,11 @@ export interface GlobOptions {
   signal?: unknown
   /** Timeout in milliseconds for the operation. */
   timeoutMs?: number
+  /**
+   * Filesystem the search root is resolved and walked through (native when
+   * absent).
+   */
+  filesystem?: ShellFilesystem
 }
 
 /** Result payload returned by a glob operation. */
@@ -1041,7 +2644,8 @@ export interface GlobResult {
  *
  * # Arguments
  * - `options`: Pattern, path, filters, and output mode.
- * - `on_match`: Optional callback invoked per match/result.
+ * - `on_match`: Optional callback invoked per returned match/result, after the
+ *   search (never called when `options.onMatches` streams instead).
  *
  * # Returns
  * Aggregated results across matching files.
@@ -1062,6 +2666,11 @@ export interface GrepMatch {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
   /** Per-file match count (count mode only). */
   matchCount?: number
 }
@@ -1070,10 +2679,25 @@ export interface GrepMatch {
 export interface GrepOptions {
   /** Regex pattern to search for. */
   pattern: string
-  /** Directory or file to search. */
+  /** Directory or file to search: a host path or an absolute `scheme://` URL. */
   path: string
-  /** Glob filter for filenames (e.g., "*.ts"). */
+  /**
+   * Glob filter for file paths (e.g., "*.ts"); a matched directory selects
+   * every file under it.
+   */
   glob?: string
+  /**
+   * Glob patterns of files and directories to leave out, relative to `path`:
+   * one without `/` matches at any depth (`*.test.ts`, `vendor`), a leading
+   * `/` anchors it to `path` (`/vendor`); a matched directory is not
+   * searched.
+   */
+  exclude?: Array<string>
+  /**
+   * Match simple glob patterns at any depth (default: true; `*.ts` ->
+   * `**\/*.ts`). Set false when `glob` is already relative to `path`.
+   */
+  recursive?: boolean
   /** Filter by file type (e.g., "js", "py", "rust"). */
   type?: string
   /** Case-insensitive search. */
@@ -1084,6 +2708,11 @@ export interface GrepOptions {
   hidden?: boolean
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
+  /**
+   * Follow descendant symbolic links with cycle detection (default: false).
+   * The filesystem provider is responsible for enforcing mount containment.
+   */
+  followLinks?: boolean
   /** Maximum number of matches to return. */
   maxCount?: number
   /** Skip first N matches. */
@@ -1108,6 +2737,22 @@ export interface GrepOptions {
   signal?: unknown
   /** Timeout in milliseconds for the operation. */
   timeoutMs?: number
+  /**
+   * Filesystem every path is stat'ed, walked, and read through (native when
+   * absent).
+   */
+  filesystem?: ShellFilesystem
+  /**
+   * Stream results instead of returning them: called on the JS thread with
+   * batches (at most 1024 entries, files in no particular order) of what
+   * `matches` would hold, while the search runs. A slow callback pauses the
+   * search instead of buffering. Successful completion waits for every
+   * callback and carries counts with empty `matches`; cancellation also
+   * interrupts delivery waits, though already queued callbacks may still run.
+   * A throw rejects the search with it. Incompatible with `maxCount` and
+   * `offset`.
+   */
+  onMatches?: (matches: GrepMatch[]) => void
 }
 
 /** Output mode for [`search`] and [`grep`] (string values match JS callers). */
@@ -1137,7 +2782,39 @@ export interface GrepResult {
   limitReached?: boolean
   /** Number of files skipped because they exceed the size limit. */
   skippedOversized?: number
+  /**
+   * Paths, relative to the search root, of files skipped as binary although
+   * their content matches; search one as an explicit path to read it as text.
+   */
+  binaryMatches?: Array<string>
 }
+
+/**
+ * Count canonical hashline op header shapes (`PUT N.=M:`, `CUT N*`, …) in
+ * a payload; empty when it carries no hashline ops.
+ */
+export declare function hashlineCountOps(input: string): Array<HashlineOpCount>
+
+/** 4-hex hashline content tag for `text`. */
+export declare function hashlineFileHash(text: string): string
+
+/** `[path#TAG]` section header. */
+export declare function hashlineFormatHeader(path: string, tag: string): string
+
+/** `N:line` numbered display rows starting at `startLine` (default 1). */
+export declare function hashlineFormatNumberedLines(text: string, startLine?: number | undefined | null): string
+
+/** Whether a row is a truncation notice emitted by `read`. */
+export declare function hashlineIsReadTruncationNotice(line: string): boolean
+
+/** Count of one canonical hashline op header shape in a payload. */
+export interface HashlineOpCount {
+  label: string
+  count: number
+}
+
+/** Strip hashline display prefixes (`N:` / `+N:` …) from pasted rows. */
+export declare function hashlineStripPrefixes(lines: Array<string>): Array<string>
 
 /**
  * Quick check if content matches a pattern.
@@ -1152,6 +2829,25 @@ export interface GrepResult {
  * True if any match exists; false on no match.
  */
 export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase?: boolean | undefined | null, multiline?: boolean | undefined | null): boolean
+
+/**
+ * How `path` is held by this process: open through another descriptor and
+ * locked. `null` when it is not, and always outside Linux.
+ *
+ * Looks at the path's inode through the descriptors already open, without
+ * opening the file.
+ */
+export declare function heldFileKind(path: string): HeldFileKind | null
+
+/** What a file this process holds locked is. */
+export declare enum HeldFileKind {
+  /** A SQLite database this process has open with its locks. */
+  Database = 'database',
+  /** A SQLite WAL-index (`-shm`) file this process has open with its locks. */
+  WalIndex = 'wal-index',
+  /** Another file this process holds open with a record lock. */
+  Locked = 'locked'
+}
 
 /**
  * Highlight code and return ANSI-colored lines.
@@ -1196,6 +2892,24 @@ export interface HighlightColors {
   deleted?: string
 }
 
+export interface HoldOptions {
+  /** Duration in seconds, from zero through 100. */
+  duration: number
+  button?: string
+  keys?: Array<string>
+  takeover?: boolean
+  /**
+   * With `takeover`, hand focus back to the user's app even after their
+   * input during the hold; see `PointerOptions.returnFocus`.
+   */
+  returnFocus?: boolean
+  /**
+   * Refuse a background left hold that starts on a control that opens a
+   * menu; see `PointerOptions.refuseMenu`.
+   */
+  refuseMenu?: boolean
+}
+
 /**
  * Convert HTML source to Markdown with optional preprocessing.
  *
@@ -1210,18 +2924,67 @@ export interface HtmlToMarkdownOptions {
   cleanContent?: boolean
   /** Skip images during conversion. */
   skipImages?: boolean
+  /**
+   * Hidden content to keep: "drop" (default) omits it, "reachable" keeps
+   * content the page can reveal (collapsed sections, inactive tab panels),
+   * "all" also keeps `<template>` and `<noscript>` content.
+   */
+  hiddenContent?: string
+}
+
+/** One stray sloppy payload region inside prose (UTF-16 offsets). */
+export interface InlineSloppyRegion {
+  start: number
+  end: number
+  payload: string
 }
 
 /**
- * Invalidate the walker scan cache.
+ * Moves this process's SQLite record locks onto open-file-description locks.
  *
- * When called with a path, removes entries for roots containing that path.
- * When called without a path, clears the entire cache.
- *
- * Intended to be called after agent file mutations: write, edit, rename, or
- * delete.
+ * No other close of the file can release those (see `ofd_locks.rs`). Call it
+ * before the process opens any SQLite database. Returns whether SQLite now
+ * uses them: `false` outside Linux, or when Bun's SQLite is not found.
  */
-export declare function invalidateFsScanCache(path?: string | undefined | null): void
+export declare function installSqliteLockShim(): boolean
+
+/** Options for `IpcConnection.connect` / `IpcConnection.connectTcp`. */
+export interface IpcConnectOptions {
+  /**
+   * `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
+   * received.
+   */
+  framing: "lines" | "raw"
+  /** Connect deadline. Default 3000 ms. Expiry rejects with code ETIMEDOUT. */
+  timeoutMs?: number
+  /** Max bytes of one received line (lines framing). Default 64 MiB. */
+  maxFrameBytes?: number
+}
+
+/**
+ * Platform endpoint for `name` scoped to directory `dir`.
+ *
+ * Unix: `<dir>/<stem>.sock`; when that path does not fit `sun_path` (104 bytes
+ * on macOS/BSD, 108 on Linux, including NUL), `/tmp/omp-<euid>/<hash16>.sock`.
+ * Windows: `\\.\pipe\omp-<stem>-<hash16(lowercase(resolve(dir)))>`.
+ * `stem` is `name` with every char outside `[A-Za-z0-9._-]` replaced by "_".
+ * Pure and deterministic: every process computes the same endpoint.
+ */
+export declare function ipcEndpoint(dir: string, name: string): string
+
+/** Options for `IpcServer.listen` / `IpcServer.listenTcp`. */
+export interface IpcListenOptions {
+  /**
+   * `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
+   * received.
+   */
+  framing: "lines" | "raw"
+  /**
+   * Max bytes of one received line (lines framing). Default 64 MiB.
+   * Exceeding closes that connection with reason "EMSGSIZE: …".
+   */
+  maxFrameBytes?: number
+}
 
 /** Kind enum of the backend selected by default for this build target. */
 export declare function isoBackend(): IsoBackendKind
@@ -1251,7 +3014,7 @@ export declare enum IsoChangeKind {
 /**
  * Capture the changes between `lower` and `merged`.
  *
- * Uses [`pi_iso::IsolationBackend::diff`]'s default implementation —
+ * Uses [`omp_iso::IsolationBackend::diff`]'s default implementation —
  * `git diff` when `merged/.git` exists, otherwise a mtime-skipped tree
  * walk. The backend selection only affects the lifecycle methods; diff
  * behaviour is uniform.
@@ -1282,6 +3045,17 @@ export interface IsoFileChange {
 export declare function isoIsUnavailableError(message: string): boolean
 
 /**
+ * Keep a stalled Windows console from blocking thread starts in this process.
+ *
+ * Stops `KernelBase`'s per-thread console call, which JSC's lazily started
+ * helper threads would otherwise wait on. Process-wide and permanent; repeat
+ * calls are no-ops. Returns false, leaving the process untouched, when
+ * `KernelBase`'s loader entry does not have the expected shape; always false
+ * off Windows.
+ */
+export declare function isolateThreadStartsFromConsole(): boolean
+
+/**
  * Probe whether the requested backend can start on this host. Pass
  * `null`/omit `kind` to probe the platform-native backend.
  */
@@ -1298,10 +3072,13 @@ export interface IsoProbeResult {
 }
 
 /**
- * Pick the best backend available right now. `preferred` is treated as
- * a hint — see [`pi_iso::resolve`] for the exact priority rules.
+ * Pick the best backend available right now.
+ *
+ * `preferred` is treated as a hint — see [`omp_iso::resolve`] for the exact
+ * priority rules. Backend probes may spawn CLIs, so they run on the native
+ * blocking pool.
  */
-export declare function isoResolve(preferred?: IsoBackendKind | undefined | null): IsoResolveResult
+export declare function isoResolve(preferred?: IsoBackendKind | undefined | null): Promise<IsoResolveResult>
 
 /** Outcome of [`iso_resolve`]. */
 export interface IsoResolveResult {
@@ -1337,6 +3114,25 @@ export declare enum KeyEventType {
   Release = 3
 }
 
+/**
+ * Matches of one [`LineMatcher::match_lines`] call, column-wise.
+ *
+ * Match `i` is on line `lines[i]` for pattern `rules[i]`, and its named
+ * groups (in [`LineMatcher::group_names`] order for that pattern) are the
+ * next `start, end` pairs of `spans`.
+ */
+export interface LineMatches {
+  /** 0-based line index per match. */
+  lines: Uint32Array
+  /** Pattern index per match. */
+  rules: Uint32Array
+  /**
+   * Per match and named group: UTF-16 start and end within the line, `-1, -1`
+   * when the group did not participate.
+   */
+  spans: Int32Array
+}
+
 export interface LineRange {
   /** 1-indexed inclusive first visible line. */
   startLine: number
@@ -1349,7 +3145,7 @@ export interface LineRange {
  *
  * File-level ignore rules for AGENTS.md are bypassed by checking each
  * traversed directory directly when `collectAgentsMd` is enabled, but ignored
- * directories are still pruned by the walker and are not searched.
+ * directories are still pruned by the walk and are not searched.
  */
 export declare function listWorkspace(options: ListWorkspaceOptions): Promise<ListWorkspaceResult>
 
@@ -1364,11 +3160,25 @@ export interface ListWorkspaceOptions {
   /** Respect .gitignore files. Default: true. */
   gitignore?: boolean
   /**
+   * Prune dependency, VCS, build-output, and cache directory names
+   * (`node_modules`, `.git`, `dist`, `target`, …); `false` lists them too.
+   * Hidden entries still require `hidden: true`; ignored entries require
+   * `gitignore: false`. Default: true.
+   */
+  pruneExcludedDirs?: boolean
+  /**
    * Also surface AGENTS.md files in directories at depth 1..=4, even when
    * gitignore would otherwise hide the file. Walks deeper than `maxDepth`
    * to find them. Default: false.
    */
   collectAgentsMd?: boolean
+  /**
+   * Report unreadable directories instead of silently skipping them: an
+   * unreadable root fails the scan, and unreadable subdirectories are
+   * returned in `unreadableDirectories` while the walk continues. Default:
+   * false (startup discovery stays best-effort).
+   */
+  reportDirectoryErrors?: boolean
   /** Timeout in milliseconds for the operation. */
   timeoutMs?: number
   /** Abort signal for cancelling the operation. */
@@ -1386,6 +3196,11 @@ export interface ListWorkspaceResult {
   agentsMdFiles: Array<string>
   /** True when any output cap was hit. */
   truncated: boolean
+  /**
+   * Subdirectories whose contents could not be listed. Always empty unless
+   * `reportDirectoryErrors` is set.
+   */
+  unreadableDirectories: Array<WorkspaceDirectoryError>
 }
 
 /**
@@ -1400,28 +3215,38 @@ export declare enum MacOSAppearance {
 }
 
 /**
- * Options for starting a macOS power assertion.
+ * Return the autocorrection macOS chooses for one completed-word range.
  *
- * Each boolean maps to a `caffeinate(8)` flag and a corresponding `IOKit`
- * `IOPMAssertion` type. Multiple flags can be combined; when set, one
- * assertion is taken per flag and all are released together when the
- * handle is stopped or dropped.
- *
- * If every flag is unset (or omitted), the handle behaves as if `idle`
- * were `true` — preserving the historical default of `caffeinate -i`.
+ * Returns `null` when no confident correction exists or the service is
+ * unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
  */
-export interface MacOSPowerAssertionOptions {
-  /** Human-readable reason shown in macOS power diagnostics. */
-  reason?: string
-  /** `caffeinate -i`: prevent the system from idle-sleeping. */
-  idle?: boolean
-  /** `caffeinate -s`: prevent the system from sleeping (AC power only). */
-  system?: boolean
-  /** `caffeinate -u`: declare the user is active (wakes the display). */
-  user?: boolean
-  /** `caffeinate -d`: prevent the display from idle-sleeping. */
-  display?: boolean
-}
+export declare function macOSAutocorrectWord(text: string, start: number, length: number): Promise<string | null>
+
+/**
+ * Find every misspelled word using the active macOS dictionaries.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the check runs on the dedicated spelling thread.
+ */
+export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
+
+/**
+ * The app macOS `WindowServer` has in front. `null` off macOS and when the
+ * front-process SPI is unavailable.
+ */
+export declare function macOSFrontApp(): MacOSFrontApp | null
+
+/** Whether the host can use Apple's native spelling service. */
+export declare function macOSSpellCheckerAvailable(): boolean
+
+/**
+ * Return macOS replacement guesses for one misspelled-word range.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
+ */
+export declare function macOSSpellingGuesses(text: string, start: number, length: number): Promise<Array<string>>
 
 /** A single match in the content. */
 export interface Match {
@@ -1435,6 +3260,11 @@ export interface Match {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
 }
 
 /**
@@ -1458,6 +3288,36 @@ export declare function matchesKittySequence(data: string, expectedCodepoint: nu
  * Returns true only when the byte sequence maps to the exact key identifier.
  */
 export declare function matchesLegacySequence(data: string, keyName: string): boolean
+
+/**
+ * Options for [`render_mermaid_ascii`]; every field defaults like the
+ * TypeScript renderer (`useAscii: false`, paddings 5, border padding 1,
+ * `colorMode: "auto"`).
+ */
+export interface MermaidRenderOptions {
+  /** `+-|>` instead of Unicode box-drawing characters. */
+  useAscii?: boolean
+  paddingX?: number
+  paddingY?: number
+  boxBorderPadding?: number
+  /** Force the flowchart/state layout direction. */
+  direction?: 'TD' | 'TB' | 'LR' | 'BT' | 'RL'
+  /** `auto` (or omitted) detects from the terminal environment. */
+  colorMode?: 'none' | 'auto' | 'ansi16' | 'ansi256' | 'truecolor' | 'html'
+  theme?: MermaidTheme
+}
+
+/** Theme colors for [`render_mermaid_ascii`]; hex strings, all optional. */
+export interface MermaidTheme {
+  fg?: string
+  border?: string
+  line?: string
+  arrow?: string
+  accent?: string
+  bg?: string
+  corner?: string
+  junction?: string
+}
 
 /** N-API opt-in handle for the minimizer. */
 export interface MinimizerOptions {
@@ -1504,9 +3364,9 @@ export interface MinimizerOptions {
  * Telemetry for a single minimization.
  *
  * Surfaced when the minimizer actually rewrote the command's output. The
- * session layer is expected to persist `original_text` via its
- * `ArtifactManager`, splice the resulting `artifact://<id>` reference
- * into `text`, and replace any previously streamed raw output with the
+ * session layer is expected to persist `original_text` as a session
+ * spill, splice the spill's URL (formatted only on the JS side) into
+ * `text`, and replace any previously streamed raw output with the
  * minimized text.
  */
 export interface MinimizerResult {
@@ -1551,6 +3411,12 @@ export interface MinimizerResult {
  */
 export declare function mmrRerankIndices(contents: Array<string>, scores: Float64Array, lambdaParam: number, topK: number): Uint32Array
 
+/** Construction options for [`NativeOAuthCallback`]. */
+export interface NativeOAuthCallbackOptions {
+  /** Custom URL scheme to register. */
+  scheme: string
+}
+
 /**
  * Named-node chain containing `options.line`, innermost-first, excluding the
  * whole-file root.
@@ -1570,6 +3436,32 @@ export interface NodeSpan {
   /** Tree-sitter grammar node kind (e.g. `attribute_item`, `function_item`). */
   kind: string
 }
+
+/**
+ * Truncate and clamp dimensions to the same limits used by PTY start and
+ * resize.
+ */
+export declare function normalizePtyDimensions(cols: number, rows: number): PtyDimensions
+
+/** Decode notebook JSON into the editable cell-marker text. */
+export declare function notebookToEditableText(json: string, displayPath: string): string
+
+/**
+ * An opened application: its [`Application`] fields and the window it
+ * shows. On macOS `window` is its frontmost window once one is on screen;
+ * other platforms report none.
+ */
+export interface OpenedApplication {
+  id: string
+  name: string
+  path: string
+  running: boolean
+  pid?: number
+  window?: DesktopWindow
+}
+
+/** Check syntax through the shared parse cache without constructing a summary. */
+export declare function parseCodeStatus(options: ParseStatusOptions): ParseStatus
 
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
@@ -1598,6 +3490,23 @@ export declare function parseKey(data: string, kittyProtocolActive: boolean): st
  * Returns a structured parse result when the input is a valid Kitty sequence.
  */
 export declare function parseKittySequence(data: string): ParsedKittyResult | null
+
+export interface ParseStatus {
+  /** Canonical language name only when parsing succeeded. */
+  language?: string
+  /** True when non-empty source parses without syntax errors. */
+  parsed: boolean
+}
+
+/** Options for checking source syntax without generating a summary. */
+export interface ParseStatusOptions {
+  /** Source code to parse; empty input is not parsed. */
+  code: string
+  /** Language alias; a non-blank value overrides path-based detection. */
+  lang?: string
+  /** File path used to infer language when `lang` is omitted or blank. */
+  path?: string
+}
 
 /** One hunk of a unified diff, matching jsdiff `structuredPatch` hunks. */
 export interface PatchHunk {
@@ -1642,11 +3551,135 @@ export interface PdfMarkdownResult {
  */
 export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
 
+/** Request options for [`PhononTts::synthesize`]. */
+export interface PhononSpeechOptions {
+  /**
+   * Registered voice name (a `voices/<name>.safetensors` stem); omit for the
+   * checkpoint's default voice.
+   */
+  voice?: string
+  /**
+   * `duration_delta` conditioner: negative speaks faster, positive slower.
+   * Omit for the model's natural rate (0).
+   */
+  durationDelta?: number
+}
+
+/** Retained bytes of a stream, as stream offsets `start..end`. */
+export interface PipeStreamChunk {
+  /**
+   * Stream offset of `data`'s first byte; past 0 once older bytes were
+   * dropped.
+   */
+  start: number
+  /** Stream offset just past `data`: the next read's `from`. */
+  end: number
+  /** The bytes `start..end`. */
+  data: Buffer
+  /** Whether bytes may still arrive. */
+  open: boolean
+}
+
+/** A tapped pipe or redirected file of a run. */
+export interface PipeStreamInfo {
+  /** Stream number, from 1. */
+  id: number
+  /**
+   * Source text of the stage writing into the pipe, or of the command whose
+   * redirection opened the file.
+   */
+  producer: string
+  /**
+   * Source text of the stage reading from the pipe, or the file's absolute
+   * path.
+   */
+  consumer: string
+  /**
+   * Bytes written so far, including those no longer retained; a file's
+   * size now.
+   */
+  total: number
+  /** Whether bytes may still arrive; for a file, whether the run goes on. */
+  open: boolean
+  /** The stream is a file a command redirected its output into. */
+  file: boolean
+  /**
+   * Run-trace node key (`unit:0:node`) of the stage writing into the pipe,
+   * or of the command whose redirection opened the file. Absent when the
+   * run has no trace or the writer's unit is not in it.
+   */
+  node?: string
+  /**
+   * When it was last written, in ms since the UNIX epoch: a pipe's last
+   * write (its opening before any), a file's modification time (0 when
+   * unreadable).
+   */
+  modified: number
+}
+
 export interface PointerOptions {
   button?: string
   count?: number
   modifiers?: Array<string>
-  deliveryMode?: string
+  /** Arbitrary keys held for the duration of a drag. */
+  keys?: Array<string>
+  /**
+   * Briefly activate the target window and post real input instead of the
+   * default background delivery.
+   */
+  takeover?: boolean
+  /**
+   * With `takeover`, hand focus back to the user's app even if they typed
+   * or clicked during the action; only a third app they switched to keeps
+   * it. The host sets this when it reruns a refused background action.
+   */
+  returnFocus?: boolean
+  /**
+   * Item path to choose in the menu a click opens, matched like a menu-bar
+   * path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the
+   * menu, presses the item and returns with the menu closed.
+   */
+  menu?: Array<string>
+  /**
+   * Refuse a background left click that lands on a control that opens a
+   * menu (on macOS a menu button or popup button), or a drag that starts on
+   * one, with `BackgroundUnavailable` before anything is sent. The host sets
+   * this when the user refuses foreground takeover: an open menu takes their
+   * keyboard.
+   */
+  refuseMenu?: boolean
+}
+
+/**
+ * Options for starting a power assertion.
+ *
+ * Each boolean maps to a `caffeinate(8)` flag and the closest corresponding
+ * platform capability. Multiple flags can be combined; when set, one
+ * assertion is taken per flag and all are released together when the
+ * handle is stopped or dropped.
+ *
+ * If every flag is unset (or omitted), the handle behaves as if `idle`
+ * were `true` — preserving the historical default of `caffeinate -i`.
+ */
+export interface PowerAssertionOptions {
+  /** Human-readable reason shown in platform power diagnostics. */
+  reason?: string
+  /** `caffeinate -i`: prevent the system from idle-sleeping. */
+  idle?: boolean
+  /** `caffeinate -s`: prevent the system from sleeping (AC power only). */
+  system?: boolean
+  /** `caffeinate -u`: declare the user is active (wakes the display). */
+  user?: boolean
+  /** `caffeinate -d`: prevent the display from idle-sleeping. */
+  display?: boolean
+}
+
+/** Ghost text for the word being typed. */
+export interface PredictedWord {
+  /** Characters to paint after the typed prefix. */
+  suffix: string
+  /** Engine-calibrated probability that `suffix` is exactly right. */
+  confidence: number
 }
 
 /** Current state of a process reference. */
@@ -1700,6 +3733,12 @@ export interface PtyArgvStartOptions {
   rows?: number
 }
 
+/** Effective terminal dimensions shared by PTY sessions and screen emulators. */
+export interface PtyDimensions {
+  cols: number
+  rows: number
+}
+
 /** Result of a PTY command run. */
 export interface PtyRunResult {
   /** Exit code when the command completes. */
@@ -1734,6 +3773,48 @@ export interface PtyStartOptions {
 }
 
 /**
+ * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
+ *
+ * The image is drawn at `scale` times the SVG's intrinsic size (default 1;
+ * above 1 renders vector content crisply at display resolution), then shrunk
+ * as needed to fit `max_width_px` x `max_height_px` with its aspect ratio
+ * kept. Conversion runs on the native blocking pool so parsing and rendering
+ * do not stall the JavaScript event loop.
+ *
+ * With `cell`, the limits round down to whole cells and the canvas pads with
+ * transparency, right and bottom, to whole cells: a terminal placing the PNG
+ * over `width / cell.width_px` columns and `height / cell.height_px` rows
+ * shows it 1:1 instead of resampling it.
+ *
+ * # Errors
+ * Returns an error for invalid SVG data, zero/oversized limits, a zero cell
+ * size, a scale that is not finite and positive, allocation failure, or PNG
+ * encoding failure.
+ */
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number, scale?: number | undefined | null, cell?: SvgCell | undefined | null): Promise<Uint8Array>
+
+/**
+ * A child spawned by `spawnRaw`: its pid and the parent-side pipe ends.
+ *
+ * The fds are `CLOEXEC`, nonblocking raw fds (Windows: handle values) owned
+ * by the caller.
+ */
+export interface RawChild {
+  pid: number
+  stdin: number
+  stdout: number
+  stderr: number
+}
+
+/** Exit status of a reaped child. */
+export interface RawExit {
+  /** Exit code when the child exited normally. */
+  exitCode: number | null
+  /** Terminating signal when the child was killed by one (Unix). */
+  signal: number | null
+}
+
+/**
  * Read an image from the system clipboard.
  *
  * Returns `Ok(None)` when no image data is available.
@@ -1744,13 +3825,38 @@ export interface PtyStartOptions {
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
 
 /**
+ * Read plain text from the system clipboard.
+ *
+ * Returns `Ok(None)` when the clipboard holds no text, so callers can tell
+ * "empty" from "unreadable" without spawning a shell bridge.
+ *
+ * # Errors
+ * Returns an error if clipboard access fails.
+ */
+export declare function readTextFromClipboard(): Promise<string | undefined | null>
+
+/** waitpid for a direct child (also one inherited across execReplace). */
+export declare function reapChild(pid: number): Promise<RawExit>
+
+/**
+ * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
+ * xychart) to ASCII/Unicode art. Synchronous: callers render inside the
+ * TUI compositor.
+ *
+ * # Errors
+ * Unparseable flowchart source or an unknown `direction`/`colorMode` value.
+ */
+export declare function renderMermaidAscii(text: string, options?: MermaidRenderOptions | undefined | null): string
+
+/**
  * Render one snapcompact frame on a libuv worker: print pre-normalized text
  * onto a `size`-wide bitmap and encode it as PNG.
  *
- * The bitmap height hugs the rows the text actually occupies
- * (`usedRows * lineRepeat * cellHeight`), so a partially filled frame never
- * pays for blank padding rows. The glyph grid holds `floor(size/cellWidth) *
- * floor(size/cellHeight/lineRepeat)` characters; input beyond that is ignored.
+ * The bitmap height hugs the rows the text occupies
+ * (`usedRows * lineRepeat * cellHeight`), with a 64px floor for vision
+ * processors that reject smaller dimensions. The glyph grid holds
+ * `floor(size/cellWidth) * floor(size/cellHeight/lineRepeat)` characters;
+ * input beyond that is ignored.
  * Native-cell bitmap-font shapes encode as indexed PNG; stretched bitmap-font
  * shapes (target cell != font cell) encode as RGB. TrueType shapes encode RGB
  * directly from grayscale coverage.
@@ -1764,6 +3870,27 @@ export declare function readImageFromClipboard(): Promise<ClipboardImage | undef
  * JS-side re-encode.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
+
+/**
+ * Put back a stdin console mode `enableConsoleVtInput` returned. False when
+ * stdin is no longer a console or refuses the mode; always false off Windows.
+ */
+export declare function restoreConsoleInputMode(mode: number): boolean
+
+/**
+ * Run the shell engine as a process shell in this process (`omp zsh`,
+ * `omp bash`, `omp sh`).
+ *
+ * `argv` is the shell's whole command line,
+ * `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
+ * shell gets it. Synchronous: blocks the calling thread until the shell
+ * exits and returns the status the process should exit with (0–255; 101
+ * after a panic). The shell uses the process's own stdin, stdout, stderr,
+ * terminal and inherited descriptors (duplicated, never taken over); the
+ * job-control and termination signals the runtime handles are reset to
+ * their defaults for the run and restored after it.
+ */
+export declare function runShellMain(argv: Array<string>): number
 
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).
@@ -1816,7 +3943,49 @@ export interface SearchResult {
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void
 
-/** Options for executing a shell command via brush-core. */
+/**
+ * The commands the embedded shell adds to bash's own builtins, sorted.
+ *
+ * For a session started with `sessionEnv` over this process's environment,
+ * whose `PI_DISABLE_*` switches gate them. omp's bash tool lists them to the
+ * model.
+ */
+export declare function shellBuiltins(sessionEnv?: Record<string, string>): Array<string>
+
+/** One invocation of a host-provided session command in the embedded shell. */
+export interface ShellCommandRequest {
+  /** Command name as invoked. */
+  name: string
+  /** Arguments after the command name. */
+  argv: Array<string>
+  /** Shell working directory at invocation time. */
+  cwd: string
+  /**
+   * UTF-8 stdin read to EOF, only when `argv` contains a bare `-`; empty
+   * otherwise.
+   */
+  stdin: string
+}
+
+/** Shell-composable response of a session command. */
+export interface ShellCommandResult {
+  stdout: string
+  stderr: string
+  /** 0..=255 */
+  exitCode: number
+}
+
+/** Host-provided commands installed for one `Shell.run`. */
+export interface ShellCommands {
+  /** Names resolvable as commands during this run. */
+  names: Array<string>
+  handler: (request: ShellCommandRequest) => Promise<ShellCommandResult>
+}
+
+/**
+ *  Options for executing a shell command via the embedded bash engine
+ * .
+ */
 export interface ShellExecuteOptions {
   /** Command string to execute in the shell. */
   command: string
@@ -1834,6 +4003,346 @@ export interface ShellExecuteOptions {
   minimizer?: MinimizerOptions
   /** Abort signal for cancelling the operation. */
   signal?: unknown
+  /** Filesystem backing the command (native when absent). */
+  filesystem?: ShellFilesystem
+}
+
+/** One host text file a command changed, as `onFileChange` receives it. */
+export interface ShellFileChange {
+  /** Absolute host path. */
+  path: string
+  /**
+   * Content before the command touched the file; absent when there was
+   * no file.
+   */
+  before?: Buffer
+  /** Content once the command was done; absent when it removed the file. */
+  after?: Buffer
+}
+
+/** Host filesystem injected into shell sessions. */
+export interface ShellFilesystem {
+  /**
+   * Services every routed operation; failures are returned as `error`
+   * data rather than thrown.
+   */
+  handler: (error: Error | null, request: ShellFsRequest) => Promise<ShellFsResponse>
+  /**
+   * When true, every path without a `scheme://` prefix — and everything
+   * beneath it — is the ordinary host filesystem: operations there run
+   * natively (including recursive traversal and removal) and `handler` is
+   * never consulted, so it cannot intercept any host subtree. Only URL
+   * paths reach `handler`. When false or absent, `handler` is a fully
+   * injected filesystem and receives every path, host paths included.
+   */
+  nativeLocalPaths?: boolean
+  /**
+   * Called for each host text file a command changed itself: a builtin's
+   * write, rename or removal (`sed -i`, `cp`, `mv`, `rm`, `tee`) and the
+   * target of a redirection, once the command is done with it. Only files
+   * git would track are reported (in a work tree, not ignored), at most
+   * 4 MiB each; what a spawned program writes on its own is not.
+   */
+  onFileChange?: (error: Error | null, change: ShellFileChange) => void
+}
+
+/** Permissions probed by an `access` request. */
+export interface ShellFsAccess {
+  read: boolean
+  write: boolean
+  execute: boolean
+}
+
+/** One directory entry. */
+export interface ShellFsDirEntry {
+  name: string
+  fileType: ShellFsFileType
+  /** Entry metadata without following a final symlink, when already known. */
+  metadata?: ShellFsMetadata
+}
+
+/** A failed operation, reported as data so its errno identity survives. */
+export interface ShellFsError {
+  /** Errno name such as `ENOENT`, `EACCES`, `EROFS`, `ENOTSUP`. */
+  code: string
+  message?: string
+}
+
+/** File type on the filesystem wire. */
+export declare enum ShellFsFileType {
+  /** Regular file. */
+  File = 'file',
+  /** Directory. */
+  Dir = 'dir',
+  /** Symbolic link. */
+  Symlink = 'symlink',
+  /** Named pipe. */
+  Fifo = 'fifo',
+  /** Unix domain socket. */
+  Socket = 'socket',
+  /** Character device. */
+  Char = 'char',
+  /** Block device. */
+  Block = 'block'
+}
+
+/**
+ * File metadata. Absent optional fields mean the provider has no such value;
+ * they are never fabricated.
+ */
+export interface ShellFsMetadata {
+  fileType: ShellFsFileType
+  size: number | bigint
+  /** Permission bits (`0o7777`). */
+  mode: number
+  /** Modification time, nanoseconds since the Unix epoch. */
+  mtimeNs?: number | bigint
+  /** Access time, nanoseconds since the Unix epoch. */
+  atimeNs?: number | bigint
+  /** Status change time, nanoseconds since the Unix epoch. */
+  ctimeNs?: number | bigint
+  /** Creation time, nanoseconds since the Unix epoch. */
+  birthtimeNs?: number | bigint
+  /** Device id; given together with `ino`. */
+  dev?: number | bigint
+  /** Inode number; given together with `dev`. */
+  ino?: number | bigint
+  nlink?: number | bigint
+  rdev?: number | bigint
+  /** Allocated 512-byte blocks; given together with `blksize`. */
+  blocks?: number | bigint
+  /** Preferred I/O block size; given together with `blocks`. */
+  blksize?: number | bigint
+  /** Owner user id; given together with `gid`. */
+  uid?: number
+  /** Owner group id; given together with `uid`. */
+  gid?: number
+}
+
+/** Which path components `canonicalize` requires to exist. */
+export declare enum ShellFsMissing {
+  /** Every component must exist (`realpath`). */
+  Existing = 'existing',
+  /** Every component but the last must exist. */
+  Normal = 'normal',
+  /** No component needs to exist. */
+  Missing = 'missing'
+}
+
+/** Filesystem operation requested from a host [`ShellFilesystem`]. */
+export declare enum ShellFsOp {
+  /** Metadata of `path`, following symlinks. Answer: `metadata`. */
+  Metadata = 'metadata',
+  /**
+   * Metadata of `path` itself, not following a final symlink. Answer:
+   * `metadata`.
+   */
+  SymlinkMetadata = 'symlinkMetadata',
+  /** Entries of directory `path`. Answer: `entries`. */
+  ReadDir = 'readDir',
+  /** Canonical spelling of `path` per `missing`/`resolve`. Answer: `path`. */
+  Canonicalize = 'canonicalize',
+  /**
+   * Host file or directory backing `path`, for user-facing commands that
+   * print real locations (`realpath`, `readlink -f`). Answer: `path`, or
+   * no `path` when nothing on the host backs it. Grants no access.
+   */
+  BackingPath = 'backingPath',
+  /** Contents of symlink `path`. Answer: `path`. */
+  ReadLink = 'readLink',
+  /** Check `access` permissions on `path` (all false: existence). */
+  Access = 'access',
+  /** Open `path` with `open` flags. Answer: `handle`. */
+  Open = 'open',
+  /**
+   * Read up to `length` bytes of `handle` at `offset`. Answer: `data`
+   * (empty at end of file).
+   */
+  Read = 'read',
+  /**
+   * Write `data` to `handle` at `offset`, or at the end when `offset` is
+   * absent (append handles). Answer: `written`, plus `offset` (end
+   * position after the write) for appends.
+   */
+  Write = 'write',
+  /** Flush buffered writes of `handle`. */
+  Flush = 'flush',
+  /** Release `handle`. Sent exactly once per opened handle. */
+  Close = 'close',
+  /** Metadata of the file behind `handle`. Answer: `metadata`. */
+  FileMetadata = 'fileMetadata',
+  /**
+   * Query whether `handle` has a conflicting advisory write lock. Answer:
+   * `locked`.
+   */
+  IsLocked = 'isLocked',
+  /** Truncate or extend `handle` to `size` bytes. */
+  SetLen = 'setLen',
+  /** Set times of `handle` (`atimeNs`/`mtimeNs`; absent = unchanged). */
+  FileSetTimes = 'fileSetTimes',
+  /** Set permission bits `mode` of `handle`. */
+  FileSetPermissions = 'fileSetPermissions',
+  /** Persist `handle` (`dataOnly`: data without metadata). */
+  Sync = 'sync',
+  /** Create directory `path` (`recursive`, optional `mode`). */
+  CreateDir = 'createDir',
+  /** Remove non-directory `path`. */
+  RemoveFile = 'removeFile',
+  /** Remove empty directory `path`. */
+  RemoveDir = 'removeDir',
+  /** Remove directory `path` and everything below it. */
+  RemoveDirAll = 'removeDirAll',
+  /** Rename `path` to `target`. */
+  Rename = 'rename',
+  /** Create hard link `target` to existing `path`. */
+  HardLink = 'hardLink',
+  /** Create symlink `path` whose contents are `target` (verbatim). */
+  Symlink = 'symlink',
+  /** Set permission bits `mode` of `path` (following symlinks). */
+  SetPermissions = 'setPermissions',
+  /**
+   * Set times of `path` (`atimeNs`/`mtimeNs`; absent = unchanged;
+   * `follow`).
+   */
+  SetTimes = 'setTimes',
+  /** Change owner `uid`/`gid` of `path` (absent = unchanged; `follow`). */
+  Chown = 'chown',
+  /** Statistics of the filesystem holding `path`. Answer: `statFs`. */
+  StatFs = 'statFs',
+  /**
+   * Extended attribute `name` of `path`. Answer: `data`, or no `data`
+   * when the attribute is absent.
+   */
+  GetXattr = 'getXattr',
+  /** Set extended attribute `name` of `path` to `data`. */
+  SetXattr = 'setXattr',
+  /** Extended attribute names of `path`. Answer: `names`. */
+  ListXattr = 'listXattr',
+  /** Remove extended attribute `name` of `path`. */
+  RemoveXattr = 'removeXattr',
+  /**
+   * Create node `path` of `fileType` with `mode` (and `device` for
+   * character/block devices).
+   */
+  Mknod = 'mknod'
+}
+
+/** Open flags for an `open` request (std `OpenOptions` semantics). */
+export interface ShellFsOpenFlags {
+  read: boolean
+  write: boolean
+  append: boolean
+  truncate: boolean
+  create: boolean
+  createNew: boolean
+  /** Permission bits for a newly created file. */
+  mode?: number
+  /** Platform open flags beyond the portable set (`O_*`); absent when none. */
+  customFlags?: number
+}
+
+/** One filesystem request. Only the fields documented for `op` are set. */
+export interface ShellFsRequest {
+  op: ShellFsOp
+  /** Subject path, verbatim (URL spellings keep their authority). */
+  path?: string
+  /** Second path: rename/hard-link destination or symlink contents. */
+  target?: string
+  /** Provider handle id from a previous `open`. */
+  handle?: number
+  /** Byte offset for positional handle I/O. */
+  offset?: bigint
+  /** Maximum bytes to read. */
+  length?: number
+  /** New length for `setLen`. */
+  size?: bigint
+  /** Bytes to write (`write`) or attribute value (`setXattr`). */
+  data?: Buffer
+  open?: ShellFsOpenFlags
+  access?: ShellFsAccess
+  recursive?: boolean
+  /** Permission bits (`0o7777`). */
+  mode?: number
+  /** Whether a final symlink is followed. */
+  follow?: boolean
+  /** Access time in nanoseconds since the Unix epoch. */
+  atimeNs?: bigint
+  /** Modification time in nanoseconds since the Unix epoch. */
+  mtimeNs?: bigint
+  uid?: number
+  gid?: number
+  /** `sync` persists data only, not metadata. */
+  dataOnly?: boolean
+  /** Extended attribute name. */
+  name?: string
+  /** Node type for `mknod`. */
+  fileType?: ShellFsFileType
+  /** Device number for character/block `mknod`. */
+  device?: bigint
+  missing?: ShellFsMissing
+  resolve?: ShellFsResolve
+  /**
+   * Removal of temporary files the shell itself created, issued even after
+   * the run was aborted. Serve it under the same policy, but without the
+   * run's abort signal. Not a retry of a cancelled request.
+   */
+  cleanup?: boolean
+}
+
+/** How `canonicalize` treats symlinks. */
+export declare enum ShellFsResolve {
+  /** Resolve symlinks as encountered. */
+  Physical = 'physical',
+  /** Apply `..` lexically before resolving symlinks. */
+  Logical = 'logical',
+  /** Never resolve symlinks; normalize lexically only. */
+  None = 'none'
+}
+
+/**
+ * Provider answer. Carries `error`, a native redirect (`local` /
+ * `localTarget`), or the op's result fields.
+ */
+export interface ShellFsResponse {
+  error?: ShellFsError
+  /** Run this operation natively on this host path instead. */
+  local?: string
+  /** Native host path replacing `target` (rename/hard-link destination). */
+  localTarget?: string
+  handle?: number
+  /**
+   * With an `open` redirect: the host file backs an immutable mount, so
+   * the opened file refuses every mutation (EROFS), duplicates included.
+   */
+  readonly?: boolean
+  data?: Uint8Array
+  written?: number
+  /** Result of an `isLocked` advisory-lock query. */
+  locked?: boolean
+  /** Handle position after an append write. */
+  offset?: number | bigint
+  path?: string
+  metadata?: ShellFsMetadata
+  entries?: Array<ShellFsDirEntry>
+  names?: Array<string>
+  statFs?: ShellFsStatFs
+}
+
+/** Filesystem statistics. */
+export interface ShellFsStatFs {
+  blockSize: number | bigint
+  /** Optimal transfer size; defaults to `blockSize`. */
+  ioSize?: number | bigint
+  blocks: number | bigint
+  blocksFree: number | bigint
+  blocksAvailable: number | bigint
+  files: number | bigint
+  filesFree: number | bigint
+  /** Filesystem type magic number. */
+  fsType?: number | bigint
+  fsTypeName?: string
+  fsid?: number | bigint
+  nameMax?: number | bigint
 }
 
 /** Options for configuring a persistent shell session. */
@@ -1844,7 +4353,22 @@ export interface ShellOptions {
   snapshotPath?: string
   /** Optional per-command output minimizer configuration. */
   minimizer?: MinimizerOptions
+  /** Filesystem backing every run of this session (native when absent). */
+  filesystem?: ShellFilesystem
+  /**
+   * The shell is this process's own: every run reads the process's stdin
+   * and writes its stdout and stderr directly (`run` streams no chunks and
+   * minimizes nothing), and externals stay in the process's session and
+   * process group, sharing its controlling terminal.
+   */
+  process?: boolean
 }
+
+/**
+ * Every name the engine resolves before a session command (reserved words,
+ * shell builtins, pi shell tools, in-process utilities, bash/sh/zsh).
+ */
+export declare function shellReservedCommandNames(): Array<string>
 
 /** Options for running a shell command. */
 export interface ShellRunOptions {
@@ -1858,6 +4382,26 @@ export interface ShellRunOptions {
   timeoutMs?: number
   /** Abort signal for cancelling the operation. */
   signal?: unknown
+  /**
+   * Filesystem for this run only, replacing the session's; the session's
+   * filesystem applies again to later runs.
+   */
+  filesystem?: ShellFilesystem
+  /**
+   * The application's speech synthesizer, which `say` speaks through when
+   * it has one configured; absent leaves `say` to the system's.
+   */
+  speech?: ShellSpeech
+  /**
+   * Host-provided commands installed for this run only, resolved after
+   * the shell's builtins, pi's shell tools and in-process utilities, and
+   * before shell functions, aliases and `PATH`.
+   */
+  commands?: ShellCommands
+  /** Receives a copy of every byte crossing the run's pipeline pipes. */
+  streams?: PipeStreams
+  /** Folds the run's engine events into a live model of the command. */
+  trace?: RunTrace
 }
 
 /** Result of running a shell command. */
@@ -1871,12 +4415,105 @@ export interface ShellRunResult {
   /**
    * When the minimizer rewrote the captured output, this carries the
    * original buffer + telemetry so the session layer can persist it as
-   * an artifact and splice an `artifact://<id>` reference into the
-   * minimized text shown to the agent. `None` when nothing was rewritten.
+   * a spill and splice the spill's URL into the minimized text shown to
+   * the agent. `None` when nothing was rewritten.
    */
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+}
+
+/** The application's speech synthesizer, injected into a shell run. */
+export interface ShellSpeech {
+  /**
+   * Serves every request; failures are returned as `error` data rather
+   * than thrown.
+   */
+  handler: (error: Error | null, request: ShellSpeechRequest) => Promise<ShellSpeechResponse>
+}
+
+/** What a [`ShellSpeechRequest`] asks of the handler. */
+export declare enum ShellSpeechOp {
+  /** List the synthesizer's voices. */
+  Voices = 'voices',
+  /** Speak `text`, or synthesize it when `capture` is set. */
+  Speak = 'speak',
+  /** Stop the `speak` request with this `id`. */
+  Cancel = 'cancel'
+}
+
+/** One speech request. Only the fields documented for `op` are set. */
+export interface ShellSpeechRequest {
+  op: ShellSpeechOp
+  /** Identifies a `speak` request to a later `cancel`. */
+  id?: number
+  /** `speak`: the text. */
+  text?: string
+  /** `speak`: the voice asked for (`say -v`), verbatim. */
+  voice?: string
+  /** `speak`: the rate asked for, in words per minute (`say -r`). */
+  rate?: number
+  /** `speak`: return the audio as `samples` instead of playing it. */
+  capture?: boolean
+  /**
+   * `voices`, `speak`: answer even when no synthesizer is configured,
+   * because the system has none either.
+   */
+  required?: boolean
+}
+
+/** Handler answer. */
+export interface ShellSpeechResponse {
+  /**
+   * False when the application has no synthesizer configured and the
+   * request did not require one; nothing was spoken.
+   */
+  configured: boolean
+  /** `voices`: the voices. */
+  voices?: Array<ShellSpeechVoice>
+  /** `speak` with `capture`: mono samples in `-1..=1`. */
+  samples?: Float32Array
+  /** `speak` with `capture`: samples per second. */
+  sampleRate?: number
+  /** Why the request failed. */
+  error?: string
+}
+
+/** One voice of the application's synthesizer. */
+export interface ShellSpeechVoice {
+  /** The name `say -v` selects it by. */
+  name: string
+  /** Its locale, `en_US` style. */
+  locale: string
+  /** A line describing it. */
+  sample: string
+}
+
+/** Native non-executing visualization transformations. */
+export interface ShellVizLayers {
+  color: boolean
+  inline: boolean
+  idioms: boolean
+  effects: boolean
+  unwrap: boolean
+}
+
+/** Native presentation controls. Node identities are opaque engine keys. */
+export interface ShellVizOptions {
+  view: 'raw' | 'pseudo'
+  layers: ShellVizLayers
+  split: boolean
+  cursor?: number
+  cursorSeq?: number
+  playing: boolean
+  speed: number
+  selectedNode?: string
+  expandedNodes: Array<string>
+  /**
+   * The script is a command still streaming in, not yet run: its
+   * unfinished end is drawn as it will most likely continue.
+   */
+  streaming?: boolean
 }
 
 /**
@@ -1902,8 +4539,8 @@ export declare function sliceWithWidth(line: string, startCol: number, length: n
 export interface SnapcompactRenderOptions {
   /**
    * Frame width in pixels; also bounds the grid rows
-   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the rows the
-   * text actually uses instead of padding to a square.
+   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the used rows
+   * with a 64px floor, rather than padding every frame to a square.
    */
   size: number
   /**
@@ -1953,13 +4590,53 @@ export interface SnapcompactRenderOptions {
 export declare function snapcompactSupportedChars(font: string, chars: string): string
 
 /**
+ * Spawn in its own process group with three pipes; parent-side fds are
+ * CLOEXEC raw fds owned by the caller.
+ */
+export declare function spawnRaw(options: SpawnRawOptions): RawChild
+
+/** Options for `spawnRaw`. */
+export interface SpawnRawOptions {
+  /** Executable name or path (resolved against `env.PATH`). */
+  application: string
+  /** Arguments passed to the executable. */
+  args: Array<string>
+  /** Complete child environment; nothing is inherited from this process. */
+  env: Record<string, string>
+  /** Working directory of the child. */
+  cwd: string
+}
+
+/** A misspelled span measured in JavaScript/UTF-16 code units. */
+export interface SpellingRange {
+  /** Inclusive UTF-16 start offset. */
+  start: number
+  /** UTF-16 length of the misspelled span. */
+  length: number
+}
+
+/**
  * Unified-diff hunks with jsdiff
  * `structuredPatch(_, _, oldText, newText, _, _, { context }).hunks`
  * semantics. `context` defaults to 4 like jsdiff.
  */
 export declare function structuredPatchHunks(oldText: string, newText: string, context?: number | undefined | null): Array<PatchHunk>
 
+/**
+ * Summarize source structure synchronously on the calling thread.
+ *
+ * Prefer [`summarize_code_async`] on hot paths: the tree-sitter parse blocks
+ * the JS thread for the whole call.
+ */
 export declare function summarizeCode(options: SummaryOptions): SummaryResult
+
+/**
+ * Summarize source structure on libuv's thread pool.
+ *
+ * Same result as [`summarize_code`], but the parse and summary run off the
+ * JS thread; only argument and result marshalling happen on it.
+ */
+export declare function summarizeCodeAsync(options: SummaryOptions): Promise<SummaryResult>
 
 export interface SummaryOptions {
   /** Source code to summarize. */
@@ -2009,11 +4686,41 @@ export interface SummarySegment {
 }
 
 /**
- * Check if a language is supported for highlighting.
- * Returns true if the language has either direct support or a fallback
- * mapping.
+ * Check if a language resolves to a grammar (by name, extension or alias),
+ * i.e. whether `highlightCode` colors it rather than echoing it.
  */
 export declare function supportsLanguage(lang: string): boolean
+
+/**
+ * Terminal cell size in device pixels, for [`rasterize_svg`] canvases a
+ * terminal shows over whole cells.
+ */
+export interface SvgCell {
+  widthPx: number
+  heightPx: number
+}
+
+/** Options for [`TextPredictor::new`]. */
+export interface TextPredictorOptions {
+  /** Engine: `ngram`, `smollm`, or `apple`. */
+  method: string
+  /** Private directory for persisted learned state. */
+  stateDir: string
+  /** Directory holding downloaded model weights (`smollm` only). */
+  modelDir?: string
+  /** Show threshold override; omit for the engine's tuned default. */
+  showThreshold?: number
+}
+
+/**
+ * Translate a kitty CSI-u Alt/Ctrl+Alt chord into the text `AltGr` produced
+ * on the active keyboard layout; `null` when the sequence is not an `AltGr`
+ * keystroke there, and always off Windows.
+ *
+ * Only meaningful on native Windows `ConPTY` hosts with the kitty protocol
+ * active: other hosts report the produced text themselves.
+ */
+export declare function translateWindowsAltGrSequence(data: string): string | null
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.
@@ -2021,6 +4728,233 @@ export declare function supportsLanguage(lang: string): boolean
  * Pads with spaces when requested.
  */
 export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): string
+
+/** Patch application options. */
+export interface VcsApplyOptions {
+  cached?: boolean
+  indexPath?: string
+  reverse?: boolean
+  threeWay?: boolean
+}
+
+/** Clean options. */
+export interface VcsCleanOptions {
+  ignoredOnly?: boolean
+  includeIgnored?: boolean
+  paths?: Array<string>
+}
+
+/** Clone options. */
+export interface VcsCloneOptions {
+  refName?: string
+  sha?: string
+  timeoutMs?: number
+}
+
+/** Commit author identity. */
+export interface VcsCommitAuthor {
+  name: string
+  email: string
+  date?: string
+}
+
+/** Commit metadata. */
+export interface VcsCommitDetails {
+  sha: string
+  parents: Array<string>
+  author: VcsCommitAuthor
+  message: string
+}
+
+/** Commit creation options. */
+export interface VcsCommitOptions {
+  author?: VcsCommitAuthor
+  allowEmpty?: boolean
+  amend?: boolean
+  files?: Array<string>
+  /** Build the commit from this index file instead of the repository's. */
+  indexPath?: string
+  /** Fail with `HeadMoved` unless HEAD resolves to this revision. */
+  expectedHead?: string
+  /** Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`). */
+  noVerify?: boolean
+}
+
+/** Detach copied Git metadata. */
+export declare function vcsDetachGitDir(worktreeRoot: string, sourceCommonDir: string, signal?: unknown | undefined | null): Promise<string>
+
+/** Diff generation options. */
+export interface VcsDiffOptions {
+  cached?: boolean
+  base?: string
+  head?: string
+  files?: Array<string>
+  context?: number
+  binary?: boolean
+  /**
+   * Fail with an `OutputTooLarge` `VcsError` once the rendered patch exceeds
+   * this many bytes, instead of buffering an arbitrarily large string.
+   * Carried as a double so a budget past 2^32 reaches the renderer intact
+   * (a `u32` field would wrap it); values beyond `usize` saturate.
+   */
+  maxBytes?: number
+}
+
+/** Discover the repository owning a directory. */
+export declare function vcsDiscover(dir: string): VcsRepo | null
+
+/**
+ * Discover the repository presenting a directory: equal-root jj+git ties
+ * prefer Jujutsu. Git-safe automation must keep using [`vcs_discover`].
+ */
+export declare function vcsDiscoverForDisplay(dir: string): VcsRepo | null
+
+/** Clone a Git repository. */
+export declare function vcsGitClone(url: string, target: string, options: VcsCloneOptions, signal?: unknown | undefined | null): Promise<void>
+
+/** Discover the Git checkout containing a directory. */
+export declare function vcsGitDiscover(dir: string): VcsGitRepo | null
+
+/** Discover Git metadata without opening the repository. */
+export declare function vcsGitRepoInfo(dir: string): VcsGitRepoInfo | null
+
+/** Discovered Git repository paths. */
+export interface VcsGitRepoInfo {
+  repoRoot: string
+  gitEntryPath: string
+  gitDir: string
+  commonDir: string
+  headPath: string
+  isReftable: boolean
+}
+
+/** Resolved HEAD state. */
+export interface VcsHeadState {
+  kind: string
+  refName?: string
+  branch?: string
+  commit?: string
+}
+
+/** Selected hunks or line range for a path. */
+export interface VcsHunkSelection {
+  path: string
+  kind: string
+  indices?: Array<number>
+  start?: number
+  end?: number
+}
+
+/** Invalid hunk selection. */
+export interface VcsHunkSelectionError {
+  path: string
+  message: string
+}
+
+/** Test whether a directory is a pure jj workspace. */
+export declare function vcsIsPureJj(dir: string): boolean
+
+/** Discover a Jujutsu workspace. */
+export declare function vcsJjDiscover(dir: string): VcsJjWorkspace | null
+
+/** Join patch fragments. */
+export declare function vcsJoinPatches(parts: Array<string>): string
+
+/** Linked worktree metadata. */
+export interface VcsLinkedWorktree {
+  root: string
+  primaryRoot: string
+}
+
+/** Per-file line counts. */
+export interface VcsNumstatEntry {
+  path: string
+  added?: number
+  removed?: number
+}
+
+/** Push options. */
+export interface VcsPushOptions {
+  remote?: string
+  refspec?: string
+  forceWithLease?: boolean
+}
+
+/** Restore options. */
+export interface VcsRestoreOptions {
+  source?: string
+  staged?: boolean
+  worktree?: boolean
+  files?: Array<string>
+}
+
+/** Bounded object contents. */
+export interface VcsShowResult {
+  data: Buffer
+  truncated: boolean
+}
+
+/** Status query options. */
+export interface VcsStatusOptions {
+  untracked?: string
+  pathspecs?: Array<string>
+  nulTerminated?: boolean
+}
+
+/** Git status counts. */
+export interface VcsStatusSummary {
+  staged: number
+  unstaged: number
+  untracked: number
+}
+
+/** One blob or symlink of a tree listing. */
+export interface VcsTreeEntry {
+  path: string
+  /**
+   * Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or
+   * `120000`.
+   */
+  mode: string
+}
+
+/** Validate hunk selections. */
+export declare function vcsValidateHunkSelections(rawDiff: string, selections: Array<VcsHunkSelection>): Array<VcsHunkSelectionError>
+
+/** Worktree creation options. */
+export interface VcsWorktreeAddOptions {
+  detach: boolean
+  clone: boolean
+  backend?: IsoBackendKind
+  /**
+   * Carry the source checkout's uncommitted changes into the new worktree
+   * (target must be the source `HEAD`).
+   */
+  keepChanges?: boolean
+}
+
+/** Worktree creation outcome. */
+export interface VcsWorktreeAddResult {
+  clonedWith?: IsoBackendKind
+  cloneError?: string
+}
+
+/**
+ * Worktree content of one repo-relative path, for
+ * [`VcsGitRepo::worktree_to_git`].
+ */
+export interface VcsWorktreeContent {
+  path: string
+  data: Uint8Array
+}
+
+/** One worktree listing row. */
+export interface VcsWorktreeEntry {
+  path: string
+  head?: string
+  branch?: string
+  detached: boolean
+}
 
 /**
  * Score every row of a normalized `f32` matrix against `query` and return
@@ -2054,6 +4988,57 @@ export interface VectorTopK {
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
 
+/**
+ * Parse `options.code` into the shared tree cache on the native blocking
+ * pool.
+ *
+ * [`enclosing_block_boundaries`], [`block_range_at`] and [`node_chain_at`]
+ * are synchronous and parse on the JS thread when their source is not
+ * cached; awaiting this first makes that parse a cache hit. Resolves without
+ * parsing when the language is unrecognized or the source is over 2 MiB,
+ * where a typical tree would not fit the cache's memory budget.
+ */
+export declare function warmBlockParse(options: BlockParseOptions): Promise<undefined>
+
+/**
+ * Warm syntax grammars, scope matchers, and the regexes of commonly
+ * highlighted languages on the native worker pool.
+ */
+export declare function warmHighlighter(): Promise<undefined>
+
+/**
+ * Wasm grammar backing `lang` (alias) or the language of `path`; `null` for
+ * built-in or unknown languages.
+ */
+export declare function wasmGrammarFor(query: WasmGrammarQuery): WasmGrammarInfo | null
+
+/** A grammar the host downloads on first use. */
+export interface WasmGrammarInfo {
+  /** Canonical language name, e.g. `verilog`, `csharp`. */
+  language: string
+  /** stencil-hq/wasm-grammars release tag hosting the grammar, e.g. `v1`. */
+  release: string
+  /**
+   * File name inside the grammar directory; the release asset is
+   * `<file>.zst`.
+   */
+  file: string
+  /** Lowercase hex SHA-256 of the decompressed `.wasm`. */
+  sha256: string
+  /** Byte size of the decompressed `.wasm`. */
+  size: number
+  /** Whether the grammar is downloaded (or already loaded). */
+  installed: boolean
+}
+
+/** Language to look up: an alias, or a path to infer it from. */
+export interface WasmGrammarQuery {
+  /** Language alias (e.g. `kotlin`, `sv`); wins over `path`. */
+  lang?: string
+  /** File whose extension selects the language. */
+  path?: string
+}
+
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {
   /** Folded stack format for flamegraph tools. */
@@ -2066,6 +5051,14 @@ export interface WorkProfile {
   totalMs: number
   /** Number of samples collected. */
   sampleCount: number
+}
+
+/** A subdirectory the scan could not list. */
+export interface WorkspaceDirectoryError {
+  /** Forward-slash path relative to the scan root. */
+  path: string
+  /** Platform error, e.g. `Permission denied (os error 13)`. */
+  message: string
 }
 
 /**

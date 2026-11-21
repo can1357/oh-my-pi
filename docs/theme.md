@@ -12,33 +12,34 @@ The theme system drives:
 - symbol preset + symbol overrides (`unicode`, `nerd`, `ascii`)
 - syntax highlighting colors used by native highlighter (`@oh-my-pi/pi-natives`)
 - status line segment colors
+- agent name colors in the agent hub, agent tree and Task tool rows
 
-Primary implementation: `src/modes/theme/theme.ts`.
+Primary implementation: `packages/tui/src/theme/theme.ts`.
 
 ## Theme JSON shape
 
-Theme files are JSON objects validated against the runtime schema in `theme.ts` (`themeJsonSchema`) and mirrored by `src/modes/theme/theme-schema.json`.
+Custom theme files are JSON objects validated by `validateThemeJson()` in `packages/tui/src/theme/schema-validation.ts` (using `@oh-my-pi/omptype`). Types live in `schema.ts`; the editor-facing JSON schema is `packages/tui/src/theme/theme-schema.json`. Embedded built-in themes bypass runtime validation.
 
 Top-level fields:
 
 - `name` (required)
-- `colors` (required; all color tokens required)
+- `colors` (required; all tokens except `thinkingMax` required)
 - `vars` (optional; reusable color variables)
 - `export` (optional; HTML export colors)
 - `symbols` (optional)
-  - `preset` (optional: `unicode | nerd | ascii`)
-  - `overrides` (optional: key/value overrides for `SymbolKey`)
+   - `preset` (optional: `unicode | nerd | ascii`)
+   - `overrides` (optional: key/value overrides for `SymbolKey`)
 
 Color values accept:
 
 - hex string (`"#RRGGBB"`)
-- 256-color index (`0..255`)
+- numeric 256-color index (use `0..255`; runtime schema accepts numbers without enforcing this range)
 - variable reference string (resolved through `vars`)
 - empty string (`""`) meaning terminal default (`\x1b[39m` fg, `\x1b[49m` bg)
 
 ## Required and optional color tokens
 
-All tokens below are required in `colors` except `thinkingMax`, which is optional for compatibility and falls back to `thinkingXhigh`.
+All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset/empty keeps the terminal default foreground), `mdExtensionLink` (unset derives a muted `mdLink`) and `subagent1`–`subagent6` (unset lets omp pick agent colors from the theme).
 
 ### Core text and borders (11)
 
@@ -48,26 +49,38 @@ All tokens below are required in `colors` except `thinkingMax`, which is optiona
 
 `selectedBg`, `userMessageBg`, `customMessageBg`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`, `statusLineBg`
 
-### Message/tool text (5)
+### Message/tool text (5 required, 1 optional)
 
-`userMessageText`, `customMessageText`, `customMessageLabel`, `toolTitle`, `toolOutput`
+`userMessageText`, `customMessageText`, `customMessageLabel`, `toolTitle`, `toolOutput`, optional `assistantMessageText`
 
-### Markdown (10)
+`assistantMessageText` colors the assistant reply's plain paragraph prose (markdown sub-elements keep their own `md*` tokens). It is the token that governs assistant prose — `text` does not: `text` is applied at explicit `theme.fg("text", …)` callsites (editor/dialog surfaces), never to assistant message bodies. When `assistantMessageText` is omitted or set to `""`, prose renders in the terminal default foreground exactly as before the token existed. An explicitly installed prose color transform (live-command output) still wins over the token.
 
-`mdHeading`, `mdLink`, `mdLinkUrl`, `mdCode`, `mdCodeBlock`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdHr`, `mdListBullet`
+### Markdown (10 required, 1 optional)
+
+`mdHeading`, `mdLink`, `mdLinkUrl`, `mdCode`, `mdCodeBlock`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdHr`, `mdListBullet`, optional `mdExtensionLink`
+
+`mdExtensionLink` colors the label of a link whose scheme an extension registered (for example a link that expands text in place). Such a link opens nothing in the browser, so its color sets it apart from `mdLink`, which colors links that open a URL. When it is omitted, omp blends `mdLink` with `text` (45% link, 55% text). A `""` in either token blends as the theme's `terminal.foreground` and a palette index 0–15 as its `terminal.ansi` slot. A theme that declares neither gets approximations: a stock palette for indices 0–15 and a guessed default foreground for `""`. Set the token explicitly when the guess looks wrong. `tui.colorfulMarkdown` does not change either link color.
+
+With the `tui.colorfulMarkdown` setting on (the default), headings, `**strong**`, `*emphasis*`, inline code and table headers take their colors from the theme's `terminal.ansi` palette instead of `mdHeading`/`mdCode` and plain bold/italic: H1 magenta, H2 yellow, H3–H6 blue, strong/emphasis magenta, inline code green, table headers yellow. All hues come from one palette so they stay distinct. Turning the setting off restores `mdHeading` for every level, `mdCode`, and uncolored bold/italic.
 
 ### Tool diff + syntax highlighting (12)
 
 `toolDiffAdded`, `toolDiffRemoved`, `toolDiffContext`,
 `syntaxComment`, `syntaxKeyword`, `syntaxFunction`, `syntaxVariable`, `syntaxString`, `syntaxNumber`, `syntaxType`, `syntaxOperator`, `syntaxPunctuation`
 
-### Mode/thinking borders (8 required, 1 optional)
+### Mode/thinking borders (9 required, 1 optional)
 
-`thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh`, optional `thinkingMax`, `bashMode`, `pythonMode`
+`thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh`, optional `thinkingMax`, `bashMode`, `pythonMode`, `btwMode`
 
 ### Status line segment colors (13)
 
 `statusLineSep`, `statusLineModel`, `statusLinePath`, `statusLineGitClean`, `statusLineGitDirty`, `statusLineContext`, `statusLineSpend`, `statusLineStaged`, `statusLineDirty`, `statusLineUntracked`, `statusLineOutput`, `statusLineCost`, `statusLineSubagents`
+
+### Agent name colors (6 optional)
+
+`subagent1`, `subagent2`, `subagent3`, `subagent4`, `subagent5`, `subagent6`
+
+The main agent's name takes `accent`. Subagents take a color in the order they arrive in the session: the first gets the first subagent color, the seventh reuses it, and an agent keeps its color for the rest of the session. A declared `subagentN` is used as written. Slots the theme leaves unset are filled, in order, with colors that are at least 3:1 against every surface names are drawn on (`terminal.background`, else `statusLineBg`, and the Task card tints `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`) and at least 0.10 apart in OKLab from `accent`, `error` and each other: first the theme's own `terminal.ansi` hues (blue, green, yellow, magenta, cyan, then their bright slots; red is left to errors), then hues derived from `accent` the way the session color is (each also offered one and two lightness steps further from the background), then a fixed fallback set.
 
 ## Optional tokens
 
@@ -81,6 +94,10 @@ Used for HTML export theming helpers:
 
 If omitted, export code derives defaults from resolved theme colors.
 
+### `terminal` section (optional)
+
+Describes the terminal the theme was made for, for hosts that paint the terminal themselves (Tern); omp never sets the terminal's colors. `terminal.ansi` (exactly 16 entries, ANSI 0–15) is also the palette colorful Markdown paints from; a theme without it falls back to the terminal's own ANSI colors. Agent name colors draw on `terminal.ansi` first and check contrast against `terminal.background`.
+
 ### `symbols` section (optional)
 
 - `symbols.preset` sets a theme-level default symbol set.
@@ -92,6 +109,8 @@ Runtime precedence:
 1. settings `symbolPreset` override (if set)
 2. theme JSON `symbols.preset`
 3. fallback `"unicode"`
+
+In interactive mode, a successful Glyph Protocol handshake upgrades a Unicode preset whose setting provenance is `default` to Nerd Font icons without changing the saved setting. An explicitly configured preset, including `unicode`, is not upgraded. A live Tern native surface forces the Nerd preset process-locally and restores the user's preset when it closes.
 
 Invalid override keys are ignored and logged (`logger.debug`).
 
@@ -109,13 +128,14 @@ Override behavior follows from that split:
 
 Theme lookup order (`loadThemeJson`):
 
-1. built-in embedded themes (`dark.json`, `light.json`, and all `defaults/*.json` compiled into `defaultThemes`)
+1. built-in embedded themes (`dark.json`, `light.json`, and every palette in `defaults.json`)
 2. custom theme file: `<customThemesDir>/<name>.json`
 
 Custom themes directory comes from `getCustomThemesDir()`:
 
 - default: `~/.omp/agent/themes`
-- overridden by `PI_CODING_AGENT_DIR` (`$PI_CODING_AGENT_DIR/themes`)
+- default-profile override: `PI_CODING_AGENT_DIR` (`$PI_CODING_AGENT_DIR/themes`)
+- named profile: `~/.omp/profiles/<name>/agent/themes` (under the configured root); named profiles derive their own agent directory
 
 `getAvailableThemes()` returns merged built-in + custom names, sorted, with built-ins taking precedence on name collision.
 
@@ -125,14 +145,14 @@ For custom theme files:
 
 1. read JSON
 2. parse JSON
-3. validate against `themeJsonSchema`
+3. validate with `validateThemeJson()` (required fields and string/number types; spinner frame arrays must be non-empty)
 4. resolve `vars` references recursively
 5. convert resolved values to ANSI by terminal capability mode
 
 Validation behavior:
 
 - missing required color tokens: explicit grouped error message
-- bad token types/values: validation errors with JSON path
+- bad token types: runtime schema errors; string color values and variable references are checked during resolution/conversion
 - unknown theme file: `Theme not found: <name>`
 
 Var reference behavior:
@@ -143,12 +163,10 @@ Var reference behavior:
 
 ## Terminal color mode behavior
 
-Color mode detection (`detectColorMode`):
+Color mode detection (`detectColorMode` in `theme/color.ts`):
 
-- `COLORTERM=truecolor|24bit` => truecolor
 - `WT_SESSION` => truecolor
-- `TERM` in `dumb`, `linux`, or empty => 256color
-- otherwise => truecolor
+- otherwise uses `detectTerminalId()` and `getTerminalInfo()` from the shared terminal capability model, selecting truecolor only when `TerminalInfo.trueColor` is true
 
 Conversion behavior:
 
@@ -158,9 +176,17 @@ Conversion behavior:
 
 ## Runtime switching behavior
 
-### Initial theme (`initTheme`)
+The `theme` export is a live binding, including in bundled extensions. Read it inside rendering callbacks rather than retaining a theme instance across switches. Extension renderer callbacks may also use their supplied theme argument.
 
-`main.ts` initializes theme with settings:
+```ts
+import { theme } from "@oh-my-pi/pi-coding-agent";
+
+const renderStatus = () => theme.fg("accent", "Ready");
+```
+
+### Initial theme (`initThemeSync` / `initTheme`)
+
+The startup composer initializes its cached theme synchronously before the first paint. `main.ts` later initializes the authoritative theme with settings:
 
 - `symbolPreset`
 - `colorBlindMode`
@@ -174,7 +200,7 @@ Auto theme slot selection uses terminal appearance in this order:
 3. macOS appearance fallback only for the known-broken macOS/Zellij OSC 11 path
 4. dark slot fallback
 
-Current defaults from settings schema:
+Current defaults (definitions in `packages/coding-agent/src/modes/settings.ts`):
 
 - `theme.dark = "titanium"`
 - `theme.light = "light"`
@@ -184,7 +210,7 @@ Current defaults from settings schema:
 ### Explicit switching (`setTheme`)
 
 - loads selected theme
-- updates global `theme` singleton
+- updates the live `theme` export
 - optionally starts watcher
 - triggers `onThemeChange` callback
 
@@ -195,7 +221,7 @@ On failure:
 
 ### Preview switching (`previewTheme`)
 
-- applies temporary preview theme to global `theme`
+- applies the preview to the live `theme` export
 - does **not** change persisted settings by itself
 - returns success/error without fallback replacement
 
@@ -219,7 +245,7 @@ Auto mode also reevaluates dark/light slot mapping from terminal appearance chan
 - `toolDiffAdded` is HSV-adjusted (green shifted toward blue)
 - adjustment is applied only when resolved value is a hex string
 
-Other tokens are unchanged.
+Other tokens are unchanged. Agent name colors derived from `accent` steer clear of the theme's hues, `toolDiffAdded` among them, so the shifted token can move one of those derived colors.
 
 ## Where theme settings are persisted
 
@@ -236,7 +262,7 @@ Persisted keys:
 - `symbolPreset`
 - `colorBlindMode`
 
-Legacy migration exists: old flat `theme: "name"` is migrated to nested `theme.dark` or `theme.light` based on luminance detection.
+Legacy migration exists: a flat custom `theme: "name"` is migrated to nested `theme.dark` or `theme.light` based on luminance detection. Flat `"dark"`/`"light"` values are removed so current defaults apply.
 
 ## Creating a custom theme (practical)
 
@@ -249,87 +275,88 @@ Minimal skeleton:
 
 ```json
 {
-  "name": "my-theme",
-  "vars": {
-    "accent": "#7aa2f7",
-    "muted": 244
-  },
-  "colors": {
-    "accent": "accent",
-    "border": "#4c566a",
-    "borderAccent": "accent",
-    "borderMuted": "muted",
-    "success": "#9ece6a",
-    "error": "#f7768e",
-    "warning": "#e0af68",
-    "muted": "muted",
-    "dim": 240,
-    "text": "",
-    "thinkingText": "muted",
+	"name": "my-theme",
+	"vars": {
+		"accent": "#7aa2f7",
+		"muted": 244
+	},
+	"colors": {
+		"accent": "accent",
+		"border": "#4c566a",
+		"borderAccent": "accent",
+		"borderMuted": "muted",
+		"success": "#9ece6a",
+		"error": "#f7768e",
+		"warning": "#e0af68",
+		"muted": "muted",
+		"dim": 240,
+		"text": "",
+		"thinkingText": "muted",
 
-    "selectedBg": "#2a2f45",
-    "userMessageBg": "#1f2335",
-    "userMessageText": "",
-    "customMessageBg": "#24283b",
-    "customMessageText": "",
-    "customMessageLabel": "accent",
-    "toolPendingBg": "#1f2335",
-    "toolSuccessBg": "#1f2d2a",
-    "toolErrorBg": "#2d1f2a",
-    "toolTitle": "",
-    "toolOutput": "muted",
+		"selectedBg": "#2a2f45",
+		"userMessageBg": "#1f2335",
+		"userMessageText": "",
+		"customMessageBg": "#24283b",
+		"customMessageText": "",
+		"customMessageLabel": "accent",
+		"toolPendingBg": "#1f2335",
+		"toolSuccessBg": "#1f2d2a",
+		"toolErrorBg": "#2d1f2a",
+		"toolTitle": "",
+		"toolOutput": "muted",
 
-    "mdHeading": "accent",
-    "mdLink": "accent",
-    "mdLinkUrl": "muted",
-    "mdCode": "#c0caf5",
-    "mdCodeBlock": "#c0caf5",
-    "mdCodeBlockBorder": "muted",
-    "mdQuote": "muted",
-    "mdQuoteBorder": "muted",
-    "mdHr": "muted",
-    "mdListBullet": "accent",
+		"mdHeading": "accent",
+		"mdLink": "accent",
+		"mdLinkUrl": "muted",
+		"mdCode": "#c0caf5",
+		"mdCodeBlock": "#c0caf5",
+		"mdCodeBlockBorder": "muted",
+		"mdQuote": "muted",
+		"mdQuoteBorder": "muted",
+		"mdHr": "muted",
+		"mdListBullet": "accent",
 
-    "toolDiffAdded": "#9ece6a",
-    "toolDiffRemoved": "#f7768e",
-    "toolDiffContext": "muted",
+		"toolDiffAdded": "#9ece6a",
+		"toolDiffRemoved": "#f7768e",
+		"toolDiffContext": "muted",
 
-    "syntaxComment": "#565f89",
-    "syntaxKeyword": "#bb9af7",
-    "syntaxFunction": "#7aa2f7",
-    "syntaxVariable": "#c0caf5",
-    "syntaxString": "#9ece6a",
-    "syntaxNumber": "#ff9e64",
-    "syntaxType": "#2ac3de",
-    "syntaxOperator": "#89ddff",
-    "syntaxPunctuation": "#9aa5ce",
+		"syntaxComment": "#565f89",
+		"syntaxKeyword": "#bb9af7",
+		"syntaxFunction": "#7aa2f7",
+		"syntaxVariable": "#c0caf5",
+		"syntaxString": "#9ece6a",
+		"syntaxNumber": "#ff9e64",
+		"syntaxType": "#2ac3de",
+		"syntaxOperator": "#89ddff",
+		"syntaxPunctuation": "#9aa5ce",
 
-    "thinkingOff": 240,
-    "thinkingMinimal": 244,
-    "thinkingLow": "#7aa2f7",
-    "thinkingMedium": "#2ac3de",
-    "thinkingHigh": "#bb9af7",
-    "thinkingXhigh": "#f7768e",
-    "thinkingMax": "#ff007c",
+		"thinkingOff": 240,
+		"thinkingMinimal": 244,
+		"thinkingLow": "#7aa2f7",
+		"thinkingMedium": "#2ac3de",
+		"thinkingHigh": "#bb9af7",
+		"thinkingXhigh": "#f7768e",
+		"thinkingMax": "#ff007c",
 
-    "bashMode": "#2ac3de",
-    "pythonMode": "#bb9af7",
+		"bashMode": "#2ac3de",
+		"pythonMode": "#bb9af7",
+		"btwMode": "#7aa2f7",
 
-    "statusLineBg": "#16161e",
-    "statusLineSep": 240,
-    "statusLineModel": "#bb9af7",
-    "statusLinePath": "#7aa2f7",
-    "statusLineGitClean": "#9ece6a",
-    "statusLineGitDirty": "#e0af68",
-    "statusLineContext": "#2ac3de",
-    "statusLineSpend": "#7dcfff",
-    "statusLineStaged": "#9ece6a",
-    "statusLineDirty": "#e0af68",
-    "statusLineUntracked": "#f7768e",
-    "statusLineOutput": "#c0caf5",
-    "statusLineCost": "#ff9e64",
-    "statusLineSubagents": "#bb9af7"
-  }
+		"statusLineBg": "#16161e",
+		"statusLineSep": 240,
+		"statusLineModel": "#bb9af7",
+		"statusLinePath": "#7aa2f7",
+		"statusLineGitClean": "#9ece6a",
+		"statusLineGitDirty": "#e0af68",
+		"statusLineContext": "#2ac3de",
+		"statusLineSpend": "#7dcfff",
+		"statusLineStaged": "#9ece6a",
+		"statusLineDirty": "#e0af68",
+		"statusLineUntracked": "#f7768e",
+		"statusLineOutput": "#c0caf5",
+		"statusLineCost": "#ff9e64",
+		"statusLineSubagents": "#bb9af7"
+	}
 }
 ```
 
@@ -351,8 +378,8 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes except optional `thinkingMax`, which falls back to `thinkingXhigh`.
+- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset keeps the terminal default foreground), `mdExtensionLink` (unset blends `mdLink` with `text`) and `subagent1`–`subagent6` (unset lets omp pick agent colors from the theme).
 - `export` and `symbols` are optional.
-- `$schema` in theme JSON is informational; runtime validation is enforced by the ArkType schema in code.
+- `$schema` in theme JSON is informational; custom-theme runtime validation is enforced by `@oh-my-pi/omptype` in `packages/tui/src/theme/schema-validation.ts`.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.
 - File watcher reload errors or temporary missing files keep the current loaded theme until a successful reload or explicit theme switch.

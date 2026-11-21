@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { buildOpenAICompat } from "@oh-my-pi/pi-catalog/compat/openai";
-import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { zhipuCodingPlanModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -60,16 +61,9 @@ function zhipuGlm52ByOfficialBaseUrl(): ModelSpec<"openai-completions"> {
 	};
 }
 
-describe("zhipu-coding-plan descriptor", () => {
-	it("defaults to the same Zhipu-hosted model used by login validation", () => {
-		expect(DEFAULT_MODEL_PER_PROVIDER["zhipu-coding-plan"]).toBe("glm-5.1");
-		expect(DEFAULT_MODEL_PER_PROVIDER.zai).toBe("glm-5.3");
-	});
-});
-
 describe("openai-completions compat — zhipu-coding-plan branch", () => {
 	it("forces zai thinking format and disables reasoning_effort before GLM-5.2", () => {
-		const compat = buildOpenAICompat(zhipuByProvider());
+		const compat = resolveModelPolicy(zhipuByProvider()).compat;
 
 		expect(compat.thinkingFormat).toBe("zai");
 		expect(compat.supportsReasoningEffort).toBe(false);
@@ -82,15 +76,15 @@ describe("openai-completions compat — zhipu-coding-plan branch", () => {
 	});
 
 	it("detects zhipu by baseUrl when provider id is custom", () => {
-		const compat = buildOpenAICompat(zhipuByBaseUrl());
+		const compat = resolveModelPolicy(zhipuByBaseUrl()).compat;
 
 		expect(compat.thinkingFormat).toBe("zai");
 		expect(compat.supportsReasoningEffort).toBe(false);
 	});
 
 	it("enables reasoning_effort for GLM-5.2 on both Zhipu route shapes", () => {
-		const codingPlanCompat = buildOpenAICompat(zhipuGlm52ByProvider());
-		const officialCompat = buildOpenAICompat(zhipuGlm52ByOfficialBaseUrl());
+		const codingPlanCompat = resolveModelPolicy(zhipuGlm52ByProvider()).compat;
+		const officialCompat = resolveModelPolicy(zhipuGlm52ByOfficialBaseUrl()).compat;
 
 		expect(codingPlanCompat.thinkingFormat).toBe("zai");
 		expect(codingPlanCompat.supportsReasoningEffort).toBe(true);
@@ -110,7 +104,7 @@ describe("openai-completions compat — zhipu-coding-plan branch", () => {
 				thinkingFormat: "openai",
 			},
 		};
-		const resolved = buildOpenAICompat(model);
+		const resolved = resolveModelPolicy(model).compat;
 
 		expect(resolved.supportsDeveloperRole).toBe(true);
 		expect(resolved.supportsReasoningEffort).toBe(true);
@@ -130,25 +124,29 @@ describe("openai-completions compat — GLM coding-plan stream idle timeout", ()
 	// Z.AI/Zhipu hosts (issue #4758: GLM-5.2 via opencode-go stalled with
 	// "OpenAI completions stream stalled while waiting for the next event").
 	it("widens the idle timeout to 600s for GLM-5.x on Z.AI, Zhipu, and OpenCode gateways", () => {
-		expect(buildOpenAICompat(glm52("zai", "https://api.z.ai/api/coding/paas/v4")).streamIdleTimeoutMs).toBe(600_000);
-		expect(
-			buildOpenAICompat(glm52("zhipu-coding-plan", "https://open.bigmodel.cn/api/coding/paas/v4"))
-				.streamIdleTimeoutMs,
-		).toBe(600_000);
-		expect(buildOpenAICompat(glm52("opencode-go", "https://opencode.ai/zen/go/v1")).streamIdleTimeoutMs).toBe(
+		expect(resolveModelPolicy(glm52("zai", "https://api.z.ai/api/coding/paas/v4")).compat.streamIdleTimeoutMs).toBe(
 			600_000,
 		);
-		expect(buildOpenAICompat(glm52("opencode-zen", "https://opencode.ai/zen/v1")).streamIdleTimeoutMs).toBe(600_000);
+		expect(
+			resolveModelPolicy(glm52("zhipu-coding-plan", "https://open.bigmodel.cn/api/coding/paas/v4")).compat
+				.streamIdleTimeoutMs,
+		).toBe(600_000);
+		expect(resolveModelPolicy(glm52("opencode-go", "https://opencode.ai/zen/go/v1")).compat.streamIdleTimeoutMs).toBe(
+			600_000,
+		);
+		expect(resolveModelPolicy(glm52("opencode-zen", "https://opencode.ai/zen/v1")).compat.streamIdleTimeoutMs).toBe(
+			600_000,
+		);
 	});
 
 	it("does not widen non-GLM models on the OpenCode gateway via the GLM floor", () => {
-		const kimi = buildOpenAICompat({
+		const kimi = resolveModelPolicy({
 			...baseModel,
 			id: "kimi-k2.5",
 			name: "Kimi K2.5",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
-		});
+		}).compat;
 		expect(kimi.streamIdleTimeoutMs).toBeUndefined();
 	});
 });
@@ -174,5 +172,55 @@ describe("zhipu-coding-plan model discovery", () => {
 		expect(requestedUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4/models");
 		expect(models?.[0]?.id).toBe("glm-5.1");
 		expect(models?.[0]?.baseUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
+	});
+
+	it("keeps FlashX reasoning and image support across bundled and discovered coding-plan models", async () => {
+		const mockFetch: FetchImpl = Object.assign(
+			async (): Promise<Response> =>
+				new Response(
+					JSON.stringify({
+						data: [
+							{ id: "glm-5.3-flash", name: "GLM-5.3-Flash" },
+							{ id: "glm-5.3-flashx", name: "GLM-5.3-FlashX" },
+							{ id: "glm-4.7-flashx", name: "GLM-4.7-FlashX" },
+							{ id: "glm-4.7-flash", name: "GLM-4.7-Flash" },
+						],
+					}),
+					{ headers: { "content-type": "application/json" } },
+				),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const options = zhipuCodingPlanModelManagerOptions({ apiKey: "test-key", fetch: mockFetch });
+		const models = await options.fetchDynamicModels?.();
+		const flash53 = models?.find(model => model.id === "glm-5.3-flash");
+		const flashx53 = models?.find(model => model.id === "glm-5.3-flashx");
+		const flashx47 = models?.find(model => model.id === "glm-4.7-flashx");
+		const bundled = getBundledModel<"openai-completions">("zhipu-coding-plan", "glm-5.3-flashx");
+
+		expect(bundled).toMatchObject({
+			api: "openai-completions",
+			baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+			input: ["text", "image"],
+			thinking: { mode: "effort", efforts: ["low", "high", "max"], defaultLevel: "max", requiresEffort: true },
+		});
+		expect(flashx53 && buildModel(flashx53)).toMatchObject({
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+			thinking: { mode: "effort", efforts: ["low", "high", "max"], defaultLevel: "max", requiresEffort: true },
+		});
+		const flash47 = models?.find(model => model.id === "glm-4.7-flash");
+
+		expect(flash53?.reasoning).toBe(true);
+		expect(flash53 && buildModel(flash53).input).toEqual(["text", "image"]);
+		// Older flash SKUs claim no reasoning identity and stay text-only.
+		expect(flash47?.reasoning).toBeUndefined();
+		expect(flash47 && buildModel(flash47).input).toEqual(["text"]);
+		expect(flashx47?.reasoning).toBeUndefined();
+		expect(flashx47 && buildModel(flashx47).input).toEqual(["text"]);
 	});
 });

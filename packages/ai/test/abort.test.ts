@@ -5,8 +5,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { e2eApiKey, resolveApiKey } from "./oauth";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
-const [geminiCliToken, openaiCodexToken] = await Promise.all([
-	resolveApiKey("google-gemini-cli"),
+const [antigravityToken, openaiCodexToken] = await Promise.all([
+	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
 ]);
 
@@ -131,7 +131,7 @@ describe("AI Providers Abort Tests", () => {
 	});
 
 	describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Anthropic Provider Abort", () => {
-		const llm = getBundledModel("anthropic", "claude-opus-4-1-20250805");
+		const llm = getBundledModel("anthropic", "claude-opus-4-5-20251101");
 
 		it(
 			"should abort mid-stream",
@@ -170,22 +170,22 @@ describe("AI Providers Abort Tests", () => {
 		);
 	});
 
-	// Google Gemini CLI / Antigravity share the same provider, so one test covers both
-	describe("Google Gemini CLI Provider Abort", () => {
-		it.skipIf(!geminiCliToken)(
+	// Google Antigravity (same Cloud Code Assist API as the retired Gemini CLI provider)
+	describe("Google Antigravity Provider Abort", () => {
+		it.skipIf(!antigravityToken)(
 			"should abort mid-stream",
 			async () => {
-				const llm = getBundledModel("google-gemini-cli", "gemini-2.5-flash");
-				await testAbortSignal(llm, { apiKey: geminiCliToken });
+				const llm = getBundledModel("google-antigravity", "gemini-2.5-flash");
+				await testAbortSignal(llm, { apiKey: antigravityToken });
 			},
 			{ retry: 3 },
 		);
 
-		it.skipIf(!geminiCliToken)(
+		it.skipIf(!antigravityToken)(
 			"should handle immediate abort",
 			async () => {
-				const llm = getBundledModel("google-gemini-cli", "gemini-2.5-flash");
-				await testImmediateAbort(llm, { apiKey: geminiCliToken });
+				const llm = getBundledModel("google-antigravity", "gemini-2.5-flash");
+				await testImmediateAbort(llm, { apiKey: antigravityToken });
 			},
 			{ retry: 3 },
 		);

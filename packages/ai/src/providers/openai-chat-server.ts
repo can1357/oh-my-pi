@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { type } from "@oh-my-pi/omptype";
-import { resolvePromptCacheKey } from "../auth-gateway/http";
+import {
+	isOpenAIReasoningEffort,
+	isOpenAIServiceTier,
+	openAIErrorResponse,
+	resolvePromptCacheKey,
+} from "../auth-gateway/http";
 /**
  * Parsed inbound OpenAI chat-completions request, ready to feed into pi-ai
  * `stream(model, context, options)`.
@@ -13,7 +18,7 @@ import type {
 	Context,
 	ImageContent,
 	Message,
-	ServiceTier,
+	Model,
 	StopReason,
 	TextContent,
 	Tool,
@@ -29,25 +34,15 @@ import {
 	type OpenAIChatToolChoice,
 	openaiChatRequestSchema,
 } from "./openai-chat-server-schema";
+import { decodeDataUri } from "./openai-data-uri";
+import {
+	geminiToolCallExtraContent,
+	rawGeminiToolCallSignature,
+	storeGeminiToolCallSignature,
+} from "./openai-completions";
+import { coerceNullMessageContentInPlace } from "./openai-shared";
 
 export type { ParsedRequest };
-
-type ReasoningEffort = NonNullable<ParsedRequest["options"]["reasoning"]>;
-
-function isReasoningEffort(value: unknown): value is ReasoningEffort {
-	return (
-		value === "minimal" ||
-		value === "low" ||
-		value === "medium" ||
-		value === "high" ||
-		value === "xhigh" ||
-		value === "max"
-	);
-}
-
-function isServiceTier(value: unknown): value is ServiceTier {
-	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
-}
 
 const UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE =
 	"openai-chat: prompt_cache_options and prompt_cache_breakpoint are unsupported by this auth-gateway route; use /v1/pi/stream with options.promptCache instead";
@@ -83,12 +78,16 @@ function rejectUnsupportedExplicitPromptCacheFields(body: unknown): void {
 // ---------------------------------------------------------------------------
 
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
-	// Header capture is centralized in `auth-gateway/server.ts` (allow-listed
-	// headers like openai-organization/openai-project/openai-beta/x-stainless-*
-	// land on `options.headers` automatically). We consult `headers` here too
-	// for `resolvePromptCacheKey` to pull a cache identity out of inbound
-	// vendor-neutral headers when the body doesn't carry one.
+	// The gateway forwards allow-listed request headers (openai-organization,
+	// openai-project, openai-beta, x-stainless-*, …) itself, for the gateway
+	// token only (`applyCallerTrust` in `auth-gateway/caller-options.ts`). We
+	// consult `headers` here for `resolvePromptCacheKey` to pull a cache
+	// identity out of inbound vendor-neutral headers when the body doesn't
+	// carry one.
 	rejectUnsupportedExplicitPromptCacheFields(body);
+	const request =
+		typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
+	coerceNullMessageContentInPlace(request?.messages, message => message.role !== "function");
 	const parsed = openaiChatRequestSchema(body);
 	if (parsed instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-chat: ${parsed.summary}`);
@@ -195,10 +194,12 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.user !== undefined) options.user = data.user;
 	if (data.response_format !== undefined) options.responseFormat = data.response_format;
 	if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
-	if (data.reasoning_effort !== undefined && isReasoningEffort(data.reasoning_effort)) {
+	if (data.reasoning_effort === "none") {
+		options.forceReasoningOff = true;
+	} else if (data.reasoning_effort !== undefined && isOpenAIReasoningEffort(data.reasoning_effort)) {
 		options.reasoning = data.reasoning_effort;
 	}
-	if (data.service_tier !== undefined && isServiceTier(data.service_tier)) {
+	if (data.service_tier !== undefined && isOpenAIServiceTier(data.service_tier)) {
 		options.serviceTier = data.service_tier;
 	}
 	if (data.metadata !== undefined) options.metadata = data.metadata;
@@ -252,18 +253,6 @@ function parseUserLikeContent(
 	return parts;
 }
 
-function decodeDataUri(url: string): { data: string; mimeType: string } | undefined {
-	if (!url.startsWith("data:")) return undefined;
-	const comma = url.indexOf(",");
-	if (comma < 0) return undefined;
-	const header = url.slice(5, comma);
-	const payload = url.slice(comma + 1);
-	const isBase64 = header.endsWith(";base64");
-	const mimeType = (isBase64 ? header.slice(0, -";base64".length) : header) || "application/octet-stream";
-	const data = isBase64 ? payload : Buffer.from(decodeURIComponent(payload), "utf8").toString("base64");
-	return { data, mimeType };
-}
-
 function buildAssistantMessage(
 	content: string | OpenAIChatContentPart[] | undefined,
 	toolCalls: OpenAIChatToolCall[] | undefined,
@@ -297,7 +286,15 @@ function buildAssistantMessage(
 					args = { __raw: argsStr };
 				}
 			}
-			const call: ToolCall = { type: "toolCall", id: raw.id, name: fn.name, arguments: args };
+			// A Gemini tool call replays the signature its response carried; store it as this API's transport does.
+			const thoughtSignature = storeGeminiToolCallSignature(Reflect.get(raw, "extra_content"));
+			const call: ToolCall = {
+				type: "toolCall",
+				id: raw.id,
+				name: fn.name,
+				arguments: args,
+				...(thoughtSignature ? { thoughtSignature } : {}),
+			};
 			parts.push(call);
 		}
 	}
@@ -318,6 +315,29 @@ function buildAssistantMessage(
 		stopReason: "stop",
 		timestamp: now,
 	};
+}
+
+/**
+ * Stamp the replayed tool-call turns that carry a Gemini signature as `model`'s own: they came from this gateway
+ * model, and a turn labeled as a foreign model loses its signature in `transformMessages`. Native Gemini
+ * transports replay the raw signature; every other transport keeps the stored envelope.
+ */
+export function adoptReplayedGeminiSignatures(context: Context, model: Model): void {
+	const nativeGemini =
+		model.api === "google-generative-ai" || model.api === "google-vertex" || model.api === "google-gemini-cli";
+	for (const message of context.messages) {
+		if (message.role !== "assistant") continue;
+		if (!message.content.some(block => block.type === "toolCall" && block.thoughtSignature)) continue;
+		message.provider = model.provider;
+		message.api = model.api;
+		message.model = model.id;
+		if (!nativeGemini) continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall" && block.thoughtSignature) {
+				block.thoughtSignature = rawGeminiToolCallSignature(block.thoughtSignature);
+			}
+		}
+	}
 }
 
 /**
@@ -388,6 +408,7 @@ function buildTools(tools: OpenAIChatTool[]): Tool[] | undefined {
 			name: t.function.name,
 			description: t.function.description ?? "",
 			parameters: (t.function.parameters ?? {}) as Record<string, unknown> as TSchema,
+			...(typeof t.function.strict === "boolean" ? { strict: t.function.strict } : {}),
 		});
 	}
 	return out;
@@ -433,11 +454,15 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		responseMessage.reasoning_content = reasoning;
 	}
 	if (toolCalls.length > 0) {
-		responseMessage.tool_calls = toolCalls.map(tc => ({
-			id: tc.id,
-			type: "function",
-			function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
-		}));
+		responseMessage.tool_calls = toolCalls.map(tc => {
+			const extraContent = geminiToolCallExtraContent(tc.thoughtSignature);
+			return {
+				id: tc.id,
+				type: "function",
+				function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
+				...(extraContent ? { extra_content: extraContent } : {}),
+			};
+		});
 	}
 
 	return {
@@ -536,6 +561,13 @@ function makeId(): string {
 // encodeStream (SSE)
 // ---------------------------------------------------------------------------
 
+// Keepalive cadence for the SSE encoder. Some upstreams go silent for minutes
+// mid-stream (e.g. xAI emits a large tool call's arguments only when complete);
+// without bytes on the wire the listener's idle timeout and client watchdogs
+// drop a healthy stream. SSE comment lines are ignored by spec-compliant clients.
+const STREAM_KEEPALIVE_INTERVAL_MS = 15_000;
+const SSE_KEEPALIVE = ": keepalive\n\n";
+
 export function encodeStream(
 	events: AssistantMessageEventStream,
 	requestedModelId: string,
@@ -551,6 +583,13 @@ export function encodeStream(
 		cancelled = true;
 	};
 	control?.signal?.addEventListener("abort", markCancelled, { once: true });
+	let keepaliveTimer: NodeJS.Timeout | undefined;
+	const stopKeepalive = () => {
+		if (keepaliveTimer !== undefined) {
+			clearInterval(keepaliveTimer);
+			keepaliveTimer = undefined;
+		}
+	};
 
 	const baseChunk = (delta: Record<string, unknown>, finishReason: string | null) => ({
 		id,
@@ -582,12 +621,28 @@ export function encodeStream(
 		async start(controller) {
 			// contentIndex (from pi-ai events) -> tool_calls index on the wire.
 			const toolIndexByContentIndex = new Map<number, number>();
-			// wire index -> id/name emitted on the start chunk, to detect late-arriving
-			// upstream id/name that needs a corrective chunk before the finish.
-			const sentToolMeta = new Map<number, { id: string; name: string }>();
+			// wire index -> metadata emitted so far, to detect values that need a
+			// concatenation-safe corrective chunk before the finish.
+			const sentToolMeta = new Map<
+				number,
+				{ id: string; name: string; hasArgumentBytes: boolean; signed: boolean }
+			>();
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
 			let finishReason: string = "stop";
+
+			keepaliveTimer = setInterval(() => {
+				try {
+					if (cancelled) {
+						stopKeepalive();
+						return;
+					}
+					controller.enqueue(encoder.encode(SSE_KEEPALIVE));
+				} catch {
+					// Controller already closed/errored (client gone); stop the timer.
+					stopKeepalive();
+				}
+			}, STREAM_KEEPALIVE_INTERVAL_MS);
 
 			try {
 				if (cancelled) {
@@ -620,7 +675,13 @@ export function encodeStream(
 							toolIndexByContentIndex.set(event.contentIndex, idx);
 							const partial = event.partial.content[event.contentIndex];
 							const call = partial && partial.type === "toolCall" ? partial : undefined;
-							sentToolMeta.set(idx, { id: call?.id ?? "", name: call?.name ?? "" });
+							sentToolMeta.set(idx, {
+								id: call?.id ?? "",
+								name: call?.name ?? "",
+								hasArgumentBytes: false,
+								signed: Boolean(call?.thoughtSignature),
+							});
+							const extraContent = geminiToolCallExtraContent(call?.thoughtSignature);
 							writeSse(
 								controller,
 								baseChunk(
@@ -631,6 +692,7 @@ export function encodeStream(
 												id: call?.id ?? "",
 												type: "function",
 												function: { name: call?.name ?? "", arguments: "" },
+												...(extraContent ? { extra_content: extraContent } : {}),
 											},
 										],
 									},
@@ -643,6 +705,8 @@ export function encodeStream(
 						case "toolcall_delta": {
 							const idx = toolIndexByContentIndex.get(event.contentIndex);
 							if (idx === undefined) break;
+							const sent = sentToolMeta.get(idx);
+							if (sent && event.delta.length > 0) sent.hasArgumentBytes = true;
 							writeSse(
 								controller,
 								baseChunk({ tool_calls: [{ index: idx, function: { arguments: event.delta } }] }, null),
@@ -655,14 +719,25 @@ export function encodeStream(
 							if (idx === undefined) break;
 							const sent = sentToolMeta.get(idx);
 							if (sent === undefined) break;
-							// Upstream completions providers can receive the real id/name in a
-							// later chunk than toolcall_start. Emit a corrective chunk only when
-							// the streamed value was empty: accumulating clients concatenate
-							// string fields, so "" + value is the only safe correction.
+							// Upstream providers can settle id, name, or arguments after the
+							// start chunk. Emit corrections only for fields whose streamed
+							// value was empty: accumulating clients concatenate each field,
+							// so "" + value is the only safe correction.
 							const correctId = sent.id === "" && event.toolCall.id !== "" ? event.toolCall.id : undefined;
 							const correctName =
 								sent.name === "" && event.toolCall.name !== "" ? event.toolCall.name : undefined;
-							if (correctId !== undefined || correctName !== undefined) {
+							const correctArguments = sent.hasArgumentBytes
+								? undefined
+								: stringifyArgs(event.toolCall.arguments);
+							const extraContent = sent.signed
+								? undefined
+								: geminiToolCallExtraContent(event.toolCall.thoughtSignature);
+							if (
+								correctId !== undefined ||
+								correctName !== undefined ||
+								correctArguments !== undefined ||
+								extraContent !== undefined
+							) {
 								writeSse(
 									controller,
 									baseChunk(
@@ -670,8 +745,18 @@ export function encodeStream(
 											tool_calls: [
 												{
 													index: idx,
+													...(extraContent ? { extra_content: extraContent } : {}),
 													...(correctId !== undefined ? { id: correctId } : {}),
-													...(correctName !== undefined ? { function: { name: correctName } } : {}),
+													...(correctName !== undefined || correctArguments !== undefined
+														? {
+																function: {
+																	...(correctName !== undefined ? { name: correctName } : {}),
+																	...(correctArguments !== undefined
+																		? { arguments: correctArguments }
+																		: {}),
+																},
+															}
+														: {}),
 												},
 											],
 										},
@@ -724,11 +809,13 @@ export function encodeStream(
 					controller.close();
 				}
 			} finally {
+				stopKeepalive();
 				control?.signal?.removeEventListener("abort", markCancelled);
 			}
 		},
 		cancel(reason) {
 			cancelled = true;
+			stopKeepalive();
 			control?.signal?.removeEventListener("abort", markCancelled);
 			control?.onCancel?.(reason);
 		},
@@ -744,9 +831,4 @@ export function encodeStream(
  *   `{ error: { message, type } }`
  * Matches the shape the official SDK auto-parses into `APIError`.
  */
-export function formatError(status: number, type: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { message, type } }), {
-		status,
-		headers: { "Content-Type": "application/json" },
-	});
-}
+export const formatError = openAIErrorResponse;

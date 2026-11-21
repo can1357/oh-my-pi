@@ -1,13 +1,17 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { BuildSessionContextOptions, SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSessionContextView } from "@oh-my-pi/pi-coding-agent/session/context-view";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -28,7 +32,7 @@ describe("AgentSession.switchSession previous-context build", () => {
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
@@ -50,7 +54,10 @@ describe("AgentSession.switchSession previous-context build", () => {
 		}
 	});
 
-	function buildSession(tempDir: TempDir): { session: AgentSession; sessionManager: SessionManager } {
+	function buildSession(
+		tempDir: TempDir,
+		extensionRunner?: ExtensionRunner,
+	): { session: AgentSession; sessionManager: SessionManager } {
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const agent = new Agent({
 			initialState: {
@@ -65,6 +72,7 @@ describe("AgentSession.switchSession previous-context build", () => {
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
+			extensionRunner,
 		});
 		sessions.push(session);
 		return { session, sessionManager };
@@ -151,5 +159,227 @@ describe("AgentSession.switchSession previous-context build", () => {
 			{ sessionFile: sessionFile!, transcript: undefined },
 			{ sessionFile: sessionFile!, transcript: undefined },
 		]);
+	});
+
+	it("restores the previous session when cwd adoption is rejected", async () => {
+		const sourceDir = TempDir.createSync("@pi-switch-cwd-source-");
+		const targetDir = TempDir.createSync("@pi-switch-cwd-target-");
+		tempDirs.push(sourceDir, targetDir);
+
+		const { session, sessionManager } = buildSession(sourceDir);
+		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await sessionManager.flush();
+		const previousSessionFile = sessionManager.getSessionFile();
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		await targetManager.close();
+		expect(previousSessionFile).toBeString();
+		expect(targetSessionFile).toBeString();
+
+		const onCwdChange = vi.fn(async () => false);
+		const switched = await session.switchSession(targetSessionFile!, { onCwdChange });
+
+		expect(switched).toBe(false);
+		expect(onCwdChange).toHaveBeenCalledWith(targetDir.path(), sourceDir.path());
+		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
+		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+	});
+	it("resumes a target whose recorded directory is gone in the current cwd", async () => {
+		const sourceDir = TempDir.createSync("@pi-switch-gone-source-");
+		const targetDir = TempDir.createSync("@pi-switch-gone-target-");
+		tempDirs.push(sourceDir, targetDir);
+
+		const { session, sessionManager } = buildSession(sourceDir);
+		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await sessionManager.flush();
+		const goneProject = path.join(targetDir.path(), "project");
+		await fs.mkdir(goneProject);
+		const targetManager = SessionManager.create(goneProject, targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		await targetManager.close();
+		await fs.rm(goneProject, { recursive: true });
+
+		const onCwdChange = vi.fn(async () => true);
+		const switched = await session.switchSession(targetSessionFile!, { onCwdChange });
+
+		// The manager keeps the current cwd; callers detect the fallback via recorded ≠ runtime cwd.
+		expect(switched).toBe(true);
+		expect(onCwdChange).not.toHaveBeenCalled();
+		expect(sessionManager.getSessionFile()).toBe(targetSessionFile);
+		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+		expect(sessionManager.getRecordedCwd()).toBe(goneProject);
+	});
+	it("rejects callback-free switches across project directories", async () => {
+		const sourceDir = TempDir.createSync("@pi-switch-no-callback-source-");
+		const targetDir = TempDir.createSync("@pi-switch-no-callback-target-");
+		tempDirs.push(sourceDir, targetDir);
+
+		const { session, sessionManager } = buildSession(sourceDir);
+		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await sessionManager.flush();
+		const previousSessionFile = sessionManager.getSessionFile();
+
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		await targetManager.close();
+
+		const switched = await session.switchSession(targetSessionFile!);
+
+		expect(switched).toBe(false);
+		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
+		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+	});
+	it("adopts a foreign replica without changing the local cwd", async () => {
+		const sourceDir = TempDir.createSync("@pi-switch-collab-source-");
+		const targetDir = TempDir.createSync("@pi-switch-collab-target-");
+		const extraDir = TempDir.createSync("@pi-switch-collab-extra-");
+		tempDirs.push(sourceDir, targetDir, extraDir);
+
+		const { session, sessionManager } = buildSession(sourceDir);
+		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await sessionManager.flush();
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "host snapshot", timestamp: 2 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		await targetManager.close();
+		expect(targetSessionFile).toBeString();
+
+		const processCwd = process.cwd();
+		const onCwdChange = vi.fn(async () => {
+			throw new Error("collab must not invoke cwd callback");
+		});
+		const switched = await session.switchSession(targetSessionFile!, {
+			preserveLocalCwd: true,
+			onCwdChange,
+		});
+
+		expect(switched).toBe(true);
+		expect(onCwdChange).not.toHaveBeenCalled();
+		expect(process.cwd()).toBe(processCwd);
+		expect(sessionManager.getSessionFile()).toBe(targetSessionFile);
+		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+		expect(sessionManager.getRecordedCwd()).toBe(targetDir.path());
+		await sessionManager.addWorkspaceDirectory(extraDir.path());
+		expect(await Bun.file(targetSessionFile!).text()).not.toContain(extraDir.path());
+	});
+
+	it("fails closed when cwd rollback throws after changing it", async () => {
+		const sourceDir = TempDir.createSync("@pi-switch-cwd-error-source-");
+		const targetDir = TempDir.createSync("@pi-switch-cwd-error-target-");
+		tempDirs.push(sourceDir, targetDir);
+
+		const { session, sessionManager } = buildSession(sourceDir);
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		await targetManager.close();
+		expect(targetSessionFile).toBeString();
+
+		let actualCwd = sourceDir.path();
+		let callbackCount = 0;
+		const onCwdChange = vi.fn(async (newCwd: string, _previousCwd: string) => {
+			actualCwd = newCwd;
+			const call = callbackCount++;
+			if (call === 0) throw new Error("settings reload failed");
+			if (call === 1) throw new Error("cwd restore denied");
+			return true;
+		});
+
+		await expect(session.switchSession(targetSessionFile!, { onCwdChange })).rejects.toThrow(
+			/settings reload failed.*cwd restore denied.*process may remain in/,
+		);
+
+		expect(actualCwd).toBe(sourceDir.path());
+		expect(onCwdChange).toHaveBeenCalledTimes(2);
+		expect(onCwdChange).toHaveBeenNthCalledWith(2, sourceDir.path(), targetDir.path());
+		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+		expect(session.isDisposed).toBe(true);
+	});
+	it("restores prompt attribution when a switch hook rebuilds the prompt and then fails", async () => {
+		const tempDir = TempDir.createSync("@pi-switch-context-sources-");
+		tempDirs.push(tempDir);
+		const target = SessionManager.create(tempDir.path(), tempDir.path());
+		target.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await target.ensureOnDisk();
+		await target.flush();
+		const targetFile = target.getSessionFile()!;
+		await target.close();
+		const built = (text: string) => ({
+			systemPrompt: [text],
+			sources: {
+				blocks: [text],
+				sources: [
+					{
+						id: "rules",
+						kind: "instruction-files" as const,
+						label: "rules",
+						block: 0,
+						start: 0,
+						end: text.length,
+					},
+				],
+			},
+		});
+		const initial = built("previous rules");
+		const next = built("target rules");
+		const instructionTexts = () =>
+			buildSessionContextView(session)
+				.categories.find(category => category.id === "instruction-files")!
+				.entries.map(entry => entry.text);
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: initial.systemPrompt, tools: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			systemPromptSources: initial.sources,
+			rebuildSystemPrompt: async () => next,
+			extensionRunner: {
+				hasHandlers: () => false,
+				emit: async (event: { type: string }) => {
+					if (event.type !== "session_switch") return;
+					await session.refreshBaseSystemPrompt();
+					expect(instructionTexts()).toEqual(["target rules"]);
+					throw new Error("target hook failed");
+				},
+			} as unknown as ExtensionRunner,
+		});
+		sessions.push(session);
+		await expect(session.switchSession(targetFile)).rejects.toThrow("target hook failed");
+		expect(session.systemPrompt).toEqual(initial.systemPrompt);
+		expect(instructionTexts()).toEqual(["previous rules"]);
+	});
+
+	it("rejects reload when the session-before-switch hook cancels", async () => {
+		const tempDir = TempDir.createSync("@pi-switch-reload-cancel-");
+		tempDirs.push(tempDir);
+
+		const emit = vi.fn(async () => ({ cancel: true }));
+		const extensionRunner = {
+			hasHandlers: (eventType: string) => eventType === "session_before_switch",
+			emit,
+		} as unknown as ExtensionRunner;
+		const { session, sessionManager } = buildSession(tempDir, extensionRunner);
+		sessionManager.appendMessage({ role: "user", content: "current", timestamp: 1 });
+		await sessionManager.flush();
+		const sessionFile = session.sessionFile;
+		expect(sessionFile).toBeString();
+
+		await expect(session.reload()).rejects.toThrow("Session reload cancelled");
+		expect(emit).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "session_before_switch", targetSessionFile: sessionFile }),
+		);
 	});
 });

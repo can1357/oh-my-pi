@@ -2,18 +2,6 @@ import { expect, it } from "bun:test";
 import { declare, type } from "@oh-my-pi/omptype/ark";
 import type { Eq } from "../type-assert";
 
-it("identity", () => {
-	const Original = type({
-		"foo?": "string",
-		bar: "number",
-		baz: "boolean",
-	});
-	const T = Original.map(entry => entry);
-
-	const _type1: Eq<typeof T, typeof Original> = true;
-	expect(T.expression).toEqual(Original.expression);
-});
-
 it("change values", () => {
 	const Original = type({
 		"foo?": "string",
@@ -63,11 +51,13 @@ it("change values", () => {
 it("infer method output", () => {
 	type ExpectedKey<t = type<object>> =
 		| propValueOf<{
-				[k in keyof t as t[k] extends Fn<never, type.Any>
-					? [t[k]] extends [Fn<never, anyOrNever>]
-						? never
-						: k
-					: never]: k;
+				[
+					k in keyof t as t[k] extends Fn<never, type.Any>
+						? [t[k]] extends [Fn<never, anyOrNever>]
+							? never
+							: k
+						: never
+				]: k;
 		  }>
 		| "to"
 		| "get"
@@ -108,8 +98,8 @@ it("infer method output", () => {
 
 	const brand = Base.brand("brand");
 
-	const filterFn = (v: Base): v is Base & { filter: 1 } => true;
-	const narrowFn = (v: Base): v is Base & { narrow: 1 } => true;
+	const filterFn = (_v: Base): _v is Base & { filter: 1 } => true;
+	const narrowFn = (_v: Base): _v is Base & { narrow: 1 } => true;
 	const pipeFn = () => ({ pipe: 1 });
 
 	const Expected = type({

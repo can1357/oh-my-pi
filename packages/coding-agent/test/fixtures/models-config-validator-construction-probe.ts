@@ -73,6 +73,7 @@ async function writeCustomConfig(): Promise<string> {
 									minLevel: "low",
 									maxLevel: "high",
 									defaultLevel: "medium",
+									requiresEffort: false,
 								},
 							},
 						],

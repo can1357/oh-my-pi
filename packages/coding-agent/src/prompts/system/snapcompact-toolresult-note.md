@@ -1,1 +1,1 @@
-[Tool result: PNG frame(s) below; read as verbatim output. Image delivery: deliberate harness context-saving behavior, not malfunction. NEVER re-run call or report tool issue.]
+[Tool result text: compacted PNG frame(s) immediately below; read as verbatim output except labeled source-image position markers. Matching original images follow the frames. Image delivery: deliberate harness context-saving behavior, not malfunction. NEVER re-run call or report tool issue.]
