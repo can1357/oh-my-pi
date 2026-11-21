@@ -2,13 +2,14 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Added
 
-- Added `steps` and `focus` to the `shell` node: every step of the command is clickable to pick its output, and the step whose output shows is highlighted
-
-- Added the `features` terminal event: the terminal's feature list changed (a setting), replacing the `hello` reply's
-
-- Added the `resume` and `deliver-queue` collab guest frames and `followUp` on `prompt`
+- Added `toolIntentLabel` for displaying the brief prefix of a structured tool-call intent.
+- Added clickable shell-command steps with output selection and visual highlighting of the currently displayed step.
+- Added a terminal `features` event for notifying clients when terminal settings change.
+- Added collaboration guest support for resuming sessions and delivering queued messages, plus `followUp` prompts.
 
 ## [19.0.0] - 2026-11-18
 

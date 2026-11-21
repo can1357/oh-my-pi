@@ -77,6 +77,14 @@ pub trait Host {
 	fn defers_to_path(&mut self, _name: &BStr, _argv: &[BString]) -> bool {
 		false
 	}
+	/// Whether the host's command `name` (a bare name, no slash) comes before
+	/// the shell functions and aliases of that name: a simple command naming
+	/// it skips the function, the parser does not expand an alias of it in
+	/// command position, and `type`/`command -v` report the host's command.
+	/// `false` (the default): functions and aliases come first, as in bash.
+	fn preempts_functions(&mut self, _name: &BStr) -> bool {
+		false
+	}
 	/// Resume a task from the bytes its [`Task::checkpoint`] produced before a
 	/// snapshot. An error makes the task [`Lost`](crate::bash::Lost) (status
 	/// 137).

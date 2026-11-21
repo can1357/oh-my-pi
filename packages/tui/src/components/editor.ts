@@ -4915,7 +4915,12 @@ export class Editor implements Component, Focusable {
 					: this.#state.cursorCol - 1
 				: undefined;
 
-			const idx = isForward ? line.indexOf(char, searchFrom) : line.lastIndexOf(char, searchFrom);
+			// `lastIndexOf` clamps a negative start to 0: at column 0 it would find the cursor's own character.
+			const idx = isForward
+				? line.indexOf(char, searchFrom)
+				: searchFrom !== undefined && searchFrom < 0
+					? -1
+					: line.lastIndexOf(char, searchFrom);
 
 			if (idx !== -1) {
 				this.#state.cursorLine = lineIdx;

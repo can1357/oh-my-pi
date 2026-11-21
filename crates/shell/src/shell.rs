@@ -34,6 +34,7 @@ use crate::{
 		trace::{RunTrace, SegmentSource, viz::model::NodeKey},
 	},
 	cancel::{AbortReason, AbortToken, CancelToken},
+	commands::{RunLease, SessionCommands},
 	git::is_git_repo_location_var,
 	minimizer,
 	mounts::Mounts,
@@ -172,6 +173,9 @@ struct ShellRunConfig {
 	trace:      Option<Arc<RunTrace>>,
 	/// The speech synthesizer `say` speaks through.
 	speech:     Option<Arc<dyn SpeechHost>>,
+	/// The run's session commands; they end when the run's config is
+	/// dropped.
+	commands:   Option<RunLease>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -192,6 +196,11 @@ pub struct ShellRunOptions {
 	/// The application's speech synthesizer, which `say` speaks through
 	/// when it has one configured; `None` leaves `say` to the system's.
 	pub speech:     Option<Arc<dyn SpeechHost>>,
+	/// Commands the host provides for this run ([`crate::commands`]):
+	/// resolved after the shell's builtins, pi's tools and extras, and before
+	/// shell functions, aliases and `PATH`; ended with the run, so a
+	/// background job that outlives it cannot reach the handler.
+	pub commands:   Option<SessionCommands>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -387,6 +396,7 @@ impl Shell {
 			pipe_taps:  options.pipe_taps,
 			trace:      options.trace,
 			speech:     options.speech,
+			commands:   options.commands.as_ref().map(RunLease::new),
 		};
 		let result = run_shell_session(
 			self.session.clone(),
@@ -469,6 +479,7 @@ pub async fn execute_shell(
 		pipe_taps: None,
 		trace: None,
 		speech: None,
+		commands: None,
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -511,6 +522,7 @@ pub async fn execute_shell_streams(
 		pipe_taps:  None,
 		trace:      None,
 		speech:     None,
+		commands:   None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -1294,6 +1306,7 @@ impl CommandScope<'_> {
 			}),
 			reported_error,
 			speech: self.options.speech.clone(),
+			commands: self.options.commands.as_ref().map(RunLease::commands),
 			text_capture: false,
 			events: self
 				.options

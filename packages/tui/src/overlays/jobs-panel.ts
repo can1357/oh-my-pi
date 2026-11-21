@@ -10,6 +10,7 @@
  */
 import type { ShellTrace, ShellVizPreferences, ShellVizPresentation, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { formatDuration, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
+import { jobDisplayLabel } from "../tools/job-label";
 import type { Component } from "../tui";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { matchesKey } from "../keys";
@@ -258,7 +259,7 @@ export class JobsSheet implements Component {
 			const age = formatDuration(jobAge(job, now));
 			const agent = entry.agent && entry.agent.id !== job.label ? `${entry.agent.id}: ` : "";
 			// The intent is model-written: strip terminal controls and flatten it to one row like the command.
-			const title = shortenEmbeddedPaths(collapseCommand(sanitizeText(job.intent ?? job.label)));
+			const title = shortenEmbeddedPaths(collapseCommand(sanitizeText(jobDisplayLabel(job))));
 			lines.push(truncateToWidth(`${cursor} ${guide}${job.status}  ${job.type} ${age}  ${agent}${title}`, width));
 		}
 		const detail = selected && this.#inspect(selected.id);
@@ -534,7 +535,7 @@ function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide
 			guide !== "" && span(guide, "mono dim"),
 			agentName !== undefined && agentName !== job.label && span(`${agentName} `, "strong"),
 			job.intent
-				? span(job.intent)
+				? span(jobDisplayLabel(job))
 				: job.type === "task"
 					? span(job.label)
 					: span(collapseCommand(job.label), "mono"),
@@ -543,7 +544,7 @@ function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide
 		icon: TYPE_ICON[job.type] ?? "job",
 		tone: STATUS_TONE[job.status],
 		title: `${job.intent ? `${job.intent}\n` : ""}${job.caption ? `${job.caption}\n` : ""}${job.label}\n${status} · ${job.type} · ${job.id}`,
-		aria: `${job.intent ?? job.label}, ${status.toLowerCase()}, ${age}`,
+		aria: `${jobDisplayLabel(job)}, ${status.toLowerCase()}, ${age}`,
 	});
 }
 
@@ -713,7 +714,7 @@ function describeDetail(
 					"col",
 					{ role: "omp.jobs.about", gap: "xs" },
 					compact<NativeChild>([
-						title ? text(title, { role: "omp.jobs.title", wrap: "word", title }) : undefined,
+						title ? text(jobDisplayLabel(job), { role: "omp.jobs.title", wrap: "word", title }) : undefined,
 						job.caption
 							? text([span(job.caption, "muted")], {
 									role: "omp.jobs.caption",

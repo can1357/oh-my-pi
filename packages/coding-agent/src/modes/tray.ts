@@ -11,7 +11,7 @@
  * counter) and memoises each card's node by its face, so an unchanged card is
  * the same node reference and the reconciler skips it.
  */
-import type { TspProps, TspTrayMain, TspTrayStatus } from "@oh-my-pi/pi-wire";
+import { type TspProps, type TspTrayMain, type TspTrayStatus, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { compact, keyed, keyNames, node, span, stableKey } from "@oh-my-pi/pi-tui/native/describe";
 import { sameItems, sameProps } from "@oh-my-pi/pi-tui/native/memo";
@@ -34,6 +34,7 @@ import {
 	jobWidgetGlance,
 	jobWidgetGlanceSpans,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
+import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { formatCount, formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManagerApi } from "../async";
@@ -351,7 +352,7 @@ function outcomeLine(session: ObservableSession | undefined, ref: AgentRecordLik
 
 /** A call's detail as the ANSI live preview words it: its own intent, else its arguments, paths shortened. */
 function callDetail(intent: string | undefined, args: string | undefined, argsKey: string | undefined): string {
-	if (intent) return previewLine(shortenEmbeddedPaths(replaceTabs(intent)), TRUNCATE_LENGTHS.CONTENT);
+	if (intent) return previewLine(shortenEmbeddedPaths(replaceTabs(toolIntentLabel(intent))), TRUNCATE_LENGTHS.CONTENT);
 	if (args) return previewLine(shortenToolArgumentPaths(replaceTabs(args), argsKey), TRUNCATE_LENGTHS.CONTENT);
 	return "";
 }
@@ -704,7 +705,7 @@ function jobItem(input: TrayInput, memory: TrayMemory, job: AsyncJob): TrayJobIt
 		if (memory.dismissed.has(key) || job.status === "cancelled" || input.consumed(job.id)) return undefined;
 	}
 	const status = jobStatus(job);
-	const name = line(job.intent ?? job.label, TRUNCATE_LENGTHS.TITLE);
+	const name = line(jobDisplayLabel(job), TRUNCATE_LENGTHS.TITLE);
 	const view = job.status === "running" ? input.widget(job) : undefined;
 	const output = jobOutput(job, TRAY_PEEK_OUT_LINES_BARE);
 	const command = job.process ? line(job.process.command, TRUNCATE_LENGTHS.LINE) : "";

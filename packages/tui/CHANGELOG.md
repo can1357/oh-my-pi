@@ -2,41 +2,47 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Breaking Changes
 
-- Removed `ComposerPreferences.completeScrollback`, `TranscriptContainer.completeScrollback`, `Composer.setRunActive` and the `transientChrome`/`selfClearingChrome`/`billedChrome` options of `Composer.setRuntimeChildren`: retirement always uses the height the chrome leaves on screen
-- Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion` and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`; import them from the new path ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
-- `OutputSinkOptions.artifactPath`/`artifactId` are replaced by `allocateArtifact` (`ArtifactAllocator`), which the sink calls only when output first overflows its inline view
-- Removed the `windows-altgr` module (`translateWindowsAltGrSequence`, `readAltGrLayer`, `createRightAltLatch`, `RIGHT_ALT_LATCH_MS`, `AltGrHost`, `KeyboardLayoutHandle`); AltGr recovery is `translateWindowsAltGrSequence` in `@oh-my-pi/pi-natives`
+- Retired the `ComposerPreferences.completeScrollback`, `TranscriptContainer.completeScrollback`, and `Composer.setRunActive` APIs, along with the `transientChrome`, `selfClearingChrome`, and `billedChrome` options of `Composer.setRuntimeChildren`. Retirement now consistently uses the height left by on-screen chrome.
+- Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion`, and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`.
+- Replaced `OutputSinkOptions.artifactPath` and `artifactId` with the `allocateArtifact` (`ArtifactAllocator`) callback, which allocates an artifact only when output first exceeds its inline view.
+- Removed the `windows-altgr` module; Windows AltGr recovery is now provided by `translateWindowsAltGrSequence` in `@oh-my-pi/pi-natives`.
 
 ### Added
 
-- The editor now shows described changes for `magic` mode as Markdown in the transcript until the apply model returns final diffs
-- Added handling of `features` terminal events to update UI without waiting for a new hello
+- The editor now displays described changes for `magic` mode as Markdown in the transcript while it waits for the apply model to return final diffs.
+- The UI now responds to terminal `features` events without waiting for a new hello message.
 
 ### Changed
 
-- Rows that chrome below the transcript pushes off screen go straight to scrollback; when that chrome shrinks, the input stays on the bottom row and the freed rows stay blank until new output fills them. A docked report, a waiting ask and the editor's completion list are the exception: the rows they cover come back when they close
-- Native chats no longer show a crossed-out Spotlight star or leave an empty row under unchanged tool results.
-- Native web search cards send their sources as one `omp.tool.sources` grid, answered or not; a search without an answer puts each page excerpt inside its source row (`omp.tool.excerpt`), which Tern shows once the card is unfolded, and titles take up to two lines
-- Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`
-- The background jobs sheet reads a job's output from where its command sends it: it follows whatever the command writes now (its own output, a pipe it feeds `| tail`, a file it redirects into `> log`) and highlights that step in the command; clicking a step of the command shows that step's output until you click it again or choose Follow live, and a source menu lists every stream, instead of "No output yet" until it ends
-- Clicking a step of a running bash command in the transcript shows the output that step writes (its pipe, its redirected file, or its own slice of the output) in place of the run's output, and while the run writes a stream the card follows it
-- The background jobs sheet draws a job's command as its live shell visualization with the running step in view, and fits what the job is for, its caption and its facts in fewer lines
-- Bash command footers replace the `Wall:` and `Timeout:` labels with icons and one compact chip (`⏱ 1.2s/5m · ✘ 1`), and prefix the job, service, PID, artifact and minimizer parts with theme glyphs
+- Tool commands run inside a bash call render as nested tool cards in the bash card
+- Tool activity and job titles show the brief label of a structured intent; the Spotlight inspector still exposes the full request.
+- Improved transcript layout around docked reports, waiting asks, completion lists, dialogs, todo lists, subagent panels, queued messages, and other lower-screen chrome so visible content and reclaimed rows behave more predictably.
+- Native chat and web search cards now present tool results and sources more clearly, including expandable page excerpts, multi-line titles, and a unified sources grid.
+- Windows console VT input and AltGr handling now use the native terminal integration.
+- Background jobs and running Bash commands now provide live, step-specific output for pipelines, redirects, and command stages, with controls to switch streams or follow the live output. Job cards also show the active command step and more compact metadata.
+- Bash command footers now use a compact, icon-based layout for timing, exit status, job and process details, artifacts, and minimizers.
 
 ### Fixed
 
-- omp now selects the light theme inside Zellij when the terminal reports a light background, instead of dropping the background reply Zellij forwards after its own DA1 answer ([#20002](https://github.com/can1357/oh-my-pi/issues/20002))
-- Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
-- Transcript rows no longer go missing between the scrollback and the screen while a todo list, subagent panel, queued-message band, dialog or draft is up, which made tool cards look cut off after their first rows
-- The terminal cursor no longer blinks off and on with every spinner tick in kitty
-- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
-- Large repaints are again written in pieces that end between rows, so output from another process sharing the terminal cannot land inside a row or an escape sequence
-- Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there
-- `ask` HTML forms keep a prefilled or hidden control named `__proto__` in their default data, so a timed-out form no longer drops it ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
-- An ask form with one question submits on one Enter instead of stopping on Submit first
+- Fixed the TUI freezing at 100% CPU while streaming text that begins with a blank line followed by a line containing `|`.
+- Fixed the TUI freezing when charting a table whose numbers overflow (`1e400`, a `p999…` header with hundreds of digits, a `1e-300 → 1e300` change) or sit above 2^53 and differ only slightly.
+- Fixed the editor freezing when a vim count is typed with hundreds of digits; counts now cap at 99,999.
+- Fixed Windows input mode freezing on a key record with an impossibly large repeat count.
+- Fixed backward character jump (`Ctrl+Alt+]`) at the start of a line finding the cursor's own character instead of searching earlier lines.
+- Fixed light-theme detection inside Zellij when the terminal reports a light background.
+- Preserved custom foreground colors and text styles in status-line segments while continuing to apply the accent color to unstyled statuses.
+- Fixed transcript rows and tool cards disappearing or appearing truncated when overlays and panels were open.
+- Fixed cursor flicker in kitty terminals during spinner updates.
+- Preserved background colors on truncated rows while scrolling.
+- Fixed WebP and JPEG images rendering as blank gaps on Kitty graphics-compatible terminals when displayed through a bare `Image`.
+- Improved terminal output handling so large repaints remain row-safe and slow or unavailable terminal writers no longer freeze input.
+- Preserved prefilled or hidden `__proto__` controls when ask HTML forms time out.
+- A single-question ask form now submits on the first Enter press.
+- Improved native-terminal ask forms so answering long questions no longer causes the entire card to resize and stall on every movement.
 
 ## [19.0.1] - 2026-11-19
 
@@ -46,7 +52,6 @@
 
 ### Fixed
 
-- Answering a long ask question by question in native terminal hosts such as Tern no longer rescales the whole card body on every move, so the next question animates in without stalling
 - Fixed images from a previous session reappearing at the top-left of the screen after `/new` in herdr-app ([#19749](https://github.com/can1357/oh-my-pi/pull/19749) by [@jaredlyon](https://github.com/jaredlyon))
 - Loop-stall diagnostics (`ui.loop-blocked`) no longer sample the JS thread while no TUI runs, such as in an external editor or after the session ends ([#19703](https://github.com/can1357/oh-my-pi/pull/19703) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the usage dashboard rendering exhausted or pressured usage rows without a quota bar (prepaid balances, spent quotas) as dim informational text; they now take the error or warning color their reported status calls for, and a spent quota with no measurable amount reads "exhausted" instead of "no data" ([#19764](https://github.com/can1357/oh-my-pi/issues/19764))

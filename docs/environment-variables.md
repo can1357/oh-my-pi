@@ -302,7 +302,6 @@ Base URL resolution: option `azureBaseUrl` → env `AZURE_OPENAI_BASE_URL` → o
 | `GOOGLE_CLOUD_PROJECT`           | Yes (unless passed in options) | Primary project ID source                                                                                                 |
 | `GCP_PROJECT`                    | Fallback                       | Alternate project ID source                                                                                               |
 | `GCLOUD_PROJECT`                 | Fallback                       | Alternate project ID source                                                                                               |
-| `GOOGLE_CLOUD_PROJECT_ID`        | OAuth login helper only        | Used by Gemini CLI OAuth project discovery                                                                                |
 | `GOOGLE_VERTEX_LOCATION`         | Yes (unless passed in options) | Primary Vertex location source                                                                                            |
 | `GOOGLE_CLOUD_LOCATION`          | Fallback                       | Alternate Vertex location source                                                                                          |
 | `VERTEX_LOCATION`                | Fallback                       | Alternate Vertex location source                                                                                          |
@@ -340,15 +339,20 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route                                                                                                                                                          |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly                                                                                                                                                            |
 
-### Gemini CLI and Antigravity compatibility
+### Antigravity compatibility
 
 | Variable                    | Default / behavior                                                                                                                                |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PI_AI_GEMINI_CLI_VERSION`  | Overrides Gemini CLI user-agent version tag (`0.46.0` if unset)                                                                                   |
 | `PI_AI_ANTIGRAVITY_VERSION` | Overrides the auto-discovered Antigravity hub user-agent version; when unset and discovery fails, the fallback is `2.26.0`                        |
 | `PI_AI_ANTIGRAVITY_CL`      | Overrides Antigravity hub user-agent build changelist (`1005016104` if unset)                                                                     |
 | `PI_AI_ANTIGRAVITY_OS`      | Overrides Antigravity hub user-agent os_type (unset: the native build for the host OS, `darwin`, `linux` or `windows`; other OSes report `linux`) |
 | `PI_AI_ANTIGRAVITY_ARCH`    | Overrides Antigravity hub user-agent arch (unset: that build's arch, `arm64` on macOS, `amd64` on Linux and Windows)                              |
+
+### Prompt perturbation
+
+| Variable                  | Default / behavior                                                                                                                                                                     |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OMP_PROMPT_PERTURBATION` | Unset: models whose KDL rules set `prompt-perturbation #true` get the pooled lines rewritten with the wording chosen for this installation; others get the bundled wording. `1` perturbs every model; `0` none. |
 
 ### GitLab Duo
 

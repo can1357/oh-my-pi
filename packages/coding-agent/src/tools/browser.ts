@@ -194,7 +194,10 @@ export function resolveBrowserKind(
 				`This session drives the user's Chrome through the omp extension and has no other browser; app: ${JSON.stringify(app)} is unavailable. Omit app or pass app: "relay".`,
 			);
 		}
-		const relayKind = resolveRelayKind({ url: env.PI_PANEL_RELAY_URL ?? cfgBrowserRelayUrl.get(session.settings) }, env);
+		const relayKind = resolveRelayKind(
+			{ url: env.PI_PANEL_RELAY_URL ?? cfgBrowserRelayUrl.get(session.settings) },
+			env,
+		);
 		if (relayKind) return relayKind;
 	}
 	if (app !== undefined && URL_SCHEME.test(app)) {

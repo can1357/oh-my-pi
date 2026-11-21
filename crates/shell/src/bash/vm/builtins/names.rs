@@ -78,6 +78,10 @@ impl AliasLookup for Aliases {
 
 /// The aliases in effect for the next parse: `None` when alias expansion
 /// is off (`expand_aliases` unset outside POSIX mode) or none are defined.
+///
+/// An alias of a name the host puts before functions and aliases
+/// ([`Host::preempts_functions`](crate::bash::Host::preempts_functions)) is
+/// left out.
 pub fn alias_table(
 	k: &mut Kernel,
 	cx: &mut Cx<'_>,
@@ -112,7 +116,11 @@ impl Aliases {
 		let regular: HashMap<BString, BString> = state::scan(&k.root, cx.store, vp, Table::Alias)?
 			.into_iter()
 			.filter_map(|(k, r)| match (k, r) {
-				(KeyBuf::Alias(n), Record::Alias(v)) => Some((n, v)),
+				(KeyBuf::Alias(n), Record::Alias(v))
+					if !cx.host.preempts_functions(BStr::new(n.as_slice())) =>
+				{
+					Some((n, v))
+				},
 				_ => None,
 			})
 			.collect();
@@ -147,6 +155,7 @@ fn zsh_alias_table(
 		for (key, rec) in state::scan(&k.root, cx.store, vp, Table::Alias)? {
 			if let (KeyBuf::Alias(n), Record::Alias(v)) = (key, rec)
 				&& !off.contains(&n)
+				&& !cx.host.preempts_functions(BStr::new(n.as_slice()))
 			{
 				table.regular.insert(n, v);
 			}
@@ -382,8 +391,11 @@ fn kinds(
 	// ask for), and a builtin only when there is none.
 	let mut self_shell = false;
 	if !path_only {
+		// A host command that comes before functions and aliases hides both.
+		let preempted = !name.contains(&b'/') && ctx.cx.host.preempts_functions(BStr::new(name));
 		// Aliases count only while alias expansion is on.
-		if ctx.option(OptId::ExpandAliases)?
+		if !preempted
+			&& ctx.option(OptId::ExpandAliases)?
 			&& let Some(v) = alias_of(ctx, name)?
 		{
 			found.push(Kind::Alias(v));
@@ -399,7 +411,7 @@ fn kinds(
 				return Ok(found);
 			}
 		}
-		if let Some(Record::Func { source, .. }) = ctx.function(name)? {
+		if !preempted && let Some(Record::Func { source, .. }) = ctx.function(name)? {
 			found.push(Kind::Function((*source).clone()));
 		}
 		if !found.is_empty() && !all {

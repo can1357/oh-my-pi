@@ -1,10 +1,12 @@
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model } from "../types";
 import { resolveCatalogPolicy } from "./catalog-policy";
+import { onCascadeRulesChange } from "./cascade";
 import { resolveCatalogAxes } from "./resolve";
 
 const imageBudgetCache = new Map<string, number | null>();
 const IMAGE_BUDGET_CACHE_MAX = 8192;
+onCascadeRulesChange(() => imageBudgetCache.clear());
 
 /**
  * Maximum encoded inline-image bytes retained per request for a deployment with a documented body-size limit.

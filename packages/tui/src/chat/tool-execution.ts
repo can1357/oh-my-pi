@@ -1,5 +1,16 @@
 import { RunTrace } from "@oh-my-pi/pi-natives";
-import { isShellTrace, type ShellTrace, type ShellVizPreferences, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
+import {
+	INTENT_FIELD,
+	isShellTrace,
+	type ShellTrace,
+	type ShellVizPreferences,
+	type ShellVizPresentation,
+	toolIntentLabel,
+	type TspCardStatus,
+	type TspPreview,
+	type TspText,
+	type TspTone,
+} from "@oh-my-pi/pi-wire";
 import {
 	defaultShellVizPreferences,
 	readShellPresentation,
@@ -38,7 +49,6 @@ import {
 	toolRenderers,
 } from "../tools/index";
 import { describeDefaultToolExecution, formatDefaultToolExecution } from "../tools/default-renderer";
-import { INTENT_FIELD, type TspCardStatus, type TspPreview, type TspText, type TspTone } from "@oh-my-pi/pi-wire";
 import { card, col, EMPTY_NODE, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
@@ -64,7 +74,7 @@ import {
 	replaceTabs,
 	resolveImageOptions,
 } from "../render/render-utils";
-import type { XdevMountedState } from "../tools/xdev";
+import type { ToolCommandMountedState } from "../tools/tool-commands";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "../png-conversion";
 import { FenceFigure } from "./fence-figure";
@@ -95,6 +105,7 @@ interface ToolImageBlock {
 	mimeType?: string;
 }
 
+/** Images a tool keeps in `details.images` (extension and custom tools) rather than in its result content. */
 function imageBlocksFromDetails(details: unknown): ToolImageBlock[] {
 	if (!isRecord(details) || !Array.isArray(details.images)) return [];
 	return details.images.filter(
@@ -114,6 +125,18 @@ function displaceableToolName(
 	if (toolName === "wait" && isWaitingPollDetails(result.details)) return "wait";
 	if (toolName === "todo" && !isPartial && isTodoToolDetails(result.details)) return "todo";
 	return undefined;
+}
+
+/** Tool command presentation state of the session behind a tool instance, when it carries one. */
+function toolCommandState(tool: unknown): ToolCommandMountedState | undefined {
+	if (!isRecord(tool) || !isRecord(tool.session) || !isToolCommandMountedState(tool.session.toolCommands)) {
+		return undefined;
+	}
+	return tool.session.toolCommands;
+}
+
+function isToolCommandMountedState(value: unknown): value is ToolCommandMountedState {
+	return isRecord(value) && value.mountedNames instanceof Set && value.tools instanceof Map;
 }
 
 function isEditLikeToolName(toolName: string): boolean {
@@ -812,8 +835,8 @@ export class ToolExecutionComponent extends Container {
 
 	/**
 	 * Signal that this specific call has begun executing (`tool_execution_start`).
-	 * Distinct from {@link setArgsComplete}: exclusive writes are marked complete
-	 * at `message_end` but stay queued until this fires for that call.
+	 * Distinct from {@link setArgsComplete}, which only marks the arguments final:
+	 * this starts the elapsed timer and moves the card from `pending` to `running`.
 	 */
 	setExecutionStarted(_toolCallId?: string): void {
 		if (this.#executionStarted) return;
@@ -931,18 +954,15 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
-	 * Get all image blocks from result content and details.
-	 * Some tools (like generate_image) store images in details to avoid bloating
-	 * model context. Xdev-dispatched tools preserve those details under
-	 * details.xdev.inner.
+	 * Image blocks of the result content plus those kept in its details. A
+	 * bash run's tool command images already arrive as content blocks.
 	 */
 	#getAllImageBlocks(): ToolImageBlock[] {
 		if (!this.#result) return [];
 		const contentImages = this.#result.content.filter(block => block.type === "image");
 		const details = this.#result.details;
 		const detailImages = imageBlocksFromDetails(details);
-		const xdevImages = isRecord(details) && isRecord(details.xdev) ? imageBlocksFromDetails(details.xdev.inner) : [];
-		return [...contentImages, ...detailImages, ...xdevImages];
+		return [...contentImages, ...detailImages];
 	}
 
 	/**
@@ -1468,7 +1488,7 @@ export class ToolExecutionComponent extends Container {
 				status,
 				age: live ? ms : undefined,
 				took: live ? undefined : ms,
-				intent: typeof intent === "string" && intent ? plainText(intent) : undefined,
+				intent: typeof intent === "string" && intent ? plainText(toolIntentLabel(intent)) : undefined,
 				frame: inline ? "inline" : "card",
 				collapsible: hasBody,
 				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,
@@ -2295,6 +2315,10 @@ export class ToolExecutionComponent extends Container {
 			context.expanded = this.#expanded;
 			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
+			// Nested tool command cards render through the host's canonical resolver, which covers mounted
+			// tools and active top-level tools, so custom and MCP renderers draw their own invocations.
+			const resolveToolCommandMounted = toolCommandState(this.#tool)?.resolve;
+			if (resolveToolCommandMounted) context.resolveToolCommandMounted = resolveToolCommandMounted;
 		} else if (this.#toolName === "eval" && this.#result) {
 			Object.defineProperty(context, "output", {
 				get: () => this.#getTrimmedTextOutput(),
@@ -2329,16 +2353,6 @@ export class ToolExecutionComponent extends Container {
 				if (fallback) context.editStreamingFallback = fallback;
 			}
 			context.renderDiff = renderDiff;
-		} else if (this.#toolName === "write") {
-			// Device-dispatch previews render through the host's canonical resolver,
-			// which covers mounted devices and active top-level tools (the `write`
-			// transport accepts both). Deciding the predicate here instead would
-			// leave a `write xd://<top-level tool>` card on the generic fallback.
-			const writeTool = this.#tool as { session?: { xdev?: XdevMountedState } } | undefined;
-			const resolveXdevMounted = writeTool?.session?.xdev?.resolve;
-			if (resolveXdevMounted) {
-				context.resolveXdevMounted = resolveXdevMounted;
-			}
 		}
 
 		return context;

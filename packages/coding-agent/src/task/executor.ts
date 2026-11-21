@@ -5496,7 +5496,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				systemPrompt: session.agent.state.systemPrompt,
 				task,
 				tools: persistedSubagentTools,
-				mountedTools: session.getMountedXdevToolNames(),
+				mountedTools: session.getMountedToolCommandNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,

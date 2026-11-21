@@ -411,6 +411,12 @@ export const COLLAB_PROTO = 3;
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";
 
+/** Activity label before the first colon-space in a tool intent; preserves bare labels and embedded URL or file:line references. */
+export function toolIntentLabel(intent: string): string {
+	const separator = intent.search(/:(?=\s|$)/);
+	return separator > 0 ? intent.slice(0, separator).trim() || intent : intent;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Envelope & link constants
 // ═══════════════════════════════════════════════════════════════════════════

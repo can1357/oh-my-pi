@@ -62,7 +62,14 @@ import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
 import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode } from "@oh-my-pi/pi-wire";
+import {
+	type TspChecklistItem,
+	type TspChecklistPhase,
+	type TspSpan,
+	type TspText,
+	type TspTreeNode,
+	toolIntentLabel,
+} from "@oh-my-pi/pi-wire";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
@@ -1261,7 +1268,7 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	// A model-written intent is prose, so home paths inside it are shortened as they stand. An argument is
 	// shortened by its key, so a literal search pattern that names a home path still shows what was searched.
 	const detail = intent
-		? shortenEmbeddedPaths(replaceTabs(intent))
+		? shortenEmbeddedPaths(replaceTabs(toolIntentLabel(intent)))
 		: args
 			? shortenToolArgumentPaths(replaceTabs(args), argsKey)
 			: undefined;
@@ -6245,28 +6252,23 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
 		const previousTools = this.session.getEnabledToolNames();
-		const previousMountedTools = this.session.getMountedXdevToolNames();
+		const previousMountedTools = this.session.getMountedToolCommandNames();
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
-		// `write` and refine it with `edit`, and plan approval itself is a `write`
-		// to `xd://propose`. Both must be in the active set or the agent falls
-		// back to `edit` on a non-existent file and stalls — and cannot submit the plan.
+		// `write` and refine it with `edit`. Both must be in the active set or the
+		// agent falls back to `edit` on a non-existent file and stalls.
 		// `edit` is an essential built-in and always ships top-level; re-activate
 		// `write` here only when the current registry entry is the built-in write
-		// tool (issue #3165). A shadowing extension tool named `write` must stay
-		// inactive because plan mode's read-only guarantee relies on the built-in
-		// write/edit guard. The standing handler below consumes plan-approval
-		// dispatches.
+		// tool (issue #3165). A shadowing extension tool named `write` is dropped
+		// from the active set rather than carried over (issue #14030): plan mode's
+		// read-only guarantee relies on the built-in write/edit guard. `propose`
+		// needs no selection: it is a `bash` command while tool commands are
+		// mounted, otherwise a top-level tool the session presents while plan mode
+		// is on. The standing handler below consumes plan submissions.
 		const planAugmentations: string[] = [];
-		// A shadowing extension tool named `write` has no `xd://` transport, so plan
-		// approval would never dispatch and the turn would loop on propose writes
-		// forever (issue #14030). Drop it from the active set rather than carrying it
-		// over: keeping it active breaks both the read-only guarantee and approval.
 		if (this.session.hasBuiltInTool("write")) {
 			planAugmentations.push("write");
 		} else if (previousTools.includes("write")) {
-			this.showWarning(
-				"Plan mode: the `write` tool is provided by an extension and cannot submit plans. Disable it to use plan mode.",
-			);
+			this.showWarning("Plan mode: the `write` tool is provided by an extension and stays disabled while planning.");
 		}
 		const uniquePlanTools = [...new Set([...previousTools.filter(name => name !== "write"), ...planAugmentations])];
 
@@ -6281,9 +6283,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// prompt, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
 
-		// Plan mode state must land before the tool partition: it keeps `write`
-		// active as the staging transport, and plan approval is a top-level
-		// `write` to `xd://propose`.
+		// Plan mode state must land before the tool partition: the session
+		// presents `propose` as a top-level tool while plan mode is on and `bash`
+		// does not carry it as a command.
 		const previousPlanModeState = this.session.getPlanModeState();
 		this.session.setPlanModeState({
 			enabled: true,
@@ -6362,7 +6364,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		// A mid-turn exit must interrupt the currently streaming turn.
 		// The plan-mode prompt instructs the model to keep planning until it
-		// writes to `xd://propose`, so the live turn must be aborted inside
+		// submits the plan with `propose`, so the live turn must be aborted inside
 		// `runModeExitTeardown` to avoid restarting on the stale toolset.
 		if (options?.interruptActiveTurn && this.session.isStreaming) {
 			await this.session.runModeExitTeardown(async () => {
@@ -6381,7 +6383,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}): Promise<void> {
 		const planModeState = this.session.getPlanModeState();
 		const planModeTools = this.session.getEnabledToolNames();
-		const planModeMountedTools = this.session.getMountedXdevToolNames();
+		const planModeMountedTools = this.session.getMountedToolCommandNames();
 		const planModeModelState = this.session.model
 			? {
 					model: this.session.model,
@@ -6425,7 +6427,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 			}
 			const enabledTools = this.session.getEnabledToolNames();
-			const mountedTools = this.session.getMountedXdevToolNames();
+			const mountedTools = this.session.getMountedToolCommandNames();
 			if (
 				enabledTools.length !== planModeTools.length ||
 				enabledTools.some((name, index) => name !== planModeTools[index]) ||
@@ -6462,7 +6464,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Warn that a plan session blocks entering goal/vibe mode, distinguishing an
 	 * active session from a paused one. A paused session already restored the
-	 * tools/model and cleared the `xd://propose` handler, so "Exit plan mode
+	 * tools/model and cleared the `propose` handler, so "Exit plan mode
 	 * first." reads as stale right after the user toggled plan mode off (#11692);
 	 * point them at the second `/plan` toggle that fully exits instead.
 	 */
@@ -7050,7 +7052,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	): Promise<boolean> {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
 			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
-			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+			mounted: this.session.getMountedToolCommandNames().filter(name => !isMCPToolName(name)),
 			registered: this.session.getAllToolNames(),
 		};
 
