@@ -21,7 +21,7 @@ import type { Extension } from "./types";
 
 // Bumped whenever canBindAfterStartup counts a new registration, so verdicts recorded without it
 // are not trusted.
-const CACHE_PREFIX = "extension_startup:v2:";
+const CACHE_PREFIX = "extension_startup:v3:";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface StartupVerdict {
@@ -64,6 +64,7 @@ export function canBindAfterStartup(extension: Extension): boolean {
 		extension.registersProviders !== true &&
 		extension.shortcuts.size === 0 &&
 		extension.composerShapes.size === 0 &&
+		extension.todoBackends === undefined &&
 		extension.fileWriteFallbackHandlers.length === 0 &&
 		extension.fileDeleteFallbackHandlers.length === 0 &&
 		extension.assistantTextRenderers.length === 0 &&

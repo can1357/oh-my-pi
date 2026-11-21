@@ -101,6 +101,8 @@ export interface TodoTrackerHost {
 	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
 	prewalkWillHandoff(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	/** Called after every write to the list. */
+	phasesChanged?(): void;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -128,6 +130,7 @@ export class TodoTracker {
 		// bridged call — so the nudge budget re-arms on the progress it
 		// rations. Views, failed batches, and unchanged reads never arrive.
 		this.#midRunNudgeCount = 0;
+		this.#host.phasesChanged?.();
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */

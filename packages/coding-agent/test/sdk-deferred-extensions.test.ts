@@ -63,12 +63,14 @@ describe("startup-deferred extensions", () => {
 			`export default function(pi) { pi.registerShortcut("ctrl+shift+y", { handler: () => {} }); }`,
 		);
 		// The first frame replays the transcript with message and reply renderers, and link schemes
-		// reach the markdown renderer at UI init: each alone keeps an extension eager.
+		// reach the markdown renderer at UI init: each alone keeps an extension eager. So does a todo
+		// backend, which a resumed session's list is sent to as soon as the session starts.
 		const drawing = {
 			"link-scheme.ts": `pi.registerLinkScheme("demo-link");`,
 			"message-renderer.ts": `pi.registerMessageRenderer("demo-message", () => undefined);`,
 			"text-renderer.ts": `pi.registerAssistantTextRenderer(() => undefined);`,
 			"thinking-renderer.ts": `pi.registerAssistantThinkingRenderer(() => undefined);`,
+			"todo-backend.ts": `pi.registerTodoBackend({ id: "demo", replace() {} });`,
 		};
 		const drawingPaths = Object.entries(drawing).map(([name, body]) => {
 			const file = path.join(tempDir.path(), name);

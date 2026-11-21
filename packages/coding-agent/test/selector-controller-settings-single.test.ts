@@ -1,8 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { Component, OverlayHandle, OverlayOptions, TUI } from "@oh-my-pi/pi-tui";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
@@ -104,6 +107,60 @@ describe("single-instance menus", () => {
 		controller.showSettingsSelector();
 		expect(overlays).toHaveLength(1);
 		expect(setFocus).toHaveBeenLastCalledWith(overlays[0]);
+	});
+
+	it("offers Native, then each registered todo backend under its label (or its id) with its description", async () => {
+		const themes = Promise.resolve(["dark"]);
+		spyOn(themeModule, "getAvailableThemes").mockReturnValue(themes);
+		const overlays: Component[] = [];
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.registerTodoBackend({ id: "tracker", label: "Tracker", description: "Mirrors todos", replace() {} });
+				pi.registerTodoBackend({ id: "plain", replace() {} });
+			},
+			process.cwd(),
+			new EventBus(),
+			new ExtensionRuntime(),
+		);
+		const backends = new Map(
+			Array.from(extension.todoBackends ?? [], ([id, definition]) => [id, { extension, definition }]),
+		);
+		const ctx = createInteractiveModeContext({
+			session: {
+				getAvailableThinkingLevels: () => [],
+				getAvailableModels: () => [],
+				extensionRunner: { getTodoBackends: () => backends },
+			},
+			ui: {
+				showOverlay: (component: Component, _options?: OverlayOptions): OverlayHandle => {
+					overlays.push(component);
+					return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+				},
+				setFocus: () => {},
+			},
+		});
+
+		new SelectorController(ctx).showSettingsSelector();
+		await themes;
+		const settings = overlays[0];
+		if (!(settings instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
+		settings.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
+		const page = settings.describe({
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		});
+		if (page.k !== "prefs" || !page.p) throw new Error(`described ${page.k}, not prefs`);
+		const control = page.p.sections.flatMap(section => section.rows).find(row => row.id === "todo.backend")?.control;
+		if (control?.k !== "choice") throw new Error("todo.backend is not a choice row");
+
+		expect(control.options.slice(1)).toEqual([
+			{ value: "tracker", label: "Tracker", detail: "Mirrors todos" },
+			{ value: "plain", label: "plain", detail: undefined },
+		]);
+		expect(control.options[0]?.value).toBe("native");
 	});
 
 	// Regression: clicking Tern's composer model chip again while the picker was
