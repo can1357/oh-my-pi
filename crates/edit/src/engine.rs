@@ -6,7 +6,7 @@
 //! Nothing here touches the filesystem for writes; the [`crate::session`]
 //! drives previews, staging, and the host writer callback.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{error::EditError, files::FileSource, store::EditStore, stream_json::ArgSnapshot};
 
@@ -68,11 +68,60 @@ impl FileOp {
 	}
 }
 
-/// A resolved edit target: the absolute filesystem path plus the display
-/// path the model authored (after unique-suffix recovery, if any).
+/// Physical disk target or an opaque host-owned identity. Hosted keys never
+/// pass through filesystem canonicalization or notebook projection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Location {
+	/// A filesystem path, canonicalized and read through local disk APIs.
+	Disk(PathBuf),
+	/// An opaque host identity; never canonicalized or interpreted as a local
+	/// file.
+	Hosted(String),
+}
+
+impl Location {
+	/// Represent a target as a path for host requests and display. Compare the
+	/// locations themselves when checking identity.
+	pub fn key(&self) -> &Path {
+		match self {
+			Self::Disk(path) => path,
+			Self::Hosted(key) => Path::new(key),
+		}
+	}
+
+	/// Canonicalize a disk path using the filesystem; preserve a hosted key
+	/// verbatim.
+	pub fn canonical_key(&self) -> Self {
+		match self {
+			Self::Disk(path) => Self::Disk(crate::path_policy::canonical_key(path)),
+			Self::Hosted(_) => self.clone(),
+		}
+	}
+
+	pub(crate) fn capacity(&self) -> usize {
+		match self {
+			Self::Disk(path) => path.capacity(),
+			Self::Hosted(key) => key.capacity(),
+		}
+	}
+
+	/// True only for local notebooks; hosted notebooks retain their raw text
+	/// view.
+	pub fn is_notebook(&self) -> bool {
+		matches!(self, Self::Disk(path) if crate::notebook::is_notebook_path(path))
+	}
+}
+
+impl From<PathBuf> for Location {
+	fn from(path: PathBuf) -> Self {
+		Self::Disk(path)
+	}
+}
+
+/// A resolved location plus the model-authored display path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
-	pub absolute: PathBuf,
+	pub location: Location,
 	pub display:  String,
 }
 
@@ -92,8 +141,8 @@ pub enum HeaderKind {
 pub struct StagedFile {
 	/// Display path as authored (after suffix / tag recovery).
 	pub display:            String,
-	/// Absolute target path.
-	pub absolute:           PathBuf,
+	/// Local disk target or opaque hosted identity.
+	pub location:           Location,
 	pub op:                 FileOp,
 	/// Destination for a rename (`*** Move to:` / hashline `MV`). The write
 	/// request becomes a `move`; the result reports `Moved to <display>`.
@@ -137,10 +186,10 @@ pub struct StagedFile {
 
 impl StagedFile {
 	/// Minimal staged update; callers fill in the optional fields.
-	pub fn new(display: impl Into<String>, absolute: PathBuf, op: FileOp) -> Self {
+	pub fn new(display: impl Into<String>, location: impl Into<Location>, op: FileOp) -> Self {
 		Self {
 			display: display.into(),
-			absolute,
+			location: location.into(),
 			op,
 			move_to: None,
 			existed: true,
@@ -171,6 +220,8 @@ pub struct PreviewFile {
 	pub first_changed_line: Option<u32>,
 	/// Model-facing error text; mutually exclusive with `diff`.
 	pub error:              Option<String>,
+	/// Host resolution awaits execution approval; never publish as an error.
+	pub deferred:           bool,
 	pub op:                 Option<FileOp>,
 	pub rename:             Option<String>,
 }
@@ -184,13 +235,14 @@ pub struct Inspection {
 	/// `(path, digest)` — the digest is the text the edit introduces into that
 	/// file (added lines only, no patch grammar). Same-path sections merge.
 	pub entries:  Vec<(String, String)>,
-	/// Delete / move intents for the ACP permission gate.
+	/// Whole-file intents; the ACP permission gate consumes deletes and moves.
 	pub file_ops: Vec<FileOpIntent>,
 }
 
-/// A destructive file operation a payload declares.
+/// An explicit whole-file operation declared by the payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOpIntent {
+	Create { path: String },
 	Delete { path: String },
 	Move { from: String, to: String },
 }

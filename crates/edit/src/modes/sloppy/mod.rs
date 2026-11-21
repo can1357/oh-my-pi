@@ -100,6 +100,7 @@ impl ModeEngine for SloppyEngine {
 						return Some(PreviewFile {
 							display: section.path,
 							error: Some(error.to_string()),
+							deferred: error.is_deferred(),
 							..PreviewFile::default()
 						});
 					},
@@ -184,7 +185,7 @@ impl ModeEngine for SloppyEngine {
 			})?;
 			let mut file = StagedFile::new(
 				read.resolved.display.clone(),
-				read.resolved.absolute.clone(),
+				read.resolved.location.clone(),
 				FileOp::Update,
 			);
 			file.before_raw = Some(read.raw.clone());

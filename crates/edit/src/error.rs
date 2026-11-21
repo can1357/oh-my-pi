@@ -32,6 +32,10 @@ pub enum EditError {
 	/// write, so the host can resolve the URL, `provide` it, and retry.
 	#[error("Internal URL not resolved yet: {0}")]
 	UnresolvedUrl(String),
+	/// Host resolution intentionally waits for execution approval. Preview
+	/// code preserves this state even when another engine wraps the error.
+	#[error("Internal URL deferred until execution approval: {0}")]
+	DeferredUrl(String),
 	/// Filesystem failure reading a target.
 	#[error("{source}")]
 	Io {
@@ -146,6 +150,15 @@ impl EditError {
 		matches!(self, Self::InvalidUtf8 { .. })
 	}
 
+	/// Whether this is a deferred host resolution, including per-file wrappers.
+	pub fn is_deferred(&self) -> bool {
+		match self {
+			Self::DeferredUrl(_) => true,
+			Self::InFile { source, .. } => source.is_deferred(),
+			_ => false,
+		}
+	}
+
 	/// Whether this is `File not found` (ENOENT) for the given path.
 	pub fn is_not_found(&self) -> bool {
 		matches!(self, Self::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
@@ -159,7 +172,7 @@ impl EditError {
 			Self::InvalidUtf8 { .. } => "invalid_utf8",
 			Self::Match(_) => "no_match",
 			Self::Plan(_) => "plan_mode",
-			Self::UnresolvedUrl(_) => "unresolved_url",
+			Self::UnresolvedUrl(_) | Self::DeferredUrl(_) => "unresolved_url",
 			Self::Io { .. } if self.is_not_found() => "file_not_found",
 			Self::Io { .. } => "io",
 			Self::Writer(_) => "write_failed",

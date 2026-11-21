@@ -17,6 +17,7 @@ use super::{
 	types::{Anchor, Cursor, Edit, ParsedRange, PasteTarget},
 };
 use crate::{
+	engine::Location,
 	error::EditError,
 	fuzzy::similarity,
 	store::{Clipboard, EditStore},
@@ -25,7 +26,7 @@ use crate::{
 /// Inputs for stale-snapshot recovery.
 pub struct RecoveryArgs<'a> {
 	/// Canonical target path.
-	pub path:         &'a Path,
+	pub path:         &'a Location,
 	/// Current LF-normalized file text.
 	pub current_text: &'a str,
 	/// Requested stale snapshot tag.
@@ -517,7 +518,7 @@ pub fn try_recover(
 	let Some((edits, offset)) = remap_edits(&snapshot.text, args.current_text, args.edits) else {
 		return Ok(None);
 	};
-	if !context_preserved(&snapshot.text, args.current_text, args.path, args.edits, &edits) {
+	if !context_preserved(&snapshot.text, args.current_text, args.path.key(), args.edits, &edits) {
 		return Ok(None);
 	}
 	if offset != 0 && aimed_at_authored_lines(args.current_text, args.edits, offset) {
@@ -530,9 +531,10 @@ pub fn try_recover(
 		.as_deref()
 		.filter(|_| has_clipboard_edit(&edits))
 		.map(Clipboard::fork);
+	let path = args.path.key().to_str();
 	let Ok(applied) = apply_edits(args.current_text, &edits, ApplyOptions {
-		clipboard:      clipboard.as_mut(),
-		path:           args.path.to_str(),
+		clipboard: clipboard.as_mut(),
+		path,
 		on_empty_paste: EmptyPaste::Throw,
 	}) else {
 		return Ok(None);
@@ -540,7 +542,6 @@ pub fn try_recover(
 	if applied.text == args.current_text {
 		return Ok(None);
 	}
-	let path = args.path.to_str();
 	if offset != 0 && parses_cleanly(path, args.current_text) && !parses_cleanly(path, &applied.text)
 	{
 		return Ok(None);

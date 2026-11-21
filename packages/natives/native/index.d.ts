@@ -232,7 +232,12 @@ export declare class EditSession {
   close(): void
 }
 
-/** Session-scoped snapshots, clipboard registers, and the no-op loop guard. */
+/**
+ * Session-scoped snapshots, clipboard registers, and the no-op loop guard.
+ *
+ * Keys are absolute disk paths or canonical resource URLs (for example,
+ * `ssh://host/home/u/x`); hosted URLs are never filesystem-canonicalized.
+ */
 export declare class EditStore {
   constructor()
   /**
@@ -2212,7 +2217,7 @@ export declare function editErrorKinds(): Array<string>
 
 /** A destructive file operation a payload declares. */
 export interface EditFileOpIntent {
-  /** `delete` | `move`. */
+  /** `create` | `delete` | `move`. */
   kind: string
   path: string
   to?: string
@@ -2220,7 +2225,7 @@ export interface EditFileOpIntent {
 
 /** One file's apply outcome. */
 export interface EditFileOutcome {
-  /** Absolute path. */
+  /** Absolute disk path or opaque hosted resource key. */
   path: string
   displayPath: string
   /** `create` | `update` | `delete`. */
@@ -2320,8 +2325,15 @@ export interface EditPreviewBatch {
 
 /** Host answer for one internal URL (`resolveUrl`). */
 export interface EditUrlResolution {
-  /** Absolute backing file; null when no local file backs the URL. */
+  /**
+   * Absolute backing file or canonical hosted resource URL. Hosted keys
+   * use `scheme://authority/absolute-path`, never disk paths.
+   */
   path?: string
+  /** Full hosted file text; omit it when the hosted target does not exist. */
+  content?: string
+  /** Resolve only after execution approval; omit previews for this target. */
+  deferred?: boolean
   /** Model-facing refusal (read-only, disabled…); wins over `path`. */
   error?: string
   /** Writable while plan mode is active (sandbox-scoped scheme). */
@@ -2330,12 +2342,15 @@ export interface EditUrlResolution {
 
 /** Host write request; the host owns the bytes. */
 export interface EditWriteRequest {
-  /** Absolute path. */
+  /** Absolute disk path or opaque hosted resource key. */
   path: string
   displayPath: string
   /** `create` | `update` | `delete` | `move`. */
   op: string
-  /** Absolute destination for `move` (write `content` there, delete `path`). */
+  /**
+   * Destination disk path or hosted key for `move` (write `content` there,
+   * delete `path`).
+   */
   moveTo?: string
   /** Final bytes as text; null for `delete`. */
   content?: string

@@ -1,9 +1,6 @@
 mod common;
 
-use std::{
-	collections::HashMap,
-	path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::Path};
 
 use common::Workspace;
 use omp_edit::{
@@ -295,8 +292,8 @@ fn compact_diff_preview_matches_all_diff_preview_cases() {
 
 #[test]
 fn snapshot_store_matches_snapshot_contract_cases() {
-	let path = PathBuf::from("/tmp/__hashline-snapshots__.ts");
-	let other = PathBuf::from("/tmp/__hashline-other__.ts");
+	let path = omp_edit::Location::Disk("/tmp/__hashline-snapshots__.ts".into());
+	let other = omp_edit::Location::Disk("/tmp/__hashline-other__.ts".into());
 
 	let store = EditStore::new();
 	let text = "L1\nL2\nL3\n";
@@ -349,7 +346,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 	let early = wide.record(&path, "first\n", None);
 	for index in 0..100 {
 		wide.record(
-			&PathBuf::from(format!("/w/other-{index}.ts")),
+			&omp_edit::Location::Disk(format!("/w/other-{index}.ts").into()),
 			&format!("content {index}\n"),
 			None,
 		);
@@ -374,7 +371,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 	assert!(mutating.by_hash(&other, &keep).is_none());
 
 	let relocating = EditStore::new();
-	let destination = PathBuf::from("/tmp/__hashline-dest__.ts");
+	let destination = omp_edit::Location::Disk("/tmp/__hashline-dest__.ts".into());
 	let moved = relocating.record(&path, "A\n", Some(&[1]));
 	relocating.relocate(&path, &destination);
 	assert!(
@@ -398,7 +395,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 	let shared_tag = shared.record(&path, shared_text, None);
 	shared.record(&other, shared_text, None);
 	let mut matches = shared.paths_with_hash(&shared_tag);
-	matches.sort();
+	matches.sort_by(|a, b| a.key().cmp(b.key()));
 	assert_eq!(
 		matches,
 		vec![other, path.clone()],
@@ -818,7 +815,9 @@ async fn coding_agent_hashline_executor_cases_run_through_session() {
 	let artifact = sandbox_root.join("cfg-module-hygiene-plan.md");
 	let source = "# Plan\n\n## Context\n- old\n";
 	std::fs::write(&artifact, source).expect("write sandbox artifact");
-	let tag = plan.store.record(&canonical_key(&artifact), source, None);
+	let tag = plan
+		.store
+		.record(&canonical_key(&artifact).into(), source, None);
 	let args =
 		json!({ "input": format!("[cfg-module-hygiene-plan.md#{tag}]\nPUT 4.=4:\n+- new\n") });
 	let outcome = plan

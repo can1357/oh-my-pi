@@ -90,7 +90,8 @@ fn resolves_parent_targets_outside_cwd() {
 		policy
 			.resolve("../outside.txt", &HashMap::new())
 			.unwrap()
-			.absolute,
+			.location
+			.key(),
 		root.path().join("outside.txt")
 	);
 }
@@ -108,7 +109,8 @@ fn preserves_absolute_targets_outside_cwd() {
 		policy
 			.resolve(absolute.to_str().unwrap(), &HashMap::new())
 			.unwrap()
-			.absolute,
+			.location
+			.key(),
 		absolute
 	);
 }
@@ -126,7 +128,8 @@ fn expands_home_targets_outside_cwd() {
 		policy
 			.resolve("~/.claude/settings.json", &HashMap::new())
 			.unwrap()
-			.absolute,
+			.location
+			.key(),
 		home.join(".claude/settings.json")
 	);
 }
