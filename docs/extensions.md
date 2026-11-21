@@ -355,9 +355,9 @@ export default function (pi: ExtensionAPI) {
 - **What.** The whole list after every committed change to the main session's list, never an operation; tasks carry `content` and `status` only. While a call runs, later lists collapse into the newest, and a list the backend already took is not sent again.
 - **Sessions.** Key your store by `ctx.sessionManager.getSessionId()`, read before the first `await`. `/new` sends an empty list under the new id. Calls are not ordered against `session_*` events, and there is no per-session instance: release state on `session_shutdown`.
 - **Failure.** A backend cannot refuse a change and gets no abort signal. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed and the next change sends the whole list again. On exit omp waits for a call still running for as long as a `session_shutdown` handler may take.
-- **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). When several extensions register an id, the first one loaded keeps it. An id no enabled extension registers is reported once as an extension error, and todos work as with `native`. A backend selected mid-session gets the list with the next change.
+- **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). When several extensions register an id, the first one loaded keeps it. An id no enabled extension registers is reported once as an extension error, and todos work as with `native`. A backend selected mid-session gets the current list at once.
 - **Scope.** Main session only: subagents and `/tan` clones are not mirrored.
-- **Settings.** `/settings` → Tools → Todos → "Todo Backend" lists `Native` and every backend an enabled extension registers, with its `label` (the `id` when omitted) and `description`. Both are optional; a blank one throws at registration. A backend picked there mid-session gets the list with the next change, not at once.
+- **Settings.** `/settings` → Tools → Todos → "Todo Backend" lists `Native` and every backend an enabled extension registers, with its `label` (the `id` when omitted) and `description`. Both are optional; a blank one throws at registration.
 
 ### Runtime setting overrides
 

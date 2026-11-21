@@ -268,23 +268,25 @@ describe("todo backend", () => {
 		expect(tasksOf(backend)).toEqual([["a"]]);
 	});
 
-	it("a session opened on a saved list sends it once started; a backend selected later gets the list with the next change", async () => {
+	it("a session opened on a saved list sends it once started; a backend selected later gets the current list at once", async () => {
 		const backend = tracker();
 		const saved = SessionManager.inMemory();
 		saved.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: list("saved") });
 		const resumed = await open([backend.extension], "tracker", { sessionManager: saved });
 		const selectedLater = await open([backend.extension]);
 		selectedLater.session.commitTodoPhases(list("before"));
-
-		cfgTodoBackend.override(selectedLater.session.settings, "tracker");
 		await settled(resumed.session);
-		await settled(selectedLater.session);
-		const beforeNextChange = tasksOf(backend);
-		selectedLater.session.commitTodoPhases(list("before", "after"));
+
+		// The write the Settings picker makes: a stored value, not a session override.
+		const told = backend.entered();
+		cfgTodoBackend.set(selectedLater.session.settings, "tracker");
+		await told;
 		await settled(selectedLater.session);
 
-		expect(beforeNextChange).toEqual([["saved"]]);
-		expect(tasksOf(backend)).toEqual([["saved"], ["before", "after"]]);
+		expect(backend.calls).toEqual([
+			{ phases: list("saved"), sessionId: resumed.session.sessionManager.getSessionId() },
+			{ phases: list("before"), sessionId: selectedLater.session.sessionManager.getSessionId() },
+		]);
 	});
 
 	it("a whole-session fork sends the list again under the fork's id", async () => {

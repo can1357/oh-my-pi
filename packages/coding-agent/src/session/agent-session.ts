@@ -3190,6 +3190,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		);
 		// A session that moves to another file gets a new id for the same list: no list write tells the todo backend.
 		this.addDisposer(this.sessionManager.onPersistenceNotice(() => this.#mirrorTodoPhases()));
+		// Nor does selecting a backend: it gets the current list at once, however the setting changed.
+		cfgTodoBackend.listen(this, () => this.#mirrorTodoPhases());
 		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
 		// The gate is registered only while a cap is set: any before-model-call gate also turns a user abort
 		// before the next request into a clean stop, which leaves no interrupted turn for `/retry`.
