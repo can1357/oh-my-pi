@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { SUPERSEDED_NOTICE } from "@oh-my-pi/pi-agent-core/compaction/pruning";
-import type { AssistantMessage, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -169,4 +171,70 @@ describe("prefix-bound stale-result pruning", () => {
 			expect(oldResultText(controlSession)).toBe(SUPERSEDED_NOTICE);
 		},
 	);
+});
+
+// The prefix-binding class rule is scoped to the OpenAI Responses APIs ("on-api"),
+// so a Bedrock-hosted GPT-6.2 row must never pick the flag up: the Converse
+// provider only sends `thinking.block_binding` + the `anthropic_beta` header when
+// `thinking.prefixBinding` and `compat.supportsThinkingBindingControls` agree
+// (packages/ai/src/providers/amazon-bedrock.ts), and Bedrock rejects both.
+describe("bedrock keeps the api-scoped prefix-binding flag off the wire", () => {
+	function bedrockGpt62(): Model<"bedrock-converse-stream"> {
+		return buildModel({
+			id: "global.openai.gpt-6.2-sol",
+			name: "GPT-6.2 Sol",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+		});
+	}
+
+	function bedrockPayload(model: Model<"bedrock-converse-stream">): Promise<unknown> {
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		void streamSimple(model, context, {
+			providerOptions: { bearerToken: "test-token" },
+			reasoning: Effort.Max,
+			maxTokens: 16,
+			fetch: async () =>
+				new Response(new Uint8Array(), {
+					status: 200,
+					headers: { "content-type": "application/vnd.amazon.eventstream" },
+				}),
+			onPayload: payload => resolve(payload),
+		});
+		return promise;
+	}
+
+	it("sends global.openai.gpt-6.2-sol on bedrock-converse-stream without thinking.block_binding or anthropic_beta", async () => {
+		const model = bedrockGpt62();
+		expect(model.thinking?.prefixBinding).toBeFalsy();
+
+		const payload = (await bedrockPayload(model)) as {
+			additionalModelRequestFields?: Record<string, unknown>;
+		};
+		expect(payload.additionalModelRequestFields).not.toHaveProperty(["thinking", "block_binding"]);
+		expect(payload.additionalModelRequestFields).not.toHaveProperty("anthropic_beta");
+	});
+
+	it("still binds the prefix for the same row on openai-responses", () => {
+		const model = buildModel({
+			id: "gpt-6.2-sol",
+			name: "GPT-6.2 Sol",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+		});
+		expect(model.thinking?.prefixBinding).toBe(true);
+	});
 });
