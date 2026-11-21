@@ -631,7 +631,13 @@ export function encodeStream(
 			// concatenation-safe corrective chunk before the finish.
 			const sentToolMeta = new Map<
 				number,
-				{ id: string; name: string; hasArgumentBytes: boolean; signed: boolean }
+				{
+					id: string;
+					name: string;
+					hasArgumentBytes: boolean;
+					sentExtraContent: boolean;
+					sentFunctionSignature: boolean;
+				}
 			>();
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
@@ -681,14 +687,15 @@ export function encodeStream(
 							toolIndexByContentIndex.set(event.contentIndex, idx);
 							const partial = event.partial.content[event.contentIndex];
 							const call = partial && partial.type === "toolCall" ? partial : undefined;
+							const extraContent = geminiToolCallExtraContent(call?.thoughtSignature);
+							const functionSignature = geminiToolCallFunctionSignature(call?.thoughtSignature);
 							sentToolMeta.set(idx, {
 								id: call?.id ?? "",
 								name: call?.name ?? "",
 								hasArgumentBytes: false,
-								signed: Boolean(call?.thoughtSignature),
+								sentExtraContent: extraContent !== undefined,
+								sentFunctionSignature: functionSignature !== undefined,
 							});
-							const extraContent = geminiToolCallExtraContent(call?.thoughtSignature);
-							const functionSignature = geminiToolCallFunctionSignature(call?.thoughtSignature);
 							writeSse(
 								controller,
 								baseChunk(
@@ -740,10 +747,10 @@ export function encodeStream(
 							const correctArguments = sent.hasArgumentBytes
 								? undefined
 								: stringifyArgs(event.toolCall.arguments);
-							const extraContent = sent.signed
+							const extraContent = sent.sentExtraContent
 								? undefined
 								: geminiToolCallExtraContent(event.toolCall.thoughtSignature);
-							const functionSignature = sent.signed
+							const functionSignature = sent.sentFunctionSignature
 								? undefined
 								: geminiToolCallFunctionSignature(event.toolCall.thoughtSignature);
 							if (

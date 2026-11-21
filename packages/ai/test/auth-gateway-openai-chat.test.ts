@@ -657,26 +657,31 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 			arguments: { value: "test" },
 			thoughtSignature: JSON.stringify({ function: "sig-fn" }),
 		};
-		const signatureDeltas = async (startCall: ToolCall) => {
+		const signatureDeltas = async (startCall: ToolCall, settledCall: ToolCall = signedCall) => {
 			const partial = emptyAssistant();
 			partial.content = [startCall];
 			const events: AssistantMessageEvent[] = [
 				{ type: "toolcall_start", contentIndex: 0, partial },
 				{ type: "toolcall_delta", contentIndex: 0, delta: '{"value":"test"}', partial },
-				{ type: "toolcall_end", contentIndex: 0, toolCall: signedCall, partial },
-				{ type: "done", reason: "toolUse", message: { ...partial, content: [signedCall], stopReason: "toolUse" } },
+				{ type: "toolcall_end", contentIndex: 0, toolCall: settledCall, partial },
+				{ type: "done", reason: "toolUse", message: { ...partial, content: [settledCall], stopReason: "toolUse" } },
 			];
 			const payloads = (await collectStream(encodeStream(makeEventStream(events, partial), "gemini-test"))).map(
 				parseSseLine,
 			);
-			const toolDeltas: Array<{ index: number; id?: string; function?: { thought_signature?: string } }> = [];
+			const toolDeltas: Array<{
+				index: number;
+				id?: string;
+				function?: { thought_signature?: string };
+				extra_content?: unknown;
+			}> = [];
 			for (const payload of payloads) {
 				if (typeof payload !== "object" || payload === null) continue;
 				const choices = Reflect.get(payload, "choices") as Array<{ delta: Record<string, unknown> }>;
 				const tc = choices[0].delta.tool_calls;
 				if (Array.isArray(tc)) toolDeltas.push(...(tc as typeof toolDeltas));
 			}
-			return toolDeltas.filter(t => t.function?.thought_signature !== undefined);
+			return toolDeltas.filter(t => t.function?.thought_signature !== undefined || t.extra_content !== undefined);
 		};
 
 		it("on the start chunk when the call is signed from the start", async () => {
@@ -689,6 +694,17 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 			const { thoughtSignature: _, ...unsignedCall } = signedCall;
 			const signed = await signatureDeltas(unsignedCall);
 			expect(signed).toEqual([{ index: 0, function: { thought_signature: "sig-fn" } }]);
+		});
+
+		it("in the end correction when the start chunk only carried extra_content", async () => {
+			const perCall = { google: { thought_signature: "sig-google" } };
+			const startCall = { ...signedCall, thoughtSignature: JSON.stringify({ perCall }) };
+			const settledCall = { ...signedCall, thoughtSignature: JSON.stringify({ perCall, function: "sig-fn" }) };
+			const signed = await signatureDeltas(startCall, settledCall);
+			expect(signed).toHaveLength(2);
+			expect(signed[0]).toMatchObject({ id: "call_portkey", extra_content: perCall });
+			expect(signed[0].function?.thought_signature).toBeUndefined();
+			expect(signed[1]).toEqual({ index: 0, function: { thought_signature: "sig-fn" } });
 		});
 	});
 
