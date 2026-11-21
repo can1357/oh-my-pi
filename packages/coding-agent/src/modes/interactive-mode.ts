@@ -233,6 +233,7 @@ import {
 	nextActionableTask,
 	TODO_HUD_STATE_CUSTOM_TYPE,
 	type TodoHudStateEntryData,
+	type TodoHudVisibility,
 } from "../tools/todo";
 import {
 	formatPhaseDisplayName,
@@ -5341,6 +5342,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const phases = this.todoPhases;
 		const persisted = getTodoHudVisibility(owner.sessionManager.getBranch(), phases);
 		this.#todoHudHidden = persisted === "dismissed";
+		if (persisted) this.todoExpanded = persisted === "revealed";
 		if (persisted || phases.length === 0) return;
 		const tasks = phases.flatMap(phase => phase.tasks);
 		if (tasks.length === 0 || tasks.some(task => !isClosedTodo(task))) return;
@@ -10113,48 +10115,59 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	setTodoExpanded(expanded: boolean): void {
 		this.todoExpanded = expanded;
+		const owner = this.#todoPhasesOwner ?? this.viewSession;
 		if (expanded) {
-			const owner = this.#todoPhasesOwner ?? this.viewSession;
 			this.#cancelTodoAutoClearTimer();
 			this.#todoHudHidden = false;
-			const appendReveal = (data: TodoHudStateEntryData): void => {
-				owner.sessionManager.appendCustomEntry(TODO_HUD_STATE_CUSTOM_TYPE, data);
-			};
-			const data = createTodoHudStateData(owner.sessionManager.getBranch(), this.todoPhases, "revealed");
-			if (data) {
-				try {
-					appendReveal(data);
-				} catch (error) {
-					logger.warn("Failed to persist TODO HUD reveal", { error });
-				}
-			} else {
-				const generation = this.#todoAutoClearGeneration;
-				const snapshotKey = JSON.stringify(this.todoPhases);
-				const sessionId = owner.sessionManager.getSessionId();
-				const sessionFile = owner.sessionManager.getSessionFile();
-				void owner
-					.settleInFlightMessagePersistence()
-					.then(() => {
-						if (
-							generation !== this.#todoAutoClearGeneration ||
-							this.#todoPhasesOwner !== owner ||
-							owner.sessionManager.getSessionId() !== sessionId ||
-							owner.sessionManager.getSessionFile() !== sessionFile ||
-							JSON.stringify(this.todoPhases) !== snapshotKey
-						)
-							return;
-						const settledData = createTodoHudStateData(
-							owner.sessionManager.getBranch(),
-							this.todoPhases,
-							"revealed",
-						);
-						if (settledData) appendReveal(settledData);
-					})
-					.catch(error => logger.warn("Failed to persist TODO HUD reveal", { error }));
-			}
+			this.#persistTodoHudVisibility(owner, "revealed");
+		} else if (!this.#todoHudHidden) {
+			// A dismissed HUD keeps its dismissal: persisting a visible state here would
+			// resurrect it on the next load. Only an explicit expand clears the dismissal.
+			this.#persistTodoHudVisibility(owner, "collapsed");
 		}
 		this.#renderTodoList();
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Persist the HUD visibility against the current canonical snapshot. Both directions are
+	 * stored so a resume never restores an expansion the user has since collapsed.
+	 */
+	#persistTodoHudVisibility(owner: AgentViewSession, visibility: TodoHudVisibility): void {
+		const appendState = (data: TodoHudStateEntryData): void => {
+			owner.sessionManager.appendCustomEntry(TODO_HUD_STATE_CUSTOM_TYPE, data);
+		};
+		const data = createTodoHudStateData(owner.sessionManager.getBranch(), this.todoPhases, visibility);
+		if (data) {
+			try {
+				appendState(data);
+			} catch (error) {
+				logger.warn("Failed to persist TODO HUD state", { error });
+			}
+			return;
+		}
+
+		// The snapshot the user acted on may still be settling: persist once it is
+		// durable, unless a newer snapshot or owner took over in the meantime.
+		const generation = this.#todoAutoClearGeneration;
+		const snapshotKey = JSON.stringify(this.todoPhases);
+		const sessionId = owner.sessionManager.getSessionId();
+		const sessionFile = owner.sessionManager.getSessionFile();
+		void owner
+			.settleInFlightMessagePersistence()
+			.then(() => {
+				if (
+					generation !== this.#todoAutoClearGeneration ||
+					this.#todoPhasesOwner !== owner ||
+					owner.sessionManager.getSessionId() !== sessionId ||
+					owner.sessionManager.getSessionFile() !== sessionFile ||
+					JSON.stringify(this.todoPhases) !== snapshotKey
+				)
+					return;
+				const settledData = createTodoHudStateData(owner.sessionManager.getBranch(), this.todoPhases, visibility);
+				if (settledData) appendState(settledData);
+			})
+			.catch(error => logger.warn("Failed to persist TODO HUD state", { error }));
 	}
 
 	setTodos(todos: TodoItem[] | TodoPhase[]): void {

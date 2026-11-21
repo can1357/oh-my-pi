@@ -155,7 +155,7 @@ export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
 
 export const TODO_HUD_STATE_CUSTOM_TYPE = "todo_hud_state";
 
-export type TodoHudVisibility = "dismissed" | "revealed";
+export type TodoHudVisibility = "collapsed" | "dismissed" | "revealed";
 
 export interface TodoSnapshotIdentity {
 	sourceEntryId: string;
@@ -234,7 +234,7 @@ export function getTodoHudVisibility(
 		if (
 			data?.sourceEntryId === snapshot.sourceEntryId &&
 			data.fingerprint === snapshot.fingerprint &&
-			(data.visibility === "dismissed" || data.visibility === "revealed")
+			(data.visibility === "collapsed" || data.visibility === "dismissed" || data.visibility === "revealed")
 		) {
 			return data.visibility;
 		}
