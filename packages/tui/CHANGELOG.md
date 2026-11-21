@@ -9,7 +9,7 @@
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
-- Fixed `OutputSink` cutting output that is a single line (one trailing newline allowed) to `maxColumns`; such output is now bounded only by the byte budget
+- Fixed `OutputSink` cutting output that is a single line (one trailing newline allowed) to `maxColumns`; such output is now bounded only by the byte budget ([#20053](https://github.com/can1357/oh-my-pi/pull/20053) by [@apoc](https://github.com/apoc))
 
 ## [19.1.0] - 2026-11-21
 
