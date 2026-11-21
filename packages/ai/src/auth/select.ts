@@ -124,7 +124,7 @@ export class CredentialSelector {
 	}
 
 	/**
-	 * FNV-1a hash for deterministic session-to-credential mapping.
+	 * xxHash32 of the session id for deterministic session-to-credential mapping.
 	 * Ensures the same session always starts with the same credential.
 	 */
 	#getHashedIndex(sessionId: string, total: number): number {
