@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `computer` tool's guidance now says `UserIntervened` also comes from Windows takeovers, which wait for you to pause before they start ([#20019](https://github.com/can1357/oh-my-pi/pull/20019) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes

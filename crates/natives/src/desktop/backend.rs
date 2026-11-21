@@ -293,13 +293,14 @@ pub trait Backend: Send {
 		false
 	}
 	/// Waits, before a window or element takeover takes the input lease,
-	/// until the backend lets it start: X11 and macOS wait for the user to
-	/// pause. Backends that see no user input admit it at once.
+	/// until the backend lets it start: X11, macOS and Windows wait for the
+	/// user to pause. Backends that see no user input admit it at once.
 	fn admit_takeover(&mut self) -> CoreResult<()> {
 		Ok(())
 	}
 	/// With the lease held: whether the last [`Self::admit_takeover`] still
-	/// holds (on X11 and macOS, the user has pressed nothing since).
+	/// holds (on X11 and macOS, the user has pressed nothing since; on Windows,
+	/// the session has had no input but OMP's).
 	fn takeover_admitted(&mut self) -> CoreResult<bool> {
 		Ok(true)
 	}
