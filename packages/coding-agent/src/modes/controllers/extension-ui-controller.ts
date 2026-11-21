@@ -916,8 +916,6 @@ export class ExtensionUiController {
 	/** Gives the keys to the composer (Tab past an ask's last stop, the ask closing). */
 	#focusComposer(): void {
 		this.ctx.ui.setFocus(this.ctx.editor);
-		// A dialog's Vim editor may have left the cursor in its own mode's shape.
-		this.ctx.syncComposerVimStatus();
 		this.ctx.ui.requestRender();
 	}
 
@@ -1623,7 +1621,6 @@ export class ExtensionUiController {
 		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookEditor = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.syncComposerVimStatus();
 		this.ctx.ui.requestRender();
 	}
 

@@ -6842,11 +6842,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#wireVimEditor(editor);
 		// Dialogs have no status line of their own; the cursor shape is what shows the mode.
 		editor.onVimModeChange = mode => this.ui.terminal.setCursorShape?.(mode === "insert" ? "bar" : "block");
-		if (editor.vimEnabled) this.ui.terminal.setCursorShape?.("bar");
-	}
-
-	syncComposerVimStatus(): void {
-		this.#syncVimStatus(this.editor);
 	}
 
 	/**

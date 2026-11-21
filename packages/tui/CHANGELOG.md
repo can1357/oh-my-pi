@@ -20,7 +20,8 @@
 - Added Vim `gj`/`gk` to move by screen row through wrapped lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim `/`, `?`, `n`, and `N` to search prompt history, like a shell's vi mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim `"+p`/`"*p` to put the system clipboard; `Editor.onYank` now also gets the register name ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added a `configureEditor` option to `HtmlFormDialog` and `HookEditorComponent`; when it turns Vim mode on, a form's "Other" answer becomes a Vim-mode editor too, and `Escape` in these editors leaves Insert mode before it closes or cancels anything ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added a `configureEditor` option to `HtmlFormDialog` and `HookEditorComponent`; when it turns Vim mode on, a form's one-line text fields and "Other" answers become Vim-mode editors too (passwords stay plain), and `Escape` in these editors leaves Insert mode before it closes or cancels anything ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- `Editor` re-announces its Vim mode through `onVimModeChange` when it gains focus, so a host's cursor shape follows the editor holding the keys ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 
 ### Changed
 

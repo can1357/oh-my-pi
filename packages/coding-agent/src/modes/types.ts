@@ -577,8 +577,6 @@ export interface InteractiveModeContext {
 	updateEditorBorderColor(): void;
 	/** Give an editor a dialog owns the composer's Vim setting, clipboard routing, and cursor shape. */
 	configureDialogEditor(editor: Editor): void;
-	/** Re-sync the Vim indicator and cursor shape from the composer once a dialog hands the keys back. */
-	syncComposerVimStatus(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(source?: AgentViewSession): Promise<void>;
