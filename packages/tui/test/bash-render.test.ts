@@ -232,6 +232,27 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("[raw output:");
 		expect(rendered.split(spillUrl(13))).toHaveLength(2);
 	});
+
+	// The edit tags end the model-facing text after the raw-output notice; left in, they hide that notice from the
+	// footer fold (losing the raw-output link) and fill the preview with tag lines.
+	it("strips edit tags so the raw output notice still folds into the footer", () => {
+		const tag = "[src/a.ts#AB12] lines 1-2";
+		const component = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: `a.ts:1:x\na.ts:2:y\n[raw output: local://13.log]\n\n${tag}` }],
+				details: { timeoutSeconds: 300, editTags: [tag] },
+				isError: false,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ command: "grep -rn x src" },
+		);
+		const rendered = sanitizeText(component.render(120).join("\n"));
+		expect(rendered).toContain("a.ts:2:y");
+		expect(rendered).not.toContain("[src/a.ts#AB12]");
+		expect(rendered).not.toContain("[raw output:");
+		expect(rendered.split(spillUrl(13))).toHaveLength(2);
+	});
 	it("renders the exit status in the footer and strips the textual exit notice for failed commands", async () => {
 		const component = bashToolRenderer.renderResult(
 			{

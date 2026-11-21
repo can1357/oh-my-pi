@@ -56,6 +56,12 @@ import { appendImageLinks } from "../utils/image-temp";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
+import {
+	bashResultReachesModelWhole,
+	findBashSeenLines,
+	formatBashSeenLinesFooter,
+	recordBashSeenLines,
+} from "./bash-seen-lines";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { applyPatchShellInput } from "./bash-apply-patch";
 import { hostCommandUrls, urlBacking } from "./bash-host-urls";
@@ -114,6 +120,7 @@ import { cfgDisplayShellVisualization } from "../modes/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { sessionShellSpeech } from "../tts/shell-speech";
+import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
@@ -1277,6 +1284,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			toolCallId?: string;
 			/** Tool command dispatches of the run, in invocation order. */
 			toolCommands?: readonly ToolCommandDispatch[];
+			/**
+			 * A program (eval `tool.bash`, the shell tool-command bridge), not the model, reads the result. Skips the
+			 * seen-lines step: crediting rows the model never saw would mark unseen lines as seen, and the tag footer
+			 * would corrupt output the script parses.
+			 */
+			programmatic?: boolean;
 		},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -1374,14 +1387,38 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		// No-op for already-bounded output; see `inlineCap` above.
 		const cappedOutputText = await enforceInlineByteCap(outputText, inlineCap);
-
 		const resultBuilder = toolResult(details)
 			.content([{ type: "text", text: cappedOutputText }, ...(result.images ?? [])])
 			.minimized("minimized" in result ? result.minimized : undefined);
 		// Output shaped from the whole spilled artifact no longer matches the sink's line ranges.
 		if (!shaped?.whole) resultBuilder.truncationFromSummary(result, { direction: "tail" });
 		if (failedExit) resultBuilder.error();
-		return resultBuilder.done();
+		const built = resultBuilder.done();
+		if (options.programmatic) return built;
+
+		// Rows the result shows with their line numbers count as displayed for the edit guard, but only when the
+		// result reaches the model uncut: a later spill or follow-up preview would drop credited rows. The tag
+		// footer goes after the cap so the cap can never cut it.
+		const seenFiles = resolveFileDisplayMode(this.session).hashLines
+			? await findBashSeenLines(options.command, options.cwd, cappedOutputText)
+			: [];
+		if (seenFiles.length === 0) return built;
+		// Only trailing newlines go: trailing spaces may belong to the last credited row.
+		const body = cappedOutputText.replace(/\n+$/, "");
+		const withTags = (tags: readonly string[]) => `${body}\n\n${tags.join("\n")}`;
+		const candidateTags = formatBashSeenLinesFooter(seenFiles, this.session.cwd);
+		const outputNotice = formatOutputNotice(built.details?.meta);
+		if (!bashResultReachesModelWhole(withTags(candidateTags), outputNotice, this.session.settings)) return built;
+		// A file the store failed to record drops out of the footer, which only shortens the checked text.
+		const recorded = recordBashSeenLines(this.session, seenFiles);
+		if (recorded.length === 0) return built;
+		const editTags =
+			recorded.length === seenFiles.length ? candidateTags : formatBashSeenLinesFooter(recorded, this.session.cwd);
+		return {
+			...built,
+			content: [{ type: "text", text: withTags(editTags) }, ...built.content.slice(1)],
+			details: { ...(built.details ?? details), editTags },
+		};
 	}
 
 	/**
@@ -1680,6 +1717,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						replies: backgrounded ? undefined : replies,
 						toolCallId: options.toolCallId,
 						toolCommands: toolCommandRecorder.list(),
+						programmatic: options.context?.programmatic === true,
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -2302,6 +2340,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						notices: pendingNotices,
 						wallTimeMs: performance.now() - bridgeWallTimeStart,
 						toolCallId,
+						programmatic: ctx?.programmatic === true,
 					});
 				}
 
@@ -2390,6 +2429,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							notices: pendingNotices,
 							wallTimeMs: performance.now() - bridgeWallTimeStart,
 							toolCallId,
+							programmatic: ctx?.programmatic === true,
 						});
 					}
 
@@ -2463,6 +2503,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 					toolCallId,
+					programmatic: ctx?.programmatic === true,
 				});
 			} finally {
 				clearTimeout(timeoutTimer);
@@ -2594,6 +2635,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			replies,
 			toolCommands: toolCommandRecorder.list(),
 			toolCallId,
+			programmatic: ctx?.programmatic === true,
 		});
 	}
 }

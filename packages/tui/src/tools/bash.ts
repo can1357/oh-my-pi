@@ -115,6 +115,11 @@ export interface BashToolDetails {
 	toolCommands?: ToolCommandRenderDispatch[];
 	/** What the session's Spotlight shaping did to the output. */
 	spotlight?: SpotlightDetails;
+	/**
+	 * `[path#TAG] lines …` lines the result ends with: files whose rows the output showed with line numbers,
+	 * credited to the edit guard. Model-facing, so renderers strip them.
+	 */
+	editTags?: string[];
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {
@@ -350,7 +355,7 @@ function cdPrefix(displayWorkdir: string, separator: ";" | undefined): string {
 	return `cd ${shellVizText(displayWorkdir)}${separator ?? " &&"}`;
 }
 
-/** Bash output with the LLM-facing notices (background, exit, wall time, artifact, truncation) removed. */
+/** Bash output with the LLM-facing notices (background, edit tags, exit, wall time, artifact, truncation) removed. */
 function stripBashNotices(
 	rawOutput: string,
 	details: BashToolDetails | undefined,
@@ -360,7 +365,11 @@ function stripBashNotices(
 		job?.state === "running"
 			? stripTrailingNotice(rawOutput, line => isBackgroundNotice(line, job.jobId))
 			: rawOutput;
-	const strippedOutput = stripOutputNotice(withoutBackground, details?.meta);
+	const withoutOutputNotice = stripOutputNotice(withoutBackground, details?.meta);
+	// The edit tags follow every notice the bash tool writes; drop them first so the notices below end the text again.
+	const strippedOutput = details?.editTags?.length
+		? stripTrailingNotice(withoutOutputNotice, details.editTags.join("\n"))
+		: withoutOutputNotice;
 	const withoutExit =
 		details?.exitCode === undefined
 			? strippedOutput
