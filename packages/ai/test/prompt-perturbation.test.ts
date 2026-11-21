@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import * as catalogPolicy from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import type { BunPlugin } from "bun";
 import { perturbContext, perturbPromptText, resetPromptPerturbation } from "../src/prompts/perturbation";
 import type { Context } from "../src/types";
 
@@ -69,6 +72,50 @@ describe("per-install prompt perturbation", () => {
 		const prompt = await Bun.file(promptUrl).text();
 		expect(prompt.startsWith("You are omp's trusted coding assistant.\n\n")).toBe(true);
 		expect(perturbPromptText(prompt).startsWith("# Engineering\n")).toBe(true);
+	});
+
+	it("reads the pool beside an npm-style bundle run from another directory", async () => {
+		using dir = TempDir.createSync("@omp-perturbation-bundle-");
+		const probe = dir.join("probe.ts");
+		const perturbationModule = path.resolve(import.meta.dir, "../src/prompts/perturbation.ts");
+		await Bun.write(
+			probe,
+			`import { perturbPromptText } from ${JSON.stringify(perturbationModule)};\nconsole.log(JSON.stringify(perturbPromptText(${JSON.stringify(sample.source)})));\n`,
+		);
+		const stubs: Record<string, string> = {
+			"@oh-my-pi/pi-catalog/compat/catalog-policy": "export const resolveCatalogPolicy = () => ({});",
+			"@oh-my-pi/pi-utils": 'export const getInstallId = () => "bundle-probe";',
+		};
+		const stubPlugin: BunPlugin = {
+			name: "perturbation-probe-stubs",
+			setup(build) {
+				build.onResolve({ filter: /.*/ }, args =>
+					stubs[args.path] === undefined ? undefined : { path: args.path, namespace: "perturbation-probe-stub" },
+				);
+				build.onLoad({ filter: /.*/, namespace: "perturbation-probe-stub" }, args => ({
+					contents: stubs[args.path]!,
+					loader: "js",
+				}));
+			},
+		};
+		const bundle = await Bun.build({
+			entrypoints: [probe],
+			outdir: dir.join("dist"),
+			target: "bun",
+			plugins: [stubPlugin],
+		});
+		expect(bundle.success, bundle.logs.map(log => log.message).join("\n")).toBe(true);
+		const entry = bundle.outputs.find(output => output.kind === "entry-point");
+		if (!entry) throw new Error("perturbation probe emitted no entry point");
+		// The bundle's asset import is relative to the bundle; from another cwd only bundle-relative resolution finds it.
+		const child = Bun.spawn([process.execPath, entry.path], { cwd: dir.path(), stdout: "pipe", stderr: "pipe" });
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(sample.variants).toContain(JSON.parse(stdout));
 	});
 
 	it("leaves text that matches no pooled source untouched", () => {
