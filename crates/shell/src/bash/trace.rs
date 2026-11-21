@@ -30,7 +30,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 
 use crate::bash::{
-	event::{Event, EventData, EventKind, EventMask, EventSink, NodeKind, RedirInfo, ResolvedKind},
+	event::{
+		Event, EventData, EventKind, EventMask, EventSink, NodeKind, NodeRef, RedirInfo, ResolvedKind,
+	},
 	ids::{RunId, UnitId, Vpid},
 	ir::NodeInfo,
 	text,
@@ -458,6 +460,23 @@ impl RunTrace {
 	/// model.
 	pub fn presentation_json(&self, options: &viz::Options) -> Result<String, viz::VizError> {
 		viz::live(&self.inner.lock(), options)
+	}
+
+	/// The presentation key of engine node `node` as vproc `vpid` runs it now:
+	/// in the unit `vpid` announced for the current segment, the key the
+	/// trace gives that node's events (`unit:0:node`). `None` when this trace
+	/// did not see the unit announced for `vpid` (another run's vproc), or
+	/// the node has no span in it (outside the segment's original source).
+	pub fn node_key(&self, vpid: Vpid, node: NodeRef) -> Option<viz::model::NodeKey> {
+		let inner = self.inner.lock();
+		let u = inner.unit_index(vpid, node.unit)?;
+		let spanned = inner
+			.units
+			.get(u as usize)?
+			.nodes
+			.get(node.node.0 as usize)
+			.is_some_and(|n| n.hi > n.lo);
+		spanned.then_some(viz::model::NodeKey::engine(u, node.node))
 	}
 
 	/// [`Self::snapshot`] as JSON.

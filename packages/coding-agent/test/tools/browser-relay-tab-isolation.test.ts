@@ -10,19 +10,13 @@ import {
 	ensureChromiumExecutable,
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import {
-	acquireBrowser,
-	releaseBrowser,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import {
 	unpackedExtensionId,
 	writeRelayExtension,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
-import {
-	type RelayServer,
-	startRelayServer,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
+import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import type {
 	WorkerInbound,
 	WorkerInitPayload,
@@ -39,11 +33,7 @@ import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import puppeteer, {
-	type Browser,
-	type Page,
-	type Protocol,
-} from "puppeteer-core";
+import puppeteer, { type Browser, type Page, type Protocol } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -54,17 +44,13 @@ interface TestWorker {
 }
 
 function startWorker(payload: WorkerInitPayload): TestWorker {
-	const outcome =
-		Promise.withResolvers<
-			Extract<WorkerOutbound, { type: "ready" | "init-failed" }>
-		>();
+	const outcome = Promise.withResolvers<Extract<WorkerOutbound, { type: "ready" | "init-failed" }>>();
 	const closed = Promise.withResolvers<void>();
 	let receive!: (message: WorkerInbound | WorkerOutbound) => void;
 	new WorkerCore(
 		{
 			send(message) {
-				if (message.type === "ready" || message.type === "init-failed")
-					outcome.resolve(message);
+				if (message.type === "ready" || message.type === "init-failed") outcome.resolve(message);
 			},
 			onMessage(handler) {
 				receive = handler;
@@ -116,13 +102,9 @@ async function launchRelayFixture(
 ): Promise<RelayFixture> {
 	const port = await findFreeCdpPort();
 	const server = startRelayServer({ port, group: false, log });
-	const extensionDir = await fs.mkdtemp(
-		path.join(os.tmpdir(), "omp-relay-isolation-"),
-	);
+	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-isolation-"));
 	// Every fixture browser saves downloads here, as the user's Chrome would its own folder (real names, " (1)" on a clash).
-	const downloads = await fs.realpath(
-		await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-downloads-")),
-	);
+	const downloads = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-downloads-")));
 	const profiles: string[] = [];
 	const held: Array<PromiseWithResolvers<void>> = [];
 	let heldArrived = Promise.withResolvers<void>();
@@ -175,22 +157,17 @@ async function launchRelayFixture(
 		// A failed test may leave a held download open; end it so the browser and server can stop.
 		for (const release of held) release.resolve();
 		try {
-			await Promise.all(
-				browsers.map((browser) => closeLaunchedBrowser({ browser })),
-			);
+			await Promise.all(browsers.map(browser => closeLaunchedBrowser({ browser })));
 		} finally {
 			server.stop();
 			pages.stop(true);
 			await fs.rm(extensionDir, { recursive: true, force: true });
 			await fs.rm(downloads, { recursive: true, force: true });
-			for (const profile of profiles)
-				await fs.rm(profile, { recursive: true, force: true });
+			for (const profile of profiles) await fs.rm(profile, { recursive: true, force: true });
 		}
 	}
 	async function launchBrowser(): Promise<RelayBrowser> {
-		const userDataDir = await fs.mkdtemp(
-			path.join(os.tmpdir(), "omp-relay-profile-"),
-		);
+		const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-profile-"));
 		profiles.push(userDataDir);
 		await Bun.write(
 			path.join(userDataDir, "Default", "Preferences"),
@@ -204,18 +181,12 @@ async function launchRelayFixture(
 			pipe: true,
 			userDataDir,
 			enableExtensions: true,
-			args: [
-				"--no-first-run",
-				"--no-default-browser-check",
-				"--use-mock-keychain",
-				...RENDERER_PRIORITY_ARGS,
-			],
+			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain", ...RENDERER_PRIORITY_ARGS],
 		});
 		browsers.push(browser);
 		// Puppeteer's `enableExtensions` list does not wait for its installs, so a page could load before a stand-in
 		// vault's content script is registered.
-		for (const extension of [extensionDir, ...extensions])
-			await browser.installExtension(extension);
+		for (const extension of [extensionDir, ...extensions]) await browser.installExtension(extension);
 		const extensionId = await unpackedExtensionId(extensionDir);
 		if (!extensionId) throw new Error("Missing relay extension directory");
 		// A service worker is transient: it may start and stop before Puppeteer observes its target.
@@ -230,11 +201,7 @@ async function launchRelayFixture(
 				await page.goto(`chrome-extension://${extensionId}/options.html`);
 				break;
 			} catch (error) {
-				if (
-					!String(error).includes("ERR_BLOCKED_BY_CLIENT") ||
-					Date.now() > deadline
-				)
-					throw error;
+				if (!String(error).includes("ERR_BLOCKED_BY_CLIENT") || Date.now() > deadline) throw error;
 				await Bun.sleep(50);
 			}
 		}
@@ -247,10 +214,7 @@ async function launchRelayFixture(
 				awaitPromise: true,
 				returnByValue: true,
 			});
-			if (exceptionDetails)
-				throw new Error(
-					exceptionDetails.exception?.description ?? exceptionDetails.text,
-				);
+			if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
 			return result.value;
 		}
 		return { browser, inExtension };
@@ -296,8 +260,7 @@ ${background}`,
 		const cdpUrl = `http://127.0.0.1:${port}`;
 		// Finish the extension hello before the native CDP client attaches to the sentinel.
 		const outcome = await waitForRelayExtension(cdpUrl);
-		if (outcome !== "ready")
-			throw new Error(`Relay fixture handshake failed: ${outcome}`);
+		if (outcome !== "ready") throw new Error(`Relay fixture handshake failed: ${outcome}`);
 		return {
 			browser,
 			inExtension,
@@ -323,10 +286,7 @@ function chromeTabId(targetId: string): number {
 }
 
 /** Chrome's own view of a tab (`{ active }`), or null once it is closed. */
-async function chromeTab(
-	fixture: RelayFixture,
-	tabId: number,
-): Promise<unknown> {
+async function chromeTab(fixture: RelayFixture, tabId: number): Promise<unknown> {
 	return await fixture.inExtension(
 		`chrome.tabs.query({}).then(tabs => { const tab = tabs.find(tab => tab.id === ${tabId}); return tab ? { active: tab.active } : null; })`,
 	);
@@ -357,9 +317,7 @@ async function writeStandInVault(contentScript: string): Promise<string> {
 			manifest_version: 3,
 			name: "Stand-in vault",
 			version: "1.0",
-			content_scripts: [
-				{ matches: ["http://127.0.0.1/*"], js: ["content.js"] },
-			],
+			content_scripts: [{ matches: ["http://127.0.0.1/*"], js: ["content.js"] }],
 			web_accessible_resources: [
 				{
 					resources: ["menu.html", "notification.html"],
@@ -374,17 +332,14 @@ async function writeStandInVault(contentScript: string): Promise<string> {
 		"<title>Vault: save login</title><h3>Save login?</h3><button>Save</button>",
 	);
 	// A page the vault does not expose to sites, so no site can frame it.
-	await fs.writeFile(
-		path.join(vaultDir, "private.html"),
-		"<title>Vault private</title>",
-	);
+	await fs.writeFile(path.join(vaultDir, "private.html"), "<title>Vault private</title>");
 	await fs.writeFile(path.join(vaultDir, "content.js"), contentScript);
 	return vaultDir;
 }
 
 /** The text a call showed the agent, or the error it failed with. */
 const shown = (result: { displays: Array<{ type: string; text?: string }> }) =>
-	result.displays.map((display) => display.text ?? "").join("\n");
+	result.displays.map(display => display.text ?? "").join("\n");
 
 /** How often `text` holds `part`. */
 const occurrences = (text: string, part: string) => text.split(part).length - 1;
@@ -393,21 +348,13 @@ const occurrences = (text: string, part: string) => text.split(part).length - 1;
  * What the calls on tab `name` showed, starting with what `told` holds so far, until one names `extensionId` and then
  * one more: the relay reports what it hid while the calls go on, so a later call may carry it. At most 20 more calls.
  */
-async function untilNamed(
-	name: string,
-	extensionId: string,
-	...told: string[]
-): Promise<string[]> {
+async function untilNamed(name: string, extensionId: string, ...told: string[]): Promise<string[]> {
 	const titleCall = {
 		code: "return await tab.title();",
 		timeoutMs: 10_000,
 		session,
 	};
-	for (
-		let call = 0;
-		call < 20 && !told.some((text) => text.includes(extensionId));
-		call++
-	) {
+	for (let call = 0; call < 20 && !told.some(text => text.includes(extensionId)); call++) {
 		told.push(shown(await runInTab(name, titleCall)));
 	}
 	told.push(shown(await runInTab(name, titleCall)));
@@ -424,16 +371,9 @@ async function emptiedFrames(page: Page): Promise<number> {
 		});
 		let count = 0;
 		const visit = (node: Protocol.DOM.Node) => {
-			if (
-				node.nodeName === "IFRAME" &&
-				node.attributes?.some((name, i) => i % 2 === 0 && name === "srcdoc")
-			)
+			if (node.nodeName === "IFRAME" && node.attributes?.some((name, i) => i % 2 === 0 && name === "srcdoc"))
 				count++;
-			for (const child of [
-				...(node.children ?? []),
-				...(node.shadowRoots ?? []),
-			])
-				visit(child);
+			for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child);
 		};
 		visit(root);
 		return count;
@@ -452,13 +392,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			await source.goto(`${fixture.origin}/framed`);
 			first = await puppeteer.connect({ browserURL: fixture.cdpUrl });
 			second = await puppeteer.connect({ browserURL: fixture.cdpUrl });
-			const firstPage = (await first.pages()).find(
-				(page) => page.url() === source.url(),
-			)!;
-			const secondPage = (await second.pages()).find(
-				(page) => page.url() === source.url(),
-			)!;
-			const frame = secondPage.frames().find((frame) => frame.parentFrame())!;
+			const firstPage = (await first.pages()).find(page => page.url() === source.url())!;
+			const secondPage = (await second.pages()).find(page => page.url() === source.url())!;
+			const frame = secondPage.frames().find(frame => frame.parentFrame())!;
 			expect(
 				await frame.client.send("Runtime.evaluate", {
 					expression: "document.title",
@@ -468,11 +404,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				result: { value: "Download" },
 			});
 			const detached: string[] = [];
-			secondPage
-				.mainFrame()
-				.client.on("Target.detachedFromTarget", (event) =>
-					detached.push(event.sessionId),
-				);
+			secondPage.mainFrame().client.on("Target.detachedFromTarget", event => detached.push(event.sessionId));
 
 			await firstPage.mainFrame().client.send("Target.setAutoAttach", {
 				autoAttach: false,
@@ -502,15 +434,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		const humanUrl = `${fixture.origin}/human`;
 		await human.goto(humanUrl);
 		await human.bringToFront();
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
-		const names = [
-			`relay-first-${process.pid}`,
-			`relay-second-${process.pid}`,
-			`relay-borrowed-${process.pid}`,
-		];
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const names = [`relay-first-${process.pid}`, `relay-second-${process.pid}`, `relay-borrowed-${process.pid}`];
 		try {
 			const first = await acquireTab(names[0]!, relay, {
 				url: `${fixture.origin}/first`,
@@ -527,9 +452,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			expect(await human.title()).toBe("Human sentinel");
 			// The user's tab stays selected; the owned tabs were created unselected.
 			expect(await activeChromeTabUrl(fixture)).toBe(humanUrl);
-			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toEqual(
-				{ active: false },
-			);
+			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toEqual({ active: false });
 
 			const clicked = await runInTab(names[0]!, {
 				code: "await tab.click('button'); return await tab.text('button');",
@@ -553,14 +476,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			});
 			expect(shot.returnValue).toBe("string");
 			expect(await activeChromeTabUrl(fixture)).toBe(humanUrl);
-			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toEqual(
-				{ active: false },
-			);
+			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toEqual({ active: false });
 
 			await releaseTab(names[0]!);
-			expect(
-				await chromeTab(fixture, chromeTabId(first.tab.targetId)),
-			).toBeNull();
+			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toBeNull();
 			expect(await human.title()).toBe("Human sentinel");
 			const surviving = await runInTab(names[1]!, {
 				code: "return await tab.title();",
@@ -588,26 +507,21 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 	it("opens a default tab in the browser of the tab omp used last, not the first selected one", async () => {
 		const secondHello = Promise.withResolvers<void>();
 		let hellos = 0;
-		const fixture = await launchRelayFixture((message) => {
-			if (message === "extension connected" && ++hellos === 2)
-				secondHello.resolve();
+		const fixture = await launchRelayFixture(message => {
+			if (message === "extension connected" && ++hellos === 2) secondHello.resolve();
 		});
 		// The first browser shows the first selected tab, which a new tab would otherwise follow.
 		const human = await fixture.browser.newPage();
 		await human.goto(`${fixture.origin}/human`);
 		await human.bringToFront();
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const names = [
 			`relay-near-human-${process.pid}`,
 			`relay-near-other-${process.pid}`,
 			`relay-near-own-${process.pid}`,
 		];
 		/** The browser a relay target id belongs to (`PAGE<browser>.<tab>`). */
-		const browserOf = (targetId: string) =>
-			targetId.slice(4, targetId.lastIndexOf("."));
+		const browserOf = (targetId: string) => targetId.slice(4, targetId.lastIndexOf("."));
 		try {
 			// Borrowing waits until the relay lists the tab, so the first browser's selected tab is listed first.
 			const inFirst = await acquireTab(names[0]!, relay, {
@@ -622,16 +536,12 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				target: "First",
 				timeoutMs: 15_000,
 			});
-			expect(browserOf(inSecond.tab.targetId)).not.toBe(
-				browserOf(inFirst.tab.targetId),
-			);
+			expect(browserOf(inSecond.tab.targetId)).not.toBe(browserOf(inFirst.tab.targetId));
 			const owned = await acquireTab(names[2]!, relay, {
 				url: `${fixture.origin}/second`,
 				timeoutMs: 15_000,
 			});
-			expect(browserOf(owned.tab.targetId)).toBe(
-				browserOf(inSecond.tab.targetId),
-			);
+			expect(browserOf(owned.tab.targetId)).toBe(browserOf(inSecond.tab.targetId));
 		} finally {
 			for (const name of names) await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
@@ -641,10 +551,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 
 	it("closes an owned tab Chrome refuses to close at first", async () => {
 		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-refused-close-${process.pid}`;
 		try {
 			const { tab } = await acquireTab(name, relay, {
@@ -652,9 +559,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				timeoutMs: 15_000,
 			});
 			// A release sends two closes (the worker's, then the supervisor's by id); Chrome refuses the first two tries.
-			await fixture.inExtension(
-				'chrome.runtime.sendMessage({ op: "refuseRemoves", count: 2 })',
-			);
+			await fixture.inExtension('chrome.runtime.sendMessage({ op: "refuseRemoves", count: 2 })');
 			await releaseTab(name);
 			// The close returned with the tab gone.
 			expect(await chromeTab(fixture, chromeTabId(tab.targetId))).toBeNull();
@@ -667,15 +572,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 
 	it("leaves a persist tab open in the user's browser when its session ends and closes the others", async () => {
 		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const owner = `relay-session-${process.pid}`;
-		const names = [
-			`relay-persist-${process.pid}`,
-			`relay-plain-${process.pid}`,
-		];
+		const names = [`relay-persist-${process.pid}`, `relay-plain-${process.pid}`];
 		try {
 			const kept = await acquireTab(names[0]!, relay, {
 				url: `${fixture.origin}/first`,
@@ -691,14 +590,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			// What session dispose runs.
 			expect(await releaseTabsForOwner(owner, { kill: true })).toBe(2);
 			const keptTabId = chromeTabId(kept.tab.targetId);
-			expect(
-				await fixture.inExtension(
-					`chrome.tabs.get(${keptTabId}).then(tab => tab.url)`,
-				),
-			).toBe(`${fixture.origin}/first`);
-			expect(
-				await chromeTab(fixture, chromeTabId(closed.tab.targetId)),
-			).toBeNull();
+			expect(await fixture.inExtension(`chrome.tabs.get(${keptTabId}).then(tab => tab.url)`)).toBe(
+				`${fixture.origin}/first`,
+			);
+			expect(await chromeTab(fixture, chromeTabId(closed.tab.targetId))).toBeNull();
 			expect(getTabsMapForTest().has(names[0]!)).toBeFalse();
 		} finally {
 			for (const name of names) await releaseTab(name).catch(() => undefined);
@@ -709,10 +604,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 
 	it("closes a persist tab whose close joins its session's end", async () => {
 		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const owner = `relay-joined-session-${process.pid}`;
 		const name = `relay-joined-close-${process.pid}`;
 		try {
@@ -735,10 +627,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 
 	it("closes a persist tab when its close joins after the keep decision and browser disconnect", async () => {
 		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		if (!("browser" in relay)) throw new Error("Expected relay Chromium");
 		const owner = `relay-late-session-${process.pid}`;
 		const name = `relay-late-close-${process.pid}`;
@@ -783,23 +672,15 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 });`,
 		);
 		const fixture = await launchRelayFixture(undefined, [vaultDir]);
-		const menuOpen = (page: Page) =>
-			page
-				.frames()
-				.some((frame) => frame.url().startsWith("chrome-extension://"));
+		const menuOpen = (page: Page) => page.frames().some(frame => frame.url().startsWith("chrome-extension://"));
 		const driven = await fixture.browser.newPage();
 		await driven.goto(`${fixture.origin}/login?who=driven`);
 		// The user's own tab has its menu open when omp connects.
 		const user = await fixture.browser.newPage();
 		await user.goto(`${fixture.origin}/login?who=user`);
 		await user.focus("#pw");
-		await user.waitForFrame((frame) =>
-			frame.url().startsWith("chrome-extension://"),
-		);
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		await user.waitForFrame(frame => frame.url().startsWith("chrome-extension://"));
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-vault-${process.pid}`;
 		const fill = {
 			code: "await tab.fill('#pw', 'secret'); return await tab.value('#pw');",
@@ -812,9 +693,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				timeoutMs: 20_000,
 			});
 			// Focusing the field opens the menu, and Chrome detaches omp from the tab during the call.
-			const failed = await runInTab(name, fill).then(shown, (error: unknown) =>
-				String(error),
-			);
+			const failed = await runInTab(name, fill).then(shown, (error: unknown) => String(error));
 			const filled = await runInTab(name, fill);
 			expect(filled.returnValue).toBe("secret");
 			// A call names what omp hid, once: that call, the next or a later one, as the relay reports it. Chrome can
@@ -827,9 +706,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				expect(told.join("\n")).toContain(`"menu.html"`);
 				expect(told.at(-1)).not.toContain(vaultId);
 			} else {
-				expect(
-					`${failed}\n${shown(filled)}\n${shown(await runInTab(name, fill))}`,
-				).not.toContain(vaultId);
+				expect(`${failed}\n${shown(filled)}\n${shown(await runInTab(name, fill))}`).not.toContain(vaultId);
 			}
 			// The menu opened, and its frame was emptied.
 			expect(await driven.$("vault-menu")).not.toBeNull();
@@ -855,10 +732,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 }, true);`,
 		);
 		const fixture = await launchRelayFixture(undefined, [vaultDir]);
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-vault-submit-${process.pid}`;
 		const title = {
 			code: "return await tab.title();",
@@ -870,9 +744,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				url: `${fixture.origin}/login?who=submit`,
 				timeoutMs: 20_000,
 			});
-			const page = (await fixture.browser.pages()).find((page) =>
-				page.url().includes("who=submit"),
-			);
+			const page = (await fixture.browser.pages()).find(page => page.url().includes("who=submit"));
 			if (!page) throw new Error("omp's tab is gone");
 			const vaultId = await unpackedExtensionId(vaultDir);
 			if (!vaultId) throw new Error("Missing stand-in vault directory");
@@ -905,11 +777,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			expect(told.join("\n")).not.toContain("decoy.html");
 			expect(told.join("\n")).not.toContain("private.html");
 			expect(told.join("\n")).not.toContain("Page text");
-			expect(
-				page
-					.frames()
-					.filter((frame) => frame.url().startsWith("chrome-extension://")),
-			).toEqual([]);
+			expect(page.frames().filter(frame => frame.url().startsWith("chrome-extension://"))).toEqual([]);
 		} finally {
 			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
@@ -921,17 +789,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		const detached = Promise.withResolvers<void>();
 		let ownedTabId = 0;
 		const fixture = await launchRelayFixture((message, data) => {
-			if (
-				message === "tab detached" &&
-				typeof data?.tabKey === "string" &&
-				data.tabKey.endsWith(`:${ownedTabId}`)
-			)
+			if (message === "tab detached" && typeof data?.tabKey === "string" && data.tabKey.endsWith(`:${ownedTabId}`))
 				detached.resolve();
 		});
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-detached-${process.pid}`;
 		const otherName = `relay-detached-other-${process.pid}`;
 		try {
@@ -946,28 +807,18 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				timeoutMs: 20_000,
 			});
 			ownedTabId = chromeTabId(tab.targetId);
-			expect(
-				fixture.server.bridge
-					.listTargets()
-					.some((target) => target.id === tab.targetId),
-			).toBeTrue();
+			expect(fixture.server.bridge.listTargets().some(target => target.id === tab.targetId)).toBeTrue();
 			// Replay the infobar dismissal through the extension's real listener.
 			const result = await fixture.inExtension(
 				`chrome.runtime.sendMessage({ op: "dismissDebugger", tabId: ${ownedTabId} })`,
 			);
 			expect(result).toEqual({});
 			await detached.promise;
-			expect(
-				fixture.server.bridge
-					.listTargets()
-					.some((target) => target.id === tab.targetId),
-			).toBeFalse();
+			expect(fixture.server.bridge.listTargets().some(target => target.id === tab.targetId)).toBeFalse();
 			expect(await chromeTab(fixture, ownedTabId)).not.toBeNull();
 			await releaseTab(name);
 			expect(await chromeTab(fixture, ownedTabId)).toBeNull();
-			expect(
-				await chromeTab(fixture, chromeTabId(other.targetId)),
-			).not.toBeNull();
+			expect(await chromeTab(fixture, chromeTabId(other.targetId))).not.toBeNull();
 			expect(await human.title()).toBe("Human sentinel");
 		} finally {
 			await releaseTab(name).catch(() => undefined);
@@ -988,10 +839,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 
 	it("reports a relay tab's downloads, from its page and a cross-site frame, at the path Chrome saved them to", async () => {
 		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-download-${process.pid}`;
 		try {
 			await acquireTab(name, relay, {
@@ -1019,9 +867,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				session,
 			});
 			const framed = await waitForDownload(name);
-			expect(framed.url).toBe(
-				`http://localhost:${new URL(fixture.origin).port}/report.csv`,
-			);
+			expect(framed.url).toBe(`http://localhost:${new URL(fixture.origin).port}/report.csv`);
 			expect(framed.path).toBe(path.join(fixture.downloads, "report (1).csv"));
 			const listed = await runInTab(name, {
 				code: "return await tab.downloads();",
@@ -1038,10 +884,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 
 	it("reports each relay download's own file when a later download of the same URL finishes first", async () => {
 		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser(
-			{ kind: "relay", cdpUrl: fixture.cdpUrl },
-			{ cwd: process.cwd() },
-		);
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-download-held-${process.pid}`;
 		try {
 			await acquireTab(name, relay, {
@@ -1078,16 +921,12 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {
 	it("keeps an owned target alive after a failed recovery init so a retry can adopt it", async () => {
-		const launched = await acquireBrowser(
-			{ kind: "headless", headless: true },
-			{ cwd: process.cwd() },
-		);
+		const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in launched)) throw new Error("Expected Chromium");
 		const page = await launched.browser.newPage();
 		await page.goto("data:text/html,<title>Recovery sentinel</title>");
 		const target = page.target();
-		if (!("_targetId" in target) || typeof target._targetId !== "string")
-			throw new Error("Missing target ID");
+		if (!("_targetId" in target) || typeof target._targetId !== "string") throw new Error("Missing target ID");
 		const payload: WorkerInitPayload = {
 			mode: "attach",
 			browserWSEndpoint: launched.wsEndpoint,
@@ -1096,9 +935,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {
 			page: { kind: "owned", targetId: target._targetId },
 			recover: true,
 		};
-		const downloadDir = await fs.mkdtemp(
-			path.join(os.tmpdir(), "omp-recovery-download-"),
-		);
+		const downloadDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recovery-download-"));
 		const blockedDownloadPath = path.join(downloadDir, "not-a-directory");
 		await fs.writeFile(blockedDownloadPath, "existing file");
 		const failed = startWorker({
@@ -1111,8 +948,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {
 			expect(page.isClosed()).toBeFalse();
 			retried = startWorker(payload);
 			const ready = await retried.outcome;
-			if (ready.type !== "ready")
-				throw new Error("Expected the retry to adopt the owned target");
+			if (ready.type !== "ready") throw new Error("Expected the retry to adopt the owned target");
 			expect(ready.info.targetId).toBe(target._targetId);
 			await retried.close();
 			retried = undefined;
@@ -1121,14 +957,12 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {
 			const { targetInfos } = await launched.browser
 				.target()
 				.createCDPSession()
-				.then(async (session) => {
+				.then(async session => {
 					const targets = await session.send("Target.getTargets");
 					await session.detach();
 					return targets;
 				});
-			expect(targetInfos.map((info) => info.targetId)).not.toContain(
-				target._targetId,
-			);
+			expect(targetInfos.map(info => info.targetId)).not.toContain(target._targetId);
 		} finally {
 			await retried?.close();
 			await failed.close();

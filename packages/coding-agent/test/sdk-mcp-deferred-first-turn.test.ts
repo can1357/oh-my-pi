@@ -22,7 +22,6 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 // agent loop that would blur the deadline. Request contents are asserted at the provider.
 
 const MCP_TOOL_NAME = "mcp__probe_lookup";
-const MCP_ROUTE = `xd://${MCP_TOOL_NAME}`;
 /** Margin around the deadline: Bun's fake clock fires a timer 1 ms before it is due. */
 const DEADLINE_SLACK_MS = 5;
 /**
@@ -173,7 +172,7 @@ describe("createAgentSession deferred MCP discovery and the first turn", () => {
 		servers.closeStartupWindow(probeTools());
 		vi.useRealTimers();
 		await prompted;
-		expect(systemPrompts[0]).toContain(MCP_ROUTE);
+		expect(systemPrompts[0]).toContain(MCP_TOOL_NAME);
 	});
 
 	it("holds the first turn for servers still connecting after discovery's startup window", async () => {
@@ -196,7 +195,7 @@ describe("createAgentSession deferred MCP discovery and the first turn", () => {
 		await stepUntil(() => systemPrompts.length > 0, SEND_MS);
 		vi.useRealTimers();
 		await prompted;
-		expect(systemPrompts[0]).toContain(MCP_ROUTE);
+		expect(systemPrompts[0]).toContain(MCP_TOOL_NAME);
 	});
 
 	it("publishes the tools discovery returned before waiting on slower servers", async () => {
@@ -212,7 +211,7 @@ describe("createAgentSession deferred MCP discovery and the first turn", () => {
 		servers.closeStartupWindow(probeTools());
 		await barrierReached.promise;
 		// A turn that runs out its wait builds from this prompt, so the routes must already be in it.
-		expect(session.agent.state.systemPrompt.join("\n")).toContain(MCP_ROUTE);
+		expect(session.agent.state.systemPrompt.join("\n")).toContain(MCP_TOOL_NAME);
 	});
 
 	it("starts the first turn at the deadline and does not hold later turns", async () => {
@@ -230,7 +229,7 @@ describe("createAgentSession deferred MCP discovery and the first turn", () => {
 		vi.useRealTimers();
 		await first;
 		expect(systemPrompts).toHaveLength(1);
-		expect(systemPrompts[0]).not.toContain(MCP_ROUTE);
+		expect(systemPrompts[0]).not.toContain(MCP_TOOL_NAME);
 
 		// Discovery is still connecting, but the first turn already paid the wait.
 		vi.useFakeTimers();

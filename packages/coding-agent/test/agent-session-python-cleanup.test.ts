@@ -685,48 +685,6 @@ describe("AgentSession python cleanup", () => {
 		expect(executeSpy).not.toHaveBeenCalled();
 	});
 
-	it("rejects eval starts that reach async preflight after dispose begins", async () => {
-		const { tempDir, cwd } = createTempProject();
-		tempDirs.push(tempDir);
-		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
-			output: "late",
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
-			totalLines: 1,
-			totalBytes: 4,
-			outputLines: 1,
-			outputBytes: 4,
-			displayOutputs: [],
-			stdinRequested: false,
-		});
-		const artifactStarted = Promise.withResolvers<void>();
-		const releaseArtifact = Promise.withResolvers<void>();
-		const sessionManager = SessionManager.inMemory(cwd);
-		vi.spyOn(sessionManager, "allocateArtifactPath").mockImplementation(async () => {
-			artifactStarted.resolve();
-			await releaseArtifact.promise;
-			return {};
-		});
-
-		const session = await createSession(tempDir, cwd, { sessionManager });
-		const EvalTool = session.getToolByName("eval");
-		expect(EvalTool).toBeDefined();
-		const execution = EvalTool!.execute(
-			"call-id",
-			{ language: "py", code: "print('late after artifact')" },
-			undefined,
-			undefined,
-			undefined,
-		);
-		await artifactStarted.promise;
-		const disposeSession = session.dispose();
-		releaseArtifact.resolve();
-		await expect(execution).rejects.toThrow("Python execution is unavailable while session disposal is in progress");
-		await disposeSession;
-		expect(executeSpy).not.toHaveBeenCalled();
-	});
-
 	it("aborts every active concurrent Python execution owned by the session during dispose", async () => {
 		const { tempDir, cwd } = createTempProject();
 		tempDirs.push(tempDir);

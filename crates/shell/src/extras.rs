@@ -3,9 +3,13 @@
 //! [`PiHost::resolve`](crate::host::PiHost) looks a name up in pi's order:
 //! the engine's intrinsics (bash's builtins: `echo`, `printf`, `test`, `kill`,
 //! `read`, `cd`, …), then pi's tools ([`crate::tools`]: `timeout`, `nohup`,
-//! `git`, and the extras that run command lines), then pi's other extras, then
-//! `PATH`. A name with a slash is never an extra. `type` and `command -v`
-//! report an extra as a shell builtin, as pi does.
+//! `git`, and the extras that run command lines), then pi's other extras,
+//! then the shells the engine runs itself (`sh`, `bash`, `zsh`), then the
+//! session commands of the run ([`crate::commands`]), then `PATH`. Shell
+//! functions and aliases come before all of these except the session
+//! commands, which come before them too. A name with a slash is never an
+//! extra or a session command. `type` and `command -v` report an extra or a
+//! session command as a shell builtin, as pi does.
 //!
 //! - Most extras (`cat`, `sort`, `grep`, `sed`, `ps`, `sleep`, …) are
 //!   [`Resolved::Native`](crate::bash::Resolved::Native): [`ExtraTask`] runs
@@ -406,10 +410,19 @@ impl Drop for Finish {
 
 /// Run `invocation` on `runtime`; its status lands in the returned [`Done`].
 pub(crate) fn spawn(runtime: &tokio::runtime::Handle, invocation: Invocation) -> Arc<Done> {
+	spawn_status(runtime, omp_builtins::extras::run(invocation))
+}
+
+/// Run `status` on `runtime`; the status it ends with lands in the returned
+/// [`Done`] (1 when it never ends: a panic, or the runtime shut down).
+pub(crate) fn spawn_status(
+	runtime: &tokio::runtime::Handle,
+	status: impl Future<Output = i32> + Send + 'static,
+) -> Arc<Done> {
 	let done = Arc::new(Done::default());
 	let finish = Finish(Arc::clone(&done));
 	drop(runtime.spawn(async move {
-		let code = omp_builtins::extras::run(invocation).await;
+		let code = status.await;
 		finish.0.finish(code);
 	}));
 	done
@@ -417,7 +430,7 @@ pub(crate) fn spawn(runtime: &tokio::runtime::Handle, invocation: Invocation) ->
 
 /// A signal that cancels an extra: those whose default action ends a
 /// process (pi's TERM/INT/KILL, and the hangup and quit a job may get).
-const fn cancels(sig: Signal) -> bool {
+pub(crate) const fn cancels(sig: Signal) -> bool {
 	matches!(sig, Signal::Term | Signal::Int | Signal::Kill | Signal::Hup | Signal::Quit)
 }
 
