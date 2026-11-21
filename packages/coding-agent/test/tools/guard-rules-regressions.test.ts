@@ -1577,6 +1577,25 @@ describe("guard rule review regressions", () => {
 		}
 	});
 
+	it("checks `./*`, which the shell expands to every entry of the directory, as it checks `*`", async () => {
+		await dirtyRepo(cwd);
+		for (const command of ["git restore ./*", "git checkout -- ./*", "git checkout ./*"]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
+
+	it("asks for a discarding git command run with another index, which the probe cannot read", async () => {
+		await dirtyRepo(cwd);
+		await $`git checkout -- a.txt`.cwd(cwd).quiet();
+		expect(ruleOf(bashApproval(cwd, "git reset --hard"))).toBeUndefined();
+		for (const command of [
+			"GIT_INDEX_FILE=/tmp/alt git reset --hard",
+			"env GIT_INDEX_FILE=/tmp/alt git checkout -- .",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
+
 	it("passes a `git clean` without `-f` or `-i`, which git refuses by default", async () => {
 		await dirtyRepo(cwd);
 		fs.writeFileSync(path.join(cwd, "scratch.txt"), "x\n");

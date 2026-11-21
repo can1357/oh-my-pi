@@ -1695,7 +1695,15 @@ const GIT_VALUE_OPTIONS: Record<string, true> = {
 	"--config-env": true,
 	"--attr-source": true,
 };
-const MASS_PATHSPECS: Record<string, true> = { ".": true, ":/": true, "*": true, ":(top)": true, "./": true };
+/** Pathspecs of the whole directory: `./*` is the shell's expansion of every entry in it, as `*` is. */
+const MASS_PATHSPECS: Record<string, true> = {
+	".": true,
+	":/": true,
+	"*": true,
+	"./*": true,
+	":(top)": true,
+	"./": true,
+};
 /**
  * git's own options that print something and exit before any subcommand runs (`--exec-path` only
  * bare; `--exec-path=<dir>` sets the directory). `--list-cmds=<kind>` exits too.
@@ -2269,6 +2277,14 @@ function discardChanges(
 	const { sub, rest, target, exits } = gitInvocation(command, scope.home);
 	const probe = discardProbe(command, scope, sub, rest);
 	if (!probe || !target || exits) return undefined;
+	// The probe reads the repository's own index; one `GIT_INDEX_FILE` names instead can hold
+	// staged files the default index lacks, which the command would delete.
+	if (command.assignments.some(assignment => assignment.startsWith("GIT_INDEX_FILE="))) {
+		return hit(
+			"discard_changes",
+			`\`git ${sub}\` runs with another index (\`GIT_INDEX_FILE\`), whose changes the guard cannot check`,
+		);
+	}
 	let check: VcsDiscardCheck = { ...probe.check, gitDir: target.gitDir, workTree: target.workTree };
 	// A stash just before keeps what it saved; only what it left behind can be lost. It keeps no
 	// nested repository, only a pointer to its commit, so a `git clean -ff` is checked in full. A
