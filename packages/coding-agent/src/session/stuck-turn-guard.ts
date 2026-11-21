@@ -81,6 +81,15 @@ export function stuckProbability(answer: ChoiceAnswer<StuckTurnMode>): number {
 	return total;
 }
 
+/** Whether every probability names a mode and lies in 0..1; judges past the discriminant are not trusted. */
+function fitsModes(answer: ChoiceAnswer<StuckTurnMode>): boolean {
+	const probabilities: unknown = answer.probabilities;
+	if (typeof probabilities !== "object" || probabilities === null) return false;
+	return Object.entries(probabilities).every(
+		([mode, value]) => mode in questionFile.mode.criteria && typeof value === "number" && value >= 0 && value <= 1,
+	);
+}
+
 /** Counts consecutive stuck turns of a run and nudges the model once a streak reaches the strike count. */
 export class StuckTurnGuard {
 	readonly #host: StuckTurnGuardHost;
@@ -187,7 +196,7 @@ export class StuckTurnGuard {
 					{ signal: signal ? AbortSignal.any([signal, timeout]) : timeout },
 				);
 			const answer = answers.mode;
-			if (answer?.type !== "choice" || !(answer.choice in questionFile.mode.criteria)) {
+			if (answer?.type !== "choice" || !(answer.choice in questionFile.mode.criteria) || !fitsModes(answer)) {
 				throw new Error("the judge returned a malformed mode answer");
 			}
 			return answer;

@@ -29,7 +29,7 @@ const zeroUsage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 } satisfies AssistantMessage["usage"];
 
-type Verdict = Partial<Record<StuckTurnMode, number>> | "throw" | "hang";
+type Verdict = Partial<Record<StuckTurnMode, number>> | "throw" | "hang" | ChoiceAnswer<StuckTurnMode>;
 
 /** P(re_investigating) + P(retrying) = 0.9: a strike at the default 0.8 threshold. */
 const STUCK: Verdict = { re_investigating: 0.6, retrying: 0.3, advancing: 0.1 };
@@ -63,7 +63,7 @@ function scriptedJudge(verdicts: Verdict[], states: unknown[] = []): Judge {
 				api: "stub",
 				provider: "stub",
 				model: "stub",
-				answers: { mode: choiceAnswer(verdict) },
+				answers: { mode: typeof verdict === "object" && "type" in verdict ? verdict : choiceAnswer(verdict) },
 				usage: zeroUsage,
 			} as never;
 		},
@@ -218,6 +218,38 @@ describe("StuckTurnGuard", () => {
 		expect(run.judgeCalls()).toBe(7);
 		expect(nudges(run.messages)).toHaveLength(0);
 		expect(run.journal).toHaveLength(0);
+	});
+
+	it("treats a choice without probabilities as a failed verdict", async () => {
+		const bare = { type: "choice", choice: "retrying", confidence: 1 } as unknown as ChoiceAnswer<StuckTurnMode>;
+		const run = harness([STUCK, STUCK, bare, STUCK, STUCK]);
+
+		for (let i = 0; i < 5; i++) await run.turn();
+
+		expect(run.judgeCalls()).toBe(5);
+		expect(nudges(run.messages)).toHaveLength(0);
+	});
+
+	it("treats out-of-range or unknown-option probabilities as a failed verdict", async () => {
+		const run = harness([
+			STUCK,
+			STUCK,
+			{ re_investigating: 5 },
+			STUCK,
+			STUCK,
+			{ retrying: 0.9, advancing: -0.5 },
+			STUCK,
+			STUCK,
+			{ retrying: 0.9, bogus: 0.1 } as Verdict,
+			STUCK,
+			STUCK,
+			{ retrying: Number.NaN, re_investigating: 0.9 },
+		]);
+
+		for (let i = 0; i < 12; i++) await run.turn();
+
+		expect(run.judgeCalls()).toBe(12);
+		expect(nudges(run.messages)).toHaveLength(0);
 	});
 
 	it("does not ask while disabled or for a turn that ends the run, and never carries strikes into a new prompt", async () => {

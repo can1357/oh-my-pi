@@ -140,9 +140,13 @@ function isOperatorMessage(message: AgentMessage): boolean {
 }
 
 function sessionMessages(messages: readonly AgentMessage[]): CutMessage[] {
-	const results = new Map<string, ToolResultMessage>();
+	// Queued per call id, so calls that share an id each take their own result in order.
+	const results = new Map<string, ToolResultMessage[]>();
 	for (const message of messages) {
-		if (message.role === "toolResult") results.set(message.toolCallId, message);
+		if (message.role !== "toolResult") continue;
+		const queue = results.get(message.toolCallId);
+		if (queue) queue.push(message);
+		else results.set(message.toolCallId, [message]);
 	}
 	const out: CutMessage[] = [];
 	let count = 0;
@@ -152,7 +156,7 @@ function sessionMessages(messages: readonly AgentMessage[]): CutMessage[] {
 			const calls: CutCall[] = [];
 			for (const block of message.content) {
 				if (block.type !== "toolCall") continue;
-				const result = results.get(block.id);
+				const result = results.get(block.id)?.shift();
 				// No result yet: nothing to say of it.
 				if (!result) continue;
 				const output = result.content.map(part => (part.type === "text" ? part.text : "[image]")).join("\n");

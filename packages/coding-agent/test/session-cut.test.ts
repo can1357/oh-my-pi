@@ -138,4 +138,22 @@ describe("buildSessionCut", () => {
 			},
 		]);
 	});
+
+	it("pairs each call with its own result when two calls share an id", () => {
+		const messages: AgentMessage[] = [
+			user("fix it"),
+			...turn(1, "First look.", "rg foo", "first output"),
+			...turn(1, "Second look.", "rg bar", "second output, longer"),
+		];
+
+		const cut = buildSessionCut(messages, 24_576);
+
+		const results = (cut.history as SessionCutEntry[])
+			.filter(entry => entry.role === "assistant")
+			.map(entry => (entry.tool_calls![0] as SessionCutCall).result);
+		expect(results).toEqual([
+			'ok, 12 chars (omitted): starts "first output"',
+			'ok, 21 chars (omitted): starts "second output, longer"',
+		]);
+	});
 });
