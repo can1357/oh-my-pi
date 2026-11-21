@@ -112,9 +112,9 @@ async function skillTargetPath(
 	contain = false,
 ): Promise<SkillTarget> {
 	let resolvedPath: string;
-	const instructions = (!urlPath || urlPath === "/") && !directory;
+	const resolvedSkillFile = path.resolve(skill.filePath);
 	if (!urlPath || urlPath === "/") {
-		resolvedPath = path.resolve(directory ? skill.baseDir : skill.filePath);
+		resolvedPath = directory ? path.resolve(skill.baseDir) : resolvedSkillFile;
 	} else {
 		const relativePath = decodeURIComponent(urlPath.slice(1));
 		validateRelativePath(relativePath, "skill");
@@ -124,6 +124,7 @@ async function skillTargetPath(
 			throw new Error("Path traversal is not allowed");
 		}
 	}
+	const instructions = !directory && resolvedPath === resolvedSkillFile;
 	// Agent Plugin skills (§4.1): every target, including the bare instruction
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.

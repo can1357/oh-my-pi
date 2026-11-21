@@ -159,7 +159,13 @@ describe("buildSkillPromptMessage", () => {
 					return result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 				};
 				expect(await readText("skill://reviewer")).toContain(`${NOTE} TodoWrite → todo.`);
+				expect(await readText("skill://reviewer/SKILL.md")).toContain(`${NOTE} TodoWrite → todo.`);
 				expect(await readText("skill://reviewer:raw")).not.toContain(NOTE);
+				const resolvedExplicit = await new SkillProtocolHandler().resolve(
+					parseInternalUrl("skill://reviewer/SKILL.md"),
+					{ skills: [{ ...skill, _source: sourceFor("claude", dir) }] },
+				);
+				expect(resolvedExplicit.content).toContain(`${NOTE} TodoWrite → todo.`);
 			} finally {
 				await removeWithRetries(dir);
 			}
