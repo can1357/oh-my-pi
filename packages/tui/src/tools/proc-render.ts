@@ -20,6 +20,7 @@ import { ansi, compact, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { errorText, noteText, toolHead } from "./native-view";
 import type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "./wait";
+import { jobDisplayLabel } from "./job-label";
 import type { IrcDeliveryReceipt } from "./irc";
 import { type PersistedSnapshot, type ServiceView, serviceView } from "./daemon";
 import { styleTerminalRow } from "./terminal-output";
@@ -179,7 +180,7 @@ function jobRow(job: JobSnapshot, theme: Theme): string {
 					: "success",
 		theme,
 	);
-	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(job.intent || job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
+	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(jobDisplayLabel(job)))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
 }
 
 /** Render live and completed process writes with the URL-selected operation. */
@@ -334,7 +335,7 @@ function jobItem(job: JobSnapshot, badge?: { text: string; tone: TspTone }): Nat
 		"item",
 		{
 			label: [span(job.type, "accent"), span(" "), span(safe(job.id), "toolOutput")],
-			detail: [span(safe(job.intent || job.label), "muted")],
+			detail: [span(safe(jobDisplayLabel(job)), "muted")],
 			value: badge ? [span(badge.text, badge.tone)] : [span(formatDuration(job.durationMs), "muted")],
 			tone: badge?.tone ?? jobTone(job.status),
 		},

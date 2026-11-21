@@ -8,9 +8,10 @@
  * emitted keyed by resolved camelCase field. Duplicate axes in one block and
  * misplaced selectors are hard errors.
  */
+import type { RuleAxes } from "../../src/compat/axes";
 import { parseRevisionConstraint } from "../../src/compat/revision";
 import type { CompiledCascade, CompiledRule, CompiledSelector } from "../../src/compat/types";
-import { collectAxis, type RuleAxes } from "./compile-axes";
+import { collectAxis } from "./compile-axes";
 import { PROVIDER_CATALOG_NODES } from "./compile-providers";
 import { type KdlNodeView, malformed, parseKdl, unexpected } from "./kdl-reader";
 
