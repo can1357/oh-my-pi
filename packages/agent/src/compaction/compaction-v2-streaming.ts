@@ -708,6 +708,8 @@ function isRetryableCompactionError(error: Error): boolean {
 	if (error instanceof AIError.ProviderHttpError) {
 		return AIError.isTransientStatus(error.status);
 	}
+	// transportFetch rewords a socket closed before the response; it stays as retryable as the close.
+	if (error instanceof AIError.ConnectionLostBeforeResponseError) return true;
 	const message = error.message.toLowerCase();
 	return (
 		isUnexpectedSocketCloseMessage(message) ||

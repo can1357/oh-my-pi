@@ -1465,6 +1465,42 @@ describe("requestCompactionV2Streaming", () => {
 			expect(result.compactionItem).toEqual(compactionItem);
 		},
 	);
+	test("retries a socket closure transportFetch reports as lost before any response", async () => {
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const request = buildCompactionV2Request(model, [], "instructions");
+		const compactionItem = { type: "compaction", encrypted_content: "enc_123" };
+		const socketClose = Object.assign(new Error("The socket connection was closed unexpectedly"), {
+			code: "ECONNRESET",
+		});
+		let attempts = 0;
+		const fetchMock: FetchImpl = async () => {
+			if (++attempts === 1) {
+				throw new AIError.ConnectionLostBeforeResponseError(socketClose, {
+					bodyBytes: 6_500_000,
+					bodySent: false,
+					elapsedMs: 15_300,
+				});
+			}
+			return sseResponse([
+				{ type: "response.output_item.done", output_index: 0, item: compactionItem },
+				{ type: "response.completed" },
+			]);
+		};
+
+		const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			fetch: fetchMock,
+			retryWait: async () => {},
+		});
+
+		expect(attempts).toBe(2);
+		expect(result.compactionItem).toEqual(compactionItem);
+	});
 	test("does not select Codex's unsupported V1 compact endpoint by default", () => {
 		const model = makeOpenAiModel({
 			provider: "openai-codex",
