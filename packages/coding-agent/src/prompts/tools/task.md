@@ -57,24 +57,24 @@ Run one agent synchronously.
 - `effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
 {{/if}}
 {{#if perCallModelEnabled}}
-- `model`: one exact `provider/model-id[@upstream][:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}.
+- `model`: one exact `provider/model-id[@upstream][:level]` or configured `@role[:level]` for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}, or an ordered array of them.
+  - First available candidate with working credentials wins at spawn; no runtime model fallback.
   - `@upstream` pins an aggregator route and is part of the model identity.
-  - Only operator-approved models; no roles, arrays, globs or partial IDs.
+  - Only operator-approved models; no globs or partial IDs.
   - Approved:
 {{#each perCallModelAdvertisement.roles}}
-    - {{#list patterns join=", "}}`{{this}}`{{/list}} ({{role}})
+    - `@{{role}}` → {{#list patterns join=", "}}`{{this}}`{{/list}}
 {{/each}}
 {{#unless perCallModelAdvertisement.parentModelWithheld}}
     - your own current model
 {{/unless}}
     - the selected bundled/user agent's own configured model
-  - A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.
 {{#if perCallModelAdvertisement.allowlist.length}}
-  - Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).
+  - Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved; globs only narrow, NEVER send a glob as `model`).
 {{/if}}
   - An agent's `task.agentModelOverrides` entry or user-chosen effort conflicts with `model`.
   - Omit unless needed.
-  - Requested model unavailable → stop and report; NEVER substitute another.
+  - No candidate available with credentials → stop and report; NEVER substitute another.
   - Every request requires an approved model; retry fallback, context promotion and prewalk are off.
 {{/if}}
 {{#if structured}}

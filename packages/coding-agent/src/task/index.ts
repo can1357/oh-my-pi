@@ -340,8 +340,9 @@ function validateModel(item: TaskItem | TaskParams, label: string, settings: Set
 }
 
 function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel"> {
-	// `validateModel` rejected anything but one string before dispatch.
-	return typeof params.model === "string" ? { perCallModel: params.model } : {};
+	if (params.model === undefined) return {};
+	// `validateModel` rejected anything but one selector or a list of them before dispatch.
+	return { perCallModel: params.model };
 }
 
 /**

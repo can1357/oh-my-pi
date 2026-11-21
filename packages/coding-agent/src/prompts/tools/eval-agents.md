@@ -10,16 +10,16 @@ await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, m
     `.send(message)`, `.cancel()`, `.output()`.
   - Unwaited results auto-deliver like async jobs.
 {{#if perCallModel}}
-  - `model`: one exact `provider/model-id[@upstream][:level]` string for this call only.
+  - `model`: one exact `provider/model-id[@upstream][:level]` or configured `@role[:level]` for this call only, or an ordered list of them.
+    - First available candidate with working credentials wins at spawn; no runtime model fallback.
     - `@upstream` pins an aggregator route and is part of the model identity.
-    - Only operator-approved models; no roles, arrays, globs or partial IDs.
-    - Approved: {{#list perCallModelAdvertisement.roles join=", "}}{{#list patterns join=", "}}`{{this}}`{{/list}} ({{role}}){{/list}}{{#if perCallModelAdvertisement.roles.length}}; {{/if}}{{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model.
-    - A listed glob approves matching exact IDs; write the exact ID, NEVER the glob.
+    - Only operator-approved models; no globs or partial IDs.
+    - Approved: {{#list perCallModelAdvertisement.roles join=", "}}`@{{role}}` → {{#list patterns join=", "}}`{{this}}`{{/list}}{{/list}}{{#if perCallModelAdvertisement.roles.length}}; {{/if}}{{#if perCallModelAdvertisement.parentModelWithheld}}{{else}}your own current model; {{/if}}the selected bundled/user agent's own configured model.
 {{#if perCallModelAdvertisement.allowlist.length}}
-    - Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).
+    - Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved; globs only narrow, NEVER send a glob as `model`).
 {{/if}}
     - An agent's `task.agentModelOverrides` entry or user-chosen effort conflicts with it.
-    - Unavailable → stop and report; NEVER substitute another.
+    - No candidate available with credentials → stop and report; NEVER substitute another.
     - Every request requires an approved model; retry fallback, context promotion and prewalk are off.
 {{/if}}
   - `schema` overrides agent/session schemas.
@@ -52,7 +52,7 @@ await workpool(agent?, { name?, context?{{#if evalTools}}, tools?{{/if}}{{#if pe
   - The first full drain closes the pool: push the whole batch while it is active; next wave → new pool.
   - {{#if waitTool}}Completely blocked? Leave `eval` and call the `wait` tool (not kernel `wait()`); {{/if}}NEVER poll.
 {{#if perCallModel}}
-  - `model` selects each worker on its first turn; follow-ups reuse that session.
+  - `model` selects each worker on its first turn (including every fresh worker); follow-ups reuse that session.
 {{/if}}
 {{#ifAll py js}}
   - JS: `pool = await workpool(agent, { name, context{{#if evalTools}}, tools{{/if}}{{#if perCallModel}}, model{{/if}} })`; `await` each pool method.

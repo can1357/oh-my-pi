@@ -6,6 +6,10 @@
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 
+### Changed
+
+- `TaskItem.model` and `TaskParams.model` widen to `string | string[]` and document configured `@role` selectors and ordered candidate lists for per-call selection ([#19921](https://github.com/can1357/oh-my-pi/pull/19921) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))

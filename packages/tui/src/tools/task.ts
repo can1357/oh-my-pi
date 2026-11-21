@@ -2257,8 +2257,8 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
-	/** One exact per-call model, gated by `task.perCallModel`. */
-	model?: string;
+	/** The per-call model (exact ids or configured `@role`s, one or an ordered list), gated by `task.perCallModel`. */
+	model?: string | string[];
 	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
 	/** Ordered stages sent instead of `task` (`task.steps`), each once the child delivered the previous (several share a prompt past four). */
@@ -2289,7 +2289,7 @@ export interface TaskParams {
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
 	/** See {@link TaskItem.model}. */
-	model?: string;
+	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
 	/** Ordered stages (flat form); see {@link TaskItem.steps}. */

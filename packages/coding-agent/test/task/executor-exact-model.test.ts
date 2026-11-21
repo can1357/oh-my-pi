@@ -30,15 +30,19 @@ const perCallSettings = (model: Model, extra: Record<string, unknown> = {}) =>
 const cleanups: (() => Promise<void>)[] = [];
 let runs = 0;
 
-/** Runs a bundled `worker` on `perCallModel` through the real executor, with `model` as the only registry entry. */
+/** Runs a bundled `worker` through the real executor against the supplied catalog. */
 async function runWorker(options: {
 	model: Model;
-	perCallModel: string;
+	models?: Model[];
+	perCallModel: string | string[];
 	settings?: Settings;
 	assignment?: string;
 	setup?: (modelRegistry: ModelRegistry) => void;
+	/** Omit the session registry so preflight defers and the executor builds its own. */
+	withoutSessionRegistry?: boolean;
 }) {
 	const { model } = options;
+	const models = options.models ?? [model];
 	const run = ++runs;
 	const sourceId = `executor-exact-model-${run}`;
 	const agentId = `ExactModel${run}`;
@@ -54,12 +58,19 @@ async function runWorker(options: {
 	authStorage.keys.setRuntime("mock", "test-key");
 	registerMockApi(sourceId);
 	const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+	// Without a session registry, the executor's own instance must see the same catalog.
+	const target = options.withoutSessionRegistry ? ModelRegistry.prototype : modelRegistry;
 	const find = modelRegistry.find.bind(modelRegistry);
-	vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
-		provider === "mock" && id === model.id ? model : find(provider, id),
+	vi.spyOn(target, "find").mockImplementation(
+		(provider, id) =>
+			models.find(candidate => candidate.provider === provider && candidate.id === id) ?? find(provider, id),
 	);
-	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => [model]);
-	vi.spyOn(modelRegistry, "getAll").mockImplementation(() => [model]);
+	vi.spyOn(target, "getAvailable").mockImplementation(() => models);
+	vi.spyOn(target, "getAll").mockImplementation(() => models);
+	if (options.withoutSessionRegistry) {
+		vi.spyOn(target, "refreshInBackground").mockImplementation(() => {});
+		vi.spyOn(target, "awaitBackgroundRefresh").mockResolvedValue(undefined);
+	}
 	options.setup?.(modelRegistry);
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
 		agents: [{ name: "worker", description: "test", systemPrompt: "test", source: "bundled", tools: ["read"] }],
@@ -70,7 +81,7 @@ async function runWorker(options: {
 		hasUI: false,
 		settings: options.settings ?? perCallSettings(model),
 		authStorage,
-		modelRegistry,
+		modelRegistry: options.withoutSessionRegistry ? undefined : modelRegistry,
 		restrictToolNames: true,
 		enableMCP: false,
 		enableLsp: false,
@@ -164,6 +175,32 @@ describe("per-call exact selection after background discovery", () => {
 		expect(failure(result)).toMatch(/not approved/);
 	});
 
+	it.each([false, true])(
+		"holds every listed literal to approval when preflight has no registry (unapproved later: %s)",
+		async withUnapproved => {
+			const approved = createMockModel({ id: "approved", handler: () => ({ content: ["Approved answer."] }) });
+			const unapproved = createMockModel({
+				id: "unapproved",
+				handler: () => ({ content: ["Unapproved answer."] }),
+			});
+			const result = await runWorker({
+				model: approved,
+				models: [approved, unapproved],
+				perCallModel: withUnapproved ? [`mock/${approved.id}`, `mock/${unapproved.id}`] : [`mock/${approved.id}`],
+				withoutSessionRegistry: true,
+			});
+			expect(unapproved.calls).toHaveLength(0);
+			if (withUnapproved) {
+				expect(approved.calls).toHaveLength(0);
+				expect(result.exitCode).not.toBe(0);
+				expect(failure(result)).toMatch(/mock\/unapproved is not approved/);
+			} else {
+				expect(result.exitCode).toBe(0);
+				expect(result.output).toBe("Approved answer.");
+			}
+		},
+	);
+
 	it.each([
 		{ label: "clamps a :high selector to task.maxEffort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
 		{ label: "fails a model whose lowest effort is above task.maxEffort", efforts: [Effort.High] },
@@ -213,5 +250,55 @@ describe("per-call exact selection after background discovery", () => {
 			perCallModelIdentity: identity,
 			perCallThinkingLevel: level,
 		});
+	});
+
+	it.each([false, true])("skips uncredentialed candidates without runtime fallback (failure: %s)", async fails => {
+		const locked = createMockModel({ provider: "nokey", id: "locked" });
+		const open = Object.assign(
+			createMockModel({
+				id: "open",
+				reasoning: true,
+				handler: () =>
+					fails
+						? { stopReason: "error", errorMessage: "503 overloaded: Candidate request failed." }
+						: { content: ["Open answer."] },
+			}),
+			{ thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] } satisfies ThinkingConfig },
+		);
+		const tail = createMockModel({ id: "tail", handler: () => ({ content: ["Wrong runtime fallback."] }) });
+		const backup = createMockModel({ id: "backup" });
+		const init = vi.spyOn(SessionManager.prototype, "appendSessionInit");
+		const result = await runWorker({
+			model: open,
+			models: [locked, open, tail, backup],
+			perCallModel: ["nokey/locked", "@review", "mock/tail"],
+			settings: perCallSettings(open, {
+				"task.maxEffort": "high",
+				"retry.enabled": true,
+				"retry.modelFallback": true,
+				"retry.maxRetries": 1,
+				"retry.baseDelayMs": 1,
+				modelRoles: { locked: "nokey/locked", review: "mock/open:high", tail: "mock/tail" },
+				"retry.fallbackChains": { default: ["mock/tail", "mock/backup"], review: ["mock/backup"] },
+			}),
+		});
+		expect(locked.calls).toHaveLength(0);
+		expect(open.calls.length).toBeGreaterThan(0);
+		expect(tail.calls).toHaveLength(0);
+		expect(backup.calls).toHaveLength(0);
+		expect(open.calls.every(call => call.options?.reasoning === Effort.High)).toBe(true);
+		expect(init.mock.calls[0]?.[0]).toMatchObject({
+			perCallModel: true,
+			perCallModelIdentity: "mock/open",
+			perCallThinkingLevel: Effort.High,
+		});
+		if (fails) {
+			expect(result.exitCode).not.toBe(0);
+			expect(failure(result)).toContain("Candidate request failed.");
+		} else {
+			expect(result.exitCode).toBe(0);
+			expect(open.calls).toHaveLength(1);
+			expect(result.output).toBe("Open answer.");
+		}
 	});
 });

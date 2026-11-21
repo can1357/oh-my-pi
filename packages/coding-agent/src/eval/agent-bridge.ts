@@ -28,7 +28,7 @@ export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
 const agentArgsSchema = type({
 	prompt: "string>0",
 	"agent?": "string>0",
-	"model?": "string",
+	"model?": "string | string[]",
 	"label?": "string",
 	"schema?": "unknown",
 	"schemaMode?": "'permissive' | 'strict'",
@@ -42,7 +42,7 @@ const agentArgsSchema = type({
 interface EvalAgentArgs {
 	prompt: string;
 	agent?: string;
-	model?: string;
+	model?: string | string[];
 	label?: string;
 	schema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
@@ -90,14 +90,17 @@ export interface EvalAgentResult {
 }
 
 function parseAgentArgs(args: unknown, settings: Settings): EvalAgentArgs {
+	const selectorProblem = invalidModelSelectorReason(
+		args !== null && typeof args === "object" && "model" in args ? args.model : undefined,
+		"agent()",
+		{ settings, invocationKind: "eval" },
+	);
+	if (selectorProblem) throw new ToolError(selectorProblem);
 	const result = agentArgsSchema(args);
 	if (result instanceof type.errors) {
 		throw new ToolError(`agent() received invalid arguments: ${result.summary}`);
 	}
-	const model = normalizeModelSelector(result.model);
-	const selectorProblem = invalidModelSelectorReason(model, "agent()", { settings, invocationKind: "eval" });
-	if (selectorProblem) throw new ToolError(selectorProblem);
-	return { ...result, model };
+	return { ...result, model: normalizeModelSelector(result.model) };
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {

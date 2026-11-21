@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-call `model` selectors for configured chat roles (`@review[:level]`) and ordered candidate lists, choosing the first available approved model with credentials at spawn without runtime fallback; `task.perCallModelAllow` also accepts configured roles and scoped globs that only narrow grants ([#19921](https://github.com/can1357/oh-my-pi/pull/19921) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
