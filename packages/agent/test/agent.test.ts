@@ -9,7 +9,16 @@ import {
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
-import type { Context, Message, SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import {
+	type Context,
+	type FetchImpl,
+	type Message,
+	type Model,
+	type SimpleStreamOptions,
+	streamSimple,
+	type ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -777,6 +786,267 @@ describe("Agent", () => {
 		}
 		expect(assistantEnd.message.stopReason).toBe("error");
 		expect(assistantEnd.message.errorMessage).toBe(errorText);
+	});
+
+	it("preserves errorStatus and errorId when a provider stream rejects before assistant start", async () => {
+		const mock = createMockModel({ responses: [] });
+		const gatewayModel: Model = {
+			...mock.model,
+			transport: "pi-native",
+			baseUrl: "http://gateway.internal",
+		};
+		const fetchImpl: FetchImpl = (async () =>
+			new Response(JSON.stringify({ error: { type: "api_error", message: "Bad gateway response" } }), {
+				status: 502,
+				headers: { "Content-Type": "application/json" },
+			})) as FetchImpl;
+		const agent = new Agent({
+			initialState: { model: gatewayModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => streamSimple(model, context, { ...options, fetch: fetchImpl }),
+		});
+		const events: AgentEvent[] = [];
+		const unsubscribe = agent.subscribe(event => events.push(event));
+
+		await agent.prompt("trigger");
+		unsubscribe();
+
+		const agentEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "agent_end" }> => event.type === "agent_end",
+		);
+		const terminalAssistant = agentEnd?.messages.find(message => message.role === "assistant");
+		expect(terminalAssistant?.role).toBe("assistant");
+		if (terminalAssistant?.role !== "assistant") throw new Error("Expected terminal assistant message");
+		expect(terminalAssistant.stopReason).toBe("error");
+		expect(terminalAssistant.errorMessage).toBe("Bad gateway response");
+		expect(terminalAssistant.errorStatus).toBe(502);
+		expect(terminalAssistant.errorId).toBe(AIError.create(AIError.Flag.Transient));
+		expect(AIError.retriable(AIError.classifyMessage({ ...terminalAssistant }))).toBe(true);
+		expect(agent.state.messages.at(-1)).toEqual(terminalAssistant);
+
+		const codexGatewayModel: Model = {
+			...gatewayModel,
+			api: "openai-codex-responses",
+		};
+		const codexAgent = new Agent({
+			initialState: { model: codexGatewayModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(new Error(`code=${AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE}`)));
+				return stream;
+			},
+		});
+		await codexAgent.prompt("trigger");
+		const codexFinal = codexAgent.state.messages.at(-1);
+		if (codexFinal?.role !== "assistant") throw new Error("Expected codex assistant message");
+		expect(codexFinal.errorId).toBe(AIError.create(AIError.Flag.Transient));
+
+		const unclassifiedAgent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(new Error("Unclassified provider failure")));
+				return stream;
+			},
+		});
+		await unclassifiedAgent.prompt("trigger");
+		const unclassifiedFinal = unclassifiedAgent.state.messages.at(-1);
+		if (unclassifiedFinal?.role !== "assistant") throw new Error("Expected unclassified assistant message");
+		expect(unclassifiedFinal.errorStatus).toBeUndefined();
+		expect(unclassifiedFinal.errorId).toBeUndefined();
+	});
+
+	it("uses the model selected for the failed request after a mid-run switch to Codex", async () => {
+		const runWithMidRunSwitch = async (switchBackInFlight: boolean) => {
+			const mock = createMockModel({ responses: [] });
+			const codexModel: Model = {
+				...mock.model,
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				id: "gpt-5.4",
+			};
+			const switchToolSchema = type({});
+			const agentRef = {} as { current: Agent };
+			const switchTool: AgentTool<typeof switchToolSchema, Record<string, never>> = {
+				name: "switch_model",
+				label: "Switch Model",
+				description: "Switches active model to Codex",
+				parameters: switchToolSchema,
+				async execute() {
+					agentRef.current.setModel(codexModel);
+					return { content: [{ type: "text", text: "switched" }], details: {} };
+				},
+			};
+
+			let callCount = 0;
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [switchTool], messages: [] },
+				streamFn: requestedModel => {
+					callCount += 1;
+					const stream = new AssistantMessageEventStream();
+					if (callCount === 1) {
+						const toolCalls = Array.from({ length: 8 }, (_, index) => ({
+							type: "toolCall" as const,
+							id: `call-switch-${index}`,
+							name: "switch_model",
+							arguments: {},
+						}));
+						const firstTurn = createAssistantMessage(toolCalls, "toolUse");
+						queueMicrotask(() => {
+							stream.push({ type: "start", partial: firstTurn });
+							for (const [index, toolCall] of toolCalls.entries()) {
+								stream.push({
+									type: "toolcall_end",
+									contentIndex: index,
+									toolCall,
+									partial: firstTurn,
+								});
+							}
+							stream.push({ type: "done", reason: "toolUse", message: firstTurn });
+						});
+					} else {
+						expect(requestedModel).toEqual(codexModel);
+						if (switchBackInFlight) {
+							agentRef.current.setModel(mock.model);
+						}
+						stream.fail(new Error(`code=${AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE}`));
+					}
+					return stream;
+				},
+			});
+			agentRef.current = agent;
+
+			await agent.prompt("switch and fail");
+
+			const terminal = agent.state.messages.at(-1);
+			expect(terminal?.role).toBe("assistant");
+			if (terminal?.role !== "assistant") throw new Error("Expected terminal assistant message");
+			expect(terminal.stopReason).toBe("error");
+			expect(terminal.api).toBe(codexModel.api);
+			expect(terminal.provider).toBe(codexModel.provider);
+			expect(terminal.model).toBe(codexModel.id);
+			expect(terminal.errorId).toBe(AIError.create(AIError.Flag.Transient));
+		};
+
+		await runWithMidRunSwitch(false);
+		await runWithMidRunSwitch(true);
+
+		const mock = createMockModel({ responses: [{ content: ["finished"] }] });
+		const codexModel: Model = {
+			...mock.model,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			id: "gpt-5.4",
+		};
+		const postTurnAgent = new Agent({
+			initialState: { model: codexModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		postTurnAgent.transformAssistantMessage = () => {
+			postTurnAgent.setModel(mock.model);
+			postTurnAgent.abort("switched after reply");
+		};
+		postTurnAgent.setOnBeforeYield(() => {
+			throw new Error("yield failure");
+		});
+		await postTurnAgent.prompt("finish then switch");
+		const postTurnTerminal = postTurnAgent.state.messages.at(-1);
+		if (postTurnTerminal?.role !== "assistant") throw new Error("Expected aborted assistant boundary");
+		expect(postTurnTerminal.stopReason).toBe("aborted");
+		expect(postTurnTerminal.api).toBe(mock.model.api);
+		expect(postTurnTerminal.provider).toBe(mock.model.provider);
+		expect(postTurnTerminal.model).toBe(mock.model.id);
+	});
+
+	it("preserves errorStatus and errorId when a partial stream rejects mid-response", async () => {
+		const mock = createMockModel({ responses: [] });
+		const started = createAssistantMessage([{ type: "text", text: "partial" }]);
+		const stallMessage = "pi-native stream stalled while waiting for the next event";
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "partial", partial: started });
+					stream.fail(
+						new AIError.StreamTimeoutError(stallMessage, {
+							cause: new AIError.AuthGatewayError("Bad gateway response", 502),
+						}),
+					);
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		const lastMessage = agent.state.messages.at(-1);
+		expect(lastMessage?.role).toBe("assistant");
+		if (lastMessage?.role !== "assistant") throw new Error("Expected assistant error message");
+		expect(lastMessage.content).toEqual([{ type: "text", text: "partial" }]);
+		expect(lastMessage.stopReason).toBe("error");
+		expect(lastMessage.errorMessage).toBe(stallMessage);
+		expect(lastMessage.errorStatus).toBe(502);
+		expect(lastMessage.errorId).toBe(AIError.create(AIError.Flag.Transient, AIError.Flag.Timeout));
+	});
+
+	it("preserves abort errorId and clears errorStatus when an aborted run catches a rejected stream", async () => {
+		const makeAbortedAgent = () => {
+			const providerStarted = Promise.withResolvers<void>();
+			const agent = new Agent({
+				streamFn: async (_model, _context, options) => {
+					const signal = options?.signal;
+					if (!signal) throw new Error("Expected provider abort signal");
+					const aborted = Promise.withResolvers<never>();
+					signal.addEventListener(
+						"abort",
+						() => aborted.reject(new AIError.AuthGatewayError("Bad gateway response", 502)),
+						{ once: true },
+					);
+					providerStarted.resolve();
+					return aborted.promise;
+				},
+			});
+			return { agent, providerStarted: providerStarted.promise };
+		};
+
+		const bare = makeAbortedAgent();
+		const bareRun = bare.agent.prompt("cancel bare");
+		await bare.providerStarted;
+		bare.agent.abort();
+		await bareRun;
+		const bareFinal = bare.agent.state.messages.at(-1);
+		if (bareFinal?.role !== "assistant") throw new Error("Expected aborted assistant message");
+		expect(bareFinal.stopReason).toBe("aborted");
+		expect(bareFinal.errorMessage).toBe("Request was aborted");
+		expect(bareFinal.errorStatus).toBeUndefined();
+		expect(bareFinal.errorId).toBe(AIError.create(AIError.Flag.Abort));
+
+		const interrupted = makeAbortedAgent();
+		const interruptedRun = interrupted.agent.prompt("cancel interrupted");
+		await interrupted.providerStarted;
+		interrupted.agent.abort(
+			AIError.attach(new Error("Interrupted by user"), AIError.create(AIError.Flag.UserInterrupt)),
+		);
+		await interruptedRun;
+		const interruptedFinal = interrupted.agent.state.messages.at(-1);
+		if (interruptedFinal?.role !== "assistant") throw new Error("Expected aborted assistant message");
+		expect(interruptedFinal.stopReason).toBe("aborted");
+		expect(interruptedFinal.errorMessage).toBe("Interrupted by user");
+		expect(interruptedFinal.errorStatus).toBeUndefined();
+		expect(interruptedFinal.errorId).toBe(AIError.create(AIError.Flag.UserInterrupt));
+
+		const plain = makeAbortedAgent();
+		const plainRun = plain.agent.prompt("cancel plain");
+		await plain.providerStarted;
+		plain.agent.abort("caller cancelled");
+		await plainRun;
+		const plainFinal = plain.agent.state.messages.at(-1);
+		if (plainFinal?.role !== "assistant") throw new Error("Expected aborted assistant message");
+		expect(plainFinal.stopReason).toBe("aborted");
+		expect(plainFinal.errorMessage).toBe("caller cancelled");
+		expect(plainFinal.errorStatus).toBeUndefined();
+		expect(plainFinal.errorId).toBeUndefined();
 	});
 
 	it("pairs tool calls from failed partial streams with synthetic tool results", async () => {
