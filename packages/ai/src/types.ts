@@ -709,7 +709,7 @@ export interface StreamOptions {
 	 * in the iterator while waiting for the first semantic stream event. Set to
 	 * `0` to disable both layers for this request. After the first semantic
 	 * event arrives, `streamIdleTimeoutMs` governs inter-event stalls. Falls
-	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 100s default.
+	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 900s default.
 	 * OpenAI-family transports additionally honor
 	 * `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS` as the most-specific override and
 	 * floor the first-event budget at the resolved idle (per-call
@@ -728,7 +728,7 @@ export interface StreamOptions {
 	 * mid-stream stalls (broker dies, half-open socket, model produces no real
 	 * progress for too long). Set to `0` to disable. Falls back to
 	 * `PI_STREAM_IDLE_TIMEOUT_MS` (alias: `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`)
-	 * and then to a 120s default.
+	 * and then to a 900s default.
 	 */
 	streamIdleTimeoutMs?: number;
 	/**

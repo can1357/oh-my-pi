@@ -463,6 +463,56 @@ describe("InteractiveMode tray", () => {
 		expect(children(trayOf(cx).node)[0]!.p).toMatchObject({ acted: callStart + 4_000 });
 	});
 
+	it("names the model a live agent's session runs on now, so a /switch shows on the next frame", async () => {
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const models = new ModelRegistry(authStorage);
+		const from = models.find("anthropic", "claude-sonnet-4-5");
+		const to = models.find("anthropic", "claude-sonnet-4-6");
+		if (!from || !to) throw new Error("Expected claude-sonnet-4-5 and claude-sonnet-4-6 in the registry");
+		const agent = new AgentSession({
+			agent: new Agent({
+				initialState: { model: from, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: models,
+			thinkingLevel: ThinkingLevel.Low,
+		});
+		try {
+			AgentRegistry.global().register({
+				id: "TrayNext",
+				displayName: "TrayNext",
+				kind: "sub",
+				parentId: "Main",
+				session: agent,
+				status: "running",
+			});
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle("TrayNext", 0, "started", "Write the norm test"));
+			// Its run so far was answered by the model it started on.
+			eventBus.emit(
+				TASK_SUBAGENT_PROGRESS_CHANNEL,
+				progress("TrayNext", {
+					currentTool: "edit",
+					resolvedModel: "anthropic/claude-sonnet-4-5",
+					resolvedThinkingLevel: ThinkingLevel.Low,
+				}),
+			);
+			const cx = context(true);
+			const model = (): unknown => {
+				const card = children(trayOf(cx).node).find(node => node.p && Reflect.get(node.p, "ref") === "TrayNext");
+				const label = nodes(card!).find(node => role(node) === "omp.tray.model");
+				return label?.p && Reflect.get(label.p, "text");
+			};
+			expect(model()).toBe("claude-sonnet-4-5 · low");
+
+			// The viewed agent switches before its new model has answered anything.
+			await agent.setModelTemporary(to, ThinkingLevel.High);
+			expect(model()).toBe("claude-sonnet-4-6 · high");
+		} finally {
+			await agent.dispose();
+		}
+	});
+
 	it("describes no tray node, and the pill as before, on a host without the feature", async () => {
 		await seed();
 		const cx = context(false);
