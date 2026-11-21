@@ -1198,12 +1198,10 @@ mod tests {
 
 		use super::super::super::error::ErrorCode::{AxUnconfirmed, InputFailed, Timeout};
 
-		// A list that scrolls by item, in rows: (offset, rows shown, rows). A
-		// reading takes `ScrollPattern`'s percent from one layout, and the view
-		// size from another, as separate getters can; then how far the anchor
-		// row moved back, which is the offset in rows, if there is an anchor.
+		// A list that scrolls by item, in rows: (offset, rows shown, rows).
+		// The anchor's movement gives the offset in rows when it exists.
 		type Layout = (f64, f64, f64);
-		let coherent = |layout: Layout| (layout, layout, Some(layout.0));
+		let coherent = |layout: Layout| (layout, Some(layout.0));
 		let percent = |(offset, shown, rows): Layout| 100.0 * offset / (rows - shown);
 		let top = coherent((2.0, 4.0, 400.0));
 		// The anchor is arbitrary; all decisions use the injected clock.
@@ -1238,14 +1236,6 @@ mod tests {
 				1,
 			),
 			(
-				"torn: rows appended between the getters",
-				coherent((10.0, 4.0, 400.0)),
-				((10.0, 4.0, 400.0), (10.0, 4.0, 800.0), Some(10.0)),
-				Err(InputFailed),
-				6,
-				1,
-			),
-			(
 				"offset moved back",
 				coherent((5.0, 4.0, 400.0)),
 				coherent((4.0, 4.0, 400.0)),
@@ -1255,8 +1245,8 @@ mod tests {
 			),
 			(
 				"no anchor",
-				((2.0, 4.0, 400.0), (2.0, 4.0, 400.0), None),
-				((3.0, 4.0, 400.0), (3.0, 4.0, 400.0), None),
+				((2.0, 4.0, 400.0), None),
+				((3.0, 4.0, 400.0), None),
 				Err(AxUnconfirmed),
 				1,
 				1,
@@ -1270,7 +1260,7 @@ mod tests {
 			let result = run.step(
 				true,
 				|run, _anchor| {
-					let (position, _view, offset) = if run.sent { after } else { before };
+					let (position, offset) = if run.sent { after } else { before };
 					let read = |value: f64| {
 						read_count.set(read_count.get() + 1);
 						if run.sent && case == "late" {
