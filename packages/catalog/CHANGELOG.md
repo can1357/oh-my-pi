@@ -21,8 +21,6 @@
 
 ### Fixed
 
-- Cursor's newly served models (Claude Fable 5.2, Claude Haiku 4.5, Claude Sonnet 5.5, Gemini 2.5 Flash, Gemini 4 Hydrogen/Neon, GLM 5.3, GPT-5.1, Muse Wonder 1.0) now use their documented per-token prices instead of $0 ([#19842](https://github.com/can1357/oh-my-pi/pull/19842) by [@fenilmodi00](https://github.com/fenilmodi00)).
-- Fixed the Codex client version cache so `codex-client-version.json` is read and written under `$XDG_CACHE_HOME/omp` when that root is initialized, instead of the agent directory ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
 - Fixed Bedrock Grok 4.6 and 4.7 requests failing with HTTP 400 on `temperature`, which left session titles untitled ([#13730](https://github.com/can1357/oh-my-pi/issues/13730)) ([#19963](https://github.com/can1357/oh-my-pi/pull/19963) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Vercel AI Gateway model refreshes so public models remain discoverable when a stored API key has expired.
 - Fixed OpenRouter models that require reasoning but do not advertise effort levels; requests that disable thinking now use the lowest supported reasoning effort instead of failing.
