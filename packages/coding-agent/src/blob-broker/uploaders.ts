@@ -12,6 +12,7 @@ import {
 	DestinationUnavailableError,
 	destinationSpawnContext,
 	optionString,
+	UPLOAD_TIMEOUT_MS,
 } from "./uploader-runtime";
 import { createAnonymousUploader } from "./uploaders-anonymous";
 import { createCloudDriveUploader } from "./uploaders-cloud-drives";
@@ -21,7 +22,6 @@ import { createLegacyUploader } from "./uploaders-legacy";
 import { createObjectStorageUploader } from "./uploaders-object-storage";
 import { createSelfHostedUploader } from "./uploaders-self-hosted";
 
-const UPLOAD_TIMEOUT_MS = 60_000;
 const URL_PATTERN = /https?:\/\/\S+/g;
 
 /**

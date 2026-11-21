@@ -118,6 +118,10 @@ fs.writeFileSync(${JSON.stringify(bodyFile)}, new Uint8Array(await Bun.stdin.arr
 				"--fail",
 				"--silent",
 				"--show-error",
+				"--connect-timeout",
+				"15",
+				"--max-time",
+				"60",
 				"--ftp-create-dirs",
 				"--upload-file",
 				"-",
@@ -125,6 +129,76 @@ fs.writeFileSync(${JSON.stringify(bodyFile)}, new Uint8Array(await Bun.stdin.arr
 				"alice:p@ss",
 				"ftp://upload.test:2121/folder/sub/a%20b.png",
 			]);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
+	});
+	it("maps a timed-out FTP curl to the upload error instead of parking the publication", async () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ftp-uploader-"));
+		try {
+			// curl's own --max-time exit: code 28 with the reason on stderr.
+			const executable = await compileFakeExecutable(
+				temp,
+				"fake-curl-timeout",
+				`process.stderr.write("curl: (28) Operation timed out.\\n");
+process.exit(28);
+`,
+			);
+			const uploader = requiredUploader(
+				createSelfHostedUploader(
+					"ftp",
+					configured(
+						{
+							protocol: "ftp",
+							host: "upload.test",
+							port: 2121,
+							publicBaseUrl: "https://cdn.test/assets/",
+							commandBinary: executable,
+						},
+						{ username: "alice" },
+					),
+				),
+			);
+
+			await expect(uploader.upload(request)).rejects.toThrow(
+				/FTP upload command exited with code 28: curl: \(28\) Operation timed out/,
+			);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
+	});
+	it("kills a stalled FTP curl that never exits instead of parking the upload", async () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ftp-uploader-"));
+		try {
+			// The #19684 hang: the server accepts the connection, the child holds
+			// stderr open, and neither exit code nor stream ever resolves.
+			const executable = await compileFakeExecutable(
+				temp,
+				"fake-curl-stalled",
+				`process.stderr.write("curl: 150 Opening data connection\\n");
+await Bun.sleep(30_000);
+`,
+			);
+			const uploader = requiredUploader(
+				createSelfHostedUploader(
+					"ftp",
+					configured(
+						{
+							protocol: "ftp",
+							host: "upload.test",
+							port: 2121,
+							publicBaseUrl: "https://cdn.test/assets/",
+							commandBinary: executable,
+						},
+						{ username: "alice" },
+					),
+					// Real-clock integration test: the kill timer and the child's
+					// stderr close are the behavior under test, so fake timers will not do.
+					200,
+				),
+			);
+
+			await expect(uploader.upload(request)).rejects.toThrow(/FTP upload command exited with code/);
 		} finally {
 			fs.rmSync(temp, { recursive: true, force: true });
 		}
