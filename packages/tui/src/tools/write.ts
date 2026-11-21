@@ -3,7 +3,6 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { HighlightStream } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
 import { fencedCode } from "../components/markdown";
-import { Text } from "../components/text";
 import { getLanguageFromPath } from "../lang-from-path";
 import { createHighlightStream, highlightCode, type Theme } from "../theme/theme";
 import { fileHyperlink, renderStatusLine } from "../render";
@@ -45,28 +44,11 @@ import type {
 	NativeToolHead,
 	NativeToolView,
 	RenderResultOptions,
-	ToolActivityContext,
 	ToolActivitySummary,
 	ToolFigure,
 	ToolRenderer,
 } from "./renderer";
 import { splitUrlScheme } from "./url-scheme-host";
-import { couldBecomeXdUrl, parseXdUrl } from "./xd-url";
-import {
-	describeXdevCall,
-	describeXdevResult,
-	renderXdevCall,
-	renderXdevResult,
-	xdevActivitySummary,
-	type XdevRenderDispatch,
-	type XdevMountedRenderer,
-} from "./xdev";
-import { describeResolutionDeviceCall, isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
-import {
-	describeReportIssueDeviceCall,
-	REPORT_ISSUE_DEVICE_NAME,
-	renderReportIssueDeviceCall,
-} from "./report-tool-issue";
 import { pendingFileLinkPath } from "./read";
 
 /** Details returned by the write tool for transcript rendering. */
@@ -78,8 +60,6 @@ export interface WriteToolDetails {
 	/** Absolute filesystem path the write resolved to. Used by the renderer to wrap
 	 * the (possibly cwd-relative) header path in an OSC 8 `file://` hyperlink. */
 	resolvedPath?: string;
-	/** Set when the write dispatched an `xd://` tool device; drives renderer delegation. */
-	xdev?: XdevRenderDispatch;
 	message?: CoordinationDetails;
 	proc?: ProcWriteDetails;
 	cfg?: CfgWriteDetails;
@@ -139,7 +119,7 @@ function writeFigure(
 	result: WriteResult | undefined,
 	options: RenderResultOptions,
 ): ToolFigure | undefined {
-	if (result?.isError || result?.details?.xdev) return undefined;
+	if (result?.isError) return undefined;
 	const rawPath =
 		typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
 	const lang = FIGURE_FENCES[path.extname(rawPath).slice(1).toLowerCase()];
@@ -426,9 +406,8 @@ function renderContentPreview(
 	});
 }
 
-/** Render context for the write tool: resolves an `xd://`-mounted tool so its live renderer drives device dispatch previews. */
+/** Render context for the write tool. */
 export interface WriteRenderContext {
-	resolveXdevMounted?: (name: string) => XdevMountedRenderer | undefined;
 	/** Original result metadata used only for filesystem link targets. */
 	rawDetails?: unknown;
 }
@@ -577,10 +556,10 @@ function writeToolHead(
 	};
 }
 
-/** Render file writes and delegated tool-device calls. */
+/** Render file and URL writes. */
 export const writeToolRenderer = {
-	/** Compact one-line activity: device writes read as the mounted tool (`LSP · references foo`), file writes as `Write · <path>`. */
-	activitySummary(args: unknown, context: ToolActivityContext): ToolActivitySummary {
+	/** Compact one-line activity: URL-card writes read as their card, file writes as `Write · <path>`. */
+	activitySummary(args: unknown): ToolActivitySummary {
 		const writeArgs = (args ?? {}) as WriteRenderArgs;
 		const rawPath =
 			typeof writeArgs.file_path === "string"
@@ -591,11 +570,6 @@ export const writeToolRenderer = {
 		if (!rawPath) return { label: "Write" };
 		const routed = writeUrlCard(rawPath);
 		if (routed) return routed.card.activity(routed.target);
-		const xdev = parseXdUrl(rawPath);
-		if (xdev?.name) {
-			const resolveMounted = (context.renderContext as WriteRenderContext | undefined)?.resolveXdevMounted;
-			return xdevActivitySummary(xdev.name, writeArgs.content, resolveMounted);
-		}
 		return { label: "Write", detail: shortenPath(rawPath) };
 	},
 
@@ -606,11 +580,9 @@ export const writeToolRenderer = {
 	): Component | undefined {
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
-		// Render NOTHING until the streamed path arrives and provably is not an
-		// xd:// device. Device writes then render as queued until execution starts,
-		// after which they delegate to the mounted tool's renderer.
-		// A present-but-malformed path (array/object from a bad provider parse)
-		// is definitively not xd:// — fall through to the legacy frame.
+		// Render nothing until the streamed path arrives; a path that could still
+		// become a card URL waits until it settles. A present-but-malformed path
+		// (array/object from a bad provider parse) falls through to the file frame.
 		if (args.path === undefined && args.file_path === undefined) return undefined;
 		const pathSettled = args.content !== undefined || options.argsComplete === true;
 		const hasStringPath = typeof args.file_path === "string" || typeof args.path === "string";
@@ -618,15 +590,6 @@ export const writeToolRenderer = {
 		const routed = writeUrlCard(rawPath);
 		if (routed)
 			return routed.card.render(rawPath, routed.target, args.content, undefined, undefined, options, uiTheme);
-		if (rawPath && couldBecomeXdUrl(rawPath)) {
-			const xdev = parseXdUrl(rawPath);
-			// The path string is settled once the content field started streaming.
-			const pathSettled = args.content !== undefined;
-			if (!xdev?.name || !pathSettled) return undefined;
-			if (isResolutionDeviceName(xdev.name)) return renderResolutionDeviceCall(xdev.name, args.content, uiTheme);
-			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return renderReportIssueDeviceCall(args.content, uiTheme);
-			return renderXdevCall(xdev.name, args.content, options, uiTheme, options.renderContext?.resolveXdevMounted);
-		}
 		const filePath = sanitizeText(shortenPath(rawPath));
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
@@ -701,14 +664,6 @@ export const writeToolRenderer = {
 		const routed = writeUrlCard(cardPath, result.details);
 		if (routed)
 			return routed.card.render(cardPath, routed.target, args?.content, result, result.details, options, uiTheme);
-		// xd:// dispatch results render as the mounted tool's own result.
-		const xdev = result.details?.xdev;
-		if (xdev) {
-			const delegated = renderXdevResult(xdev, result, options, uiTheme, options.renderContext?.resolveXdevMounted);
-			if (delegated) return delegated;
-			const text = result.content?.find(c => c.type === "text")?.text ?? "";
-			return new Text(uiTheme.fg("toolOutput", replaceTabs(text)), 0, 0);
-		}
 		const rawPath =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
 		const filePath = sanitizeText(shortenPath(rawPath));
@@ -799,20 +754,13 @@ export const writeToolRenderer = {
 	): NativeToolView | undefined {
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
-		// Same gating as renderCall: nothing until the path provably is not a device/card URL.
+		// Same gating as renderCall: nothing until the path provably is not a card URL.
 		if (args.path === undefined && args.file_path === undefined) return undefined;
 		const pathSettled = args.content !== undefined || options.argsComplete === true;
 		const hasStringPath = typeof args.file_path === "string" || typeof args.path === "string";
 		if (hasStringPath && !pathSettled && couldBecomeWriteCardUrl(rawPath.toLowerCase())) return undefined;
 		const routed = writeUrlCard(rawPath);
 		if (routed) return describeWriteUrl(routed, rawPath, args.content, undefined, undefined);
-		if (rawPath && couldBecomeXdUrl(rawPath)) {
-			const xdev = parseXdUrl(rawPath);
-			if (!xdev?.name || args.content === undefined) return undefined;
-			if (isResolutionDeviceName(xdev.name)) return describeResolutionDeviceCall(xdev.name, args.content);
-			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return describeReportIssueDeviceCall(args.content);
-			return describeXdevCall(xdev.name, args.content, options, options.renderContext?.resolveXdevMounted);
-		}
 		const content = normalizeDisplayText(args.content);
 		// A figure write draws as it arrives, over its streaming source.
 		const figure = writeFigure(args, undefined, options);
@@ -832,8 +780,6 @@ export const writeToolRenderer = {
 			typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : "";
 		const routed = writeUrlCard(cardPath, result.details);
 		if (routed) return describeWriteUrl(routed, cardPath, args?.content, result, result.details);
-		const xdev = result.details?.xdev;
-		if (xdev) return describeXdevResult(xdev, result, options, options.renderContext?.resolveXdevMounted);
 		const rawPath =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
 		const fileContent = normalizeDisplayText(args?.content);

@@ -12,6 +12,7 @@ import type { AgentSessionHandle } from "../../src/session/agent-session-handle"
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import { collectIrcPeerRoster } from "../../src/task/executor";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
 import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
@@ -166,6 +167,39 @@ describe("agent bridging across subagent workers", () => {
 		expect(await probe.cas("W1", "running")).toEqual({ grabbed: false, fresh: true, canonical: true });
 		expect(registry.get("W1")?.status).toBe("running");
 		expect(await probe.manages()).toBe(true);
+	});
+
+	it("keeps late worker activity out of a same-id replacement's peer roster entry", async () => {
+		const { probe } = await startWorker();
+		const registry = AgentRegistry.global();
+		const runs: Promise<boolean>[] = [];
+		const openRun = async () => {
+			const key = await probe.open("W1", { gated: true, monitored: true });
+			const ref = liveRef("W1");
+			const remote = mirrorOf(ref.session);
+			runs.push(remote.prompt("Inspect the task"));
+			await waitFor(() => ref.status === "running" && remote.isStreaming);
+			return key;
+		};
+		const activity = () => collectIrcPeerRoster(registry, "Main").peers.find(peer => peer.id === "W1")?.activity;
+		try {
+			const old = await openRun();
+			await probe.toolCall(old, "grep");
+			expect(activity()).toBe("running grep");
+			const current = await openRun();
+			await probe.toolCall(current, "read");
+			expect(activity()).toBe("running read");
+			const lastActivity = liveRef("W1").lastActivity;
+
+			// Tool start flushes progress at once (no 150ms coalescing), so the worker sends
+			// the tool's heartbeat and then the probe reply on the same port.
+			await probe.toolCall(old, "bash");
+			expect(activity()).toBe("running read");
+			expect(liveRef("W1").lastActivity).toBe(lastActivity);
+		} finally {
+			await probe.openGate();
+			await Promise.all(runs);
+		}
 	});
 
 	it("lets a worker read a main-homed session through one canonical peer handle", async () => {

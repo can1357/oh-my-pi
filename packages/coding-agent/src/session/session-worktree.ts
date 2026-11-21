@@ -2,14 +2,15 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { logger } from "@oh-my-pi/pi-utils";
+import { sanitizeDisplayLines, sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { $which, logger } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { cfgWorktreeCleanSource, type cfgWorktreeOnExit } from "../task/settings";
 import { formatIsolationBackend } from "../task/worktree";
 import type { SessionWorktree } from "../worktree/backend";
 import { creationBackend, worktreeBackend, worktreeOrigin } from "../worktree/worktrees";
+import type { AgentSession } from "./agent-session";
 
 /** State of a session-owned worktree at exit. */
 export interface SessionWorktreeState {
@@ -93,6 +94,51 @@ export async function cleanSourceCheckoutIfConfigured(
 		};
 	}
 }
+
+/** Bytes at the end of a failed hook's output that are searched for its last line. */
+const HOOK_OUTPUT_TAIL_BYTES = 4096;
+
+/**
+ * Runs the `post-checkout` hook of a worktree `/wt` created, a linked git worktree or an ovnfs
+ * checkout, with the arguments `git worktree add` gives it, then has `session` rediscover skills and
+ * slash commands so it sees what the hook added. An ovnfs checkout has its own git dir without
+ * `hooks/`, so there only a hook found through `core.hooksPath` runs. Never throws: a failing hook
+ * keeps the worktree and comes back as a display-ready warning.
+ */
+export async function runSessionWorktreeHook(
+	worktree: SessionWorktree,
+	session: Pick<AgentSession, "isDisposed" | "refreshSkillsAndCommands">,
+): Promise<string[]> {
+	// Without a `git` executable no hook can run: stay silent, as `/wt` was before it ran hooks.
+	if (!$which("git")) return [];
+	const warnings: string[] = [];
+	try {
+		const hook = await vcs.runPostCheckoutHook(worktree.path, worktree.baseCommit);
+		if (hook.exitCode !== 0) {
+			// `git hook run` sends the hook's stdout to stderr; the fallback for git older than 2.36 keeps
+			// them apart, and stderr's last line wins.
+			const tails = [hook.stdout, hook.stderr].map(bytes =>
+				new TextDecoder().decode(bytes.subarray(-HOOK_OUTPUT_TAIL_BYTES)),
+			);
+			const lastLine = sanitizeDisplayLines(tails.join("\n"))
+				.map(line => line.trim())
+				.findLast(Boolean);
+			warnings.push(`post-checkout hook exited with ${hook.exitCode}${lastLine ? `: ${lastLine}` : ""}`);
+		}
+	} catch (error) {
+		warnings.push(`post-checkout hook could not run: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	// The session can end while the hook runs.
+	if (!session.isDisposed) {
+		try {
+			await session.refreshSkillsAndCommands();
+		} catch (error) {
+			warnings.push(`skill and command rescan failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	return sanitizeDisplayWarnings(warnings.map(warning => `Worktree created, but ${warning}`));
+}
+
 /**
  * Create the worktree for `/wt`: an ovnfs checkout when `isolation.backend` is
  * auto and ovnfs is found, else a linked git worktree. Throws with a
