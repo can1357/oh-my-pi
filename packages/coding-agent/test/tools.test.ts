@@ -1052,7 +1052,7 @@ describe("Coding Agent Tools", () => {
 				path: "local://7.log:3-4",
 			});
 			const output = getTextOutput(result);
-			expect(output).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
+			expect(output).toContain("[Showing lines 2-2 of 4 (32.0KB limit)]");
 			expect(output).toContain("Line 3 is 60.0KB");
 			expect(output).toContain("local://7.log:raw:3-3");
 			expect(output).not.toContain("Use :3- to continue");
@@ -1175,7 +1175,7 @@ describe("Coding Agent Tools", () => {
 			}
 		});
 
-		it("bounds oversized URL reads like plain files, except pages of local:// files", async () => {
+		it("bounds oversized URL reads like plain files, and pages of spill files by the page budget", async () => {
 			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
 			const skillDir = path.join(testDir, "skills", "demo");
 			fs.mkdirSync(skillDir, { recursive: true });
@@ -1243,11 +1243,21 @@ describe("Coding Agent Tools", () => {
 				// the full budget and is never copied into another spill.
 				const artifactId = await spillManager.saveArtifact(payload);
 				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
-				for (const url of [`${spillUrl(artifactId!)}:1-3000`, "local://big.md:1-3000"]) {
+				for (const url of ["local://big.md:1-3000"]) {
 					const page = await spillReadTool.execute(`page-${url}`, { path: url }, undefined, undefined, context);
 					expect(page.details?.meta?.truncation?.artifactId).toBeUndefined();
 					expect(getTextOutput(page)).toContain("payload line 2999");
 				}
+				const spillPage = await spillReadTool.execute(
+					"spill-page",
+					{ path: `${spillUrl(artifactId!)}:1-3000` },
+					undefined,
+					undefined,
+					context,
+				);
+				expect(spillPage.details?.meta?.truncation?.artifactId).toBeUndefined();
+				expect(getTextOutput(spillPage)).not.toContain("payload line 2999");
+				expect(spillPage.details?.meta?.truncation?.nextOffset).toBeGreaterThan(0);
 				expect(saveArtifact).not.toHaveBeenCalled();
 			} finally {
 				await spillManager.close();
