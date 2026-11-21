@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSkillPromptMessage, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -158,6 +160,40 @@ describe("buildSkillPromptMessage", () => {
 				};
 				expect(await readText("skill://reviewer")).toContain(`${NOTE} TodoWrite → todo.`);
 				expect(await readText("skill://reviewer:raw")).not.toContain(NOTE);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		test("ignores Claude tool names that appear only in frontmatter across all delivery paths", async () => {
+			const raw =
+				"---\nname: reviewer\ndescription: Use TodoWrite\nallowed-tools: WebFetch\n---\n\nReview the files.\n";
+			const { dir, skill } = await createSkillFromRaw(raw);
+			const claudeSkill = { ...skill, _source: sourceFor("claude", dir) };
+			try {
+				const built = await buildSkillPromptMessage(claudeSkill, { args: "" });
+				expect(built.message).not.toContain(NOTE);
+
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [claudeSkill],
+				};
+				const readResult = await new ReadTool(session).execute("read-claude-frontmatter", {
+					path: "skill://reviewer",
+				});
+				const readText = readResult.content
+					.flatMap(block => (block.type === "text" ? [block.text] : []))
+					.join("\n");
+				expect(readText).not.toContain(NOTE);
+
+				const resolved = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://reviewer"), {
+					skills: [claudeSkill],
+				});
+				expect(resolved.content).toBe(raw);
 			} finally {
 				await removeWithRetries(dir);
 			}

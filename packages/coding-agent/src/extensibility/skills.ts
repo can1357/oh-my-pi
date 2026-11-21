@@ -916,31 +916,46 @@ async function isClaudeDialectSkill(skill: SkillFile): Promise<boolean> {
 	return root !== undefined && (await pluginUsesClaudeModelDialect(root));
 }
 
+/** Strip YAML frontmatter from a skill file without rewriting HTML comments or logging diagnostics. */
+export function parseSkillBody(raw: string, filePath: string): string {
+	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
+	// diagnostics to the loader, which already parsed this frontmatter.
+	return parseFrontmatter(raw, { source: filePath, repair: false, level: "off" }).body.trim();
+}
+
+async function claudeSkillToolMappings(
+	skill: SkillFile,
+	body: string,
+): Promise<Array<{ claude: string; omp: string | undefined }> | undefined> {
+	if (!(await isClaudeDialectSkill(skill))) return undefined;
+	const names = claudeToolMentions(body);
+	if (names.length === 0) return undefined;
+	return names.map(claude => ({ claude, omp: CLAUDE_CODE_TOOL_NAMES.get(claude.toLowerCase()) }));
+}
+
 /**
  * The note appended to a Claude-dialect skill body that names Claude Code tools, mapping each to
  * the omp tool that covers it; undefined when the skill is not Claude-dialect or names none.
  */
 export async function claudeCodeToolNote(skill: SkillFile, body: string): Promise<string | undefined> {
-	if (!(await isClaudeDialectSkill(skill))) return undefined;
-	const names = claudeToolMentions(body);
-	if (names.length === 0) return undefined;
-	const tools = names.map(claude => ({ claude, omp: CLAUDE_CODE_TOOL_NAMES.get(claude.toLowerCase()) }));
-	return prompt.render(claudeCodeToolNoteTemplate, { tools }).trim();
+	const tools = await claudeSkillToolMappings(skill, body);
+	return tools ? prompt.render(claudeCodeToolNoteTemplate, { tools }).trim() : undefined;
 }
 
-/** `body` with {@link claudeCodeToolNote} appended, or `body` itself when there is no note. */
-export async function withClaudeCodeToolNote(skill: SkillFile, body: string): Promise<string> {
-	const note = await claudeCodeToolNote(skill, body);
-	return note ? `${body}\n\n${note}` : body;
+/** `content` with {@link claudeCodeToolNote} appended when `scanBody` names Claude Code tools. */
+export async function withClaudeCodeToolNote(
+	skill: SkillFile,
+	content: string,
+	scanBody: string = content,
+): Promise<string> {
+	const tools = await claudeSkillToolMappings(skill, scanBody);
+	return tools ? prompt.render(claudeCodeToolNoteTemplate, { body: content, tools }).trimEnd() : content;
 }
 
 /** Read a skill's instruction body before rendering user-provided arguments. */
 export async function loadSkillPromptBody(skill: SkillFile): Promise<string> {
 	const content = await Bun.file(skill.filePath).text();
-	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
-	// diagnostics to the loader, which already parsed this frontmatter.
-	const body = parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
-	return withClaudeCodeToolNote(skill, body);
+	return withClaudeCodeToolNote(skill, parseSkillBody(content, skill.filePath));
 }
 
 /** A skill's instruction body and the skill it was read from. */

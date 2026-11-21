@@ -15,13 +15,14 @@ import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
 import {
+	claudeCodeToolNote,
 	findStaleSkillStandIn,
 	getActiveSkills,
 	isSkillSuperseded,
+	parseSkillBody,
 	rediscoverSkills,
 	type Skill,
 	type SkillRediscoveryHost,
-	claudeCodeToolNote,
 	withClaudeCodeToolNote,
 } from "../extensibility/skills";
 import { MCPManager, type MCPManagerApi } from "../mcp/manager";
@@ -301,8 +302,8 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 	}
 
 	const raw = await Bun.file(targetPath).text();
-	// Only the skill's own instruction file is Claude-dialect prose; a referenced asset is not.
-	const content = instructions ? await withClaudeCodeToolNote(skill, raw) : raw;
+	// Only the skill's own instruction body is Claude-dialect prose; frontmatter and referenced assets are not.
+	const content = instructions ? await withClaudeCodeToolNote(skill, raw, parseSkillBody(raw, targetPath)) : raw;
 	return {
 		url: url.href,
 		content,
@@ -324,7 +325,8 @@ export async function skillUrlClaudeCodeToolNote(
 ): Promise<string | undefined> {
 	const target = await locateSkillTarget(url, context, false);
 	if (!target.instructions || !target.stats?.isFile()) return undefined;
-	return claudeCodeToolNote(target.skill, await Bun.file(target.path).text());
+	const raw = await Bun.file(target.path).text();
+	return claudeCodeToolNote(target.skill, parseSkillBody(raw, target.path));
 }
 
 /**
