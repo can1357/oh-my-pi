@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ValidationError } from "@oh-my-pi/pi-ai/error";
+import { ProviderResponseError, ValidationError } from "@oh-my-pi/pi-ai/error";
 import {
 	isTranscriptionApi,
 	TranscriptionApiError,
@@ -55,10 +55,10 @@ interface CapturedBody {
 	};
 }
 
-function sse(text: string): Response {
+function sse(text: string, finishReason = "STOP"): Response {
 	const chunk = {
 		response: {
-			candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
+			candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason }],
 			usageMetadata: { promptTokenCount: 150, candidatesTokenCount: 15, totalTokenCount: 165 },
 		},
 	};
@@ -173,6 +173,17 @@ describe("google-gemini-cli-transcribe runner", () => {
 		).catch(e => e);
 		expect(error).toBeInstanceOf(TranscriptionApiError);
 		expect(error.status).toBe(404);
+	});
+
+	it("rejects a transcript cut at the output token limit", async () => {
+		const { fetch } = upstream(() => sse("The first half of a long dicta", "MAX_TOKENS"));
+		const error = await transcribeAudio(
+			transcribeModel(),
+			{ audio: AUDIO, mimeType: "audio/wav", responseFormat: "json" },
+			{ apiKey: CREDENTIAL, fetch },
+		).catch(e => e);
+		expect(error).toBeInstanceOf(ProviderResponseError);
+		expect(error.message).toContain("output token limit");
 	});
 
 	it("rejects non-audio input and timestamp requests before sending", async () => {

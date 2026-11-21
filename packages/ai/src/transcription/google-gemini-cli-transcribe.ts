@@ -89,6 +89,12 @@ export async function transcribeGeminiCli(
 		if (response.errorStatus !== undefined) throw new TranscriptionApiError(message, response.errorStatus);
 		throw new AIError.ProviderResponseError(message, { provider: model.provider });
 	}
+	// Gemini's MAX_TOKENS arrives as `length`: the transcript is cut, not finished.
+	if (response.stopReason === "length") {
+		throw new AIError.ProviderResponseError(`${label} transcript was cut at the output token limit`, {
+			provider: model.provider,
+		});
+	}
 	let text = "";
 	for (const block of response.content) if (block.type === "text") text += block.text;
 	return { text: unwrapTranscript(text), usage: response.usage };
