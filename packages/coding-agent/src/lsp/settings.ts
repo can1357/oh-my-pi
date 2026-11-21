@@ -112,3 +112,25 @@ export const cfgLspRequestTimeout = register({
 		],
 	},
 });
+
+export const cfgLspMinTimeout = register({
+	id: "lsp.minTimeout",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "files",
+		group: "LSP",
+		label: "Minimum Timeout",
+		description:
+			"Seconds every lsp timeout budget is floored to — the agent's per-call `timeout` cannot go below it, and timeout errors say when it raised one. 0 disables the floor. Values stay within the tool's 5–300 s range.",
+		options: [
+			{ value: "0", label: "Disabled", description: "Default" },
+			{ value: "10", label: "10 seconds" },
+			{ value: "20", label: "20 seconds" },
+			{ value: "30", label: "30 seconds" },
+			{ value: "60", label: "1 minute" },
+			{ value: "120", label: "2 minutes" },
+			{ value: "300", label: "5 minutes" },
+		],
+	},
+});
