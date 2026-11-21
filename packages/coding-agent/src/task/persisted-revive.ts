@@ -389,11 +389,6 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		: sessionLocalModel
 			? [sessionLocalModel, ...(spawnModelPattern === undefined ? [] : [spawnModelPattern].flat())]
 			: spawnModelPattern;
-	// Older session files persisted the synthetic xd:// write transport in the
-	// enabled set. A read-only agent definition could never grant full write,
-	// so remove that transport name before replaying tools as explicit grants.
-	const revivedToolNames =
-		init.readOnly === true && init.tools.includes("write") ? init.tools.filter(name => name !== "write") : init.tools;
 	const artifactManager = spec.artifactManager;
 	if (artifactManager) reopened.adoptArtifactManager(artifactManager);
 	// A restricted persisted contract must not consult process-global MCP
@@ -443,8 +438,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				: {}),
 			expectedAgentRef: expectedRef,
 			taskDepth,
-			toolNames: revivedToolNames,
-			// `revivedToolNames` is the enabled set, devices included: keep those devices,
+			toolNames: init.tools,
+			// The persisted enabled set includes tool commands: keep them as commands,
 			// or they come back as top-level tools and change the replayed tool list.
 			mountedToolNames: init.mountedTools,
 			outputSchema: init.outputSchema,
@@ -500,7 +495,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// Clamp the active set to the persisted list: createAgentSession's
 	// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 	// the original run didn't carry. Unknown/missing names are ignored.
-	await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+	await session.setActiveToolsByName([...init.tools, ...session.getMountedToolCommandNames()]);
 	// The yield tool's schema carries the last batch's items; the replayed prefix must match it.
 	if (init.workPoolYieldItems) await session.setWorkPoolYieldItems(init.workPoolYieldItems);
 	// Wire the extension runtime exactly as the live executor does. Without
