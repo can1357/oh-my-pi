@@ -18,10 +18,7 @@ import type { BashResult } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import type { RpcGoalResult } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
 import type { RpcMessagesPage } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-messages";
-import type {
-	RpcModelPickerRole,
-	RpcModelPickerRow,
-} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-model-picker";
+import type { RpcModelPickerRole, RpcModelPickerRow } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-model-picker";
 import type {
 	RpcAbortAndRestoreQueueResult,
 	RpcAgentSessionEventFrame,

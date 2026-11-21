@@ -23,17 +23,20 @@ export function discoverRelayEndpoints(): string[] {
 	} catch {
 		return [];
 	}
-	return names.flatMap(name => {
-		const match = /^(\d+)-(\d+)$/.exec(name);
-		if (!match) return [];
-		const pid = Number(match[1]);
-		const port = Number(match[2]);
-		if (pid < 1 || port < 1 || port > 65535) return [];
-		try {
-			process.kill(pid, 0);
-			return [{ port, started: fs.statSync(path.join(dir, name)).mtimeMs }];
-		} catch {
-			return [];
-		}
-	}).sort((a, b) => b.started - a.started).map(({ port }) => `http://127.0.0.1:${port}`);
+	return names
+		.flatMap(name => {
+			const match = /^(\d+)-(\d+)$/.exec(name);
+			if (!match) return [];
+			const pid = Number(match[1]);
+			const port = Number(match[2]);
+			if (pid < 1 || port < 1 || port > 65535) return [];
+			try {
+				process.kill(pid, 0);
+				return [{ port, started: fs.statSync(path.join(dir, name)).mtimeMs }];
+			} catch {
+				return [];
+			}
+		})
+		.sort((a, b) => b.started - a.started)
+		.map(({ port }) => `http://127.0.0.1:${port}`);
 }
