@@ -18,6 +18,7 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { pausedProviders, type PausedProviderInfo } from "@oh-my-pi/pi-ai/oauth";
 import type { ConfigError } from "../config/config-file";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
@@ -87,8 +88,15 @@ interface ModelJson {
 	pricingStatus: ModelPricingStatus;
 }
 
+interface PausedProviderJson {
+	provider: string;
+	reason: string;
+}
+
 interface ModelsJson {
 	models: ModelJson[];
+	/** Providers paused by their auth rules; omitted when none are paused. */
+	paused?: PausedProviderJson[];
 }
 
 function writeLine(line = ""): void {
@@ -180,13 +188,20 @@ function boxTable(columns: BoxColumn[], rows: string[][]): string[] {
 }
 
 /**
- * The two registry reads the listing performs. Structural so the renderer can be
- * exercised without booting a full {@link ModelRegistry}.
+ * The two registry reads the listing performs. Structural so the renderer can
+ * be exercised without booting a full {@link ModelRegistry}.
  */
 export interface ModelsListingSource {
 	/** Return models available for the selected catalog kind, or every kind for `all`. */
 	getAvailable(kind?: ModelKind | "all"): Model<Api>[];
 	getError(): ConfigError | undefined;
+}
+
+function writePausedProviders(paused: readonly PausedProviderInfo[]): void {
+	writeLine(`${chalk.bold("Paused providers")} ${chalk.dim("(sign-in kept, not selectable)")}`);
+	for (const { provider, reason } of paused) {
+		writeLine(`  ${chalk.cyan(provider)}: ${reason}`);
+	}
 }
 
 /**
@@ -225,6 +240,11 @@ export function renderProviderModels(
 	}
 
 	const configError = source.getError();
+	// A filter narrows the pause footer too: `omp models anthropic` must not end
+	// with an unrelated provider's pause notice. Pauses live in the auth rules,
+	// not the registry, so the renderer reads them directly from `@oh-my-pi/pi-ai/oauth`.
+	const allPaused = pausedProviders();
+	const paused = needle ? allPaused.filter(entry => entry.provider.toLowerCase().includes(needle)) : allPaused;
 
 	if (json) {
 		if (configError) {
@@ -232,7 +252,10 @@ export function renderProviderModels(
 				`Warning: models.yml validation failed — custom providers disabled\n${configError.message}\n`,
 			);
 		}
-		const output: ModelsJson = { models: filtered.slice().sort(byProviderThenId).map(toModelJson) };
+		const output: ModelsJson = {
+			models: filtered.slice().sort(byProviderThenId).map(toModelJson),
+			...(paused.length > 0 ? { paused } : {}),
+		};
 		writeLine(JSON.stringify(output));
 		return;
 	}
@@ -241,12 +264,22 @@ export function renderProviderModels(
 		writeModelsConfigError(configError);
 	}
 
-	if (available.length === 0) {
-		writeLine("No models available. Set API keys in environment variables.");
-		return;
-	}
 	if (filtered.length === 0) {
-		writeLine(`No models matching "${pattern}"`);
+		// A paused provider is configured and signed in, so "no models matching"
+		// would read as if it had never existed (#18697).
+		if (needle !== undefined && paused.length > 0) {
+			writePausedProviders(paused);
+			return;
+		}
+		writeLine(
+			available.length === 0
+				? "No models available. Set API keys in environment variables."
+				: `No models matching "${pattern}"`,
+		);
+		if (paused.length > 0) {
+			writeLine();
+			writePausedProviders(paused);
+		}
 		return;
 	}
 
@@ -287,6 +320,11 @@ export function renderProviderModels(
 		)) {
 			writeLine(line);
 		}
+	}
+
+	if (paused.length > 0) {
+		writeLine();
+		writePausedProviders(paused);
 	}
 }
 
