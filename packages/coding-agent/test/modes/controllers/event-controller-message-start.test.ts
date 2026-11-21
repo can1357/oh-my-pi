@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { ToolExecutionComponent, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -267,5 +269,54 @@ describe("EventController IRC expiry", () => {
 
 		expect(chatContainer.children).toHaveLength(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("EventController message_start (assistant role)", () => {
+	const opening: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "stop",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: 1,
+	};
+
+	it("seals tool cards no result can reach, so they cannot block transcript retirement, and leaves a running call alone", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const pendingTools = new Map<string, ToolExecutionHandle>();
+		const ctx = createInteractiveModeContext({ pendingTools });
+		const controller = new EventController(ctx);
+		const card = (id: string) =>
+			new ToolExecutionComponent("bash", { command: "echo hi" }, {}, undefined, ctx.ui, process.cwd(), id);
+		// No call id routes to it: a preview left behind by a stream that never ended.
+		const untracked = card("gone");
+		ctx.chatContainer.addChild(untracked);
+		// Streamed by an earlier message, never started.
+		const stale = card("stale");
+		ctx.chatContainer.addChild(stale);
+		pendingTools.set("stale", stale);
+		await controller.handleEvent({ type: "tool_execution_start", toolCallId: "run", toolName: "bash", args: {} });
+		const running = pendingTools.get("run") as ToolExecutionComponent;
+
+		await controller.handleEvent({ type: "message_start", message: opening });
+
+		expect(untracked.isTranscriptBlockFinalized()).toBe(true);
+		expect(stale.isTranscriptBlockFinalized()).toBe(true);
+		expect(pendingTools.has("stale")).toBe(false);
+		expect(running.isTranscriptBlockFinalized()).toBe(false);
+		expect(pendingTools.get("run")).toBe(running);
+		running.seal();
+		resetSettingsForTest();
 	});
 });

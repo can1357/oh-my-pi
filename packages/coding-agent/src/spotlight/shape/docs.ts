@@ -8,7 +8,7 @@ import { countNewlines } from "@oh-my-pi/pi-utils";
 import { DOC_FILE, fileLines, readTargets, resolveTarget } from "./command";
 import { words } from "./lines";
 import { bump, noteRank, noteWhy, type Origin, type Run, scoreLines, shifted, spanShares } from "./run";
-import { renderFolds, type View } from "./view";
+import { rebasePeaks, renderFolds, type SourcePeak, type View } from "./view";
 
 /** Shorter docs are shown as printed. */
 const MIN_LINES = 80;
@@ -83,7 +83,7 @@ export async function foldReadDoc(run: Run): Promise<View | undefined> {
 }
 
 /** Docs a bash command printed whole (`cat README.md`), each folded in place; undefined when nothing folds. */
-export async function foldBashDocs(run: Run, output: string): Promise<string | undefined> {
+export async function foldBashDocs(run: Run, output: string, peaks?: SourcePeak[]): Promise<string | undefined> {
 	const targets = readTargets(run.input.command ?? "").filter(t => !t.ranges && DOC_FILE.test(t.arg));
 	let text = output;
 	let cursor = 0;
@@ -99,6 +99,7 @@ export async function foldBashDocs(run: Run, output: string): Promise<string | u
 			const origin = text === run.input.text ? shifted(countNewlines(text.slice(0, at))) : null;
 			const folds = await docFolds(run, lines, origin);
 			if (!folds) continue;
+			if (peaks?.length) rebasePeaks(peaks, folds, countNewlines(text.slice(0, at)));
 			const view = renderFolds(lines, lines, 1, folds, false).lines.join("\n");
 			text = text.slice(0, at) + view + text.slice(at + block.length);
 			cursor = at + view.length;

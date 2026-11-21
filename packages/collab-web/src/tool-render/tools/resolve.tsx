@@ -2,12 +2,13 @@
  * `resolve` / `reject` / `propose` — finalize a staged preview (apply/discard)
  * or submit a plan for approval.
  *
- * In collab-web these arrive as `write xd://<device>` calls that `ToolView`
- * unwraps: the card model then lives on the unwrapped inner details
- * (`result.details`) and the device name (`props.name`). Historical top-level
- * `resolve` transcripts instead carried `action`/`reason` on `args`, so read
- * details first and fall back to args. When neither is present yet (a running
- * card), the device name supplies the default action.
+ * In collab-web these arrive either as direct `resolve` / `reject` / `propose`
+ * tool calls or as tool-command records nested in a `bash` result, whose inner
+ * details `ToolView` renders as this card: the card model then lives on the
+ * unwrapped `result.details` and the command name on `props.name`. A direct
+ * call instead carries `action` / `reason` on `args`, so read details first and
+ * fall back to args. When neither is present yet (a running card), the command
+ * name supplies the default action.
  */
 import type { ReactNode } from "react";
 import type { Tone } from "../parts";
@@ -43,7 +44,7 @@ interface ResolveCard {
 	extra: Record<string, unknown> | null;
 }
 
-/** Derive the card model from unwrapped inner details, args fallback, and device name. */
+/** Derive the card model from unwrapped inner details, args fallback, and command name. */
 function cardModel({ name, args, result }: ToolRenderProps): ResolveCard {
 	const details = detailsRecord(result);
 	const explicit = str(details?.action) ?? str(args.action);

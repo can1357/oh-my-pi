@@ -1,9 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	getBrowserRelayInstallRegistryFile,
-	isEnoent,
-} from "@oh-my-pi/pi-utils";
+import { getBrowserRelayInstallRegistryFile, isEnoent } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { NATIVE_HOST } from "../../../../../browser-relay/extension/messages";
 import { resolveCliEntryCmd } from "../../../subprocess/worker-client";
@@ -27,46 +24,32 @@ function hostDir(): string {
 }
 
 function launcherPath(dir: string, platform: NodeJS.Platform): string {
-	return path.join(
-		dir,
-		platform === "win32" ? "native-host.cmd" : "native-host",
-	);
+	return path.join(dir, platform === "win32" ? "native-host.cmd" : "native-host");
 }
 
-function manifestPaths(
-	platform: NodeJS.Platform,
-	options: RelayNativeHostOptions,
-	dir: string,
-): string[] {
+function manifestPaths(platform: NodeJS.Platform, options: RelayNativeHostOptions, dir: string): string[] {
 	const file = `${NATIVE_HOST}.json`;
 	if (platform === "win32") return [path.join(dir, file)];
 	return chromiumUserDataDirs({
 		platform,
 		home: options.home,
 		configHome: options.configHome,
-	}).map((browser) => path.join(browser.dir, "NativeMessagingHosts", file));
+	}).map(browser => path.join(browser.dir, "NativeMessagingHosts", file));
 }
 
-function launcherText(
-	platform: NodeJS.Platform,
-	command: readonly string[],
-): string {
+function launcherText(platform: NodeJS.Platform, command: readonly string[]): string {
 	const argv = [...command, "browser-relay", "native-host"];
 	// Chrome passes origin/window metadata to the launcher, not to the omp CLI.
 	if (platform !== "win32") return `#!/bin/sh\nexec ${quotePosixArgv(argv)}\n`;
-	const line = argv.map((arg) => `"${arg.replace(/%/g, "%%")}"`).join(" ");
+	const line = argv.map(arg => `"${arg.replace(/%/g, "%%")}"`).join(" ");
 	return `@echo off\r\nsetlocal DisableDelayedExpansion\r\n${line}\r\nexit /b %errorlevel%\r\n`;
 }
 
-async function writeLauncher(
-	file: string,
-	platform: NodeJS.Platform,
-	command: readonly string[],
-): Promise<void> {
+async function writeLauncher(file: string, platform: NodeJS.Platform, command: readonly string[]): Promise<void> {
 	const script = launcherText(platform, command);
 	const prior = await Bun.file(file)
 		.text()
-		.catch((error) => {
+		.catch(error => {
 			if (!isEnoent(error)) throw error;
 			return null;
 		});
@@ -86,18 +69,13 @@ function resolveHost(options: RelayNativeHostOptions): {
 }
 
 /** Chrome admits a native host connection only from the extension ids listed here. */
-function manifestText(
-	launcher: string,
-	extensionIds: readonly string[],
-): string {
+function manifestText(launcher: string, extensionIds: readonly string[]): string {
 	const manifest = {
 		name: NATIVE_HOST,
 		description: "omp browser native messaging host",
 		path: launcher,
 		type: "stdio",
-		allowed_origins: [...new Set(extensionIds)]
-			.sort()
-			.map((id) => `chrome-extension://${id}/`),
+		allowed_origins: [...new Set(extensionIds)].sort().map(id => `chrome-extension://${id}/`),
 	};
 	return `${JSON.stringify(manifest, null, 2)}\n`;
 }
@@ -113,14 +91,10 @@ export async function writeRelayNativeHost(
 	const { platform, dir, launcher, targets } = resolveHost(options);
 	if (targets.length === 0) return targets;
 	await fs.mkdir(dir, { recursive: true });
-	await writeLauncher(
-		launcher,
-		platform,
-		options.command ?? resolveCliEntryCmd(),
-	);
+	await writeLauncher(launcher, platform, options.command ?? resolveCliEntryCmd());
 	const content = manifestText(launcher, extensionIds);
 	await Promise.all(
-		targets.map(async (target) => {
+		targets.map(async target => {
 			await fs.mkdir(path.dirname(target), { recursive: true });
 			await writeFileAtomically(target, content);
 		}),
@@ -129,19 +103,12 @@ export async function writeRelayNativeHost(
 }
 
 /** Install the native host manifest admitting `extensionIds` where the user's Chromium browsers look for it. */
-export async function registerRelayNativeHost(
-	extensionIds: readonly string[],
-): Promise<void> {
+export async function registerRelayNativeHost(extensionIds: readonly string[]): Promise<void> {
 	const [manifest] = await writeRelayNativeHost(extensionIds);
 	if (process.platform !== "win32" || !manifest) return;
-	const result =
-		await $`reg.exe add ${CHROME_REGISTRY_KEY} /ve /t REG_SZ /d ${manifest} /f`
-			.quiet()
-			.nothrow();
+	const result = await $`reg.exe add ${CHROME_REGISTRY_KEY} /ve /t REG_SZ /d ${manifest} /f`.quiet().nothrow();
 	if (result.exitCode !== 0) {
-		throw new Error(
-			`Could not register the omp native messaging host: ${result.stderr.toString().trim()}`,
-		);
+		throw new Error(`Could not register the omp native messaging host: ${result.stderr.toString().trim()}`);
 	}
 }
 
@@ -155,22 +122,17 @@ export async function refreshRelayNativeHost(
 ): Promise<void> {
 	const { platform, launcher, targets } = resolveHost(options);
 	if (!(await Bun.file(launcher).exists())) return;
-	await writeLauncher(
-		launcher,
-		platform,
-		options.command ?? resolveCliEntryCmd(),
-	);
+	await writeLauncher(launcher, platform, options.command ?? resolveCliEntryCmd());
 	const content = manifestText(launcher, extensionIds);
 	await Promise.all(
-		targets.map(async (target) => {
+		targets.map(async target => {
 			const prior = await Bun.file(target)
 				.text()
 				.catch((error: unknown) => {
 					if (isEnoent(error)) return null;
 					throw error;
 				});
-			if (prior !== null && prior !== content)
-				await writeFileAtomically(target, content);
+			if (prior !== null && prior !== content) await writeFileAtomically(target, content);
 		}),
 	);
 }

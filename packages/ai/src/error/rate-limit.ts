@@ -477,10 +477,12 @@ const OUT_OF_CREDIT_PATTERN = /\bout of credit|\badd (?:more )?credit|\btop ?up\
  */
 export function isBillingCapUsageLimit(status: number | undefined, message: string | undefined): boolean {
 	if (message === undefined) return false;
-	if (isConcurrencyCapExclusion(status, message)) return false;
+	const reason = parseRateLimitReason(message);
+	if (reason === "CONCURRENT_LIMIT" && status !== 402) return false;
 	if (isDashScopeTokenLimitText(message)) return false;
 	if (status === 402) return is402BillingCapBody(message);
 	return (
+		reason === "INSUFFICIENT_G1_CREDITS_BALANCE" ||
 		OUT_OF_CREDIT_PATTERN.test(message) ||
 		INSUFFICIENT_BALANCE_PATTERN.test(message) ||
 		CREDITS_EXHAUSTED_PATTERN.test(message) ||
