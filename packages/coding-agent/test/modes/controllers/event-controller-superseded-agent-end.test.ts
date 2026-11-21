@@ -92,13 +92,12 @@ describe("EventController agent_end teardown", () => {
 		expect(ctx.loadingAnimation).toBeUndefined();
 	});
 
-	it("releases the worker's run flag and loader when a focused worker ends while the main session's run goes on", async () => {
+	it("releases the worker's loader when a focused worker ends while the main session's run goes on", async () => {
 		const { ctx, streamState, loader } = createContext();
 		const controller = new EventController(ctx);
 
 		streamState.viewIsStreaming = true;
 		await controller.handleEvent(AGENT_START);
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
 
 		// The viewed worker finishes; the main session's run keeps going underneath
 		// (streaming, or paused awaiting its own jobs).
@@ -107,7 +106,6 @@ describe("EventController agent_end teardown", () => {
 		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		await controller.handleEvent(AGENT_END);
 
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
 		// A stale "Working…" row would otherwise stay under the finished worker.
 		expect(loader.stop).toHaveBeenCalledTimes(1);
 		expect(ctx.loadingAnimation).toBeUndefined();
@@ -149,7 +147,6 @@ describe("EventController agent_end teardown", () => {
 
 		// Run 2's agent_start follows the stale end and re-arms the live run.
 		await controller.handleEvent(AGENT_START);
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
 		expect(ctx.loadingAnimation).toBeDefined();
 
 		// The live run's own terminal end still reports done normally.
@@ -158,26 +155,6 @@ describe("EventController agent_end teardown", () => {
 		report.mockClear();
 		await controller.handleEvent(DONE_END);
 		expect(report).toHaveBeenCalledWith({ state: "done" });
-	});
-
-	it("keeps the composer busy for idle auto-compaction and releases it at the end", async () => {
-		const { ctx } = createContext();
-		const controller = new EventController(ctx);
-
-		await controller.handleEvent({
-			type: "auto_compaction_start",
-			reason: "idle",
-			action: "context-full",
-		} as unknown as AgentSessionEvent);
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
-
-		// An aborted compaction leaves no rebuilt transcript to refill the loader's row.
-		await controller.handleEvent({
-			type: "auto_compaction_end",
-			action: "context-full",
-			aborted: true,
-		} as unknown as AgentSessionEvent);
-		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
 	});
 
 	it("flushes queued command panels at a pause", async () => {

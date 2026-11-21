@@ -212,36 +212,6 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 	}
 
-	type GeminiCliDiscoveryCapture = {
-		loadCodeAssistCalls: number;
-		urls: string[];
-		quotaAuthorization?: string | null;
-		quotaBody?: unknown;
-	};
-
-	function mockGeminiCliStandardDiscovery(capture: GeminiCliDiscoveryCapture): FetchImpl {
-		return async (input, init) => {
-			const url = String(input);
-			capture.urls.push(url);
-			if (url.includes("/manifest/latest-arm64-mac.yml")) {
-				return new Response("", { status: 404 });
-			}
-			if (url.includes(":fetchAvailableModels")) {
-				return new Response("Forbidden", { status: 403 });
-			}
-			if (url.includes(":loadCodeAssist")) {
-				capture.loadCodeAssistCalls++;
-				return new Response("Forbidden", { status: 403 });
-			}
-			if (url.includes(":retrieveUserQuota")) {
-				capture.quotaAuthorization = new Headers(init?.headers).get("authorization");
-				capture.quotaBody = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-				return Response.json({ buckets: [{ modelId: "gemini-3.5-flash" }] });
-			}
-			throw new Error(`Unexpected URL: ${url}`);
-		};
-	}
-
 	test("scoped discovery coalesces with an in-flight background refresh", async () => {
 		writeRawModelsJson({
 			gateway: {
@@ -805,56 +775,15 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
 	});
 
-	test("Gemini CLI discovery forwards a stored OAuth project id to the quota fallback", async () => {
-		await authStorage.credentials.set("google-gemini-cli", {
-			type: "oauth",
-			access: "stored-gemini-token",
-			refresh: "stored-gemini-refresh",
-			expires: Date.now() + 3_600_000,
-			projectId: "stored-gcp-project",
-		});
-		const capture: GeminiCliDiscoveryCapture = { loadCodeAssistCalls: 0, urls: [] };
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
-			fetch: mockGeminiCliStandardDiscovery(capture),
-		});
-
-		await registry.refreshProvider("google-gemini-cli", "online");
-
-		expect(capture.loadCodeAssistCalls).toBe(0);
-		expect(capture.urls).toContain("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota");
-		expect(capture.quotaAuthorization).toBe("Bearer stored-gemini-token");
-		expect(capture.quotaBody).toEqual({ project: "stored-gcp-project" });
-		expect(registry.find("google-gemini-cli", "gemini-3.5-flash")).toBeDefined();
-	});
-
-	test("Gemini CLI discovery accepts project_id in a runtime credential override", async () => {
-		authStorage.keys.setRuntime(
-			"google-gemini-cli",
-			JSON.stringify({ token: "runtime-gemini-token", project_id: "runtime-gcp-project" }),
-		);
-		const capture: GeminiCliDiscoveryCapture = { loadCodeAssistCalls: 0, urls: [] };
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
-			fetch: mockGeminiCliStandardDiscovery(capture),
-		});
-
-		await registry.refreshProvider("google-gemini-cli", "online");
-
-		expect(capture.loadCodeAssistCalls).toBe(0);
-		expect(capture.urls).toContain("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota");
-		expect(capture.quotaAuthorization).toBe("Bearer runtime-gemini-token");
-		expect(capture.quotaBody).toEqual({ project: "runtime-gcp-project" });
-		expect(registry.find("google-gemini-cli", "gemini-3.5-flash")).toBeDefined();
-	});
-
 	test("configured discovery suppresses built-in special OAuth discovery", async () => {
-		await authStorage.credentials.set("google-gemini-cli", {
+		await authStorage.credentials.set("google-antigravity", {
 			type: "oauth",
-			access: "fresh-google-gemini-cli",
-			refresh: "refresh-google-gemini-cli",
+			access: "fresh-google-antigravity",
+			refresh: "refresh-google-antigravity",
 			expires: Date.now() + 3_600_000,
 		});
 		writeRawModelsJson({
-			"google-gemini-cli": {
+			"google-antigravity": {
 				baseUrl: "http://127.0.0.1:4893",
 				api: "openai-completions",
 				auth: "none",
@@ -866,7 +795,7 @@ describe("ModelRegistry runtime discovery", () => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:4893/v1/models") {
 				return Response.json({
-					data: [{ id: "configured-gemini-cli-model", context_length: 65_536 }],
+					data: [{ id: "configured-antigravity-model", context_length: 65_536 }],
 				});
 			}
 			unexpectedUrls.push(url);
@@ -874,10 +803,10 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 
-		await registry.refreshProvider("google-gemini-cli", "online");
+		await registry.refreshProvider("google-antigravity", "online");
 
 		expect(unexpectedUrls).toEqual([]);
-		const configuredModel = registry.find("google-gemini-cli", "configured-gemini-cli-model");
+		const configuredModel = registry.find("google-antigravity", "configured-antigravity-model");
 		expect(configuredModel?.baseUrl).toBe("http://127.0.0.1:4893");
 		expect(configuredModel?.contextWindow).toBe(65_536);
 	});
@@ -3615,6 +3544,118 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(rosterFor("chat")).toEqual(["multimodal-chat", "speech-or-music", "vision-chat"]);
 		expect(rosterFor("embedding")).toEqual(["bare-embedder", "openrouter/openai/text-embedding-3-small"]);
 		expect(rosterFor("image")).toEqual(["image-generator"]);
+	});
+
+	test("openai-models-list routes gateway speech and transcription rows by their declared modalities", async () => {
+		writeRawModelsJson({
+			"gateway-test": {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9993/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							// Poe's rows, verbatim: a TTS voice and a music generator declare
+							// the same `text->audio`, and Poe serves both on chat completions.
+							{
+								id: "orpheus-tts",
+								architecture: {
+									input_modalities: ["text"],
+									output_modalities: ["audio"],
+									modality: "text->audio",
+								},
+							},
+							{
+								id: "lyria",
+								architecture: {
+									input_modalities: ["text"],
+									output_modalities: ["audio"],
+									modality: "text->audio",
+								},
+							},
+							{
+								id: "vendor/audio-reader",
+								architecture: { input_modalities: ["audio"], output_modalities: ["text"] },
+							},
+							// OpenRouter's TTS and STT rows, verbatim from its roster.
+							{
+								id: "speechify/simba-3.5",
+								architecture: {
+									modality: "text->speech",
+									input_modalities: ["text"],
+									output_modalities: ["speech"],
+								},
+							},
+							{
+								id: "x-ai/grok-stt-2.0",
+								architecture: {
+									modality: "audio->transcription",
+									input_modalities: ["audio"],
+									output_modalities: ["transcription"],
+								},
+							},
+							{ id: "openrouter/vendor/tts-lite", architecture: { modality: "text->speech" } },
+							// Nothing declared: stays chat, whatever the id suggests.
+							{ id: "vendor/flash-tts", supported_methods: ["generateContent"] },
+							{
+								id: "vendor/chat",
+								architecture: { modality: "text+image->text", output_modalities: ["text"] },
+							},
+							{
+								id: "vendor/voice-chat",
+								architecture: { input_modalities: ["text", "audio"], output_modalities: ["text", "audio"] },
+							},
+							{ id: "vendor/plain-chat" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		// Audio output, or text from audio input, names no endpoint: chat API.
+		for (const id of ["orpheus-tts", "lyria", "vendor/audio-reader"]) {
+			const model = registry.find("gateway-test", id);
+			expect(model?.kind).toBeUndefined();
+			expect(model?.api).toBe("openai-completions");
+		}
+		expect(registry.find("gateway-test", "speechify/simba-3.5")).toMatchObject({
+			kind: "tts",
+			api: "openai-speech",
+			baseUrl: "http://127.0.0.1:9993/v1",
+			supportsTools: false,
+		});
+		expect(registry.find("gateway-test", "x-ai/grok-stt-2.0")).toMatchObject({
+			kind: "stt",
+			api: "openai-transcriptions",
+			baseUrl: "http://127.0.0.1:9993/v1",
+			supportsTools: false,
+		});
+		const rosterFor = (kind: ModelKind) =>
+			registry
+				.getAll(kind)
+				.filter(model => model.provider === "gateway-test")
+				.map(model => model.id)
+				.sort();
+		expect(rosterFor("chat")).toEqual([
+			"lyria",
+			"orpheus-tts",
+			"vendor/audio-reader",
+			"vendor/chat",
+			"vendor/flash-tts",
+			"vendor/plain-chat",
+			"vendor/voice-chat",
+		]);
+		expect(rosterFor("tts")).toEqual(["openrouter/vendor/tts-lite", "speechify/simba-3.5"]);
+		expect(rosterFor("stt")).toEqual(["x-ai/grok-stt-2.0"]);
 	});
 
 	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {

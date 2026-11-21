@@ -2,21 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the `computer` tool on Linux Wayland leaving GTK 3 message dialogs (OK/Cancel and Yes/No boxes) out of `windows()`, so their buttons could not be found or pressed ([#19884](https://github.com/can1357/oh-my-pi/pull/19884) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [19.1.0] - 2026-11-21
+
 ### Added
 
-- The `sd` shell builtin can require an exact match count with `--expect N` and show the applied changes with `-U N` or `--unified N`.
-
-- Added `ShellFilesystem.onFileChange`: the embedded shell reports each text file git would track that a command changed itself (a builtin's write, rename or removal; a redirection's target) with its content before and after
-- Added `diffLineRunsWithin(oldText, newText, maxEdits)`: `diffLineRuns` that returns `null` once more than `maxEdits` lines are added or removed, instead of spending time quadratic in the size of a wholesale rewrite
-- Added `enableConsoleVtInput()` and `restoreConsoleInputMode()`, which turn Windows console VT input on and back off without `bun:ffi`
-- Added redirected files to `PipeStreams`: a regular file a run's command redirects its output into (`>`, `>>`, `&>`) is listed with `file: true` and read from disk
-- Added `translateWindowsAltGrSequence()`, which recovers the text an AltGr chord produced on the active Windows keyboard layout when the console host reported it as an Alt chord
-
-### Changed
-
-- `TtyWriter` writes a terminal it cannot reopen (a PTY master, a TTY that is not yours after `su`, a sandbox that hides its path) through a duplicate instead of refusing it
-- `TtyWriter` ends each 16 KiB write where a row or a `write()` ends whenever one fits, so a large repaint is no longer cut inside a row or an escape sequence
-- `TtyWriter` turns Windows console VT processing back on when it finds it off, instead of printing escape sequences as text
+- Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`
 
 ### Fixed
 
@@ -27,6 +23,12 @@
 - Fixed Windows window captures and accessibility trees of a fully covered window passing as current: for Chromium-based browsers and Electron apps, which can stop drawing while covered, they now report `covered` ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Windows `computer` `setValue` on a classic text box (Win32 and WinForms, including Windows 10 Notepad) bringing its window in front of yours, so the keys you typed next went into that box ([#19814](https://github.com/can1357/oh-my-pi/pull/19814) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the native addon load error printing a `curl` command for a `.node` file that no release publishes, which returned 404; it now names the release page of the running version ([#10126](https://github.com/can1357/oh-my-pi/issues/10126))
+- Fixed grouped `sed` scripts such as `1{h;d};2{G}` being rejected when no semicolon precedes a closing brace.
+- Fixed the native addon failing to load when `HOME`, `PI_NATIVES_DIR`, or the installation path contains `?`.
+- `commitCreate()` now reports a `HeadMoved` error when `HEAD` changes after the expected-HEAD check, including changes made by a `commit-msg` hook.
+- Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
+- Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
+- Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
 
 ## [19.0.1] - 2026-11-19
 

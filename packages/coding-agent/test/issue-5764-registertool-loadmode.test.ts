@@ -1,9 +1,9 @@
 /**
  * Regression for issue #5764: re-registering an essential built-in (read /
  * write / bash / edit / glob) without an explicit `loadMode` must NOT demote it
- * to `discoverable`, which — with `tools.xdev` on — unmounts it from the
- * top-level schema and breaks the `xd://` transport (transport IS `read xd://`
- * / `write xd://<tool>`).
+ * to `discoverable`, which — with `tools.commands` on — unmounts it from the
+ * top-level schema and breaks the command transport (`bash` runs every tool
+ * command).
  */
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
@@ -17,7 +17,7 @@ import {
 	defaultLoadModeForToolName,
 	ESSENTIAL_BUILTIN_TOOL_NAMES,
 } from "@oh-my-pi/pi-coding-agent/tools/essential-tools";
-import { isMountableUnderXdev } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { isMountableAsToolCommand } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 
 function makeSession(): ToolSession {
 	return {
@@ -34,13 +34,12 @@ const emptySchema = type({});
 const noopExecute = async () => ({ content: [{ type: "text" as const, text: "" }] });
 
 describe("issue #5764: registerTool loadMode default", () => {
-	it("never mounts the read/write transport tools under xdev, even when mislabeled discoverable", () => {
+	it("never mounts the bash transport under toolCommands, even when mislabeled discoverable", () => {
 		// A UI-only re-register could carry loadMode "discoverable"; the transport
-		// invariant must still keep read/write top-level.
-		expect(isMountableUnderXdev({ name: "read", loadMode: "discoverable" })).toBe(false);
-		expect(isMountableUnderXdev({ name: "write", loadMode: "discoverable" })).toBe(false);
+		// invariant must still keep the bash command runner top-level.
+		expect(isMountableAsToolCommand({ name: "bash", loadMode: "discoverable" })).toBe(false);
 		// A genuinely discoverable tool still mounts.
-		expect(isMountableUnderXdev({ name: "lsp", loadMode: "discoverable" })).toBe(true);
+		expect(isMountableAsToolCommand({ name: "lsp", loadMode: "discoverable" })).toBe(true);
 	});
 
 	it("defaults omitted loadMode to essential for essential built-in names, discoverable otherwise", () => {
@@ -72,7 +71,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 			runner,
 		);
 		expect(adapter.loadMode).toBe("essential");
-		expect(isMountableUnderXdev(adapter)).toBe(false);
+		expect(isMountableAsToolCommand(adapter)).toBe(false);
 	});
 
 	it("RegisteredToolAdapter still defaults a novel extension tool to discoverable", () => {
@@ -92,7 +91,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 			runner,
 		);
 		expect(adapter.loadMode).toBe("discoverable");
-		expect(isMountableUnderXdev(adapter)).toBe(true);
+		expect(isMountableAsToolCommand(adapter)).toBe(true);
 	});
 
 	it("CustomToolAdapter keeps a re-registered essential built-in essential", () => {
@@ -107,7 +106,7 @@ describe("issue #5764: registerTool loadMode default", () => {
 			() => ({}) as never,
 		);
 		expect(adapter.loadMode).toBe("essential");
-		expect(isMountableUnderXdev(adapter)).toBe(false);
+		expect(isMountableAsToolCommand(adapter)).toBe(false);
 	});
 
 	it("keeps ESSENTIAL_BUILTIN_TOOL_NAMES in sync with the tool classes that declare loadMode essential", async () => {

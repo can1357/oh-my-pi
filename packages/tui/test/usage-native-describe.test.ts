@@ -188,6 +188,30 @@ describe("UsageDashboardComponent.describe", () => {
 		expect(findAll(root, n => n.p?.role === "omp.usage.stats" || n.k === "chart")).toEqual([]);
 	});
 
+	it("keeps a failed sync visible instead of the empty state when the painted history is empty", async () => {
+		const settled = Promise.withResolvers<void>();
+		let renders = 0;
+		const component = new UsageDashboardComponent({
+			reports: [],
+			renderDetail: () => "",
+			loadActivity: async push => {
+				push([]);
+				throw new Error("database is locked");
+			},
+			// The push renders once; the settled load renders again.
+			requestRender: () => {
+				if (++renders === 2) settled.resolve();
+			},
+			onClose: () => {},
+		});
+		await settled.promise;
+		const root = component.describe(cx);
+		expect(findAll(root, n => n.p?.role === "omp.usage.empty")).toEqual([]);
+		expect(findAll(root, n => n.p?.role === "omp.usage.section.meta").map(plain)).toContain(
+			"not synced (database is locked)",
+		);
+	});
+
 	it("re-fetches reports from the Refresh button like the r key", async () => {
 		const fresh = [report("openai", "c@test", [limit("openai", "5h", "Codex 5h", 0.5, "ok")])];
 		let calls = 0;

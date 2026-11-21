@@ -1,10 +1,11 @@
 ```
 {{#if py}}
-completion(prompt, *, model?="default"|"smol"|"slow", system?=None, schema?=None) → handle
+completion(prompt, *, model?="default"|"smol"|"slow"|"m<N>", system?=None, schema?=None) → handle
 {{else}}
-await completion(prompt, { model?: "default"|"smol"|"slow", system?, schema? }) → handle
+await completion(prompt, { model?: "default"|"smol"|"slow"|"m<N>", system?, schema? }) → handle
 {{/if}}
     Returns at once; `.wait()` returns text (parsed with `schema`). Stateless, no tools/history.
+    `model` is a tier, or a user-tagged model agent name (`m<N>`) to run that pinned model.
 {{#ifAll py js}}
     JS: ONE trailing object — `h = await completion(prompt, { model, system, schema })`; without `await`, `.id` is undefined. `.wait()` returns a Promise.
 {{else}}
