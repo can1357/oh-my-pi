@@ -11,6 +11,7 @@ pub mod cleanse;
 pub mod collab;
 pub mod commit;
 pub mod compress;
+pub mod consult;
 pub mod control_visibility;
 pub mod delegated_prompt;
 pub mod discovery;
