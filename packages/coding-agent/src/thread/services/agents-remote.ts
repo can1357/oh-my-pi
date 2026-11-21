@@ -139,8 +139,8 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 		return this.#remote.callSync("staleAcceptedRuns");
 	}
 
-	setActivity(id: string, activity: string): void {
-		this.#remote.notify("setActivity", id, activity);
+	setActivity(id: string, activity: string, expected?: AgentRefExpectation): void {
+		this.#remote.notify("setActivity", id, activity, expected);
 	}
 
 	attachSession(

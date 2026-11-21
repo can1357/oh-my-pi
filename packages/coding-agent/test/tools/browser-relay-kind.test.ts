@@ -1,11 +1,7 @@
+import { discoverRelayEndpoints } from "../../src/tools/browser/relay/discovery";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	createBrowserPrelude,
-	DEFAULT_RELAY_URL,
-	resolveBrowserKind,
-	resolveRelayKind,
-} from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { createBrowserPrelude, resolveBrowserKind, resolveRelayKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import type { BrowserKindTag } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
@@ -16,7 +12,10 @@ describe("resolveRelayKind", () => {
 	});
 
 	it("resolves the default endpoint when the setting enables it", () => {
-		expect(resolveRelayKind({ settingEnabled: true }, {})).toEqual({ kind: "relay", cdpUrl: DEFAULT_RELAY_URL });
+		expect(resolveRelayKind({ settingEnabled: true }, {})).toEqual({
+			kind: "relay",
+			cdpUrl: discoverRelayEndpoints()[0] ?? "",
+		});
 	});
 
 	it("uses the configured URL and trims trailing slashes", () => {
@@ -29,7 +28,7 @@ describe("resolveRelayKind", () => {
 	it("falls back to the default endpoint for a blank URL", () => {
 		expect(resolveRelayKind({ settingEnabled: true, url: "   " }, {})).toEqual({
 			kind: "relay",
-			cdpUrl: DEFAULT_RELAY_URL,
+			cdpUrl: discoverRelayEndpoints()[0] ?? "",
 		});
 	});
 
@@ -37,10 +36,17 @@ describe("resolveRelayKind", () => {
 		expect(resolveRelayKind({ settingEnabled: true }, { PI_BROWSER_RELAY: "0" })).toBeNull();
 	});
 
+	it("PI_BROWSER_RELAY=only enables the relay when the setting is off", () => {
+		expect(resolveRelayKind({ settingEnabled: false }, { PI_BROWSER_RELAY: "only" })).toEqual({
+			kind: "relay",
+			cdpUrl: discoverRelayEndpoints()[0] ?? "",
+		});
+	});
+
 	it("PI_BROWSER_RELAY=1 enables the relay when the setting is off", () => {
 		expect(resolveRelayKind({ settingEnabled: false }, { PI_BROWSER_RELAY: "1" })).toEqual({
 			kind: "relay",
-			cdpUrl: DEFAULT_RELAY_URL,
+			cdpUrl: discoverRelayEndpoints()[0] ?? "",
 		});
 	});
 });
@@ -196,6 +202,49 @@ describe("resolveBrowserKind in a subagent", () => {
 			expect(guidance).toBe(createBrowserPrelude(subagent({ "browser.relay": false })).guidance);
 		} finally {
 			if (saved !== undefined) process.env.PI_BROWSER_RELAY = saved;
+		}
+	});
+});
+
+describe("relay-only sessions (PI_BROWSER_RELAY=only)", () => {
+	const only = { PI_BROWSER_RELAY: "only" };
+	const sessionAt = (taskDepth: number): ToolSession =>
+		({
+			cwd: process.cwd(),
+			hasUI: false,
+			taskDepth,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({}),
+		}) as ToolSession;
+
+	it("sends every open to the relay, a subagent's included", () => {
+		expect(resolveBrowserKind({ action: "open" }, sessionAt(0), only).kind).toBe("relay");
+		expect(resolveBrowserKind({ action: "open" }, sessionAt(1), only).kind).toBe("relay");
+		expect(resolveBrowserKind({ action: "open", app: "relay" }, sessionAt(1), only).kind).toBe("relay");
+	});
+
+	it("refuses any other app", () => {
+		for (const app of ["auto", "own", "http://127.0.0.1:9222"]) {
+			expect(() => resolveBrowserKind({ action: "open", app }, sessionAt(0), only)).toThrow(
+				"This session drives the user's Chrome through the omp extension and has no other browser",
+			);
+		}
+	});
+
+	it("tells the model the user's Chrome is the only browser", () => {
+		const saved = process.env.PI_BROWSER_RELAY;
+		process.env.PI_BROWSER_RELAY = "only";
+		try {
+			for (const depth of [0, 1]) {
+				const guidance = createBrowserPrelude(sessionAt(depth)).guidance;
+				expect(guidance).toContain("There is no other browser");
+				expect(guidance).toContain("the user's Chrome");
+				expect(guidance).not.toContain('app: "auto"');
+			}
+		} finally {
+			if (saved === undefined) delete process.env.PI_BROWSER_RELAY;
+			else process.env.PI_BROWSER_RELAY = saved;
 		}
 	});
 });
