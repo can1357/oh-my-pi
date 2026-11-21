@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Eval cells can call activatable MCP tools and discoverable tool commands without activating or mounting them first, while preserving tool restrictions and approvals ([#19917](https://github.com/can1357/oh-my-pi/pull/19917) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
