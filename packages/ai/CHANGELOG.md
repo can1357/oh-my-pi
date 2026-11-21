@@ -15,6 +15,7 @@
 - Fixed chat completions dropping reasoning sent only as `reasoning_details` (Bifrost Gemini) ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
 - Fixed Antigravity CLI quota exhaustion (`RESOURCE_EXHAUSTED`) streaming into replies as "API error" text; the request now fails with a 429 rate-limit error, so omp's retry, credential rotation and model fallback policy applies instead of a thinking-loop retry ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
 - Anthropic requests now declare `Context.inactiveTools` as deferred from the first request, so a tool activated later no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
+- Assistant messages on `openai-codex-responses` and `openai-responses` now carry the `effort` the request sent on the wire ([#14942](https://github.com/can1357/oh-my-pi/issues/14942), [#18721](https://github.com/can1357/oh-my-pi/pull/18721) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [19.0.1] - 2026-11-19
 
@@ -43,6 +44,7 @@
 - Improved authentication broker compatibility across client and broker versions by tolerating unknown credential, usage, and observed-usage fields and values.
 - Fixed Codex Spark usage meters so reports that identify the meter only by `metered_feature` remain correctly scoped to the Spark model.
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
+- Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
 
 ## [18.22.2] - 2026-11-18
 
