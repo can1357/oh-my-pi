@@ -62,7 +62,7 @@ Detection uses `Bun.spawnSync` when available, then falls back to `node:child_pr
 1. Every selected filename in `@oh-my-pi/pi-natives-<tag>`.
 2. For each filename, package-local `nativeDir`, then the executable directory.
 
-The platform leaf wins over a stale core artifact. Workspace loads deliberately skip leaf resolution. The leaf is found with `require.resolve`; when that misses (a release copied into bun's install cache, where the leaf is a version-pinned sibling `pi-natives-<tag>@<version>@@@N` of the core package), the loader takes the sibling `pi-natives-<tag>` directory in the core package's scope directory that holds a selected filename, preferring the running version.
+The platform leaf wins over a stale core artifact. Workspace loads deliberately skip leaf resolution. The leaf is found with `require.resolve`; when that misses (a release copied into bun's install cache, where the leaf is a version-pinned sibling `pi-natives-<tag>@<version>@@@N` of the core package), the loader takes the sibling `pi-natives-<tag>` directory in the core package's scope directory that holds a selected filename, matching the running version (`pi-natives-<tag>@<version>@@@N`, or the bare `pi-natives-<tag>`).
 
 ### Windows `node_modules` staging
 

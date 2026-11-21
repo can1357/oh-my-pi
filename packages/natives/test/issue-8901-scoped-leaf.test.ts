@@ -84,6 +84,20 @@ describe("issue 8901: platform leaf beside a bun-cache copy of the core package"
 		expect(loaderCandidates(path.join(native, "loader-state.js"))).toContain(path.join(leaf, ADDON));
 	});
 
+	it("ignores a foreign-version sibling when no leaf matches the running version", () => {
+		const root = tempRoot();
+		const scope = path.join(root, "@oh-my-pi");
+		const native = writePackage(path.join(scope, `pi-natives@${VERSION}@@@1`), {
+			name: "@oh-my-pi/pi-natives",
+			version: VERSION,
+			optionalDependencies: { [LEAF_PACKAGE]: VERSION },
+		});
+		const foreign = path.join(scope, `pi-natives-${TAG}@18.9.0@@@1`);
+		writeLeaf(foreign);
+
+		expect(loaderCandidates(path.join(native, "loader-state.js"))).not.toContain(path.join(foreign, ADDON));
+	});
+
 	it("still skips the leaf for a checkout, whose manifest declares none", () => {
 		const root = tempRoot();
 		const native = writePackage(path.join(root, "checkout", "packages", "natives"), {

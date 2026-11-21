@@ -75,7 +75,7 @@ function getNativesDir() {
  * Bun's install cache has no `node_modules` around a release copy, so
  * `require.resolve` cannot reach the platform leaf beside it: a version-pinned
  * sibling (`pi-natives-<tag>@<version>@@@N`) of the core package. Scan the core
- * package's scope directory for the leaf that holds the addon, preferring the
+ * package's scope directory for the leaf that holds the addon, matching the
  * running version (issue #8901).
  */
 function findScopedLeafPackageDir(platformTag, addonFilenames) {
@@ -87,10 +87,7 @@ function findScopedLeafPackageDir(platformTag, addonFilenames) {
 		return null;
 	}
 	const leafName = `pi-natives-${platformTag}`;
-	const runningVersion = `@${packageJson.version}@`;
-	const leaves = names
-		.filter(name => name === leafName || name.startsWith(`${leafName}@`))
-		.sort((a, b) => Number(b.includes(runningVersion)) - Number(a.includes(runningVersion)));
+	const leaves = names.filter(name => name === leafName || name.startsWith(`${leafName}@${packageJson.version}@`));
 	for (const name of leaves) {
 		const dir = path.join(scopeDir, name);
 		if (addonFilenames.some(filename => fs.existsSync(path.join(dir, filename)))) return dir;
