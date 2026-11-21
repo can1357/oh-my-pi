@@ -19,6 +19,7 @@ import {
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
 	type NonMessageTokenSource,
+	computeContextUsageDetails,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	estimateToolSchemaTokens,
@@ -27,6 +28,43 @@ import {
 } from "../src/status-line/context-usage";
 
 const tokenizer = new Tokenizer();
+
+describe("computeContextUsageDetails", () => {
+	it("omits deferred tool schemas and refreshes details when the model policy changes", () => {
+		const tools = [{ name: "read", description: "Read files.", parameters: { type: "object" } }];
+		const skillLine = "- visible: Visible skill.";
+		const blocks = [`You are an agent.\n${skillLine}\nEnd.`];
+		const systemPromptSources = {
+			blocks,
+			sources: [
+				{
+					id: "skill-0",
+					kind: "skills" as const,
+					label: "visible",
+					block: 0,
+					start: 18,
+					end: 18 + skillLine.length,
+				},
+			],
+		};
+		const session = {
+			model: { toolSchemasInContext: false } as Model,
+			agent: { tokenizer, state: { tools } },
+			systemPrompt: blocks,
+			systemPromptSources,
+		};
+
+		const deferred = computeContextUsageDetails(session);
+		expect(deferred.tools).toEqual([]);
+		expect(deferred.skills).toEqual([{ name: "visible", tokens: tokenizer.countTokens(skillLine) }]);
+
+		session.model = { toolSchemasInContext: true } as Model;
+		const inline = computeContextUsageDetails(session);
+		expect(inline.tools).toEqual([{ name: "read", tokens: estimateToolSchemaTokens(tools, tokenizer) }]);
+		// A source whose block changed after the build stays in System Prompt, like the Skills category.
+		expect(computeContextUsageDetails({ ...session, systemPrompt: [`${blocks[0]}\nhook`] }).skills).toEqual([]);
+	});
+});
 
 describe("estimateToolSchemaTokens", () => {
 	it("counts arktype tool schemas by their wire JSON Schema, not arktype internals", () => {
@@ -144,6 +182,31 @@ describe("pruned tool description accounting", () => {
 			[tool.name, tool.description, JSON.stringify(tool.parameters)].filter(part => part !== ""),
 		),
 	);
+
+	it("refreshes per-tool details when effective pruning changes without replacing the roster", () => {
+		let prune = true;
+		const model = { toolSchemasInContext: true } as Model;
+		const session = {
+			model,
+			agent: {
+				tokenizer,
+				state: { tools: tools as never },
+				prunesToolDescriptions: (requestedModel: Model | undefined) => {
+					expect(requestedModel).toBe(model);
+					return prune;
+				},
+			},
+		};
+		expect(computeContextUsageDetails(session).tools).toEqual([{ name: "grep", tokens: prunedWireTokens }]);
+
+		// Owned dialects retain descriptions even when the raw prune setting is enabled.
+		prune = false;
+		const full = computeContextUsageDetails(session).tools;
+		expect(full[0]!.tokens).toBeGreaterThan(prunedWireTokens);
+
+		prune = true;
+		expect(computeContextUsageDetails(session).tools).toEqual([{ name: "grep", tokens: prunedWireTokens }]);
+	});
 
 	it("counts the pruned wire specs while the agent prunes, and the full specs otherwise", () => {
 		const systemPrompt = ["You are an assistant."];
