@@ -285,9 +285,10 @@ pub fn unwrap_hashline_header_path(target: &str) -> &str {
 	if path.is_empty() { target } else { path }
 }
 
-/// Snapshot key: the deepest existing ancestor canonicalized (symlinks
-/// resolved, Windows verbatim prefix stripped) with the missing tail
-/// re-appended, so a path keeps one key before and after it is created.
+/// Snapshot key that stays the same before and after the path is created.
+///
+/// The deepest existing ancestor is canonicalized (symlinks resolved, Windows
+/// verbatim prefix stripped) and the missing tail re-appended.
 ///
 /// Falls back to `realpath`, parent realpath plus basename, or the input
 /// unchanged only when a missing tail component is a dangling symlink or
