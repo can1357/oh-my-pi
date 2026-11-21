@@ -30,10 +30,14 @@ pub enum PhaseSpec {
 	/// A model turn driven by this prompt.
 	Prompt {
 		/// Instruction text installed as the child's turn input.
-		text:     Str,
+		text:            Str,
 		/// A delegated executor that runs the turn instead of a native OMP kernel
 		/// (ADR 0052 D1, D6). `None` runs natively.
-		executor: Option<Str>,
+		executor:        Option<Str>,
+		/// Accept the phase on its completion claim without verification
+		/// evidence. When `false` (default), the phase requires verification
+		/// evidence to pass (ADR 0053 O1 — unverified-by-default).
+		accept_on_claim: bool,
 	},
 	/// A process whose exit status decides the outcome.
 	Command {
@@ -252,7 +256,11 @@ fn lower(
 					if declared.executor.is_some() && declared.requires != Requirement::default() {
 						return Err(DefinitionError::ExecutorWithRequirement { phase: name });
 					}
-					PhaseSpec::Prompt { text: prompt, executor: declared.executor }
+					PhaseSpec::Prompt {
+						text:            prompt,
+						executor:        declared.executor,
+						accept_on_claim: declared.accept_on_claim,
+					}
 				},
 				PhaseKind::Code => {
 					if declared.executor.is_some() {
@@ -315,26 +323,28 @@ struct FileWorkflow {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FilePhase {
-	name:         Str,
-	kind:         PhaseKind,
+	name:            Str,
+	kind:            PhaseKind,
 	#[serde(default)]
-	depends_on:   Option<Vec<Str>>,
+	depends_on:      Option<Vec<Str>>,
 	#[serde(default)]
-	inputs:       Vec<Str>,
+	inputs:          Vec<Str>,
 	#[serde(default = "retry")]
-	on_reject:    OnReject,
+	on_reject:       OnReject,
 	#[serde(default)]
-	requires:     Requirement,
+	requires:        Requirement,
 	#[serde(default)]
-	prompt:       Option<Str>,
+	prompt:          Option<Str>,
 	#[serde(default)]
-	executor:     Option<Str>,
+	executor:        Option<Str>,
 	#[serde(default)]
-	command:      Option<Vec<Str>>,
+	accept_on_claim: bool,
 	#[serde(default)]
-	cwd:          Option<Str>,
+	command:         Option<Vec<Str>>,
 	#[serde(default)]
-	verification: Option<NativeVerificationSpec>,
+	cwd:             Option<Str>,
+	#[serde(default)]
+	verification:    Option<NativeVerificationSpec>,
 }
 
 /// Matches `Phase::new`, whose undeclared rejection route is a retry.
@@ -370,8 +380,9 @@ prompt = "Implement it."
 		assert_eq!(
 			definition.spec(PhaseName::from_ref("build")),
 			Some(&PhaseSpec::Prompt {
-				text:     Str::new_static("Implement it."),
-				executor: Some(Str::new_static("codex")),
+				text:            Str::new_static("Implement it."),
+				executor:        Some(Str::new_static("codex")),
+				accept_on_claim: false,
 			})
 		);
 	}
@@ -458,7 +469,11 @@ prompt = "Judge it."
 		assert_eq!(definition.workflow().phases().len(), 3);
 		assert_eq!(
 			definition.spec(PhaseName::from_ref("build")),
-			Some(&PhaseSpec::Prompt { text: Str::new_static("Implement it."), executor: None })
+			Some(&PhaseSpec::Prompt {
+				text:            Str::new_static("Implement it."),
+				executor:        None,
+				accept_on_claim: false,
+			})
 		);
 		assert_eq!(
 			definition.spec(PhaseName::from_ref("test")),

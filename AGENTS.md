@@ -96,8 +96,8 @@ all recipes.
 CI (`.github/workflows/ci.yml`): authoritative Cargo-only gate. Format,
 licences, runtime-symbol contracts and a second workspace lint on Linux;
 workspace tests and the e2e acceptance proofs on arm64 macOS and Linux (P7 also
-on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P12, P14 and
-`tool_sources` (P13 is not, and is the one gap) (`ci.yml` says which job runs which; keep it and `just e2e` in
+on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P14 and
+`tool_sources` (`ci.yml` says which job runs which; keep it and `just e2e` in
 step). P12 needs Seatbelt, so it gates on the macOS job: it skips off macOS,
 and on macOS a failed Seatbelt probe fails it.
 CI job selection uses `.github/ci-job-paths.json` and `scripts/ci_scope.py`:
@@ -837,3 +837,13 @@ Every final report must include:
 - No numeric coverage target. Coverage = changed observable behavior defended:
   branch edges, precedence, state transitions, malformed input, cancellation,
   recovery. Narrow test → affected crate → relevant E2E proof.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues for `blyzer/oh-my-pi`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout: root glossary and `docs/adr/`. See `docs/agents/domain.md`.

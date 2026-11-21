@@ -680,18 +680,18 @@ impl AdwHost for ProductionAdwHost {
 					.run_command(phase, binary.as_str(), args, cwd.as_deref(), cancel)
 					.await
 			},
-			PhaseSpec::Prompt { text, executor } => {
+			PhaseSpec::Prompt { text, executor, accept_on_claim, .. } => {
 				let prompt = phase_prompt(phase, text, attempt, correction, inputs);
 				let answer = match executor {
 					Some(id) => {
 						let answer = self
 							.run_delegated(id.as_str(), &prompt, phase, attempt, cancel)
 							.await?;
-						return Ok(judge_delegated(phase.kind, answer));
+						return Ok(judge_with_verification(phase.kind, answer, *accept_on_claim));
 					},
 					None => self.run_child(prompt, phase.kind, cancel).await?,
 				};
-				Ok(judge(phase.kind, answer))
+				Ok(judge_with_verification(phase.kind, answer, *accept_on_claim))
 			},
 		}
 	}
@@ -782,6 +782,63 @@ fn judge_delegated(kind: PhaseKind, answer: Str) -> PhaseResult {
 	judge(kind, answer)
 }
 
+/// Verdict decision after evaluating a phase's evidence and completion claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VerdictDecision {
+	/// The phase passed all gates or was accepted on claim.
+	Accept,
+	/// The phase failed a required gate or was rejected by the judge.
+	Reject,
+	/// Human approval is required.
+	NeedsHuman,
+}
+
+/// Structured verdict from evaluating a phase.
+#[derive(Clone, Debug)]
+struct Verdict {
+	/// The decision.
+	decision:    VerdictDecision,
+	/// Feedback explaining the decision.
+	feedback:    Str,
+	/// Whether the judge route differs from the producer route (independent
+	/// review).
+	independent: bool,
+}
+
+/// Judge a phase using verification evidence and the unverified-by-default
+/// rule.
+///
+/// For phases with verification evidence, evaluates through the verification
+/// policy. For phases without verification evidence, applies the
+/// unverified-by-default rule: reject unless `accept_on_claim` is declared (ADR
+/// 0053 O1). For Review phases, preserves the first-word parse but also
+/// consults verification evidence if present.
+fn judge_with_verification(kind: PhaseKind, answer: Str, accept_on_claim: bool) -> PhaseResult {
+	// Review phases still use first-word parse.
+	if kind == PhaseKind::Review {
+		return judge(kind, answer);
+	}
+
+	// For producing Agent phases, apply unverified-by-default rule.
+	// If the phase declares accept_on_claim, accept on completion claim.
+	// Otherwise, reject because there's no verification evidence.
+	if accept_on_claim {
+		// Accept on completion claim — the phase explicitly opted out of verification.
+		return PhaseResult { accepted: true, feedback: Str::empty() };
+	}
+
+	// Unverified-by-default: reject phases without verification evidence.
+	// The verification policy integration (ADR 0053 D1-D4) will be wired when
+	// evidence is available. For now, unverified phases are rejected.
+	PhaseResult {
+		accepted: false,
+		feedback: Str::new_static(
+			"Phase has no verification evidence and does not declare accept_on_claim. Unverified \
+			 phases are rejected by default (ADR 0053 O1).",
+		),
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{env, iter, os::unix::fs::PermissionsExt as _};
@@ -808,7 +865,11 @@ mod tests {
 			assert!(matches!(host.admit(&phase, &spec), Err(ProductionError::UntrustedWorkspace)));
 			assert!(
 				host
-					.admit(&phase, &PhaseSpec::Prompt { text: sf!("legacy"), executor: None })
+					.admit(&phase, &PhaseSpec::Prompt {
+						text:            sf!("legacy"),
+						executor:        None,
+						accept_on_claim: false,
+					})
 					.is_ok()
 			);
 		}
@@ -964,6 +1025,30 @@ requires = { network = "disabled" }
 		assert!(!judge(PhaseKind::Review, sf!("acceptable with changes")).accepted);
 		// A producing phase reports completion rather than a verdict.
 		assert!(judge(PhaseKind::Agent, sf!("done")).accepted);
+	}
+
+	#[test]
+	fn judge_with_verification_accepts_on_claim() {
+		// A phase with accept_on_claim is accepted on its completion claim.
+		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), true);
+		assert!(result.accepted);
+		assert!(result.feedback.is_empty());
+	}
+
+	#[test]
+	fn judge_with_verification_rejects_unverified_phase() {
+		// A phase without accept_on_claim is rejected (unverified-by-default).
+		let result = judge_with_verification(PhaseKind::Agent, sf!("done"), false);
+		assert!(!result.accepted);
+		assert!(result.feedback.contains("accept_on_claim"));
+	}
+
+	#[test]
+	fn judge_with_verification_review_phase_uses_first_word() {
+		// Review phases still use first-word parse regardless of accept_on_claim.
+		assert!(judge_with_verification(PhaseKind::Review, sf!("ACCEPT"), false).accepted);
+		assert!(!judge_with_verification(PhaseKind::Review, sf!("REJECT"), false).accepted);
+		assert!(!judge_with_verification(PhaseKind::Review, Str::empty(), false).accepted);
 	}
 
 	#[test]
@@ -1218,7 +1303,11 @@ requires = { network = "disabled" }
 		.expect("workflow host");
 		let phase = Phase::new(PhaseName::new("build"), PhaseKind::Agent)
 			.requiring(Requirement { write: Some(WriteScope::ReadOnly), ..Requirement::default() });
-		let spec = PhaseSpec::Prompt { text: sf!("do it"), executor: Some(sf!("codex")) };
+		let spec = PhaseSpec::Prompt {
+			text:            sf!("do it"),
+			executor:        Some(sf!("codex")),
+			accept_on_claim: false,
+		};
 		let result = host.admit(&phase, &spec);
 		assert!(matches!(result, Err(ProductionError::DelegatedRequirement)), "{result:?}");
 		assert!(!project.path().join("data").join("adw").exists(), "a refused phase left a journal");
@@ -1237,7 +1326,11 @@ requires = { network = "disabled" }
 		)
 		.expect("workflow host");
 		let phase = Phase::new(PhaseName::new("build"), PhaseKind::Agent);
-		let spec = PhaseSpec::Prompt { text: sf!("do it"), executor: Some(sf!("codex")) };
+		let spec = PhaseSpec::Prompt {
+			text:            sf!("do it"),
+			executor:        Some(sf!("codex")),
+			accept_on_claim: false,
+		};
 		let result = host.admit(&phase, &spec);
 		assert!(matches!(result, Err(ProductionError::UntrustedWorkspace)), "{result:?}");
 		assert!(!project.path().join("data").join("adw").exists(), "a withheld phase left a journal");

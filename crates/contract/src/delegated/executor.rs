@@ -206,3 +206,53 @@ pub trait DelegatedSession: Send {
 	/// [`ExecutorError::TeardownFailed`] when the tree could not be reaped.
 	fn terminate(&mut self) -> impl Future<Output = Result<(), ExecutorError>> + Send + '_;
 }
+
+/// Unified executor contract covering native OMP2 and delegated executors.
+///
+/// ADR 0052 D5: native OMP2 is an executor behind the same interface as
+/// delegated executors, so a workflow can move a phase between native and
+/// delegated without edits. The trait covers Subagent and Execution JobKind
+/// shapes only — Tool and Process stay in the job board since they are
+/// single-turn.
+pub trait Executor: Send + Sync {
+	/// What this executor declares about itself.
+	fn capabilities(&self) -> &Capabilities;
+
+	/// Executes a work assignment and returns evidence (not a verdict).
+	///
+	/// The executor reports evidence; ADW alone decides acceptance from
+	/// evidence, gates, and an independent verdict (ADR 0053 D1).
+	fn execute(
+		&self,
+		assignment: WorkAssignment,
+	) -> impl Future<Output = Result<WorkOutcome, ExecutorError>> + Send;
+
+	/// Cancels an in-flight turn.
+	fn cancel(&self, turn: TurnId) -> impl Future<Output = Result<(), ExecutorError>> + Send;
+}
+
+/// A work item to be executed by an [`Executor`].
+#[derive(Clone, Debug)]
+pub struct WorkAssignment {
+	/// The prompt or command to execute.
+	pub prompt:  DelegatedPrompt,
+	/// Maximum time for this assignment.
+	pub timeout: Duration,
+}
+
+/// The outcome of executing a [`WorkAssignment`].
+#[derive(Clone, Debug)]
+pub enum WorkOutcome {
+	/// The work completed with evidence.
+	Accepted {
+		/// The answer or output produced.
+		answer: omp_core::Str,
+	},
+	/// The work was rejected.
+	Rejected {
+		/// Feedback explaining the rejection.
+		feedback: omp_core::Str,
+	},
+	/// The work was cancelled.
+	Cancelled,
+}

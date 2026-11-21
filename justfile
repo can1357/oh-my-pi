@@ -367,6 +367,11 @@ e2e-p11:
 e2e-p12:
     cargo nextest run -p omp-e2e --test p12_daemon_approvals --locked
 
+# Run proof P13: remote execution via the `omp-exec` backend.
+[group('e2e')]
+e2e-p13:
+    cargo nextest run -p omp-e2e --test p13_remote_exec --locked
+
 # Run proof P14: a read-only observer converges over the owner socket and cannot steer.
 [group('e2e')]
 e2e-p14:
@@ -400,9 +405,9 @@ remote-p8-baseline:
 e2e-tool-sources:
     cargo nextest run -p omp-e2e --test tool_sources --locked
 
-# Run every P1-P12 and P14 proof plus the tool-sources check (CI runs P1-P8 and P12 on macOS, plus P7, P9, P10, P11, P14 and tool_sources on Linux).
+# Run every P1-P14 proof plus the tool-sources check (CI runs P1-P8 and P12 on macOS, plus P7, P9-P14 and tool_sources on Linux).
 [group('e2e')]
-e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10 e2e-p11 e2e-p12 e2e-p14 e2e-tool-sources e2e-p8
+e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10 e2e-p11 e2e-p12 e2e-p13 e2e-p14 e2e-tool-sources e2e-p8
 
 # ---------------------------------------------------------------------------
 # LLM catalog & compat cascade (crates/catalog)

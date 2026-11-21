@@ -579,7 +579,7 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
-  # P9, P10, P11 and tool_sources were only ever run by `just e2e`. Nothing in them
+  # P9-P14 and tool_sources were only ever run by `just e2e`. Nothing in them
   # needs macOS: they drive the production environment host, document
   # authority and embedded-Python extension host over unix sockets and
   # scratch roots, with no PTY and no Apple-only code path. They therefore
@@ -588,7 +588,7 @@ jobs:
   # Both jobs build the same omp-e2e test graph, so they share one Cargo
   # cache entry; this job is its only writer.
   p9_p10_linux:
-    name: Acceptance proofs P9, P10 and tool sources (Linux)
+    name: Acceptance proofs P9-P14 and tool sources (Linux)
     needs: [format, changes]
     if: ${{ !cancelled() && needs.changes.outputs.p9_p10_linux != 'false' }}
     runs-on: ubuntu-24.04
@@ -659,7 +659,7 @@ jobs:
       # `--profile ci` gives e2e tests the whole machine one at a time
       # (`threads-required = "num-cpus"` in .config/nextest.toml), so these
       # proofs never race for sockets or the shared embedded interpreter.
-      - name: Run proofs P9, P10, P11 and P14
+      - name: Run proofs P9-P14
         run: |
           cargo nextest run --profile ci -p omp-e2e --locked \
             --test p9_isolation \
@@ -668,6 +668,7 @@ jobs:
             --test p9_continuation_grants \
             --test p10_lift_idempotence \
             --test p11_collab_spectator \
+            --test p13_remote_exec \
             --test p14_session_attach
 
       - name: Run tool source routing check

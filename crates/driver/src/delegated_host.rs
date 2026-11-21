@@ -54,10 +54,10 @@ use std::{
 
 use flume::Sender;
 use omp_agent::delegated::{
-	ActiveSession, Capabilities, DelegatedEvent, DelegatedExecutor, DelegatedPolicy,
-	DelegatedPrompt, ExecutionMode, ExecutorError, ExecutorId, LifecycleEvent, PermissionResolver,
-	PromptRole, PromptSection, SessionRequest, TurnInput, TurnLimits, TurnReport, UnknownAuth,
-	start_session,
+	ActiveSession, Capabilities, CliVersion, DelegatedEvent, DelegatedExecutor, DelegatedPolicy,
+	DelegatedPrompt, ExecutionMode, ExecutorError, ExecutorId, FeatureSet, LifecycleEvent,
+	PermissionResolver, PromptRole, PromptSection, SessionRequest, TurnInput, TurnLimits,
+	TurnReport, UnknownAuth, VersionRange, start_session,
 };
 use omp_con::Ctx;
 use omp_core::{Hash32, Str};
@@ -100,8 +100,11 @@ pub fn codex_profile(ctx: &Ctx) -> ExecutorProfile {
 
 /// A resolved executor, usable without heap allocation on the turn hot path.
 ///
-/// Variants are ordered: `Codex` first, then the operator-enabled ACP CLIs.
+/// Variants are ordered: `Native` first (ADR 0052 D5), then `Codex`, then the
+/// operator-enabled ACP CLIs.
 pub enum ExecutorKind {
+	/// Native OMP2 child-kernel path (ADR 0052 D5).
+	Native,
 	/// The Codex CLI adapter.
 	Codex(CodexExecutor),
 	/// An ACP agent CLI (dsh, Devin, Grok) under its launch profile.
@@ -113,6 +116,12 @@ impl ExecutorKind {
 	#[must_use]
 	pub fn id(&self) -> &ExecutorId {
 		match self {
+			Self::Native => {
+				// Native executor uses a static id
+				use std::sync::LazyLock;
+				static NATIVE_ID: LazyLock<ExecutorId> = LazyLock::new(|| ExecutorId::new("native"));
+				&NATIVE_ID
+			},
 			Self::Codex(e) => &e.capabilities().executor,
 			Self::Acp(e) => &e.capabilities().executor,
 		}
@@ -122,6 +131,20 @@ impl ExecutorKind {
 	#[must_use]
 	pub fn capabilities(&self) -> &Capabilities {
 		match self {
+			Self::Native => {
+				use std::sync::LazyLock;
+				static NATIVE_CAPS: LazyLock<Capabilities> = LazyLock::new(|| Capabilities {
+					executor: ExecutorId::new("native"),
+					mode:     ExecutionMode::CliManaged,
+					versions: VersionRange {
+						min_inclusive: CliVersion::new(0, 0, 0),
+						max_exclusive: None,
+					},
+					features: FeatureSet::EMPTY,
+					policies: Box::new([]),
+				});
+				&NATIVE_CAPS
+			},
 			Self::Codex(e) => e.capabilities(),
 			Self::Acp(e) => e.capabilities(),
 		}
@@ -139,11 +162,13 @@ pub struct ExecutorRegistry {
 
 impl ExecutorRegistry {
 	/// Builds a registry from `ctx`, constructing each executor from the
-	/// operator-controlled profile convars.
+	/// operator-controlled profile convars. Native OMP2 is always registered
+	/// first (ADR 0052 D5).
 	#[must_use]
 	pub fn from_ctx(ctx: &Ctx) -> Self {
 		let profile = codex_profile(ctx);
-		let mut executors = vec![ExecutorKind::Codex(CodexExecutor::new(profile.program))];
+		let mut executors =
+			vec![ExecutorKind::Native, ExecutorKind::Codex(CodexExecutor::new(profile.program))];
 		executors.extend(
 			crate::delegated_acp::enabled_executors(ctx)
 				.into_iter()
@@ -359,6 +384,11 @@ pub async fn run_delegated_turn<R: PermissionResolver>(
 	session: &mut Session,
 ) -> Result<TurnReport, DelegatedHostError> {
 	match registry.get(executor_id) {
+		Some(ExecutorKind::Native) => {
+			// Native executor runs through run_child in production.rs,
+			// not through the delegated turn path.
+			Err(DelegatedHostError::UnknownExecutor { id: executor_id.clone() })
+		},
 		Some(ExecutorKind::Codex(executor)) => {
 			run_turn_on(executor, request, input, limits, &mut resolver, cancel, events, session).await
 		},
