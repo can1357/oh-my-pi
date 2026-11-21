@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Fixed RAR4 extraction stalling for seconds per filter on archives that declare an out-of-range delta filter channel count; such archives are now rejected as corrupt.
 - Fixed `formatAge` to display durations of one year or more in years, such as `23y ago`, instead of months.
 
 ## [19.0.0] - 2026-11-18
