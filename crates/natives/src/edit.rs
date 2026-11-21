@@ -567,11 +567,11 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlAnswer {
 }
 
 fn url_answer(url: &str, answer: EditUrlResolution) -> UrlAnswer {
-	if answer.deferred.unwrap_or(false) {
-		return UrlAnswer::Pending;
-	}
 	if let Some(error) = answer.error {
 		return UrlAnswer::Refused(error);
+	}
+	if answer.deferred.unwrap_or(false) {
+		return UrlAnswer::Pending;
 	}
 	let Some(path) = answer.path else {
 		let kind = if answer.content.is_some() {
@@ -1178,6 +1178,18 @@ mod tests {
 			error:         None,
 			plan_writable: false,
 		})
+	}
+
+	#[test]
+	fn resolver_error_takes_precedence_over_deferred() {
+		let answer = url_answer("ssh://host/notes.txt", EditUrlResolution {
+			path:          None,
+			content:       None,
+			deferred:      Some(true),
+			error:         Some("Host denied the edit".into()),
+			plan_writable: false,
+		});
+		assert!(matches!(answer, UrlAnswer::Refused(message) if message == "Host denied the edit"));
 	}
 
 	#[test]
