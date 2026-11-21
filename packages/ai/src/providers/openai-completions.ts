@@ -150,7 +150,7 @@ import {
 
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
 
-const OPENAI_TOOL_CALL_ID_MAX_LENGTH = 40;
+export const OPENAI_TOOL_CALL_ID_MAX_LENGTH = 40;
 
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
 
@@ -2696,6 +2696,40 @@ export function getReasoningOpaqueReplay(
 	return opaque === undefined ? undefined : { opaque, text };
 }
 
+interface CompletionsToolCallIdCompat {
+	requiresMistralToolIds?: boolean;
+	usesOpenAIToolCallIdLimit?: boolean;
+}
+
+/** Normalize before dedup for foreign turns, or at encode time for the target's own turns. */
+export function normalizeCompletionsToolCallId(
+	id: string,
+	compat: CompletionsToolCallIdCompat | undefined,
+	isSameModelSource: boolean,
+): string {
+	if (compat?.requiresMistralToolIds) return normalizeMistralToolId(id, true);
+	// A pipe is a literal part of a same-model Chat Completions correlation ID.
+	const pipe = isSameModelSource ? -1 : id.indexOf("|");
+	if (pipe !== -1) return normalizeToolCallId(id.slice(0, pipe), OPENAI_TOOL_CALL_ID_MAX_LENGTH);
+	return compat?.usesOpenAIToolCallIdLimit && id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH
+		? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH)
+		: id;
+}
+
+/** Whether encoding an opaque replay turn changes any of its provider-issued IDs. */
+export function completionsRewritesToolCallId(
+	turn: AssistantMessage,
+	compat: CompletionsToolCallIdCompat | undefined,
+): boolean {
+	for (const block of turn.content) {
+		if (block.type !== "toolCall") continue;
+		if (typeof block.id !== "string") return true;
+		const normalized = normalizeCompletionsToolCallId(block.id, compat, true);
+		if (normalized !== block.id || normalized.trim().length === 0) return true;
+	}
+	return false;
+}
+
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -2709,30 +2743,10 @@ export function convertMessages(
 			? OPENAI_TOOL_CALL_ID_MAX_LENGTH
 			: undefined;
 	const duplicateToolCallIdSuffixPrefix = compat.requiresMistralToolIds ? "dup" : undefined;
-	const normalizeCompletionsToolCallId = (id: string, source?: AssistantMessage): string => {
-		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id, true);
-
-		const isSameModelSource =
-			source !== undefined &&
-			source.provider === model.provider &&
-			source.api === model.api &&
-			source.model === model.id;
-		// Cross-model replay converts OpenAI Responses composite IDs from
-		// `{call_id}|{item_id}` to the Chat Completions `call_id`. Same-model
-		// Chat Completions IDs are provider-issued opaque correlation tokens.
-		if (!isSameModelSource && id.includes("|")) {
-			const [callId] = id.split("|");
-			return normalizeToolCallId(callId, OPENAI_TOOL_CALL_ID_MAX_LENGTH);
-		}
-
-		if (compat.usesOpenAIToolCallIdLimit)
-			return id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH ? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH) : id;
-		return id;
-	};
 	const transformedMessages = transformMessages(
 		context.messages,
 		model,
-		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
+		(id, _target, source) => normalizeCompletionsToolCallId(id, compat, isSameModelTurn(source, model)),
 		maxNormalizedToolCallIdLength,
 		duplicateToolCallIdSuffixPrefix,
 		compat,
@@ -2765,7 +2779,11 @@ export function convertMessages(
 	};
 
 	const ensureToolCallId = (rawId: string, seed: string, source?: AssistantMessage): string => {
-		const normalized = normalizeCompletionsToolCallId(rawId, source);
+		const normalized = normalizeCompletionsToolCallId(
+			rawId,
+			compat,
+			source !== undefined && isSameModelTurn(source, model),
+		);
 		if (normalized.trim().length > 0) return normalized;
 		return generateFallbackToolCallId(seed);
 	};
