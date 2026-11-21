@@ -953,6 +953,9 @@ export class OutputSink {
 	#headBytes = 0;
 	#headLines = 0; // newline count inside #head
 	#headRetentionDisabled = false;
+	// Set once a chunk split at the head limit sent bytes to the tail: later bytes must not
+	// refill residual head room (a multibyte char can leave some), or they would precede the tail.
+	#headClosed = false;
 	#totalLines = 0; // newline count
 	#totalBytes = 0;
 	#sawData = false;
@@ -1193,6 +1196,7 @@ export class OutputSink {
 		this.#head = "";
 		this.#headBytes = 0;
 		this.#headLines = 0;
+		this.#headClosed = false;
 		this.#buffer = "";
 		this.#bufferBytes = 0;
 		this.#tailUntrimmed = false;
@@ -1248,7 +1252,12 @@ export class OutputSink {
 	#retain(capped: string, cappedBytes: number): void {
 		let tailChunk = capped;
 		let tailBytes = cappedBytes;
-		if (this.#headLimit > 0 && !this.#headRetentionDisabled && this.#headBytes < this.#headLimit) {
+		if (
+			this.#headLimit > 0 &&
+			!this.#headRetentionDisabled &&
+			!this.#headClosed &&
+			this.#headBytes < this.#headLimit
+		) {
 			const room = this.#headLimit - this.#headBytes;
 			if (cappedBytes <= room) {
 				this.#head += capped;
@@ -1256,7 +1265,8 @@ export class OutputSink {
 				this.#headLines += countNewlines(capped);
 				return;
 			}
-			// Split: head takes a UTF-8-safe prefix; remainder flows to tail.
+			// Split: head takes a UTF-8-safe prefix; remainder flows to tail. The head is closed after.
+			this.#headClosed = true;
 			const headSlice = truncateHeadBytes(capped, room);
 			if (headSlice.bytes > 0) {
 				this.#head += headSlice.text;

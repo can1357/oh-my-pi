@@ -920,6 +920,30 @@ describe("OutputSink head-retain mode", () => {
 		expect(dumped.elidedBytes).toBeUndefined();
 	});
 
+	test("a multibyte char leaving head room does not let later output precede the tail", async () => {
+		// 342 euro signs are 1026 bytes: 341 fit the 1024-byte head window (1023 bytes), leaving
+		// 1 byte of room that the next push must not refill.
+		const sink = new OutputSink({ maxColumns: 2048, headBytes: 1024, spillThreshold: 100_000 });
+		await sink.push("€".repeat(342));
+		await sink.push("abc");
+		const dumped = await sink.dump();
+		expect(dumped.output).toBe(`${"€".repeat(342)}abc`);
+		expect(dumped.truncated).toBe(false);
+	});
+
+	test("a multibyte char leaving head room keeps one push's first line before its rest", async () => {
+		const sink = new OutputSink({
+			maxColumns: 2048,
+			headBytes: 1024,
+			spillThreshold: 100_000,
+			exemptSingleLine: () => true,
+		});
+		const text = `${"€".repeat(342)}\nabc`;
+		await sink.push(text);
+		const dumped = await sink.dump();
+		expect(dumped.output).toBe(text);
+	});
+
 	test("replace + push appends to tail and emits no elision marker", async () => {
 		// Simulates the bash-minimizer flow: large raw stream is replaced with a
 		// short minimized text, then an artifact-link line is pushed. The push
