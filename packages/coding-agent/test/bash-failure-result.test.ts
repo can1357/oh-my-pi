@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -10,6 +10,7 @@ import { Shell } from "@oh-my-pi/pi-natives";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
 import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 afterEach(() => {
 	mock.restore();
@@ -33,6 +34,49 @@ function makeSession(): ToolSession {
 		}),
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;
+}
+
+/** Stubs the shell so a failing `pnpm lint` streams `rawOutput` and reports `minimizedText` as its summary. */
+function mockMinimizedRun(rawOutput: string, minimizedText: string): void {
+	spyOn(Shell.prototype, "run").mockImplementation(function (this: Shell, _options, onChunk) {
+		onChunk?.(null, rawOutput);
+		return Promise.resolve({
+			exitCode: 1,
+			cancelled: false,
+			timedOut: false,
+			workingDir: process.cwd(),
+			minimized: {
+				filter: "lint",
+				text: minimizedText,
+				originalText: rawOutput,
+				inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
+				outputBytes: Buffer.byteLength(minimizedText, "utf-8"),
+			},
+		});
+	});
+}
+
+/** A session whose artifact allocator hands out sequential ids like the session's spill manager, recording each in `allocated`. */
+function sessionWithArtifacts(dir: string, allocated: string[] = []): ToolSession {
+	return {
+		...makeSession(),
+		allocateOutputArtifact: async () => {
+			const id = String(allocated.length + 1);
+			allocated.push(id);
+			return { id, path: path.join(dir, `${id}.log`) };
+		},
+	} as unknown as ToolSession;
+}
+
+/** Runs `fn` with fresh in-memory global settings (executeBash reads them), pinning defaults over any user config. */
+async function withGlobalSettings<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true, cwd: dir });
+	try {
+		return await fn();
+	} finally {
+		resetSettingsForTest();
+	}
 }
 
 describe("BashTool execution results", () => {
@@ -239,33 +283,11 @@ describe("BashTool execution results", () => {
 	it("records the minimizer's filter and byte counts with the saved raw output", async () => {
 		const rawOutput = `${"src/a.ts:1:1 error TS2304 Cannot find name 'foo'\n".repeat(40)}`;
 		const minimizedText = "src/a.ts: 40 errors TS2304\n";
-		spyOn(Shell.prototype, "run").mockImplementation(function (this: Shell, _options, onChunk) {
-			onChunk?.(null, rawOutput);
-			return Promise.resolve({
-				exitCode: 1,
-				cancelled: false,
-				timedOut: false,
-				workingDir: process.cwd(),
-				minimized: {
-					filter: "lint",
-					text: minimizedText,
-					originalText: rawOutput,
-					inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
-					outputBytes: Buffer.byteLength(minimizedText, "utf-8"),
-				},
-			});
-		});
+		mockMinimizedRun(rawOutput, minimizedText);
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-meta-"));
 		// Sequential ids like the session's spill manager. Output that fits inline claims
 		// no spill, so the raw original gets the first id.
-		let nextId = 1;
-		const session = {
-			...makeSession(),
-			allocateOutputArtifact: async () => {
-				const id = String(nextId++);
-				return { id, path: path.join(artifactsDir, `${id}.log`) };
-			},
-		} as unknown as ToolSession;
+		const session = sessionWithArtifacts(artifactsDir);
 
 		try {
 			const args = { command: "pnpm lint" };
@@ -295,6 +317,62 @@ describe("BashTool execution results", () => {
 				bashToolRenderer.describeResult(result, { expanded: false, isPartial: false }, args),
 			);
 			expect(view).toContain("Minimized lint 1.9KB → 27B");
+		} finally {
+			await fs.rm(artifactsDir, { recursive: true, force: true });
+		}
+	});
+
+	// With a trailing newline the footer follows it; without one the footer push brings the newline itself.
+	it.each([
+		{ ending: "a trailing newline", minimizedText: `${"x".repeat(2000)}\n` },
+		{ ending: "no trailing newline", minimizedText: "x".repeat(2000) },
+	])(
+		"claims no output artifact when a wide one-line minimized summary with $ending meets its footer",
+		async ({ minimizedText }) => {
+			const rawOutput = `${"src/a.ts:1:1 error TS2304 Cannot find name 'foo'\n".repeat(40)}`;
+			mockMinimizedRun(rawOutput, minimizedText);
+			const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-wide-"));
+			const allocated: string[] = [];
+			const session = sessionWithArtifacts(artifactsDir, allocated);
+
+			try {
+				await withGlobalSettings(artifactsDir, async () => {
+					const result = await new BashTool(session).execute("call-minimized-wide", { command: "pnpm lint" });
+
+					// Only the raw original is addressable; the sink must not claim a second artifact for the summary.
+					expect(allocated).toEqual(["1"]);
+					expect(result.details?.meta?.minimized?.artifactId).toBe("1");
+					expect(result.details?.meta?.truncation?.artifactId).toBeUndefined();
+					const text = result.content.find(c => c.type === "text")?.text ?? "";
+					expect(text).toContain(
+						"[output summarized by the lint filter; pipe through `| cat` for verbatim output]",
+					);
+					expect(text).toContain(formatRawOutputNotice("1"));
+					expect(text).not.toContain("local://2.log");
+				});
+			} finally {
+				await fs.rm(artifactsDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("bounds a minimized summary larger than the spill threshold to the inline budget", async () => {
+		const rawOutput = `${"src/a.ts:1:1 error TS2304 Cannot find name 'foo'\n".repeat(40)}`;
+		const minimizedText = "src/a.ts: error TS2304\n".repeat(3700);
+		mockMinimizedRun(rawOutput, minimizedText);
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-large-"));
+		const session = sessionWithArtifacts(artifactsDir);
+
+		try {
+			await withGlobalSettings(artifactsDir, async () => {
+				const result = await new BashTool(session).execute("call-minimized-large", { command: "pnpm lint" });
+
+				expect(result.details?.meta?.truncation).toBeDefined();
+				const text = result.content.find(c => c.type === "text")?.text ?? "";
+				expect(Buffer.byteLength(text, "utf-8")).toBeLessThanOrEqual(DEFAULT_MAX_BYTES + 2048);
+				expect(text.split("[raw output: ").length - 1).toBe(1);
+				expect(text).toContain("[output summarized by the lint filter; pipe through `| cat` for verbatim output]");
+			});
 		} finally {
 			await fs.rm(artifactsDir, { recursive: true, force: true });
 		}
