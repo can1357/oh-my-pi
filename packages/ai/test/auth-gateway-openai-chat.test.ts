@@ -649,6 +649,49 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		);
 	});
 
+	describe("emits a function-level Gemini signature exactly once", () => {
+		const signedCall: ToolCall = {
+			type: "toolCall",
+			id: "call_portkey",
+			name: "check",
+			arguments: { value: "test" },
+			thoughtSignature: JSON.stringify({ function: "sig-fn" }),
+		};
+		const signatureDeltas = async (startCall: ToolCall) => {
+			const partial = emptyAssistant();
+			partial.content = [startCall];
+			const events: AssistantMessageEvent[] = [
+				{ type: "toolcall_start", contentIndex: 0, partial },
+				{ type: "toolcall_delta", contentIndex: 0, delta: '{"value":"test"}', partial },
+				{ type: "toolcall_end", contentIndex: 0, toolCall: signedCall, partial },
+				{ type: "done", reason: "toolUse", message: { ...partial, content: [signedCall], stopReason: "toolUse" } },
+			];
+			const payloads = (await collectStream(encodeStream(makeEventStream(events, partial), "gemini-test"))).map(
+				parseSseLine,
+			);
+			const toolDeltas: Array<{ index: number; id?: string; function?: { thought_signature?: string } }> = [];
+			for (const payload of payloads) {
+				if (typeof payload !== "object" || payload === null) continue;
+				const choices = Reflect.get(payload, "choices") as Array<{ delta: Record<string, unknown> }>;
+				const tc = choices[0].delta.tool_calls;
+				if (Array.isArray(tc)) toolDeltas.push(...(tc as typeof toolDeltas));
+			}
+			return toolDeltas.filter(t => t.function?.thought_signature !== undefined);
+		};
+
+		it("on the start chunk when the call is signed from the start", async () => {
+			const signed = await signatureDeltas(signedCall);
+			expect(signed).toHaveLength(1);
+			expect(signed[0]).toMatchObject({ id: "call_portkey", function: { thought_signature: "sig-fn" } });
+		});
+
+		it("in the end correction when only the settled call carries it", async () => {
+			const { thoughtSignature: _, ...unsignedCall } = signedCall;
+			const signed = await signatureDeltas(unsignedCall);
+			expect(signed).toEqual([{ index: 0, function: { thought_signature: "sig-fn" } }]);
+		});
+	});
+
 	it("emits an error envelope when the stream errors", async () => {
 		const partial = emptyAssistant();
 		const errorMessage: AssistantMessage = { ...partial, errorMessage: "upstream went away" };
