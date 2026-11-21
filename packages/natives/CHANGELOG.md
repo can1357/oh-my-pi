@@ -2,31 +2,14 @@
 
 ## [Unreleased]
 
-### Added
-
-- The `sd` shell builtin can require an exact match count with `--expect N` and show the applied changes with `-U N` or `--unified N`.
-
-- Added `ShellFilesystem.onFileChange`: the embedded shell reports each text file git would track that a command changed itself (a builtin's write, rename or removal; a redirection's target) with its content before and after
-- Added `diffLineRunsWithin(oldText, newText, maxEdits)`: `diffLineRuns` that returns `null` once more than `maxEdits` lines are added or removed, instead of spending time quadratic in the size of a wholesale rewrite
-- Added `enableConsoleVtInput()` and `restoreConsoleInputMode()`, which turn Windows console VT input on and back off without `bun:ffi`
-- Added redirected files to `PipeStreams`: a regular file a run's command redirects its output into (`>`, `>>`, `&>`) is listed with `file: true` and read from disk
-- Added `node` and `modified` to `PipeStreamInfo`: the run-trace node of the command writing each pipe or file (when the run has a trace) and when it was last written
-- Added `translateWindowsAltGrSequence()`, which recovers the text an AltGr chord produced on the active Windows keyboard layout when the console host reported it as an Alt chord
-
-### Changed
-
-- `TtyWriter` writes a terminal it cannot reopen (a PTY master, a TTY that is not yours after `su`, a sandbox that hides its path) through a duplicate instead of refusing it
-- `TtyWriter` ends each 16 KiB write where a row or a `write()` ends whenever one fits, so a large repaint is no longer cut inside a row or an escape sequence
-- `TtyWriter` turns Windows console VT processing back on when it finds it off, instead of printing escape sequences as text
-
 ### Fixed
 
-- The `sed` shell builtin accepts grouped scripts such as `1{h;d};2{G}` without a semicolon before the closing brace.
-- Fixed the native addon failing to load when HOME, PI_NATIVES_DIR or the install directory contains `?` ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
-- `commitCreate()` now reports a HEAD that moves after the expected-HEAD check, such as from a `commit-msg` hook, as a `HeadMoved` error instead of a generic `Backend` failure ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
-- Fixed macOS window reads losing a window once it is minimized: an AX snapshot or query of that exact window ID still reads its tree, marks the root `(minimized)`, and keeps its refs inspection-only until a visible read of the restored window completes; menu reads and commands report `WindowUnavailable` instead of restoring it or using a sibling's menu ([#19825](https://github.com/can1357/oh-my-pi/pull/19825) by [@baekjosh](https://github.com/baekjosh))
-- Fixed Windows window captures and accessibility trees of a fully covered window passing as current: for Chromium-based browsers and Electron apps, which can stop drawing while covered, they now report `covered` ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Windows `computer` `setValue` on a classic text box (Win32 and WinForms, including Windows 10 Notepad) bringing its window in front of yours, so the keys you typed next went into that box ([#19814](https://github.com/can1357/oh-my-pi/pull/19814) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed grouped `sed` scripts such as `1{h;d};2{G}` being rejected when no semicolon precedes a closing brace.
+- Fixed the native addon failing to load when `HOME`, `PI_NATIVES_DIR`, or the installation path contains `?`.
+- `commitCreate()` now reports a `HeadMoved` error when `HEAD` changes after the expected-HEAD check, including changes made by a `commit-msg` hook.
+- Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
+- Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
+- Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
 
 ## [19.0.1] - 2026-11-19
 

@@ -4,7 +4,7 @@
 
 ### Added
 
-- `Agent.setStandbyTools()` and `AgentContext.standbyTools` name inactive tools that may activate later; they reach the provider as `inactiveTools` until a request declares tools ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
+- Added standby tools support through `Agent.setStandbyTools()` and `AgentContext.standbyTools`, allowing tools to remain inactive until a request explicitly enables tool use.
 
 ## [19.0.0] - 2026-11-18
 
