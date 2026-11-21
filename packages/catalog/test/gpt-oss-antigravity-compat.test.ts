@@ -14,7 +14,7 @@ const ZERO_USAGE: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function createGptOssSpec(provider: "google-antigravity" | "google-gemini-cli"): ModelSpec<"google-gemini-cli"> {
+function createGptOssSpec(provider: "google-antigravity"): ModelSpec<"google-gemini-cli"> {
 	return {
 		id: "gpt-oss-120b",
 		name: "GPT OSS 120B",
@@ -33,9 +33,6 @@ describe("gpt-oss compat on Cloud Code Assist (Antigravity)", () => {
 	it("resolves supportsFunctionPartId as true via policy cascade", () => {
 		const agPolicy = resolveModelPolicy(createGptOssSpec("google-antigravity"));
 		expect(agPolicy.compat.supportsFunctionPartId).toBe(true);
-
-		const cliPolicy = resolveModelPolicy(createGptOssSpec("google-gemini-cli"));
-		expect(cliPolicy.compat.supportsFunctionPartId).toBe(true);
 	});
 
 	it("populates tool call id in functionCall and functionResponse for Antigravity gpt-oss", () => {

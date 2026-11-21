@@ -31,7 +31,7 @@ function registerPeer(id: string, status: "running" | "idle" = "running"): void 
 	});
 }
 
-function makeSession(options: { senderId?: string; deviceOnlyWrite?: boolean; planMode?: boolean } = {}): ToolSession {
+function makeSession(options: { senderId?: string; planMode?: boolean } = {}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -40,7 +40,6 @@ function makeSession(options: { senderId?: string; deviceOnlyWrite?: boolean; pl
 		getSessionSpawns: () => "*",
 		getAgentId: () => options.senderId ?? "Main",
 		agentRegistry: registry,
-		deviceOnlyWrite: options.deviceOnlyWrite,
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
 }
@@ -185,22 +184,18 @@ describe("write agent:// messaging", () => {
 		expect(received.get("Scout")).toEqual([]);
 	});
 
-	it("permits device-only and plan-mode messaging, but rejects path suffixes and empty content", async () => {
+	it("permits plan-mode messaging, but rejects path suffixes and empty content", async () => {
 		registerPeer("Scout");
-		const deviceOnly = new WriteTool(makeSession({ deviceOnlyWrite: true }));
 		const planMode = new WriteTool(makeSession({ planMode: true }));
-		expect(
-			(await deviceOnly.execute("device", { path: "agent://Scout", content: "from device" })).content[0],
-		).toMatchObject({ text: "Delivered to Scout." });
 		expect(
 			(await planMode.execute("plan", { path: "agent://Scout", content: "from plan" })).content[0],
 		).toMatchObject({ text: "Delivered to Scout." });
 		await expect(planMode.execute("suffix", { path: "agent://Scout/result", content: "oops" })).rejects.toThrow(
 			"JSON-path suffix",
 		);
-		await expect(deviceOnly.execute("empty", { path: "agent://Scout", content: "  " })).rejects.toThrow(
-			"non-empty content",
-		);
-		expect(received.get("Scout")?.map(message => message.body)).toEqual(["from device", "from plan"]);
+		await expect(
+			new WriteTool(makeSession()).execute("empty", { path: "agent://Scout", content: "  " }),
+		).rejects.toThrow("non-empty content");
+		expect(received.get("Scout")?.map(message => message.body)).toEqual(["from plan"]);
 	});
 });

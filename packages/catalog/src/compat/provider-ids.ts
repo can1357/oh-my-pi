@@ -37,7 +37,6 @@ export type KnownProvider =
 	| "gmi-cloud"
 	| "google"
 	| "google-antigravity"
-	| "google-gemini-cli"
 	| "google-vertex"
 	| "groq"
 	| "helmcode"

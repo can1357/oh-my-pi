@@ -316,7 +316,7 @@ describe("proc:// background jobs", () => {
 			})
 			.find(line => line.startsWith("proc://"));
 		expect(help).toMatch(/\/kill[^;]*jobs, agents, and services/);
-		// Service controls live in the on-demand reference (`xd://read/urls`), never unqualified in the always-on line.
+		// Service controls live in the on-demand reference (`help://read/urls`), never unqualified in the always-on line.
 		expect(help).not.toContain("stdin");
 		const reference = router.reference().find(line => line.startsWith("proc://"));
 		expect(reference).toMatch(/stdin[^;]*services.only/);
@@ -393,10 +393,7 @@ describe("proc:// background jobs", () => {
 		}
 	});
 
-	it.each([
-		{ label: "plan mode", deviceOnlyWrite: false },
-		{ label: "plan mode with device-only write", deviceOnlyWrite: true },
-	])("kills owned jobs under $label while stdin stays guarded (issue #13803)", async ({ deviceOnlyWrite }) => {
+	it("kills owned jobs under plan mode while stdin stays guarded (issue #13803)", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
 		const id = manager.register(
@@ -415,12 +412,9 @@ describe("proc:// background jobs", () => {
 			workflow: "parallel",
 			reentry: false,
 		});
-		session.deviceOnlyWrite = deviceOnlyWrite || undefined;
 		const write = new WriteTool(session);
 		try {
-			await expect(write.execute("stdin", { path: `proc://${id}`, content: "go" })).rejects.toThrow(
-				deviceOnlyWrite ? "limited to the xd:// device transport" : "Plan mode",
-			);
+			await expect(write.execute("stdin", { path: `proc://${id}`, content: "go" })).rejects.toThrow("Plan mode");
 			expect(manager.getJob(id)?.status).toBe("running");
 			const result = await write.execute("kill", { path: `proc://${id}/kill`, content: "" });
 			await manager.getJob(id)?.promise;
