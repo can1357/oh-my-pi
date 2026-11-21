@@ -135,7 +135,7 @@ From `types.ts` and `loader.ts`:
 - `zod`: injected Zod-compatible omptype builder
 - `typebox`: compatibility shim for legacy TypeBox-style schemas
 - `pi`: injected `@oh-my-pi/pi-coding-agent` exports
-- `pushPendingAction(action)`: stage a preview action that is finalized by writing a plain-text reason to `xd://resolve` or `xd://reject`
+- `pushPendingAction(action)`: stage a preview action that is finalized by running the `resolve` or `reject` command with a plain-text reason
 
 The loader starts with a no-op UI context and `hasUI: false`. Library hosts can
 call the returned `setUIContext(...)` when real UI is ready. Normal SDK
@@ -169,7 +169,8 @@ Although the public `CustomTool` type also declares `formatApprovalDetails`, `de
 - Session bootstrap wraps included SDK-provided and discovered custom tools as extension tool definitions; library consumers may instead use `CustomToolAdapter` directly.
 - They are inserted into the session tool registry by name.
 - Unrestricted SDK bootstrap auto-enables custom and extension-registered tools unless the effective registry winner is hidden/default-inactive. Explicit `toolNames` can enable hidden tools. Restricted sessions exclude SDK-provided custom tools unless `allowRestrictedCustomTools: true`, and expose an opted-in custom tool only when its name appears in `toolNames`; ambient filesystem tool discovery is skipped.
-- With `tools.xdev` enabled and the `read`/`write` transport available, enabled discoverable tools are mounted under `xd://` rather than advertised as top-level functions. Explicitly requested tools and essential tools stay top-level.
+- With `tools.commands` enabled and the `bash` tool active, enabled discoverable tools are mounted as bash tool commands rather than advertised as top-level functions; without an active `bash` tool they stay ordinary top-level tools. Explicitly requested tools and essential tools stay top-level.
+- A mounted tool is presented by its bare name: the system-prompt catalog lists it with a one-line summary (the tool's `summary`, else the first non-empty line of its description), and `<name> --help` prints usage derived from its JSON schema — required top-level scalars as positionals, every field also as a flag (`--flag value`; booleans `--flag` / `--no-flag`), and `-j '<json>'` for a raw arguments object.
 - CLI `--tools` validates against the fully discovered session registry, including registered custom tools. Unknown names and unavailable built-ins produce distinct errors.
 
 ## Rendering hooks

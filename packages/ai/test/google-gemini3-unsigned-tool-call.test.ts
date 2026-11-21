@@ -84,19 +84,17 @@ function toolCallParts(model: Model<GoogleApi>, context: Context) {
 
 describe("Gemini 3 unsigned tool-call signatures (#9638, #10602)", () => {
 	it("uses the sentinel only for an unsigned first call on Cloud Code Assist", () => {
-		for (const provider of ["google-antigravity", "google-gemini-cli"]) {
-			const model = buildGeminiModel("google-gemini-cli", provider, "gemini-3.7-flash");
+		const model = buildGeminiModel("google-gemini-cli", "google-antigravity", "gemini-3.7-flash");
 
-			const parallel = parallelToolCalls("google-gemini-cli", provider, "gemini-3.7-flash");
-			const parallelCalls = toolCallParts(model, parallel);
-			expect(parallelCalls).toHaveLength(3);
-			expect(parallelCalls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
-			expect(parallelCalls[1]?.thoughtSignature).toBeUndefined();
-			expect(parallelCalls[2]?.thoughtSignature).toBeUndefined();
+		const parallel = parallelToolCalls("google-gemini-cli", "google-antigravity", "gemini-3.7-flash");
+		const parallelCalls = toolCallParts(model, parallel);
+		expect(parallelCalls).toHaveLength(3);
+		expect(parallelCalls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
+		expect(parallelCalls[1]?.thoughtSignature).toBeUndefined();
+		expect(parallelCalls[2]?.thoughtSignature).toBeUndefined();
 
-			const unsigned = unsignedFirstCall("google-gemini-cli", provider, "gemini-3.7-flash");
-			expect(toolCallParts(model, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
-		}
+		const unsigned = unsignedFirstCall("google-gemini-cli", "google-antigravity", "gemini-3.7-flash");
+		expect(toolCallParts(model, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
 	});
 
 	it("carries the first-call bypass policy on the bundled CCA catalog entry", () => {

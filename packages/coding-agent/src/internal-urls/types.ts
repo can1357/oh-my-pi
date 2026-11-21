@@ -25,7 +25,6 @@ import type { ToolSession } from "../tools";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg-render";
-import type { XdevRenderDispatch } from "@oh-my-pi/pi-tui/tools/xdev";
 import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 
 /** Render state and prewalk facts a handler write attaches to the `write` tool result. */
@@ -33,13 +32,12 @@ export interface InternalWriteDetails {
 	message?: CoordinationDetails;
 	proc?: ProcWriteDetails;
 	cfg?: CfgWriteDetails;
-	xdev?: XdevRenderDispatch;
 	/** Absolute file the write landed in, for the transcript card's file link (conflict://). */
 	resolvedPath?: string;
 	/**
 	 * The write changed no files (process stdin, service mode), so the prewalk gate must not read
-	 * it as implementation work. Unlike {@link SchemeWritePolicy.cancels}, the plan-mode and
-	 * device-only gates still apply.
+	 * it as implementation work. Unlike {@link SchemeWritePolicy.cancels}, the plan-mode
+	 * gate still applies.
 	 */
 	touchesNoFiles?: true;
 }
@@ -61,7 +59,7 @@ export interface InternalWriteResult {
  *   returns; `read` routes located URLs through its filesystem pipeline (paging, images, sqlite, archives).
  * - `virtual`: content is rendered by the handler (it may still `locate` a backing file for search/bash).
  * - `remote`: content lives on another host or service; never locatable.
- * - `device`: session-bound control surface (processes, tool devices).
+ * - `device`: session-bound control surface (processes, replies to the user).
  */
 export type SchemeBacking = "file" | "virtual" | "remote" | "device";
 
@@ -80,7 +78,7 @@ export interface SchemeWritePolicy {
 	 * - `file`: tools (`write`, `edit`, `ast_edit`) write the file {@link ProtocolHandler.locate}
 	 *   returns with `{ create: true }`; the handler has no `write` hook.
 	 * - `handler`: {@link ProtocolHandler.write} performs it (messages, stdin, settings, remote
-	 *   hosts, devices) for `write` and for bash redirects, which deliver a handle's bytes as one
+	 *   hosts) for `write` and for bash redirects, which deliver a handle's bytes as one
 	 *   write on close; file-editing tools refuse the URL even when it locates a backing file.
 	 */
 	via: "file" | "handler";
@@ -98,7 +96,7 @@ export interface SchemeWritePolicy {
 	maxBytes?: number;
 	/**
 	 * True when this URL's write only cancels background work (`proc://<id>/kill`), so it
-	 * passes the plan-mode and device-only gates like a `coordination`-scoped write. Approval
+	 * passes the plan-mode gate like a `coordination`-scoped write. Approval
 	 * still follows {@link SchemeWritePolicy.tier}.
 	 */
 	cancels?(url: InternalUrl): boolean;
@@ -128,7 +126,7 @@ export interface SchemeSpec {
 	unbounded?: boolean;
 	/** Renderers may call `locate` to hyperlink these URLs: locate is local, cheap, never spawns or fetches. */
 	linkable?: boolean;
-	/** Transcript read cards collapse like plain files instead of expanding (xd://). */
+	/** Transcript read cards collapse like plain files instead of expanding (help://). */
 	compactTranscript?: boolean;
 	/** `read` peels a trailing `?q=<question>` as an image question (local://, attachment://); other schemes own their query. */
 	imageQuestion?: true;
@@ -342,7 +340,7 @@ export interface ResolveContext {
 	 */
 	rules?: readonly Rule[];
 	/**
-	 * Calling tool session. Session-bound schemes (`proc://`, `xd://`) require it
+	 * Calling tool session. Session-bound schemes (`proc://`) require it
 	 * and throw when it is absent.
 	 */
 	session?: ToolSession;
@@ -368,10 +366,10 @@ export interface WriteContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
 	 * Calling tool session. Session-bound writes (`agent://` messages,
-	 * `proc://` stdin/stop/mode, `xd://` devices) require it and throw when it is absent.
+	 * `proc://` stdin/stop/mode) require it and throw when it is absent.
 	 */
 	session?: ToolSession;
-	/** The tool call dispatching this write (`write`, or a bash command redirecting into the URL); device dispatch (`xd://`) forwards it to the wrapped tool. */
+	/** The tool call dispatching this write (`write`, or a bash command redirecting into the URL). */
 	toolCall?: {
 		id: string;
 		onUpdate?: AgentToolUpdateCallback;
@@ -380,7 +378,7 @@ export interface WriteContext {
 }
 
 /**
- * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://, xd://).
+ * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://).
  */
 export interface ProtocolHandler {
 	/** The scheme this handler processes (without trailing ://) */
@@ -459,7 +457,7 @@ export interface ProtocolHandler {
 	/**
 	 * Sub-path, query and limit grammar the {@link promptDoc} line leaves out
 	 * (rendered from `prompts/internal-urls/<scheme>-reference.md`), served on demand
-	 * at `xd://read/urls`. Reads cheap process facts only; `undefined` omits the scheme.
+	 * at `help://read/urls`. Reads cheap process facts only; `undefined` omits the scheme.
 	 */
 	promptReference?(): string | undefined;
 }

@@ -29,6 +29,8 @@ export interface EditorHandle {
 	read(expand: (shortcutId: string) => string | undefined): EditorContent;
 	/** Replace everything with `text` and put the caret at its end. */
 	setText(text: string): void;
+	/** Put `text` before what is there, a blank line apart, keeping chips; the caret goes to the end. */
+	prepend(text: string): void;
 	clear(): void;
 	/** Replace the `/query` being typed with a shortcut chip, or just remove it (commands and actions). */
 	resolveSlash(chip: { id: string; name: string } | null): void;
@@ -84,7 +86,8 @@ export interface EditorProps {
 	onSlash(query: string | null): void;
 	/** First look at every key; true means consumed (the slash menu). */
 	onKey(event: KeyboardEvent<HTMLDivElement>): boolean;
-	onSubmit(): void;
+	/** Enter; `followUp` with Ctrl (omp's Ctrl+Enter: wait for the running turn instead of steering it). */
+	onSubmit(options: { followUp: boolean }): void;
 	/** ↑ pressed in an empty editor. */
 	onRecall(): void;
 	onPasteFiles(files: File[]): void;
@@ -162,6 +165,15 @@ export function Editor(props: EditorProps): ReactNode {
 			caretToEnd();
 			sync();
 		},
+		prepend(text) {
+			const root = rootRef.current;
+			if (root === null) return;
+			if (isEmpty()) root.replaceChildren(text);
+			else root.prepend(`${text}\n\n`);
+			root.focus();
+			caretToEnd();
+			sync();
+		},
 		clear() {
 			rootRef.current?.replaceChildren();
 			sync();
@@ -221,7 +233,7 @@ export function Editor(props: EditorProps): ReactNode {
 		}
 		if (event.key === "Enter" && !event.shiftKey) {
 			event.preventDefault();
-			props.onSubmit();
+			props.onSubmit({ followUp: event.ctrlKey });
 		} else if (event.key === "ArrowUp" && isEmpty()) {
 			event.preventDefault();
 			props.onRecall();
