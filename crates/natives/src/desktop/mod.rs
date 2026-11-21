@@ -4311,6 +4311,42 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn windows_fences_a_no_menu_action_through_the_request_itself() {
+		let core = SessionCore::with_operation_timeout(
+			DisplaySelector::Active,
+			Arc::default(),
+			None,
+			HUNG_CALL_TIMEOUT,
+		);
+		let (tx, _queued) = flume::unbounded();
+		core.lifecycle.lock().tx = Some(tx);
+		let error = core
+			.call_with_wait(
+				core.cancellation.token(),
+				|reply| Request::AxPerform {
+					reference: "e1".into(),
+					action: "press".into(),
+					menu: None,
+					reply,
+				},
+				|_, _| Err(flume::RecvTimeoutError::Timeout),
+			)
+			.err()
+			.unwrap();
+		#[cfg(target_os = "windows")]
+		{
+			let abandoned = control::abandoned_before_dispatch();
+			assert_eq!(error.code, abandoned.code);
+			assert_eq!(error.message, abandoned.message);
+		}
+		#[cfg(not(target_os = "windows"))]
+		{
+			assert_eq!(error.code, ErrorCode::Timeout);
+			assert_ne!(error.message, control::abandoned_before_dispatch().message);
+		}
+	}
+
+	#[test]
 	fn unfenced_requests_keep_their_native_reply_deadline_and_timeout() {
 		// No worker: only the caller's side of each off-side request runs.
 		let core = SessionCore::with_operation_timeout(
