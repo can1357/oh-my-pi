@@ -124,10 +124,16 @@ fn preview_section(
 	files: &mut dyn FileSource,
 	store: &EditStore,
 	clipboard: &mut Clipboard,
-) -> PreviewFile {
+) -> (PreviewFile, bool) {
 	let mut result = PreviewFile { display: section.path.clone(), ..PreviewFile::default() };
+	let initial = files.resolve(&section.path, false);
+	let local = match &initial {
+		Ok(resolved) => matches!(resolved.location, Location::Disk(_)),
+		// A host lookup can fail before it supplies a location.
+		Err(_) => !files.policy().is_internal_url(&section.path),
+	};
 	let outcome = (|| {
-		let initial = files.resolve(&section.path, false)?;
+		let initial = initial?;
 		let recovered = recover_target(section, &initial, files, store)?;
 		let (target, resolved) = recovered
 			.as_ref()
@@ -234,7 +240,7 @@ fn preview_section(
 		result.deferred = error.is_deferred();
 		result.error = Some(error.to_string());
 	}
-	result
+	(result, local)
 }
 
 /// Compute per-section previews, threading a transactional clipboard in patch
@@ -255,8 +261,8 @@ pub fn preview_patch(
 	let mut clipboard = store.start_clipboard_batch();
 	let mut previews = Vec::new();
 	for (index, section) in patch.sections.iter().take(count).enumerate() {
-		let preview = preview_section(section, streaming, files, store, &mut clipboard);
-		if preview.error.is_some() && streaming && index + 1 == count {
+		let (preview, local) = preview_section(section, streaming, files, store, &mut clipboard);
+		if preview.error.is_some() && (streaming || (local && count > 1)) && index + 1 == count {
 			continue;
 		}
 		previews.push(preview);

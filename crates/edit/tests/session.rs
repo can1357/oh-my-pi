@@ -114,6 +114,33 @@ fn hosted_tagged_preview_uses_the_read_version_instead_of_the_latest_head() {
 }
 
 #[test]
+fn final_hashline_preview_hides_the_last_disk_error_in_a_multi_file_batch() {
+	let mut ws = Workspace::new(EditMode::Hashline);
+	ws.config.policy.url_schemes = vec!["local".into()];
+	ws.write("a.txt", "before a\n");
+	ws.write("b.txt", "before b\n");
+	let url = "local://b.txt";
+	for last in ["b.txt", url] {
+		let mut session = ws.session();
+		let input =
+			format!("[a.txt#AB12]\nPUT 1.=1:\n+after a\n[{last}#CD34]\nPUT 1.=1:\n+after b\n");
+		session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+		session.finish();
+		if last == url {
+			session.provide(url.into(), UrlAnswer::Backed {
+				path:          ws.cwd().join("b.txt"),
+				plan_writable: false,
+			});
+		}
+		let preview = session.preview();
+		assert!(!preview.streaming, "{preview:?}");
+		assert_eq!(preview.files.len(), 1, "{preview:?}");
+		assert_eq!(preview.files[0].display, "a.txt", "{preview:?}");
+		assert!(preview.files[0].error.is_some(), "{preview:?}");
+	}
+}
+
+#[test]
 fn missing_hosted_snapshot_reports_an_error_and_keeps_the_local_preview() {
 	for has_head in [false, true] {
 		for remote_first in [false, true] {
