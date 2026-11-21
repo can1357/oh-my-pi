@@ -1782,4 +1782,18 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("deploy to us");
 		});
 	});
+
+	describe("Vim mode chrome", () => {
+		it("re-announces the mode when the editor gains focus, so a shared cursor shape follows the keys", () => {
+			const editor = vimEditor("text");
+			const modes: string[] = [];
+			editor.onVimModeChange = mode => modes.push(mode);
+			editor.focused = true;
+			editor.focused = true;
+			editor.focused = false;
+			editor.handleInput("i");
+			editor.focused = true;
+			expect(modes).toEqual(["normal", "insert", "insert"]);
+		});
+	});
 });

@@ -172,8 +172,8 @@ const PICK_ACT = "pick:";
 /** List item key of a group's Other answer (option items are `o<index>`). */
 const OTHER_ITEM = "other";
 const OTHER_PLACEHOLDER = "type your own";
-/** Rows a Vim-mode Other answer grows to (`o` or a linewise put can split it) before it scrolls. */
-const OTHER_MAX_ROWS = 3;
+/** Rows a Vim-mode one-line answer (Other, `<input>`) grows to (`o` or a linewise put splits it) before it scrolls. */
+const LINE_MAX_ROWS = 3;
 /** A folded text field's well when the form gives no placeholder. */
 const WELL_PLACEHOLDER = "type your answer";
 
@@ -968,6 +968,13 @@ export class HtmlFormDialog implements Component, Focusable {
 			this.#editors.set(field, editor);
 			return;
 		}
+		// A password keeps the masked input; any other one-line field takes Vim mode when the host turns it on.
+		const vim = field.type === "password" ? undefined : this.#vimLineEditor(field.placeholder || undefined);
+		if (vim) {
+			vim.setText(field.value, { cursor: "start" });
+			this.#editors.set(field, vim);
+			return;
+		}
 		const input = new Input();
 		input.prompt = "";
 		input.mask = field.type === "password";
@@ -977,6 +984,23 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#inputs.set(field, input);
 	}
 
+	/**
+	 * A one-line answer box (an `<input>`, a group's Other) as a Vim-mode editor, or undefined when
+	 * the host leaves Vim mode off and the box stays a plain input.
+	 */
+	#vimLineEditor(placeholder: string | undefined): Editor | undefined {
+		const editor = new Editor(getEditorTheme());
+		this.#options.configureEditor?.(editor);
+		if (!editor.vimEnabled) return undefined;
+		editor.setBorderVisible(false);
+		editor.setMaxHeight(LINE_MAX_ROWS);
+		// Enter moves on to the next field (handled before the editor).
+		editor.disableSubmit = true;
+		editor.placeholder = () => placeholder;
+		editor.onChange = () => this.#resetCountdown();
+		return editor;
+	}
+
 	/** Fixed textarea height: the `rows` asked for, grown to fit a prefilled draft, capped. */
 	#textareaRows(field: TextField): number {
 		const draftRows = field.value.split("\n").length;
@@ -984,7 +1008,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#textValue(field: TextField): string {
-		return field.multiline ? this.#editors.get(field)!.getExpandedText() : this.#inputs.get(field)!.getValue();
+		return this.#editors.get(field)?.getExpandedText() ?? this.#inputs.get(field)!.getValue();
 	}
 
 	#value(field: FormField): HtmlFormValue | undefined {
@@ -1355,17 +1379,8 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	/** The Other answer's box. With Vim mode it is an editor, so Vim keys and Esc work as in a textarea. */
 	#otherBox(): Input | Editor {
-		const editor = new Editor(getEditorTheme());
-		this.#options.configureEditor?.(editor);
-		if (editor.vimEnabled) {
-			editor.setBorderVisible(false);
-			editor.setMaxHeight(OTHER_MAX_ROWS);
-			// Enter moves on to the next field (handled before the editor).
-			editor.disableSubmit = true;
-			editor.placeholder = () => OTHER_PLACEHOLDER;
-			editor.onChange = () => this.#resetCountdown();
-			return editor;
-		}
+		const editor = this.#vimLineEditor(OTHER_PLACEHOLDER);
+		if (editor) return editor;
 		const input = new Input();
 		input.prompt = "";
 		input.placeholder = OTHER_PLACEHOLDER;
@@ -2025,6 +2040,8 @@ export class HtmlFormDialog implements Component, Focusable {
 				if (!focused) rows[height - 1] = theme.fg("dim", truncateToWidth("…", inner));
 			}
 			while (rows.length < height) rows.push("");
+		} else if (focused && this.#editors.has(field)) {
+			rows = [...this.#editors.get(field)!.render(inner)];
 		} else if (focused) {
 			const input = this.#inputs.get(field)!;
 			input.cursorOverride =
@@ -2033,7 +2050,8 @@ export class HtmlFormDialog implements Component, Focusable {
 					: undefined;
 			rows = [...input.render(inner)];
 		} else if (value) {
-			const shown = field.type === "password" ? "•".repeat(value.length) : sanitize(value);
+			// A Vim-mode box can hold a line break (`o`, a linewise put); folded, the answer stays one row.
+			const shown = field.type === "password" ? "•".repeat(value.length) : sanitize(value).replace(/\s+/g, " ");
 			rows = [theme.fg("toolOutput", truncateToWidth(shown, inner, Ellipsis.Unicode))];
 		} else {
 			rows = [theme.fg("dim", truncateToWidth(sanitize(field.placeholder), inner, Ellipsis.Unicode))];
@@ -2330,7 +2348,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			children.push(text([...nativeSpans(field.label), ...required], { wrap: "word", role: "omp.ask.label" }));
 		}
 		if (field.kind === "text") {
-			children.push(field.multiline ? this.#editors.get(field)! : this.#inputs.get(field)!);
+			children.push(this.#editors.get(field) ?? this.#inputs.get(field)!);
 		} else {
 			const stop = this.#stops[this.#focus];
 			const focusedOption =

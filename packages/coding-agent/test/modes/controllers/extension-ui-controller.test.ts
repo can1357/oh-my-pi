@@ -88,7 +88,6 @@ function makeHarness() {
 		showStatus: vi.fn(),
 		closeLinkBrowser: vi.fn(),
 		configureDialogEditor: vi.fn(),
-		syncComposerVimStatus: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
 		statusLine: { setAwaitingAnswer: vi.fn() },
 		keybindings: KeybindingsManager.inMemory(),

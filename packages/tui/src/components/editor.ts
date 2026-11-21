@@ -771,8 +771,20 @@ export class Editor implements Component, Focusable {
 		cursorLine: 0,
 		cursorCol: 0,
 	};
+	#focused = false;
 	/** Focusable interface - set by TUI when focus changes */
-	focused: boolean = false;
+	get focused(): boolean {
+		return this.#focused;
+	}
+	/**
+	 * Gaining focus re-announces the Vim mode through {@link onVimModeChange}: the terminal has one
+	 * cursor, so its shape has to follow whichever editor holds the keys, not the last to switch modes.
+	 */
+	set focused(value: boolean) {
+		if (value === this.#focused) return;
+		this.#focused = value;
+		if (value && this.#vim !== null) this.onVimModeChange?.(this.#vim.mode);
+	}
 
 	#theme: EditorTheme;
 	#useTerminalCursor = false;

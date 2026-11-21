@@ -1174,6 +1174,25 @@ describe("html form", () => {
 			expect(releaseKeys).toHaveBeenCalledTimes(1);
 		});
 
+		it("in Vim mode a one-line text input takes Vim keys; a password stays a plain masked input", () => {
+			const releaseKeys = vi.fn();
+			const { form } = dialog(
+				`<form><label>Name <input type="text" name="name"></label><label>Secret <input type="password" name="pw"></label></form>`,
+				{ releaseKeys, configureEditor: editor => editor.setVimMode(true) },
+			);
+			form.handleInput("hello world");
+			form.handleInput(ESC);
+			expect(releaseKeys).not.toHaveBeenCalled();
+			form.handleInput("bD");
+			expect(form.data()).toMatchObject({ name: "hello " });
+			form.handleInput(TAB);
+			form.handleInput("abc");
+			// No Vim mode in the password: Esc goes straight back to the composer.
+			form.handleInput(ESC);
+			expect(releaseKeys).toHaveBeenCalledTimes(1);
+			expect(form.data()).toMatchObject({ pw: "abc" });
+		});
+
 		it("rows: no footer in the panel; keyHints() gives the focused stop's keys for the host to draw", () => {
 			const { form } = dialog(DB_FORM);
 			const rows = plain(form);

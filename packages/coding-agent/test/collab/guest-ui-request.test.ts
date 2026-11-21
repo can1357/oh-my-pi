@@ -260,7 +260,6 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 		},
 		closeLinkBrowser: () => {},
 		configureDialogEditor: () => {},
-		syncComposerVimStatus: () => {},
 		rerenderInLinkBrowser: () => {},
 		rebuildTranscriptScrollback: () => {},
 		showHookSelector: (
@@ -828,7 +827,6 @@ function makeAskHostContext(): InteractiveModeContext {
 		editor: { getText: () => "", setText: () => {} },
 		closeLinkBrowser: () => {},
 		configureDialogEditor: () => {},
-		syncComposerVimStatus: () => {},
 		ui: {
 			requestRender: () => {},
 			setFocus: () => {},
