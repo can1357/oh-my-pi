@@ -3045,10 +3045,12 @@ export class Editor implements Component, Focusable {
 	/**
 	 * `k`/`j` past the first or last line: `count` prompts older or newer, as zsh's vi mode. An older
 	 * prompt opens on its last line and a newer one on its first, so further `k`/`j` walk through it;
-	 * stepping newer past the newest prompt brings back the draft the first `k` left.
+	 * stepping newer past the newest prompt brings back the draft the first `k` left. Like Up in
+	 * Insert mode, `k` off the draft's top first offers the keys to whatever waits above (an ask).
 	 */
 	#stepVimHistory(older: boolean, count: number): void {
 		const start = this.#historyIndex;
+		if (older && start === -1 && this.onUpFromTop?.()) return;
 		const draft = start === -1 && older ? this.#state.lines.join("\n") : null;
 		for (let n = 0; n < count; n++) {
 			const index = this.#historyIndex;

@@ -211,6 +211,23 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("current draft");
 		});
 
+		it("k off the top of the draft first hands the keys to what waits above, as Up does in Insert mode", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.addToHistory("an older prompt");
+			editor.setVimMode(true);
+			editor.setText("current draft");
+			editor.handleInput(ESC);
+			let offered = 0;
+			editor.onUpFromTop = () => ++offered > 0;
+			editor.handleInput("k");
+			expect(offered).toBe(1);
+			expect(editor.getText()).toBe("current draft");
+			// Nothing above takes them: k steps into history.
+			editor.onUpFromTop = () => false;
+			editor.handleInput("k");
+			expect(editor.getText()).toBe("an older prompt");
+		});
+
 		it("backspace moves left in normal mode rather than deleting", () => {
 			const editor = vimEditor("alfa", { cursorToStart: false });
 			editor.handleInput(ESC);
