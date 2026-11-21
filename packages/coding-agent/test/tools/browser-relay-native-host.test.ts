@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { discoverRelayEndpoints } from "../../src/tools/browser/relay/discovery";
+import { afterEach, describe, expect, it, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -37,6 +38,9 @@ for await (const bytes of Bun.stdin.stream()) {
 			await out(JSON.stringify({ id: command.id, type: "response", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } }));
 		} else if (command.type === "echo") {
 			await out(JSON.stringify({ type: "response", command: "echo", success: true, data: { cwd: process.cwd(), relay: process.env.PI_BROWSER_RELAY, protocol } }));
+		} else if (command.type === "browser") {
+			const response = await fetch(process.env.PI_PANEL_RELAY_URL + "/json/version");
+			await out(JSON.stringify({ type: "response", command: "browser", data: { url: process.env.PI_PANEL_RELAY_URL, status: response.status } }));
 		} else if (command.type === "big") {
 			await out(JSON.stringify({ type: "message_update", text: "é".repeat(600_000) }));
 		} else if (command.type === "chunked") {
@@ -104,9 +108,9 @@ async function startHost(relayPort = 0): Promise<Harness> {
 				}
 			}
 		},
-		spawn: cwd => {
+		spawn: (cwd, relayUrl) => {
 			spawnedIn.push(cwd);
-			return spawnRpcChild([process.execPath, script], cwd);
+			return spawnRpcChild([process.execPath, script], cwd, relayUrl);
 		},
 		relayPort,
 		log: () => {},
@@ -153,7 +157,7 @@ describe("native host", () => {
 	it("relays rpc lines both ways, chunks oversized ones and reports the child's exit", async () => {
 		const host = await startHost();
 		const cwd = await fs.realpath(os.tmpdir());
-		host.send({ t: "open", cwd });
+		host.send({ t: "open", extensionId: "a".repeat(32), cwd });
 		const ready = await host.waitFor(message => message.t === "ready");
 		expect(ready).toMatchObject({ t: "ready", pid: expect.any(Number) });
 		expect(host.spawnedIn).toEqual([cwd]);
@@ -177,7 +181,7 @@ describe("native host", () => {
 			"get_entries",
 		]);
 		// Sent without waiting for the child's ready line, yet answered under v2: the host negotiates first.
-		expect(lines[1].data).toEqual({ cwd, relay: "1", protocol: 2 });
+		expect(lines[1].data).toEqual({ cwd, relay: "only", protocol: 2 });
 		expect(lines[2].text).toBe("é".repeat(600_000));
 		expect(lines[3].data).toBe("x".repeat(1_200_000));
 		const chunkIds = new Set(host.received.flatMap(message => (message.t === "chunk" ? [message.id] : [])));
@@ -186,7 +190,7 @@ describe("native host", () => {
 
 	it("stops the child when the extension disconnects", async () => {
 		const host = await startHost();
-		host.send({ t: "open", cwd: os.tmpdir() });
+		host.send({ t: "open", extensionId: "a".repeat(32), cwd: os.tmpdir() });
 		await host.waitFor(message => message.t === "ready");
 		host.disconnect();
 		await host.done;
@@ -196,7 +200,7 @@ describe("native host", () => {
 	it("refuses a missing directory without spawning", async () => {
 		const host = await startHost();
 		const missing = path.join(os.tmpdir(), `omp-missing-${Date.now()}`);
-		host.send({ t: "open", cwd: missing });
+		host.send({ t: "open", extensionId: "a".repeat(32), cwd: missing });
 		await host.done;
 		expect(host.spawnedIn).toEqual([]);
 		expect(host.received).toEqual([{ t: "exit", code: null, stderr: `directory not found: ${missing}` }]);
@@ -229,6 +233,35 @@ async function link(host: Harness, instanceId: string, from = 0): Promise<void> 
 	await host.waitFor(message => message.t === "linked", from);
 	host.send({ t: "relay", line: JSON.stringify({ ...HELLO, instanceId }) });
 }
+
+test("chat child discovers its browser over the chat port, not the terminal relay", async () => {
+	const terminalPort = await findFreeCdpPort();
+	const host = await startHost(terminalPort);
+	host.send({ t: "open", cwd: os.tmpdir(), extensionId: "a".repeat(32) });
+	await link(host, "panel-browser");
+	host.send({ t: "rpc", line: JSON.stringify({ type: "browser" }) });
+	const result = await host.waitFor(frame => frame.t === "rpc" && frame.line.includes('"command":"browser"'));
+	if (result.t !== "rpc") throw new Error("expected RPC answer");
+	const { data } = JSON.parse(result.line);
+	expect(data.status).toBe(200);
+	expect(new URL(data.url).port).not.toBe(String(terminalPort));
+	host.send({ t: "rpc", line: JSON.stringify({ type: "quit" }) });
+	await host.done;
+	await expect(fetch(`${data.url}/json/version`)).rejects.toThrow();
+});
+
+test("terminal relay publishes its assigned port and retires it when Chrome disconnects", async () => {
+	const before = new Set(discoverRelayEndpoints());
+	const host = await startHost();
+	host.send({ t: "link", extensionId: "a".repeat(32) });
+	await link(host, "dynamic-browser");
+	const url = discoverRelayEndpoints().find(endpoint => !before.has(endpoint));
+	if (!url) throw new Error("relay did not publish an endpoint");
+	expect(await waitForRelayExtension(url)).toBe("ready");
+	host.disconnect();
+	await host.done;
+	expect(discoverRelayEndpoints()).not.toContain(url);
+});
 
 describe("native host relay link", () => {
 	it("serves the relay for the first browser, forwards the next one's, and hands over when the first leaves", async () => {

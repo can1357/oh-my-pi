@@ -1,11 +1,12 @@
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { visibleWidth } from "../utils";
-import { formatAge } from "@oh-my-pi/pi-utils";
+import { formatAge, truncate } from "@oh-my-pi/pi-utils";
 import { shimmerEnabled, shimmerText } from "../theme/shimmer";
 import type { Theme } from "../theme/theme";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../render/index";
 import { formatArtifactErrorNotice, stripOutputNotice, type OutputMeta } from "./output-meta";
+import { jobDisplayLabel } from "./job-label";
 import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
@@ -224,19 +225,26 @@ function flattenStructuredPreview(text: string): string {
 /** The row label: a running task's own stage line when it reports one, else what the job is for, else its label. */
 function jobRowLabel(job: JobSnapshot): string {
 	if (job.type === "task" && job.status === "running" && job.stage?.trim()) return job.stage;
-	return job.intent || job.label;
+	return jobDisplayLabel(job);
 }
 
 /** A job as its tile; `live` while the card's clocks run. */
 function jobTile(job: JobSnapshot, live: boolean): JobTile {
+	const label = jobDisplayLabel(job);
+	let widget = job.widget;
+	// A saved fallback title was clipped from the job intent; an authored title is independent of it.
+	if (widget && widget.state !== "live" && job.intent && label !== job.intent) {
+		const title = truncate(label.replace(/\s+/g, " ").trim(), widget.title.length);
+		if (title !== widget.title) widget = { ...widget, title };
+	}
 	return {
 		id: job.id,
 		type: job.type,
 		status: job.status,
-		label: job.intent || job.label,
+		label,
 		durationMs: job.durationMs,
 		live: live && job.status === "running",
-		...(job.widget ? { widget: job.widget } : {}),
+		...(widget ? { widget } : {}),
 		...(job.status === "running" && job.completionPercent !== undefined
 			? { completionPercent: job.completionPercent }
 			: {}),

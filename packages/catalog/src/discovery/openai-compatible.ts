@@ -104,6 +104,8 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	baseUrl: string;
 	/** Optional bearer token for Authorization header. */
 	apiKey?: string;
+	/** Retry a rejected bearer against a public catalog without credentials (only on HTTP 401). */
+	retryWithoutApiKeyOnUnauthorized?: boolean;
 	/** Additional request headers. */
 	headers?: Record<string, string>;
 	/** Query parameters appended to the `/models` probe (e.g. OpenRouter's `output_modalities` roster filter). */
@@ -166,6 +168,15 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 				headers: requestHeaders,
 				signal,
 			});
+			if (response.status === 401 && options.apiKey && options.retryWithoutApiKeyOnUnauthorized) {
+				const anonymousHeaders = { ...requestHeaders };
+				delete anonymousHeaders.Authorization;
+				response = await fetchImpl(`${baseUrl}${MODELS_PATH}${query}`, {
+					method: "GET",
+					headers: anonymousHeaders,
+					signal,
+				});
+			}
 		} catch {
 			return null;
 		}
