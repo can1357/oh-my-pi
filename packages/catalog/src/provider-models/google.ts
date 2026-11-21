@@ -1,7 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { isExcludedModel } from "../compat/behavior";
 import { providerEntry } from "../compat/providers";
-import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
+import { antigravityRowReference, fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
@@ -105,6 +105,7 @@ export function googleAntigravityModelManagerOptions(
 									endpoint: config?.endpoint,
 									projectId: account.projectId,
 									fetcher,
+									resolveReference: antigravityRowReference,
 								}),
 							})),
 						);
