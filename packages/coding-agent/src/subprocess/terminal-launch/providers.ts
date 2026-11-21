@@ -2,6 +2,7 @@ import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer"
 import { cmuxLaunchProvider } from "./cmux";
 import { herdrLaunchProvider } from "./herdr";
 import { orcaLaunchProvider } from "./orca";
+import { ternLaunchProvider } from "./tern";
 import { tmuxLaunchProvider } from "./tmux";
 import type { SupportedMultiplexerCapabilities, UnsupportedMultiplexerCapabilities } from "./types";
 import { zellijLaunchProvider } from "./zellij";
@@ -31,6 +32,7 @@ export const terminalLaunchProviders = {
 			reason: "wmux launch is not implemented by this API.",
 		},
 	},
+	tern: ternLaunchProvider,
 	orca: orcaLaunchProvider,
 } as const satisfies Record<
 	TerminalMultiplexer,
