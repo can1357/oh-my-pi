@@ -26,7 +26,7 @@ const RANGE_OPTIONS = TIME_RANGES.map((range, i) => ({
 
 /**
  * Fixed glass topbar + naked sidebar framing one inset content panel. Owns
- * the global keyboard shortcuts: `1`–`6` pick a range, `g` then a letter jumps
+ * the global keyboard shortcuts: `1`–`8` pick a range, `g` then a letter jumps
  * to a page.
  */
 export function Shell({ section, onSectionChange, range, onRangeChange, children }: ShellProps) {
@@ -115,7 +115,7 @@ export function Shell({ section, onSectionChange, range, onRangeChange, children
 				))}
 				<div className="sidebar-foot micro">
 					<span>
-						<span className="kbd">1</span>–<span className="kbd">6</span> range
+						<span className="kbd">1</span>–<span className="kbd">8</span> range
 					</span>
 					<span>
 						<span className="kbd">G</span> then letter to jump

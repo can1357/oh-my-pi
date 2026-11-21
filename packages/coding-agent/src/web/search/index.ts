@@ -29,6 +29,7 @@ import {
 	formatSearchProviderFailures,
 	getGroundedSearchProvider,
 	getSearchProvider,
+	type SearchParams,
 	type SearchProvider,
 	type SearchProviderFailure,
 } from "./provider";
@@ -236,10 +237,14 @@ function expandHostedCandidate(
  * or prepend {@link xaiModelChain} when the chain has none. Unchanged without
  * xAI credentials.
  */
-function preferXAI(chain: RoleChainCandidate[], modelRegistry: ModelRegistry): RoleChainCandidate[] {
+function preferXAI(
+	chain: RoleChainCandidate[],
+	modelRegistry: ModelRegistry,
+	activeSettings: Settings,
+): RoleChainCandidate[] {
 	const xai = chain.filter(candidate => candidate.model.webSearch === "xai");
 	if (xai.length > 0) return [...xai, ...chain.filter(candidate => candidate.model.webSearch !== "xai")];
-	return [...xaiModelChain(modelRegistry, settings).map(model => ({ model, explicit: false })), ...chain];
+	return [...xaiModelChain(modelRegistry, activeSettings).map(model => ({ model, explicit: false })), ...chain];
 }
 
 function isHackerNewsEngine(model: Model<Api>): boolean {
@@ -264,24 +269,27 @@ async function executeSearch(
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
 	const { authStorage, sessionId, signal } = options;
-	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
-	const pool = roleCandidatePool("web", settings, modelRegistry);
+	// The session's own settings (an ACP session's project, a subagent overlay) win over the process global.
+	const activeSettings = options.settings ?? settings;
+	const modelRegistry =
+		options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings: activeSettings });
+	const pool = roleCandidatePool("web", activeSettings, modelRegistry);
 	const candidates = params.model
 		? (() => {
-				const resolved = resolveModelRoleValue(params.model, pool, { settings });
+				const resolved = resolveModelRoleValue(params.model, pool, { settings: activeSettings });
 				return resolved.model
 					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
 					: [];
 			})()
-		: resolveRoleChain("web", settings, pool);
+		: resolveRoleChain("web", activeSettings, pool);
 	const parsedQuery = parseSearchQuery(params.query);
 	let expanded = rankXAIProviders(
 		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool)),
 		candidate => candidate.model,
-		settings,
+		activeSettings,
 	);
 	// Only xAI reaches X posts; X-only queries try it first even when the role prefers another engine.
-	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry);
+	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry, activeSettings);
 	// General engines index HN threads sparsely and late; a query whose every
 	// `site:` is Hacker News (with or without a path) tries the HN Search API first.
 	const hnOnly =
@@ -291,14 +299,14 @@ async function executeSearch(
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 	try {
-		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
+		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(activeSettings);
 	} catch {
 		antigravityEndpointMode = undefined;
 	}
 
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
-		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(settings);
+		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(activeSettings);
 		if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
 			timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
 		}
@@ -307,7 +315,7 @@ async function executeSearch(
 	}
 
 	// Only a per-request selector reaches a keyless service once the user turned them off.
-	const keylessAllowed = params.model !== undefined || cfgProvidersWebKeyless.get(options.settings ?? settings);
+	const keylessAllowed = params.model !== undefined || cfgProvidersWebKeyless.get(activeSettings);
 	let keylessSkipped = false;
 	const failures: SearchProviderFailure[] = [];
 	let availableProviderCount = 0;
@@ -319,7 +327,7 @@ async function executeSearch(
 	// The tool result holds the text; this is the only place a search's tokens reach session totals.
 	const journal = journalCompletion(options.usageLedger, { purpose: "web-search", usageOnly: true });
 	for (const candidate of expanded) {
-		if (cfgOffline.get(options.settings ?? settings)) {
+		if (cfgOffline.get(activeSettings)) {
 			const activeProvider = options.sessionModel?.provider;
 			// Search-only catalog entries use the synthetic "web" provider; their
 			// backend is not the session's model endpoint, so do not infer a match.
@@ -379,7 +387,7 @@ async function executeSearch(
 			lastProvider = provider;
 
 			const sentAt = Date.now();
-			const response = await provider.search({
+			const searchParams: SearchParams = {
 				query: params.query,
 				parsedQuery,
 				limit: params.limit,
@@ -397,7 +405,10 @@ async function executeSearch(
 				explicit: candidate.explicit,
 				sessionId,
 				antigravityEndpointMode,
-			});
+			};
+			// An extension may own the request for its provider's models; availability stays the backend's.
+			const extensionSearch = modelRegistry.getProviderWebSearch(model.provider);
+			const response = await (extensionSearch ? extensionSearch(searchParams) : provider.search(searchParams));
 			// Before any rejection below: a response a later check discards was still billed.
 			const billed = searchUsageMessage(model, response, Date.now() - sentAt);
 			if (billed) journal?.(billed);
@@ -496,7 +507,7 @@ async function executeSearch(
 	}
 
 	if (availableProviderCount === 0 && failures.length === 0) {
-		const message = cfgOffline.get(options.settings ?? settings)
+		const message = cfgOffline.get(activeSettings)
 			? "No web search backend is available on the active model's provider under --offline."
 			: params.model
 				? `No web search model matches selector "${params.model}".`

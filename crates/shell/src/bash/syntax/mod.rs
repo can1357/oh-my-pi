@@ -69,7 +69,10 @@ pub use crate::bash::syntax::{
 		RedirTarget, Seq, Simple, Subscript, Tree, Word, WordPart,
 	},
 };
-pub(crate) use crate::bash::syntax::{parser::MAX_NESTING, util::ansi_decode_all};
+pub(crate) use crate::bash::syntax::{
+	parser::{MAX_NESTING, RESERVED_WORDS},
+	util::ansi_decode_all,
+};
 
 /// Parse a whole source without aliases (tools, visualizers, tests).
 ///

@@ -7,7 +7,8 @@
  * error to adopt from, so the version tracks the `latest` npm dist-tag of
  * `@openai/codex` instead:
  *
- *  - The first read in a process loads `<agent-dir>/codex-client-version.json`
+ *  - The first read in a process loads the cache record
+ *    (`$XDG_CACHE_HOME/omp/codex-client-version.json`, else `<agent-dir>/codex-client-version.json`)
  *    synchronously and keeps that value for the rest of the process. The
  *    version keys the model-cache namespace and must not move mid-process.
  *  - When the record is older than {@link REFRESH_INTERVAL_MS}, a background
@@ -18,12 +19,10 @@
  * the disk record and the network refresh; so does running under `bun test`.
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
-import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { getCodexClientVersionPath, logger } from "@oh-my-pi/pi-utils";
 import { CODEX_CLIENT_VERSION } from "./codex";
 
 const NPM_LATEST_URL = "https://registry.npmjs.org/@openai/codex/latest";
-const RECORD_FILE = "codex-client-version.json";
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5_000;
 const SEMVER_PATTERN = /^(\d+)\.(\d+)\.(\d+)$/;
@@ -35,6 +34,7 @@ interface VersionRecord {
 
 let resolvedVersion: string | null = null;
 let refreshStarted = false;
+let refreshInFlight: Promise<void> | null = null;
 
 function compareSemver(a: string, b: string): number {
 	const pa = SEMVER_PATTERN.exec(a);
@@ -56,13 +56,9 @@ function isDynamicResolutionDisabled(): boolean {
 	return Boolean(process.env.PI_AI_CODEX_CLIENT_VERSION) || process.env.NODE_ENV === "test";
 }
 
-function recordPath(): string {
-	return path.join(getAgentDir(), RECORD_FILE);
-}
-
 function readRecord(): VersionRecord | null {
 	try {
-		const parsed: unknown = JSON.parse(fs.readFileSync(recordPath(), "utf-8"));
+		const parsed: unknown = JSON.parse(fs.readFileSync(getCodexClientVersionPath(), "utf-8"));
 		if (typeof parsed !== "object" || parsed === null) return null;
 		const version = Reflect.get(parsed, "version");
 		const checkedAt = Reflect.get(parsed, "checkedAt");
@@ -84,7 +80,7 @@ async function refreshRecord(): Promise<void> {
 		const version = typeof data === "object" && data !== null ? Reflect.get(data, "version") : undefined;
 		if (typeof version !== "string" || !SEMVER_PATTERN.test(version)) return;
 		const record: VersionRecord = { version, checkedAt: Date.now() };
-		const target = recordPath();
+		const target = getCodexClientVersionPath();
 		const temp = `${target}.${process.pid}.tmp`;
 		await Bun.write(temp, JSON.stringify(record));
 		fs.renameSync(temp, target);
@@ -110,7 +106,19 @@ export function getCodexClientVersion(): string {
 	resolvedVersion = newerOf(record?.version);
 	if (!refreshStarted && (!record || Date.now() - record.checkedAt > REFRESH_INTERVAL_MS)) {
 		refreshStarted = true;
-		void refreshRecord();
+		refreshInFlight = refreshRecord();
 	}
 	return resolvedVersion;
+}
+
+/** Test-only: drop the memoized version and refresh latch so the next read re-resolves from disk. */
+export function __resetCodexClientVersionCacheForTests(): void {
+	resolvedVersion = null;
+	refreshStarted = false;
+	refreshInFlight = null;
+}
+
+/** Test-only: settle the background refresh a read may have started, instead of sleeping for it. */
+export function __awaitCodexClientVersionRefreshForTests(): Promise<void> {
+	return refreshInFlight ?? Promise.resolve();
 }

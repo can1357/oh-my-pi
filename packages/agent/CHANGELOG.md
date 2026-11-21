@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added standby tools support through `Agent.setStandbyTools()` and `AgentContext.standbyTools`, allowing tools to remain inactive until a request explicitly enables tool use.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

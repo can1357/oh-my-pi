@@ -258,6 +258,15 @@ pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>>;
+	/// A minimized window's exact accessibility root, for inspection only.
+	/// This never adds a window to the roster used for input or menu dispatch.
+	fn minimized_root(
+		&mut self,
+		_id: &str,
+		_retained: Option<&AxHandle>,
+	) -> CoreResult<Option<super::ax::WindowRoot>> {
+		Ok(None)
+	}
 	/// The process owning window `id`, found even when the window is off the
 	/// current Space, without listing every window.
 	#[cfg(target_os = "macos")]
@@ -276,6 +285,12 @@ pub trait Backend: Send {
 	/// tell report both as false.
 	fn screen_state(&mut self, _display: Option<&DisplaySelector>) -> ScreenState {
 		ScreenState::default()
+	}
+	/// Whether window `id` appears fully covered and its app can stop drawing
+	/// and updating its tree while covered, so both may be stale. Backends
+	/// that do not detect it report false.
+	fn window_covered(&mut self, _id: &str) -> bool {
+		false
 	}
 	/// Waits, before a window or element takeover takes the input lease,
 	/// until the backend lets it start: X11 and macOS wait for the user to

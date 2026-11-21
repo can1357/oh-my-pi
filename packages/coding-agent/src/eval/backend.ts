@@ -10,6 +10,8 @@ import type { EvalDisplayOutput } from "./types";
 export interface ExecutorBackendExecOptions {
 	cwd: string;
 	sessionId: string;
+	/** ID of the eval invocation, not the session or its reusable kernel. */
+	parentToolCallId?: string;
 	sessionFile: string | undefined;
 	kernelOwnerId: string | undefined;
 	signal?: AbortSignal;

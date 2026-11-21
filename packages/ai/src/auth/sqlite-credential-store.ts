@@ -654,6 +654,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				expires_at INTEGER NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
+			CREATE TABLE IF NOT EXISTS auth_broker_local_providers (
+				provider TEXT PRIMARY KEY,
+				created_at INTEGER NOT NULL
+			);
 			CREATE TABLE IF NOT EXISTS usage_history (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				recorded_at INTEGER NOT NULL,
@@ -2081,6 +2085,30 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	async deleteProvider(provider: string): Promise<void> {
 		await this.deleteAuthCredentials(provider, "deleted by user");
+	}
+
+	/**
+	 * Providers whose logins this machine keeps although an auth broker is
+	 * configured: the broker stored them but would not serve them back.
+	 * Maintained by `HybridAuthCredentialStore`.
+	 */
+	listBrokerLocalProviders(): string[] {
+		const rows = this.#db.query<{ provider: string }, []>("SELECT provider FROM auth_broker_local_providers").all();
+		return rows.map(row => row.provider);
+	}
+
+	/** Record `provider` in {@link listBrokerLocalProviders}; a no-op when already listed. */
+	markBrokerLocalProvider(provider: string): void {
+		this.#db
+			.query(
+				`INSERT OR IGNORE INTO auth_broker_local_providers (provider, created_at) VALUES (?, ${SQLITE_NOW_EPOCH})`,
+			)
+			.run(provider);
+	}
+
+	/** Drop `provider` from {@link listBrokerLocalProviders}, so its next login tries the broker again. */
+	unmarkBrokerLocalProvider(provider: string): void {
+		this.#db.query("DELETE FROM auth_broker_local_providers WHERE provider = ?").run(provider);
 	}
 
 	/**
