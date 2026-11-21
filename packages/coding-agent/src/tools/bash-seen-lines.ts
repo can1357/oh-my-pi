@@ -169,6 +169,8 @@ class FileProbe {
 type ClaimedRows = Map<number, Set<string>>;
 
 function claim(claims: Map<string, ClaimedRows>, absolutePath: string, row: NumberedRow): void {
+	// Edit addresses a notebook's cell text, not the JSON rows bash numbers; its tag would not match either.
+	if (absolutePath.toLowerCase().endsWith(".ipynb")) return;
 	let rows = claims.get(absolutePath);
 	if (!rows) {
 		if (claims.size >= MAX_CREDITED_FILES) return;

@@ -210,6 +210,17 @@ describe("bash numbered file views credit seen lines", () => {
 		expect(footers(output)).toEqual([]);
 	});
 
+	// Edit addresses a notebook's cell text, not its JSON rows: a tag for the raw JSON would not match, and its row
+	// numbers do not address the editable text.
+	it("does not credit rows of a notebook", async () => {
+		const session = createSession(cwd);
+		const notebook = JSON.stringify({ cells: [{ cell_type: "code", source: ["needle = 1\n"] }] }, null, 1);
+		await Bun.write(path.join(cwd, "nb.ipynb"), `${notebook}\n`);
+		const output = await bash(session, "grep -n needle nb.ipynb");
+		expect(output).toContain("needle = 1");
+		expect(footers(output)).toEqual([]);
+	});
+
 	// T4: path-prefixed rows credit every file they name, one footer line each.
 	it("credits each file of a recursive grep -rn", async () => {
 		const session = createSession(cwd);
