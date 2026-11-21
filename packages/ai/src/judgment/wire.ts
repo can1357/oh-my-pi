@@ -31,6 +31,17 @@ export type JudgmentImageAssets = Readonly<Record<string, ImageContent>>;
 
 /** How one judgment API addresses, encodes, and decodes a request. */
 export interface JudgmentWire {
+	/** Display name of the protocol, e.g. in the model hub's native route form. */
+	label: string;
+	/** Request path appended to the model's `baseUrl`; `{model}` stands for the wire model id. */
+	path: string;
+	/** Extra guidance on the endpoint root, shown where a root is entered. */
+	rootHelp?: string;
+	/**
+	 * Whether the root is the provider's OpenAI-compatible API root (e.g. `…/v1`), so the provider's chat
+	 * `baseUrl` is a sensible default for it.
+	 */
+	chatRoot?: boolean;
 	/**
 	 * Target of one attempt made with credential `key` against `model`.
 	 * Throws when the credential cannot address the endpoint (e.g. no account id).

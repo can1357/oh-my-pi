@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `JUDGMENT_PROTOCOLS` and `judgmentProtocol` (each judgment API's label, request path and root help, taken from its wire definition), `JUDGMENT_API_PATHS` (derived from them), `catalogJudgmentApis` and `nativeJudgeRootDefault` (default endpoint roots from the model, the catalog seed or the provider's chat root), `validateNativeJudgeEndpointRoot` and `validateNativeJudgeProviderId` to `judgment/native`, for tools that declare native judge models, `timeoutMs` to `NativeJudgeConnection` so `createNativeJudge` callers can set the per-attempt timeout, and `detail` (the error body's message) to `JudgmentApiError`, whose `code` now falls back to the body's top-level `type` as Bifrost sends it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
