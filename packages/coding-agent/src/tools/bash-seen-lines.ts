@@ -28,8 +28,13 @@ import { extractFlatShellCommandSegments, tokenizeShellSegments } from "./shell-
 
 /** Distinct files credited per result. */
 const MAX_CREDITED_FILES = 16;
-/** The edit store retains no snapshot above this size, so such files cannot be credited. */
+/**
+ * The edit store retains no snapshot above this size, so such files cannot be credited. Mirrors
+ * `MAX_SNAPSHOT_FILE_BYTES` in `crates/edit/src/store.rs`, which the native binding does not export.
+ */
 const MAX_SNAPSHOT_FILE_BYTES = 4 * 1024 * 1024;
+/** File bytes read per result across every candidate file. */
+const MAX_TOTAL_READ_BYTES = 8 * 1024 * 1024;
 /** Distinct path-prefix spellings probed on disk per result; bounds stats on output that merely looks numbered. */
 const MAX_PREFIX_PROBES = 64;
 /** Path/number splits considered per output line (`a:1:b:2:c` splits at `:1:` and `:2:`). */
@@ -186,9 +191,7 @@ function claim(claims: Map<string, ClaimedRows>, absolutePath: string, row: Numb
 }
 
 /** Read a file the way the edit store snapshots it: BOM-stripped, LF-normalized UTF-8; undefined when unusable. */
-async function readSnapshotText(absolutePath: string, probe: FileProbe): Promise<string | undefined> {
-	const size = await probe.size(absolutePath);
-	if (size === undefined || size > MAX_SNAPSHOT_FILE_BYTES) return undefined;
+async function readSnapshotText(absolutePath: string): Promise<string | undefined> {
 	try {
 		const decoded = decodeUtf8Text(await Bun.file(absolutePath).bytes());
 		return decoded === null ? undefined : normalizeToLF(stripBom(decoded).text);
@@ -279,8 +282,17 @@ export async function findBashSeenLines(command: string, cwd: string, outputText
 	}
 
 	if (claims.size === 0) return [];
-	const entries = [...claims];
-	const texts = await Promise.all(entries.map(([absolutePath]) => readSnapshotText(absolutePath, probe)));
+	// Output that only looks numbered (`path:line:col` diagnostics of a failing build) names real files nobody
+	// viewed; the total budget keeps reading them cheap. Sizes come from the probe's cached stats.
+	const entries: [string, ClaimedRows][] = [];
+	let budget = MAX_TOTAL_READ_BYTES;
+	for (const entry of claims) {
+		const size = await probe.size(entry[0]);
+		if (size === undefined || size > MAX_SNAPSHOT_FILE_BYTES || size > budget) continue;
+		budget -= size;
+		entries.push(entry);
+	}
+	const texts = await Promise.all(entries.map(([absolutePath]) => readSnapshotText(absolutePath)));
 	const files: BashSeenFile[] = [];
 	entries.forEach(([absolutePath, claimed], index) => {
 		const text = texts[index];

@@ -221,6 +221,20 @@ describe("bash numbered file views credit seen lines", () => {
 		expect(footers(output)).toEqual([]);
 	});
 
+	// Output that only looks numbered (a failing build's `path:line:col` diagnostics) can name many large files;
+	// without a total budget every one would be read and hashed for no credit. Files past the budget get none.
+	it("stops reading candidate files past the total byte budget", async () => {
+		const session = createSession(cwd);
+		const filler = `${"x".repeat(1023)}\n`.repeat(3 * 1024);
+		for (const name of ["a.txt", "b.txt", "c.txt"]) await Bun.write(path.join(cwd, name), `needle\n${filler}`);
+		const output = await bash(session, "grep -n needle a.txt b.txt c.txt");
+		expect(output).toContain("c.txt:1:needle");
+		expect(footers(output).map(footer => [footer.path, footer.lines])).toEqual([
+			["a.txt", "1"],
+			["b.txt", "1"],
+		]);
+	});
+
 	// T4: path-prefixed rows credit every file they name, one footer line each.
 	it("credits each file of a recursive grep -rn", async () => {
 		const session = createSession(cwd);
