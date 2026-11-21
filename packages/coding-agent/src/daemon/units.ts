@@ -31,7 +31,6 @@ import {
 	DAEMON_OUTPUT_PATTERN_FLAGS,
 	DAEMON_PTY_COLUMNS,
 	DAEMON_PTY_ROWS,
-	DAEMON_RESUME_LEASE_GRACE_MS,
 	type DaemonCompletionEvent,
 	type DaemonEvent,
 	type DaemonLogs,
@@ -94,6 +93,8 @@ export interface UnitTableOptions {
 	modules: readonly DaemonModule[];
 	/** Started from a re-exec: restore `survive: "exec"` units and hold idle timers for the grace period. */
 	resumed: boolean;
+	/** How long dropped and restored leases are waited for before idle timers resume (`DAEMON_RESUME_LEASE_GRACE_MS` by default). */
+	leaseGraceMs: number;
 	/** Any unit became live or terminal; the server re-evaluates its own idle exit. */
 	onLivenessChange(): void;
 }
@@ -445,6 +446,7 @@ export class UnitTable {
 	readonly #modules = new Map<string, DaemonModule>();
 	readonly #contexts = new Map<string, ModuleContext>();
 	readonly #resumed: boolean;
+	readonly #leaseGraceMs: number;
 	readonly #onLivenessChange: () => void;
 	readonly #units = new Map<string, UnitEntry>();
 	readonly #byIdentity = new Map<string, UnitEntry>();
@@ -467,6 +469,7 @@ export class UnitTable {
 	constructor(options: UnitTableOptions) {
 		this.#store = options.store;
 		this.#resumed = options.resumed;
+		this.#leaseGraceMs = options.leaseGraceMs;
 		this.#onLivenessChange = options.onLivenessChange;
 		for (const module of options.modules) this.#modules.set(module.kind, module);
 	}
@@ -488,9 +491,9 @@ export class UnitTable {
 			}
 		}
 		if (this.#resumed) {
-			this.#holdIdleUntil = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
+			this.#holdIdleUntil = Date.now() + this.#leaseGraceMs;
 			// The daemon's own idle exit is held too; look again once the grace ends.
-			setTimeout(() => this.#onLivenessChange(), DAEMON_RESUME_LEASE_GRACE_MS + 50);
+			setTimeout(() => this.#onLivenessChange(), this.#leaseGraceMs + 50);
 			for (const fd of this.#readInheritedFds()) this.#inheritedFds.add(fd);
 		}
 		this.#store.setMeta(INHERITED_FDS_META, "[]");
@@ -955,7 +958,7 @@ export class UnitTable {
 		const connectionId = connection.client.connectionId;
 		this.#watchers.delete(connection);
 		// A dropped connection is not a release: give its client time to reconnect and retake the lease.
-		const graceUntil = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
+		const graceUntil = Date.now() + this.#leaseGraceMs;
 		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
 			const entry = this.#leases.get(leaseId)?.entry;
 			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
@@ -2216,7 +2219,7 @@ export class UnitTable {
 			}
 			entry.snapshot.supervised = false;
 			// Its clients' leases died with the last daemon: give them time to reconnect and retake them.
-			entry.idleNotBefore = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
+			entry.idleNotBefore = Date.now() + this.#leaseGraceMs;
 			runtime.notify = this.#armNotify(entry);
 			if (proc.ready?.port !== undefined && entry.snapshot.state !== "ready") {
 				void this.#pollPort(entry, runtime.launch, proc.ready);

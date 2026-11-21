@@ -62,6 +62,9 @@ describe("CLI RPC MCP discovery", () => {
 				// Wait for the stub at startup: a server the MCP host has never seen is
 				// probed before it serves, which outlasts the default startup window.
 				OMP_MCP_STARTUP_TIMEOUT_MS: "0",
+				// The stub ignores end-of-input (see the fixture), so each stop, the era
+				// probe's included, waits out the step before SIGTERM: keep that short.
+				OMP_MCP_SHUTDOWN_STEP_MS: "10",
 			};
 			using model = ptree.spawn([process.execPath, fakeModel, agentDir], {
 				cwd: project,

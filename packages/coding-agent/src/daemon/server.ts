@@ -24,6 +24,8 @@ import {
 	compareDaemonBuilds,
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_RESUME_ENV,
+	DAEMON_RESUME_LEASE_GRACE_ENV,
+	DAEMON_RESUME_LEASE_GRACE_MS,
 	DAEMON_WORKER_ARG,
 	type DaemonEvent,
 	type DaemonHello,
@@ -181,7 +183,7 @@ class Daemon {
 	#closing = false;
 	#shutdown: Promise<void> | undefined;
 
-	constructor(token: string, lock: FileLock, store: DaemonStore, resumed: boolean) {
+	constructor(token: string, lock: FileLock, store: DaemonStore, resumed: boolean, leaseGraceMs: number) {
 		this.#token = token;
 		this.#lock = lock;
 		this.#store = store;
@@ -189,6 +191,7 @@ class Daemon {
 			store,
 			modules: DAEMON_MODULES,
 			resumed,
+			leaseGraceMs,
 			onLivenessChange: () => this.#scheduleIdleExit(),
 		});
 	}
@@ -524,6 +527,12 @@ async function acquireDaemonLock(retryMs: number): Promise<FileLock | undefined>
 	}
 }
 
+/** Lease grace from {@link DAEMON_RESUME_LEASE_GRACE_ENV} when positive, else {@link DAEMON_RESUME_LEASE_GRACE_MS}. */
+function resumeLeaseGraceMs(): number {
+	const graceMs = Number(process.env[DAEMON_RESUME_LEASE_GRACE_ENV]);
+	return graceMs > 0 ? graceMs : DAEMON_RESUME_LEASE_GRACE_MS;
+}
+
 /** Run the daemon until it goes idle, is shut down, or replaces itself. Returns at once when another daemon holds the lock. */
 export async function startDaemonFromEnvironment(): Promise<void> {
 	const resumed = process.env[DAEMON_RESUME_ENV] !== undefined;
@@ -541,7 +550,7 @@ export async function startDaemonFromEnvironment(): Promise<void> {
 	try {
 		const token = await readOrCreateToken();
 		store = DaemonStore.open(daemonDbPath());
-		daemon = new Daemon(token, lock, store, resumed);
+		daemon = new Daemon(token, lock, store, resumed, resumeLeaseGraceMs());
 		const cancelCleanup = postmortem.register("omp-daemon", () => daemon?.shutdown());
 		try {
 			await daemon.run();
