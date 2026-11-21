@@ -1471,11 +1471,26 @@ export function proseLed(table: TableAnalysis, columns: readonly TableColumn[]):
 
 /**
  * The data `plan` draws from `table`, or `undefined` when it leaves fewer than
- * two categories or no series with two values. The kind is fitted to the
- * series it ends up with ({@link fitKind}), so any plan — a model's pick
- * included — draws as something the renderer supports.
+ * two categories or no series with two values, or holds a value overflowed to
+ * Infinity. The kind is fitted to the series it ends up with ({@link fitKind}),
+ * so any plan — a model's pick included — draws as something the renderer supports.
  */
 export function buildChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | undefined {
+	const spec = assembleChart(table, plan);
+	// Finite cells still overflow in a ratio (`1e-300 ms → 1e300 ms`), and an axis looping up to Infinity never ends.
+	return spec && !holdsInfinity(spec) ? spec : undefined;
+}
+
+/** Whether `value` or anything inside it is ±Infinity. `NaN` stays allowed: specs mark absent values with it. */
+function holdsInfinity(value: unknown): boolean {
+	if (typeof value === "number") return value === Number.POSITIVE_INFINITY || value === Number.NEGATIVE_INFINITY;
+	if (typeof value !== "object" || value === null) return false;
+	for (const key in value) if (holdsInfinity(Reflect.get(value, key))) return true;
+	return false;
+}
+
+/** {@link buildChart} before it drops specs holding Infinity. */
+function assembleChart(table: TableAnalysis, plan: ChartPlan): ChartSpec | undefined {
 	const label = plan.label === undefined ? undefined : table.columns[plan.label];
 	// A line over unordered categories draws a trend that is not there: they compare side by side, or, where
 	// the columns are the ordered steps (`Jul | Aug | Sep` beside metric rows), each row is a panel across them.
@@ -1912,6 +1927,8 @@ function quantileRank(word: string): number {
 	if (lower.startsWith("max")) return 100;
 	if (!/^p\d/.test(lower)) return 50;
 	let rank = Number(lower.slice(1));
+	// `p` and hundreds of nines overflow: dividing Infinity never gets under 100.
+	if (rank === Number.POSITIVE_INFINITY) return 100;
 	while (rank > 100) rank /= 10;
 	return rank;
 }

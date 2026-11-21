@@ -22,12 +22,18 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 const MINIMAX_CN_TOKEN_PLAN_429 =
 	'{"type":"error","error":{"type":"rate_limit_error","message":"当前已达到 Token Plan 用量上限。为避免调用中断，请升级 Token Plan 套餐，或购买积分补充用量并开启积分自动消耗。 (2067)"}}';
 
-function googleRpc429(reason: string, retryDelay?: string, message = "Resource exhausted"): string {
-	const details: Array<Record<string, string>> = [
+function googleRpc429(
+	reason: string,
+	retryDelay?: string,
+	message = "Resource exhausted",
+	quotaResetDelay?: string,
+): string {
+	const details: Array<Record<string, unknown>> = [
 		{
 			"@type": "type.googleapis.com/google.rpc.ErrorInfo",
 			reason,
 			domain: "cloudcode-pa.googleapis.com",
+			...(quotaResetDelay === undefined ? {} : { metadata: { quotaResetDelay } }),
 		},
 	];
 	if (retryDelay) {
@@ -355,10 +361,18 @@ describe("parseRateLimitReason", () => {
 		expect(isUsageLimitOutcome(429, body)).toBe(true);
 	});
 
-	it("preserves structured INSUFFICIENT_G1_CREDITS_BALANCE while rotating credentials", () => {
+	it("classifies a headerless 30-minute CCA quotaResetDelay as rotatable, not billing", () => {
+		const body = googleRpc429("RATE_LIMIT_EXCEEDED", undefined, "Resets in 2s.", "30m");
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+		expect(isBillingCapUsageLimit(429, body)).toBe(false);
+	});
+
+	it("treats structured INSUFFICIENT_G1_CREDITS_BALANCE as a rotatable billing cap", () => {
 		const body = googleRpc429("INSUFFICIENT_G1_CREDITS_BALANCE", undefined, "Credit balance is unavailable");
 		expect(parseRateLimitReason(body)).toBe("INSUFFICIENT_G1_CREDITS_BALANCE");
 		expect(isUsageLimitOutcome(429, body)).toBe(true);
+		expect(isBillingCapUsageLimit(429, body)).toBe(true);
 		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(true);
 	});
 
