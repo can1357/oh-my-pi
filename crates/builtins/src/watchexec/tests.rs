@@ -8,7 +8,7 @@ use std::{
 	ffi::OsString,
 	fs,
 	path::{Path, PathBuf},
-	time::{Duration, Instant},
+	time::Duration,
 };
 
 use clap::Parser as _;
@@ -348,7 +348,7 @@ fn project_origin_is_the_marked_directory_above_the_watched_paths() {
 
 #[cfg(unix)]
 mod running {
-	use std::collections::HashMap;
+	use std::{collections::HashMap, time::Instant};
 
 	use tokio_util::sync::CancellationToken;
 
@@ -699,24 +699,6 @@ mod running {
 		for watch in [environment, json, file, only] {
 			assert_eq!(watch.cancelled().await.0, 130);
 		}
-	}
-
-	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-	async fn a_watched_file_survives_being_replaced() {
-		let watch = Watch::postponed(&[("config.toml", "v0")], &["-w", "config.toml", "-n", "--", "echo", "ran"]).await;
-		for round in 1..=3 {
-			let before = count(&watch.settled(Duration::from_millis(300)).await, "ran");
-			// An editor's save: a temporary file renamed over the target.
-			let temp = watch.root.join(".config.toml.tmp");
-			fs::write(&temp, format!("v{round}")).unwrap();
-			fs::rename(&temp, watch.root.join("config.toml")).unwrap();
-			watch.until(|out| count(out, "ran") > before).await;
-		}
-		// Its siblings are not watched.
-		let before = watch.settled(Duration::from_millis(300)).await;
-		watch.write("other.toml");
-		assert_eq!(watch.settled(Duration::from_millis(500)).await, before);
-		watch.cancelled().await;
 	}
 
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]

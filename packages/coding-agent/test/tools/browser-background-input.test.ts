@@ -11,6 +11,10 @@ import {
 	type BrowserKind,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import {
+	unpackedExtensionId,
+	writeRelayExtension,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import {
@@ -20,11 +24,11 @@ import {
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import puppeteer, { type Browser, type Page, type WebWorker } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
-const ASSETS = path.resolve(import.meta.dir, "../../src/tools/browser/relay/extension-assets");
 
 const session = {
 	cwd: process.cwd(),
@@ -62,12 +66,17 @@ async function openTabs(browser: Browser, openBackground: (url: string) => Promi
 /** Resolves once the page reads hidden: a session ends after omp's connection closes, a beat after the release. */
 async function waitHidden(target: Page): Promise<void> {
 	// rAF polling would never fire in the hidden tab this waits for.
-	await target.waitForFunction(() => document.visibilityState === "hidden", { polling: 50, timeout: 5_000 });
+	await target.waitForFunction(() => document.visibilityState === "hidden", {
+		polling: 50,
+		timeout: 5_000,
+	});
 }
 
 /** Hovers and clicks the background page through omp, then releases it; hover needs a rendered frame, which a hidden tab never produces. */
 async function driveAndRelease(kind: BrowserKind, target: Page): Promise<void> {
-	const handle: BrowserHandle = await acquireBrowser(kind, { cwd: process.cwd() });
+	const handle: BrowserHandle = await acquireBrowser(kind, {
+		cwd: process.cwd(),
+	});
 	const name = `background-${kind.kind}-${process.pid}`;
 	try {
 		await acquireTab(name, handle, { target: "Target", timeoutMs: 15_000 });
@@ -101,15 +110,13 @@ async function withRelay(run: (fixture: RelayFixture) => Promise<void>): Promise
 	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-background-"));
 	let browser: Browser | undefined;
 	try {
-		for (const file of ["manifest.json", "options.html", "options.js"]) {
-			await fs.copyFile(path.join(ASSETS, `${file}.txt`), path.join(extensionDir, file));
-		}
-		const background = await Bun.file(path.join(ASSETS, "background.js.txt")).text();
+		await writeRelayExtension(extensionDir, VERSION);
+		const backgroundPath = path.join(extensionDir, "background.js");
+		const background = await Bun.file(backgroundPath).text();
 		// Point the disposable extension at this relay before its code can dial a user's default relay.
-		await Bun.write(
-			path.join(extensionDir, "background.js"),
-			`chrome.storage.local.set({ port: ${port} }).then(() => {\n${background}\n});`,
-		);
+		await Bun.write(backgroundPath, `chrome.storage.local.set({ port: ${port} }).then(() => {\n${background}\n});`);
+		const extensionId = await unpackedExtensionId(extensionDir);
+		if (!extensionId) throw new Error("Missing relay extension directory");
 		browser = await puppeteer.launch({
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
@@ -118,7 +125,11 @@ async function withRelay(run: (fixture: RelayFixture) => Promise<void>): Promise
 			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
 		});
 		const extension = await (
-			await browser.waitForTarget(target => target.type() === "service_worker", { timeout: 15_000 })
+			await browser.waitForTarget(
+				target =>
+					target.type() === "service_worker" && target.url() === `chrome-extension://${extensionId}/background.js`,
+				{ timeout: 15_000 },
+			)
 		).worker();
 		if (!extension) throw new Error("Missing relay extension worker");
 		const cdpUrl = `http://127.0.0.1:${port}`;
@@ -152,7 +163,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("background tab input", () => {
 			const handle = await acquireBrowser({ kind: "relay", cdpUrl }, { cwd: process.cwd() });
 			const names = [`background-first-${process.pid}`, `background-second-${process.pid}`];
 			try {
-				for (const name of names) await acquireTab(name, handle, { target: "Target", timeoutMs: 15_000 });
+				for (const name of names)
+					await acquireTab(name, handle, {
+						target: "Target",
+						timeoutMs: 15_000,
+					});
 				await releaseTab(names[0]!);
 				const result = await runInTab(names[1]!, {
 					code: "await tab.hover('#hover'); return await tab.text('#hover');",

@@ -496,7 +496,7 @@ impl Shared {
 		}
 	}
 
-	/// With `tools.xdev`, host tools run through `write` to an `xd://` device,
+	/// With `tools.commands`, host tools run as tool commands inside `bash` calls,
 	/// so update/end events name the transport tool; report the host tool
 	/// instead. `tool_execution_start` precedes `host_tool_call` and keeps the
 	/// transport name.

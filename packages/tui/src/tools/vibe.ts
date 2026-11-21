@@ -1,7 +1,7 @@
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { describeShimmer, shimmerEnabled, shimmerText } from "../theme/shimmer";
-import type { TspCardStatus, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import { type TspCardStatus, type TspSpan, type TspTone, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { compact, elapsed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
@@ -231,6 +231,7 @@ function tvScreen(
 	const body: string[] = [];
 	const hook = uiTheme.tree.hook;
 	if (live) {
+		const intent = screen.lastIntent && toolIntentLabel(screen.lastIntent);
 		if (screen.turnMessage) {
 			body.push(`${uiTheme.fg("accent", ">")} ${uiTheme.fg("dim", frameText(screen.turnMessage, TV_LINE_MAX))}`);
 		}
@@ -239,15 +240,15 @@ function tvScreen(
 			body.push(`${uiTheme.fg("dim", hook)} ${uiTheme.fg("dim", frameText(line, TV_LINE_MAX))}`);
 		}
 		if (screen.currentTool) {
-			const detail = screen.lastIntent ?? screen.currentToolArgs;
+			const detail = intent ?? screen.currentToolArgs;
 			const label = `${screen.currentTool}${detail ? `: ${detail}` : ""}`;
 			const painted =
 				options.spinnerFrame !== undefined && shimmerEnabled()
 					? shimmerText(frameText(label, TV_LINE_MAX), uiTheme)
 					: uiTheme.fg("muted", frameText(label, TV_LINE_MAX));
 			body.push(`${uiTheme.fg("accent", hook)} ${painted}`);
-		} else if (screen.lastIntent) {
-			body.push(`${uiTheme.fg("accent", hook)} ${uiTheme.fg("muted", frameText(screen.lastIntent, TV_LINE_MAX))}`);
+		} else if (intent) {
+			body.push(`${uiTheme.fg("accent", hook)} ${uiTheme.fg("muted", frameText(intent, TV_LINE_MAX))}`);
 		}
 		const outputCap = options.expanded ? TV_OUTPUT_EXPANDED : TV_OUTPUT_COLLAPSED;
 		for (const line of screen.outputTail.slice(-outputCap)) {
@@ -373,17 +374,18 @@ function describeVibeScreen(
 		),
 	];
 	if (live) {
+		const intent = screen.lastIntent && toolIntentLabel(screen.lastIntent);
 		if (screen.turnMessage) {
 			body.push(text([span("> ", "accent"), span(plainText(screen.turnMessage), "dim")], { truncate: "end" }));
 		}
 		for (const line of screen.trace.slice(-TV_TRACE_EXPANDED)) {
 			body.push(text([span(plainText(line), "dim")], { truncate: "end" }));
 		}
-		const detail = screen.lastIntent ?? screen.currentToolArgs;
+		const detail = intent ?? screen.currentToolArgs;
 		if (screen.currentTool) {
 			body.push(describeShimmer([{ text: plainText(`${screen.currentTool}${detail ? `: ${detail}` : ""}`) }]));
-		} else if (screen.lastIntent) {
-			body.push(text([span(plainText(screen.lastIntent), "muted")], { truncate: "end" }));
+		} else if (intent) {
+			body.push(text([span(plainText(intent), "muted")], { truncate: "end" }));
 		}
 		for (const line of screen.outputTail.slice(-TV_OUTPUT_EXPANDED)) {
 			if (line.trim().length > 0) body.push(text([span(plainText(line), "muted")], { truncate: "end" }));

@@ -165,7 +165,7 @@ function evalCustomTool(owner: WeakRef<ToolSession>, descriptor: EvalToolDescrip
 		description: descriptor.description,
 		parameters: descriptor.parameters,
 		loadMode: "essential",
-		async execute(_toolCallId, rawParams, _onUpdate, _ctx, signal) {
+		async execute(toolCallId, rawParams, _onUpdate, _ctx, signal) {
 			const session = owner.deref();
 			if (!session) {
 				return errorResult(
@@ -182,12 +182,13 @@ function evalCustomTool(owner: WeakRef<ToolSession>, descriptor: EvalToolDescrip
 					result = await callPythonTool(descriptor.name, args, {
 						...resolvePythonKernelIdentity(session),
 						toolSession: session,
+						parentToolCallId: toolCallId,
 						signal,
 					});
 				} else {
 					const jsResult = await invokeJsTool(
 						{ op: "call", name: descriptor.name, args },
-						{ ...resolveJsKernelIdentity(session), session, signal },
+						{ ...resolveJsKernelIdentity(session), session, parentToolCallId: toolCallId, signal },
 					);
 					result =
 						"tools" in jsResult ? { ok: false, error: "JavaScript tool call returned a descriptor" } : jsResult;

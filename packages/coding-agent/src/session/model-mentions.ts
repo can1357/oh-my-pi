@@ -8,6 +8,7 @@ import { getBundledAgent } from "../task/agents";
 import type { AgentDefinition } from "../task/types";
 import {
 	MODEL_MENTION_RE,
+	MODEL_MENTION_TAG_RE,
 	type ModelMention,
 	modelMentionDisplayName,
 	modelMentionName,
@@ -20,6 +21,11 @@ import type { SessionManager } from "./session-manager";
 
 /** Journal entry identifying a model the user authorized for delegation. */
 export const MODEL_MENTION_ENTRY_TYPE = "model_mention";
+
+/** The `m<N>` agents whose expanded mention tags appear in `text`. */
+export function referencedModelAgents(text: string): Set<string> {
+	return new Set(Array.from(text.matchAll(MODEL_MENTION_TAG_RE), match => match[1]!));
+}
 
 /** Replay valid branch entries, keeping the first occurrence of each agent and selector. */
 export function readModelMentions(entries: readonly SessionEntry[]): ModelMention[] {

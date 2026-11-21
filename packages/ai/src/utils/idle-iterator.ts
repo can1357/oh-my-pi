@@ -2,8 +2,8 @@ import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { LocalWorkSource } from "./event-stream";
 
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000;
-const DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS = 300_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 900_000;
+const DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS = 900_000;
 /** Re-mint persistent race promises every N iterations (see hoisted-racer comment). */
 const RACER_REMINT_INTERVAL = 1024;
 

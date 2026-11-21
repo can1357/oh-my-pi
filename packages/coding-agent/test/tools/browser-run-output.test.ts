@@ -69,7 +69,9 @@ describe("browser handle enrichment — fill()", () => {
 						return { activeElement: this };
 					},
 				}),
+			remoteObject: () => ({ objectId: "field" }),
 			frame: {
+				client: { send: async () => ({}) },
 				page: () => ({
 					keyboard: {
 						sendCharacter: async (text: string) => {
@@ -273,7 +275,9 @@ describe("browser handle enrichment — guarded actions", () => {
 					},
 				}),
 			type: async () => {},
+			remoteObject: () => ({ objectId: "field" }),
 			frame: {
+				client: { send: async () => ({}) },
 				page: () => ({
 					keyboard: {
 						sendCharacter: async (text: string) => {

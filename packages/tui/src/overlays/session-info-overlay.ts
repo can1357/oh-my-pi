@@ -187,7 +187,7 @@ export class SessionInfoOverlay implements Component {
 
 	/**
 	 * The sheet body (the overlay is the frame), in three tiers: who the session
-	 * is (the id and file as copyable mono fields), how full its context window
+	 * is (the id, file and local:// directory as copyable fields), how full its context window
 	 * is (a meter under a right-aligned figure), then the report's sections as
 	 * headed groups. Groups of plain counts (Messages, Tokens, Cost) share a
 	 * two-column stats grid with right-aligned figures and their Total set off
@@ -219,7 +219,7 @@ export class SessionInfoOverlay implements Component {
 		};
 		for (const [index, { head, entries }] of sections.entries()) {
 			if (head === undefined) {
-				// The session's identity: its id, then its file (copyable when it is one).
+				// The session's identity: its id, then its file (copyable when it is one) and local:// directory.
 				const identity: NativeChild[] = [];
 				const rest: NativeChild[] = [];
 				for (const entry of entries) {
@@ -233,6 +233,9 @@ export class SessionInfoOverlay implements Component {
 								? identityField("File", [span(path, "path")], "file", `Copy ${path}`)
 								: identityField("File", [span(path, "muted")], "file"),
 						);
+					} else if (entry.k === "Local") {
+						const path = joined(entry.v);
+						identity.push(identityField("Local", [span(path, "path")], "local", `Copy ${path}`));
 					} else rest.push(node("kv", { items: [{ k: entry.k, v: entry.v }], role: "omp.info.kv" }));
 				}
 				if (identity.length > 0) body.push(node("col", { role: "omp.info.identity" }, identity, "identity"));
