@@ -351,6 +351,7 @@ Both actions write only `providers.<provider>.models[]` in the active models con
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
 - `imageCountBudget`: positive integer. Set this on a custom model or `modelOverrides` entry to state how many images one request to its host may carry. It replaces the catalog budget, which is 5 for a provider no catalog rule names. A gateway in front of a vendor with a higher limit needs it: once a session holds more images than the budget, OMP drops the oldest ones, which changes the cached prompt prefix.
+- `snapcompactShape`: `{ variant, frameSize? }`. Set this on a custom model or `modelOverrides` entry to choose the snapcompact frame shape its archive pages use, in place of the shape OMP picks for the model line. `variant` is a `snapcompact.shape` value other than `auto` (for example `11on16-bw`); `frameSize` is the frame edge in px, an integer from 64 to 2576, and defaults to the variant's own. The `snapcompact.shape` setting, when not `auto`, still wins, the frame is still shrunk to the host's `image-max-edge`, and billing estimates still follow the model.
 - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, `glm5`, `cl100k` (OpenAI GPT-3.5 and GPT-4) and `o200k` (OpenAI GPT-5 and later). Omit it to use catalog identity policy; models without one count in o200k.
 
 ## Validation rules (current)
@@ -480,7 +481,7 @@ Provider defaults vs per-model overrides:
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
-  `imageInputDecoder`, `imageCountBudget`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
+  `imageInputDecoder`, `imageCountBudget`, `snapcompactShape`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
   `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
   `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
@@ -666,8 +667,12 @@ acceptance counts even if the provider returns no visible reasoning. Explicit ca
 including `reasoning: false`, take precedence over probing.
 
 A row advertising only image output becomes an image-generation runner; embedding-only output
-becomes an embedding runner. Mixed outputs remain chat models. These runners are visible with
-`omp models --kind all`, not the default chat listing.
+becomes an embedding runner. `speech` as the only output becomes a `tts` runner on `openai-speech`,
+and `transcription` an `stt` runner on `openai-transcriptions`. Outputs come from the row's
+modality arrays or OpenRouter's `architecture.modality` summary
+(`text->speech`). Mixed outputs, a bare `audio` output (Poe lists TTS voices and music generators
+alike as `text->audio`), and rows that declare no modalities remain chat models. These runners are
+visible with `omp models --kind all`, not the default chat listing.
 
 ### Explicit provider discovery
 
@@ -1271,7 +1276,7 @@ providers:
               cacheWrite: 3.75
 ```
 
-`disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly.
+`disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly. Claude on `google-vertex` can also reject strict tools when the GCP organization policy `vertexai.allowedPartnerModelFeatures` disallows `structured_outputs`; OMP retries once without `strict` and pins `strictToolsDisabled` for the session. Set `disableStrictTools: true` for `google-vertex` to skip that failed first request.
 
 Tool schemas going on the wire are normalized by the unified flow in
 `packages/ai/src/utils/schema/normalize.ts` (Google/CCA/MCP dispatchers

@@ -16,7 +16,7 @@ import {
 } from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
-import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { AGENT_KILL_LABEL, type InterruptReason } from "../session/messages";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
@@ -526,7 +526,7 @@ export async function executeCancel(
 			// No job by this id (or it belongs to another agent): a budget-aborted
 			// keep-alive subagent lives on as a jobless registration long after its
 			// job row is reaped, so let cancel reach the agent registration too.
-			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id));
+			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id, AGENT_KILL_LABEL));
 			continue;
 		}
 		if (existing.status !== "running") {
@@ -534,7 +534,7 @@ export async function executeCancel(
 			// The agent registration behind it (job id == agent id for task
 			// spawns) can outlive the row as an idle/parked zombie — try the
 			// registration kill before reporting the row as already done.
-			const regOutcome = await cancelAgentRegistration(session, ownerId, id);
+			const regOutcome = await cancelAgentRegistration(session, ownerId, id, AGENT_KILL_LABEL);
 			cancelOutcomes.push(
 				regOutcome.status === "cancelled"
 					? regOutcome
@@ -550,7 +550,9 @@ export async function executeCancel(
 		// live and idle, and the next message queued for it starts it again. Kill
 		// the agent too, as an explicit kill, before its run observes the abort.
 		const runAgent = agentRunOf(existing);
-		const agentKill = runAgent ? await cancelAgentRegistration(session, ownerId, runAgent) : undefined;
+		const agentKill = runAgent
+			? await cancelAgentRegistration(session, ownerId, runAgent, AGENT_KILL_LABEL)
+			: undefined;
 		const cancelled = manager.cancel(id, { ownerId });
 		cancelOutcomes.push(
 			cancelled
@@ -608,13 +610,15 @@ export type AgentKillScope = Pick<ToolSession, "agentRegistry" | "agentLifecycle
  * Stop agent `id` for good on its parent's behalf, as cancelling its task job
  * does (see {@link executeCancel}): kill its registration so no queued message
  * restarts it, then cancel the job that runs it, if one still runs.
+ * `reason` goes to {@link cancelAgentRegistration}.
  */
 export async function stopAgentRun(
 	scope: AgentKillScope,
 	manager: AsyncJobManagerApi | undefined,
 	id: string,
+	reason: InterruptReason,
 ): Promise<CancelOutcome> {
-	const outcome = await cancelAgentRegistration(scope, scope.agentRegistry?.get(id)?.parentId, id);
+	const outcome = await cancelAgentRegistration(scope, scope.agentRegistry?.get(id)?.parentId, id, reason);
 	let cancelledJob = false;
 	for (const job of manager?.getRunningJobs() ?? []) {
 		if (agentRunOf(job) === id && manager?.cancel(job.id, { ownerId: job.ownerId })) cancelledJob = true;
@@ -629,15 +633,16 @@ export async function stopAgentRun(
  * keep a terminal `aborted` row, so no queued message wakes it, while a message
  * sent to it later reopens its transcript). It is the kill path for a task
  * job's agent and for a keep-alive subagent that was budget-aborted, went
- * `idle`/`parked`, and outlived its job row — otherwise it is unstoppable short
- * of a broker restart (issue #6315). Scoped to the caller's own descendants so
- * cross-agent kills stay impossible; an unowned caller (no owner id) reaches
- * only parentless subs. Never touches Main, the caller, or advisor transcripts.
+ * `idle`/`parked`, and outlived its job row. The caller supplies `reason` to
+ * control its interrupt label. Scope limits this function to the caller's own
+ * descendants and blocks cross-agent kills. An unowned caller reaches only
+ * parentless subs. The function never touches Main, the caller, or advisor transcripts.
  */
 export async function cancelAgentRegistration(
 	session: AgentKillScope,
 	ownerId: string | undefined,
 	id: string,
+	reason: InterruptReason,
 ): Promise<CancelOutcome> {
 	const registry = session.agentRegistry;
 	const ref = registry?.get(id);
@@ -653,7 +658,7 @@ export async function cancelAgentRegistration(
 	const lifecycle = session.agentLifecycle?.();
 	try {
 		if (ref.status === "running" && ref.session) {
-			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
+			await ref.session.abort({ reason });
 		}
 		if (lifecycle) {
 			await lifecycle.release(id, undefined, { tombstone: true });

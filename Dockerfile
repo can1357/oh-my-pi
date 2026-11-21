@@ -227,9 +227,11 @@ RUN bun install --frozen-lockfile --ignore-scripts
 # hoisted node_modules that `bun install` just produced.
 COPY . /pi/
 
-# Generate the hosted viewer metadata that `--ignore-scripts` skipped above.
-# The root prepare script normally handles it on a vanilla install.
-RUN bun --cwd=packages/coding-agent run gen:export-viewer
+# Generate the hosted viewer metadata and the embedded relay extension that
+# `--ignore-scripts` skipped above. The root prepare script normally handles
+# them on a vanilla install.
+RUN bun --cwd=packages/coding-agent run gen:export-viewer && \
+    bun --cwd=packages/browser-relay run gen:embedded
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/omp"]
 CMD ["--help"]

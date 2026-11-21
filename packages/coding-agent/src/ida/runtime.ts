@@ -1,21 +1,14 @@
 import { $env, logger } from "@oh-my-pi/pi-utils";
 import { DisasmUnavailableError, type WorkerRuntime } from "../disasm/backend";
 import { $ } from "bun";
-import { Settings } from "../config/settings";
-import {
-	enumeratePythonRuntimes,
-	filterEnv,
-	type PythonRuntime,
-	resolveExplicitPythonRuntime,
-} from "../eval/py/runtime";
+import { findWorkerRuntime, memoizeWorkerRuntime } from "../disasm/python-runtime";
+import type { PythonRuntime } from "../eval/py/runtime";
 import type { ToolSession } from "../tools";
 import { cfgIdaInstall } from "./install";
 import { cfgIdaPython } from "./settings";
 
 const PROBE =
 	"import importlib.util as u,sys;sys.exit(0 if u.find_spec('ida_domain') and u.find_spec('idapro') else 3)";
-
-const runtimes = new Map<string, Promise<WorkerRuntime>>();
 
 /**
  * Resolve the Python interpreter that can import `ida_domain` and `idapro`, memoized per
@@ -32,30 +25,16 @@ export function resolveIdaRuntime(session: ToolSession): Promise<WorkerRuntime> 
 		);
 	}
 	const python = cfgIdaPython.get(session.settings)?.trim() || undefined;
-	const key = `${python ?? ""}\0${installDir}\0${session.cwd}`;
-	const cached = runtimes.get(key);
-	if (cached) return cached;
-	const promise = probeIdaRuntime(python, installDir, session.cwd);
-	runtimes.set(key, promise);
-	promise.catch(() => {
-		if (runtimes.get(key) === promise) runtimes.delete(key);
-	});
-	return promise;
-}
-
-async function probeIdaRuntime(python: string | undefined, installDir: string, cwd: string): Promise<WorkerRuntime> {
-	const baseEnv = filterEnv((await Settings.init()).getShellConfig().env);
-	const candidates: PythonRuntime[] = python
-		? [resolveExplicitPythonRuntime(python, cwd, baseEnv)]
-		: enumeratePythonRuntimes(cwd, baseEnv);
-
-	for (const candidate of candidates) {
-		if (await probeCandidate(candidate)) return buildRuntime(candidate, installDir);
-	}
-
-	const paths = candidates.length > 0 ? candidates.map(c => c.pythonPath).join(", ") : "none";
-	throw new DisasmUnavailableError(
-		`IDA unavailable: no Python interpreter can import ida_domain and idapro (tried: ${paths}). Install ida-domain into the Python targeted by IDA's idapyswitch, or set ida.python.`,
+	return memoizeWorkerRuntime("ida", [python, installDir, session.cwd], () =>
+		findWorkerRuntime(
+			python,
+			session.cwd,
+			async candidate => ((await probeCandidate(candidate)) ? buildRuntime(candidate, installDir) : undefined),
+			tried =>
+				new DisasmUnavailableError(
+					`IDA unavailable: no Python interpreter can import ida_domain and idapro (tried: ${tried}). Install ida-domain into the Python targeted by IDA's idapyswitch, or set ida.python.`,
+				),
+		),
 	);
 }
 

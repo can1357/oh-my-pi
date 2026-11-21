@@ -100,6 +100,42 @@ describe("ModelsConfigSchema tokenizer", () => {
 	});
 });
 
+describe("ModelsConfigSchema snapcompactShape", () => {
+	const config = (snapcompactShape: unknown) => ({
+		providers: {
+			p: {
+				baseUrl,
+				apiKey: "K",
+				models: [{ id: "gemini-3.5-flash", api: "google-generative-ai" as const, snapcompactShape }],
+				modelOverrides: { "gemini-3.5-pro": { snapcompactShape } },
+			},
+		},
+	});
+
+	test("accepts a known variant with an optional frame size at either bound", () => {
+		expect(ModelsConfigSchema(config({ variant: "11on16-bw" }))).not.toBeInstanceOf(OmpErrors);
+		for (const frameSize of [64, 1932, 2576]) {
+			expect(ModelsConfigSchema(config({ variant: "11on16-bw", frameSize }))).not.toBeInstanceOf(OmpErrors);
+		}
+	});
+
+	test("rejects an unknown variant or an out-of-range frame size in models and modelOverrides", () => {
+		const rejected = [
+			{ variant: "11on16" },
+			{ variant: "11on16-bw", frameSize: 63 },
+			{ variant: "11on16-bw", frameSize: 2577 },
+			{ variant: "11on16-bw", frameSize: 1932.5 },
+		];
+		for (const shape of rejected) {
+			const checked = ModelsConfigSchema(config(shape));
+			if (!(checked instanceof OmpErrors)) throw new Error(`expected ${JSON.stringify(shape)} to be rejected`);
+			expect(new Set(checked.map(error => error.path.slice(0, 4).join(".")))).toEqual(
+				new Set(["providers.p.models.0", "providers.p.modelOverrides.gemini-3.5-pro"]),
+			);
+		}
+	});
+});
+
 describe("ModelsConfigSchema Responses compat overrides", () => {
 	/** A custom Responses-compatible proxy serving gpt-6-astra, as a user writes it in models.yml. */
 	function astraProxyConfig(compat: Record<string, unknown>): unknown {
