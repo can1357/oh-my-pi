@@ -11,6 +11,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
+import { parseSessionOrigin, type SessionOrigin } from "./session-entries";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
@@ -38,6 +39,8 @@ export interface SessionInfo {
 	/** Working directory where the session was started. Empty string for old sessions. */
 	cwd: string;
 	title?: string;
+	/** Client other than the terminal that started the session (header `origin`); see {@link isForeignSession}. */
+	origin?: SessionOrigin;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
 	/** Id of the session whose conversation this one continues in a new file (header `continuationOf`). */
@@ -342,6 +345,7 @@ interface SessionListHeader {
 	id: string;
 	cwd?: string;
 	title?: string;
+	origin?: SessionOrigin;
 	parentSession?: string;
 	continuationOf?: string;
 	timestamp?: string;
@@ -361,6 +365,7 @@ function sessionListHeaderFromRecord(
 		type: "session",
 		id: record.id,
 		cwd: typeof record.cwd === "string" ? record.cwd : undefined,
+		origin: parseSessionOrigin(record.origin),
 		title:
 			titleOverride === null
 				? undefined
@@ -379,6 +384,7 @@ function parseSessionListHeaderLine(line: string, titleOverride?: string | null)
 		type: "session",
 		id,
 		cwd: extractStringProperty(line, "cwd"),
+		origin: parseSessionOrigin(extractStringProperty(line, "origin")),
 		title: titleOverride === null ? undefined : (titleOverride ?? extractStringProperty(line, "title")),
 		parentSession: extractStringProperty(line, "parentSession"),
 		continuationOf: extractStringProperty(line, "continuationOf"),
@@ -529,6 +535,7 @@ async function scanSessionFile(
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
+			origin: header.origin,
 			title: header.title ?? shortSummary,
 			parentSessionPath: header.parentSession,
 			continuationOf: header.continuationOf,
@@ -684,11 +691,11 @@ async function scanSessionDirReadOnly(
 }
 
 /**
- * List sessions in a resolved session directory (newest first), reading each
- * file's lifecycle {@link SessionStatus}.
+ * List the terminal's sessions in a resolved session directory (newest first),
+ * reading each file's lifecycle {@link SessionStatus}; {@link isForeignSession}s are skipped.
  */
-export function listSessions(sessionDir: string, storage: SessionStorage): Promise<SessionInfo[]> {
-	return scanSessionDir(sessionDir, storage, true);
+export async function listSessions(sessionDir: string, storage: SessionStorage): Promise<SessionInfo[]> {
+	return (await scanSessionDir(sessionDir, storage, true)).filter(session => !isForeignSession(session));
 }
 
 /**
@@ -698,18 +705,29 @@ export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage
 	return scanSessionDirReadOnly(sessionDir, storage, true);
 }
 
-/** List all sessions across all project directories (newest first). */
+/** List the terminal's sessions across all project directories (newest first); see {@link isForeignSession}. */
 export async function listAllSessions(
 	storage: SessionStorage = new FileSessionStorage(),
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
 	try {
 		const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, "*.jsonl"));
-		return await collectSessionsFromFiles(files, storage, true);
+		const sessions = await collectSessionsFromFiles(files, storage, true);
+		return sessions.filter(session => !isForeignSession(session));
 	} catch {
 		return [];
 	}
 }
+
+/**
+ * True when another client started `session` (header `origin`, e.g. Chrome's side panel). Its sessions are that
+ * client's to resume: the terminal's picker, `--continue`, recent sessions and ACP listings skip them, while an
+ * explicit `--resume <id|path>` still opens one.
+ */
+export function isForeignSession(session: SessionInfo): boolean {
+	return session.origin !== undefined;
+}
+
 /**
  * True when a scanned session is a 0-turn stub with no display name: the tail
  * lifecycle shows no assistant activity (pending user-only or unscannable)
@@ -730,9 +748,11 @@ export function isEmptySession(session: SessionInfo): boolean {
 	return true;
 }
 
-/** Picker-facing view of a session list: empties dropped, pinned sessions kept. */
+/** Picker-facing view of a session list: foreign sessions and unpinned empties dropped. */
 function filterSessionsForPicker(sessions: SessionInfo[], pinnedIds: ReadonlySet<string>): SessionInfo[] {
-	return sessions.filter(session => pinnedIds.has(session.id) || !isEmptySession(session));
+	return sessions.filter(
+		session => !isForeignSession(session) && (pinnedIds.has(session.id) || !isEmptySession(session)),
+	);
 }
 
 /**
@@ -862,13 +882,15 @@ async function indexedSessions(files: readonly string[], titles: ReadonlyMap<str
 function indexScannedTitles(sessions: readonly SessionInfo[], indexed: ReadonlyMap<string, string>): void {
 	const changed = new Map<string, string>();
 	for (const session of sessions) {
+		// Indexed titles become picker rows without a header read.
+		if (isForeignSession(session)) continue;
 		const title = sanitizeSessionName(session.title);
 		if (title && indexed.get(session.id) !== title) changed.set(session.id, title);
 	}
 	recordSessionTitles(changed);
 }
 
-/** Most recent session with resumable content, skipping 0-turn empties. Exported for testing. */
+/** Most recent terminal session with resumable content, skipping 0-turn empties and foreign sessions. Exported for testing. */
 export async function findMostRecentNonEmptySession(
 	sessionDir: string,
 	storage: SessionStorage = new FileSessionStorage(),
@@ -877,7 +899,7 @@ export async function findMostRecentNonEmptySession(
 	// prefix, so a transcript whose first assistant record starts past the
 	// prefix is never skipped.
 	const sessions = await scanSessionDir(sessionDir, storage, true);
-	return sessions.find(session => !isEmptySession(session))?.path ?? null;
+	return sessions.find(session => !isForeignSession(session) && !isEmptySession(session))?.path ?? null;
 }
 
 /** Exported for testing */
@@ -886,7 +908,7 @@ export async function findMostRecentSession(
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<string | null> {
 	const sessions = await scanSessionDir(sessionDir, storage, false);
-	return sessions[0]?.path ?? null;
+	return sessions.find(session => !isForeignSession(session))?.path ?? null;
 }
 
 /** Where the conversation of a resumed session file went on (see {@link findSessionContinuation}). */
@@ -1654,7 +1676,7 @@ export async function getRecentSessions(
 			continue;
 		}
 		const info = await scanSessionFile(file, storage, true, stat);
-		if (!info || isEmptySession(info)) continue;
+		if (!info || isForeignSession(info) || isEmptySession(info)) continue;
 		const title = sanitizeSessionName(info.title);
 		if (useIndex && title && info.id) recordSessionTitle(info.id, title);
 		recent.push({ path: file, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });

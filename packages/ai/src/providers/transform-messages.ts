@@ -1617,5 +1617,33 @@ export function transformMessages<TApi extends Api>(
 	flushPendingToolCalls(Date.now());
 	flushPendingAbortedToolCalls();
 
-	return result;
+	const foldsUserText =
+		targetCompat !== undefined && "foldUserAfterToolResult" in targetCompat && targetCompat.foldUserAfterToolResult;
+	return foldsUserText ? foldUserMessagesIntoToolResults(result) : result;
+}
+
+/**
+ * Append each user/developer message that directly follows a tool result to
+ * that result's content, so the request never continues with user text after
+ * a function response (`foldUserAfterToolResult`). Folding every position, not
+ * only the tail, keeps earlier turns byte-stable for prompt caching. Messages
+ * carrying native provider history stay separate turns.
+ */
+function foldUserMessagesIntoToolResults(messages: Message[]): Message[] {
+	const folded: Message[] = [];
+	for (const msg of messages) {
+		const previous = folded.at(-1);
+		if (previous?.role !== "toolResult" || (msg.role !== "user" && msg.role !== "developer") || msg.providerPayload) {
+			folded.push(msg);
+			continue;
+		}
+		const content: ToolResultMessage["content"] =
+			typeof msg.content === "string"
+				? msg.content.trim() === ""
+					? []
+					: [{ type: "text", text: msg.content }]
+				: msg.content;
+		folded[folded.length - 1] = { ...previous, content: [...previous.content, ...content] };
+	}
+	return folded;
 }

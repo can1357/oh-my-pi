@@ -30,12 +30,18 @@ function browserX11Guidance(settings: Settings, platform: NodeJS.Platform = proc
 	return platform === "linux" || remoteBrowser ? x11Guidance.trim() : undefined;
 }
 
+/**
+ * What the relay guidance tells the model: `only` when the relay is the session's only browser
+ * (`PI_BROWSER_RELAY=only`), `default` when an open without `app` goes to the relay and `app: "auto"` to `fallback`.
+ */
+export type BrowserRelayGuidance = { mode: "only" } | { mode: "default"; fallback: BrowserKind };
+
 /** Build the browser eval facade after an eval runtime first requests preludes. */
 export function createBrowserPreludeDefinition(
 	session: ToolSession,
 	host: Pick<HostEvalPreludeDefinition, "invoke" | "status"> & {
-		/** Where an open with `app: "auto"` goes; set only while an open without `app` goes to the relay. */
-		relayFallback?: BrowserKind;
+		/** Relay guidance to render; unset while an open without `app` stays out of the user's Chrome. */
+		relay?: BrowserRelayGuidance;
 	},
 ): HostEvalPreludeDefinition {
 	return {
@@ -46,13 +52,15 @@ export function createBrowserPreludeDefinition(
 		},
 		firstCallDocumentation: browserCoreDescription,
 		get guidance() {
-			const fallback = host.relayFallback;
-			const relay = fallback
+			const mode = host.relay;
+			const fallback = mode?.mode === "default" ? mode.fallback : undefined;
+			const relay = mode
 				? prompt.render(relayGuidance, {
+						only: mode.mode === "only",
 						// The block reaches the model provider: never echo userinfo or token params.
-						cdpUrl: fallback.kind === "connected" ? redactUrlForLog(fallback.cdpUrl) : undefined,
-						tern: fallback.kind === "tern",
-						cmux: fallback.kind === "cmux",
+						cdpUrl: fallback?.kind === "connected" ? redactUrlForLog(fallback.cdpUrl) : undefined,
+						tern: fallback?.kind === "tern",
+						cmux: fallback?.kind === "cmux",
 					})
 				: undefined;
 			return prompt.render(userSessionGuidance, { relay, x11: browserX11Guidance(session.settings) }).trim();
