@@ -668,7 +668,7 @@ function createCodexRequestMetadata(
 }
 
 function applyCodexCompatibilityHeaders(headers: Headers, metadata: CodexCompatibilityIdentity): void {
-	headers.set(OPENAI_HEADERS.SCOPED_SESSION_ID, metadata.affinitySessionId ?? metadata.sessionId);
+	headers.set(OPENAI_HEADERS.SESSION_ID, metadata.affinitySessionId ?? metadata.sessionId);
 	headers.set(OPENAI_HEADERS.THREAD_ID, metadata.threadId);
 	headers.set(OPENAI_HEADERS.WINDOW_ID, metadata.windowId);
 	if (metadata.turnMetadataJson) {
@@ -4224,14 +4224,11 @@ function createCodexHeaders(
 	headers.set(OPENAI_HEADERS.VERSION, codexClientVersion);
 	headers.set("User-Agent", USER_AGENT);
 	if (sessionId) {
-		// The backend derives prompt-cache affinity from the session headers
-		// (codex-rs `responses_session_id`); a side request shares its parent's.
-		const affinitySessionId = requestMetadata?.affinitySessionId ?? sessionId;
-		headers.set(OPENAI_HEADERS.CONVERSATION_ID, affinitySessionId);
-		headers.set(OPENAI_HEADERS.SESSION_ID, affinitySessionId);
+		// The backend derives prompt-cache affinity from `session-id` (codex-rs
+		// `responses_session_id`); a side request shares its parent's.
+		headers.set(OPENAI_HEADERS.SESSION_ID, requestMetadata?.affinitySessionId ?? sessionId);
 		headers.set("x-client-request-id", sessionId);
 	} else {
-		headers.delete(OPENAI_HEADERS.CONVERSATION_ID);
 		headers.delete(OPENAI_HEADERS.SESSION_ID);
 		headers.delete("x-client-request-id");
 	}
@@ -4239,7 +4236,6 @@ function createCodexHeaders(
 	if (requestMetadata) {
 		applyCodexCompatibilityHeaders(headers, requestMetadata);
 	} else {
-		headers.delete(OPENAI_HEADERS.SCOPED_SESSION_ID);
 		headers.delete(OPENAI_HEADERS.THREAD_ID);
 		headers.delete(OPENAI_HEADERS.WINDOW_ID);
 		headers.delete(OPENAI_HEADERS.TURN_METADATA);

@@ -13,32 +13,18 @@ interface Edit {
 	actor: string;
 	before: string | null;
 	after: string | null;
-	gapHint?: string;
 }
 
 /** Content committed when only `scope`'s preselected ops are applied, plus the per-op verdicts. */
-function commitFor(
-	head: string | null,
-	edits: Edit[],
-	work: string | null,
-	scope: string[],
-	tailHint?: string,
-	headMoved = false,
-) {
+function commitFor(head: string | null, edits: Edit[], work: string | null, scope: string[], headMoved = false) {
 	const recorded: RecordedEdit[] = edits.map(edit => ({
 		actor: edit.actor,
 		before: toLines(edit.before),
 		after: toLines(edit.after),
-		gapHint: edit.gapHint,
 	}));
 	const headLines = toLines(head);
 	const workLines = toLines(work);
-	const attribution = attribute(
-		headLines,
-		historySteps(headLines, recorded, workLines, tailHint),
-		workLines,
-		headMoved,
-	);
+	const attribution = attribute(headLines, historySteps(headLines, recorded, workLines), workLines, headMoved);
 	const { status, reasons } = classify(attribution, new Set(scope));
 	const selected = new Set(attribution.ops.filter(op => status[op.id] === "own").map(op => op.id));
 	const verdicts = attribution.ops.map(op => `${status[op.id]} ${op.kind}${op.text}`);
@@ -128,7 +114,7 @@ describe("selective commit attribution", () => {
 		const head = "old";
 		const after = "first\nsecond";
 		const work = "first\ninserted\nsecond";
-		const { content } = commitFor(head, [{ actor: "Main", before: head, after }], work, ["Main"], "Main");
+		const { content } = commitFor(head, [{ actor: "Main", before: head, after }], work, ["Main"]);
 		expect(content).toBe(after);
 	});
 
@@ -152,15 +138,6 @@ describe("selective commit attribution", () => {
 		expect(verdicts).toContain("review -    return 1");
 		expect(verdicts).toContain("review +    return 10 ");
 		expect(content).toBe(CODE.replace("def b():\n    return 2", "def b():\n    log()\n    return 2"));
-	});
-
-	it("counts an unrecorded rewrite of the agent's lines as its own when its shell call explains it", () => {
-		const after = CODE.replace("return 1", "return  10");
-		const work = CODE.replace("return 1", "return 10");
-
-		const { content } = commitFor(CODE, [{ actor: "Main", before: CODE, after }], work, ["Main"], "Main");
-
-		expect(content).toBe(work);
 	});
 
 	describe("history that predates HEAD", () => {
@@ -281,7 +258,7 @@ describe("selective commit attribution", () => {
 			const headCounts = tally(lines(head));
 			const workCounts = tally(before);
 
-			const committed = tally(commitFor(lines(head), edits, before, ["Main"], undefined, true).content);
+			const committed = tally(commitFor(lines(head), edits, before, ["Main"], true).content);
 
 			for (const [line, count] of committed) {
 				expect(count).toBeLessThanOrEqual(Math.max(headCounts.get(line) ?? 0, workCounts.get(line) ?? 0));
@@ -307,7 +284,7 @@ describe("selective commit attribution", () => {
 			before = lines(after);
 		}
 
-		const { verdicts } = commitFor(lines("x B x D A q q q q"), edits, before, ["Main"], undefined, true);
+		const { verdicts } = commitFor(lines("x B x D A q q q q"), edits, before, ["Main"], true);
 
 		expect(verdicts.at(-1)).toBe("own +C");
 		expect(verdicts.slice(0, -1).every(verdict => verdict.startsWith("review"))).toBe(true);
@@ -333,7 +310,7 @@ describe("selective commit attribution", () => {
 			{ actor: "Other", before: "A\nB", after: "B\nx" },
 		];
 
-		expect(commitFor("B", edits, "B\nx", ["Main"], undefined, true).content).toBe("B");
+		expect(commitFor("B", edits, "B\nx", ["Main"], true).content).toBe("B");
 	});
 
 	describe("subagents", () => {

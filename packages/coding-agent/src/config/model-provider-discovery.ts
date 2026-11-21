@@ -9,12 +9,7 @@ import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
  * Built-in providers whose discovery requires provider-specific credentials
  * or account expansion and therefore cannot use the standard descriptor path.
  */
-export const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
-	"google-antigravity",
-	"google-gemini-cli",
-	"kiro",
-	"openai-codex",
-];
+export const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = ["google-antigravity", "kiro", "openai-codex"];
 
 const STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD: Record<string, true> = Object.create(null);
 for (const providerId of [
@@ -109,27 +104,6 @@ export function extractGoogleOAuthToken(value: string | undefined): string | und
 		// OAuth values for Google providers are expected to be JSON, but custom setups may already provide raw token.
 	}
 	return value;
-}
-
-/**
- * Pull the GCP project id out of a Google structured discovery key
- * (`{ token, projectId, ... }` or `{ token, project_id, ... }`). Runtime/config API-key overrides and
- * refreshed OAuth credentials carry the project inline; raw bare tokens do
- * not. Returns `undefined` when the value is not structured or omits the id.
- */
-export function extractGoogleOAuthProjectId(value: string | undefined): string | undefined {
-	if (!isAuthenticated(value)) return undefined;
-	try {
-		const parsed = JSON.parse(value) as { projectId?: unknown; project_id?: unknown };
-		const rawProjectId = typeof parsed.projectId === "string" ? parsed.projectId : parsed.project_id;
-		if (typeof rawProjectId === "string") {
-			const projectId = rawProjectId.trim();
-			return projectId.length > 0 ? projectId : undefined;
-		}
-	} catch {
-		// Raw (non-JSON) tokens carry no project id.
-	}
-	return undefined;
 }
 
 export function getOAuthCredentialsForProvider(authStorage: AuthStorage, provider: string): OAuthCredential[] {

@@ -157,8 +157,9 @@ import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
-import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
+import { syncRelayInstallsOnStartup } from "./tools/browser/relay/installs";
 import { claimTerminal } from "./tools/browser/terminal-owner";
+import { cfgAsyncPrintWake, cfgLaunchPersist, cfgToolsApprovalMode } from "./tools/settings";
 import {
 	cfgAutocompleteMaxVisible,
 	cfgAutoResume,
@@ -179,7 +180,6 @@ import {
 	cfgSymbolPreset,
 	cfgThemeDark,
 	cfgThemeLight,
-	cfgTuiCompleteScrollback,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
@@ -1381,12 +1381,16 @@ export async function createSessionManager(
 		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
 	}
 	if (parsed.continue) {
-		return await forkIfMovedAway(
+		const manager = await forkIfMovedAway(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
 			}),
 			parsed.sessionDir,
 		);
+		// Nothing to resume (none left, or the newest is open in another omp
+		// process): start up as a plain launch would.
+		if (manager.getEntries().length === 0) parsed.continue = false;
+		return manager;
 	}
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there
@@ -1906,6 +1910,7 @@ export async function runRootCommand(
 		if (parsedArgs.invalidFlagValues.length === 0) {
 			rejectNoUiWithoutRpc(parsedArgs);
 		}
+		if (!parsedArgs.help && !isBunTestRuntime()) syncRelayInstallsOnStartup();
 		const mode = parsedArgs.mode || "text";
 		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
 		const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;
@@ -2124,7 +2129,6 @@ export async function runRootCommand(
 			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),
 			maxInlineImages: cfgTuiMaxInlineImages.get(settingsInstance),
 			resizeScrollback: cfgTuiResizeScrollback.get(settingsInstance),
-			completeScrollback: cfgTuiCompleteScrollback.get(settingsInstance),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(settingsInstance),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settingsInstance),
 			spellingTypoDetection: cfgSpellingTypoDetection.get(settingsInstance),

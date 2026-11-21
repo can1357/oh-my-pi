@@ -63,7 +63,7 @@ import { hasWaitTool } from "./wait";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
-import { docTopicsReadable } from "./xdev";
+import { docTopicsReadable } from "./doc-topics";
 
 import {
 	cfgEvalAutoBackgroundEnabled,
@@ -305,7 +305,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	}
 
 	/**
-	 * `xd://eval/<topic>` docs follow the live prelude set so a prelude announced
+	 * `help://eval/<topic>` docs follow the live prelude set so a prelude announced
 	 * by the mid-session notice is readable before the description catches up.
 	 */
 	docTopics(): Record<string, string> {
@@ -864,11 +864,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 			const sessionFile = session.getSessionFile?.() ?? undefined;
 			const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? undefined;
-			const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.()) ?? {};
-			session.assertEvalExecutionAllowed?.();
 			outputSink = new OutputSink({
-				artifactPath,
-				artifactId,
+				allocateArtifact: session.allocateOutputArtifact,
 				headBytes: resolveOutputSinkHeadBytes(session.settings),
 				artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(session.settings),
 				maxColumns: resolveOutputMaxColumns(session.settings),

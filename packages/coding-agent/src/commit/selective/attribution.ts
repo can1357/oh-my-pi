@@ -19,7 +19,7 @@
  * const committed = fromLines(buildContent(attribution, new Set(attribution.ops.filter(op => status[op.id] === "own").map(op => op.id))));
  * ```
  */
-import { diffLineRuns } from "@oh-my-pi/pi-natives";
+import { type DiffRun, diffLineRuns, diffLineRunsWithin } from "@oh-my-pi/pi-natives";
 
 /** Lines already in the file (relative to HEAD) before its first recorded edit. */
 export const PRE = "~pre";
@@ -57,8 +57,6 @@ export interface Step {
 	actor: string;
 	before: readonly string[];
 	after: readonly string[];
-	/** For pseudo-actor steps: agent whose shell/eval call window contains the change. */
-	hint?: string;
 }
 
 /** A change line of the file's HEAD → worktree difference. */
@@ -73,9 +71,6 @@ export interface ChangeOp {
 	over: readonly string[];
 	/** Actors whose replacement must be selected to locate this insertion. */
 	placementDependencies?: readonly string[];
-	/** Index of the step that produced the change. */
-	step: number;
-	hint?: string;
 }
 
 /** A contiguous region of change lines between unchanged HEAD lines. */
@@ -101,11 +96,7 @@ interface Item {
 	span?: { start?: number; end?: number; placementDependencies?: readonly string[] };
 	by: string;
 	over: readonly string[];
-	step: number;
-	hint?: string;
 	deletedBy?: string;
-	deletedStep?: number;
-	deletedHint?: string;
 	/** Op id once ops are derived. */
 	op?: number;
 }
@@ -134,8 +125,6 @@ export interface RecordedEdit {
 	actor: string;
 	before: readonly string[];
 	after: readonly string[];
-	/** Agent whose shell/eval call explains a change that landed between the previous edit and this one. */
-	gapHint?: string;
 }
 
 /**
@@ -144,29 +133,20 @@ export interface RecordedEdit {
  * with no edits becomes one {@link UNRECORDED} step. Edits up to the latest recorded snapshot
  * equal to `head` are skipped: HEAD already holds them (they were committed meanwhile).
  */
-export function historySteps(
-	head: readonly string[],
-	edits: readonly RecordedEdit[],
-	work: readonly string[],
-	tailHint?: string,
-): Step[] {
+export function historySteps(head: readonly string[], edits: readonly RecordedEdit[], work: readonly string[]): Step[] {
 	const steps: Step[] = [];
 	let current = head;
 	for (let index = firstUncommitted(head, edits); index < edits.length; index++) {
 		const edit = edits[index];
 		if (!linesEqual(current, edit.before)) {
-			steps.push(
-				index === 0
-					? { actor: PRE, before: current, after: edit.before }
-					: { actor: GAP, before: current, after: edit.before, hint: edit.gapHint },
-			);
+			steps.push({ actor: index === 0 ? PRE : GAP, before: current, after: edit.before });
 		}
 		if (!linesEqual(edit.before, edit.after))
 			steps.push({ actor: edit.actor, before: edit.before, after: edit.after });
 		current = edit.after;
 	}
 	if (!linesEqual(current, work)) {
-		steps.push({ actor: edits.length === 0 ? UNRECORDED : TAIL, before: current, after: work, hint: tailHint });
+		steps.push({ actor: edits.length === 0 ? UNRECORDED : TAIL, before: current, after: work });
 	}
 	return steps;
 }
@@ -182,14 +162,36 @@ function firstUncommitted(head: readonly string[], edits: readonly RecordedEdit[
 
 /** Changed regions between two line lists, in order (equal runs omitted). */
 export function changedRegions(a: readonly string[], b: readonly string[]): Region[] {
-	if (a.length === 0 || b.length === 0) {
-		return a.length === 0 && b.length === 0 ? [] : [{ i1: 0, i2: a.length, j1: 0, j2: b.length }];
-	}
+	return emptySideRegions(a, b) ?? runRegions(diffLineRuns(a.join("\n"), b.join("\n")));
+}
+
+/**
+ * {@link changedRegions} when the lists differ by at most `maxEdits` added or removed lines;
+ * `undefined` for a larger rewrite, whose exact diff takes time quadratic in its size.
+ */
+export function changedRegionsWithin(
+	a: readonly string[],
+	b: readonly string[],
+	maxEdits: number,
+): Region[] | undefined {
+	const trivial = emptySideRegions(a, b);
+	if (trivial) return trivial;
+	const runs = diffLineRunsWithin(a.join("\n"), b.join("\n"), maxEdits);
+	return runs ? runRegions(runs) : undefined;
+}
+
+/** Regions when either list has no lines, which joined text cannot tell from one empty line. */
+function emptySideRegions(a: readonly string[], b: readonly string[]): Region[] | undefined {
+	if (a.length > 0 && b.length > 0) return undefined;
+	return a.length === 0 && b.length === 0 ? [] : [{ i1: 0, i2: a.length, j1: 0, j2: b.length }];
+}
+
+function runRegions(runs: readonly DiffRun[]): Region[] {
 	const regions: Region[] = [];
 	let i = 0;
 	let j = 0;
 	let open: Region | undefined;
-	for (const run of diffLineRuns(a.join("\n"), b.join("\n"))) {
+	for (const run of runs) {
 		if (!run.added && !run.removed) {
 			if (open) regions.push(open);
 			open = undefined;
@@ -281,7 +283,7 @@ export function attribute(
 	work: readonly string[],
 	headMoved = false,
 ): Attribution {
-	let items: Item[] = head.map((text, index) => ({ text, alive: true, head: index, by: HEAD, over: [], step: -1 }));
+	let items: Item[] = head.map((text, index) => ({ text, alive: true, head: index, by: HEAD, over: [] }));
 	steps.forEach((step, stepIndex) => {
 		const aliveAt: number[] = [];
 		items.forEach((item, index) => {
@@ -304,8 +306,6 @@ export function attribute(
 				}
 				item.alive = false;
 				item.deletedBy = step.actor;
-				item.deletedStep = stepIndex;
-				item.deletedHint = step.hint;
 				over.add(item.by);
 			}
 			if (region.j2 === region.j1) continue;
@@ -364,8 +364,6 @@ export function attribute(
 				by: step.actor,
 				over: actors,
 				span,
-				step: stepIndex,
-				hint: step.hint,
 			}));
 			insertions.push({ at, items: added });
 		}
@@ -425,7 +423,7 @@ function reconcileNetHunks(
 	}
 	const sources = replay.items.filter(item => item.op !== undefined);
 	const result: Item[] = [];
-	const base = { by: HEAD, over: [], step: -1 };
+	const base = { by: HEAD, over: [] };
 	let i = 0;
 	regions.forEach((r, n) => {
 		for (; i < r.i1; i++) result.push({ ...base, text: head[i], head: i, alive: true });
@@ -639,8 +637,6 @@ function deriveOps(items: Item[]): Attribution {
 					text: item.text,
 					by: item.deletedBy ?? UNRECORDED,
 					over: [],
-					step: item.deletedStep ?? -1,
-					hint: item.deletedHint,
 				}
 			: {
 					id: ops.length,
@@ -649,8 +645,6 @@ function deriveOps(items: Item[]): Attribution {
 					by: item.by,
 					over: item.over,
 					placementDependencies: item.span?.placementDependencies,
-					step: item.step,
-					hint: item.hint,
 				};
 		item.op = op.id;
 		ops.push(op);
@@ -701,38 +695,22 @@ export interface Classification {
 	status: OpStatus[];
 	/** Set for every op whose status is `review`. */
 	reasons: Map<number, ReviewReason>;
-	/** Ops counted as own only because a scope agent's shell/eval call window explains them. */
-	likely: Set<number>;
 }
 
 /**
  * Decide which change ops belong to the agents in `scope`.
  *
- * - Own: inserted or deleted by a scope agent, or by an unrecorded change that rewrote scope lines
- *   while a scope agent's shell/eval call was running (formatters, codegen).
+ * - Own: inserted or deleted by a scope agent.
  * - Review: a scope agent rewrote or inserted inside uncommitted work outside the scope, or
- *   someone outside the scope rewrote scope lines. Any review op puts its whole hunk in review.
- * - Other: everything else.
+ *   someone outside the scope (another agent, or an unrecorded change such as a formatter) rewrote
+ *   scope lines. Any review op puts its whole hunk in review.
+ * - Other: everything else, including every change no recorded edit explains.
  */
 export function classify(attribution: Attribution, scope: ReadonlySet<string>): Classification {
 	const status: OpStatus[] = attribution.ops.map(() => "other");
 	const reasons = new Map<number, ReviewReason>();
-	const likely = new Set<number>();
 	const inScope = (actor: string) => scope.has(actor);
 	for (const hunk of attribution.hunks) {
-		// Unrecorded steps in this hunk that rewrote scope lines inside a scope agent's call window.
-		const likelySteps = new Set<number>();
-		for (const op of hunk.ops) {
-			if (
-				op.kind === "+" &&
-				isPseudoActor(op.by) &&
-				op.hint !== undefined &&
-				inScope(op.hint) &&
-				op.over.some(inScope)
-			) {
-				likelySteps.add(op.step);
-			}
-		}
 		let review = false;
 		for (const op of hunk.ops) {
 			if (op.by === REORDERED) {
@@ -741,8 +719,7 @@ export function classify(attribution: Attribution, scope: ReadonlySet<string>): 
 				review = true;
 				continue;
 			}
-			const inferred = likelySteps.has(op.step) && isPseudoActor(op.by);
-			if ((inScope(op.by) || inferred) && op.placementDependencies?.length) {
+			if (inScope(op.by) && op.placementDependencies?.length) {
 				const missing = op.placementDependencies.filter(actor => !inScope(actor));
 				if (missing.length > 0) {
 					status[op.id] = "review";
@@ -750,11 +727,6 @@ export function classify(attribution: Attribution, scope: ReadonlySet<string>): 
 					review = true;
 					continue;
 				}
-			}
-			if (inferred) {
-				status[op.id] = "own";
-				likely.add(op.id);
-				continue;
 			}
 			if (inScope(op.by)) {
 				const foreign = op.over.filter(actor => actor !== HEAD && !inScope(actor));
@@ -778,8 +750,7 @@ export function classify(attribution: Attribution, scope: ReadonlySet<string>): 
 			if (status[op.id] === "review") continue;
 			status[op.id] = "review";
 			reasons.set(op.id, { kind: "hunk" });
-			likely.delete(op.id);
 		}
 	}
-	return { status, reasons, likely };
+	return { status, reasons };
 }

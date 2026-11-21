@@ -1,6 +1,6 @@
 import { logger, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { type ArtifactAllocator, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -85,8 +85,7 @@ export interface KernelExecutorBaseOptions {
 	toolSession?: ToolSession;
 	parentToolCallId?: string;
 	bridgeSessionId?: string;
-	artifactId?: string;
-	artifactPath?: string;
+	allocateArtifact?: ArtifactAllocator;
 	/** Set by the kernel session registry; true when this cell is the first on a replacement for a dead kernel. */
 	claimKernelRestartNotice?: () => boolean;
 }
@@ -489,8 +488,7 @@ export async function executeWithKernelBase<
 	const settings = await Settings.init();
 	const sink = new OutputSink({
 		onChunk: options?.onChunk,
-		artifactPath: options?.artifactPath,
-		artifactId: options?.artifactId,
+		allocateArtifact: options?.allocateArtifact,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),

@@ -49,12 +49,14 @@ Named service example:
 
 ## Builtins
 
-The embedded shell resolves a command name in order: the engine's own bash 5.3 builtins, then pi's shell tools, then pi's in-process utilities, then `PATH`. A name containing a slash is never a builtin, and `type`/`command -v` report the in-process utilities as shell builtins.
+The embedded shell resolves a command name in order: the engine's own bash 5.3 builtins, then pi's shell tools, then pi's in-process utilities, then mounted tool commands, then `PATH`. A name containing a slash is never a builtin, and `type`/`command -v` report the in-process utilities as shell builtins.
 
 - Engine builtins are bash 5.3's own: `alias`, `cd`, `command`, `coproc`, `declare`/`typeset`, `echo`, `eval`, `exec`, `export`, `fc`, `getopts`, `history`, `jobs`, `kill`, `let`, `local`, `mapfile`/`readarray`, `printf`, `pwd`, `read`, `readonly`, `set`, `shopt`, `source`, `test`, `times`, `trap`, `type`, `ulimit`, `umask`, `unset`, `wait`, and the rest of the builtin table. `suspend` is withheld (`suspend: not available in this shell`, status `1`); `exec` never replaces pi's process, and its fd-only form (`exec 3>&1`, `exec >log`) changes only the shell's own descriptors. `complete`, `compopt`, and `bind` are accepted no-ops.
 - pi's shell tools run their operands in subshells: `timeout`, `nohup`, `git` (when `PI_SMART_GIT`/`PI_GIT_GUARD` layers are on), and the utilities that run command lines (`direnv exec`, `entr`, `env`, `flock`, `ifne`, `watchexec`, `xargs`, `find -exec`).
 - pi's in-process utilities replace the matching external binaries: `ast-grep`/`sg`, `awk`, `b2sum`, `base32`, `base64`, `basename`, `cat`, `chmod`, `cksum`, `cmp`, `combine`, `comm`, `cp`, `cut`, `date`, `dd`, `df`, `diff`, `dirname`, `du`, `errno`, `fd`, `file`, `find`, `fold`, `fswatch`, `grep`, `head`, `hostname`, `id`, `ifne`, `isutf8`, `jq`, `ln`, `ls`, `md5`, `md5sum`, `mkdir`, `mktemp`, `mv`, `nl`, `nproc`, `od`, `open`, `paste`, `printenv`, `readlink`, `realpath`, `rg`, `rm`, `rmdir`, `rsync`, `say`, `sd`, `sed`, `seq`, `sha1sum`, `sha224sum`, `sha256sum`, `sha384sum`, `sha512sum`, `shasum`, `sort`, `sponge`, `stat`, `strings`, `tac`, `tail`, `tar`, `tee`, `touch`, `tr`, `truncate`, `ts`, `uname`, `uniq`, `uptime`, `wc`, `which`, `whoami`, `xargs`, `xdg-open`, `yes`. `chmod`, `errno`, and `id` are Unix-only; `tar` needs a Unix or Windows target; `ast-grep`, `fd`, `find`, `grep`, `rg` are awaited natively so cancellation stops the work.
 - pi's process builtins are `ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`, and `lsof` (Linux, macOS, Windows); they buffer output and are never gated off.
+
+For a checked literal edit, use `sd -F --expect 3 -U 2 'oldName' 'newName' file.ts`. `--expect` checks the number of matches **per input**, before any `-n` limit; a count mismatch exits nonzero without writing any file. `-U 2` prints the applied unified diff with two lines of context. No change prints nothing; binary changes print a filename notice. `-U` requires file operands and cannot be combined with `--preview`.
 
 Gates are read once, from the environment the session starts with; a set, nonempty value other than `0`/`false` turns one on.
 
@@ -66,6 +68,20 @@ Gates are read once, from the environment the session starts with; a set, nonemp
 | `PI_DISABLE_MV_BUILTIN`         | `mv` resolves to the system's.                                             |
 
 A path (`/usr/bin/jq`) always runs the system program for that one command, even with the utilities enabled. The bundled `jq` behaves like jq 1.8.2; its divergence list is in [bash-tool-runtime.md](../bash-tool-runtime.md).
+
+### Tool commands
+
+A tool mounted as a session command (`isMountableAsToolCommand`) is a command of the embedded shell, resolved after the engine builtins, pi's shell tools, and the in-process utilities, and before `PATH`; a name the shell reserves is never mounted as a command. `exec/tool-command-host.ts` installs the session's command names for a run, and `runToolCli()` in `exec/tool-cli.ts` parses and runs each invocation from the tool's JSON schema:
+
+- required top-level scalar/enum fields are positionals in schema order;
+- every field also takes `--flag value` (underscores become dashes; a nested field is `--a.b`);
+- a boolean field is `--flag` or `--no-flag`;
+- an array field repeats its flag;
+- `-j` / `--json <JSON>` merges a raw object;
+- `@FILE` and `-` merge a JSON object, or bind their text to the next positional (`-` reads stdin);
+- `--help` prints the schema-derived usage.
+
+A usage error exits `2`; the tool's own failure exits `1`. Each invocation is recorded on the result as `details.toolCommands` (partial and final results), in invocation order. A line naming a tool command stays on the embedded engine even when a client terminal is available, and `pty: true` refuses it (`<name> is a session tool command and cannot run in a PTY; run it without \`pty\`.`). A line made only of tool commands — joined by `;`, `&&`, `||`, `|`, `|&`, or newlines, with no redirection, expansion, or substitution — passes the outer bash approval gate; each tool is approved on its own tier and `tools.approval.<tool>` policy when it runs. Image blocks a tool returns reach the shell as kitty graphics on stdout, and the output pipeline decodes terminal graphics from any command into attached images plus `Image saved: <path>` link lines.
 
 ## Outputs
 
@@ -215,6 +231,7 @@ Choose the setting by the desired outcome:
    - Requires `pty: true`, UI context, and `PI_NO_PTY !== "1"`.
    - Uses `runInteractiveBashPty()` and a `PtySession` overlay.
    - Supports interactive input; `Esc` kills the session from the overlay.
+   - While the program waits on keys, the run shows as blocked on the user (title `!`, OSC 7501 `blocked`), and each new wait sends a `Console waiting for input` terminal notification unless `pty.notify` is `off` or keys were sent to the console in the last 10s. `PtySession.awaitsInput()` decides: terminal echo off (password prompts, full-screen programs) on every Unix; on Linux, also a foreground process blocked in `read` on the terminal (`/proc/<pid>/syscall`). Where it cannot tell (macOS and Windows line prompts, an uninspectable setuid process on Linux), 2s of silent output with the cursor after text counts as a prompt.
 4. Explicit background job
    - Requires `async: true` or `notify`, and `async.enabled`.
    - Registers a job with `session.asyncJobManager` and returns `{ state: "running", jobId }` immediately. `timeout: 0` leaves the job without a tool-imposed deadline.
@@ -236,7 +253,7 @@ Choose the setting by the desired outcome:
   - Validates `cwd` with `fs.stat()`.
   - May allocate and write artifact files for full local output (`bash`) and minimizer-preserved raw output (`bash-original`).
   - `scheme://` paths are served per operation by `InternalUrlFilesystem`: file-backed schemes redirect to their backing files (writes only for mutable file-written schemes such as `local://`, within the approved tier); rendered resources are read-only; `realpath`/`readlink` print the physical backing path of file-backed URLs.
-  - A redirect to a handler-written URL (`: > proc://<id>/kill`, `echo hi > agent://<id>`, `printf '{…}' > xd://<tool>`, `cfg://`, `ssh://`, …) opens a write-only handle; on close its bytes (UTF-8 only) reach the scheme's handler as one write, as with the `write` tool. The handler's answer (or refusal reason) is appended to the result as a notice; a refusal also fails the close, so the command exits non-zero. Appends (`>>`) are refused except for devices and message channels, since a handler write replaces its target. A device dispatch (`xd://<tool>`) is refused when `tools.approval.<tool>` is `deny` or `prompt`; the shell cannot ask.
+  - A redirect to a handler-written URL (`: > proc://<id>/kill`, `echo hi > agent://<id>`, `cfg://`, `ssh://`, …) opens a write-only handle; on close its bytes (UTF-8 only) reach the scheme's handler as one write, as with the `write` tool. The handler's answer (or refusal reason) is appended to the result as a notice; a refusal also fails the close, so the command exits non-zero. Appends (`>>`) are refused except for the `proc://`, `out://`, and `agent://` channels that hold no content, since a handler write replaces its target.
   - A redirect to `out://` (`printf '…' > out://`) opens a write-only handle; on close its text becomes a reply shown to the user as assistant prose after the call. Replies ride every progress frame and the result as `details.replies`, so the transcript draws each once, live and on rebuild. They are accepted only while the call waits on the command (a backgrounded job's writes fail), and a reply past 64 KiB fails with `EFBIG` and is dropped whole.
 - Subprocesses / native bindings / client terminal
   - Non-PTY local execution uses native shell execution via `@oh-my-pi/pi-natives` (`Shell.run()` or `executeShell()`).

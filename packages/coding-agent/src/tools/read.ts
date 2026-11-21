@@ -32,7 +32,7 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
-import { cfgDisasmBackend, DISASM_BACKENDS, isExecutableFile } from "../disasm";
+import { cfgDisasmBackend, databaseOwner, isExecutableFile } from "../disasm";
 import { normalizeToLF } from "../edit/normalize";
 import { isRemoteTextWritable, writeRemoteMirror } from "../edit/remote-mirror";
 import { writeResourceBackingFile } from "../internal-urls/filesystem-resource";
@@ -1305,8 +1305,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		});
 	}
 	/**
-	 * `xd://read/sources`: selector reference for the sources the description only names.
-	 * `xd://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
+	 * `help://read/sources`: selector reference for the sources the description only names.
+	 * `help://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
 	 */
 	docTopics(): Record<string, string> {
 		return {
@@ -2387,7 +2387,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 
 			const sqlitePath = await resolveSqliteReadPath(this.session, readPath, suffixCache, signal);
-			if (sqlitePath) {
+			// A disassembler database stored as SQLite (Binary Ninja `.bndb`) belongs to its backend:
+			// views take the disassembler route below and a bare read shows database metadata.
+			if (sqlitePath && !databaseOwner(sqlitePath.absolutePath)) {
 				return readSqlite(sqlitePath, signal);
 			}
 			// local:// locates backing files without its URL query;
@@ -2618,7 +2620,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			!isRawSelector(parsed) &&
 			parsed.kind !== "image" &&
 			lexicalAbsolutePath === undefined &&
-			(DISASM_BACKENDS.ida.isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath)))
+			(databaseOwner(absolutePath) !== undefined || (await isExecutableFile(absolutePath)))
 		) {
 			const backend = cfgDisasmBackend.get(this.session.settings);
 			return readBinary(this.session, { backend, absolutePath, view: "" }, parsed, signal);

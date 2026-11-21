@@ -2,11 +2,20 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`
+
 ### Fixed
 
-- Fixed the native addon failing to load when HOME, PI_NATIVES_DIR or the install directory contains `?` ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
-- `commitCreate()` now reports a HEAD that moves after the expected-HEAD check, such as from a `commit-msg` hook, as a `HeadMoved` error instead of a generic `Backend` failure ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
-- Fixed macOS window reads losing a window once it is minimized: an AX snapshot or query of that exact window ID still reads its tree, marks the root `(minimized)`, and keeps its refs inspection-only until a visible read of the restored window completes; menu reads and commands report `WindowUnavailable` instead of restoring it or using a sibling's menu ([#19825](https://github.com/can1357/oh-my-pi/pull/19825) by [@baekjosh](https://github.com/baekjosh))
+- Fixed grouped `sed` scripts such as `1{h;d};2{G}` being rejected when no semicolon precedes a closing brace.
+- Fixed the native addon failing to load when `HOME`, `PI_NATIVES_DIR`, or the installation path contains `?`.
+- `commitCreate()` now reports a `HeadMoved` error when `HEAD` changes after the expected-HEAD check, including changes made by a `commit-msg` hook.
+- Fixed macOS window reads for minimized windows so the requested window remains inspectable without being restored or replaced by a sibling window; unavailable menus and commands now report `WindowUnavailable`.
+- Fixed Windows captures and accessibility trees incorrectly reporting fully covered Chromium and Electron windows as current; they now report `covered` when those applications stop drawing while covered.
+- Fixed Windows `computer` `setValue` bringing classic Win32 and WinForms text-box windows to the foreground and directing subsequent keyboard input into them.
 
 ## [19.0.1] - 2026-11-19
 

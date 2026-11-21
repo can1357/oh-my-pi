@@ -836,6 +836,11 @@ export function getBrowserRelayDir(): string {
 	return dirs.rootSubdir("browser-relay", "data");
 }
 
+/** Get the install registry shared by every omp profile and browser. */
+export function getBrowserRelayInstallRegistryFile(): string {
+	return dirs.baseRootSubdir(path.join("browser-relay", "installs.json"));
+}
+
 /** Get the profile root for Chromium browsers the browser tool spawns via `app.path` (~/.omp/browser-profiles). */
 export function getBrowserProfilesDir(): string {
 	return dirs.rootSubdir("browser-profiles", "state");
@@ -1004,6 +1009,11 @@ export function getLastChangelogVersionPath(agentDir?: string): string {
 /** Get the path to history.db (SQLite database for session history). */
 export function getHistoryDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "history.db", "data");
+}
+
+/** Get the path to transcripts.db (full-text index of session transcripts). */
+export function getTranscriptIndexDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "transcripts.db", "data");
 }
 
 /** Get the path to models.db (model cache database). */

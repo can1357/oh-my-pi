@@ -2,13 +2,25 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
+### Breaking Changes
+
+- Removed the built-in Gemini CLI OAuth provider (`google-gemini-cli`). Google Antigravity and Antigravity CLI remain available.
+
 ### Added
 
-- Added `uncached-instructions` compatibility flag, enabled for GPT-6.2 models on every host, which moves the system prompt out of the uncached Responses `instructions` field
+- Added runtime provider rules (`setRuntimeProviderRule` in `compat/cascade`). They apply KDL directives to one provider's models, win ties with bundled rules, and clear rule-derived caches when they change.
+- Added the `prompt-perturbation` catalog axis, which opts a provider or model into per-install prompt paraphrasing.
+- Added the `uncached-instructions` compatibility flag for GPT-6.2 models across all hosts, moving system prompts out of the uncached Responses `instructions` field.
 
 ### Fixed
 
-- Fixed the Codex client version cache so `codex-client-version.json` is read and written under `$XDG_CACHE_HOME/omp` when that root is initialized, instead of the agent directory ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+- Fixed Vercel AI Gateway model refreshes so public models remain discoverable when a stored API key has expired.
+- Fixed OpenRouter models that require reasoning but do not advertise effort levels; requests that disable thinking now use the lowest supported reasoning effort instead of failing.
+- Fixed Gemini 4 models (Argon, Carbon, Hydrogen, and Neon) failing with empty malformed responses when messages arrived immediately after tool results.
+- Updated pricing for newly served Cursor models to use their documented per-token rates instead of being reported as free.
+- Fixed Codex client version caching so its cache file is stored under the configured `$XDG_CACHE_HOME/omp` directory.
 
 ## [19.0.1] - 2026-11-19
 

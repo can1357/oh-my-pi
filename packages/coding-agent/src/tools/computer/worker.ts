@@ -57,6 +57,8 @@ import {
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
 	type ControlVerdict,
+	COVERED_CAPTURE_NOTICE,
+	COVERED_TREE_NOTICE,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
@@ -116,7 +118,7 @@ export interface NativeDesktopSession {
 	typeText(target: string, text: string, opts?: PointerOptions | null): TypeCall;
 	keyChord(target: string, keys: string[], opts?: PointerOptions | null): InputCall;
 	raiseWindow(windowId: string): Promise<void>;
-	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string }>;
+	axSnapshot(target: string, opts?: AxSnapshotOptions | null): Promise<{ text: string; covered?: boolean }>;
 	axQuery(target: string, query: AxQuery): Promise<AxNode[]>;
 	axElementAt(target: string, x: number, y: number): Promise<AxNode | null | undefined>;
 	axFocused(): Promise<AxNode | null | undefined>;
@@ -154,7 +156,7 @@ type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
 	ComputerScreenshot,
-	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked"
+	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked" | "covered"
 >;
 type MenuOptions = { menu?: string[] };
 type ClickOptions = InputOptions & MenuOptions & { button?: string; count?: number; modifiers?: string[] };
@@ -796,6 +798,12 @@ async function captureScreenshot(
 	return await emitScreenshot(context, frame, options);
 }
 
+/** A tree read's text, closed by the covered note when its window appeared fully covered around the read. */
+function treeText(snapshot: { text: string; covered?: boolean }): string {
+	if (!snapshot.covered) return snapshot.text;
+	return snapshot.text ? `${snapshot.text}\n${COVERED_TREE_NOTICE}` : COVERED_TREE_NOTICE;
+}
+
 async function emitScreenshot(
 	context: ComputerRunContext,
 	frame: DesktopCapture,
@@ -813,6 +821,7 @@ async function emitScreenshot(
 		...(frame.region ? { region: frame.region } : {}),
 	};
 	if (frame.screenLocked) result.screenLocked = true;
+	if (frame.covered) result.covered = true;
 	const scaled = frame.width !== frame.sourceWidth || frame.height !== frame.sourceHeight;
 	context.screenshots.push({
 		...result,
@@ -826,10 +835,11 @@ async function emitScreenshot(
 		const captured = frame.region
 			? `zoom ${frame.target} ${dimensions}; region=${JSON.stringify(frame.region)}; ${coordinates}; use the base full screenshot coordinates for input, not zoom pixels → ${destination}`
 			: `screenshot ${frame.target} ${dimensions}; ${coordinates} → ${destination}`;
-		context.output.push({
-			type: "text",
-			text: frame.screenLocked ? `${captured}\n${screenLockedCaptureNotice()}` : captured,
-		});
+		const notes = [
+			...(frame.screenLocked ? [screenLockedCaptureNotice()] : []),
+			...(frame.covered ? [COVERED_CAPTURE_NOTICE] : []),
+		];
+		context.output.push({ type: "text", text: [captured, ...notes].join("\n") });
 		context.output.push({
 			type: "image",
 			data: Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength).toString("base64"),
@@ -1251,7 +1261,7 @@ class WindowAccess {
 	async ax(options?: AxOptions): Promise<string> {
 		strictOptions(options, axOptionsKeys, "ax");
 		const { signal } = this.#getContext();
-		return (await nativeCall(signal, () => this.#session.axSnapshot(this.id, options))).text;
+		return treeText(await nativeCall(signal, () => this.#session.axSnapshot(this.id, options)));
 	}
 
 	async find(query: AxQuery): Promise<El[]> {
@@ -1504,10 +1514,11 @@ class Win extends WindowAccess {
 			),
 		);
 		const screenshot = await emitScreenshot(context, result.capture, options);
-		if (!options?.silent) context.output.push({ type: "text", text: result.accessibility.text });
+		const ax = treeText(result.accessibility);
+		if (!options?.silent) context.output.push({ type: "text", text: ax });
 		return {
 			...screenshot,
-			ax: result.accessibility.text,
+			ax,
 			nodeCount: result.accessibility.nodeCount,
 			truncated: result.accessibility.truncated,
 		};

@@ -633,54 +633,82 @@ describe("selective commit flow", () => {
 		expect(draft.summary()).toContain("✓ notes.md  +1  [Main]");
 	});
 
-	it("lists files a call deleted or renamed under review and commits them once taken", async () => {
-		const { root, journal } = await emptyRepo();
-		for (const file of ["gone.ts", "old.ts", "legacy/a.ts", "keep/x.ts", "keep/y.ts", "user.ts"]) {
+	it("lists what no edit tool changed as unrecorded and commits it once taken", async () => {
+		const { root, journal, write } = await emptyRepo();
+		for (const file of ["gone.ts", "old.ts", "generated.ts", "user.ts"]) {
 			await Bun.write(path.join(root, file), `export const file = "${file}";\n`);
 		}
 		await git(root, ["add", "."]);
 		await git(root, ["commit", "-q", "-m", "seed"]);
-		// `mv` keeps this mtime; only the ctime shows the rename landed inside the call.
-		const past = new Date(Date.now() - 3_600_000);
-		await fs.utimes(path.join(root, "old.ts"), past, past);
-		// The user's deletions: one never named, one under a directory the call names but did not remove.
-		await fs.rm(path.join(root, "user.ts"));
-		await fs.rm(path.join(root, "keep/y.ts"));
-
-		const start = Date.now();
+		await write("Main", undefined, "own.ts", "export const own = true;\n");
+		// What the agent's commands did, none of it through an edit tool, and the user's own edit.
 		await fs.rm(path.join(root, "gone.ts"));
-		await fs.rm(path.join(root, "legacy"), { recursive: true });
 		await fs.rename(path.join(root, "old.ts"), path.join(root, "new.ts"));
-		journal.recordCall({
-			agent: "Main",
-			tool: "bash",
-			start,
-			end: Date.now(),
-			label: "rm gone.ts",
-			script: `rm ${path.join(root, "gone.ts")} && rm -rf ./legacy/ && mv old.ts new.ts && bun test keep`,
-		});
+		await Bun.write(path.join(root, "generated.ts"), "export const generated = true;\n");
+		await Bun.write(path.join(root, "user.ts"), "export const user = true;\n");
 		await journal.flush();
 
 		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
-		const review = draft
-			.summary()
-			.split("\n")
-			.flatMap(line => line.match(/^ {2}\? (\S+) {2}.*; no edit record; (deleted|modified)/)?.slice(1, 3) ?? []);
-		expect(review).toEqual([
+		const summary = draft.summary();
+		expect(draft.selection().map(change => change.path)).toEqual(["own.ts"]);
+		expect(summary).not.toContain("Review:");
+		expect(summary).toContain("Unrecorded: 5 path(s)");
+		expect(summary.split("\n").flatMap(line => line.match(/^ {2}· (\S+) {2}/)?.slice(1) ?? [])).toEqual([
+			"generated.ts",
 			"gone.ts",
-			"deleted",
-			"legacy/a.ts",
-			"deleted",
 			"new.ts",
-			"modified",
 			"old.ts",
-			"deleted",
+			"user.ts",
 		]);
 
-		for (const file of ["gone.ts", "legacy/a.ts", "new.ts", "old.ts"]) draft.take({ path: file });
+		for (const file of ["generated.ts", "gone.ts", "new.ts", "old.ts"]) draft.take({ path: file });
 		await commitSelection(draft, { subject: "refactor: moved files" }, { journal, agent: { agent: "Main" } });
-		expect(await git(root, ["ls-tree", "-r", "--name-only", "HEAD"])).toBe("keep/x.ts\nkeep/y.ts\nnew.ts\nuser.ts\n");
-		expect(await git(root, ["status", "--porcelain"])).toBe(" D keep/y.ts\n D user.ts\n");
+		expect(await git(root, ["ls-tree", "-r", "--name-only", "HEAD"])).toBe("generated.ts\nnew.ts\nown.ts\nuser.ts\n");
+		expect(await git(root, ["show", "HEAD:generated.ts"])).toBe("export const generated = true;\n");
+		expect(await git(root, ["status", "--porcelain"])).toBe(" M user.ts\n");
+	});
+
+	it("holds a formatter's rewrite of the agent's lines for review and commits it once taken", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const head = "fn a() {}\n\nfn keep() {}\n\nfn user() {}\n";
+		await Bun.write(path.join(root, "lib.rs"), head);
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		const edited = head.replace("fn a() {}", "fn a() { let  x=1; }");
+		await write("Main", undefined, "lib.rs", edited);
+		// A formatter the agent ran reflows its line; the user changes another function.
+		const formatted = edited.replace("fn a() { let  x=1; }", "fn a() {\n    let x = 1;\n}");
+		const work = formatted.replace("fn user() {}", "fn user() { todo!() }");
+		await Bun.write(path.join(root, "lib.rs"), work);
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.selection()).toEqual([]);
+		expect(draft.summary()).toContain(
+			"? lib.rs  hunk 1: in-scope lines rewritten afterwards by an unrecorded change",
+		);
+		expect(draft.show()).toContain("+    let x = 1;");
+
+		draft.take({ path: "lib.rs", units: ["1"] });
+		await commitSelection(draft, { subject: "feat: a" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["show", "HEAD:lib.rs"])).toBe(formatted);
+		expect(await Bun.file(path.join(root, "lib.rs")).text()).toBe(work);
+	});
+
+	it("asks for review of a file whose recorded edits cannot be replayed", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "data.txt"), "one\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		// Content with a NUL is not stored: the record names its editor but replays nothing.
+		await write("Main", undefined, "data.txt", "one\0two\n");
+		await Bun.write(path.join(root, "data.txt"), "one\ntwo\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.selection()).toEqual([]);
+		expect(draft.summary()).toContain("? data.txt  +1; edited by Main, but the edit record cannot be replayed");
+		expect(draft.show()).toContain("+two");
 	});
 
 	it("refuses to commit on a HEAD that moved onto the same lines", async () => {
@@ -1084,7 +1112,7 @@ describe("selective commit flow", () => {
 		const draft = await createDraft({ cwd: root, journal: null, caller: "Main" });
 
 		expect(draft.summary()).toContain("No change journal: this session keeps no artifacts");
-		expect(draft.summary()).toContain("Not yours: 1 path(s).");
+		expect(draft.summary()).toContain("Unrecorded: 1 path(s)");
 	});
 
 	it("keeps a draft of many untracked files near their size", async () => {
@@ -1101,7 +1129,8 @@ describe("selective commit flow", () => {
 
 		// 1.6 MB of text; per-line attribution of every file held ~60 MB.
 		expect(retained).toBeLessThan(20 * 1024 * 1024);
-		expect(draft.summary()).toContain("Not yours: 1000 path(s).");
+		expect(draft.summary()).toContain("Unrecorded: 1000 path(s)");
+		expect(draft.summary()).toContain("… 988 more");
 	});
 
 	it("commits one taken hunk of a file no edit record explains", async () => {

@@ -13,7 +13,7 @@ function nodes(children: readonly NativeChild[] | undefined): NativeNode[] {
 }
 
 describe("web_search native view", () => {
-	it("heads with the query and lists sources as linked rows with a domain mark", () => {
+	it("heads with the query and lists sources as linked cards with a domain mark and no excerpt", () => {
 		const view = webSearchToolRenderer.describeResult(
 			{
 				content: [],
@@ -21,7 +21,14 @@ describe("web_search native view", () => {
 					response: {
 						provider: "parallel",
 						answer: "The answer",
-						sources: [{ url: "https://www.example.com/a", title: "Example", ageSeconds: 3 * 86400 }],
+						sources: [
+							{
+								url: "https://www.example.com/a",
+								title: "Example",
+								ageSeconds: 3 * 86400,
+								snippet: "page text",
+							},
+						],
 						model: "m1",
 						usage: { inputTokens: 5 },
 					},
@@ -36,8 +43,10 @@ describe("web_search native view", () => {
 		expect(view?.tool?.badges?.[0]?.title).toContain("in 5");
 		const [answer, sources] = nodes(view?.body);
 		expect(answer?.k).toBe("md");
+		expect(sources?.p?.role).toBe("omp.tool.sources");
 		const rowNode = nodes(sources?.c)[0]!;
 		expect(rowNode.p).toMatchObject({ role: "omp.tool.source", href: "https://www.example.com/a" });
+		expect(nodes(rowNode.c)).toHaveLength(3);
 		const [mark, title, meta] = nodes(rowNode.c);
 		expect(mark?.p).toMatchObject({ text: "E" });
 		expect(title?.p).toMatchObject({ spans: [{ href: "https://www.example.com/a" }] });
@@ -67,15 +76,19 @@ describe("web_search native view", () => {
 		const body = JSON.stringify(view?.body);
 		expect(body).not.toContain('"k":"md"');
 		expect(body).not.toContain("[1]");
-		const hits = nodes(nodes(view?.body)[0]?.c);
-		expect(hits).toHaveLength(2);
-		const [row, excerpt] = nodes(hits[0]!.c);
-		expect(row?.p).toMatchObject({ role: "omp.tool.source", href: sources[0]!.url });
-		expect(excerpt?.p).toMatchObject({
+		const grid = nodes(view?.body);
+		expect(grid).toHaveLength(1);
+		expect(grid[0]?.p?.role).toBe("omp.tool.sources");
+		const rows = nodes(grid[0]?.c);
+		expect(rows.map(n => n.p?.role)).toEqual(["omp.tool.source", "omp.tool.source"]);
+		expect(rows[0]?.p).toMatchObject({ href: sources[0]!.url });
+		expect(nodes(rows[0]!.c).at(-1)?.p).toMatchObject({
+			role: "omp.tool.excerpt",
 			spans: [{ t: "valid-expect\nRequire expect to get a value\nexpect ( x )" }],
 			lines: 3,
 		});
-		expect(nodes(hits[1]!.c).map(n => n.p?.role)).toEqual(["omp.tool.source"]);
+		// A source without a snippet has no excerpt.
+		expect(nodes(rows[1]!.c).some(n => n.p?.role === "omp.tool.excerpt")).toBe(false);
 		for (const { url } of sources) expect(body.split(`"href":"${url}"`).length - 1).toBe(2);
 	});
 });
