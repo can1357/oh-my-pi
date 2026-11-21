@@ -630,17 +630,17 @@ FAKE_SERVER = textwrap.dedent(
                     flush=True,
                 )
                 continue
-            if message == "needs xd host tool":
+            if message == "needs bash tool command":
                 print(json.dumps({"type": "agent_start"}), flush=True)
-                host_event_tool_call_id = "toolu_write_1"
-                host_event_tool_name = "write"
+                host_event_tool_call_id = "toolu_bash_1"
+                host_event_tool_name = "bash"
                 print(
                     json.dumps(
                         {
                             "type": "tool_execution_start",
-                            "toolCallId": "toolu_write_1",
-                            "toolName": "write",
-                            "args": {"path": "xd://echo_host", "content": '{"message": "hello"}'},
+                            "toolCallId": "toolu_bash_1",
+                            "toolName": "bash",
+                            "args": {"command": "echo_host hello"},
                         }
                     ),
                     flush=True,
@@ -650,7 +650,7 @@ FAKE_SERVER = textwrap.dedent(
                         {
                             "type": "host_tool_call",
                             "id": "host-call-2",
-                            "toolCallId": "toolu_write_1",
+                            "toolCallId": "toolu_bash_1",
                             "toolName": "echo_host",
                             "arguments": {"message": "hello"},
                         }
@@ -1651,16 +1651,17 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(len(end_events), 1)
             self.assertEqual(end_events[0].result["content"][0]["text"], "host:hello")
 
-    def test_xd_dispatched_custom_tool_events_carry_host_tool_name(self) -> None:
-        """Events for an xd:// device dispatch are renamed to the executed host tool.
+    def test_tool_command_events_carry_host_tool_name(self) -> None:
+        """Events for a tool command run inside a `bash` call are renamed to the executed host tool.
 
-        With `tools.xdev` on, omp invokes a custom tool through `write
-        xd://<name>` and the wire events carry the transport tool (`write`).
-        Consumers must observe the host-tool name on update/end events
-        regardless of transport — roboomp's terminal-action detection
-        triple-posted PR reviews when end events only said `write`
-        (oh-my-pi#6696). `tool_execution_start` precedes the `host_tool_call`
-        frame on the wire and keeps the transport name.
+        With `tools.commands` on, omp mounts a custom tool as a command in the
+        embedded bash engine and the agent runs it inside a `bash` call, so the
+        wire events carry the transport tool (`bash`). Consumers must observe
+        the host-tool name on update/end events regardless of dispatch path —
+        roboomp's terminal-action detection triple-posted PR reviews when end
+        events only said `bash` (oh-my-pi#6696). `tool_execution_start`
+        precedes the `host_tool_call` frame on the wire and keeps the transport
+        name.
         """
 
         def echo_host(args: dict[str, str], context) -> str:
@@ -1682,7 +1683,7 @@ class RpcClientTests(unittest.TestCase):
                 ),
             )
         ) as client:
-            turn = client.prompt_and_wait("needs xd host tool", timeout=2.0)
+            turn = client.prompt_and_wait("needs bash tool command", timeout=2.0)
             start_names = [
                 event.tool_name
                 for event in turn.events
@@ -1699,12 +1700,12 @@ class RpcClientTests(unittest.TestCase):
                 if getattr(event, "type", None) == "tool_execution_end"
             ]
 
-            self.assertEqual(start_names, ["write"])
+            self.assertEqual(start_names, ["bash"])
             self.assertEqual(
                 [event.tool_name for event in update_events], ["echo_host"]
             )
             self.assertEqual([event.tool_name for event in end_events], ["echo_host"])
-            self.assertEqual(end_events[0].tool_call_id, "toolu_write_1")
+            self.assertEqual(end_events[0].tool_call_id, "toolu_bash_1")
             self.assertEqual(end_events[0].result["content"][0]["text"], "host:hello")
 
     def _echo_host_tool(self, execute) -> HostTool:

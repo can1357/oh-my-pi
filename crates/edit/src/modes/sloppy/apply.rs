@@ -633,6 +633,26 @@ fn resolve_boundary(
 	previous.map_or(0, |entry| end_at(entry.end))
 }
 
+/// A comment continuation must not consume stars from a line-leading opener.
+fn starts_in_comment_opener(content: &str, offset: usize) -> bool {
+	let tail = &content[offset..];
+	if !tail.starts_with(['*', '/']) {
+		return false;
+	}
+	let before = content[..offset]
+		.rsplit('\n')
+		.next()
+		.unwrap_or("")
+		.trim_ascii_start();
+	if before.is_empty() {
+		return tail.starts_with("/*");
+	}
+	tail.starts_with('*')
+		&& before
+			.strip_prefix('/')
+			.is_some_and(|prefix| prefix.bytes().all(|byte| byte == b'*'))
+}
+
 /// Every way `pattern` matches `content` in `mode`. With `strict_blocks`, the
 /// line closing a block range must satisfy `Search::closes_block`.
 fn collect_candidates(
@@ -654,11 +674,24 @@ fn collect_candidates(
 		let PatternToken::Literal { text, normalized: needle } = &pattern.tokens[*index] else {
 			unreachable!()
 		};
-		let values = match mode {
+		let mut values = match mode {
 			MatchMode::Raw => exact_occurrences(content, text),
 			MatchMode::Normalized => exact_occurrences(&normalized.text, needle),
 			MatchMode::Fuzzy => fuzzy_occurrences(&normalized.text, needle, allow_punctuation),
 		};
+		if mode != MatchMode::Raw
+			&& text
+				.trim_ascii_start()
+				.strip_prefix('*')
+				.is_some_and(|rest| rest.starts_with([' ', '\t']))
+		{
+			values.retain(|occurrence| {
+				!starts_in_comment_opener(
+					content,
+					source_start(normalized, occurrence.start, content.len()),
+				)
+			});
+		}
 		if values.is_empty() {
 			return CandidateResult { candidates: Vec::new(), overflow: false };
 		}
