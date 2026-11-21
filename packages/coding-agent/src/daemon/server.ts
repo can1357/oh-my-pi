@@ -22,6 +22,8 @@ import {
 } from "./paths";
 import {
 	compareDaemonBuilds,
+	DAEMON_IDLE_EXIT_GRACE_ENV,
+	DAEMON_IDLE_EXIT_GRACE_MS,
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_RESUME_ENV,
 	DAEMON_RESUME_LEASE_GRACE_ENV,
@@ -37,8 +39,6 @@ import {
 import { DaemonStore } from "./store";
 import { type UnitConnection, UnitTable } from "./units";
 
-/** Grace after the last connection closes (and no unit holds the daemon) before it exits. */
-const IDLE_EXIT_GRACE_MS = 3_000;
 /** Control lines carry whole launch environments; tunnels are unframed. */
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const LISTEN_OPTIONS = { framing: "lines", maxFrameBytes: MAX_FRAME_BYTES } as const;
@@ -174,6 +174,7 @@ class Daemon {
 	#lock: FileLock;
 	readonly #store: DaemonStore;
 	readonly #units: UnitTable;
+	readonly #idleExitGraceMs: number;
 	readonly #startedAt = Date.now();
 	readonly #connections = new Set<DaemonConnection>();
 	readonly #finished = Promise.withResolvers<void>();
@@ -183,10 +184,18 @@ class Daemon {
 	#closing = false;
 	#shutdown: Promise<void> | undefined;
 
-	constructor(token: string, lock: FileLock, store: DaemonStore, resumed: boolean, leaseGraceMs: number) {
+	constructor(
+		token: string,
+		lock: FileLock,
+		store: DaemonStore,
+		resumed: boolean,
+		leaseGraceMs: number,
+		idleExitGraceMs: number,
+	) {
 		this.#token = token;
 		this.#lock = lock;
 		this.#store = store;
+		this.#idleExitGraceMs = idleExitGraceMs;
 		this.#units = new UnitTable({
 			store,
 			modules: DAEMON_MODULES,
@@ -473,7 +482,7 @@ class Daemon {
 			this.#idleTimer = undefined;
 			if (this.#closing || this.#connections.size > 0 || this.#units.keepsDaemonAlive()) return;
 			void this.shutdown();
-		}, IDLE_EXIT_GRACE_MS);
+		}, this.#idleExitGraceMs);
 	}
 }
 
@@ -527,10 +536,10 @@ async function acquireDaemonLock(retryMs: number): Promise<FileLock | undefined>
 	}
 }
 
-/** Lease grace from {@link DAEMON_RESUME_LEASE_GRACE_ENV} when positive, else {@link DAEMON_RESUME_LEASE_GRACE_MS}. */
-function resumeLeaseGraceMs(): number {
-	const graceMs = Number(process.env[DAEMON_RESUME_LEASE_GRACE_ENV]);
-	return graceMs > 0 ? graceMs : DAEMON_RESUME_LEASE_GRACE_MS;
+/** Milliseconds from env var `name` when positive, else `fallback`. */
+function graceMsFromEnv(name: string, fallback: number): number {
+	const graceMs = Number(process.env[name]);
+	return graceMs > 0 ? graceMs : fallback;
 }
 
 /** Run the daemon until it goes idle, is shut down, or replaces itself. Returns at once when another daemon holds the lock. */
@@ -550,7 +559,14 @@ export async function startDaemonFromEnvironment(): Promise<void> {
 	try {
 		const token = await readOrCreateToken();
 		store = DaemonStore.open(daemonDbPath());
-		daemon = new Daemon(token, lock, store, resumed, resumeLeaseGraceMs());
+		daemon = new Daemon(
+			token,
+			lock,
+			store,
+			resumed,
+			graceMsFromEnv(DAEMON_RESUME_LEASE_GRACE_ENV, DAEMON_RESUME_LEASE_GRACE_MS),
+			graceMsFromEnv(DAEMON_IDLE_EXIT_GRACE_ENV, DAEMON_IDLE_EXIT_GRACE_MS),
+		);
 		const cancelCleanup = postmortem.register("omp-daemon", () => daemon?.shutdown());
 		try {
 			await daemon.run();
