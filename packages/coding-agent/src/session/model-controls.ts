@@ -14,7 +14,7 @@ import {
 import { isFireworksFastModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyDifficulty } from "../auto-thinking/classifier";
 import type { ModelRegistry } from "../config/model-registry";
@@ -24,8 +24,8 @@ import {
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
+	resolveImplicitDefaultRole,
 	resolveModelRoleValue,
-	routedModelsAreEqual,
 } from "../config/model-resolver";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
@@ -85,12 +85,14 @@ export function resolveRoleModelCycle(
 	roleOrder: readonly string[],
 ): RoleModelCycle | undefined {
 	if (availableModels.length === 0 || !currentModel) return undefined;
-	const options = { settings, matchPreferences: getModelMatchPreferences(settings) };
+	const matchPreferences = getModelMatchPreferences(settings);
 	const models: ResolvedRoleModel[] = [];
 	for (const role of roleOrder) {
 		const configuredRole = settings.getModelRole(role);
-		const roleValue = role === "default" ? (configuredRole ?? currentModel) : configuredRole;
-		const resolved = resolveModelRoleValue(roleValue, availableModels, options);
+		const resolved =
+			role === "default" && !configuredRole
+				? resolveImplicitDefaultRole(currentModel, availableModels, matchPreferences)
+				: resolveModelRoleValue(configuredRole, availableModels, { settings, matchPreferences });
 		if (!resolved.model) continue;
 		models.push({
 			role,
@@ -356,9 +358,7 @@ export class ModelControls {
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
 		// Identity, not object equality: the agent's resolver and metadata rebinds swap in refitted rows of the
 		// same model. Only a different model means another selection replaced this one during reconciliation.
-		const landed =
-			this.#model !== undefined &&
-			formatModelStringWithRouting(this.#model) === formatModelStringWithRouting(targetModel);
+		const landed = routedModelsAreEqual(this.#model, targetModel);
 		if (landed) {
 			this.#host.sessionManager.appendModelChange(
 				formatModelStringWithRouting(targetModel),

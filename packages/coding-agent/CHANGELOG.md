@@ -114,7 +114,7 @@
 
 ### Fixed
 
-- Model switches, cycling, session restore, and prewalk preserve upstream pins. Cycling keeps the active pin even when a literal ID looks like the same selector. Presets and startup honor the allowed model variant and route, including in ACP workspaces ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
+- Model switches, cycling, session restore, and prewalk preserve upstream pins. Cycling keeps the active pin even when a literal ID looks like the same selector. Presets and startup defaults stay within the allowed model variant and route ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti)).
 - Fixed PTY command transcripts sometimes gaining a blank line where a `\r\n` line ending was split across two terminal reads.
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)
 - Fixed bash output minimizing being skipped on Windows when a command is named by a `\` path or with `.exe` (`"C:\Program Files\Git\cmd\git.exe" status`, `git.exe log`)

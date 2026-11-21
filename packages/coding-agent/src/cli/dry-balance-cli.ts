@@ -23,7 +23,6 @@ import {
 	resolveCliModel,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { cfgEnabledModels } from "../config/model-settings";
 import { Settings } from "../config/settings";
 import dryBalanceBenchPrompt from "../prompts/dry-balance-bench.md" with { type: "text" };
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
@@ -75,7 +74,6 @@ export interface DryBalanceAuthStorage {
 export interface DryBalanceModelRegistry {
 	authStorage: DryBalanceAuthStorage;
 	getAll(): Model<Api>[];
-	getProviderModels?(provider: string): Model<Api>[];
 	getAvailable(): Model<Api>[];
 	getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined>;
 }
@@ -572,12 +570,6 @@ async function resolveDryBalanceModel(
 	const defaultRoleSpec = resolveModelRoleValue(settings?.getModelRole("default"), allowedModels, {
 		settings,
 		matchPreferences: preferences,
-		respectUpstreamPins: settings !== undefined && cfgEnabledModels.get(settings).length > 0,
-		modelLookup: {
-			getProviderModels: provider =>
-				modelRegistry.getProviderModels?.(provider) ??
-				modelRegistry.getAll().filter(model => model.provider === provider),
-		},
 	});
 	if (defaultRoleSpec.model) {
 		return { model: defaultRoleSpec.model, warning: defaultRoleSpec.warning };

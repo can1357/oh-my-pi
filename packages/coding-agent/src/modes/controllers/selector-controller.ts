@@ -27,7 +27,8 @@ import {
 	modelPresetSavedMessage,
 	saveModelPreset,
 } from "../../config/model-presets";
-import { resolveAdvisorRoleSelection, resolveModelRoleValue, routedModelsAreEqual } from "../../config/model-resolver";
+import { resolveAdvisorRoleSelection, resolveModelRoleValue, scopeAllowList } from "../../config/model-resolver";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -122,12 +123,7 @@ import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-
 
 import { cfgAdvisorSyncBacklog } from "../../advisor/settings";
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
-import {
-	cfgCycleOrder,
-	cfgDisabledProviders,
-	cfgEnabledModels,
-	cfgModelRoleStorage,
-} from "../../config/model-settings";
+import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
 import { cfgDefaultThinkingLevel, cfgRetryFallbackChains, cfgSessionWorktreeScope } from "../../session/settings";
 import {
 	cfgStatusLineCompactThinkingLevel,
@@ -1045,16 +1041,12 @@ export class SelectorController {
 								fallbackProvenance === "project" || fallbackProvenance === "global";
 							if (fallbackRoleValue && exposesPersistedFallback) {
 								const session = this.ctx.session;
-								const explicitScope = session.scopedModelsFromSettings ? [] : session.scopedModels;
-								const hasScope = explicitScope.length > 0 || cfgEnabledModels.get(this.ctx.settings).length > 0;
 								const availableModels =
-									explicitScope.length > 0
-										? explicitScope.map(entry => entry.model)
+									session.scopedModels.length > 0
+										? scopeAllowList(session.scopedModels, session.modelRegistry.getAvailable())
 										: session.getAvailableModels();
 								const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
 									settings: this.ctx.settings,
-									respectUpstreamPins: hasScope,
-									modelLookup: session.modelRegistry,
 								});
 								const liveDiffers = !routedModelsAreEqual(session.model, resolved.model);
 								if (resolved.model && (fallbackRoleValue !== previousEffectiveRoleValue || liveDiffers)) {

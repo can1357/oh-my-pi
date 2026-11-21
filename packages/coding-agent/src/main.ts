@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
 import {
@@ -54,14 +54,13 @@ import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-select
 import {
 	disabledProviderIds,
 	expandRoleAlias,
-	findScopedModelIndex,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 	resolveModelScope,
-	routedModelsAreEqual,
 	type ScopedModel,
+	scopeAllowList,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
@@ -202,7 +201,7 @@ import {
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
@@ -533,21 +532,13 @@ interface AcpSessionHandle {
 
 type AcpSessionFactory = (cwd: string, options?: { interactivePrompts?: boolean }) => Promise<AcpSessionHandle>;
 
-const API_KEY_REQUIRES_MODEL =
-	"--api-key requires a model to be specified via --model, --provider/--model, or --models";
-
 export interface AcpSessionFactoryOptions {
 	baseOptions: CreateAgentSessionOptions;
 	settings: Settings;
 	sessionDir?: string;
 	authStorage: AuthStorage;
-	/** Provider selected at launch, even when the workspace will select a different model. */
-	apiKeyProvider?: string;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<
-		Args,
-		"apiKey" | "trustedExtensions" | "tools" | "invalidFlagValues" | "model" | "models" | "thinking"
-	>;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools" | "invalidFlagValues">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
@@ -583,31 +574,8 @@ async function loadTrustedSessionExtensions(
  * tool registry and shadow the client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
-	const apiKey = args.parsedArgs.apiKey;
-	let apiKeyProvider = args.apiKeyProvider ?? args.baseOptions.model?.provider;
-	const bindApiKey = (provider: string | undefined, key: string) => {
-		if (!provider) throw new CliUsageError(API_KEY_REQUIRES_MODEL);
-		// Auth storage is shared by every session/new. Never copy one CLI key to a second provider.
-		if (apiKeyProvider && apiKeyProvider !== provider) {
-			throw new CliUsageError(`--api-key is bound to ${apiKeyProvider}, not ${provider}`);
-		}
-		args.authStorage.keys.setRuntime(provider, key);
-		apiKeyProvider = provider;
-	};
 	return async (cwd, factoryOptions) => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
-		const nextOptions = { ...args.baseOptions, scopedModelsFromSettings: args.parsedArgs.models === undefined };
-		if (nextOptions.scopedModelsFromSettings) {
-			const scope = await resolveScopedModels(args.parsedArgs, args.modelRegistry, nextSettings);
-			applyStartupScopedModels(nextOptions, args.parsedArgs, scope, args.modelRegistry, nextSettings, false);
-		}
-		if (apiKey) {
-			if (nextOptions.model) bindApiKey(nextOptions.model.provider, apiKey);
-			else if (!nextOptions.modelPattern && !(args.parsedArgs.models ?? cfgEnabledModels.get(nextSettings)).length) {
-				throw new CliUsageError(API_KEY_REQUIRES_MODEL);
-			}
-		}
-
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
 		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
@@ -631,7 +599,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// limits, …) on its own project's settings until disposed; its requests redact credentials
 		// per that project's `secrets.enabled` regardless of which session holds the effects.
 		const { session: nextSession, setToolUIContext } = await args.createSession({
-			...nextOptions,
+			...args.baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,
@@ -647,6 +615,9 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			eventBus,
 			preloadedExtensions: trustedExtensions,
 		});
+		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
+			args.authStorage.keys.setRuntime(nextSession.model.provider, args.parsedArgs.apiKey);
+		}
 		const runner = nextSession.extensionRunner;
 		const reparsedArgs = applyExtensionFlags(
 			runner
@@ -672,25 +643,6 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				await nextSession.dispose();
 				throw error;
 			}
-		}
-		if (apiKey && !nextOptions.model) {
-			try {
-				bindApiKey(nextSession.model?.provider, apiKey);
-			} catch (error) {
-				await nextSession.dispose();
-				throw error;
-			}
-		}
-		nextSession.setScopedModelsRefresher(async () => {
-			await rebuildScopedModels(nextSession, args.parsedArgs, args.modelRegistry, nextSettings);
-		});
-		watchScopedModelSettings(nextSession, args.parsedArgs, args.modelRegistry, nextSettings);
-		const configuredScope = args.parsedArgs.models ?? cfgEnabledModels.get(nextSettings);
-		if (configuredScope.length > 0) {
-			await rebuildScopedModels(nextSession, args.parsedArgs, args.modelRegistry, nextSettings);
-			void rebuildScopedModelsAfterDiscovery(nextSession, args.parsedArgs, args.modelRegistry, nextSettings).catch(
-				error => logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
-			);
 		}
 		return { session: nextSession, setToolUIContext };
 	};
@@ -1145,7 +1097,7 @@ function notifyResumeCwdFallback(
  * destination project's settings-derived scope wins over the launch directory's.
  */
 export async function resolveScopedModels(
-	parsed: Pick<Args, "models">,
+	parsed: Args,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "getDiscoverableProviders" | "refresh">,
 	activeSettings: Settings,
 ): Promise<ScopedModel[]> {
@@ -1212,7 +1164,7 @@ export interface ScopedModelSink {
  */
 export async function rebuildScopedModelsAfterDiscovery(
 	session: ScopedModelSink,
-	parsed: Pick<Args, "models">,
+	parsed: Args,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "awaitBackgroundRefresh">,
 	activeSettings: Settings,
 ): Promise<void> {
@@ -1231,7 +1183,7 @@ export async function rebuildScopedModelsAfterDiscovery(
  */
 export async function rebuildScopedModels(
 	session: ScopedModelSink,
-	parsed: Pick<Args, "models">,
+	parsed: Args,
 	modelRegistry: Pick<ModelRegistry, "getAvailable">,
 	activeSettings: Settings,
 ): Promise<ScopedModel[] | undefined> {
@@ -1252,22 +1204,18 @@ export async function rebuildScopedModels(
 }
 
 /** Settings the scoped model list follows (see {@link watchScopedModelSettings}). */
-const cfgScopedModelInputs = combine({
-	enabledModels: cfgEnabledModels,
-	disabledProviders: cfgDisabledProviders,
-	modelProviderOrder: cfgModelProviderOrder,
-});
+const cfgScopedModelInputs = combine({ enabledModels: cfgEnabledModels, disabledProviders: cfgDisabledProviders });
 
 /**
  * Keep the Ctrl+P / scoped `/models` list in step with live settings: an
- * `enabledModels` or provider-order edit re-resolves a settings-derived scope
- * (an explicit `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
+ * `enabledModels` edit re-resolves a settings-derived scope (an explicit
+ * `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
  * after the catalog rebuild so re-enabled providers rejoin (disabled ones are
  * already filtered from `session.scopedModels` at read time).
  */
 export function watchScopedModelSettings(
 	session: ScopedModelSink & Pick<AgentSession, "addDisposer">,
-	parsed: Pick<Args, "models">,
+	parsed: Args,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "reapplyModelPolicies">,
 	activeSettings: Settings,
 ): void {
@@ -1496,61 +1444,6 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
-function applyStartupScopedModels(
-	options: CreateAgentSessionOptions,
-	parsed: Pick<Args, "model" | "models" | "thinking">,
-	scopedModels: readonly ScopedModel[],
-	modelRegistry: ModelRegistry,
-	activeSettings: Settings,
-	restoringSession: boolean,
-): void {
-	const first = scopedModels[0];
-	let deferredDefaultRole = false;
-	if (!parsed.model && !options.model && !restoringSession) {
-		if (first) {
-			const remembered = activeSettings.getModelRole("default");
-			if (remembered) {
-				const rememberedSpec = resolveModelRoleValue(
-					remembered,
-					scopedModels.map(scopedModel => scopedModel.model),
-					{
-						settings: activeSettings,
-						matchPreferences: getModelMatchPreferences(activeSettings),
-						respectUpstreamPins: true,
-						modelLookup: modelRegistry,
-					},
-				);
-				const rememberedModel =
-					rememberedSpec.model ??
-					scopedModels.find(entry => entry.model.id.toLowerCase() === remembered.toLowerCase())?.model;
-				if (rememberedModel) {
-					options.model = rememberedModel;
-					if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
-						options.thinkingLevel = rememberedSpec.thinkingLevel;
-					}
-				}
-			}
-			// Let the SDK retry a missing default after extension models register (#6694).
-			// An explicit CLI scope cannot defer: the SDK would only see enabledModels.
-			deferredDefaultRole = !options.model && Boolean(remembered) && !parsed.models?.length;
-			if (!deferredDefaultRole) {
-				options.model ??= first.model;
-				options.rebindModelAfterDiscovery = true;
-			}
-		} else if (parsed.models?.length) {
-			// The explicit scope may name models that extensions register in the SDK.
-			options.modelPattern = parsed.models;
-		}
-	}
-	if (parsed.thinking) {
-		options.thinkingLevel = parsed.thinking;
-	} else if (!deferredDefaultRole && !restoringSession) {
-		const selected = scopedModels[findScopedModelIndex(scopedModels, options.model)] ?? first;
-		if (selected?.explicitThinkingLevel) options.thinkingLevel = selected.thinkingLevel;
-	}
-	options.scopedModels = first ? toSessionScopedModels(scopedModels, activeSettings) : undefined;
-}
-
 /**
  * Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage.
  * Non-fatal warnings go to `warn`, which an interactive launch points at its UI's startup notices.
@@ -1566,7 +1459,6 @@ export async function buildSessionOptions(
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
-		scopedModelsFromSettings: parsed.models === undefined,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
@@ -1648,6 +1540,10 @@ export async function buildSessionOptions(
 	// configured assignment so explicit prewalk role targets still resolve
 	// against the value that existed when the CLI was invoked.
 	const preModelOverrideDefaultRole = activeSettings.getModelRole("default");
+	// True when a configured `default` role was deliberately left unresolved for
+	// createAgentSession's post-extension re-resolution (issue #6694); the
+	// scoped thinking-level seed below must be deferred along with the model.
+	let deferredDefaultRole = false;
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -1709,6 +1605,59 @@ export async function buildSessionOptions(
 				options.thinkingLevel = resolved.thinkingLevel;
 			}
 		}
+	} else if (scopedModels.length > 0 && !restoringSession) {
+		const remembered = activeSettings.getModelRole("default");
+		if (remembered) {
+			const rememberedSpec = resolveModelRoleValue(
+				remembered,
+				scopeAllowList(scopedModels, modelRegistry.getAvailable()),
+				{
+					settings: activeSettings,
+					matchPreferences: modelMatchPreferences,
+				},
+			);
+			// The resolved model keeps its variant and pin; only an unresolved role falls back to an id match.
+			const rememberedModel =
+				rememberedSpec.model ??
+				scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase())?.model;
+			if (rememberedModel) {
+				options.model = rememberedModel;
+				options.rebindModelAfterDiscovery = true;
+				// Apply explicit thinking level from remembered role value
+				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
+					options.thinkingLevel = rememberedSpec.thinkingLevel;
+				}
+			}
+		}
+		// A configured `default` role that doesn't resolve within the startup
+		// scope is deferred, NOT silently pinned to `scopedModels[0]`: the scope
+		// is resolved before extensions register their providers, so a role naming
+		// an extension-registered model (listed in `enabledModels`) would drop out
+		// here and the session would run on an unrelated in-scope provider without
+		// any error. Leaving `options.model` unset lets createAgentSession's
+		// post-extension default-role resolution reclaim it against the fully
+		// registered, still enabledModels-scoped catalog (issue #6694).
+		// Defer ONLY for a settings-derived scope: createAgentSession re-resolves
+		// against `settings.enabledModels` and never sees CLI `--models`, so
+		// deferring under an explicit CLI scope would let the saved default
+		// escape it — keep pinning the first scoped model there.
+		deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
+		if (!options.model && !deferredDefaultRole) {
+			options.model = scopedModels[0].model;
+			options.rebindModelAfterDiscovery = true;
+		}
+	} else if ((parsed.models?.length ?? 0) > 0 && !restoringSession) {
+		// A CLI `--models` scope that resolved to zero models at startup: its
+		// selectors name only models supplied by extension providers (or discovery)
+		// that register during createAgentSession, so nothing matched the
+		// pre-session catalog and `getDiscoverableProviders()` did not yet list the
+		// provider for resolveScopedModels' pre-refresh. Defer the choice to the
+		// SDK's post-extension resolution — the same `modelPattern` path a deferred
+		// `--model` uses — so the initial model is picked from the requested scope
+		// instead of an unrelated fallback. The rebuild right after createSession
+		// then activates the scoped list for extension providers (issue #6694), and
+		// the fire-and-forget one once discovery settles (issue #9220).
+		options.modelPattern = parsed.models;
 	}
 
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
@@ -1780,7 +1729,25 @@ export async function buildSessionOptions(
 		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
 	}
 
-	applyStartupScopedModels(options, parsed, scopedModels, modelRegistry, activeSettings, restoringSession);
+	// Thinking level
+	if (parsed.thinking) {
+		options.thinkingLevel = parsed.thinking;
+	} else if (
+		scopedModels.length > 0 &&
+		scopedModels[0].explicitThinkingLevel === true &&
+		// A deferred default role resolves its own model (and any explicit
+		// thinking suffix) after extensions register; seeding the fallback
+		// scoped model's level here would override it in createAgentSession.
+		!deferredDefaultRole &&
+		!restoringSession
+	) {
+		options.thinkingLevel = scopedModels[0].thinkingLevel;
+	}
+
+	// Scoped models for Ctrl+P cycling — fill in default thinking levels when not explicit.
+	if (scopedModels.length > 0) {
+		options.scopedModels = toSessionScopedModels(scopedModels, activeSettings);
+	}
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)
@@ -2171,12 +2138,13 @@ export async function runRootCommand(
 		});
 
 		await credentialScopedCacheHydration;
-		// ACP's settings-derived scope belongs to each session/new workspace.
-		const resolveStartupScopedModels = () =>
-			mode === "acp" && parsedArgs.models === undefined
-				? Promise.resolve([])
-				: resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
-		let scopedModels = await logger.time("resolveModelScope", resolveStartupScopedModels);
+		let scopedModels = await logger.time(
+			"resolveModelScope",
+			resolveScopedModels,
+			parsedArgs,
+			modelRegistry,
+			settingsInstance,
+		);
 
 		// Resolve an explicit `--continue <id>` before extension flags are loaded.
 		// Reading the token immediately after `--continue` distinguishes the session
@@ -2296,7 +2264,7 @@ export async function runRootCommand(
 				// Destination project may scope a different `enabledModels`; re-resolve
 				// so the model UI and session options reflect it (explicit `--models`
 				// stays fixed inside resolveScopedModels).
-				scopedModels = await resolveStartupScopedModels();
+				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
 			}
 		}
 
@@ -2389,7 +2357,7 @@ export async function runRootCommand(
 			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd, isInteractive ? notifs : undefined);
 			if (cwd !== previousCwd) {
 				parsedArgs.cwd = cwd;
-				scopedModels = await resolveStartupScopedModels();
+				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
 			}
 		}
 
@@ -2483,42 +2451,15 @@ export async function runRootCommand(
 		}
 
 		// Handle CLI --api-key as runtime override (not persisted)
-		let apiKeyProvider = sessionOptions.model?.provider;
 		if (parsedArgs.apiKey) {
-			if (!apiKeyProvider && !sessionOptions.modelPattern) {
-				if (mode !== "acp") {
-					process.stderr.write(`${chalk.red(API_KEY_REQUIRES_MODEL)}\n`);
-					process.exit(1);
-				}
-				// The launch scope can identify the credential's provider, but must not select the workspace's model.
-				const keyTarget: CreateAgentSessionOptions = {};
-				const launchScope = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
-				applyStartupScopedModels(keyTarget, parsedArgs, launchScope, modelRegistry, settingsInstance, false);
-				apiKeyProvider = keyTarget.model?.provider;
-				// No authenticated match: a declared scope still names its provider without a stored
-				// credential. Refuse a scope that does not name exactly one, so no workspace claims the key.
-				const declaredScope = parsedArgs.models ?? cfgEnabledModels.get(settingsInstance);
-				if (!apiKeyProvider && declaredScope.length > 0) {
-					const disabled = disabledProviderIds(settingsInstance);
-					const catalog = {
-						getAvailable: (kind?: Parameters<ModelRegistry["getAll"]>[0]) =>
-							modelRegistry.getAll(kind).filter(model => !disabled.has(model.provider)),
-					};
-					const matches = await resolveModelScope(
-						declaredScope,
-						catalog,
-						getModelMatchPreferences(settingsInstance),
-						settingsInstance,
-					);
-					const providers = new Set(matches.map(entry => entry.model.provider));
-					if (providers.size !== 1) {
-						throw new CliUsageError("--api-key requires exactly one enabled provider in the launch scope");
-					}
-					[apiKeyProvider] = providers;
-				}
+			if (!sessionOptions.model && !sessionOptions.modelPattern) {
+				process.stderr.write(
+					`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
+				);
+				process.exit(1);
 			}
-			if (apiKeyProvider) {
-				authStorage.keys.setRuntime(apiKeyProvider, parsedArgs.apiKey);
+			if (sessionOptions.model) {
+				authStorage.keys.setRuntime(sessionOptions.model.provider, parsedArgs.apiKey);
 			}
 		}
 
@@ -2552,7 +2493,6 @@ export async function runRootCommand(
 				settings: settingsInstance,
 				sessionDir: parsedArgs.sessionDir,
 				authStorage,
-				apiKeyProvider,
 				modelRegistry,
 				parsedArgs,
 				rawArgs,

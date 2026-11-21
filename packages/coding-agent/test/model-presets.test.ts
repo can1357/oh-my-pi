@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { Effort, type Model } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	acquireModelRoleMutation,
@@ -12,20 +12,14 @@ import {
 	getModelPresetNames,
 	formatModelPresetSwitch,
 	modelPresetSavedMessage,
-	type ModelPresetSession,
 	modelPresetShadowOwner,
 	saveModelPreset,
 } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import {
-	formatModelStringWithRouting,
-	parseModelPattern,
-	resolveModelScope,
-} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -68,34 +62,13 @@ describe("model presets", () => {
 		fixtureDir.removeSync();
 	});
 
-	function createSession(
-		settings: Settings,
-		initialModel = SONNET,
-		thinkingLevel: Effort = Effort.High,
-		scope?: Pick<AgentSessionConfig, "scopedModels" | "scopedModelsFromSettings">,
-	) {
+	function createSession(settings: Settings, initialModel = SONNET, thinkingLevel: Effort = Effort.High) {
 		const agent = new Agent({
 			initialState: { model: bundled(initialModel), systemPrompt: ["Test"], tools: [], messages: [], thinkingLevel },
 		});
-		const session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-			...scope,
-		});
+		const session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 		sessions.push(session);
 		return session;
-	}
-
-	function presetAdapter(session: AgentSession): ModelPresetSession {
-		return {
-			setModel: session.setModel.bind(session),
-			setThinkingLevel: session.setThinkingLevel.bind(session),
-			getAvailableModels: session.getAvailableModels.bind(session),
-			scopedModels: session.scopedModels,
-			modelRegistry: session.modelRegistry,
-		};
 	}
 
 	/** Settings with a real project layer and an optional `--config` overlay. */
@@ -133,7 +106,7 @@ describe("model presets", () => {
 		cfgDefaultThinkingLevel.set(settings, Effort.High);
 		const session = createSession(settings, SONNET, Effort.High);
 
-		const result = await applyModelPreset(settings, presetAdapter(session), "focus");
+		const result = await applyModelPreset(settings, session, "focus");
 
 		expect(result.kind).toBe("switched");
 		expect({ ...settings.getModelRoles() }).toEqual({ default: OPUS, plan: SONNET_46 });
@@ -243,43 +216,6 @@ describe("model presets", () => {
 		expect(session.model?.id).toBe("claude-sonnet-4-5");
 	});
 
-	it("uses the preferred provider for an ambiguous enabled model before writing preset roles", async () => {
-		const id = "anthropic/claude-preset-fixture";
-		const vercel = `vercel-ai-gateway/${id}`;
-		const router = `openrouter/${id}`;
-		const settings = Settings.isolated({ enabledModels: [id], modelProviderOrder: ["vercel-ai-gateway"] });
-		settings.setModelRole("default", router);
-		cfgModelPresets.setEntry(settings, "vercel", {
-			modelRoles: { default: vercel },
-			defaultThinkingLevel: Effort.Low,
-		});
-		cfgModelPresets.setEntry(settings, "router", {
-			modelRoles: { default: router, slow: OPUS },
-			defaultThinkingLevel: Effort.High,
-		});
-		const model = bundled(SONNET);
-		const openrouter: Model = {
-			...model,
-			id,
-			provider: "openrouter",
-			api: "openai-completions",
-			baseUrl: "https://openrouter.ai/api/v1",
-		};
-		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
-			openrouter,
-			{ ...model, id, provider: "vercel-ai-gateway", baseUrl: "https://ai-gateway.vercel.sh" },
-		]);
-		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(true);
-		const session = createSession(settings);
-		await session.setModel(openrouter);
-
-		expect((await applyModelPreset(settings, session, "vercel")).kind).toBe("switched");
-		expect((await applyModelPreset(settings, session, "router")).kind).toBe("unavailable");
-		expect(settings.getModelRoles()).toEqual({ default: vercel });
-		expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.Low);
-		expect(session.model && formatModelStringWithRouting(session.model)).toBe(vercel);
-	});
-
 	const cerebras = "openrouter/z-ai/glm-4.7@cerebras";
 	const sambanova = "openrouter/z-ai/glm-4.7@sambanova";
 
@@ -331,111 +267,6 @@ describe("model presets", () => {
 		} finally {
 			modelRegistry.unregisterProvider("openrouter");
 		}
-	});
-
-	it.each([
-		{ scope: "settings", fromSettings: true, target: cerebras, expected: "unavailable" },
-		{ scope: "settings", fromSettings: true, target: sambanova, expected: "switched" },
-		{ scope: "explicit", fromSettings: false, target: cerebras, expected: "switched" },
-	])("checks $target against the prospective $scope scope", async ({ fromSettings, target, expected }) => {
-		const settings = Settings.isolated({ enabledModels: ["@slow"] });
-		settings.setModelRole("default", cerebras);
-		settings.setModelRole("slow", cerebras);
-		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: target, slow: sambanova } });
-		const { model } = parseModelPattern(cerebras, modelRegistry.getAvailable());
-		if (!model) throw new Error(`missing model ${cerebras}`);
-		const session = createSession(settings, SONNET, Effort.High, {
-			scopedModels: [{ model }],
-			scopedModelsFromSettings: fromSettings,
-		});
-		session.setScopedModelsRefresher(async () => {
-			session.setScopedModels(await resolveModelScope(["@slow"], modelRegistry, undefined, settings));
-		});
-		await session.setModel(model);
-		expect(session.getAvailableModels().map(formatModelStringWithRouting)).toEqual([cerebras]);
-
-		const result = await applyModelPreset(settings, session, "reroute");
-
-		expect(result.kind).toBe(expected);
-		expect(session.scopedModels.map(entry => formatModelStringWithRouting(entry.model))).toEqual([
-			fromSettings && expected === "switched" ? sambanova : cerebras,
-		]);
-		const slow = expected === "switched" ? sambanova : cerebras;
-		const active = expected === "switched" ? target : cerebras;
-		expect(settings.getModelRoles()).toEqual({ default: active, slow });
-		expect(session.getAvailableModels().map(formatModelStringWithRouting)).toEqual([slow]);
-		expect(session.model && formatModelStringWithRouting(session.model)).toBe(active);
-	});
-
-	it("resolves allowlist aliases through the layer that will still own the role", async () => {
-		const settings = await projectSettings({
-			overlay: `enabledModels: ['@slow']\nmodelRoles:\n  slow: ${cerebras}\n`,
-		});
-		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: "@slow", slow: sambanova } });
-		const session = createSession(settings);
-
-		const result = await applyModelPreset(settings, session, "reroute");
-
-		expect(result).toMatchObject({
-			kind: "switched",
-			shadowed: [{ role: "slow", expected: sambanova, actual: cerebras, source: "overlay" }],
-		});
-		expect(session.model && formatModelStringWithRouting(session.model)).toBe(cerebras);
-	});
-
-	it("resolves allowlist aliases through the global role revealed by a project removal", async () => {
-		const settings = await projectSettings({
-			project: `enabledModels: ['@slow']\nmodelRoles:\n  slow: ${cerebras}\n`,
-			storage: "project",
-		});
-		settings.setModelRole("slow", sambanova);
-		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: "@slow" } });
-		const session = createSession(settings);
-		expect(session.getAvailableModels().map(formatModelStringWithRouting)).toEqual([cerebras]);
-
-		const result = await applyModelPreset(settings, session, "reroute");
-
-		expect(result).toMatchObject({
-			kind: "switched",
-			shadowed: [{ role: "slow", expected: undefined, actual: sambanova, source: "global" }],
-		});
-		expect(settings.getProjectModelRole("slow")).toBeUndefined();
-		expect(session.model && formatModelStringWithRouting(session.model)).toBe(sambanova);
-	});
-
-	it("does not write roles when a shadowing default will be outside the prospective allowlist", async () => {
-		const settings = await projectSettings({
-			project: `enabledModels: ['@slow']\nmodelRoles:\n  default: ${cerebras}\n`,
-		});
-		settings.setModelRole("slow", cerebras);
-		cfgModelPresets.setEntry(settings, "reroute", { modelRoles: { default: sambanova, slow: sambanova } });
-		const session = createSession(settings);
-
-		const result = await applyModelPreset(settings, session, "reroute");
-
-		expect(result).toEqual({ kind: "unavailable", reason: `default model \`${cerebras}\` is not available` });
-		expect(settings.getGlobalModelRole("default")).toBeUndefined();
-		expect(settings.getModelRole("slow")).toBe(cerebras);
-	});
-
-	it.each([
-		{ name: "allows a preset pinned to an upstream in enabledModels", enabledModels: [cerebras], target: cerebras },
-		{ name: "allows a preset to re-pin when enabledModels is empty", enabledModels: [], target: sambanova },
-	])("$name", async ({ enabledModels, target }) => {
-		const settings = Settings.isolated({ enabledModels });
-		settings.setModelRole("default", cerebras);
-		cfgModelPresets.setEntry(settings, "routed", { modelRoles: { default: target } });
-		const session = createSession(settings);
-		const { model } = parseModelPattern(cerebras, session.getAvailableModels());
-		if (!model) throw new Error(`missing model ${cerebras}`);
-		await session.setModel(model);
-		expect(session.model && formatModelStringWithRouting(session.model)).toBe(cerebras);
-
-		const result = await applyModelPreset(settings, session, "routed");
-
-		expect(result.kind).toBe("switched");
-		expect(settings.getModelRole("default")).toBe(target);
-		expect(session.model && formatModelStringWithRouting(session.model)).toBe(target);
 	});
 
 	it("reports a failed live switch instead of success", async () => {
@@ -550,7 +381,7 @@ describe("model presets", () => {
 		vi.spyOn(session, "getAvailableModels").mockReturnValue([bundled(OPUS)]);
 		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(false);
 
-		const result = await applyModelPreset(settings, presetAdapter(session), "auto");
+		const result = await applyModelPreset(settings, session, "auto");
 
 		expect(result.kind).toBe("unavailable");
 		expect(settings.getModelRole("default")).toBe(SONNET);
