@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Model.voice` (default voice for speech models) and `Model.speechFormats` (the only audio containers a speech model returns), and moved `SPEECH_FORMATS`/`SpeechFormat` here from `@oh-my-pi/pi-ai` ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))

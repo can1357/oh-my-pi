@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `models.yml` speech models accept `voice` (sent when the `tts` tool or the vocalizer names no voice, for gateways that reject a voiceless request) and `speechFormats` (the only containers the model returns). The `tts` tool asks a WAV-only model for WAV when the path ends in `.mp3` (and an MP3-only one for MP3 when it ends in `.wav`) and writes the sibling file with that extension; a model that returns neither is skipped ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- `speech.enabled` now speaks through the `openai-speech` or `xai-tts` models you explicitly configured in the `speech` role chain, falling back to a later model (or local Phonon) when one fails and warning when every model failed; a model that fails with a missing key or a 4xx is skipped for the rest of the session. Unconfigured, vocalization stays on local Phonon; `--offline` keeps only the session provider's models, as before. If you upgrade with `speech.enabled` on and set the speech role to a cloud model only for the `tts` tool, vocalization now uses that model too ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
