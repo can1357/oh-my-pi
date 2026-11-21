@@ -1556,19 +1556,26 @@ fn errexit_suppressed(command: &str) -> String {
 	format!("{{ {command}\n}} && :")
 }
 
+const fn chain_segment_is_runnable(
+	segment: &minimizer::plan::ChainSegment,
+	previous_succeeded: bool,
+) -> bool {
+	!segment.run_if_previous_succeeded || previous_succeeded
+}
+
 /// What the stop branch knows about the segment run that stopped the chain.
 #[derive(Clone, Copy)]
 struct ChainStopFacts {
 	/// The run recorded an `exit`/errexit unwind.
-	exited:       bool,
+	exited:                  bool,
 	/// The recorded unwind cause, when any.
-	exit_cause:   Option<crate::bash::ExitCause>,
+	exit_cause:              Option<crate::bash::ExitCause>,
 	/// The segment's own continuation walk saw input left unrun.
-	cut_short:    bool,
-	/// Later unconditional segments were still owed.
-	owed_work:    bool,
+	cut_short:               bool,
+	/// Cancellation prevented the submission of a runnable segment.
+	cancelled_before_submit: bool,
 	/// One owed segment still holds a command under the session's parser.
-	owed_command: bool,
+	owed_command:            bool,
 }
 
 impl ChainStopFacts {
@@ -1588,7 +1595,7 @@ impl ChainStopFacts {
 			self.exited
 				&& self.exit_cause == Some(crate::bash::ExitCause::Exit)
 				&& (self.cut_short || self.owed_command),
-			!self.exited && self.owed_work,
+			!self.exited && self.cancelled_before_submit,
 		)
 	}
 }
@@ -1626,7 +1633,7 @@ async fn run_shell_command_segmented_chain(
 	let max_capture_bytes = config.max_capture_bytes as usize;
 	let mut segments = segments.into_iter();
 	while let Some(segment) = segments.next() {
-		if segment.run_if_previous_succeeded && !previous_succeeded {
+		if !chain_segment_is_runnable(&segment, previous_succeeded) {
 			continue;
 		}
 
@@ -1697,43 +1704,42 @@ async fn run_shell_command_segmented_chain(
 		let keep_running = !command_run.outcome.exited && !scope.cancel.is_cancelled();
 		last_status = Some(exit);
 		if !keep_running {
-			// Work the chain still owed: later unconditional segments. A
-			// suppressed segment already contains `&& :`: its continuation
-			// walk decides whether any conditional successor would run, even
-			// when a function's final `!` changes its outgoing status — the
-			// raw exit status is not the counterfactual continuation status.
-			// A segment's raw text is not proof of owed input either: an
-			// alias can expand its command to a comment, so each one is
-			// judged by the session's parser, the same predicate the
-			// single-command path's walk applies to unread input.
-			let mut owed_work = false;
+			let outcome = &command_run.outcome;
 			let mut owed_command = false;
-			for pending in segments.by_ref() {
-				if pending.run_if_previous_succeeded {
-					continue;
+			let cancelled_before_submit = if outcome.exited {
+				// The `&& :` wrapper already models conditional continuation after
+				// an exit unwind. Its counterfactual status is not the actual
+				// status used for scheduling. Only inspect unconditional tails
+				// here, using the session parser (aliases can hide commands).
+				if outcome.exit_cause == Some(crate::bash::ExitCause::Exit) && !outcome.cut_short {
+					for pending in segments.filter(|pending| !pending.run_if_previous_succeeded) {
+						if session
+							.session
+							.source_holds_command(pending.command.as_bytes())
+							.await
+							.unwrap_or(true)
+						{
+							owed_command = true;
+							break;
+						}
+					}
 				}
-				owed_work = true;
-				if !owed_command
-					&& session
-						.session
-						.source_holds_command(pending.command.as_bytes())
-						.await
-						.unwrap_or(true)
-				{
-					owed_command = true;
-					break;
-				}
-			}
+				false
+			} else {
+				// The completed segment's actual status decides whether the
+				// cancel prevented another segment from being submitted.
+				segments.any(|pending| chain_segment_is_runnable(&pending, previous_succeeded))
+			};
 			// A stop the script's own semantics already decided keeps its
 			// classification: the run-level outcome is authoritative, and a
 			// cancel token that latched after the run's own cancel window
 			// (a deadline during attribution or output drain, a post-run
 			// signal) never reached the engine and cannot have caused it.
 			let (exit_notice, cancel_cut) = ChainStopFacts {
-				exited: command_run.outcome.exited,
-				exit_cause: command_run.outcome.exit_cause,
-				cut_short: command_run.outcome.cut_short,
-				owed_work,
+				exited: outcome.exited,
+				exit_cause: outcome.exit_cause,
+				cut_short: outcome.cut_short,
+				cancelled_before_submit,
 				owed_command,
 			}
 			.classify();

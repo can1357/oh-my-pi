@@ -1321,7 +1321,7 @@ fn segmented_chain_stop_classification_matrix() {
 		exited,
 		cause,
 		cut_short,
-		owed_work,
+		cancelled_before_submit,
 		owed_command,
 		expected_notice,
 		expected_cancel_cut,
@@ -1347,9 +1347,14 @@ fn segmented_chain_stop_classification_matrix() {
 		// arriving after the run ended must not make it a cancellation.
 		("completed-run-stays-itself", false, None, false, false, false, false, false),
 	] {
-		let (notice, cancel_cut) =
-			ChainStopFacts { exited, exit_cause: cause, cut_short, owed_work, owed_command }
-				.classify();
+		let (notice, cancel_cut) = ChainStopFacts {
+			exited,
+			exit_cause: cause,
+			cut_short,
+			cancelled_before_submit,
+			owed_command,
+		}
+		.classify();
 		assert_eq!(notice, expected_notice, "{name}: ended_by_exit");
 		assert_eq!(cancel_cut, expected_cancel_cut, "{name}: cancel_cut");
 	}
