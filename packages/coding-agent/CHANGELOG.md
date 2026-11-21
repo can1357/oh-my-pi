@@ -34,6 +34,10 @@
 - Added Binary Ninja as a disassembler backend for read analysis views and the `dsm` namespace. Select it with `disassembler.backend = binja` and configure its installation with `binja.installDir` or `$BN_INSTALL_DIR`.
 - Clicking the usage-limit segment in native terminal hosts such as Tern now opens `/usage`. Changing Tern's Agents tray setting immediately switches between tray cards and the running-agent and job counters without restarting omp.
 
+### Fixed
+
+- Ctrl+O now collapses tool output that has scrolled into terminal history instead of leaving expanded rows behind ([#19631](https://github.com/can1357/oh-my-pi/pull/19631) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Changed
 
 - Images a command prints as kitty or sixel graphics are saved to a temp file and linked in the bash output, in addition to being attached
