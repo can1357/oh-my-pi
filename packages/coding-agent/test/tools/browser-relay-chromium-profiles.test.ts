@@ -14,25 +14,14 @@ afterEach(async () => {
 	await home.remove();
 });
 
-async function profile(
-	browserDir: string,
-	dir: string,
-	files: { prefs?: unknown; secure?: unknown },
-): Promise<void> {
+async function profile(browserDir: string, dir: string, files: { prefs?: unknown; secure?: unknown }): Promise<void> {
 	const root = home.join("Library/Application Support", browserDir, dir);
-	if (files.prefs !== undefined)
-		await Bun.write(`${root}/Preferences`, JSON.stringify(files.prefs));
-	if (files.secure !== undefined)
-		await Bun.write(`${root}/Secure Preferences`, JSON.stringify(files.secure));
+	if (files.prefs !== undefined) await Bun.write(`${root}/Preferences`, JSON.stringify(files.prefs));
+	if (files.secure !== undefined) await Bun.write(`${root}/Secure Preferences`, JSON.stringify(files.secure));
 }
 
-async function localState(
-	browserDir: string,
-	profiles: Record<string, string>,
-): Promise<void> {
-	const info_cache = Object.fromEntries(
-		Object.entries(profiles).map(([dir, name]) => [dir, { name }]),
-	);
+async function localState(browserDir: string, profiles: Record<string, string>): Promise<void> {
+	const info_cache = Object.fromEntries(Object.entries(profiles).map(([dir, name]) => [dir, { name }]));
 	await Bun.write(
 		home.join("Library/Application Support", browserDir, "Local State"),
 		JSON.stringify({ profile: { info_cache } }),
@@ -66,12 +55,7 @@ describe("findUnpackedInstalls", () => {
 		await profile("Google/Chrome", "Profile 2", {
 			secure: { extensions: { settings: { [ID]: { location: 1 } } } },
 		});
-		await Bun.write(
-			home.join(
-				"Library/Application Support/Google/Chrome/Profile 2/Preferences",
-			),
-			"{",
-		);
+		await Bun.write(home.join("Library/Application Support/Google/Chrome/Profile 2/Preferences"), "{");
 		// A browser without Local State is not installed.
 		await profile("Chromium", "Default", {
 			secure: { extensions: { settings: { [ID]: { location: 4 } } } },

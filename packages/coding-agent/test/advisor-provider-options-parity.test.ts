@@ -33,7 +33,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 /** Provider-facing advisor session ids must be UUIDv7 (issue #5040): Codex writes
- *  them verbatim onto `conversation_id`/`session_id` headers, so `-advisor`
+ *  them verbatim onto the `session-id` header, so `-advisor`
  *  labels stay local-only (telemetry, transcripts). */
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 

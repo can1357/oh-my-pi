@@ -136,7 +136,7 @@ function registerMnemopiState(entries: () => unknown[]): MnemopiSessionState {
 				appendCustomEntry: () => {},
 				getCwd: () => "/work/project-alpha",
 			} as never,
-			getXdevToolEntries: () => [],
+			getToolCommandEntries: () => [],
 			emitNotice: () => {},
 			getHindsightSessionState: () => undefined,
 			subscribe: () => () => {},

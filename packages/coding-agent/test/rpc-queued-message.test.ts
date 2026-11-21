@@ -36,6 +36,26 @@ describe("RPC queued-message editing", () => {
 		await removeWithRetries(directory);
 	});
 
+	/** Starts the fixture under `script` with a first turn that streams until aborted. */
+	async function startStreamingTurn(script: "hold" | "internal-steer" | "live-steer" = "hold"): Promise<void> {
+		client = createClient(script);
+		await client.start();
+		const agentStarted = Promise.withResolvers<void>();
+		const unsubscribe = client.onEvent(event => {
+			if (event.type === "agent_start") agentStarted.resolve();
+		});
+		try {
+			await client.prompt("start a long turn");
+			await withTimeout(agentStarted.promise, 10_000, "First turn never started streaming");
+		} finally {
+			unsubscribe();
+		}
+	}
+
+	function userTexts(messages: AgentMessage[]): unknown[] {
+		return messages.filter(message => message.role === "user").map(message => message.content);
+	}
+
 	test("validates removal and delivers only the surviving queued request", async () => {
 		await client.start();
 		await client.followUp("cancel this");
@@ -233,22 +253,6 @@ describe("RPC queued-message editing", () => {
 	}, 30_000);
 
 	describe("abort_and_restore_queue", () => {
-		/** Starts the fixture under `script` with a first turn that streams until aborted. */
-		async function startStreamingTurn(script: "hold" | "internal-steer" | "live-steer" = "hold"): Promise<void> {
-			client = createClient(script);
-			await client.start();
-			const agentStarted = Promise.withResolvers<void>();
-			const unsubscribe = client.onEvent(event => {
-				if (event.type === "agent_start") agentStarted.resolve();
-			});
-			try {
-				await client.prompt("start a long turn");
-				await withTimeout(agentStarted.promise, 10_000, "First turn never started streaming");
-			} finally {
-				unsubscribe();
-			}
-		}
-
 		/** Re-reads session state until `check` holds. The fixture changes these queues inside
 		 *  the model call without emitting an event, so each `get_state` round trip is the wait. */
 		async function untilState(check: (state: RpcSessionState) => boolean, message: string): Promise<void> {
@@ -279,10 +283,6 @@ describe("RPC queued-message editing", () => {
 				unsubscribe();
 			}
 			return client.getMessages();
-		}
-
-		function userTexts(messages: AgentMessage[]): unknown[] {
-			return messages.filter(message => message.role === "user").map(message => message.content);
 		}
 
 		const expectedUserTurns = [
@@ -426,5 +426,62 @@ describe("RPC queued-message editing", () => {
 			const maxBytes = Buffer.byteLength(JSON.stringify(expected));
 			expect(fitAbortAndRestoreQueueResponse("stop", restored, maxBytes)).toEqual(expected);
 		});
+	});
+
+	describe("abort_and_deliver_queue and resume", () => {
+		const isContinuation = (message: AgentMessage) =>
+			message.role === "assistant" && JSON.stringify(message.content).includes("Handled queued request");
+
+		/** Re-reads the transcript until the interrupted run's continuation has answered. */
+		async function untilContinued(): Promise<AgentMessage[]> {
+			let messages: AgentMessage[] = [];
+			await withTimeout(
+				(async () => {
+					while (!(messages = await client.getMessages()).some(isContinuation));
+				})(),
+				10_000,
+				"The interrupted run never continued",
+			);
+			return messages;
+		}
+
+		test("abort_and_deliver_queue continues the run with queued input, and does nothing without it", async () => {
+			await startStreamingTurn();
+			expect(await client.abortAndDeliverQueue()).toBe(false);
+			expect((await client.getState()).isStreaming).toBe(true);
+
+			await client.steer("queued steer");
+			expect(await client.abortAndDeliverQueue()).toBe(true);
+			const messages = await untilContinued();
+			expect(userTexts(messages)).toEqual([
+				[{ type: "text", text: "start a long turn" }],
+				[{ type: "text", text: "queued steer" }],
+			]);
+			expect(
+				messages.find(message => message.role === "assistant" && message.stopReason === "aborted"),
+			).toMatchObject({ errorMessage: USER_INTERRUPT_LABEL });
+		}, 30_000);
+
+		test("resume delivers a prompt sent just before it instead of the continue directive", async () => {
+			await startStreamingTurn();
+			const steered = client.prompt("late steer", undefined, "steer");
+			await client.resume();
+			await steered;
+			expect(userTexts(await untilContinued())).toEqual([
+				[{ type: "text", text: "start a long turn" }],
+				[{ type: "text", text: "late steer" }],
+			]);
+		}, 30_000);
+
+		test("resume interrupts a run with nothing queued and continues it, and refuses an empty session", async () => {
+			await client.start();
+			expect(await rejectionOf(client.resume())).toMatchObject({ command: "resume", message: "Nothing to resume" });
+			await client.stop();
+
+			await startStreamingTurn();
+			await client.resume();
+			// Interrupted before any output, the prompt runs again as is: no second user turn.
+			expect(userTexts(await untilContinued())).toEqual([[{ type: "text", text: "start a long turn" }]]);
+		}, 30_000);
 	});
 });
