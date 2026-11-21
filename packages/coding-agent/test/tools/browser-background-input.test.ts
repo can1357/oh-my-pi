@@ -11,10 +11,7 @@ import {
 	type BrowserKind,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import {
-	unpackedExtensionId,
-	writeRelayExtension,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
+import { unpackedExtensionId } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import {
@@ -24,8 +21,8 @@ import {
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import puppeteer, { type Browser, type Page, type WebWorker } from "puppeteer-core";
+import { writeRelayFixtureExtension } from "./browser-relay-extension-fixture";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -106,15 +103,12 @@ interface RelayFixture {
 /** Headless Chromium running the real relay extension against a relay on a free port, with the tabs of {@link openTabs}. */
 async function withRelay(run: (fixture: RelayFixture) => Promise<void>): Promise<void> {
 	const port = await findFreeCdpPort();
-	const server = startRelayServer({ port, group: false });
 	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-background-"));
 	let browser: Browser | undefined;
+	let server: ReturnType<typeof startRelayServer> | undefined;
 	try {
-		await writeRelayExtension(extensionDir, VERSION);
-		const backgroundPath = path.join(extensionDir, "background.js");
-		const background = await Bun.file(backgroundPath).text();
-		// Point the disposable extension at this relay before its code can dial a user's default relay.
-		await Bun.write(backgroundPath, `chrome.storage.local.set({ port: ${port} }).then(() => {\n${background}\n});`);
+		server = startRelayServer({ port, group: false, installRegistryFile: path.join(extensionDir, "installs.json") });
+		await writeRelayFixtureExtension(extensionDir, port);
 		const extensionId = await unpackedExtensionId(extensionDir);
 		if (!extensionId) throw new Error("Missing relay extension directory");
 		browser = await puppeteer.launch({
@@ -140,7 +134,7 @@ async function withRelay(run: (fixture: RelayFixture) => Promise<void>): Promise
 		await run({ cdpUrl, extension, target });
 	} finally {
 		await browser?.close();
-		server.stop();
+		server?.stop();
 		await fs.rm(extensionDir, { recursive: true, force: true });
 	}
 }

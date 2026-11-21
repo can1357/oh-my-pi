@@ -11,10 +11,7 @@ import {
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import {
-	unpackedExtensionId,
-	writeRelayExtension,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
+import { unpackedExtensionId } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import type {
@@ -32,8 +29,8 @@ import {
 import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
-import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import puppeteer, { type Browser, type Page, type Protocol } from "puppeteer-core";
+import { writeRelayFixtureExtension } from "./browser-relay-extension-fixture";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -101,8 +98,13 @@ async function launchRelayFixture(
 	extensions: string[] = [],
 ): Promise<RelayFixture> {
 	const port = await findFreeCdpPort();
-	const server = startRelayServer({ port, group: false, log });
 	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-isolation-"));
+	const server = startRelayServer({
+		port,
+		group: false,
+		log,
+		installRegistryFile: path.join(extensionDir, "installs.json"),
+	});
 	// Every fixture browser saves downloads here, as the user's Chrome would its own folder (real names, " (1)" on a clash).
 	const downloads = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-downloads-")));
 	const profiles: string[] = [];
@@ -198,7 +200,7 @@ async function launchRelayFixture(
 		const deadline = Date.now() + 10_000;
 		for (;;) {
 			try {
-				await page.goto(`chrome-extension://${extensionId}/options.html`);
+				await page.goto(`chrome-extension://${extensionId}/fixture.html`);
 				break;
 			} catch (error) {
 				if (!String(error).includes("ERR_BLOCKED_BY_CLIENT") || Date.now() > deadline) throw error;
@@ -220,16 +222,10 @@ async function launchRelayFixture(
 		return { browser, inExtension };
 	}
 	try {
-		await writeRelayExtension(extensionDir, VERSION);
-		const backgroundPath = path.join(extensionDir, "background.js");
-		const background = await Bun.file(backgroundPath).text();
-		// Have the first worker read wait for settings without deferring listener registration.
-		await Bun.write(
-			backgroundPath,
-			`const testPortReady = chrome.storage.local.set({ port: ${port} });
-const testReadStorage = chrome.storage.local.get.bind(chrome.storage.local);
-chrome.storage.local.get = (...args) => testPortReady.then(() => testReadStorage(...args));
-const testRegisterDetach = chrome.debugger.onDetach.addListener.bind(chrome.debugger.onDetach);
+		await writeRelayFixtureExtension(
+			extensionDir,
+			port,
+			`const testRegisterDetach = chrome.debugger.onDetach.addListener.bind(chrome.debugger.onDetach);
 chrome.debugger.onDetach.addListener = listener => {
 	globalThis.testDebuggerDetach = listener;
 	testRegisterDetach(listener);
@@ -253,9 +249,9 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 		}, error => respond({ error: String(error) }));
 		return true;
 	}
-});
-${background}`,
+});`,
 		);
+		await Bun.write(path.join(extensionDir, "fixture.html"), "<!doctype html><title>Relay test fixture</title>");
 		const { browser, inExtension } = await launchBrowser();
 		const cdpUrl = `http://127.0.0.1:${port}`;
 		// Finish the extension hello before the native CDP client attaches to the sentinel.

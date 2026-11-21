@@ -76,18 +76,19 @@ export class FakeNativePort {
 
 /** A `chrome.runtime.Port` the probe drives as a side panel. */
 export class FakePort {
-	readonly name: string;
 	readonly received: unknown[] = [];
 	readonly #messageListeners: Array<(message: unknown) => void> = [];
 	readonly onMessage = {
 		addListener: (listener: (message: unknown) => void) => this.#messageListeners.push(listener),
 	};
 	readonly onDisconnect = { addListener: () => {} };
-	constructor(name: string) {
-		this.name = name;
-	}
+	constructor(
+		readonly name: string,
+		readonly onPost?: (message: unknown) => void,
+	) {}
 	postMessage(message: unknown): void {
 		this.received.push(message);
+		this.onPost?.(message);
 	}
 	/** Deliver `message` to the worker, as the panel's `postMessage` would. */
 	deliver(message: unknown): void {

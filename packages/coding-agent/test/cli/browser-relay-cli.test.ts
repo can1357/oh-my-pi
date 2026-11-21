@@ -5,7 +5,7 @@ import { relayExtensionFiles } from "@oh-my-pi/pi-coding-agent/tools/browser/rel
 import { installRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/installs";
 import { serveRelayLink } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/native-relay";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { relayExtensionNotice } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
+import { relayExtensionNotice, waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import type { FromNativeHost, ToNativeHost } from "../../../browser-relay/extension/messages";
 
@@ -170,20 +170,12 @@ describe("omp browser-relay install", () => {
 	it("reports the omp that installed the running script when Chrome restarts onto a newer manifest", async () => {
 		// After reinstalling, a Chrome restart re-reads manifest.json but keeps running the old service worker.
 		const port = await findFreeCdpPort();
-		const hello = Promise.withResolvers<void>();
-		relay = startRelayServer({
-			port,
-			group: false,
-			log: message => {
-				if (message === "extension connected") hello.resolve();
-			},
-		});
+		relay = startRelayServer({ port, group: false, installRegistryFile: dir.join("installs.json") });
 		const runningScript = (await relayExtensionFiles("18.6.1"))["background.js"]!;
 		const manifestOnDisk = JSON.parse((await relayExtensionFiles(VERSION))["manifest.json"]!);
 		stopWorker = runExtensionWorker(runningScript, port, manifestOnDisk);
-		await hello.promise;
-		expect(await relayExtensionNotice(`http://127.0.0.1:${port}`)).toContain(
-			`installed by omp 18.6.1; this is omp ${VERSION}`,
-		);
+		const cdpUrl = `http://127.0.0.1:${port}`;
+		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
+		expect(await relayExtensionNotice(cdpUrl)).toContain(`installed by omp 18.6.1; this is omp ${VERSION}`);
 	});
 });

@@ -5,6 +5,7 @@
  * host, the relay, the panel and the tabs saw. Scenario from the environment: `PROBE_DOWNLOADS`, `PROBE_FIND_DOWNLOAD`,
  * `PROBE_SCENARIO` (`panel`, `overlay`, `epoch`, `chunk`, `reconnect`).
  */
+import { withTimeout } from "@oh-my-pi/pi-utils";
 import { FakePort, probe } from "./browser-relay-background-stubs";
 
 /**
@@ -44,7 +45,19 @@ await settle();
 
 switch (Bun.env.PROBE_SCENARIO) {
 	case "panel": {
-		const port = new FakePort("omp-panel");
+		const tabContext = Promise.withResolvers<void>();
+		const port = new FakePort("omp-panel", message => {
+			if (
+				message &&
+				typeof message === "object" &&
+				"kind" in message &&
+				message.kind === "response" &&
+				"id" in message &&
+				message.id === 3
+			) {
+				tabContext.resolve();
+			}
+		});
 		fire("runtimeOnConnect", port);
 		port.deliver({ kind: "hello", windowId: 1 });
 		port.deliver({ kind: "request", id: 1, request: { op: "collabHosts" } });
@@ -72,7 +85,7 @@ switch (Bun.env.PROBE_SCENARIO) {
 		});
 		probe.zoom = 1.25;
 		port.deliver({ kind: "request", id: 3, request: { op: "tabContext", tabId: 5 } });
-		await settle();
+		await withTimeout(tabContext.promise, 3_000, "Missing tabContext response");
 		// The relay goes away with the collabLink call unanswered.
 		host().hostSays({ t: "unlinked", reason: "omp relay went away" });
 		await settle();

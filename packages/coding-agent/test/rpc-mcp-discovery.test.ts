@@ -135,17 +135,13 @@ describe("CLI RPC MCP discovery", () => {
 							expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({ isError: true });
 							expect(await auditEntries(audit)).toEqual([]);
 						} else {
-							// Deferred discovery may land after the first turn starts: wait until the command is mounted.
-							const probe = `type ${toolCommand}`;
-							for (let attempt = 0; attempt < 20; attempt++) {
-								const seen = toolResult(await client.promptAndWait(`run_command ${probe}`), "bash", {
-									command: probe,
-								});
-								if (!seen.includes("not found")) break;
-							}
-							const help = toolResult(await client.promptAndWait(`run_command ${toolCommand} --help`), "bash", {
-								command: `${toolCommand} --help`,
-							});
+							// Discovery runs asynchronously. Probe the help command itself until it is mounted.
+							const helpCommand = `${toolCommand} --help`;
+							const help = await waitFor(async () => {
+								const events = await client.promptAndWait(`run_command ${helpCommand}`);
+								const output = toolResult(events, "bash", { command: helpCommand });
+								return output.includes(`${toolCommand}: command not found`) ? undefined : output;
+							}, `${toolCommand} to be mounted`);
 							expect(help).toContain("Return an independently audited invocation marker.");
 							const invoke = async () => {
 								const before = (await auditEntries(audit)).filter(
