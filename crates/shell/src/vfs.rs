@@ -67,6 +67,15 @@
 //! only reaches the externals it spawns, so the hint points before the
 //! start.
 //!
+//! # Reporting changes
+//!
+//! A native-local path the engine opens for writing, unlinks, renames or
+//! links goes to `StdFs`, which the filesystem's [`omp_vfs::ChangeSink`]
+//! never sees, so [`VfsFs`] declares each to it ([`omp_vfs::Fs::changing`]).
+//! A redirection's file is compared with what it held once its last
+//! duplicate closes: after the command it was opened for is done, whether a
+//! builtin or a spawned program wrote through it.
+//!
 //! # Temp nodes
 //!
 //! [`Fs::mkfifo_or_temp`] names no directory, so it always creates the FIFO
@@ -168,6 +177,12 @@ impl VfsFs {
 		host_path(path).is_ok_and(|host| self.fs.read().is_native_local(host))
 	}
 
+	/// [`omp_vfs::Fs::changing`] for a native-local `path` the engine is about
+	/// to change through [`StdFs`], which the filesystem never sees.
+	fn changing(&self, path: &BStr) -> Option<omp_vfs::ChangeGuard> {
+		self.fs.read().changing(host_path(path).ok()?)
+	}
+
 	/// `native()` for a native-local `path`; otherwise `provider` run on the
 	/// runtime with the current filesystem and the host spelling of `path`.
 	fn route<T, F>(
@@ -195,14 +210,87 @@ impl VfsFs {
 	}
 }
 
+/// A host file the engine opened for writing. Every duplicate holds the
+/// change guard, so the file's change is reported once the last one closes:
+/// when the command the redirection belongs to is done with it.
+struct Tracked {
+	file:   Box<dyn File>,
+	/// Dropped after `file`, so the comparison reads what the close flushed.
+	change: omp_vfs::ChangeGuard,
+}
+
+impl File for Tracked {
+	fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+		self.file.poll_read(cx, buf)
+	}
+
+	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+		self.file.poll_write(cx, buf)
+	}
+
+	fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		self.file.poll_flush(cx)
+	}
+
+	fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+		self.file.seek(pos)
+	}
+
+	fn kind(&self) -> FileKind {
+		self.file.kind()
+	}
+
+	fn os_handle(&self) -> Option<OsHandle> {
+		self.file.os_handle()
+	}
+
+	fn os_output_handle(&self) -> Option<OsHandle> {
+		self.file.os_output_handle()
+	}
+
+	fn stat(&self) -> io::Result<Stat> {
+		self.file.stat()
+	}
+
+	fn observes_output(&self) -> bool {
+		self.file.observes_output()
+	}
+
+	fn output_key(&self) -> Option<(usize, i32)> {
+		self.file.output_key()
+	}
+
+	fn poll_write_tagged(
+		&mut self,
+		cx: &mut Context<'_>,
+		bytes: &[u8],
+		tag: Option<crate::bash::CmdTag>,
+	) -> Poll<io::Result<usize>> {
+		self.file.poll_write_tagged(cx, bytes, tag)
+	}
+
+	fn dup(&self) -> io::Result<Box<dyn File>> {
+		Ok(Box::new(Self { file: self.file.dup()?, change: self.change.clone() }))
+	}
+}
+
 impl Fs for VfsFs {
 	fn open(&mut self, path: &BStr, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
 		let rt = self.rt.clone();
 		self.route(
 			path,
-			|| match StdFs::default().open(path, flags, mode) {
-				FsPoll::Ready(Err(err)) => FsPoll::Ready(Err(name_the_limit(err))),
-				opened => opened,
+			|| {
+				let change = (flags.contains(OpenFlags::WRITE) || flags.is_mutating())
+					.then(|| self.changing(path))
+					.flatten();
+				match (StdFs::default().open(path, flags, mode), change) {
+					(FsPoll::Ready(Ok(file)), Some(change)) => {
+						FsPoll::Ready(Ok(Box::new(Tracked { file, change }) as Box<dyn File>))
+					},
+					(FsPoll::Ready(Err(err)), _) => FsPoll::Ready(Err(name_the_limit(err))),
+					// A pending open is a FIFO's, which holds no content to report.
+					(opened, _) => opened,
+				}
 			},
 			move |fs, path| async move {
 				let file = fs
@@ -317,7 +405,10 @@ impl Fs for VfsFs {
 	fn unlink(&mut self, path: &BStr) -> FsPoll<()> {
 		self.route(
 			path,
-			|| StdFs::default().unlink(path),
+			|| {
+				let _change = self.changing(path);
+				StdFs::default().unlink(path)
+			},
 			|fs, path| async move { fs.remove_file(&path).await },
 		)
 	}
@@ -329,7 +420,10 @@ impl Fs for VfsFs {
 		};
 		self.route(
 			from,
-			|| StdFs::default().rename(from, to),
+			|| {
+				let _changes = (self.changing(from), self.changing(to));
+				StdFs::default().rename(from, to)
+			},
 			|fs, from| async move { fs.rename(&from, &to_host).await },
 		)
 	}
@@ -353,7 +447,10 @@ impl Fs for VfsFs {
 		};
 		self.route(
 			from,
-			|| StdFs::default().link(from, to),
+			|| {
+				let _change = self.changing(to);
+				StdFs::default().link(from, to)
+			},
 			|fs, from| async move { fs.hard_link(&from, &to_host).await },
 		)
 	}

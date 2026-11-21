@@ -154,5 +154,17 @@ export function renderComputerCall(chain: readonly ComputerCallStep[]): string {
 	if (chain.length === 1) return `return await desktop.${renderCallChain([root])};`;
 	// `desktop.ref(id)` returns a thenable handle whose element methods check their arguments before the lookup.
 	if (root.method === "ref") return `return await desktop.${renderCallChain(chain)};`;
+	const step = chain[1]!;
+	const id = root.args[0];
+	if (
+		root.method === "window" &&
+		root.args.length === 1 &&
+		(typeof id === "string" || typeof id === "number") &&
+		["ax", "find", "menu.items", "menu.select"].includes(step.method)
+	) {
+		// A retained handle's id is already exact. Native resolves it for this operation;
+		// rediscovering it through the visible list loses minimized windows.
+		return `return await desktop.${renderCallChain([{ method: "windowAccess", args: [String(id)] }, step])};`;
+	}
 	return `return await (await desktop.${renderCallChain([root])}).${renderCallChain([chain[1]!])};`;
 }

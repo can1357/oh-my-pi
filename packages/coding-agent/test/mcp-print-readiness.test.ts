@@ -1,7 +1,8 @@
 import * as path from "node:path";
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callTool } from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { disposeLocalMcpHost } from "@oh-my-pi/pi-coding-agent/mcp/host/local";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { resolveMCPStartupTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -10,15 +11,22 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "readiness-mcp.ts");
-const SLOW_START_MS = 1_100;
+// Every launch of slowstart lags this long, and an unknown server is launched
+// twice: once to be probed, once to serve. Its tools arrive after about twice this.
+const SLOW_START_MS = 600;
 const expectedTools = ["mcp__instant_marker", "mcp__slowcall_marker", "mcp__slowstart_marker"];
 const managers: MCPManager[] = [];
 const originalTimeout = Bun.env.OMP_MCP_TIMEOUT_MS;
 const originalStartup = Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
 const originalStrict = Bun.env.OMP_MCP_REQUIRE_READY;
 
+// Every scenario starts with servers the host has never seen: a server it
+// knows answers from its store inside the startup window, lagging or not.
+beforeEach(disposeLocalMcpHost);
+
 afterEach(async () => {
 	await Promise.all(managers.splice(0).map(manager => manager.disconnectAll()));
+	await disposeLocalMcpHost();
 	if (originalTimeout === undefined) delete Bun.env.OMP_MCP_TIMEOUT_MS;
 	else Bun.env.OMP_MCP_TIMEOUT_MS = originalTimeout;
 	if (originalStartup === undefined) delete Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;

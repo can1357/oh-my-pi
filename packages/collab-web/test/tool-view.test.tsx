@@ -2,119 +2,113 @@ import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ToolView } from "../src/tool-render/ToolView";
 
-describe("ToolView xd:// dispatches", () => {
-	it("renders successful execute-mode xdev writes as the inner generate_image tool", () => {
+it("renders just the intent label before and after execution metadata arrives", () => {
+	const raw = "Checking http.py:42: Did Retry-After override the timer?";
+	for (const props of [
+		{ args: { i: raw }, running: true },
+		{ intent: raw, result: { content: [] } },
+	]) {
+		const html = renderToStaticMarkup(<ToolView name="bash" defaultOpen {...props} />);
+		expect(html).toContain('class="tv-intent">Checking http.py:42</div>');
+		expect(html).not.toContain("Retry-After");
+	}
+});
+
+describe("ToolView bash tool commands", () => {
+	it("renders one nested view per execute record beside the bash card", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
-				name="write"
+				name="bash"
 				defaultOpen
+				args={{ command: "generate_image 'alpine lake' && resolve 'ok'" }}
 				result={{
 					content: [],
 					details: {
-						xdev: {
-							tool: "generate_image",
-							mode: "execute",
-							args: { subject: "alpine lake" },
-							inner: {
-								images: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
+						toolCommands: [
+							{
+								tool: "generate_image",
+								mode: "execute",
+								exitCode: 0,
+								args: { subject: "alpine lake" },
+								inner: { images: [{ data: "aW1hZ2U=", mimeType: "image/png" }] },
 							},
-						},
+							{
+								tool: "resolve",
+								mode: "execute",
+								exitCode: 0,
+								args: { reason: "ok" },
+								inner: {
+									action: "apply",
+									reason: "ok",
+									sourceToolName: "ast_edit",
+									label: "ast_edit: edit foo.ts",
+								},
+							},
+						],
 					},
 				}}
 			/>,
 		);
 
-		expect(html).toContain("xd://generate_image");
+		expect(html).toContain('class="tv-name">bash<');
+		expect(html).toContain('class="tv-name">generate_image<');
+		expect(html).toContain('class="tv-name">resolve<');
+		// Each nested card is fed its own record: the summary reads `args`, the card model `inner`.
 		expect(html).toContain("alpine lake");
-		expect(html).toContain('src="data:image/png;base64,aW1hZ2U="');
-	});
-
-	it("renders xd://resolve apply cards from unwrapped inner details", () => {
-		const html = renderToStaticMarkup(
-			<ToolView
-				name="write"
-				defaultOpen
-				result={{
-					content: [{ type: "text", text: "Applied 1 replacement in 1 file." }],
-					details: {
-						xdev: {
-							tool: "resolve",
-							mode: "execute",
-							args: { reason: "looks correct" },
-							inner: {
-								action: "apply",
-								reason: "looks correct",
-								sourceToolName: "ast_edit",
-								label: "ast_edit: edit foo.ts",
-							},
-						},
-					},
-				}}
-			/>,
-		);
-
-		expect(html).toContain("xd://resolve");
-		expect(html).toContain("proposed → resolved");
 		expect(html).toContain("tv-badge--ok");
-		expect(html).toContain("ast_edit: edit foo.ts");
-		// The historical args-only path once left the badge as a warn "?".
-		expect(html).not.toContain('tv-badge--warn">?');
 	});
 
-	it("renders xd://reject discard cards with reject semantics", () => {
+	it("renders a help record as a one-line command", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="bash"
+				defaultOpen
+				args={{ command: "ls" }}
+				result={{
+					content: [],
+					details: { toolCommands: [{ tool: "generate_image", mode: "help", exitCode: 0 }] },
+				}}
+			/>,
+		);
+
+		expect(html).toContain("generate_image --help");
+		expect(html).not.toContain('class="tv-name">generate_image<');
+	});
+
+	it("renders a write card plainly when its details carry stray toolCommands", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
 				name="write"
 				defaultOpen
+				args={{ path: "src/out.ts", content: "x" }}
 				result={{
-					content: [{ type: "text", text: "Discarded pending action." }],
+					content: [],
 					details: {
-						xdev: {
-							tool: "reject",
-							mode: "execute",
-							args: { reason: "not right" },
-							inner: { action: "discard", reason: "not right", sourceToolName: "edit" },
-						},
+						toolCommands: [
+							{
+								tool: "generate_image",
+								mode: "execute",
+								exitCode: 0,
+								args: { subject: "should not render" },
+								inner: { images: [{ data: "aW1hZ2U=", mimeType: "image/png" }] },
+							},
+						],
 					},
 				}}
 			/>,
 		);
 
-		expect(html).toContain("xd://reject");
-		expect(html).toContain("proposed → rejected");
-		expect(html).toContain("tv-badge--warn");
-		// Not the generic JSON dump.
-		expect(html).not.toContain("tv-out-title");
+		expect(html).toContain('class="tv-name">write<');
+		expect(html).toContain("src/out.ts");
+		expect(html).not.toContain("generate_image");
+		expect(html).not.toContain("should not render");
+		expect(html).not.toContain("data:image/png;base64");
 	});
 
-	it("defaults a running xd://reject to discard before details arrive", () => {
+	it("defaults a running reject call to discard before details arrive", () => {
 		const html = renderToStaticMarkup(<ToolView name="reject" defaultOpen running args={{ reason: "" }} />);
 
 		expect(html).toContain("proposed → rejected");
-	});
-
-	it("renders xd://propose plan metadata from unwrapped inner details", () => {
-		const html = renderToStaticMarkup(
-			<ToolView
-				name="write"
-				defaultOpen
-				result={{
-					content: [{ type: "text", text: "Plan ready for review." }],
-					details: {
-						xdev: {
-							tool: "propose",
-							mode: "execute",
-							args: { title: "ship it" },
-							inner: { planFilePath: "local://ship-it-plan.md", title: "ship it", planExists: true },
-						},
-					},
-				}}
-			/>,
-		);
-
-		expect(html).toContain("xd://propose");
-		expect(html).toContain("plan proposed");
-		expect(html).toContain("local://ship-it-plan.md");
 	});
 
 	it("keeps historical top-level resolve cards working from args.action", () => {
@@ -130,7 +124,87 @@ describe("ToolView xd:// dispatches", () => {
 		expect(html).toContain("proposed → resolved");
 		expect(html).toContain("tv-badge--ok");
 	});
+});
 
+/** The card each record's inner details feeds when its nested view is expanded. */
+describe("ToolView tool command record cards", () => {
+	it("renders a generate_image record's inner images", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="generate_image"
+				defaultOpen
+				args={{ subject: "alpine lake" }}
+				result={{ content: [], details: { images: [{ data: "aW1hZ2U=", mimeType: "image/png" }] } }}
+			/>,
+		);
+
+		expect(html).toContain("alpine lake");
+		expect(html).toContain('src="data:image/png;base64,aW1hZ2U="');
+	});
+
+	it("renders a resolve record's inner apply details", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="resolve"
+				defaultOpen
+				args={{ reason: "looks correct" }}
+				result={{
+					content: [{ type: "text", text: "Applied 1 replacement in 1 file." }],
+					details: {
+						action: "apply",
+						reason: "looks correct",
+						sourceToolName: "ast_edit",
+						label: "ast_edit: edit foo.ts",
+					},
+				}}
+			/>,
+		);
+
+		expect(html).toContain("proposed → resolved");
+		expect(html).toContain("tv-badge--ok");
+		expect(html).toContain("ast_edit: edit foo.ts");
+		// The historical args-only path once left the badge as a warn "?".
+		expect(html).not.toContain('tv-badge--warn">?');
+	});
+
+	it("renders a reject record's inner discard details", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="reject"
+				defaultOpen
+				args={{ reason: "not right" }}
+				result={{
+					content: [{ type: "text", text: "Discarded pending action." }],
+					details: { action: "discard", reason: "not right", sourceToolName: "edit" },
+				}}
+			/>,
+		);
+
+		expect(html).toContain("proposed → rejected");
+		expect(html).toContain("tv-badge--warn");
+		// Not the generic JSON dump.
+		expect(html).not.toContain("tv-out-title");
+	});
+
+	it("renders a propose record's inner plan metadata", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="propose"
+				defaultOpen
+				args={{ title: "ship it" }}
+				result={{
+					content: [{ type: "text", text: "Plan ready for review." }],
+					details: { planFilePath: "local://ship-it-plan.md", title: "ship it", planExists: true },
+				}}
+			/>,
+		);
+
+		expect(html).toContain("plan proposed");
+		expect(html).toContain("local://ship-it-plan.md");
+	});
+});
+
+describe("ToolView wait renderer", () => {
 	it("renders every received wait message without falling back to JSON", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
