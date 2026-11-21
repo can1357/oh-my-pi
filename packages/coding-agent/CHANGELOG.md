@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added read-only browsing of persisted top-level sessions with `history://session/browse`, including sessions another process is still writing and a full persisted-branch view ([#6154](https://github.com/can1357/oh-my-pi/issues/6154)).
+- Added read-only browsing of persisted top-level sessions with `history://session/browse`, including sessions another process is still writing and a full persisted-branch view ([#6154](https://github.com/can1357/oh-my-pi/issues/6154)) ([#20035](https://github.com/can1357/oh-my-pi/pull/20035) by [@NikkeTryHard](https://github.com/NikkeTryHard)).
 
 ## [19.1.0] - 2026-11-21
 
