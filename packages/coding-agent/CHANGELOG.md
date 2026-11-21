@@ -6,6 +6,7 @@
 
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 - `OMP_MCP_SHUTDOWN_STEP_MS` sets how long a stdio MCP server gets to exit after its input closes before SIGTERM, and again before SIGKILL (default `1000`)
+- `auth.accountPolicies` entries take `autoRedeem5h`, `autoRedeemWeekly` and `autoRedeemFable` (`yes` or `no`), deciding that one account's saved-reset spending over `codexResets.*`/`claudeResets.*`; `omp usage` shows them on the account's policy line and in the expiring-reset banner ([#19701](https://github.com/can1357/oh-my-pi/pull/19701) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

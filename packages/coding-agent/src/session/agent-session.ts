@@ -396,9 +396,12 @@ import {
 	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	REDEEM_RETRY_DEFER_MS,
+	accountResetWindowModes,
+	credentialResetModes,
+	type ResetConsent,
+	resetConsentEnabled,
 	resetPlanSettings,
 	resetWindowMode,
-	resetWindowsEnabled,
 	SWEEP_MIN_INTERVAL_MS,
 } from "./codex-auto-reset";
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
@@ -583,6 +586,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 	cfgProvidersAnthropicSlowMode,
+	type ResetWindowModes,
 	resetWindowModes,
 	resetWindowSettings,
 } from "./settings";
@@ -15947,7 +15951,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Ask before spending resets whose governing window is unset and return the
 	 * confirmed actions. The answer is saved to every governing window key still
-	 * unset (both chat windows when the window is unknown). A host that cannot
+	 * unset (both chat windows when the window is unknown), except a window the
+	 * account's own policy decides. A host that cannot
 	 * prompt (no extension UI, or one whose prompts cannot reach a human) spends
 	 * nothing and gets a one-shot notice instead.
 	 */
@@ -15955,6 +15960,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
+		consent: ResetConsent,
 	): Promise<readonly (CodexResetAction | ClaudeResetAction)[]> {
 		if (actions.length === 0) return [];
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
@@ -15962,11 +15968,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const windowSettings = resetWindowSettings[provider];
 		const keys = [
 			...new Set(
-				actions.flatMap(action =>
-					(action.window ? [action.window] : (["5h", "weekly"] as const)).flatMap(
-						window => windowSettings[window] ?? [],
-					),
-				),
+				actions.flatMap(action => {
+					const modes = credentialResetModes(consent, action.target.credentialId);
+					return (action.window ? [action.window] : (["5h", "weekly"] as const))
+						.filter(window => modes[window] === consent.modes[window])
+						.flatMap(window => windowSettings[window] ?? []);
+				}),
 			),
 		];
 		const keyList = keys.map(key => key.id).join(", ");
@@ -16020,17 +16027,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return [];
 	}
 
-	/** Spend what each governing window allows outright, then ask about the unset ones. */
+	/** Spend what each account's governing window allows outright, then ask about the unset ones. */
 	async #redeemConsentedResets(
 		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
+		consent: ResetConsent,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
-		const modes = resetWindowModes(provider, this.settings);
-		const approved = actions.filter(action => resetWindowMode(modes, action.window) === "yes");
+		const mode = (action: CodexResetAction | ClaudeResetAction) =>
+			resetWindowMode(credentialResetModes(consent, action.target.credentialId), action.window);
+		const approved = actions.filter(action => mode(action) === "yes");
 		const spent = await this.#executeResetActions(provider, approved, coordinator);
-		const unset = actions.filter(action => resetWindowMode(modes, action.window) === "unset");
-		const confirmed = await this.#confirmAutoRedeem(provider, unset, coordinator);
+		const unset = actions.filter(action => mode(action) === "unset");
+		const confirmed = await this.#confirmAutoRedeem(provider, unset, coordinator, consent);
 		if (confirmed.length === 0) return spent;
 		const consented = await this.#executeResetActions(provider, confirmed, coordinator);
 		return {
@@ -16039,11 +16048,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
+	/**
+	 * `provider`'s saved-reset consent for one pass: its window settings, plus each
+	 * stored account whose account policy sets an `autoRedeem*` key, by the
+	 * credential id of the store this pass plans and spends from.
+	 */
+	#resetConsent(provider: "openai-codex" | "anthropic"): ResetConsent {
+		const modes = resetWindowModes(provider, this.settings);
+		const oauth = this.#modelRegistry.authStorage.oauth;
+		const accountModes = new Map<number, ResetWindowModes>();
+		for (const account of oauth.accounts(provider)) {
+			const policyModes = accountResetWindowModes(modes, oauth.policy(provider, account));
+			if (policyModes) accountModes.set(account.credentialId, policyModes);
+		}
+		return { modes, accountModes };
+	}
+
 	#planCodexResets(
 		trigger: CodexResetTrigger,
 		reports: UsageReport[] | null,
 		identity: OAuthAccountIdentity | undefined,
 		coordinator: CodexAutoRedeemCoordinator,
+		consent: ResetConsent,
 		activeBlockUnblockAtMs?: number,
 	): CodexResetPlan {
 		const cfg = cfgCodexResets.get(this.settings);
@@ -16053,7 +16079,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			trigger,
 			provider: model?.provider ?? "",
 			modelId: model?.id ?? "",
-			settings: resetPlanSettings(resetWindowModes("openai-codex", this.settings), cfg),
+			settings: resetPlanSettings(consent, cfg),
 			identity,
 			permitsCredential: credentialId =>
 				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
@@ -16074,6 +16100,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		reports: UsageReport[] | null,
 		statuses: readonly ResetCreditAccountStatus[],
 		coordinator: CodexAutoRedeemCoordinator,
+		consent: ResetConsent,
 		activeBlockUnblockAtMs?: number,
 	): ClaudeResetPlan {
 		const cfg = cfgClaudeResets.get(this.settings);
@@ -16083,7 +16110,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			trigger,
 			provider: model?.provider ?? "",
 			modelId: model?.provider === "anthropic" ? model.id : "",
-			settings: resetPlanSettings(resetWindowModes("anthropic", this.settings), cfg),
+			settings: resetPlanSettings(consent, cfg),
 			reports,
 			statuses,
 			permitsCredential: credentialId =>
@@ -16304,8 +16331,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
 		const provider = this.model?.provider;
 		if (provider !== "anthropic" && provider !== "openai-codex") return { restored: false };
-		const modes = resetWindowModes(provider, this.settings);
-		if (!resetWindowsEnabled(modes)) return { restored: false };
+		if (!resetConsentEnabled(this.#resetConsent(provider))) return { restored: false };
 		const coordinator = this.#resetCoordinator;
 		const authStorage = this.#modelRegistry.authStorage;
 		const identity = authStorage.oauth.identity(provider, this.sessionId);
@@ -16334,14 +16360,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Claude's live reset listing includes the same response's quota
 			// windows; a second broker usage poll adds no evidence and can 429.
 			const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
+			// Consent is read after the listing, so its credential ids are the ones this plan spends.
+			const consent = this.#resetConsent(provider);
 			const plan =
 				provider === "anthropic"
-					? this.#planClaudeResets("blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
+					? this.#planClaudeResets("blocked", reports, statuses, coordinator, consent, activeBlockUnblockAtMs)
 					: this.#planCodexResets(
 							"blocked",
 							overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() }),
 							identity,
 							coordinator,
+							consent,
 							activeBlockUnblockAtMs,
 						);
 			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
@@ -16349,9 +16378,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
 				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
 				let retryAfterMs: number | undefined;
-				if (provider === "anthropic" && Object.values(modes).includes("yes")) {
+				if (provider === "anthropic") {
 					for (const status of statuses) {
 						if (!status.error || status.retryAfterMs === undefined || !Number.isFinite(status.retryAfterMs))
+							continue;
+						// Waiting out a throttled listing helps only an account this session may use and spend on unasked.
+						if (
+							!authStorage.sessions.permits(provider, this.sessionId, status.credentialId) ||
+							!Object.values(credentialResetModes(consent, status.credentialId)).includes("yes")
+						)
 							continue;
 						const delay = Math.max(0, status.retryAfterMs);
 						retryAfterMs = retryAfterMs === undefined ? delay : Math.min(retryAfterMs, delay);
@@ -16359,7 +16394,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 				return { restored: false, retryAfterMs, poolLimited };
 			}
-			const executed = await this.#redeemConsentedResets(provider, plan.actions, coordinator);
+			const executed = await this.#redeemConsentedResets(provider, plan.actions, coordinator, consent);
 			return {
 				restored: executed.restoredCredentialIds.length > 0,
 				restoredCredentialIds: executed.restoredCredentialIds,
@@ -16386,10 +16421,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#maybeScheduleResetSweep(reports: UsageReport[]): void {
 		const coordinator = this.#resetCoordinator;
 		const codexEnabled =
-			resetWindowsEnabled(resetWindowModes("openai-codex", this.settings)) &&
+			resetConsentEnabled(this.#resetConsent("openai-codex")) &&
 			reports.some(report => report.provider === "openai-codex");
 		const claudeEnabled =
-			resetWindowsEnabled(resetWindowModes("anthropic", this.settings)) &&
+			resetConsentEnabled(this.#resetConsent("anthropic")) &&
 			reports.some(report => report.provider === "anthropic");
 		if (!codexEnabled && !claudeEnabled) return;
 		if (coordinator.sweepInFlight || coordinator.inFlightByAccount.size > 0) return;
@@ -16403,8 +16438,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "openai-codex");
 					const effectiveReports = overlayLiveResetCredits(reports, statuses);
 					const identity = this.#modelRegistry.authStorage.oauth.identity("openai-codex", this.sessionId);
-					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
-					await this.#redeemConsentedResets("openai-codex", plan.actions, coordinator);
+					const consent = this.#resetConsent("openai-codex");
+					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator, consent);
+					await this.#redeemConsentedResets("openai-codex", plan.actions, coordinator, consent);
 				} catch (error) {
 					logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 				}
@@ -16417,18 +16453,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						reports,
 						claudeResetStatusesFromReports(accounts, reports),
 						coordinator,
+						this.#resetConsent("anthropic"),
 					);
-					const plan =
-						candidates.actions.length > 0
-							? this.#planClaudeResets(
-									"sweep",
-									reports,
-									await this.listResetCredits(AbortSignal.timeout(10_000), "anthropic"),
-									coordinator,
-								)
-							: candidates;
-					if (plan.actions.length > 0) {
-						await this.#redeemConsentedResets("anthropic", plan.actions, coordinator);
+					if (candidates.actions.length > 0) {
+						const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "anthropic");
+						const consent = this.#resetConsent("anthropic");
+						const plan = this.#planClaudeResets("sweep", reports, statuses, coordinator, consent);
+						if (plan.actions.length > 0) {
+							await this.#redeemConsentedResets("anthropic", plan.actions, coordinator, consent);
+						}
 					}
 				} catch (error) {
 					logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });

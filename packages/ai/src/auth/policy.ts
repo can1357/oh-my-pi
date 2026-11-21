@@ -108,6 +108,19 @@ export class AccountPolicies {
 					);
 				}
 			}
+			for (const field of ["autoRedeem5h", "autoRedeemWeekly", "autoRedeemFable"] as const) {
+				const consent = policy[field];
+				if (consent === undefined) continue;
+				if (consent !== "yes" && consent !== "no") {
+					throw new AIError.ConfigurationError(`${path}.${field} must be "yes" or "no"`);
+				}
+				const savedResetProviders = field === "autoRedeemFable" ? ["anthropic"] : ["anthropic", "openai-codex"];
+				if (!savedResetProviders.includes(policy.provider)) {
+					throw new AIError.ConfigurationError(
+						`${path}.${field} applies only to ${savedResetProviders.join(" and ")} saved resets`,
+					);
+				}
+			}
 		}
 	}
 

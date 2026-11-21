@@ -13,10 +13,12 @@ import type { AuthCredentialStore } from "./store";
 import type {
 	ListResetCreditsOptions,
 	OAuthAccess,
+	OAuthAccountIdentity,
 	OAuthAccountSummary,
 	RedeemResetCreditOptions,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
+	ResetCreditTarget,
 	ResetsApi,
 } from "./types";
 import type { UsageService } from "./usage";
@@ -30,6 +32,27 @@ export interface ResetCreditsDeps {
 	usage: UsageService;
 	usageCache: UsageCache;
 	blocks: CredentialBlocks;
+}
+
+/** Whether two identity fields agree; `undefined` when either side lacks the field. */
+function sameIdentityField(left: string | undefined, right: string | undefined): boolean | undefined {
+	return left === undefined || right === undefined
+		? undefined
+		: left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+/**
+ * Whether the stored row a target names still holds the account the target was
+ * planned for: no identity field both sides carry may differ, and a target that
+ * names an account must share its account id or email with the row. An
+ * organization only one side knows is not compared here: Claude discovers it for
+ * a credential stored without one, and the redeem checks the discovered one.
+ */
+function isSameAccount(target: ResetCreditTarget, stored: OAuthAccountIdentity): boolean {
+	const accountId = sameIdentityField(target.accountId, stored.accountId);
+	const email = sameIdentityField(target.email, stored.email);
+	if (accountId === false || email === false || sameIdentityField(target.orgId, stored.orgId) === false) return false;
+	return (target.accountId === undefined && target.email === undefined) || accountId === true || email === true;
 }
 
 /** Saved rate-limit resets (Codex / Claude): list offers and redeem one per account. */
@@ -133,7 +156,8 @@ export class ResetCredits implements ResetsApi {
 		}
 		const baseUrl = options.baseUrlResolver?.(provider);
 		const match = await this.#deps.oauth.accessById(provider, target.credentialId, { signal: options.signal });
-		if (!match) return { ...identity, ok: false, code: "no_account" };
+		// A row id is unique only within one store; a replaced store may reuse it for another account.
+		if (!match || !isSameAccount(target, match)) return { ...identity, ok: false, code: "no_account" };
 		const resolvedIdentity = {
 			provider,
 			accountId: match.accountId,
@@ -149,6 +173,7 @@ export class ResetCredits implements ResetsApi {
 		}
 		const promise = this.#redeemAccountReset(provider, match, accountKey, {
 			creditId,
+			plannedOrgId: target.orgId,
 			baseUrl,
 			signal: options.signal,
 		}).finally(() => this.#resetInFlight.delete(accountKey));
@@ -160,7 +185,7 @@ export class ResetCredits implements ResetsApi {
 		provider: string,
 		access: OAuthAccess,
 		accountKey: string,
-		options: { creditId?: string; baseUrl?: string; signal?: AbortSignal },
+		options: { creditId?: string; plannedOrgId?: string; baseUrl?: string; signal?: AbortSignal },
 	): Promise<ResetCreditRedeemOutcome> {
 		const identity = { provider, accountId: access.accountId, email: access.email, orgId: access.orgId };
 		const auth = { ...access, baseUrl: options.baseUrl, fetch: this.#deps.usage.fetch, signal: options.signal };
@@ -170,6 +195,15 @@ export class ResetCredits implements ResetsApi {
 		if (provider === "anthropic") {
 			const list = await listClaudeResetCredits(auth);
 			if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
+			// A row stored without its organization resolves one live; it must be the planned one.
+			const orgId = list.orgId ?? access.orgId;
+			if (sameIdentityField(options.plannedOrgId, orgId) === false) {
+				return { ...identity, orgId, ok: false, code: "no_account" };
+			}
+			// Unresolved, the consume would resolve it again unchecked.
+			if (options.plannedOrgId !== undefined && orgId === undefined && list.credits.length > 0) {
+				return { ...identity, ok: false, code: "organization_unavailable" };
+			}
 			const selected = list.credits.find(credit => credit.id === list.nextCreditId);
 			if (creditId && creditId !== list.nextCreditId) {
 				return { ...identity, ok: false, code: "offer_changed", creditId };
@@ -221,7 +255,7 @@ export class ResetCredits implements ResetsApi {
 			const consumed = await consumeClaudeResetCredit({
 				...auth,
 				baseUrl: list.baseUrl ?? auth.baseUrl,
-				orgId: list.orgId ?? access.orgId,
+				orgId,
 				credit: selected,
 				redeemRequestId: requestId,
 			});

@@ -24,6 +24,7 @@ import { getTestModel } from "./helpers/model-fixtures";
 const EMAIL = "user@example.com";
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 const CODEX_USAGE_LIMIT_ERROR =
 	'429 {"type":"error","error":{"type":"rate_limit_error","message":"usage_limit_reached"}} retry-after-ms=259200000';
 
@@ -105,6 +106,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		for (const manager of managers.splice(0).reverse()) {
 			await manager.close();
 		}
+		authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: 10 });
 		tempDir.removeSync();
 		vi.restoreAllMocks();
 	});
@@ -118,6 +120,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		streamErrorFirst?: boolean;
 		/** Builds the session the way ACP does for a client with or without form elicitation. */
 		acpForm?: boolean;
+		settings?: Record<string, unknown>;
 	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
@@ -131,6 +134,16 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => options.accounts.map(codexReport));
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async () =>
 			options.accounts.map(account => liveCreditStatus(account, account === active)),
+		);
+		// The runtime key hides stored OAuth rows; account policies match the accounts the listing names.
+		vi.spyOn(authStorage.oauth, "accounts").mockImplementation(() =>
+			options.accounts.map((account, position) => ({
+				position,
+				credentialId: account.credentialId,
+				accountId: account.accountId,
+				email: EMAIL,
+				active: account === active,
+			})),
 		);
 		const targets: ResetCreditTarget[] = [];
 		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
@@ -157,6 +170,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			"retry.maxRetries": 1,
 			"codexResets.autoRedeem": "unset",
 			"claudeResets.autoRedeem": "no",
+			...options.settings,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
@@ -218,6 +232,45 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			expect(targets).toEqual([]);
 			expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+		},
+	);
+
+	it.each(["no", "yes"])(
+		"spends only the account whose policy consents while codexResets.autoRedeemWeekly is %s",
+		async providerMode => {
+			const pro = {
+				accountId: "acct-pro",
+				credentialId: 1,
+				weeklyUsed: 1,
+				limitReached: true,
+				creditExpiresInMs: DAY,
+			};
+			const team = {
+				accountId: "acct-team",
+				credentialId: 2,
+				weeklyUsed: 1,
+				limitReached: true,
+				creditExpiresInMs: DAY,
+			};
+			authStorage.setAccountPolicies({
+				accountPolicies: [
+					{ provider: "openai-codex", account: { accountId: "acct-pro" }, autoRedeemWeekly: "no" },
+					{ provider: "openai-codex", account: { accountId: "acct-team" }, autoRedeemWeekly: "yes" },
+				],
+				defaultReservePct: 10,
+			});
+			const { session, targets, notices } = buildSession({
+				accounts: [pro, team],
+				streamErrorFirst: true,
+				settings: { "codexResets.autoRedeem5h": providerMode, "codexResets.autoRedeemWeekly": providerMode },
+			});
+			mockSchedulerWaitWithClock();
+
+			await session.prompt("trigger a codex usage limit");
+			await session.waitForIdle();
+
+			expect(targets.map(target => target.credentialId)).toEqual([team.credentialId]);
+			expect(notices).not.toContainEqual(expect.stringContaining("auto-redeem is unset"));
 		},
 	);
 

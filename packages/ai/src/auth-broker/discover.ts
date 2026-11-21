@@ -133,6 +133,8 @@ function readDottedString(record: Record<string, unknown>, dottedKey: string): s
 	return typeof value === "string" ? value : undefined;
 }
 
+const AUTO_REDEEM_POLICY_FIELDS = ["autoRedeem5h", "autoRedeemWeekly", "autoRedeemFable"] as const;
+
 function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 	if (value === undefined) return [];
 	if (!Array.isArray(value)) {
@@ -151,7 +153,8 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				key !== "account" &&
 				key !== "priority" &&
 				key !== "reservePct" &&
-				key !== "reclaimAbovePct",
+				key !== "reclaimAbovePct" &&
+				!AUTO_REDEEM_POLICY_FIELDS.includes(key as (typeof AUTO_REDEEM_POLICY_FIELDS)[number]),
 		);
 		if (unknownPolicyFields.length > 0) {
 			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
@@ -206,6 +209,11 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		) {
 			throw new AIError.ConfigurationError(`${path}.reclaimAbovePct must be a finite number`);
 		}
+		for (const field of AUTO_REDEEM_POLICY_FIELDS) {
+			if (policy[field] !== undefined && policy[field] !== "yes" && policy[field] !== "no") {
+				throw new AIError.ConfigurationError(`${path}.${field} must be "yes" or "no"`);
+			}
+		}
 
 		return {
 			provider,
@@ -218,6 +226,15 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
 			...(typeof policy.reclaimAbovePct === "number" ? { reclaimAbovePct: policy.reclaimAbovePct } : {}),
+			...(policy.autoRedeem5h === "yes" || policy.autoRedeem5h === "no"
+				? { autoRedeem5h: policy.autoRedeem5h }
+				: {}),
+			...(policy.autoRedeemWeekly === "yes" || policy.autoRedeemWeekly === "no"
+				? { autoRedeemWeekly: policy.autoRedeemWeekly }
+				: {}),
+			...(policy.autoRedeemFable === "yes" || policy.autoRedeemFable === "no"
+				? { autoRedeemFable: policy.autoRedeemFable }
+				: {}),
 		};
 	});
 }
