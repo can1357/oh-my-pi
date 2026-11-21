@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS `computer` background keys, typing and held keys into a window that is already its application's key window bringing that window in front of yours for a moment: they no longer send the press that made it key ([#19702](https://github.com/can1357/oh-my-pi/pull/19702) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
