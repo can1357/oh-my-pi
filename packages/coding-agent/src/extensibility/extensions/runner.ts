@@ -1860,10 +1860,11 @@ export class ExtensionRunner {
 			if (verdict === true) {
 				// Accepted for a session omp has left: its record of what the backend holds stays unknown.
 				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
-				// A list queued while this call was with the backend (a late acceptance's correction, or a
-				// client setting the list it had) would go out before the tool commits `next` and take the
-				// change back. That commit's list replaces it; when the list changed, what waits goes out.
-				if (Bun.deepEquals(current(), change.previous)) this.#todoPending = undefined;
+				// A list queued for this backend while the call was with it (a late acceptance's correction,
+				// or a client setting the list it had) would go out before the tool commits `next` and take
+				// the change back. That commit's list replaces it; when the list changed, what waits goes out.
+				if (this.#todoPending?.backend === backend && Bun.deepEquals(current(), change.previous))
+					this.#todoPending = undefined;
 				// `next` is recorded as held only when this backend held `previous`. After a failed call,
 				// or when it was selected or took the id over since, the commit's list still goes out.
 				const held =

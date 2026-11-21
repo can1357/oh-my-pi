@@ -498,24 +498,31 @@ describe("todo backend", () => {
 			session.getTodoPhases().flatMap(phase => phase.tasks.map(task => task.content));
 
 		it("an accepted todo call commits, and the backend is not told a second time, nor sent a list a client set again meanwhile", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension], "tracker");
-			const gate = Promise.withResolvers<void>();
-			backend.applyHold = gate.promise;
+			for (const elsewhere of [false, true]) {
+				const backend = tracker("tracker", true);
+				const other = tracker("other");
+				const { session } = await open([backend.extension, other.extension], "tracker");
+				const gate = Promise.withResolvers<void>();
+				backend.applyHold = gate.promise;
 
-			const deciding = backend.entered();
-			const call = todo(session, { op: "init", items: ["a", "b"] });
-			await deciding;
-			// The list omp already has: sent after the backend's answer, it would take the change back.
-			session.commitTodoPhases([]);
-			gate.resolve();
-			const result = await call;
-			await settled(session);
+				const deciding = backend.entered();
+				const call = todo(session, { op: "init", items: ["a", "b"] });
+				await deciding;
+				// The list omp already has: sent after the backend's answer, it would take the change back.
+				// Set while another backend was selected for a moment, it is still that backend's to get.
+				if (elsewhere) cfgTodoBackend.override(session.settings, "other");
+				session.commitTodoPhases([]);
+				if (elsewhere) cfgTodoBackend.override(session.settings, "native");
+				gate.resolve();
+				const result = await call;
+				await settled(session);
 
-			expect(result.isError).not.toBe(true);
-			expect(backend.asked).toEqual([{ op: "init", previous: [], next: session.getTodoPhases() }]);
-			expect(committed(session)).toEqual(["a", "b"]);
-			expect(backend.calls).toEqual([]);
+				expect(result.isError).not.toBe(true);
+				expect(backend.asked).toEqual([{ op: "init", previous: [], next: session.getTodoPhases() }]);
+				expect(committed(session)).toEqual(["a", "b"]);
+				expect(backend.calls).toEqual([]);
+				expect(tasksOf(other)).toEqual(elsewhere ? [[]] : []);
+			}
 		});
 
 		it("a refusal fails the call with the backend's reason on one clean line and leaves the list unchanged; an edit outside the tool is not asked about", async () => {
