@@ -1,4 +1,4 @@
-import { RunTrace, ShellVisualization, type ShellVizOptions } from "@oh-my-pi/pi-natives";
+import { type PipeStreams, RunTrace, ShellVisualization, type ShellVizOptions } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	ShellTrace,
@@ -8,15 +8,40 @@ import type {
 	ShellVizSegment,
 	ShellVizWatch,
 } from "@oh-my-pi/pi-wire";
+import { nativeShellStreams, type ShellStream } from "./shell-steps";
 
 /** Native live-run or restored-trace owner; the UI never holds shell syntax. */
 export type ShellVisualizationSource = RunTrace | ShellVisualization;
 /** Each snapshot's native owner; `null` marks one the engine rejected, so it is not restored again per paint. */
 const visualizations = new WeakMap<ShellTrace, ShellVisualizationSource | null>();
 
-/** Bind the immutable snapshot before publishing it; live paints borrow the actual run. */
-export function attachShellTrace(snapshot: ShellTrace, trace: RunTrace): void {
+/** A live snapshot's run streams: the pipes and files its steps write, read while the run's card is drawn. */
+const kRunStreams = Symbol("shellTrace.streams");
+
+/** A snapshot possibly bound to its run's streams by {@link attachShellTrace}. */
+interface LiveShellTrace extends ShellTrace {
+	[kRunStreams]?: PipeStreams;
+}
+
+/**
+ * Bind the immutable snapshot before publishing it; live paints borrow the
+ * actual run, and with `streams` the run's tapped pipes and redirected files.
+ */
+export function attachShellTrace(snapshot: ShellTrace, trace: RunTrace, streams?: PipeStreams): void {
 	visualizations.set(snapshot, trace);
+	const live: LiveShellTrace = snapshot;
+	if (streams) live[kRunStreams] = streams;
+}
+
+/**
+ * The streams of the run `snapshot` was taken from, now; undefined for a
+ * snapshot not bound to a live run's streams (a reloaded trace, or a run
+ * without taps), whose steps write only into its own output.
+ */
+export function shellTraceStreams(snapshot: ShellTrace): ShellStream[] | undefined {
+	const live: LiveShellTrace = snapshot;
+	const streams = live[kRunStreams];
+	return streams && nativeShellStreams(streams);
 }
 
 /**

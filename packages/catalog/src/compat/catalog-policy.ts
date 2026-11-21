@@ -1,5 +1,6 @@
 import { withoutUnverifiedThinking } from "../model-thinking";
 import type { CatalogPolicyInputs } from "../types";
+import { onCascadeRulesChange } from "./cascade";
 import { type ResolveRoute, resolveCatalogAxes } from "./resolve";
 
 /**
@@ -13,6 +14,7 @@ import { type ResolveRoute, resolveCatalogAxes } from "./resolve";
  */
 const catalogPolicyCache = new Map<string, Readonly<Record<string, unknown>>>();
 const CATALOG_POLICY_CACHE_MAX = 8192;
+onCascadeRulesChange(() => catalogPolicyCache.clear());
 
 /**
  * The `catalog` axis bag authored in the KDL cascade rules for a model (on one
