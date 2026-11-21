@@ -228,7 +228,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		expect(toolResultBLine).toBeLessThan(finalLine);
 	});
 
-	it("uses the canonical mounted-tool renderer for prefixed calls live and after transcript rebuild", async () => {
+	it("uses the canonical mounted-tool renderer live and after transcript rebuild", async () => {
 		const githubTool: AgentTool = {
 			name: "github",
 			label: "GitHub",
@@ -236,11 +236,11 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			parameters: type({}),
 			execute: async () => ({ content: [] }),
 		};
-		const toolByName = (name: string) => (name === "github" || name === "xd://github" ? githubTool : undefined);
+		const toolByName = (name: string) => (name === "github" ? githubTool : undefined);
 		const toolCall: ToolCall = {
 			type: "toolCall",
-			id: "toolu_prefixed_github",
-			name: "xd://github",
+			id: "toolu_mounted_github",
+			name: "github",
 			arguments: { op: "repo_view", repo: "can1357/oh-my-pi" },
 		};
 		const streaming = assistantMessage([toolCall]);
@@ -284,8 +284,8 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		});
 		expect(Bun.stripANSI(rebuilt.chatContainer.render(120).join("\n"))).toContain("GitHub Repo can1357/oh-my-pi");
 
-		// Canonicalization is presentation-only; provider replay keeps the wire spelling.
-		expect(toolCall.name).toBe("xd://github");
+		// Presentation resolves the renderer by name; the tool call itself is untouched.
+		expect(toolCall.name).toBe("github");
 	});
 
 	it("keeps assistant text streaming while hiding bash failures and grouped read activity", async () => {
