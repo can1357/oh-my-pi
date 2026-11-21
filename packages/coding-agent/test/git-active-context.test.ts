@@ -175,4 +175,13 @@ describe("resolveActiveRepoContext", () => {
 		} satisfies ActiveRepoContext;
 		await expectResolvers(cwd, expected);
 	});
+
+	it("returns null in a scratch directory with more than 4,096 direct children", async () => {
+		const cwd = path.join(tempRoot, "workspace");
+		fs.mkdirSync(cwd, { recursive: true });
+		createGitDirectory(path.join(cwd, "repo"));
+		for (let i = 0; i < 4_097; i++) fs.writeFileSync(path.join(cwd, `noise-${i}`), "");
+
+		await expectResolvers(cwd, null);
+	});
 });

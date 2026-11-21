@@ -32,20 +32,20 @@ function insideRepository(cwd: string): boolean {
 	}
 }
 
-async function readDirectChildren(cwd: string): Promise<fs.Dirent[]> {
+async function readDirectChildren(cwd: string, sorted = true): Promise<fs.Dirent[]> {
 	try {
 		const entries = await fsPromises.readdir(cwd, { withFileTypes: true });
-		entries.sort(compareEntryNames);
+		if (sorted) entries.sort(compareEntryNames);
 		return entries;
 	} catch {
 		return [];
 	}
 }
 
-function readDirectChildrenSync(cwd: string): fs.Dirent[] {
+function readDirectChildrenSync(cwd: string, sorted = true): fs.Dirent[] {
 	try {
 		const entries = fs.readdirSync(cwd, { withFileTypes: true });
-		entries.sort(compareEntryNames);
+		if (sorted) entries.sort(compareEntryNames);
 		return entries;
 	} catch {
 		return [];
@@ -102,9 +102,18 @@ function hasGitRepositorySync(childPath: string): boolean {
 	}
 }
 
+/**
+ * Directories with this many children are scratch spaces (temp dirs, caches),
+ * not project wrappers. Scanning every child for a `.git` marker costs seconds
+ * there and never yields a single-repo context; skip the scan entirely.
+ */
+const MAX_REPO_SCAN_CHILDREN = 4_096;
+
 async function findSingleDirectChildRepo(cwd: string): Promise<ActiveRepoContext | null> {
+	const entries = await readDirectChildren(cwd, false);
+	if (entries.length > MAX_REPO_SCAN_CHILDREN) return null;
 	let context: ActiveRepoContext | null = null;
-	for (const entry of await readDirectChildren(cwd)) {
+	for (const entry of entries) {
 		const childPath = await resolveDirectChildDirectory(cwd, entry);
 		if (!childPath) continue;
 		if (!(await hasGitRepository(childPath))) continue;
@@ -115,8 +124,10 @@ async function findSingleDirectChildRepo(cwd: string): Promise<ActiveRepoContext
 }
 
 function findSingleDirectChildRepoSync(cwd: string): ActiveRepoContext | null {
+	const entries = readDirectChildrenSync(cwd, false);
+	if (entries.length > MAX_REPO_SCAN_CHILDREN) return null;
 	let context: ActiveRepoContext | null = null;
-	for (const entry of readDirectChildrenSync(cwd)) {
+	for (const entry of entries) {
 		const childPath = resolveDirectChildDirectorySync(cwd, entry);
 		if (!childPath) continue;
 		if (!hasGitRepositorySync(childPath)) continue;
