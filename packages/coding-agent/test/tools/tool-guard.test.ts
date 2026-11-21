@@ -368,6 +368,16 @@ describe("tool guard", () => {
 		}
 	});
 
+	it("judges a glob or brace after a leading dash, which can complete an option", () => {
+		for (const command of ["find . -delete*", "find . -de?ete", "find . -{delete,}", 'find . "-"{delete,}']) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		// Any other literal prefix pins the expansion to a name, never an option.
+		for (const command of ["find . -name x*.ts", "find src/{a,b} -name x", "find . -name '-delete*'"]) {
+			expect(isReadOnlyCommand(command)).toBe(true);
+		}
+	});
+
 	it("treats `>&file` as a write to the file and `>&N` as a descriptor copy", () => {
 		expect(isReadOnlyCommand("echo overwritten >&/etc/important.conf")).toBe(false);
 		expect(isReadOnlyCommand("echo overwritten 1>& /etc/important.conf")).toBe(false);
@@ -552,6 +562,31 @@ describe("tool guard", () => {
 		]);
 		// A package name is not a file to show.
 		expect(scriptsRun("node -r dotenv/config app.js", cwd)).toEqual([path.join(cwd, "app.js")]);
+	});
+
+	it("never resolves a bare preload specifier in the working directory, where node does not look", () => {
+		expect(scriptsRun("node -r pkg/preload.js main.js", cwd)).toEqual([path.join(cwd, "main.js")]);
+		expect(scriptsRun("node --import hook.mjs main.js", cwd)).toEqual([path.join(cwd, "main.js")]);
+	});
+
+	it("skips the operands of env options before finding the script", () => {
+		for (const command of [
+			"env -u FOO python task.py",
+			"env -iu FOO python task.py",
+			"env --unset FOO python task.py",
+			"env --unset=FOO X=1 python task.py",
+			"env -uFOO python task.py",
+		]) {
+			expect(scriptsRun(command, cwd)).toEqual([path.join(cwd, "task.py")]);
+		}
+		// A command run in another directory or from a split string is not where the words place it.
+		for (const command of [
+			"env -C /srv python task.py",
+			"env --chdir=/srv python task.py",
+			"env -S 'python task.py'",
+		]) {
+			expect(scriptsRun(command, cwd)).toEqual([]);
+		}
 	});
 
 	it("resolves the scripts a command runs in the directory it moved to", () => {

@@ -137,8 +137,8 @@ const SCRIPT_SUFFIX = /\.(?:py|sh|js|mjs|ts|rb|pl)$/;
 const SCRIPT_VALUE_OPTIONS = wordTable("-o +o -O +O -W -X -I --require");
 /** Node options that load a module before the script; a local file named there runs first. */
 const NODE_PRELOADS = wordTable("-r --require --import --loader --experimental-loader");
-/** A preload that names a file rather than a package (`./hook.js`, `/tmp/x.cjs`, `hook.mjs`; not `dotenv/config`). */
-const LOCAL_MODULE = /^(?:\.{0,2}\/|~\/)|\.[cm]?[jt]s$/;
+/** A preload that names a file rather than a package (`./hook.js`, `/tmp/x.cjs`, `~/x.mjs`). Node resolves any other specifier (`dotenv/config`, `pkg/preload.js`, even `hook.js`) as a package in `node_modules`, never in the working directory. */
+const LOCAL_MODULE = /^(?:\.{0,2}\/|~\/)/;
 /** The system's own programs (`/usr/bin/env`), never shown as scripts. */
 const SYSTEM_TREES = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/System", "/nix", "/opt/homebrew"];
 
@@ -207,24 +207,46 @@ function resolveWord(word: string, base: string): string | undefined {
 
 /**
  * Whether the shell may turn the word `raw` into a different word, or into several: a parameter or command
- * expansion outside single quotes (`$ACTION`, `"$X"`, `` `cmd` ``), or a glob or brace expansion at its start
- * (`*`, `[-]delete`, `{-delete,}`), which can yield an option such as `-delete`. A literal prefix pins what a
- * glob or brace expansion begins with.
+ * expansion outside single quotes (`$ACTION`, `"$X"`, `` `cmd` ``), or an unquoted glob or brace expansion that
+ * can yield an option such as `-delete`: one at the word's start (`*`, `[-]delete`, `{-delete,}`) or after a
+ * leading dash (`-delete*` beside a file named `-delete`, `-{delete,}`). Any other literal prefix pins what the
+ * expansion begins with.
  */
 function expandsWord(raw: string): boolean {
-	if (/^[*?[{]/.test(raw)) return true;
 	let quote: string | undefined;
+	let lead: string | undefined;
 	for (let i = 0; i < raw.length; i++) {
 		const char = raw[i];
-		if (char === "\\" && quote !== "'") i++;
+		if (char === "\\" && quote !== "'") lead ??= raw[++i];
 		else if (char === quote) quote = undefined;
 		else if (quote === undefined && (char === "'" || char === '"')) quote = char;
 		else if (quote !== "'" && (char === "$" || char === "`")) return true;
+		else if (quote === undefined && "*?[{".includes(char) && (lead === undefined || lead === "-")) return true;
+		else lead ??= char;
 	}
 	return false;
 }
 
-/** Leading assignments and read-only wrappers removed (`FOO=1 timeout 5 cat x` → `cat x`). */
+/** `env` options that take the next word as their value when nothing follows them in the word: GNU `-u NAME`, BSD `-P PATH`, `-L`/`-U USER`. */
+const ENV_VALUE_FLAGS = "uPLU";
+
+/**
+ * How `env OPTION` moves where its command starts: `"unknown"` for `-C DIR` and `-S STRING`, which run the command
+ * in another directory or from a split string the words do not show; otherwise how many following words it takes.
+ */
+function envOperands(option: string): number | "unknown" {
+	if (option.startsWith("--")) {
+		if (longOption(option, ["--chdir", "--split-string"])) return "unknown";
+		return !option.includes("=") && longOption(option, ["--unset"]) ? 1 : 0;
+	}
+	for (let j = 1; j < option.length; j++) {
+		if (option[j] === "C" || option[j] === "S") return "unknown";
+		if (ENV_VALUE_FLAGS.includes(option[j])) return j === option.length - 1 ? 1 : 0;
+	}
+	return 0;
+}
+
+/** Leading assignments and read-only wrappers removed (`FOO=1 timeout 5 cat x` → `cat x`); empty when an `env` option hides where the command runs. */
 function unwrapCommand(words: string[], wrappers: WordTable): string[] {
 	let rest = words;
 	for (;;) {
@@ -235,7 +257,11 @@ function unwrapCommand(words: string[], wrappers: WordTable): string[] {
 		while (rest.length > 0 && rest[0].startsWith("-")) {
 			const option = rest[0];
 			rest = rest.slice(1);
-			if ((name === "nice" && option === "-n") || (name === "sudo" && (option === "-u" || option === "-g"))) {
+			if (name === "env") {
+				const operands = envOperands(option);
+				if (operands === "unknown") return [];
+				rest = rest.slice(operands);
+			} else if ((name === "nice" && option === "-n") || (name === "sudo" && (option === "-u" || option === "-g"))) {
 				rest = rest.slice(1);
 			}
 		}
