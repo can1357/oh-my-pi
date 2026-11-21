@@ -78,12 +78,14 @@ export default function myExtension(pi: ExtensionAPI) {
 omp loads extension modules from these sources:
 
 1. Native `.omp` locations discovered through the capability system:
-   - project/ancestor `.omp/extensions/` directories within the discovery boundary
+   - the launch directory's `<cwd>/.omp/extensions/` (native project discovery does not walk ancestors)
    - `~/.omp/agent/extensions/`
    - legacy extension paths listed in `.omp/settings.json#extensions` or `~/.omp/agent/settings.json#extensions`
 2. Discovered JavaScript/TypeScript hook factories (`hooks/pre/` and `hooks/post/`), bound through the extension runner.
 3. Enabled installed plugins under `~/.omp/plugins/node_modules` or a project plugin root — including npm, marketplace, and `omp plugin link` installs — via their `omp.extensions`/`pi.extensions` manifests.
 4. Explicit configured paths passed by the CLI (`omp --extension ./my-ext.ts`, also `-e`; `--hook` is treated as an alias) and by the `extensions:` setting in config.
+
+To auto-load a project extension, place it in the launch directory's `.omp/extensions/`. From a nested directory, load a parent extension explicitly with `omp -e ../.omp/extensions/parent.ts`. See [Extension loading](../extension-loading.md#inputs-to-extension-loading) for the full discovery scope.
 
 The runtime de-duplicates by resolved absolute path — first seen wins.
 
