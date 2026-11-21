@@ -240,7 +240,7 @@ describe("OpenAI tool strict mode", () => {
 	});
 
 	it("sends strict=true for openai-completions tool schemas on OpenRouter", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 
 		const payload = (await captureCompletionsPayload(model)) as {
 			tools?: Array<{ function?: { strict?: boolean } }>;
@@ -395,7 +395,7 @@ describe("OpenAI tool strict mode", () => {
 	});
 
 	it("keeps OpenRouter Anthropic tools non-strict after compiled grammar errors", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const strictFlags: boolean[][] = [];
 		let attempt = 0;
@@ -471,7 +471,7 @@ describe("OpenAI tool strict mode", () => {
 	});
 
 	it("retries non-strict when a gateway rejects structured outputs for the model", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const strictFlags: boolean[][] = [];
 		let attempt = 0;
@@ -592,7 +592,7 @@ describe("OpenAI tool strict mode", () => {
 	});
 
 	it("does not disable OpenRouter Anthropic strict tools for unrelated invalid requests", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const strictFlags: boolean[][] = [];
 		const fetchMock: FetchImpl = Object.assign(

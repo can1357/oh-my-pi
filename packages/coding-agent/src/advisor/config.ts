@@ -145,7 +145,7 @@ const ADVISOR_PROVIDER_SESSION_KEY_SEPARATOR = "\u0000";
 /**
  * Returns a stable provider-facing UUIDv7 for one advisor within one primary session.
  *
- * Codex treats `session_id`/`conversation_id` as a UUID-shaped routing identity,
+ * Codex treats `session-id` as a UUID-shaped routing identity,
  * so advisor labels such as `-advisor` stay local-only.
  */
 export function getOrCreateAdvisorProviderSessionId(

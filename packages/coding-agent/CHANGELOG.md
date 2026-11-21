@@ -5,89 +5,107 @@
 ### Fixed
 
 - ACP steering requests now wait for the client prompt's own run instead of being injected into an unrelated background run that happens to be streaming, so their answers are no longer dropped or attributed to the wrong prompt ([#19316](https://github.com/can1357/oh-my-pi/pull/19316) by [@eggpeat](https://github.com/eggpeat))
+- Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
+- Fixed AST edits and searches across several targets duplicating explicit `local://` file names (such as `local://example.ts/example.ts`) or replacing symlinked file names in previews, search results, and the edit journal ([#20025](https://github.com/can1357/oh-my-pi/pull/20025) by [@eggpeat](https://github.com/eggpeat))
+- Fixed Claude-format plugin agents losing tools whose Claude Code names match no OMP built-in: frontmatter `tools:` now translates `WebFetch`, `WebSearch`, `TodoWrite`, `AskUserQuestion`, `MultiEdit`, `Agent`, and the rest to their OMP equivalents, and `Agent` infers unrestricted spawns like `Task` ([#19887](https://github.com/can1357/oh-my-pi/pull/19887) by [@joseotaviorf](https://github.com/joseotaviorf))
+- Fixed a TTSR rule interrupt that matched a tool call leaving the session idle with `Cannot continue from message role: assistant` instead of retrying the turn with the rule ([#19875](https://github.com/can1357/oh-my-pi/issues/19875))
+- Extension `ctx.ui.notify(…, "info")` notices shown at session start stay visible instead of being overwritten by the next extension's notice or the MCP startup status line ([#19866](https://github.com/can1357/oh-my-pi/issues/19866))
+- Passing `--plan` before another CLI flag no longer treats that next flag as `--plan`'s value during startup, `/restart`, `/fork`, or subcommand routing ([#20028](https://github.com/can1357/oh-my-pi/pull/20028) by [@eggpeat](https://github.com/eggpeat))
+- Fixed the edit tool not finding the snapshot it recorded for a file created beneath a symlinked ancestor, such as a new file under `/var/...` on macOS ([#19926](https://github.com/can1357/oh-my-pi/pull/19926) by [@FnSGit](https://github.com/FnSGit))
+- Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
+- Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+
+## [19.1.0] - 2026-11-21
+
 ### Breaking Changes
 
-- Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
-- The browser relay now runs inside the omp extension's native host while Chrome is open, instead of being started on demand by omp. `omp browser-relay` (serving the relay by hand) and its `--port`, `--token` and `--no-group` options are removed; `browser.relayUrl` still points omp at a relay forwarded from another machine. After updating, reload the omp extension once (or restart Chrome)
-- Eval's `archive.search(query)` now finds sessions by title, idle recap, or what the user and assistant wrote, across all history, and returns session records with their `matches`; prompt-only search moved to `archive.prompts({ query })`. Both match query words against the start of words (`arch` finds `archive`, `chiv` no longer does)
-- RPC hosts must handle the `ask` tool's whole HTML form as a `form` UI request and answer with submitted `data` or cancellation; field-by-field prompts are no longer used for the tool ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
+- Replaced `xd://` tool devices with tool commands: rarely-used tools now run as bash commands (`<tool> --help`, `<tool> <args>`) while `bash` is active and are ordinary tools otherwise
+- Renamed the `tools.xdev`, `tools.xdevDocs`, `tools.xdevInlineDevices` and `tools.xdevNotices` settings to `tools.commands`, `tools.commandDocs`, `tools.commandInline` and `tools.commandNotices`
+- Staged previews, plan submission and Auto-QA reports now use the `resolve`, `reject`, `propose` and `report_issue` commands, and tool doc topics moved from `xd://<tool>/<topic>` to `help://<tool>/<topic>`
+- Removed the `tui.completeScrollback` setting; transcript rows covered by the HUD, dialogs, or draft now always move to scrollback, and the input returns to the bottom row when overlays close.
+- Replaced the standalone MCP transport and tool-cache SDK exports and removed `DeferredMCPTool` plus MCP cache and reconnect-policy manager options. MCP servers are now accessed through the MCP host APIs.
+- Browser relay hosting now runs through the omp extension's native host while Chrome is open. Removed the on-demand `omp browser-relay` server command and its `--port`, `--token`, and `--no-group` options; `browser.relayUrl` remains available for relays forwarded from another machine. Reload the omp extension once after upgrading, or restart Chrome.
+- Changed `archive.search(query)` to search session titles, idle recaps, and user/assistant content across all history and return matching session records; use `archive.prompts({ query })` for prompt-only searches. Searches match query terms at the beginning of words.
+- RPC hosts must handle the `ask` tool as one complete HTML-form `form` request and respond with submitted data or cancellation; field-by-field prompts are no longer emitted.
 
 ### Added
 
-- Sloppy edits can replace, delete or move a syntax block by its opening line without quoting its body, and rename a whole identifier with `*** Find all`
-- MCP servers now run in the omp daemon instead of inside every session: sessions with the same server configuration share one process for servers on MCP 2026-07-28, and `/mcp list` shows each server's state, pid and how many sessions share it. Turn off with `mcp.shared` ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))
-- MCP servers start on first use: tool, prompt and resource lists come from a shared cache, so a session that never calls a server starts no process for it, and an unused 2026-07-28 server stops after `mcp.idleStopMinutes` (default 5) ([#2888](https://github.com/can1357/oh-my-pi/issues/2888))
-- Added MCP protocol revision 2026-07-28 (`server/discover`, per-request metadata, input rounds for roots, `subscriptions/listen`, `ttlMs`/`cacheScope` caching). Servers that need the `initialize` handshake keep working, with one process per session
-- Added `omp browser-relay native-host`, the Chrome native messaging host that runs a new `omp --mode rpc` session (with `browser.relay` on) in a directory the omp extension's side panel picks
-- Added `omp browser-relay sync`: rewrites every registered omp extension folder with this omp's files. `install` registers its folder (and the native host); a verified `omp update`, and the first launch of a new version, sync every registered folder
-- `omp browser-relay install` now adds the extension to Chrome itself: it writes the profile's unpacked-install record with Chrome's HMAC and macOS OSCrypt authenticators, restarting a running Chrome, instead of only printing load steps (`--no-chrome` keeps the old behavior, `--profile` picks a profile)
-- The browser relay draws omp's page overlay in tabs it drives: an animated pointer, click ring and action label for the input omp sends, hidden around every screenshot and screencast
-- The browser relay reloads a connected omp extension into its folder whenever the folder holds a different build, including a rebuilt source checkout at the same version, once the extension is idle. `install`, `sync` and the startup sync ask a running relay to recheck right after they write. The startup sync also runs after a rebuild, not only after a version change
-- `omp browser-relay install` reports which Chrome, Chromium or Brave profiles have the extension loaded. It prints the one manual Load unpacked step only when none does. The native host admits every registered extension folder's ID
-- Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
-- When a program in a bash `pty` console waits on your keys (a `sudo` password prompt, a `[y/N]` question), the terminal title and status record show the session as waiting on you and a notification is sent; turn the notification off with `pty.notify`
-- Extensions can identify which eval cell or kernel-defined tool dispatched a nested tool: `tool_call` and `tool_result` now include an optional `parentToolCallId` ([#19823](https://github.com/can1357/oh-my-pi/pull/19823) by [@baekjosh](https://github.com/baekjosh)).
-- Session transcripts get a full-text index (`~/.omp/agent/transcripts.db`) of user and assistant messages, built by the omp daemon in the background on the first `archive.search` and kept current on later ones, never on a session's own thread; the first build reads every top-level transcript once
-- Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
-- Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
-- Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Extensions can take over a built-in provider through `registerProvider`: `stream` replaces its request adapter, `generateImage` its image generation, and `webSearch` its grounded search request, and `discoverModels` its model discovery request. `rules` sets KDL rule directives (such as `prompt-perturbation`) for its models.
+- Added the `magic` edit mode, which accepts Markdown bulleted change descriptions grouped under `# path` headings and uses a configurable fast model or role to generate and apply patches. It supports concise block replacement, deletion, movement, and identifier-renaming descriptions, and presents the resulting diffs.
+- Added remote session model controls through RPC, including the model picker, thinking-level and role selection, `auto` thinking, and commands to resume, abort while delivering queued messages, or continue the host agent. Collab guests can now continue, interrupt, and queue follow-up prompts for the host.
+- Added support for Unicode set mode (`v`) in slash-delimited `secrets.yml` regular expressions.
+- Moved MCP servers into the omp daemon, with optional process sharing across sessions, lazy startup, idle shutdown, shared discovery caching, and `/mcp list` status including process and session information. Configure sharing with `mcp.shared` and idle shutdown with `mcp.idleStopMinutes`.
+- Added MCP protocol revision 2026-07-28 support, including server discovery, per-request metadata, root input rounds, subscriptions, and cache controls, while retaining compatibility with servers that require the initialize handshake.
+- Added native browser-relay integration for the Chrome extension, including side-panel sessions, extension installation and synchronization, automatic profile registration, and in-tab action overlays. Side-panel sessions remain separate from terminal resume, recent-session, `--continue`, and ACP session lists unless explicitly resumed.
+- Added a coloured extension-status variant to `omp gallery --segment status`.
+- Added notifications and waiting status when a program running in a bash `pty` is waiting for keyboard input, such as a password or confirmation prompt; disable notifications with `pty.notify`.
+- Eval `completion()` now records raw provider frames for `/debug` inspection and saves frames from failed calls as log files in the session artifacts directory.
+- Added `parentToolCallId` to extension `tool_call` and `tool_result` events so nested tool calls can be associated with the eval cell or kernel-defined tool that dispatched them.
+- Added full-text transcript search indexing for `archive.search`, covering user and assistant messages across session history.
+- Session files now record approval requests and their outcomes, allowing dashboards and sidebars to show when a session is waiting for tool approval.
+- Added live visibility into output redirected to files by background bash jobs, including job streams, the jobs sheet, job widgets, and command cards; selecting a command shows the output for its relevant pipeline or redirected stream.
+- Added Binary Ninja as a disassembler backend for read analysis views and the `dsm` namespace. Select it with `disassembler.backend = binja` and configure its installation with `binja.installDir` or `$BN_INSTALL_DIR`.
+- Clicking the usage-limit segment in native terminal hosts such as Tern now opens `/usage`. Changing Tern's Agents tray setting immediately switches between tray cards and the running-agent and job counters without restarting omp.
 
 ### Changed
 
-- Listing sessions across every project (`/resume` across projects, `archive.sessions(project="*")`, `archive.projects()`) is faster with thousands of project directories
-- In the interactive session, `wait` on background jobs now blocks for up to 4 minutes on its first call instead of returning after 5 seconds, saving a wasted turn per wait ([#19873](https://github.com/can1357/oh-my-pi/pull/19873) by [@H4vC](https://github.com/H4vC))
-- Updated MCP OAuth client name to "Codex"
-- Auto-retries are quieter: once a retry is scheduled, the failed attempt's error leaves the pinned banner and stays out of the transcript; the retry status line shows the reason, and a recovered retry leaves only a dim "retried" note
-- Selective commits (`/commit`, eval `commit`) no longer guess which changes a `bash` or `eval` call made. Edit-tool writes are attributed, and so is what the shell writes itself: builtins such as `sed -i`, `cp`, `mv`, `rm` and redirections such as `cat > file`. Files changed by programs you run (formatters, codegen) are listed under Unrecorded and a formatter's rewrite of your lines under Review, for you to `take`
-- A session's change journal takes far less disk: it keeps one copy of each file an edit tool touched plus the changed lines of every later write, instead of a full copy per write, and no longer logs every `bash` and `eval` command (about 160 MB → 21 MB for a 7,600-edit session)
-- Selective commit previews show what changed inside a long line: `d.diff()` prints a long line edited in place once, with its `[-removed-]` and `{+added+}` words marked and the unchanged text far from them left out, instead of two lines cut at the output column cap; the returned patch is unchanged ([#19817](https://github.com/can1357/oh-my-pi/pull/19817) by [@baekjosh](https://github.com/baekjosh))
-- Changed read to treat a file named .i64 or .idb as an IDA database even when it is a SQLite file: it shows database metadata instead of a table listing ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
-- Changed an in-place disassembler database to be identified by its real path, so one opened through a symlink gets a new id and dsm handle ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
-- Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Images a command prints as kitty or sixel graphics are saved to a temp file and linked in the bash output, in addition to being attached
+- `generate_image` returns its images as attachments
+- Spotlight tool calls use `Label: detail`; activity shows only the label, while output ranking uses the full intent.
+- Improved regex performance for TTSR and secret-redaction scans, including SIMD acceleration and faster candidate matching, without changing matching semantics.
+- Improved performance when listing sessions across all projects, especially with thousands of project directories.
+- Interactive `wait` now waits up to four minutes on its first call for background jobs instead of returning after five seconds.
+- Updated the MCP OAuth client name to `Codex`.
+- Made automatic retries less disruptive: failed attempts stay out of the transcript, retry status explains the reason, and successful recovery leaves only a brief indication.
+- Selective commits now attribute edit-tool and shell-built-in changes more accurately, distinguish external program changes for review, and use a substantially smaller change journal. Long-line commit previews now highlight only the changed words while preserving the original patch.
+- TTSR rules that cannot interrupt streaming are evaluated at the end of the relevant response, reasoning, or tool call, reducing unnecessary work while preserving matches and reminders.
+- Eval `completion()` now accepts user-tagged model agents, such as models pinned with `^model`, and uses their tagged effort level.
+- `read` recognizes SQLite-backed `.i64` and `.idb` files as IDA databases and reports disassembler-backend mismatches clearly.
 
 ### Fixed
 
-- The shell's `rg` builtin prints paths under an explicit `.` as `./path` like ripgrep, so names starting with `-` (session directories such as `--work-pi--`) can be passed back to `rg` and other commands
-- The shell's `fd` builtin prints paths like fd: `./path` under an explicit `.`, with `-0`, or when a name starts with `-`; directories end in the path separator; `--strip-cwd-prefix` takes effect, `--format`'s `{//}` is the printed path's parent instead of an absolute one, and `--absolute-path` no longer prints `/./`
-- Sloppy edits reject incomplete Find/action pairs without writing, preserve numeric `||` expressions, and no longer mistake a nested or partial closing line for the end of a block range
-- OpenCode v2 MCP configurations now discover servers from `mcp.servers` while continuing to import flat `mcp` entries ([#19863](https://github.com/can1357/oh-my-pi/issues/19863))
-- Fixed ovnfs commands failing with "command not found" when `ovnfs.path` is a Windows path with backslashes, or contains spaces or `$` ([#19874](https://github.com/can1357/oh-my-pi/pull/19874) by [@H4vC](https://github.com/H4vC))
-- Failed browser launches no longer log URL userinfo, query strings (including OAuth device codes), or fragments ([#19844](https://github.com/can1357/oh-my-pi/pull/19844) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- `web_search` follows the web search order and exclusions configured for its own session, such as an ACP session opened in a project whose `.omp/config.yml` sets them, instead of the default chain ([#19837](https://github.com/can1357/oh-my-pi/pull/19837) by [@BUR4KBEY](https://github.com/BUR4KBEY), fixes [#11296](https://github.com/can1357/oh-my-pi/issues/11296))
-- Fixed MCP OAuth refresh failing with `AADSTS90009` on Microsoft Entra servers whose client is also the resource: refresh now repeats the granted scope (credentials saved earlier need one `/mcp reauth`) ([#19855](https://github.com/can1357/oh-my-pi/pull/19855) by [@jerry153fish](https://github.com/jerry153fish))
-- Cursor's explicit 500K Grok 4.7 lanes now keep their 500K window with extended context off, instead of being capped to the base 256K lane's long-context price threshold ([#19842](https://github.com/can1357/oh-my-pi/pull/19842) by [@fenilmodi00](https://github.com/fenilmodi00)).
-- Eval's `archive` records always carry every documented key, with `null` for missing values, so Python code reading `row["recap"]` on a session without a recap no longer raises `KeyError`
-- `bash` and `eval` calls whose output fits inline, and request-timeout recovery that finds too little to trim, no longer leave an empty `<N>.log` in the session's `local://` directory
-- `read` suggests the line-range syntax for `file:1:2` when `file` exists, directly or by unique suffix, but `file:1` does not ([#19821](https://github.com/can1357/oh-my-pi/pull/19821) by [@baekjosh](https://github.com/baekjosh)).
-- `read` suggests only the line for a `file:line:column` selector such as `file:10:5`, instead of a reversed range it would reject
-- Fixed in-memory text reads (including converted documents, URLs, notebooks, and internal resources) losing source line totals and continuation selectors to a second output truncation when their rendered page fits the inline budget.
-- Fixed an agent staying live instead of parking when an earlier agent with the same ID finished preparing to revive ([#19846](https://github.com/can1357/oh-my-pi/pull/19846) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- A click whose only effect was a change to omp's own page overlay no longer counts as delivered
-- In a relay tab with inline SVG or MathML, hiding another extension's frame (a password manager's menu) now reports what was hidden instead of losing the report
-- Filling a search field in Chrome with the browser tool's `fill` updates its results again on pages that search as you type on key events, such as CyberChef's operation search, which showed nothing after a fill in 19.0.0 ([#19748](https://github.com/can1357/oh-my-pi/pull/19748) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `/commit` moving an insertion across another writer's unselected replacement. Insertions with no clear position in HEAD now go to review; lines already committed at the boundary stay out of later drafts ([#19786](https://github.com/can1357/oh-my-pi/pull/19786) by [@baekjosh](https://github.com/baekjosh))
-- Fixed every omp launch storing new copies of each loaded extension's modules in Bun's transpiler cache (`~/Library/Caches/bun/@t@` on macOS, `~/.bun/install/cache/@t@` elsewhere), which grew without limit; launches with unchanged extensions now reuse the cached copies ([#16600](https://github.com/can1357/oh-my-pi/pull/16600) by [@enieuwy](https://github.com/enieuwy))
-- Extensions, plugins, custom tools, hooks, custom commands and share scripts under a path containing `?` now fail with an error naming the path and the fix, instead of "Cannot find module" ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
-- Fixed pending agent messages reaching a replacement with the same ID or a session being disposed during shutdown or an explicit kill ([#19845](https://github.com/can1357/oh-my-pi/pull/19845) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- Fixed browser tabs on CDP engines that keep each page on its own connection, such as Lightpanda: listing tabs no longer closes them, and a timed-out run or exited worker opens a new page on the same URL instead of closing the tab ([#19658](https://github.com/can1357/oh-my-pi/pull/19658) by [@azais-corentin](https://github.com/azais-corentin))
-- Fixed per-call subagent models rejecting OpenRouter route variants such as `openrouter/<id>:nitro` with "No available model matches", which also left a role naming the variant unusable for subagents; they now resolve like `--model` and `/model` do ([#19575](https://github.com/can1357/oh-my-pi/pull/19575) by [@yibaimeng](https://github.com/yibaimeng))
-- Fixed shared sessions with secret redaction still carrying provider-encrypted reasoning from chat-completions tool calls ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
-- Fixed `bash.allowCompoundCommands` rejecting `&&` chains (and marking segments uncovered in compound approval prompts) when a segment began with a leading `KEY=VALUE` environment assignment permitted by `bash.allowedEnvVars` or the matching rule's `env` list, or passed a single-dash flag containing `c` or `e` (such as `go test -race`) without shell-control arguments, and prevented wildcard `allow` rules (such as `match: "*"`) that do not begin with an assignment prefix from matching single commands with unlisted leading environment assignments ([#19681](https://github.com/can1357/oh-my-pi/pull/19681) by [@asuffield](https://github.com/asuffield)).
-- `/commit`'s selective commit now retries when HEAD moves after the expected-HEAD check, such as inside a `commit-msg` hook, instead of failing the commit ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
-- Clarified in the settings help and docs that `find` in auto mode supports native judges beyond TypeSafe Jev, including OpenAI Decisions ([#19816](https://github.com/can1357/oh-my-pi/pull/19816) by [@baekjosh](https://github.com/baekjosh))
-- Selective commits no longer duplicate an already committed paragraph when replaying reordered edits from multiple writers. If ownership is ambiguous, the draft offers the actual remaining change for review ([#19824](https://github.com/can1357/oh-my-pi/pull/19824) by [@baekjosh](https://github.com/baekjosh)).
-- Fixed computer use losing a macOS window once it is minimized: `win.ax()` and `win.find()` on a handle you already hold still read that exact window, marked `(minimized)` with inspection-only refs until you restore it and read again, and `win.menu` reports `WindowUnavailable` instead of restoring it or using a sibling's menu ([#19825](https://github.com/can1357/oh-my-pi/pull/19825) by [@baekjosh](https://github.com/baekjosh))
-- Fixed `computer` on Windows passing off a fully covered window's screenshot and `ax()` tree as current: for Chrome, Edge and Electron apps, which can stop drawing while covered, both now say the window appeared covered and may be stale ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
-- Entering `/goal` on Anthropic no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
-- Fixed isolated `task` subagents starting with no git work tree when the session cwd is a bare-repository container (`.git` with `core.bare=true`); isolation now refuses before spawning and names the repository's work trees to start from ([#19791](https://github.com/can1357/oh-my-pi/issues/19791))
+- A tool card left unfinished by a stream that never completed no longer keeps the rest of the transcript out of scrollback and squeezed to one-line rows; it is closed when the next reply starts
+- Spotlight keeps short relevant passages from multiple large function bodies together with their signatures, even when a code outline is cut again.
+- A usage-limit reset inside `retry.maxDelayMs` is now waited out even without a `Retry-After` header.
+- Logging in while an auth broker is configured no longer reports success for a provider the broker stores but does not serve (such as one an older broker pauses); the login is kept in this machine's `agent.db` instead, survives restarts, and login/logout now name where credentials were saved.
+- Spotlight keeps more high-relevance lines with their neighbours in long results and large code outlines, while preserving visible intent matches within the window budget.
+- Fixed Tern tray cards and subagent live previews showing stale calls, models, or thinking states while an agent was running or after a model switch; completed cards now retain the model and thinking level used.
+- Fixed extension side-panel sessions launching omp's own browser instead of driving only the user's Chrome window.
+- Preserved answer footers and Copy controls in Tern after resuming, compacting, or rebuilding a transcript.
+- Prevented `--continue` and `autoResume` from attaching to a session currently being written by another omp process.
+- Added visible progress reporting while `/handoff` writes its summary.
+- Fixed access to cloud-only files on macOS iCloud Drive, Desktop & Documents, Google Drive, and Dropbox locations.
+- Prevented pathological TTSR condition and secret-redaction regular expressions from freezing sessions or requests.
+- Fixed prompt-cache handling for IRC-woken subagents and sessions whose context hooks provide an initial message.
+- Improved shell `rg` and `fd` path output and option handling to match their native tools, including paths beginning with `-`, null-separated output, and explicit current-directory prefixes.
+- Fixed sloppy-edit validation and block matching for incomplete actions, numeric `||` expressions, nested or partial block endings, JSDoc comments, and hashline headers with trailing whitespace.
+- Fixed OpenCode v2 MCP configuration discovery from `mcp.servers` while preserving support for legacy flat `mcp` entries.
+- Fixed `ovnfs` commands when `ovnfs.path` contains Windows backslashes, spaces, or `$` characters.
+- Stopped failed browser launches from logging URL credentials, query strings, OAuth device codes, or fragments.
+- Fixed `web_search` to honor the search order and exclusions configured for the current session.
+- Fixed MCP OAuth refresh for Microsoft Entra servers where the client is also the resource; previously saved credentials may require one `/mcp reauth`.
+- Fixed model resolution for OpenRouter route variants used by per-call subagents and roles.
+- Fixed secret redaction in shared sessions so provider-encrypted reasoning is not retained unexpectedly.
+- Fixed bash approval handling for compound commands with environment assignments and flags, including wildcard allow rules.
+- Fixed selective commits when HEAD changes during a commit hook and when edits from multiple writers are reordered or overlap; ambiguous changes are now sent to review instead of being duplicated or silently misapplied.
+- Fixed archive records to include all documented keys with `null` for missing values.
+- Fixed unnecessary empty session log files for inline bash/eval output and request-timeout recovery.
+- Improved `read` suggestions for line, range, and column selectors and preserved source line metadata for in-memory and converted text reads.
+- Fixed agent lifecycle races involving duplicate IDs, pending messages, shutdown, and revival.
+- Fixed browser tab handling on CDP engines that use separate connections per page, including recovery after timeouts or worker exits.
+- Fixed browser interaction reporting for overlay-only clicks, hidden frames containing inline SVG or MathML, and search fields that update on key events.
+- Fixed browser computer-use inspection of minimized macOS windows and fully covered Windows Chrome, Edge, and Electron windows.
+- Fixed `/goal` on Anthropic from unnecessarily rewriting the cached system prompt and transcript.
+- Fixed isolated task subagents in bare Git repositories by refusing early and identifying available work trees instead of starting without a usable work tree.
+- Fixed Nix browser-relay builds to fetch all dependencies without falling back to the npm registry.
+- Fixed extension, plugin, custom-tool, hook, command, and share-script loading for paths containing `?`, with a useful error identifying the path and remedy.
 
 ## [19.0.1] - 2026-11-19
 
 ### Added
 
 - `/session` shows the path of the session's `local://` directory, and `/copy local` copies it, creating the directory first so it can be entered before anything was written there ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
-- In native terminal hosts such as Tern, clicking the usage segment in the composer's status bar (the 5h/7d limits) opens `/usage`
-- Turning Tern's Agents tray setting off (or on) switches running sessions between the tray's cards and the running agents and jobs counters over the composer at once, without restarting omp
 - `snapcompactShape` on `models.yml` models, `modelOverrides` and extension `registerProvider` models sets that model's snapcompact frame shape ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
 
 ### Fixed
