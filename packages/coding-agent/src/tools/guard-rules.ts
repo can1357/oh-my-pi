@@ -1802,10 +1802,15 @@ function isLongOption(arg: string, name: string): boolean {
 /** A word the shell expands before git sees it: one with a variable, or a leading `~`. */
 const SHELL_EXPANDED_RE = /\$|^~/;
 /**
- * A brace expansion, which can make one word several (`{build,dist}`, `out{1..3}`). One the source
- * quoted counts too, which only widens the check.
+ * Whether `word` holds a brace expansion, which can make one word several (`{build,dist}`,
+ * `out{1..3}`). One the source quoted counts too, which only widens the check.
  */
-const BRACE_EXPANSION_RE = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
+function hasBraceExpansion(word: string): boolean {
+	for (const [group] of word.matchAll(BRACE_GROUP_RE)) {
+		if (group.includes(",") || group.includes("..")) return true;
+	}
+	return false;
+}
 
 /**
  * `words`, pathspecs a git command names, as git sees them: a word the shell expands is resolved
@@ -1814,8 +1819,10 @@ const BRACE_EXPANSION_RE = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
  */
 function resolvePathspecs(words: readonly string[], command: ShellCommand, scope: GuardScope): string[] {
 	const resolved = words.map(word => {
-		if (BRACE_EXPANSION_RE.test(word)) return undefined;
+		if (hasBraceExpansion(word)) return undefined;
 		if (!SHELL_EXPANDED_RE.test(word)) return word;
+/** A brace group with no brace inside, matched in time linear in the word. */
+const BRACE_GROUP_RE = /\{[^{}]*\}/g;
 		return resolveCommandWordPath(command, word, command.cwd, scope.home);
 	});
 	return resolved.every((word): word is string => word !== undefined) ? resolved : [];
@@ -1880,7 +1887,7 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 		includeIgnored,
 		ignoredOnly,
 		nestedRepositories: force > 1,
-		excludes: excludes.filter(word => !SHELL_EXPANDED_RE.test(word) && !BRACE_EXPANSION_RE.test(word)),
+		excludes: excludes.filter(word => !SHELL_EXPANDED_RE.test(word) && !hasBraceExpansion(word)),
 		pathspecs: resolvePathspecs(pathspecs, command, scope),
 	};
 }

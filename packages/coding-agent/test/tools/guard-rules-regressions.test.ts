@@ -970,6 +970,16 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("checks a long `git clean` word with an unclosed brace in linear time", async () => {
+		await dirtyRepo(cwd);
+		const word = `'{${",".repeat(80_000)}'`;
+		for (const command of [`git clean -f ${word}`, `git clean -f -e ${word}`]) {
+			const started = performance.now();
+			bashApproval(cwd, command);
+			expect(performance.now() - started).toBeLessThan(1000);
+		}
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"does not count a touched file behind a transforming filter driver as changed",
 		async () => {
