@@ -1,9 +1,18 @@
-use omp_edit::modes::sloppy::{
-	parse::{
-		extract_inline_sloppy_regions, ir_to_payload, normalize_input, parse_operations,
-		split_sloppy_sections,
+mod common;
+
+use common::{DiskWriter, Workspace};
+use omp_edit::{
+	EditMode, ModeEngine,
+	files::FileCache,
+	modes::sloppy::{
+		SloppyEngine,
+		parse::{
+			extract_inline_sloppy_regions, ir_to_payload, normalize_input, operation_payload,
+			parse_operations, split_sloppy_sections,
+		},
+		types::{OperationRewrite, Placement},
 	},
-	types::{OperationRewrite, Placement},
+	stream_json::ArgSnapshot,
 };
 
 fn message(input: &str, content: &str) -> String {
@@ -257,20 +266,171 @@ fn optional_patch_envelope_is_silent_during_normalization() {
 	assert_eq!(normalize_input(input).unwrap(), "«\nold\n»\nnew");
 }
 
+#[tokio::test]
+async fn a_plain_find_without_an_action_rejects_the_whole_call_before_writes() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	let content = "const result = computeValue();\nreport(result);\n";
+	workspace.write("a.ts", content);
+	workspace.write("b.ts", "one();\n");
+	let writer = DiskWriter::default();
+	for input in [
+		// Exact context, a plausible near-match, and purported old/new text.
+		"*** Edit File: a.ts\n*** Find\nconst result = computeValue();\nreport(result);",
+		"*** Edit File: a.ts\n*** Find all\nconst result = computeValues();",
+		"*** Edit File: a.ts\n*** Find\nreport(result);\nreport(other);",
+		// Earlier completed work (including another file) cannot be staged.
+		"*** Edit File: b.ts\n*** Find\none();\n*** Replace\ntwo();\n*** Edit File: a.ts\n*** \
+		 Find\nconst result = computeValue();",
+		// The next Find cannot stand in for a missing action, even if empty.
+		"*** Edit File: a.ts\n*** Find\n*** Find\nreport(result);\n*** Replace\nlog(result);",
+		"*** Edit File: a.ts\n*** Find\nreport(result);\n*** Edit File: b.ts\n*** Find\none();\n*** \
+		 Replace\ntwo();",
+	] {
+		let error = workspace
+			.apply_raw(input, &writer)
+			.await
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("Send one complete pair"), "{error}");
+		assert!(!error.contains("computeValue") && !error.contains("report("), "{error}");
+		assert!(writer.requests.lock().is_empty());
+		assert_eq!(workspace.read("a.ts").as_deref(), Some(content));
+		assert_eq!(workspace.read("b.ts").as_deref(), Some("one();\n"));
+	}
+}
+
 #[test]
-fn copy_ready_correction_preserves_the_complete_atomic_payload() {
-	let content = "const a = 1;\nkeep();\n";
-	let input = "*** Edit File: a.ts\n*** Find\nconst a = 1;\n*** Replace\nconst a = 2;\n*** Edit \
-	             File:\n*** Find\nkeep();";
-	let error = message(input, content);
-	let start = error.find("*** Edit File:").expect("copy-ready payload");
-	let completed = error[start..].replace("{new text}", "changed();");
-	let sections = split_sloppy_sections(&completed).unwrap();
-	assert_eq!(sections.len(), 1);
-	let operations = parse_operations(&sections[0].body, content, "a.ts").unwrap();
-	assert_eq!(operations.len(), 2);
-	assert_eq!(operations[0].pattern_text, "const a = 1;");
-	assert_eq!(operations[1].pattern_text, "keep();");
+fn an_incomplete_find_is_reported_by_both_normalization_and_inline_extraction() {
+	let input = "*** Edit File: a.ts\n*** Find\nold\n*** Replace\nnew\n*** Find\ncontext";
+	assert!(message(input, "old\ncontext\n").contains("Send one complete pair"));
+	let regions = extract_inline_sloppy_regions(input);
+	assert_eq!(regions.len(), 1);
+	assert_eq!(regions[0].payload, input);
+}
+
+#[test]
+fn an_embedded_edit_stays_one_operation_across_both_normalization_passes() {
+	let input = "*** Edit File: a.ts\n*** Find all\nbefore\n«\nvalue = \u{27ea}1│2\u{27eb}";
+	let sections = split_sloppy_sections(input).unwrap();
+	let ops = parse_operations(&sections[0].body, "before\n«\nvalue = 1\n", "a.ts").unwrap();
+	assert_eq!(ops.len(), 1);
+	assert!(ops[0].all);
+	assert_eq!(ops[0].pattern_text, "before\n«\nvalue = \u{27ea}1\u{27eb}");
+	assert!(
+		matches!(&ops[0].rewrite, OperationRewrite::Inline { replacements } if replacements == &["2"])
+	);
+}
+
+#[test]
+fn block_selectors_and_replacements_round_trip_as_literal_data() {
+	let selector = "  fn open(arg: \"»1 …\"): {  ";
+	let replacement = "«\n»9\n＋literal\n…\n";
+	let input = format!("*** Edit File: a.ts\n*** Replace Block: {selector}\n{replacement}\n");
+	let sections = split_sloppy_sections(&input).unwrap();
+	let ops = parse_operations(&sections[0].body, "", "a.ts").unwrap();
+	assert_eq!(ops.len(), 1);
+	let op = &ops[0];
+	assert!(op.block && !op.all);
+	assert_eq!(op.pattern_text, selector);
+	assert_eq!(op.rewrite, OperationRewrite::Explicit { text: replacement.to_owned() });
+	let rendered = ir_to_payload(&sections[0].body.lines().collect::<Vec<_>>(), "a.ts");
+	assert_eq!(rendered, input);
+	let corrected = operation_payload(op, "a.ts", true, Some("ignore fuzzy suggestions"));
+	assert_eq!(parse_operations(&corrected, "", "a.ts").unwrap(), ops);
+	let regions = extract_inline_sloppy_regions(&format!("Before.\n{input}*** End Patch\nAfter."));
+	assert_eq!(parse_operations(&regions[0].payload, "", "a.ts").unwrap(), ops);
+}
+
+#[test]
+fn block_moves_link_to_the_cut_operation_without_copying_its_selector() {
+	for (paste, at) in [("Paste Before", Placement::Before), ("Paste After", Placement::After)] {
+		let input = format!(
+			"*** Edit File: a.ts\n*** Find all\nold\n*** Replace\nnew\n*** Cut Block: function \
+			 first\n*** {paste} Block: function last\n*** Delete Block: function unused\n"
+		);
+		let ops = parse_operations(&input, "old\n", "a.ts").unwrap();
+		assert_eq!(ops.len(), 4);
+		assert!(ops[0].all && !ops[0].block);
+		assert!(ops[1..].iter().all(|op| op.block && !op.all));
+		assert_eq!(ops[1].rewrite, OperationRewrite::Cut);
+		assert_eq!(ops[2].rewrite, OperationRewrite::Paste { cut: 2, at });
+		assert_eq!(ops[3].rewrite, OperationRewrite::Explicit { text: String::new() });
+		let rendered = ops
+			.iter()
+			.map(|op| operation_payload(op, "a.ts", op.all, None))
+			.collect::<Vec<_>>()
+			.join("\n");
+		assert_eq!(parse_operations(&rendered, "old\n", "a.ts").unwrap(), ops);
+		assert_eq!(
+			operation_payload(&ops[3], "a.ts", false, None),
+			"*** Edit File: a.ts\n*** Delete Block: function unused\n"
+		);
+		let ir = normalize_input(&input).unwrap();
+		let payload = ir_to_payload(&ir.lines().collect::<Vec<_>>(), "a.ts");
+		assert_eq!(parse_operations(&payload, "old\n", "a.ts").unwrap(), ops);
+	}
+}
+
+#[test]
+fn a_structural_header_requires_a_supported_action_and_one_literal_selector() {
+	for (body, diagnostic) in [
+		("*** Block\nfunction first", "standalone *** Block"),
+		("*** Block\nfirst\n*** Replace\nnew", "standalone *** Block"),
+		("*** Delete Block:  \t", "nonblank opening-line prefix"),
+		("*** Replace Block first\nnew", "colon"),
+		("*** Insert Before Block: first\nnew", "for insertion use *** Find"),
+		("*** Insert Block: first\nnew", "for insertion use *** Find"),
+		("*** Replace Block: first\nnew\n*** Insert After\nnew", "already names its action"),
+		("*** Replace Block: first\n*** Find\nx\n*** Replace\ny", "nonempty replacement body"),
+	] {
+		let input = format!("*** Edit File: a.ts\n{body}");
+		assert!(message(&input, "").contains(diagnostic), "{input}");
+	}
+	for action in ["Cut", "Paste Before", "Paste After", "Delete", "Replace"] {
+		let input = format!("*** Edit File: a.ts all\n*** {action} Block: function first");
+		assert!(message(&input, "").contains("drop all"), "{input}");
+	}
+	for action in ["Cut", "Paste Before", "Paste After", "Delete"] {
+		let input = format!("*** Edit File: a.ts\n*** {action} Block: function first\nstray");
+		assert_eq!(
+			message(&input, ""),
+			format!(
+				"Invalid block edit: *** {action} Block takes no body. Start the next operation with \
+				 a new header."
+			)
+		);
+		let regions =
+			extract_inline_sloppy_regions(&format!("Before.\n{input}\n*** End Patch\nAfter."));
+		assert_eq!(regions[0].payload, input);
+	}
+}
+
+#[tokio::test]
+async fn incomplete_block_replacement_never_becomes_a_deletion() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	let content = "alpha\nfunction keep() {\n  beta();\n}\n";
+	workspace.write("a.ts", content);
+	let input =
+		"*** Edit File: a.ts\n*** Find\nalpha\n*** Replace\nALPHA\n*** Replace Block: function keep";
+	let partial = ArgSnapshot { input: Some(input.to_owned()), ..ArgSnapshot::default() };
+	let engine = SloppyEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	let mut files = FileCache::new(workspace.config.policy.clone());
+	let preview = engine.preview(&partial, true, &mut files, &workspace.store);
+	let diff = preview[0]
+		.diff
+		.as_deref()
+		.expect("finished Find should preview");
+	assert!(diff.contains("+1|ALPHA") && !diff.contains("-2|function keep"), "{diff}");
+	let writer = DiskWriter::default();
+	let error = workspace
+		.apply_raw(input, &writer)
+		.await
+		.unwrap_err()
+		.to_string();
+	assert!(error.contains("*** Replace Block needs a nonempty replacement body"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.ts").as_deref(), Some(content));
+	assert_eq!(extract_inline_sloppy_regions(input)[0].payload, input);
 }
 
 #[test]
@@ -387,7 +547,7 @@ fn ir_to_payload_preserves_operation_boundaries_all_and_terminal_newline() {
 	assert_eq!(
 		ir_to_payload(&["«*", "old", "»", "new", "«", "x"], "a.ts"),
 		concat!(
-			"*** Edit File: a.ts all\n*** Find\nold\n",
+			"*** Edit File: a.ts\n*** Find all\nold\n",
 			"*** Replace\nnew\n*** Edit File: a.ts\n",
 			"*** Find\nx\n",
 		)

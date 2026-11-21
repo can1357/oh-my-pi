@@ -29,6 +29,7 @@ import {
 } from "../auth-storage";
 import * as AIError from "../error";
 import { AuthBrokerClient, AuthBrokerError, type FetchSnapshotResult } from "./client";
+import { HybridAuthCredentialStore } from "./hybrid-store";
 import { type AuthBrokerAccountPool, type AuthBrokerProviderPool, RemoteAuthCredentialStore } from "./remote-store";
 import { readAuthBrokerSnapshotCache, scheduleAuthBrokerSnapshotCacheWrite } from "./snapshot-cache";
 import { DEFAULT_SNAPSHOT_CACHE_TTL_MS, type SnapshotResponse } from "./types";
@@ -531,7 +532,9 @@ export interface OpenedAuthCredentialStore {
 /**
  * Open the credential store {@link discoverAuthStorage} would use for
  * `brokerConfig`: the remote broker store (fails when the broker has no
- * usable snapshot) or the local SQLite store. Also feeds
+ * usable snapshot) wrapped in {@link HybridAuthCredentialStore}, which keeps
+ * logins the broker will not serve in the local `agent.db`; or the local SQLite
+ * store. Also feeds
  * {@link AuthStorage.replaceStore} when broker settings change at runtime.
  */
 export async function openAuthCredentialStore(
@@ -589,13 +592,18 @@ export async function openAuthCredentialStore(
 		// the current generation within one RTT without blocking startup on a
 		// broker round trip. A token revoked since the cache was written surfaces
 		// through that background path exactly like a mid-session revocation.
-		const store = new RemoteAuthCredentialStore({
+		// Opened before the broker store, whose constructor starts background sync that a failed open would leak.
+		const local = await SqliteAuthCredentialStore.open(getAgentDbPath(options.agentDir ?? getAgentDir()));
+		const broker = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,
 			onSnapshot: persist,
 			accountPool,
 		});
-		return { store, sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}` };
+		return {
+			store: new HybridAuthCredentialStore({ broker, local }),
+			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
+		};
 	}
 
 	const dbPath = getAgentDbPath(options.agentDir ?? getAgentDir());

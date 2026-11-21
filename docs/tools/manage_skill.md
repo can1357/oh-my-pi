@@ -11,7 +11,7 @@
 
 ## Registration / Visibility
 
-- Tool metadata: `approval = "write"`, `strict = true`, `loadMode = "essential"`. It stays top-level rather than mounting under `xd://`.
+- Tool metadata: `approval = "write"`, `strict = true`, `loadMode = "essential"`. It stays top-level rather than becoming a tool command.
 - Registration requires `autolearn.enabled = true` (default `false`) but is independent of `memory.backend`.
 - Enabled top-level sessions auto-include it in an ordinary explicit tool list. Subagents do not discover or auto-receive it, but may use it when their requested-tools/frontmatter list explicitly includes it.
 - Execution is single-shot and emits no progress updates.

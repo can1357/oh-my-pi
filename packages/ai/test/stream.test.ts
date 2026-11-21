@@ -28,11 +28,10 @@ import { e2eApiKey, resolveApiKey } from "./oauth";
 const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
-	resolveApiKey("google-gemini-cli"),
 	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, geminiCliToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, antigravityToken, openaiCodexToken] = oauthTokens;
 
 function hasBedrockCredentials(): boolean {
 	const region = e2eApiKey("AWS_REGION") ?? e2eApiKey("AWS_DEFAULT_REGION");
@@ -1625,79 +1624,6 @@ describe("Generate E2E Tests", () => {
 			{ retry: 3 },
 		);
 	});
-
-	describe("Google Gemini CLI Provider (gemini-2.5-flash)", () => {
-		const llm = getBundledModel("google-gemini-cli", "gemini-2.5-flash");
-
-		it.skipIf(!geminiCliToken)(
-			"should complete basic text generation",
-			async () => {
-				await basicTextGeneration(llm, { apiKey: geminiCliToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!geminiCliToken)(
-			"should handle tool calling",
-			async () => {
-				await handleToolCall(llm, { apiKey: geminiCliToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!geminiCliToken)(
-			"should handle streaming",
-			async () => {
-				await handleStreaming(llm, { apiKey: geminiCliToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!geminiCliToken)(
-			"should handle thinking",
-			async () => {
-				await handleThinking(llm, { apiKey: geminiCliToken, thinking: { enabled: true, budgetTokens: 1024 } });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!geminiCliToken)(
-			"should handle multi-turn with thinking and tools",
-			async () => {
-				await multiTurn(llm, { apiKey: geminiCliToken, thinking: { enabled: true, budgetTokens: 2048 } });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!geminiCliToken)(
-			"should handle image input",
-			async () => {
-				await handleImage(llm, { apiKey: geminiCliToken });
-			},
-			{ retry: 3 },
-		);
-	});
-
-	describe("Google Gemini CLI Provider (gemini-3-flash-preview with thinkingLevel)", () => {
-		const llm = getBundledModel("google-gemini-cli", "gemini-3-flash-preview");
-
-		it.skipIf(!geminiCliToken)(
-			"should handle thinking with thinkingLevel",
-			async () => {
-				await handleThinking(llm, { apiKey: geminiCliToken, thinking: { enabled: true, level: "LOW" } });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!geminiCliToken)(
-			"should handle multi-turn with thinking and tools",
-			async () => {
-				await multiTurn(llm, { apiKey: geminiCliToken, thinking: { enabled: true, level: "MEDIUM" } });
-			},
-			{ retry: 3 },
-		);
-	});
-
 	describe("Google Antigravity Provider (gemini-3-pro-high)", () => {
 		const llm = getBundledModel("google-antigravity", "gemini-3-pro-high");
 

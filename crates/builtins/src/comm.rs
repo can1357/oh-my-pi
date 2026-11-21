@@ -385,8 +385,8 @@ fn app() -> Command {
 mod tests {
 	use std::fs;
 
-	use super::{Comm, app};
-	use crate::host::{Host, Utility, run_util};
+	use super::Comm;
+	use crate::host::run_util;
 
 	#[test]
 	fn compares_three_columns_and_resolves_relative_paths() {
@@ -444,6 +444,9 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn merges_lines_in_the_shell_collation() {
+		use super::app;
+		use crate::host::{Host, Utility};
+
 		if !crate::locale::locale_loadable("en_US.UTF-8", libc::LC_ALL_MASK) {
 			eprintln!("skipping: en_US.UTF-8 not installed");
 			return;

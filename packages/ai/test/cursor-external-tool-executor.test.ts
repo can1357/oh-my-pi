@@ -293,11 +293,13 @@ describe("Cursor runs whose tools an external executor owns", () => {
 		},
 		{
 			// A local bridge answers native frames, so Cursor keeps its native
-			// tools and the bridged ones are not offered twice.
+			// tools and the bridged ones are not offered twice. Only `bash` is
+			// re-included: `resolve`/`reject` run as its commands, so a staged
+			// preview can otherwise never be finalized.
 			mode: "a local bridge",
 			options: {},
 			allowedTools: undefined,
-			advertised: ["edit", "write"],
+			advertised: ["edit", "bash"],
 		},
 	])("limits Cursor's toolset and MCP catalog for a run with $mode", async ({ options, allowedTools, advertised }) => {
 		const { observed } = await runReadTurn(options);
