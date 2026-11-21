@@ -245,7 +245,7 @@ _[观看录屏 ↗](https://omp.sh/clips/conflict.mp4)_
 
 ### 19 · 先预览，再接受。
 
-`ast_edit` 会返回一张带替换数量的 _（proposed）_ 卡片，修改处于暂存状态。智能体向 `xd://resolve` 写入一行理由；TUI 将其变为 **Accept** 卡片，随后才真正写入磁盘——原子操作，要么全部成功，要么全部不做。
+`ast_edit` 会返回一张带替换数量的 _（proposed）_ 卡片，修改处于暂存状态。智能体运行 `resolve "<reason>"`；TUI 将其变为 **Accept** 卡片，随后才真正写入磁盘——原子操作，要么全部成功，要么全部不做。
 
 ![omp TUI：✓ AST Edit: console.log($X)（proposed）3 处替换 · 1 个文件，然后 ✓ Accept: 1 个文件中 3 处替换（AST Edit），接着是 “Applied 3 replacements in src/auth.ts.”](https://omp.sh/clips/codemod-poster.webp)
 
@@ -261,7 +261,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 ## 任务需要什么，_早已内置_。
 
-核心工具与 `read` 和 `bash` 位于同一命名空间。用 `--tools read,edit,bash,…` 固定启用的工具集；不常用的工具则通过 `xd://` 设备按需发现。`read xd://` 会列出它们，启用 `tools.xdev` 后可用 `write xd://<tool>` 运行。
+核心工具与 `read` 和 `bash` 位于同一命名空间。用 `--tools read,edit,bash,…` 固定启用的工具集；启用 `tools.commands` 后，不常用的可发现工具会挂载为 bash 命令——用 bash 工具运行 `<tool> <args>`，用 `<tool> --help` 获取由 schema 派生的用法，而无需在每次请求中附带 schema。
 
 **文件与搜索**
 

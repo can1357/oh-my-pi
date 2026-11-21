@@ -19,7 +19,6 @@ import {
 	PREVIEW_LIMITS,
 	replaceTabs,
 	sanitizeDisplayLines,
-	TRUNCATE_LENGTHS,
 	truncateToWidth,
 	clipCollapsed,
 } from "../render/render-utils";
@@ -300,8 +299,13 @@ function searchHead(query: string | undefined, meta?: string, badge?: { text: st
 	};
 }
 
-/** One cited source row: domain-initial mark, linked title, muted `domain · age`. */
-function sourceRow(src: SearchResponse["sources"][number], index: number): NativeChild {
+/**
+ * One cited source (role `omp.tool.source`): domain-initial mark, linked title, muted `domain · age`,
+ * then the page excerpt (role `omp.tool.excerpt`) when the search has no synthesized answer to read
+ * instead. Tern draws each as a card in the `omp.tool.sources` grid and shows excerpts only while
+ * the tool is unfolded.
+ */
+function sourceRow(src: SearchResponse["sources"][number], index: number, excerpt: boolean): NativeChild {
 	const url = typeof src.url === "string" ? src.url : "";
 	const title = typeof src.title === "string" && src.title.trim() ? src.title : url.trim() ? url : "Untitled";
 	const domain = url ? getDomain(url) : "";
@@ -310,32 +314,20 @@ function sourceRow(src: SearchResponse["sources"][number], index: number): Nativ
 		(typeof src.publishedDate === "string" ? src.publishedDate : "");
 	const meta = [domain, age].filter(Boolean).join(" · ");
 	const initial = (domain.replace(/^www\./, "")[0] ?? "?").toUpperCase();
+	// The host clamps the excerpt to its card's width, so its lines go whole.
+	const lines = excerpt ? excerptLines(src.snippet) : [];
 	return node(
 		"row",
 		{ gap: "sm", align: "baseline", role: "omp.tool.source", href: url || undefined },
 		compact([
 			node("badge", { text: initial, title: domain || undefined }),
-			text([span(plainText(title), "link", url ? { href: url } : undefined)], { lines: 1, truncate: "end" }),
+			text([span(plainText(title), "link", url ? { href: url } : undefined)], { lines: 2, truncate: "end" }),
 			meta ? text([span(plainText(meta), "muted")], { lines: 1 }) : undefined,
+			lines.length > 0
+				? text([span(lines.join("\n"), "muted")], { role: "omp.tool.excerpt", wrap: "word", lines: EXCERPT_LINES })
+				: undefined,
 		]),
 		`${index}:${url}`,
-	);
-}
-
-/**
- * One result of an answerless search: its {@link sourceRow} over the cleaned page
- * excerpt, standing in for the model-facing numbered listing of the same sources.
- */
-function sourceResult(src: SearchResponse["sources"][number], index: number): NativeChild {
-	const excerpt = excerptLines(src.snippet).map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE));
-	return node(
-		"col",
-		{ gap: "none", role: "omp.tool.web.hit" },
-		compact([
-			sourceRow(src, index),
-			excerpt.length > 0 ? noteText(excerpt.join("\n"), "muted", EXCERPT_LINES) : undefined,
-		]),
-		`hit:${index}:${typeof src.url === "string" ? src.url : ""}`,
 	);
 }
 
@@ -386,21 +378,25 @@ function describeSearchResult(
 	const tooltip = plainText([providerInfo, usageParts.join(" · ")].filter(Boolean).join("\n"));
 	const badge = response.model ? { text: plainText(response.model), title: tooltip } : undefined;
 
+	// No synthesized answer: the result text is the model-facing numbered listing of these sources,
+	// so each source carries its excerpt instead of that text being rendered.
+	const sourceGrid =
+		sources.length > 0
+			? node(
+					"col",
+					{ role: "omp.tool.sources" },
+					sources.map((src, i) => sourceRow(src, i, !answer)),
+					"sources",
+				)
+			: noteText("No sources returned");
 	return {
 		tool: searchHead(query, `${providerLabel} · ${formatCount("source", sources.length)}`, badge),
 		tone: sources.length > 0 ? undefined : "warning",
 		body: answer
-			? [
-					{ ...md(plainText(answer), { title: tooltip }), key: "answer" },
-					sources.length > 0
-						? node("col", { role: "omp.tool.files" }, sources.map(sourceRow), "sources")
-						: noteText("No sources returned"),
-				]
+			? [{ ...md(plainText(answer), { title: tooltip }), key: "answer" }, sourceGrid]
 			: sources.length > 0
-				? // No synthesized answer: the result text is the model-facing numbered listing of these
-					// sources, so list each source once with its excerpt instead of rendering that text.
-					[node("col", { gap: "sm" }, sources.map(sourceResult), "results")]
-				: [noteText(rawText || "No answer text returned"), noteText("No sources returned")],
+				? [sourceGrid]
+				: [noteText(rawText || "No answer text returned"), sourceGrid],
 	};
 }
 

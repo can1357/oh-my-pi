@@ -3104,6 +3104,12 @@ pub struct SessionState {
 	pub model: Option<ModelInfo>,
 	#[serde(rename = "thinkingLevel", default, skip_serializing_if = "Option::is_none")]
 	pub thinking_level: Option<ThinkingLevel>,
+	/// The user's thinking selector: `auto` while auto mode picks the effort, else `thinkingLevel`.
+	#[serde(rename = "configuredThinkingLevel", default, skip_serializing_if = "Option::is_none")]
+	pub configured_thinking_level: Option<ConfiguredThinkingLevel>,
+	/// Selectors the active model accepts, as omp's thinking selector lists them: `off`, `auto`, then its efforts.
+	#[serde(rename = "thinkingLevels", default, skip_serializing_if = "Option::is_none")]
+	pub thinking_levels: Option<Vec<ConfiguredThinkingLevel>>,
 	#[serde(rename = "isStreaming", default = "default_session_state_is_streaming")]
 	pub is_streaming: bool,
 	#[serde(rename = "isCompacting", default = "default_session_state_is_compacting")]
@@ -3254,6 +3260,52 @@ pub struct CompactionResult {
 	pub preserve_data: Option<Map<String, Value>>,
 	#[serde(rename = "providerReplayThroughEntryId", default, skip_serializing_if = "Option::is_none")]
 	pub provider_replay_through_entry_id: Option<String>,
+}
+
+/// A role a model holds, as picker rows chip it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPickerRole {
+	pub role: String,
+	/// The role's display tag.
+	pub label: String,
+	/// Auto-selected: the role has no configured model.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub auto: Option<bool>,
+}
+
+/// One row of omp's session model picker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPickerRow {
+	pub provider: String,
+	pub id: String,
+	pub name: String,
+	/// The quick role this row applies (`@` search); pass it to `set_model`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub role: Option<String>,
+	/// Visible roles the model holds, built-in order first.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub roles: Option<Vec<ModelPickerRole>>,
+	/// Steps of the model's thinking slider, low to high: `auto`, `off`, then its efforts. Absent when it has no effort to pick.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub thinking: Option<Vec<ConfiguredThinkingLevel>>,
+	/// Model rows: the session's level as this model would run it (the untouched slider). Quick-role rows: the role's explicit level, which `set_model` should carry.
+	#[serde(rename = "thinkingLevel", default, skip_serializing_if = "Option::is_none")]
+	pub thinking_level: Option<ConfiguredThinkingLevel>,
+	/// The session's context exceeds the model's window.
+	#[serde(rename = "overContext", default, skip_serializing_if = "Option::is_none")]
+	pub over_context: Option<bool>,
+	/// The session runs this row: its model, or under `@` its active quick role.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub current: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPickerResult {
+	pub rows: Vec<ModelPickerRow>,
+	/// Leading rows that are recently used or role-held (the picker's Recent block); 0 when there is no such split.
+	pub recent: i64,
+	/// Matching rows before `limit`.
+	pub total: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5342,6 +5394,11 @@ pub struct AbortAndPromptParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AbortAndDeliverQueueResult {
+	pub aborted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewSessionParams {
 	#[serde(rename = "parentSession", default, skip_serializing_if = "Option::is_none")]
 	pub parent_session: Option<String>,
@@ -5550,6 +5607,12 @@ pub struct SetModelParams {
 	pub provider: String,
 	#[serde(rename = "modelId")]
 	pub model_id: String,
+	/// Thinking level to run the model at, clamped to it; omitted re-applies the session's level.
+	#[serde(rename = "thinkingLevel", default, skip_serializing_if = "Option::is_none")]
+	pub thinking_level: Option<ConfiguredThinkingLevel>,
+	/// Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5558,8 +5621,19 @@ pub struct GetAvailableModelsResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GetModelPickerParams {
+	/// Search text; blank browses every model, `provider/` limits matches to a provider.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub query: Option<String>,
+	/// Most rows to return; default 100.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetThinkingLevelParams {
-	pub level: ThinkingLevel,
+	/// `auto` lets omp pick the effort per turn.
+	pub level: ConfiguredThinkingLevel,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6416,6 +6490,35 @@ impl Command for AbortAndRestoreQueueCommand {
 	}
 }
 
+/// Abort the current run and continue it with the queued user input (the TUI's empty Enter); `aborted` is false when no run was streaming with queued input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AbortAndDeliverQueueCommand {}
+
+impl Command for AbortAndDeliverQueueCommand {
+	const NAME: &'static str = "abort_and_deliver_queue";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = AbortAndDeliverQueueResult;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<AbortAndDeliverQueueResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first; queued input continues the run in place of the continue directive. Acknowledged once the continuation is under way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResumeCommand {}
+
+impl Command for ResumeCommand {
+	const NAME: &'static str = "resume";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = ();
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		let _ = data;
+		Ok(())
+	}
+}
+
 /// Start a new session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct NewSessionCommand {
@@ -6843,6 +6946,12 @@ pub struct SetModelCommand {
 	pub provider: String,
 	#[serde(rename = "modelId")]
 	pub model_id: String,
+	/// Thinking level to run the model at, clamped to it; omitted re-applies the session's level.
+	#[serde(rename = "thinkingLevel", default, skip_serializing_if = "Option::is_none")]
+	pub thinking_level: Option<ConfiguredThinkingLevel>,
+	/// Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub role: Option<String>,
 }
 
 impl Command for SetModelCommand {
@@ -6886,10 +6995,32 @@ impl Command for GetAvailableModelsCommand {
 	}
 }
 
+/// Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GetModelPickerCommand {
+	/// Search text; blank browses every model, `provider/` limits matches to a provider.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub query: Option<String>,
+	/// Most rows to return; default 100.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub limit: Option<i64>,
+}
+
+impl Command for GetModelPickerCommand {
+	const NAME: &'static str = "get_model_picker";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = ModelPickerResult;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<ModelPickerResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
 /// Set the thinking level.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetThinkingLevelCommand {
-	pub level: ThinkingLevel,
+	/// `auto` lets omp pick the effort per turn.
+	pub level: ConfiguredThinkingLevel,
 }
 
 impl Command for SetThinkingLevelCommand {

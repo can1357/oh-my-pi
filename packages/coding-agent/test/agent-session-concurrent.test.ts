@@ -2231,8 +2231,8 @@ describe("AgentSession TTSR resume gate", () => {
 		const modelResult = JSON.stringify(mock.calls[1]?.context.messages ?? []);
 		expect(modelResult.match(/Do not write FORBIDDEN_TOKEN\./g) ?? []).toHaveLength(1);
 	});
-	it("does not preflight a direct nested xd device dispatch", async () => {
-		const parameters = type({ path: "string", content: "string" });
+	it("does not preflight a direct nested tool command dispatch", async () => {
+		const parameters = type({ command: "string" });
 		const sessionManager = SessionManager.inMemory(tempDir);
 		const extensionRunner = new ExtensionRunner(
 			[],
@@ -2241,33 +2241,31 @@ describe("AgentSession TTSR resume gate", () => {
 			sessionManager,
 			sharedModelRegistry,
 		);
-		const deviceTool: AgentTool<typeof parameters> = {
+		const commandTool: AgentTool<typeof parameters> = {
 			name: "lsp",
 			label: "LSP",
-			description: "Nested device",
+			description: "Nested tool command",
 			parameters,
 			matcherDigest: args => {
-				if (!args || typeof args !== "object" || !("content" in args)) return undefined;
-				return typeof args.content === "string" ? args.content : undefined;
+				if (!args || typeof args !== "object" || !("command" in args)) return undefined;
+				return typeof args.command === "string" ? args.command : undefined;
 			},
-			execute: async () => ({ content: [{ type: "text", text: "device executed" }] }),
+			execute: async () => ({ content: [{ type: "text", text: "nested executed" }] }),
 		};
-		const inner = new ExtensionToolWrapper(deviceTool, extensionRunner);
-		const outerTool: AgentTool<typeof parameters> = {
-			name: "write",
-			label: "Write",
-			description: "Outer xd write",
+		const inner = new ExtensionToolWrapper(commandTool, extensionRunner);
+		const bashTool: AgentTool<typeof parameters> = {
+			name: "bash",
+			label: "Bash",
+			description: "Outer bash command",
 			parameters,
 			execute: (id, args, signal, onUpdate, context) =>
-				inner.execute(id, { path: "probe.ts", content: args.content }, signal, onUpdate, context),
+				inner.execute(id, { command: args.command }, signal, onUpdate, context),
 		};
-		const outer = new ExtensionToolWrapper(outerTool, extensionRunner);
+		const outer = new ExtensionToolWrapper(bashTool, extensionRunner);
 		const mock = createMockModel({
 			responses: [
 				{
-					content: [
-						{ type: "toolCall", name: "write", arguments: { path: "xd://lsp", content: "DEVICE_RULE_TOKEN" } },
-					],
+					content: [{ type: "toolCall", name: "bash", arguments: { command: "NESTED_TOOL_TOKEN" } }],
 				},
 			],
 			handler: () => ({ content: ["Done"] }),
@@ -2288,13 +2286,13 @@ describe("AgentSession TTSR resume gate", () => {
 			repeatGap: 10,
 		});
 		ttsrManager.addRule({
-			name: "no-device-token",
-			path: "device-rule.md",
-			content: "Do not use DEVICE_RULE_TOKEN.",
-			condition: ["DEVICE_RULE_TOKEN"],
+			name: "no-nested-tool-token",
+			path: "nested-tool-rule.md",
+			content: "Do not use NESTED_TOOL_TOKEN.",
+			condition: ["NESTED_TOOL_TOKEN"],
 			scope: ["tool:lsp"],
 			interruptMode: "never",
-			_source: { provider: "test", providerName: "test", path: "device-rule.md", level: "project" },
+			_source: { provider: "test", providerName: "test", path: "nested-tool-rule.md", level: "project" },
 		});
 		session = new AgentSession({
 			agent,
@@ -2306,11 +2304,11 @@ describe("AgentSession TTSR resume gate", () => {
 			autoApprove: true,
 		});
 
-		await session.prompt("Use the lsp device through write");
+		await session.prompt("Run the lsp tool command through bash");
 		await session.waitForIdle();
 		const modelResult = JSON.stringify(mock.calls[1]?.context.messages ?? []);
-		expect(modelResult).toContain("device executed");
-		expect(modelResult).not.toContain("Do not use DEVICE_RULE_TOKEN.");
+		expect(modelResult).toContain("nested executed");
+		expect(modelResult).not.toContain("Do not use NESTED_TOOL_TOKEN.");
 	});
 
 	it("matches finalized write arguments regardless of streaming chunk boundaries", async () => {
