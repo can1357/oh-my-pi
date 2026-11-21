@@ -8,7 +8,7 @@
  ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
 ### Fixed ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
  ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed the refusal of an `xd://resolve` or `xd://reject` write sent with other tool calls, which now says that the other calls caused it ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed the refusal of an `xd://resolve` or `xd://reject` write sent with other tool calls, which now says that the other calls caused it ([#18859](https://github.com/can1357/oh-my-pi/issues/18859)) ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
  ([#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ## [19.1.0] - 2026-11-21
