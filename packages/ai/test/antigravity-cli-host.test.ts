@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import * as credentials from "@oh-my-pi/pi-ai/providers/antigravity-cli/credentials";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
@@ -18,7 +19,15 @@ import {
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
-import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	ProviderSessionState,
+	Tool,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -666,6 +675,83 @@ describe("AgyHost stateful steps", () => {
 		await restarted.prompts.next();
 		restarted.exit.resolve(24);
 		await expect(next.done).rejects.toThrow("exited with code 24");
+	});
+
+	it("returns a text-only report through streamSimple without exposing tools", async () => {
+		const state = await fixture();
+		const apiKey = JSON.stringify({
+			token: "fixture-access",
+			refreshToken: "fixture-refresh",
+			expiresAt: Date.now() + 3_600_000,
+			email: "wrapup@example.test",
+		});
+		const sessionId = "wrap-up";
+		const sessions = new Map<string, ProviderSessionState>([
+			[`antigravity-acp:${credentials.agyCredentialKey(apiKey)}:${sessionId}`, state.host],
+		]);
+		const staging = spyOn(credentials, "stageAgyCredentials").mockResolvedValue(undefined);
+		try {
+			const stream = streamSimple(
+				model,
+				{ messages: [user("Tools disabled. Report now.")], tools },
+				{ apiKey, sessionId, providerSessionState: sessions, toolChoice: "none" },
+			);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			expect(fake.options.tools).toEqual([]);
+			fake.text("Final report.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			expect((await stream.result()).content).toEqual([{ type: "text", text: "Final report." }]);
+		} finally {
+			staging.mockRestore();
+		}
+	});
+
+	it("disables tools for a text-only step and restores them on the next step", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("Report without tools")], {}, undefined, { toolChoice: "none" });
+		const textOnly = await state.started.next();
+		const prompt = await textOnly.prompts.next();
+		expect(textOnly.options.tools).toEqual([]);
+		textOnly.text("Final report.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		expect(first.writer.output.content).toEqual([{ type: "text", text: "Final report." }]);
+
+		const second = step(state.host, [user("Report without tools"), first.writer.output, user("Read now")]);
+		const withTools = await state.started.next();
+		await withTools.prompts.next();
+		const toolResult = withTools.call();
+		await second.done;
+		expect(second.writer.output.content.some(block => block.type === "toolCall")).toBe(true);
+		state.host.close();
+		await toolResult;
+	});
+
+	it("drops an existing tool bridge for the wrap-up turn", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("Work with tools")]);
+		const original = await state.started.next();
+		const initialPrompt = await original.prompts.next();
+		original.text("Work complete.");
+		initialPrompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+
+		const final = step(
+			state.host,
+			[user("Work with tools"), first.writer.output, user("Tools disabled. Report now.")],
+			{},
+			undefined,
+			{ toolChoice: "none" },
+		);
+		const textOnly = await state.started.next();
+		const prompt = await textOnly.prompts.next();
+		expect(original.closed).toBe(true);
+		expect(textOnly.options.tools).toEqual([]);
+		textOnly.text("Final report.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await final.done;
+		expect(final.writer.output.content).toEqual([{ type: "text", text: "Final report." }]);
 	});
 
 	it("never emits unknown, foreign or unannounced tool calls", async () => {
