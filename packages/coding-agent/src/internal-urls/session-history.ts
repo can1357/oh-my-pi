@@ -17,6 +17,7 @@ import type { InternalUrl, ResolveContext } from "./types";
 const SESSION_HOST = "session";
 const BROWSE_PATH = "/browse";
 const BROWSE_PREFIX = `${BROWSE_PATH}/`;
+/** Completion target for the top-level session index, without the history scheme. */
 export const SESSION_HISTORY_TARGET = `${SESSION_HOST}${BROWSE_PATH}`;
 const SESSION_INDEX = `history://${SESSION_HISTORY_TARGET}`;
 
@@ -24,6 +25,7 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const MAX_ID_SUGGESTIONS = 5;
 
+/** Parsed request to list or read persisted top-level sessions in the selected scope. */
 export type SessionHistoryRequest = { scope: "project" | "all" } & (
 	| { kind: "index"; limit: number; offset: number; query: string }
 	| { kind: "transcript"; id: string; full: boolean }
@@ -57,6 +59,7 @@ function integerParam(params: URLSearchParams, key: string, fallback: number, mi
 	return number;
 }
 
+/** Parse the top-level history route, returning undefined for other routes and throwing on invalid parameters. */
 export function parseSessionHistory(url: InternalUrl): SessionHistoryRequest | undefined {
 	// Like current/full, reserve a subpath, not a name in the agent roster.
 	if ((url.rawHost || url.hostname).toLowerCase() !== SESSION_HOST) return undefined;
@@ -131,6 +134,7 @@ function metadataLine(value: string): string {
 	);
 }
 
+/** Render the session display name as a single line of escaped Markdown. */
 export function historySessionTitle(session: SessionInfo): string {
 	return metadataLine(sessionDisplayName(session));
 }
@@ -143,10 +147,12 @@ function sessionHint(session: SessionInfo): string {
 	return `${encodeURIComponent(session.id)} — ${historySessionTitle(session)}`;
 }
 
+/** Resolve an exact header ID or a unique case-insensitive prefix, throwing on a miss or ambiguity. */
 export function findHistorySession(
 	sessions: SessionInfo[],
 	request: Extract<SessionHistoryRequest, { kind: "transcript" }>,
 ): SessionInfo;
+/** Resolve an ID as above, but return undefined for a miss while still rejecting ambiguity. */
 export function findHistorySession(
 	sessions: SessionInfo[],
 	request: Extract<SessionHistoryRequest, { kind: "transcript" }>,
@@ -180,6 +186,7 @@ export function findHistorySession(
 	throw new Error(hints.join("\n"));
 }
 
+/** Render one page of matching sessions, with a next-page link when more results remain. */
 export function renderHistorySessionIndex(
 	sessions: SessionInfo[],
 	request: Extract<SessionHistoryRequest, { kind: "index" }>,
