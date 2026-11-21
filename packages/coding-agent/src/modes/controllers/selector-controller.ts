@@ -7,14 +7,7 @@ import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import {
-	getAgentDbPath,
-	getAgentDir,
-	getProjectDir,
-	logger,
-	normalizePathForComparison,
-	sanitizeText,
-} from "@oh-my-pi/pi-utils";
+import { getAgentDir, getProjectDir, logger, normalizePathForComparison, sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	discoverAdvisorConfigs,
@@ -52,6 +45,7 @@ import { getAvailableThemes, getSymbolTheme, previewTheme, theme } from "@oh-my-
 import type { AgentHubOpenOptions, InteractiveModeContext, ResumeSessionOptions } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
+import { credentialStoreLabel } from "../../session/auth-broker-config";
 import {
 	createForeignSessionStore,
 	foreignSessionInfoToSessionInfo,
@@ -2294,7 +2288,8 @@ export class SelectorController {
 					0,
 				),
 			);
-			block.addChild(new Text(theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`), 1, 0));
+			const destination = await credentialStoreLabel(getOAuthCredentialProvider(providerId));
+			block.addChild(new Text(theme.fg("dim", `Credentials saved to ${destination}`), 1, 0));
 			this.ctx.present(block);
 			return true;
 		} catch (error: unknown) {
@@ -2312,6 +2307,8 @@ export class SelectorController {
 
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
 		try {
+			// Before the logout: removing a broker-unserved provider's last local login hands it back to the broker.
+			const source = await credentialStoreLabel(providerId);
 			const { removed, remainingSource } = await logoutCredential(
 				this.ctx.session,
 				providerId,
@@ -2333,7 +2330,7 @@ export class SelectorController {
 					0,
 				),
 			);
-			block.addChild(new Text(theme.fg("dim", `Credential removed from ${getAgentDbPath()}`), 1, 0));
+			block.addChild(new Text(theme.fg("dim", `Credential removed from ${source}`), 1, 0));
 			if (remainingSource) {
 				block.addChild(
 					new Text(theme.fg("warning", `${providerId} is still authenticated via ${remainingSource}`), 1, 0),
