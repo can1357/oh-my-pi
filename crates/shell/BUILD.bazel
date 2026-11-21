@@ -107,6 +107,14 @@ rust_test(
 )
 
 rust_test(
+    name = "session_commands_test",
+    srcs = ["tests/session_commands.rs"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True) + all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal = True) + all_crate_deps(normal_dev = True) + [":shell"],
+)
+
+rust_test(
     name = "minimizer_fixtures_test",
     srcs = ["tests/minimizer_fixtures.rs"],
     data = glob(["tests/fixtures/minimizer/**"]),

@@ -11,7 +11,6 @@ const rootHelpers: [name: string, kind: "function" | "object"][] = [
 	["compactText", "function"],
 	["rowsText", "function"],
 	["styledSpans", "function"],
-	["parseXdUrl", "function"],
 	["cfgExtensionTranscriptPresenters", "object"],
 ];
 
@@ -21,5 +20,11 @@ describe("extension helpers exported from the package root", () => {
 	it.each(rootHelpers)("exports %s as a %s", (name, kind) => {
 		expect(root[name]).not.toBeNull();
 		expect(typeof root[name]).toBe(kind);
+	});
+
+	it("exposes the bash tool-command name helper", () => {
+		expect(PiCodingAgent.toolCommandCallName({ name: "bash", arguments: { command: "github pr_view 1" } })).toBe(
+			"github",
+		);
 	});
 });

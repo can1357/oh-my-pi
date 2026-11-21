@@ -85,6 +85,8 @@ class FakeReconnectManager {
 	readonly order: string[] = [];
 	pending: Promise<unknown> | undefined;
 	status: "connected" | "connecting" | "disconnected" = "connected";
+	/** What the manual reconnect yields: a connection, or null when it failed. */
+	outcome: object | null = {};
 
 	getServerConfig(name: string): MCPServerConfig | undefined {
 		return this.configs.get(name);
@@ -95,10 +97,10 @@ class FakeReconnectManager {
 		this.order.push("update");
 		return this.pending;
 	}
-	async reconnectServer(name: string, options?: { manual?: boolean }): Promise<null> {
+	async reconnectServer(name: string, options?: { manual?: boolean }): Promise<object | null> {
 		this.reconnected.push({ name, manual: options?.manual });
 		this.order.push("reconnect");
-		return null;
+		return this.outcome;
 	}
 	getConnectionStatus(_name: string): "connected" | "connecting" | "disconnected" {
 		return this.status;
@@ -135,6 +137,21 @@ describe("reconnectMcpManagerServer", () => {
 		expect(asHttpServerConfig(installed).url).toBe("https://acp.example.com/mcp");
 		expect(Object.keys(asHttpServerConfig(installed).headers ?? {})).toEqual([]);
 		expect(installed.auth).toBeUndefined();
+	});
+
+	test("never reports a failed reconnect as connected, whatever the entry's status says", async () => {
+		const manager = new FakeReconnectManager();
+		manager.configs.set("client-server", { type: "http", url: "https://acp.example.com/mcp" });
+		const selected: MCPServerConfig = { type: "http", url: "https://acp.example.com/mcp" };
+		manager.outcome = null;
+
+		expect(await reconnectMcpManagerServer(manager as unknown as MCPManager, "client-server", selected)).toBe(
+			"disconnected",
+		);
+		manager.status = "connecting";
+		expect(await reconnectMcpManagerServer(manager as unknown as MCPManager, "client-server", selected)).toBe(
+			"connecting",
+		);
 	});
 
 	test("refuses a manager entry that is not the reauthorized definition", async () => {

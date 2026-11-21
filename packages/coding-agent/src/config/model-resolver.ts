@@ -241,8 +241,10 @@ export function resolveExactModelIdentity(
 	const literal = models.find(model => formatModelStringWithRouting(model) === identity);
 	if (literal) return literal;
 	const routing = splitUpstreamRouting(identity);
-	if (!routing) return undefined;
-	const base = models.find(model => formatModelString(model) === routing.base);
+	if (!routing) return findOpenRouterRouteVariant(identity, models);
+	const base =
+		models.find(model => formatModelString(model) === routing.base) ??
+		findOpenRouterRouteVariant(routing.base, models);
 	if (!base || !supportsUpstreamRouting(base)) return undefined;
 	const routed = applyUpstreamRouting(base, routing.upstream);
 	return formatModelStringWithRouting(routed) === identity ? routed : undefined;
@@ -305,6 +307,21 @@ function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Mode
 		id: requestedId,
 		...(model.name === model.id ? { name: requestedId } : {}),
 	};
+}
+
+/**
+ * An OpenRouter route variant (`openrouter/<id>:nitro`) of a literal catalog model, cloned the way
+ * full selector resolution clones it, so exact-only lookups accept the variants it accepts.
+ * Undefined for other providers, thinking-level suffixes, or a base the catalog lacks.
+ */
+export function findOpenRouterRouteVariant(selector: string, models: Model<Api>[]): Model<Api> | undefined {
+	const prefix = "openrouter/";
+	if (!selector.startsWith(prefix)) return undefined;
+	const modelId = selector.slice(prefix.length);
+	const route = getOpenRouterRouteSuffix(modelId);
+	if (!route) return undefined;
+	const base = models.find(model => model.provider === "openrouter" && model.id === route.baseId);
+	return base ? cloneModelWithRequestedId(base, modelId) : undefined;
 }
 
 const AMAZON_BEDROCK_PROVIDER = "amazon-bedrock";
@@ -1801,9 +1818,10 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 /**
  * Resolve a list of override patterns to the first matching model.
  *
- * `exactOnly` matches each pattern only as a literal `provider/model-id`,
- * optionally followed by a supported `:level` and an aggregator `@upstream` pin:
- * no role aliases, globs, or fuzzy ids.
+ * `exactOnly` matches each pattern only as a literal `provider/model-id` or an
+ * OpenRouter route variant of one (`openrouter/<id>:nitro`), optionally followed
+ * by a supported `:level` and an aggregator `@upstream` pin: no role aliases,
+ * globs, or fuzzy ids. Per-call grant matching relies on this contract.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
@@ -1814,7 +1832,9 @@ export function resolveModelOverride(
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
 	if (options?.exactOnly) {
-		const find = (selector: string) => availableModels.find(model => `${model.provider}/${model.id}` === selector);
+		const find = (selector: string) =>
+			availableModels.find(model => `${model.provider}/${model.id}` === selector) ??
+			findOpenRouterRouteVariant(selector, availableModels);
 		const exact = (selector: string) => {
 			// Some real ids end in a level-shaped segment, so the literal id wins over a suffix split.
 			const literal = find(selector);

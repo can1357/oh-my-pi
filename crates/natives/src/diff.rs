@@ -141,14 +141,37 @@ fn diff_lines_impl(old_text: &[u16], new_text: &[u16]) -> Vec<DiffChange> {
 pub fn diff_line_runs(old_text: JsString, new_text: JsString) -> Result<Vec<DiffRun>> {
 	let old_text = js::utf16(old_text)?;
 	let new_text = js::utf16(new_text)?;
-	Ok(diff_line_runs_impl(&old_text, &new_text))
+	let (old_ids, new_ids) = line_ids(&old_text, &new_text);
+	Ok(diff_runs(omp_diff::myers_diff(&old_ids, &new_ids)))
 }
 
-fn diff_line_runs_impl(old_text: &[u16], new_text: &[u16]) -> Vec<DiffRun> {
+/// [`diff_line_runs`] bounded to `max_edits` added or removed lines.
+///
+/// Returns `null` once the edit script needs more. An exact diff of a
+/// wholesale rewrite takes time quadratic in its size; this one stops after
+/// `O((N + M) · max_edits)`, for callers that can treat such a rewrite as one
+/// replaced block.
+#[napi]
+pub fn diff_line_runs_within(
+	old_text: JsString,
+	new_text: JsString,
+	max_edits: u32,
+) -> Result<Option<Vec<DiffRun>>> {
+	let old_text = js::utf16(old_text)?;
+	let new_text = js::utf16(new_text)?;
+	let (old_ids, new_ids) = line_ids(&old_text, &new_text);
+	Ok(omp_diff::myers_diff_within(&old_ids, &new_ids, max_edits as usize).map(diff_runs))
+}
+
+/// Interned ids of `text.split("\n")` for both sides.
+fn line_ids(old_text: &[u16], new_text: &[u16]) -> (Vec<u32>, Vec<u32>) {
 	let old_tokens: Vec<&[u16]> = old_text.split(|&unit| unit == LF).collect();
 	let new_tokens: Vec<&[u16]> = new_text.split(|&unit| unit == LF).collect();
-	let (old_ids, new_ids) = omp_diff::intern(&old_tokens, &new_tokens);
-	omp_diff::myers_diff(&old_ids, &new_ids)
+	omp_diff::intern(&old_tokens, &new_tokens)
+}
+
+fn diff_runs(runs: Vec<omp_diff::Run>) -> Vec<DiffRun> {
+	runs
 		.into_iter()
 		.map(|run| DiffRun { count: run.count, added: run.added, removed: run.removed })
 		.collect()

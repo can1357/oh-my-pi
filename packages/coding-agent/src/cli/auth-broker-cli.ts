@@ -335,9 +335,7 @@ async function runList(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 const CLIPROXY_TYPE_TO_PROVIDER: Record<string, string> = {
 	claude: "anthropic",
 	codex: "openai-codex",
-	gemini: "google-gemini-cli",
 	antigravity: "google-antigravity",
-	"gemini-cli": "google-gemini-cli",
 };
 
 interface CliProxyCredentialJson {
