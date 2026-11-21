@@ -82,23 +82,26 @@ it.skipIf(process.platform === "win32")(
 
 it.skipIf(process.platform === "win32")("gives a background job the session identity", async () => {
 	const sessionFile = path.join(cwd, "sessions", "bg.jsonl");
+	const artifactsDir = path.join(cwd, "sessions", "bg");
 	const job = new BashTool({
 		cwd,
 		hasUI: false,
 		getSessionFile: () => sessionFile,
 		getSessionId: () => "session-bg",
+		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => "*",
 		asyncJobManager: manager,
 		settings: Settings.isolated({}),
 	});
 	const result = await job.execute("bg-env", {
-		command: `printf '%s|%s|%s' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$PI_TOOL_CALL_ID" > env.txt`,
+		command: `printf '%s|%s|%s|%s' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$PI_TOOL_CALL_ID" "$PI_LOCAL_DIR" > env.txt`,
 		async: true,
 	});
 	if (!result.details?.async?.jobId) throw new Error("expected background job");
 	await manager.waitForAll();
-	const [id, file, callId] = (await Bun.file(path.join(cwd, "env.txt")).text()).split("|");
+	const [id, file, callId, localDir] = (await Bun.file(path.join(cwd, "env.txt")).text()).split("|");
 	expect(id).toBe("session-bg");
 	expect(file).toBe(sessionFile);
 	expect(callId).toBe("bg-env");
+	expect(localDir).toBe(path.join(artifactsDir, "local"));
 });

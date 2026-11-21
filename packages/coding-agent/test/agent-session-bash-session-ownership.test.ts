@@ -12,6 +12,7 @@ import { createBashTool } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-p
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -56,6 +57,7 @@ describe("AgentSession bash session ownership", () => {
 		sessionManager: SessionManager = SessionManager.inMemory(tempDir.path()),
 		extensionRunner?: ExtensionRunner,
 		responseContent: () => string[] = () => ["Done"],
+		evalToolSession?: ToolSession,
 	): AgentSession {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
@@ -72,6 +74,7 @@ describe("AgentSession bash session ownership", () => {
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 			extensionRunner,
+			evalToolSession,
 		});
 		return session;
 	}
@@ -154,6 +157,50 @@ describe("AgentSession bash session ownership", () => {
 				cwd: tempDir.path(),
 			}),
 		);
+	});
+
+	it("gives user-shell commands the session's local:// directory over an inherited one", async () => {
+		const shell = process.platform === "win32" ? (Bun.env.ComSpec ?? "cmd.exe") : "/bin/sh";
+		cfgShellPath.set(Settings.instance, shell);
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell,
+			args: process.platform === "win32" ? ["/c"] : ["-c"],
+			env: { PATH: Bun.env.PATH ?? "", HOME: tempDir.path(), SHELL: shell, PI_LOCAL_DIR: "/parent/local" },
+			prefix: undefined,
+		});
+		createSession(SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions")));
+		await seedPersistedSession();
+		const artifactsDir = session.sessionManager.getArtifactsDir();
+		if (!artifactsDir) throw new Error("Expected a persisted session's artifacts dir");
+
+		const result = await session.executeBash('printf "%s" "$PI_LOCAL_DIR"', undefined, { useUserShell: true });
+
+		expect(result.output).toBe(path.join(artifactsDir, "local"));
+	});
+
+	it("gives user-shell commands the local:// directory its tools have pinned, not the session's own", async () => {
+		const shell = process.platform === "win32" ? (Bun.env.ComSpec ?? "cmd.exe") : "/bin/sh";
+		cfgShellPath.set(Settings.instance, shell);
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell,
+			args: process.platform === "win32" ? ["/c"] : ["-c"],
+			env: { PATH: Bun.env.PATH ?? "", HOME: tempDir.path(), SHELL: shell },
+			prefix: undefined,
+		});
+		const pinned = path.join(tempDir.path(), "parent-artifacts");
+		const tools: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({}),
+			localProtocolOptions: { getArtifactsDir: () => pinned, getSessionId: () => "parent-session" },
+		};
+		createSession(undefined, undefined, undefined, tools);
+
+		const result = await session.executeBash('printf "%s" "$PI_LOCAL_DIR"', undefined, { useUserShell: true });
+
+		expect(result.output).toBe(path.join(pinned, "local"));
 	});
 
 	/** Aborts a TERM-ignoring command and verifies disposal killed its process. */
@@ -286,8 +333,9 @@ describe("AgentSession bash session ownership", () => {
 		await session.executeBash("true", undefined, { useUserShell: true });
 
 		expect(executeBashSpy).toHaveBeenCalledTimes(2);
-		expect(executeBashSpy.mock.calls[0]?.[1]?.env).toEqual({ OMP_INJECTED_TOKEN: "injected-value" });
-		expect(executeBashSpy.mock.calls[1]?.[1]?.env).toEqual({ OMP_INJECTED_TOKEN: "injected-value" });
+		const forwarded = { OMP_INJECTED_TOKEN: "injected-value", PI_LOCAL_DIR: session.localRoot };
+		expect(executeBashSpy.mock.calls[0]?.[1]?.env).toEqual(forwarded);
+		expect(executeBashSpy.mock.calls[1]?.[1]?.env).toEqual(forwarded);
 		expect(cachedShellConfig.env).not.toHaveProperty("OMP_INJECTED_TOKEN");
 	});
 

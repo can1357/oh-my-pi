@@ -657,9 +657,10 @@ Every command the agent runs through the `bash` tool (foreground, background, PT
 | ----------------- | ------------------------------------------------------------------------------------------ |
 | `PI_SESSION_ID`   | Current session ID                                                                         |
 | `PI_SESSION_FILE` | Absolute path to the current session JSONL file; empty when not persisted (`--no-session`) |
+| `PI_LOCAL_DIR`    | Absolute path of the directory `local://` paths resolve to; it exists once something is written there |
 | `PI_TOOL_CALL_ID` | ID of the `bash` tool call running the command                                             |
 
-Values are read when each tool call starts, so the next call follows `/fork`, `/new`, and `/resume`, and a call already under way keeps the session it started in. They are always set, so an empty value replaces a stale one inherited from a parent omp process. User `!` commands do not receive them.
+Values are read when each tool call starts, so the next call follows `/fork`, `/new`, and `/resume`, and a call already under way keeps the session it started in. They are always set, so an empty value replaces a stale one inherited from a parent omp process. User `!` and `!!` commands receive only `PI_LOCAL_DIR`, since a user shell such as fish or zsh cannot resolve `local://` paths itself: `!! ls $PI_LOCAL_DIR`.
 
 `PI_TOOL_CALL_ID` matches the `toolCall` entry in `PI_SESSION_FILE` when the agent called `bash` itself (a subagent's call is in the subagent's own transcript). A `bash` call made from an `eval` cell through the tool bridge gets the bridge's generated id (`js-bash-…`), which no transcript entry carries; the transcript records the `eval` call instead.
 

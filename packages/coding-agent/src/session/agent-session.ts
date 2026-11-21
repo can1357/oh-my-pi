@@ -2278,6 +2278,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: this.settings,
 			extensionRunner: () => this.#extensionRunner,
 			isStreaming: () => this.isStreaming,
+			localRoot: () => this.localRoot,
 		};
 		this.#bash = new BashRunner(bashHost);
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.

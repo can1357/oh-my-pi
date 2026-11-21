@@ -63,6 +63,8 @@ export interface BashRunnerHost {
 	settings: Settings;
 	extensionRunner(): ExtensionRunner | undefined;
 	isStreaming(): boolean;
+	/** The session's `local://` directory, passed to commands as `PI_LOCAL_DIR`. */
+	localRoot(): string;
 }
 
 /** Owns bash execution and preserves result ownership across transcript transitions. */
@@ -93,6 +95,7 @@ export class BashRunner {
 		let targetTransferred = false;
 		const excludeFromContext = options?.excludeFromContext === true;
 		const cwd = this.#host.sessionManager.getCwd();
+		const localRoot = this.#host.localRoot();
 		try {
 			const extensionRunner = this.#host.extensionRunner();
 			if (extensionRunner?.hasHandlers("user_bash")) {
@@ -139,7 +142,9 @@ export class BashRunner {
 					cwd,
 					timeout: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.#host.settings)) * 1000,
 					onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),
-					env: shellEnv,
+					// Every `!` and RPC command gets the `local://` directory; only the
+					// embedded shell resolves the URLs themselves, not fish or zsh.
+					env: { ...shellEnv, PI_LOCAL_DIR: localRoot },
 					useUserShell: options?.useUserShell,
 					pty: options?.pty,
 				});
