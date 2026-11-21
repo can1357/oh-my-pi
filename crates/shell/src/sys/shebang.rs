@@ -19,8 +19,8 @@ use bstr::{BStr, BString, ByteSlice};
 /// Bytes of a file the kernel looks at for `#!` (Linux `BINPRM_BUF_SIZE`).
 pub const HEAD_LEN: usize = 256;
 
-/// Shells run in-engine.
-const SELF_SHELLS: [&[u8]; 3] = [b"sh", b"bash", b"zsh"];
+/// Shells run in-engine ([`is_self_shell`]).
+pub const SELF_SHELLS: [&str; 3] = ["sh", "bash", "zsh"];
 
 /// A parsed `#!` line, borrowing the file head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +88,7 @@ fn basename(path: &[u8]) -> &[u8] {
 /// Whether `name` (a bare command name, no directory) is a shell the engine
 /// implements itself: `sh`, `bash` or `zsh`.
 pub fn is_self_shell(name: &[u8]) -> bool {
-	SELF_SHELLS.contains(&name)
+	SELF_SHELLS.iter().any(|shell| shell.as_bytes() == name)
 }
 
 impl<'a> Shebang<'a> {
