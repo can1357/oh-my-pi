@@ -136,6 +136,8 @@ Important edge behavior from runtime:
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "abort_and_restore_queue" }`
+- `{ id?, type: "abort_and_deliver_queue" }`
+- `{ id?, type: "resume" }`
 - `{ id?, type: "new_session", parentSession?: string }`
 - `{ id?, type: "open_session", sessionDir: string, provider?: string, modelId?: string }`
 
@@ -165,19 +167,22 @@ Important edge behavior from runtime:
 
 ### Model
 
-- `{ id?, type: "set_model", provider: string, modelId: string }`
+- `{ id?, type: "set_model", provider: string, modelId: string, thinkingLevel?: ConfiguredThinkingLevel, role?: string }`
 - `{ id?, type: "cycle_model" }`
 - `{ id?, type: "get_available_models" }`
+- `{ id?, type: "get_model_picker", query?: string, limit?: number }`
 
-`get_available_models` waits for background model discovery before returning. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure.
+`get_available_models` waits for background model discovery before returning. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure. An optional `role` records the model role the switch belongs to (a quick-role pick passes its role); nothing is persisted either way.
+
+`get_model_picker` returns `{ rows, recent, total }`: omp's session model picker (alt+p) served to any client, so a remote picker lists and ranks models exactly as the TUI does. A blank `query` browses with the Recent block first (`recent` counts its leading rows; role-held and recently used models), `provider/` limits matches to a provider, and a query starting with `@` lists the ctrl+p quick roles. A row carries the roles the model holds (`roles`), the steps of its thinking slider (`thinking`) with the level the session would run it at (`thinkingLevel`), `overContext`, and `current`; a quick-role row carries `role`, which `set_model` takes back.
 
 ### Thinking
 
-- `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
+- `{ id?, type: "set_thinking_level", level: ConfiguredThinkingLevel }`
 - `{ id?, type: "cycle_thinking_level" }`
 - `{ id?, type: "get_available_thinking_levels" }`
 
-`ThinkingLevel` is `"inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`. Discovery returns `"off"` followed by the live model's supported efforts, omitting `"inherit"` and the session-only `"auto"` selector.
+`ThinkingLevel` is `"inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`. Discovery returns `"off"` followed by the live model's supported efforts, omitting `"inherit"` and the session-only `"auto"` selector. `set_thinking_level` itself takes `ConfiguredThinkingLevel` (that plus `"auto"`), so a client can opt into per-turn auto effort.
 
 ### Queue modes
 
@@ -459,6 +464,23 @@ Before aborting, the server withdraws every user-authored steering and follow-up
 
 The response always succeeds, even when the withdrawn input is too large for one response under the negotiated protocol (1 MiB per frame on v1, 64 MiB reassembled on v2). Instead of failing with a transport-limit error, which would lose the already-withdrawn input, the server first omits every entry's `images` and sets `data.imagesDropped: true`, keeping all texts. If the texts alone still do not fit, it returns only the oldest entries that fit (steering first, then follow-ups) and sets `data.truncated: true`; entries after the last one listed are gone. Neither flag is present when the full result fits.
 
+### `abort_and_deliver_queue` and `resume` payloads
+
+The TUI's empty Enter and its `.`/`c` continue shortcut:
+
+```json
+{"id":"req_5","type":"abort_and_deliver_queue"}
+{"id":"req_5","type":"response","command":"abort_and_deliver_queue","success":true,"data":{"aborted":true}}
+{"id":"req_6","type":"resume"}
+{"id":"req_6","type":"response","command":"resume","success":true}
+```
+
+`abort_and_deliver_queue` interrupts a streaming run that has queued user input (or steering the in-flight response took live) and continues it with that input. With no run streaming or nothing queued it does nothing and answers `aborted: false`.
+
+`resume` continues the agent. A running turn is interrupted first; when input is queued, that input continues the run instead of the continue directive. A prompt the model has not answered yet runs again as is. It answers once the continuation is under way, or fails with `Nothing to resume` when the session has no conversation to continue.
+
+Both wait behind user input received before them, so a `prompt` sent just before is queued by the time they run and is the input they deliver. Unlike `abort`, they cancel no earlier input and leave goal continuation running; an `abort` received after them cancels them if they have not started. Older runtimes reject both. The TypeScript client exposes `abortAndDeliverQueue(): Promise<boolean>` and `resume(): Promise<void>`.
+
 ### `get_state` payload
 
 `tokensPerSecond` is a number when output throughput is available and `null`
@@ -498,6 +520,8 @@ field is absent outside both stages. No event carries it, so re-read
 {
 	"model": { "provider": "...", "id": "..." },
 	"thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
+	"configuredThinkingLevel": "auto|off|minimal|low|medium|high|xhigh|max",
+	"thinkingLevels": ["off", "auto", "low", "medium", "high"],
 	"isStreaming": false,
 	"isCompacting": false,
 	"steeringMode": "all|one-at-a-time",

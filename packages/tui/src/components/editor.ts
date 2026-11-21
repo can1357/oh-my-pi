@@ -874,6 +874,8 @@ export class Editor implements Component, Focusable {
 	#autocompleteProvider?: AutocompleteProvider;
 	#textAssistProvider?: EditorTextAssistProvider;
 	#autocompleteList?: SelectList;
+	/** Rows the completion list took in the last render. */
+	#popupRows = 0;
 	#autocompleteState: "regular" | "force" | "assist" | null = null;
 	#textAssistReplacement:
 		| {
@@ -1898,7 +1900,11 @@ export class Editor implements Component, Focusable {
 			autocompleteList.setMaxVisible(
 				Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
 			);
-			result.push(...autocompleteList.render(width));
+			const list = autocompleteList.render(width);
+			result.push(...list);
+			this.#popupRows = list.length;
+		} else {
+			this.#popupRows = 0;
 		}
 
 		return result;
@@ -5361,6 +5367,10 @@ export class Editor implements Component, Focusable {
 	 * while its refresh is pending stays open internally but is hidden, so it does
 	 * not claim keys (Escape, Vim mode switches) meant for the editor or app.
 	 */
+	coveringRows(): number {
+		return this.#popupRows;
+	}
+
 	isShowingAutocomplete(): boolean {
 		return this.#visibleAutocompleteList() !== undefined;
 	}

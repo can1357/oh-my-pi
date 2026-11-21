@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- The side panel's model switcher is omp's session model picker: Recent block, the same search ranking as the TUI, role chips, `@` quick roles and a thinking slider; a thinking chip sits beside it.
+- The side panel's composer takes omp's input shortcuts: `.` or `c` alone continues the agent, Enter in an empty composer interrupts a run to send the queued messages, Ctrl+Enter queues a message until the run finishes, and Esc (or Stop) puts queued messages back in the composer instead of leaving them to run later.
+
+### Fixed
+
+- Browser relay ports are assigned by the OS. Terminal clients discover the endpoint locally; sidebar chats use their existing connection.
+
+- The relay link to the native host now drops an attempt the host never answers and retries, so a stale native port no longer leaves Chrome without a relay until the extension is reloaded.
+
 ### Breaking Changes
 
 - The omp extension has a pinned Chrome ID. Remove the old unpinned extension and use _Load unpacked_ to install it again once.
@@ -14,6 +25,10 @@
 ### Changed
 
 - The omp extension now keeps registered installations current across omp upgrades and reloads when idle.
+
+### Fixed
+
+- Side panel sessions drive only your Chrome: the browser tool no longer opens omp's own headless browser where you can't see it
 
 ## [19.0.1] - 2026-11-19
 

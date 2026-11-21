@@ -1364,6 +1364,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const outputTap = new TextTap("out", "the command's own stdout+stderr");
 		const pipeSources = new PipeTextSources(streams);
 		let latestText = "";
+		// When the command last wrote its own output: the jobs sheet follows whichever source flows.
+		let outputModified: number | undefined;
 		let latestProgressDetails: BashProgressDetails | undefined;
 		let backgrounded = !options.foreground;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
@@ -1454,6 +1456,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						speech: sessionShellSpeech(this.session),
 						allocateArtifact: this.session.allocateOutputArtifact,
 						onChunk: chunk => {
+							outputModified = Date.now();
 							outputTap.append(chunk);
 							notifier?.poll();
 						},
@@ -1533,6 +1536,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					cwd: options.commandCwd,
 					pids: () => pids(),
 					streams,
+					outputModified: () => outputModified,
 					trace: () => liveTrace ?? latestProgressDetails?.trace,
 				},
 				intent: options.intent,

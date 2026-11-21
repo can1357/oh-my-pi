@@ -2371,6 +2371,15 @@ export interface YieldItem {
 	schemaOverridden?: boolean;
 }
 
+/**
+ * What an agent's model is producing while a response streams: its reasoning, its prose, or a tool
+ * call it is still writing, with the call's argument preview and intent so far.
+ */
+export type AgentStreaming =
+	| { kind: "thinking" }
+	| { kind: "text" }
+	| { kind: "call"; tool: string; args?: string; argsKey?: string; intent?: string };
+
 /** Progress tracking for a single agent */
 export interface AgentProgress {
 	index: number;
@@ -2389,6 +2398,11 @@ export interface AgentProgress {
 	/** Intent the model attached to the current call; undefined when that call carried none. */
 	currentToolIntent?: string;
 	currentToolStartMs?: number;
+	/**
+	 * What the model is producing now, while a response streams. A call it finished writing stays
+	 * until it starts running ({@link currentTool}); reasoning and prose clear when the response ends.
+	 */
+	streaming?: AgentStreaming;
 	recentTools: Array<{
 		tool: string;
 		args: string;

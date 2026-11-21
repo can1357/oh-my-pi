@@ -186,13 +186,18 @@ const TRACE_POLL_MS = 80;
 
 /**
  * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
- * forwards each changed snapshot; `stop()` takes the final one.
+ * forwards each changed snapshot, bound to the run (and its `streams`, so
+ * a card can show what a step writes there); `stop()` takes the final one.
  *
  * An invalid snapshot is logged once and skipped: the poll runs from a timer,
  * where a throw would escape as an uncaught exception and end the session,
  * and the trace is only a visualization of the run.
  */
-function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
+function pollRunTrace(
+	trace: RunTrace,
+	streams: PipeStreams | undefined,
+	onTrace: (trace: ShellTrace) => void,
+): { stop: () => ShellTrace | undefined } {
 	let last = -1;
 	let latest: ShellTrace | undefined;
 	let warned = false;
@@ -207,7 +212,7 @@ function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { 
 			return;
 		}
 		latest = snapshot;
-		attachShellTrace(latest, trace);
+		attachShellTrace(latest, trace, streams);
 		onTrace(latest);
 	};
 	const timer = setInterval(poll, TRACE_POLL_MS);
@@ -952,7 +957,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// Set when the command returns before its native run settled.
 	let unsettled: { run: Promise<ShellRunResult>; cleanup: Promise<void> } | undefined;
 	const runTrace = options?.onTrace ? new RunTrace(finalCommand) : undefined;
-	const tracePoll = runTrace && options?.onTrace ? pollRunTrace(runTrace, options.onTrace) : undefined;
+	const tracePoll =
+		runTrace && options?.onTrace ? pollRunTrace(runTrace, options.streams, options.onTrace) : undefined;
 	// The last snapshot once the run settled (any outcome); `stop()` is idempotent past the first call.
 	let finalTrace: ShellTrace | undefined;
 	const settleTrace = (): { trace: ShellTrace } | Record<string, never> => {

@@ -16,7 +16,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { compact, keyed, keyNames, node, span, stableKey } from "@oh-my-pi/pi-tui/native/describe";
 import { sameItems, sameProps } from "@oh-my-pi/pi-tui/native/memo";
 import type { NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
-import { formatCost, modelChip } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+import { formatCost, liveModelChip, modelChip } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { type AgentRecordLike, MAIN_AGENT_ID } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { stripInlineMarkdown } from "@oh-my-pi/pi-tui/overlays/plan-toc";
 import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
@@ -118,7 +118,7 @@ export interface TrayDoneEntry {
 	readonly id: string;
 	readonly name: string;
 	readonly status: "done" | "failed" | "stopped";
-	/** `4m 12s · 38 tools · $0.12`, of what is known; empty when nothing is. */
+	/** `opus-4.5 · high · 4m 12s · 38 tools · $0.12`: the model it ran on, then its run, of what is known; empty when nothing is. */
 	readonly meta: string;
 	/** Its last output or result line; empty when nothing has one. */
 	readonly line: string;
@@ -356,7 +356,10 @@ function callDetail(intent: string | undefined, args: string | undefined, argsKe
 	return "";
 }
 
-/** What a running agent is doing: its current call, else its last one, else a word. */
+/**
+ * What a running agent is doing: the call it runs, else what its model is producing (a call it is
+ * writing, the newest line of its prose, its reasoning), else its last call, else a word.
+ */
 function runningDoing(
 	progress: AgentProgress | undefined,
 	activity: string | undefined,
@@ -367,6 +370,18 @@ function runningDoing(
 			tool: line(current, TRUNCATE_LENGTHS.SHORT),
 			text: callDetail(progress.currentToolIntent, progress.currentToolArgs, progress.currentToolArgsKey),
 		};
+	}
+	const streaming = progress?.streaming;
+	if (streaming?.kind === "call") {
+		return {
+			tool: line(streaming.tool, TRUNCATE_LENGTHS.SHORT),
+			text: callDetail(streaming.intent, streaming.args, streaming.argsKey),
+		};
+	}
+	if (streaming?.kind === "thinking") return { tool: "", text: "Thinking" };
+	if (streaming?.kind === "text") {
+		const said = plainLine(progress?.recentOutput ?? []);
+		if (said) return { tool: "", text: said };
 	}
 	const recent = progress?.recentTools[0];
 	if (recent)
@@ -401,8 +416,19 @@ function agentDoing(
 	}
 }
 
-/** `sonnet-5.5 · low`: the model that produced the agent's work and its thinking level. */
+/**
+ * `sonnet-5.5 · low`: what a queued or running agent with a live session runs on now, as its
+ * composer names it (a `/switch` shows at once), else the model that produced its work. Settled
+ * cards name {@link servedModel}.
+ */
 function agentModel(session: ObservableSession | undefined, ref: AgentRecordLike | undefined): string {
+	const live = ref?.session && liveModelChip(ref.session);
+	if (live) return line(live.level ? `${live.text} · ${live.level}` : live.text, TRUNCATE_LENGTHS.TITLE);
+	return servedModel(session, ref);
+}
+
+/** `sonnet-5.5 · low`: the model that produced the agent's work, whatever its session points at now. */
+function servedModel(session: ObservableSession | undefined, ref: AgentRecordLike | undefined): string {
 	// An agent only the observer knows gets a stand-in ref, so its badge resolves the same way.
 	const record: AgentRecordLike | undefined =
 		ref ??
@@ -418,9 +444,9 @@ function agentModel(session: ObservableSession | undefined, ref: AgentRecordLike
 		});
 	const chip = record && modelChip(record, session);
 	if (!chip) return "";
-	const configured = session?.progress?.resolvedThinkingLevel;
-	const level =
-		chip.level ?? (configured && configured !== "off" && configured !== "inherit" ? configured : undefined);
+	// The level it ran at, not the one its session holds now (the chip's fallback for a selector without one).
+	const served = session?.progress?.resolvedThinkingLevel;
+	const level = served ? (served !== "off" && served !== "inherit" ? served : undefined) : chip.level;
 	return line(level ? `${chip.text} · ${level}` : chip.text, TRUNCATE_LENGTHS.TITLE);
 }
 
@@ -550,7 +576,7 @@ function agentItem(
 		tool: doing.tool,
 		text: doing.text,
 		type,
-		model: agentModel(session, ref),
+		model: isLive(status) ? agentModel(session, ref) : servedModel(session, ref),
 		tools,
 		stats: agentStats(session?.progress),
 		start: remembered.start,
@@ -639,7 +665,7 @@ function finishedAgentItem(
 		tool: "",
 		text,
 		type,
-		model: agentModel(session, ref),
+		model: servedModel(session, ref),
 		tools,
 		stats,
 		start: acted - (duration ?? 0),
@@ -716,6 +742,7 @@ function doneEntry(
 	const tools = progress?.toolCount || metrics?.tools || 0;
 	const cost = progress?.cost || metrics?.cost || 0;
 	const meta = [
+		servedModel(session, ref),
 		duration > 0 ? formatDuration(duration) : "",
 		tools > 0 ? formatCount("tool", tools) : "",
 		cost > 0 ? formatCost(cost) : "",
@@ -1104,8 +1131,11 @@ export function trayAgentDetail(session: ObservableSession | undefined, now: num
 		(session?.description ?? progress?.description ?? progress?.assignment ?? progress?.task ?? "").split("\n"),
 	);
 	if (!progress) return { task, tail: [] };
-	const current = session?.status === "active" ? progress.currentTool : undefined;
-	const past = progress.recentTools.slice(0, current ? TRAY_TAIL_LIMIT - 1 : TRAY_TAIL_LIMIT).reverse();
+	const active = session?.status === "active";
+	const current = active ? progress.currentTool : undefined;
+	// No call runs: the call the model is writing is the one it is inside.
+	const writing = active && !current && progress.streaming?.kind === "call" ? progress.streaming : undefined;
+	const past = progress.recentTools.slice(0, current || writing ? TRAY_TAIL_LIMIT - 1 : TRAY_TAIL_LIMIT).reverse();
 	const tail: TrayEvent[] = past.map(call => ({
 		tool: line(call.tool, TRUNCATE_LENGTHS.SHORT),
 		text: callDetail(call.intent, call.args, call.argsKey),
@@ -1119,6 +1149,14 @@ export function trayAgentDetail(session: ObservableSession | undefined, now: num
 			text: callDetail(progress.currentToolIntent, progress.currentToolArgs, progress.currentToolArgsKey),
 			state: "run",
 			age: age > TRAY_CALL_ELAPSED_MIN_MS ? age : undefined,
+		});
+	}
+	if (writing) {
+		tail.push({
+			tool: line(writing.tool, TRUNCATE_LENGTHS.SHORT),
+			text: callDetail(writing.intent, writing.args, writing.argsKey),
+			state: "run",
+			age: undefined,
 		});
 	}
 	return { task, tail };

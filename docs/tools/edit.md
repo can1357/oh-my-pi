@@ -27,6 +27,27 @@ Supported modes are `hashline`, `apply_patch`, `patch`, `replace`, and `sloppy`.
 
 This page primarily documents hashline. The schema, prompt, examples, renderer, and optional Lark format switch with the mode. Models with `editPromptVariant: "compact"` receive the compact hashline prompt. In `apply_patch` custom-tool mode the wire name is `apply_patch`; dispatch, including `xd://apply_patch`, still reaches the same internal tool. The tool is strict, essential, and uses exclusive concurrency.
 
+## `magic` mode
+
+`edit.mode: magic` (or `PI_EDIT_VARIANT=magic`) keeps the `edit` tool but changes its contract: the payload describes the changes in words, one section per file, and an auxiliary model writes each file's patch. `edit.modelVariants` cannot select it. Source: `packages/coding-agent/src/edit/magic.ts`; model-facing prompt: `packages/coding-agent/src/prompts/tools/magic-edit.md`.
+
+```text
+# src/jobs.ts
+- In `drain()`, declare `limit` before `batch`.
+# src/parse.ts
+- Rename every `retrunValue` to `returnValue`.
+```
+
+The schema is `{ input: string }`. Providers with custom-tool grammars receive the payload's Lark grammar and send it raw, as in `hashline` mode. A line starting with `# ` opens the next file unless it sits inside a code fence; text before the first `# path` line is rejected. Sections naming the same path merge.
+
+1. Each file is read and shown to the apply model with a line-number gutter, together with its changes. A line that opens a block shows the block's span instead of its number (`20-49`), so the model copies where a block ends instead of counting. A file of 200 lines or more is first shown as an excerpt when that leaves out at least half of it: the lines the change quotes, names by identifier, or gives by number, each with the block it opens and twelve lines of context, plus the head and tail of the file; `⋮ lines A-B not shown` marks each gap. A reply that is rejected or declines against an excerpt is asked for again with the whole file.
+2. It answers with line operations, one JSON array per line, numbered against the file as shown: `["delete",12,14]`, `["replace",9,9,"text"]`, `["sub",7,"old","new"]` (`"all"` instead of a line for every occurrence in the file), `["insert","after",15,"text"]`, `["move",20,41,"before",3]`, `["swap",20,49,51,74]`, `["indent",13,17,2]` / `["dedent",…]`. Existing text is never retyped, so deleting, moving or re-indenting a block costs a few tokens whatever its size. A first line `CANNOT: <reason>` declines the change. Fences, an outer array, quoted numbers and commentary after the operations are accepted; operations after commentary are not. Source: `packages/coding-agent/src/edit/magic-lines.ts`.
+3. The operations compile into one exact replacement of the lines they span. Blank lines between blocks are separators the compiler places itself: a deleted block leaves one behind, a moved block is set off again where it lands, and a range that is one blank line off gives the same result. Operations that touch the same lines, name a line outside the file or the shown excerpt, or remove indentation that is not there are rejected.
+4. Before writing, two checks send a doubtful reply back to the model instead of applying it: the file parsed and would no longer parse; or a deleted, moved or swapped range starts a block and stops inside it or runs past it. The second is a question: the same operations sent again are applied. The write is one atomic `replace`-mode batch and is refused if the file changed after it was read. Writes go one file at a time; plan-mode policy, LSP diagnostics and the result diff are the same as for any other mode.
+5. A rejected reply goes back to the model with the rejection: three completions per file inside one 120 second budget for the call. The output limit of a completion is sized to the shown file and the change.
+
+Files are independent. A section fails, leaving its file unchanged, when the model declines or no reply applies; when the file is missing or binary; when the file is larger than half the apply model's context window and the change names no part of it to show instead; or when the reply is cut off or the budget runs out. The result then reports `[path] not applied: <reason>` next to the other files' diffs, and the call is an error only when no section applied. The whole call fails when the payload has no section or no apply model resolves.
+
 ## Input
 
 | Field   | Type     | Required | Description                                                                                                                                                                                                      |
@@ -131,7 +152,7 @@ MV lib/welcome.py
 
 `sloppy` uses existing-text anchors, not snapshot tags. Find must identify one match unless it is `*** Find all` (or the file header ends in ` all`), which changes every match; for a bare identifier that means whole words. Bodies are raw text, without diff prefixes or closing markers. `…` in Find captures omitted text; Replace re-emits those captures in order. A Find of a first line, a `…` line, and a last line addresses a block, closing at the line that ends that block rather than a nested or continued one. Insert keeps the anchor and treats `…` literally. `*** Cut` takes the matched lines and the next `*** Paste Before`/`*** Paste After` puts them beside its own match; neither has a body, and a paste that fails leaves the block in place. A Find with no action is rejected. Every pair addresses the original file; matching/validation failures occur before writes.
 
-For a whole multiline construct, put the action and the opening-line prefix on one line: `*** Replace Block: opener`, `*** Delete Block: opener`, `*** Cut Block: opener`, or `*** Paste Before Block: opener` / `*** Paste After Block: opener`. Replace takes the final code; the others take no body. An unresolved syntax block, shared closing line, or ambiguous opener is rejected. Use a text Find with distinctive context instead. `Delete Block` also accepts two adjacent byte-identical copies: it keeps the first and removes the separator and second copy.
+For a whole multiline construct, put the action and the opening-line prefix on one line: `*** Replace Block: opener`, `*** Delete Block: opener`, `*** Cut Block: opener`, or `*** Paste Before Block: opener` / `*** Paste After Block: opener`. The header only locates the old block. Replace takes the complete final code, including the opening line if it stays; the other block actions take no body. An unresolved syntax block, shared closing line, or ambiguous opener is rejected. Use a text Find with distinctive context instead. `Delete Block` also accepts two adjacent byte-identical copies: it keeps the first and removes the separator and second copy.
 
 The mode prompts in `crates/edit/prompts/` define the full syntax.
 

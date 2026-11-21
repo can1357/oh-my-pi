@@ -9114,12 +9114,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * directive would add nothing. Otherwise the hidden manual-continue directive
 	 * asks the model to pick its work back up. A conversation with neither a user
 	 * turn nor a compaction/branch summary of earlier ones cannot be continued.
+	 * `onAdmitted` fires once a continue directive claims the session; a resume that
+	 * schedules the continuation or hands the run to queued input returns without
+	 * calling it, once that is under way.
 	 *
 	 * @throws {AgentBusyError} when another turn claims the session between the interrupt and the continuation.
 	 * @throws {Error} when there is no conversation to resume.
 	 */
-	async resume(): Promise<void> {
-		if (!this.isStreaming) return this.#resumeIdle();
+	async resume(options?: { onAdmitted?: () => void }): Promise<void> {
+		const onAdmitted = options?.onAdmitted;
+		if (!this.isStreaming) return this.#resumeIdle(onAdmitted);
 		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
 		// until the continuation is live, so a host driving this session to a result
 		// (the subagent executor) never mistakes the gap for the end of the run.
@@ -9133,7 +9137,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: queued });
 			// Interrupt-and-send: the abort's own drain resumes the run with the queued input.
 			if (queued) return;
-			await this.#resumeIdle(() => void this.#waitForPromptDispatchLive().then(release));
+			await this.#resumeIdle(() => {
+				onAdmitted?.();
+				void this.#waitForPromptDispatchLive().then(release);
+			});
 		} finally {
 			release();
 		}

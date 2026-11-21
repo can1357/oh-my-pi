@@ -10,7 +10,7 @@ use std::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
 	},
-	time::Duration,
+	time::{Duration, UNIX_EPOCH},
 };
 
 use napi::{
@@ -367,6 +367,14 @@ pub struct PipeStreamInfo {
 	pub open:     bool,
 	/// The stream is a file a command redirected its output into.
 	pub file:     bool,
+	/// Run-trace node key (`unit:0:node`) of the stage writing into the pipe,
+	/// or of the command whose redirection opened the file. Absent when the
+	/// run has no trace or the writer's unit is not in it.
+	pub node:     Option<String>,
+	/// When it was last written, in ms since the UNIX epoch: a pipe's last
+	/// write (its opening before any), a file's modification time (0 when
+	/// unreadable).
+	pub modified: f64,
 }
 
 /// Retained bytes of a stream, as stream offsets `start..end`.
@@ -404,6 +412,11 @@ impl PipeStreams {
 				total:    stream.total as f64,
 				open:     stream.open,
 				file:     stream.file,
+				node:     stream.node.map(|node| node.to_string()),
+				modified: stream
+					.modified
+					.duration_since(UNIX_EPOCH)
+					.map_or(0.0, |since| since.as_millis() as f64),
 			})
 			.collect()
 	}

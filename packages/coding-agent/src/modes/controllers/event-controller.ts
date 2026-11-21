@@ -340,10 +340,6 @@ export class EventController {
 	 * last loop's normal yield.
 	 */
 	#stoppedWaiting = false;
-	// Composer activity: a host run or idle maintenance (auto-compaction) owns
-	// turn-scoped chrome, so the post-run chrome floor must not settle on it.
-	#runActive = false;
-	#maintenanceActive = false;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -1065,17 +1061,6 @@ export class EventController {
 		return this.#executionStartedCallIds.has(toolCallId);
 	}
 
-	/** The viewed session was swapped for an idle one: no run owns the chrome any more. */
-	markViewIdle(): void {
-		this.#runActive = false;
-		this.#maintenanceActive = false;
-		this.#syncComposerActivity();
-	}
-
-	#syncComposerActivity(): void {
-		this.ctx.composer.setRunActive(this.#runActive || this.#maintenanceActive);
-	}
-
 	/**
 	 * Clear every transcript-anchored/turn-scoped piece of state. Used by the
 	 * session focus proxy when re-pointing the transcript at another session:
@@ -1288,8 +1273,6 @@ export class EventController {
 		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
-		this.#runActive = true;
-		this.#syncComposerActivity();
 		setRunStatus({ state: "working" });
 		this.ctx.ui.requestRender();
 	}
@@ -2463,8 +2446,6 @@ export class EventController {
 				this.ctx.loadingAnimation = undefined;
 				this.ctx.statusContainer.disposeChildren();
 			}
-			this.#runActive = false;
-			this.#syncComposerActivity();
 			return;
 		}
 		if (stoppedWaiting) {
@@ -2555,8 +2536,6 @@ export class EventController {
 			this.ctx.loadingAnimation = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		this.#runActive = false;
-		this.#syncComposerActivity();
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#readToolCallArgs.clear();
@@ -2682,8 +2661,6 @@ export class EventController {
 			() => this.ctx.interruptFromPointer(),
 		);
 		this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
-		this.#maintenanceActive = true;
-		this.#syncComposerActivity();
 		this.ctx.ui.requestRender();
 	}
 
@@ -2697,8 +2674,6 @@ export class EventController {
 			this.ctx.autoCompactionLoader = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		this.#maintenanceActive = false;
-		this.#syncComposerActivity();
 		const isHandoffAction = event.action === "handoff";
 		const isRemoteAction = event.action === "remote";
 		const isShakeAction = event.action === "shake";

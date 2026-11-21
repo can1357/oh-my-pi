@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+- Provider stream watchdogs (time-to-first-event and inter-event idle) now default to 15 minutes, up from 5, so slow one-shot completions are not cut off
+- Gemini reasoning streams are now interrupted after 64 consecutive planning headers with no tool call (was 36)
+
 ### Fixed
 - Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
+- Models flagged `foldUserAfterToolResult` now receive a user message that arrives right after a tool result inside that tool result, instead of as a separate turn
 - LiteLLM requests now switch to another configured key when a 422 budget-exceeded response stops the current key ([#19860](https://github.com/can1357/oh-my-pi/issues/19860)).
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))

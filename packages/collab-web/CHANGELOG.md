@@ -5,6 +5,7 @@
 ### Added
 
 - `GuestClient.sendPrompt` accepts images and sends them with the prompt.
+- `GuestClient.sendResume`, `GuestClient.sendDeliverQueue` and `sendPrompt`'s `followUp` option: continue the host's agent, interrupt it to send queued messages, or queue a follow-up.
 
 ## [19.0.0] - 2026-11-18
 
