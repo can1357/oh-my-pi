@@ -8895,7 +8895,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	showSessionInfo(info: string, context?: ContextUsage): void {
 		this.#hideSessionInfo();
-		const overlay = new SessionInfoOverlay(this.ui, info, () => this.#hideSessionInfo(), context);
+		const sessionId = this.session.sessionId;
+		const overlay: SessionInfoOverlay = new SessionInfoOverlay(
+			this.ui,
+			info,
+			() => this.#hideSessionInfo(),
+			context,
+			() => {
+				copyToClipboard(sessionId).then(
+					() => {
+						overlay.markCopied();
+						this.showStatus("Copied session ID to clipboard");
+						this.ui.requestRender();
+					},
+					(error: unknown) =>
+						this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
+				);
+			},
+		);
 		this.#sessionInfoOverlayHandle = this.ui.showOverlay(overlay, {
 			anchor: "bottom-center",
 			width: "100%",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/copy id` copies the session ID, and so does `c` in `/session` (or its Copy ID button in the native sheet) ([#19777](https://github.com/can1357/oh-my-pi/pull/19777) by [@farnoy](https://github.com/farnoy))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
