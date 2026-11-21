@@ -7,6 +7,7 @@ import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { noStoreErrorResponse } from "@oh-my-pi/pi-ai/auth-gateway/http";
+import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import { encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type {
 	AssistantMessage,
@@ -285,6 +286,39 @@ describe("pi-native gateway cache controls", () => {
 				promptCacheKey: "bench-cache-pair",
 				statefulResponses: false,
 			});
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+
+	it("round-trips cursorContextBudgetTokens from streamPiNative through the auth gateway", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-cursor-budget-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.keys.setRuntime("cursor", "test-key");
+		const mock = createMockModel({ provider: "cursor", id: "pi-native-cursor-budget" });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+		});
+
+		try {
+			mock.push({ content: ["ok"] });
+			const clientModel = { ...mock, baseUrl: handle.url, transport: "pi-native" as const };
+			const stream = streamPiNative(clientModel, baseContext, {
+				apiKey: "test-token",
+				cursorContextBudgetTokens: 150_000,
+			});
+			await stream.result();
+
+			expect(mock.calls).toHaveLength(1);
+			expect(mock.calls[0]?.options?.cursorContextBudgetTokens).toBe(150_000);
 		} finally {
 			await handle.close();
 			storage.close();
