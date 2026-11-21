@@ -26,6 +26,46 @@ async fn apply(before: &str, body: &str, expected: Result<&str, &str>) {
 }
 
 #[tokio::test]
+async fn a_comment_continuation_cannot_match_part_of_an_opener() {
+	let body = "*** Find\n * Explain the lookup.\n*** Replace\n * Describe the cache.\n";
+	let inline = "\t/** Explain the lookup. */\n\t#lookup() {\n\t\treturn read();\n\t}\n";
+	apply(inline, body, Err("did not match")).await;
+	apply("/**\n * Explain the lookup.\n */\n", body, Ok("/**\n * Describe the cache.\n */\n"))
+		.await;
+	apply(
+		inline,
+		"*** Find\n/** Explain the lookup. */\n*** Replace\n/** Describe the cache. */\n",
+		Ok("\t/** Describe the cache. */\n\t#lookup() {\n\t\treturn read();\n\t}\n"),
+	)
+	.await;
+}
+
+#[tokio::test]
+async fn replacing_a_private_method_keeps_its_authored_signature_and_adjacent_doc_comment() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write(
+		"a.ts",
+		"class Table {\n\t/** Reads an entry. */\n\t#lookup(\n\t\tkey: string,\n\t) {\n\t\treturn \
+		 this.old[key];\n\t}\n}\n",
+	);
+	workspace
+		.apply_raw(
+			"*** Edit File: a.ts\n*** Replace Block: #lookup(\n\t#lookup(\n\t\tkey: string,\n\t) \
+			 {\n\t\treturn this.entries[key];\n\t}\n",
+			&DiskWriter::default(),
+		)
+		.await
+		.expect("the selector must not consume the authored declaration");
+	assert_eq!(
+		workspace.read("a.ts").as_deref(),
+		Some(
+			"class Table {\n\t/** Reads an entry. */\n\t#lookup(\n\t\tkey: string,\n\t) \
+			 {\n\t\treturn this.entries[key];\n\t}\n}\n"
+		),
+	);
+}
+
+#[tokio::test]
 async fn short_ranges_require_a_whole_closing_line_at_the_authored_depth() {
 	let body = "*** Find\nif (ready) {\n…\n}\n*** Replace\nchanged\n";
 	for before in [

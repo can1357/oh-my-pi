@@ -242,6 +242,14 @@ export interface SessionStorage {
 	 */
 	claimSession?(sessionId: string, sessionPath: string): (() => void) | null;
 	/**
+	 * Whether another live process holds the claim (see `claimSession`) on the
+	 * session journaled at `sessionPath`, observed without taking it, so the
+	 * probe never makes the owner's own claim fail. `SessionManager.continueRecent`
+	 * starts a new session instead of resuming one a running process writes.
+	 * Optional for the same reason as `claimSession`.
+	 */
+	isSessionOwnedElsewhere?(sessionPath: string): boolean;
+	/**
 	 * Atomically delete a session and its artifacts only when `shouldDelete`
 	 * accepts the current session content. Optional because backends without a
 	 * cross-process conditional-delete primitive must skip opportunistic GC.
@@ -1368,6 +1376,13 @@ export class FileSessionStorage implements SessionStorage {
 			sessionLeases.delete(sessionId);
 			claim.lease.release();
 		};
+	}
+
+	/** A session this process holds, or whose lease cannot be probed, is not owned elsewhere. */
+	isSessionOwnedElsewhere(sessionPath: string): boolean {
+		const sessionId = readSessionHeaderIdSync(sessionPath);
+		if (sessionId === undefined || sessionLeases.has(sessionId)) return false;
+		return isSessionLeaseHeld(sessionId) === true;
 	}
 
 	/**

@@ -827,6 +827,8 @@ const CD_TARGET_TERMINATORS: Record<string, true> = {
 	")": true,
 };
 
+const CD_TARGET_EXPANSION_CHARS = "$`()*?[]{}";
+
 /**
  * Parses a leading `cd <path> && ...` or `cd <path>; ...` prefix so the bash
  * tool can route the target through its structured `cwd` parameter when the
@@ -845,6 +847,7 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 	const prefix = /^cd[ \t]+/.exec(command);
 	if (!prefix) return null;
 	let i = prefix[0].length;
+	const hasUnquotedLeadingTilde = command[i] === "~";
 	let path = "";
 	let inSingle = false;
 	let inDouble = false;
@@ -874,6 +877,7 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 				inDouble = false;
 				continue;
 			}
+			if (ch === "$" || ch === "`") return null;
 			path += ch;
 			continue;
 		}
@@ -892,13 +896,18 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 			i++;
 			continue;
 		}
+		if (CD_TARGET_EXPANSION_CHARS.includes(ch)) return null;
 		if (CD_TARGET_TERMINATORS[ch]) break;
 		path += ch;
 	}
 	// Unterminated quote or empty target: leave the command for the shell.
 	if (inSingle || inDouble || path.length === 0) return null;
-	// A path needing shell expansion can't be resolved literally through cwd.
-	if (/[$`(]/.test(path)) return null;
+	// These operands depend on shell directory-stack state rather than naming a
+	// literal directory, even when their spelling was quoted.
+	if (path === "-" || /^[+-]\d+$/.test(path)) return null;
+	// Only the current user's home is resolved outside the shell. A named-user
+	// (or other special) tilde prefix needs the shell's own expansion rules.
+	if (hasUnquotedLeadingTilde && path !== "~" && !path.startsWith("~/")) return null;
 	// Skip inter-token whitespace, then require a top-level `&&` or `;` (a single
 	// `&`, `||`, `|`, a `case` terminator `;;`/`;&`, or a redirect all mean this
 	// is not a bare `cd <path>`).

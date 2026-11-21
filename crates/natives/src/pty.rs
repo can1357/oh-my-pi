@@ -264,6 +264,31 @@ impl PtySession {
 		self.handles.lock().pid
 	}
 
+	/// Whether the program in the terminal waits on the user's keys.
+	///
+	/// `true` while echo is off (a password prompt such as `sudo`'s, or a
+	/// full-screen program like `less`) or, on Linux, while a foreground
+	/// process is blocked reading the terminal (a `[y/N]` prompt). `false` when
+	/// no session runs or, on Linux, no foreground process reads the terminal.
+	/// `null` when an echoing line prompt cannot be told from a busy program:
+	/// always on macOS and Windows, and on Linux when a foreground process
+	/// cannot be inspected (one running setuid).
+	#[cfg_attr(
+		not(unix),
+		allow(clippy::missing_const_for_fn, reason = "unix reads the terminal at runtime")
+	)]
+	#[napi]
+	pub fn awaits_input(&self) -> Option<bool> {
+		#[cfg(unix)]
+		{
+			input_wait::probe(&self.handles)
+		}
+		#[cfg(not(unix))]
+		{
+			None
+		}
+	}
+
 	/// Start a shell command, stream output chunks, and report the spawned child
 	/// PID.
 	#[napi]
@@ -516,6 +541,137 @@ impl PtyMaster {
 				use std::os::fd::AsRawFd;
 				Some(fd.as_raw_fd())
 			},
+		}
+	}
+}
+
+/// Detection behind [`PtySession::awaits_input`].
+#[cfg(unix)]
+mod input_wait {
+	use std::mem::MaybeUninit;
+
+	use parking_lot::Mutex;
+
+	use super::PtyHandles;
+
+	/// See [`super::PtySession::awaits_input`].
+	pub fn probe(handles: &Mutex<PtyHandles>) -> Option<bool> {
+		// Teardown clears `master_fd` under this lock before closing the fd, so
+		// it stays open while the guard is held.
+		let guard = handles.lock();
+		let Some(fd) = guard.master_fd else {
+			return Some(false);
+		};
+		if !echoes(fd)? {
+			return Some(true);
+		}
+		#[cfg(target_os = "linux")]
+		{
+			let foreground = linux::Foreground::read(fd, guard.pid?)?;
+			drop(guard);
+			foreground.reads_terminal()
+		}
+		#[cfg(not(target_os = "linux"))]
+		{
+			// No per-process syscall state: an echoing line prompt looks like a
+			// busy program.
+			None
+		}
+	}
+
+	/// Whether the terminal echoes typed keys; `None` when its mode is
+	/// unreadable.
+	fn echoes(master_fd: i32) -> Option<bool> {
+		let mut termios = MaybeUninit::<libc::termios>::uninit();
+		// SAFETY: tcgetattr writes a whole `termios` on success.
+		if unsafe { libc::tcgetattr(master_fd, termios.as_mut_ptr()) } != 0 {
+			return None;
+		}
+		// SAFETY: initialized by the successful tcgetattr above.
+		let termios = unsafe { termios.assume_init() };
+		Some((termios.c_lflag & libc::ECHO) != 0)
+	}
+
+	#[cfg(target_os = "linux")]
+	mod linux {
+		use std::{ffi::CStr, io::ErrorKind, os::unix::fs::MetadataExt};
+
+		use omp_shell::proctree::Process;
+
+		/// The terminal's foreground process group and the device its slave is.
+		pub struct Foreground {
+			leader: i32,
+			group:  i32,
+			slave:  u64,
+		}
+
+		impl Foreground {
+			/// Read from the open master; `leader` is the session's child. `None`
+			/// when the group or the slave cannot be read.
+			pub fn read(master_fd: i32, leader: i32) -> Option<Self> {
+				// SAFETY: tcgetpgrp on an open fd.
+				let group = unsafe { libc::tcgetpgrp(master_fd) };
+				if group <= 0 {
+					return None;
+				}
+				let mut name: [libc::c_char; 64] = [0; 64];
+				// SAFETY: ptsname_r writes a NUL-terminated name of at most
+				// `name.len()` bytes.
+				if unsafe { libc::ptsname_r(master_fd, name.as_mut_ptr(), name.len()) } != 0 {
+					return None;
+				}
+				// SAFETY: NUL-terminated by the successful ptsname_r above.
+				let path = unsafe { CStr::from_ptr(name.as_ptr()) };
+				let slave = std::fs::metadata(path.to_str().ok()?).ok()?.rdev();
+				Some(Self { leader, group, slave })
+			}
+
+			/// Whether a foreground process is blocked reading the terminal, from
+			/// `/proc/<pid>/syscall`; `None` when one is not ours to inspect.
+			pub fn reads_terminal(&self) -> Option<bool> {
+				let Some(leader) = Process::from_pid(self.leader) else {
+					return Some(false);
+				};
+				// `/dev/tty`: the controlling terminal under its generic name.
+				let console = libc::makedev(5, 0);
+				let mut unknown = false;
+				for process in leader.live_descendants().into_iter().chain([leader]) {
+					if process.group_id() != Some(self.group) {
+						continue;
+					}
+					let pid = process.pid();
+					let syscall = match std::fs::read_to_string(format!("/proc/{pid}/syscall")) {
+						Ok(syscall) => syscall,
+						Err(error) => {
+							// Gone by now is no wait; a setuid process hides what it
+							// waits on.
+							unknown |= error.kind() == ErrorKind::PermissionDenied;
+							continue;
+						},
+					};
+					let Some(fd) = blocked_read_fd(&syscall) else {
+						continue;
+					};
+					let Ok(file) = std::fs::metadata(format!("/proc/{pid}/fd/{fd}")) else {
+						continue;
+					};
+					if file.rdev() == self.slave || file.rdev() == console {
+						return Some(true);
+					}
+				}
+				if unknown { None } else { Some(false) }
+			}
+		}
+
+		/// The fd a `/proc/<pid>/syscall` line shows blocked in `read`/`readv`:
+		/// `<nr> 0x<fd> …`; `running` or `-1 …` outside a syscall.
+		fn blocked_read_fd(syscall: &str) -> Option<u32> {
+			let mut fields = syscall.split_whitespace();
+			let nr: libc::c_long = fields.next()?.parse().ok()?;
+			if nr != libc::SYS_read && nr != libc::SYS_readv {
+				return None;
+			}
+			u32::from_str_radix(fields.next()?.strip_prefix("0x")?, 16).ok()
 		}
 	}
 }
@@ -1188,6 +1344,13 @@ fn drive_pty(
 	// reached `on_chunk` (#7421). A reader parked on backpressure is not
 	// aborted. A descendant holding the slave open is the existing no-join
 	// case and is the only path that may skip an unbounded wait.
+	// Cleared before the master closes: `awaits_input` uses the fd under this
+	// lock, and a closed fd number can be reused by an unrelated file.
+	{
+		let mut handles = handles.lock();
+		handles.master_fd = None;
+		handles.pid = None;
+	}
 	#[cfg(windows)]
 	{
 		let (drop_tx, drop_rx) = flume::unbounded::<()>();
@@ -1200,11 +1363,6 @@ fn drive_pty(
 	#[cfg(not(windows))]
 	{
 		drop(master);
-	}
-	{
-		let mut handles = handles.lock();
-		handles.master_fd = None;
-		handles.pid = None;
 	}
 	await_pty_output_drain(
 		pump_done_rx,
@@ -1472,6 +1630,80 @@ mod output_gate_tests {
 		}
 		gate.resume();
 		assert!(reader.join().unwrap(), "resume releases the reader");
+	}
+}
+
+#[cfg(all(test, unix))]
+mod input_wait_tests {
+	use std::thread;
+
+	use super::*;
+
+	/// What `awaits_input` reports for `script` on a PTY, sampled every 50ms
+	/// for a second once the session started.
+	fn observe(script: &str) -> Vec<Option<bool>> {
+		let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+		let handles = Arc::new(Mutex::new(PtyHandles::default()));
+		let (tx, rx) = flume::unbounded();
+		let config = PtyRunConfig {
+			command: PtyCommand::Argv {
+				application: "/bin/sh".to_string(),
+				args:        vec!["-c".to_string(), script.to_string()],
+			},
+			cwd:     None,
+			env:     None,
+			cols:    80,
+			rows:    24,
+		};
+		let run = {
+			let handles = Arc::clone(&handles);
+			let tx = tx.clone();
+			let runtime = runtime.handle().clone();
+			// `run_pty_sync` spawns its pump on the ambient Tokio runtime.
+			thread::spawn(move || {
+				let _runtime = runtime.enter();
+				run_pty_sync(config, None, None, tx, rx, task::CancelToken::new(None, None), &handles)
+			})
+		};
+		while handles.lock().master_fd.is_none() {
+			thread::sleep(Duration::from_millis(10));
+		}
+		let samples = (0..20)
+			.map(|_| {
+				thread::sleep(Duration::from_millis(50));
+				input_wait::probe(&handles)
+			})
+			.collect();
+		let _ = tx.send(ControlMessage::Kill);
+		let _ = run.join();
+		samples
+	}
+
+	#[test]
+	fn echo_off_awaits_input() {
+		assert_eq!(observe("stty -echo; sleep 5").last(), Some(&Some(true)));
+	}
+
+	#[test]
+	fn line_prompt_awaits_input_where_detectable() {
+		let expected = if cfg!(target_os = "linux") {
+			Some(true)
+		} else {
+			None
+		};
+		assert_eq!(observe("printf 'Proceed? [y/N] '; read answer").last(), Some(&expected));
+	}
+
+	#[test]
+	fn busy_program_never_awaits_input() {
+		let samples = observe("sleep 5");
+		assert!(!samples.contains(&Some(true)), "{samples:?}");
+		let expected = if cfg!(target_os = "linux") {
+			Some(false)
+		} else {
+			None
+		};
+		assert_eq!(samples.last(), Some(&expected));
 	}
 }
 

@@ -589,13 +589,16 @@ export declare class PhononTts {
 }
 
 /**
- * The bytes crossing one shell run's pipeline pipes, during and after the run.
+ * The output of one shell run that never reaches its own stdout, during and
+ * after the run: the bytes crossing its pipeline pipes, and the files its
+ * commands redirect their output into.
  *
  * For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
- * so far while `tail` still holds it back. Create one per run and pass it as
+ * so far while `tail` still holds it back; for `cargo build > build.log`,
+ * stream 1 reads `build.log`. Create one per run and pass it as
  * [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
- * run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
- * 4 newest finished streams.
+ * run opened them; each keeps (a file: reads) its most recent 1 MiB, and a
+ * run keeps its 4 newest finished pipes and its 8 newest files.
  */
 export declare class PipeStreams {
   constructor()
@@ -688,6 +691,18 @@ export declare class PtySession {
   masterFd(): number | null
   /** Process id of the running session's child. */
   pid(): number | null
+  /**
+   * Whether the program in the terminal waits on the user's keys.
+   *
+   * `true` while echo is off (a password prompt such as `sudo`'s, or a
+   * full-screen program like `less`) or, on Linux, while a foreground
+   * process is blocked reading the terminal (a `[y/N]` prompt). `false` when
+   * no session runs or, on Linux, no foreground process reads the terminal.
+   * `null` when an echoing line prompt cannot be told from a busy program:
+   * always on macOS and Windows, and on Linux when a foreground process
+   * cannot be inspected (one running setuid).
+   */
+  awaitsInput(): boolean | null
   /**
    * Start a shell command, stream output chunks, and report the spawned child
    * PID.
@@ -3565,18 +3580,41 @@ export interface PipeStreamChunk {
   open: boolean
 }
 
-/** A tapped pipe of a run. */
+/** A tapped pipe or redirected file of a run. */
 export interface PipeStreamInfo {
   /** Stream number, from 1. */
   id: number
-  /** Source text of the stage writing into the pipe. */
+  /**
+   * Source text of the stage writing into the pipe, or of the command whose
+   * redirection opened the file.
+   */
   producer: string
-  /** Source text of the stage reading from it. */
+  /**
+   * Source text of the stage reading from the pipe, or the file's absolute
+   * path.
+   */
   consumer: string
-  /** Bytes written so far, including those no longer retained. */
+  /**
+   * Bytes written so far, including those no longer retained; a file's
+   * size now.
+   */
   total: number
-  /** Whether bytes may still arrive. */
+  /** Whether bytes may still arrive; for a file, whether the run goes on. */
   open: boolean
+  /** The stream is a file a command redirected its output into. */
+  file: boolean
+  /**
+   * Run-trace node key (`unit:0:node`) of the stage writing into the pipe,
+   * or of the command whose redirection opened the file. Absent when the
+   * run has no trace or the writer's unit is not in it.
+   */
+  node?: string
+  /**
+   * When it was last written, in ms since the UNIX epoch: a pipe's last
+   * write (its opening before any), a file's modification time (0 when
+   * unreadable).
+   */
+  modified: number
 }
 
 export interface PointerOptions {
@@ -3913,6 +3951,36 @@ export declare function setHangulCompatJamoWidthOverride(value: number): void
  * model.
  */
 export declare function shellBuiltins(sessionEnv?: Record<string, string>): Array<string>
+
+/** One invocation of a host-provided session command in the embedded shell. */
+export interface ShellCommandRequest {
+  /** Command name as invoked. */
+  name: string
+  /** Arguments after the command name. */
+  argv: Array<string>
+  /** Shell working directory at invocation time. */
+  cwd: string
+  /**
+   * UTF-8 stdin read to EOF, only when `argv` contains a bare `-`; empty
+   * otherwise.
+   */
+  stdin: string
+}
+
+/** Shell-composable response of a session command. */
+export interface ShellCommandResult {
+  stdout: string
+  stderr: string
+  /** 0..=255 */
+  exitCode: number
+}
+
+/** Host-provided commands installed for one `Shell.run`. */
+export interface ShellCommands {
+  /** Names resolvable as commands during this run. */
+  names: Array<string>
+  handler: (request: ShellCommandRequest) => Promise<ShellCommandResult>
+}
 
 /**
  *  Options for executing a shell command via the embedded bash engine
@@ -4296,6 +4364,12 @@ export interface ShellOptions {
   process?: boolean
 }
 
+/**
+ * Every name the engine resolves before a session command (reserved words,
+ * shell builtins, pi shell tools, in-process utilities, bash/sh/zsh).
+ */
+export declare function shellReservedCommandNames(): Array<string>
+
 /** Options for running a shell command. */
 export interface ShellRunOptions {
   /** Command string to execute in the shell. */
@@ -4318,6 +4392,12 @@ export interface ShellRunOptions {
    * it has one configured; absent leaves `say` to the system's.
    */
   speech?: ShellSpeech
+  /**
+   * Host-provided commands installed for this run only, resolved after
+   * the shell's builtins, pi's shell tools and in-process utilities, and
+   * before shell functions, aliases and `PATH`.
+   */
+  commands?: ShellCommands
   /** Receives a copy of every byte crossing the run's pipeline pipes. */
   streams?: PipeStreams
   /** Folds the run's engine events into a live model of the command. */
