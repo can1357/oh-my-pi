@@ -2061,6 +2061,21 @@ export class TurnRecovery {
 		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
 	}
 
+	/**
+	 * Models a retry fallback may switch to under the `enabledModels` scope, or `undefined` when the
+	 * session's fallbacks are not scoped (main sessions, or no scope configured).
+	 */
+	#retryFallbackScopedModels(): Model[] | undefined {
+		if (!this.#host.retryFallbackScopedToEnabledModels?.()) return undefined;
+		const scopePatterns = cfgEnabledModels.get(this.#host.settings);
+		if (scopePatterns.length === 0) return undefined;
+		return filterAvailableModelsByEnabledPatterns(
+			this.#host.modelRegistry.getAvailable(),
+			scopePatterns,
+			this.#host.settings,
+		);
+	}
+
 	/** Finds fallback candidates that follow the active selector. */
 	findRetryFallbackCandidates(
 		role: string,
@@ -2076,17 +2091,7 @@ export class TurnRecovery {
 			options,
 		);
 		const provider = this.#host.model()?.provider;
-		const scopePatterns = this.#host.retryFallbackScopedToEnabledModels?.()
-			? cfgEnabledModels.get(this.#host.settings)
-			: [];
-		const scopedModels =
-			scopePatterns.length > 0
-				? filterAvailableModelsByEnabledPatterns(
-						this.#host.modelRegistry.getAvailable(),
-						scopePatterns,
-						this.#host.settings,
-					)
-				: undefined;
+		const scopedModels = this.#retryFallbackScopedModels();
 		return candidates.filter(candidate => {
 			if (cfgOffline.get(this.#host.settings) && (provider === undefined || candidate.provider !== provider)) {
 				return false;
@@ -2689,6 +2694,8 @@ export class TurnRecovery {
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
 		if (!baseModel) return false;
+		const scopedModels = this.#retryFallbackScopedModels();
+		if (scopedModels && !scopedModels.some(scoped => modelsAreEqual(scoped, baseModel))) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
