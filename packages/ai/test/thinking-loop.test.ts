@@ -474,10 +474,20 @@ describe("ThinkingLoopDetector", () => {
 		expect(feed(`[TA_CASES]#{"cases": [${jsonRecords(60, 250).join(", ")}]}`, 20)).toBeNull();
 	});
 
-	test("does not trip on 500 one-line JSON records with 600-character string values (issue #11129)", () => {
-		// The measured case: 500 records at 600 characters stay trip-free in this alignment.
-		// Other lengths and alignments can still trip, so this is not a bound.
-		expect(feed(`[TA_CASES]#{"cases": [${jsonRecords(500, 600).join(", ")}]}`, 20)).toBeNull();
+	test("does not trip on 100 one-line JSON records with 550-character string values (issue #11129)", () => {
+		// At this length a 700-character chunk starts at a value's opening quote after its
+		// `:` landed in the previous chunk; the value must still be masked, not read as prose.
+		expect(feed(`[TA_CASES]#{"cases": [${jsonRecords(100, 550).join(", ")}]}`, 20)).toBeNull();
+	});
+
+	test("does not trip on a one-line JSON array whose records carry array-valued fields (issue #11129)", () => {
+		// A field value may be a flat array of scalars, not only a scalar.
+		const items = Array.from(
+			{ length: 100 },
+			(_, i) =>
+				`{"case_id": ${35350 + i}, "case_name": "case ${i + 1}", "steps": [1, 2, 3], "tags": ["auth", "login"], "case_sheet": 0}`,
+		);
+		expect(feed(`[TA_CASES]#{"cases": [${items.join(", ")}]}`, 20)).toBeNull();
 	});
 
 	test("does not trip on JSON records one per line (issue #11129)", () => {

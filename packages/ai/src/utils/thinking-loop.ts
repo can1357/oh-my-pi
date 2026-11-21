@@ -105,15 +105,32 @@ const SEGMENT_MIN_CLUSTER = 4;
  *  its closing quote, which a JSON delimiter follows. It is masked to `""` first, so the
  *  first real token after it is read as an opener. */
 const JSON_STRING_TAIL = /^[^"\n]*"(?=\s*[,}\]:])/;
+/** A JSON string value whose opening quote starts the segment: the `:` or `,` that
+ *  introduced it landed at the end of the previous chunk, so the delimiter lookbehind
+ *  of {@link JSON_STRING} is outside the segment and {@link JSON_STRING_TAIL} cannot
+ *  cross the opening quote to find a closing one. The value may run to the segment
+ *  end with no closing quote (`"?`); it is masked to `""` like any other string. */
+const JSON_STRING_LEAD = /^\s*"(?:\\.|[^"\\\n])*"?(?=\s*[,}\]:]|$)/;
 /** A JSON key or value string, closed or cut off at the segment end. It is masked to
  *  `""` before the record check, so a long descriptive value cannot hide the record
  *  around it. Anchored after `{`, `[`, `,` or `:` so a closing quote that the chunker
- *  left at a segment start is never read as an opener. */
+ *  left at a segment start is never read as an opener; a string whose opening quote
+ *  starts the segment is {@link JSON_STRING_LEAD}'s case. */
 const JSON_STRING = /(?<=[{[,:]\s*)"(?:\\.|[^"\\\n])*"?/g;
+/** A scalar JSON value on masked text: a masked string, a number, or a literal. */
+const JSON_SCALAR = /""|-?\d[\d.eE+-]*|true|false|null/;
+/** A flat JSON array of scalar values on masked text, possibly empty. */
+const JSON_SCALAR_ARRAY = new RegExp(
+	`\\[\\s*(?:(?:${JSON_SCALAR.source})(?:\\s*,\\s*(?:${JSON_SCALAR.source}))*)?\\s*\\]`,
+);
 /** A JSON record field on masked text: `"key": value` after a `{` or `,` delimiter,
- *  with a masked key and a masked, number, or literal value. Global flag: collected
- *  with matchAll, never used with the stateful test(). */
-const JSON_FIELD = /(?:^|[{,])\s*""\s*:\s*(?:""|-?\d[\d.eE+-]*|true|false|null)/gm;
+ *  with a masked key and a masked, number, literal, or flat-array value — or a leading
+ *  masked value whose `:` the chunker cut off at the previous segment boundary. Global
+ *  flag: collected with matchAll, never used with the stateful test(). */
+const JSON_FIELD = new RegExp(
+	`(?:^|[{,])\\s*""\\s*:\\s*(?:${JSON_SCALAR.source}|${JSON_SCALAR_ARRAY.source})|^\\s*""(?=\\s*[,}\\]])`,
+	"gm",
+);
 /** JSON fields a segment needs before its field text can make it a record. */
 const JSON_MIN_FIELDS = 2;
 /** Least share of a segment's characters that must be JSON field text. */
@@ -674,7 +691,10 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
  *  pipes (a union type such as `A | B`, a shell pipeline such as `cat f | grep x`) is
  *  reasoning and must still trip. Bullet and numbered lists are not structured here. */
 function isStructuredSegment(segment: string): boolean {
-	const masked = segment.replace(JSON_STRING_TAIL, '""').replace(JSON_STRING, '""');
+	const masked = segment
+		.replace(JSON_STRING_TAIL, '""')
+		.replace(JSON_STRING_LEAD, '""')
+		.replace(JSON_STRING, '""');
 	let fields = 0;
 	let fieldChars = 0;
 	for (const match of masked.matchAll(JSON_FIELD)) {
