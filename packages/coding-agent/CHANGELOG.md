@@ -458,6 +458,10 @@
 - Fixed Tern and WebKit browser calls that incorrectly exposed unsupported page event-listener APIs; errors now identify the supported alternatives.
 - Fixed browser timeout and busy-page errors to include the current URL, affected tab, and actionable recovery guidance.
 - Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
+- Fixed Mnemopi embedding API failures (rejected key, unknown model, missing `input_type`) silently degrading recall to keyword search; they now show a warning with the provider's response, and print mode writes it to stderr ([#19322](https://github.com/can1357/oh-my-pi/pull/19322) by [@yibaimeng](https://github.com/yibaimeng))
+### Fixed
+
+- Fixed Claude auto-reset spending a 5h-only reset on the active account, then retrying it at once into the same 429, when the 429's retry-after showed a weekly window the usage report had not yet marked exhausted ([#19311](https://github.com/can1357/oh-my-pi/pull/19311) by [@pedropaulovc](https://github.com/pedropaulovc))
 
 ## [18.20.2] - 2026-11-14
 

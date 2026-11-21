@@ -77,7 +77,7 @@ export const MAX_PLAUSIBLE_WEEKLY_REMAINING_MS = 7 * 24 * 3_600_000 + 60 * 60_00
 /** A 5h reset can never be more than one window length (5h) away; +1h slack for skew. */
 export const MAX_PLAUSIBLE_PRIMARY_REMAINING_MS = 5 * 3_600_000 + 60 * 60_000;
 /** Slack before a live 429 deadline past the reported resets counts as a later window: the hint is rounded. */
-const LIVE_HINT_TOLERANCE_MS = 5 * 60_000;
+export const LIVE_HINT_TOLERANCE_MS = 5 * 60_000;
 /** Shared last-chance expiry horizon; bypasses salvage usage thresholds and non-terminal deferrals, never consent or cooldown. */
 export const IMMINENT_RESET_EXPIRY_MS = 5 * 60_000;
 /** Below this usage on BOTH chat windows, non-imminent salvage restores too little to bother. */

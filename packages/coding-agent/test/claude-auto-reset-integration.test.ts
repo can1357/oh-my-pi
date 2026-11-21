@@ -383,6 +383,43 @@ describe("Claude saved-reset trigger integration", () => {
 		return () => replaced;
 	}
 
+	it("never spends a 5h-only reset when the 429's retry-after names the weekly reset", async () => {
+		// The listing predates the 429 that pushed the weekly window to its cap: it shows
+		// the 5h window exhausted and the weekly one at 99%. The 429 waits until the
+		// weekly reset (3 days), so clearing the 5h window cannot serve the retry.
+		const report = claudeReport(0.99);
+		const fiveHour = report.limits.find(limit => limit.id === "anthropic:5h");
+		if (!fiveHour) throw new Error("expected a 5h row");
+		fiveHour.amount = { usedFraction: 1, unit: "percent" };
+		const status: ResetCreditAccountStatus = {
+			...claudeStatus(true),
+			report,
+			nextCreditId: "juniper_tide",
+			credits: [
+				{
+					id: "juniper_tide",
+					title: "Claude session limit reset",
+					program: "juniper_tide",
+					remainingCount: 1,
+					usable: true,
+					requiresLimit: true,
+					clears: ["anthropic:5h"],
+					blocking: [],
+					usedFractions: {},
+					status: "available",
+				},
+			],
+		};
+		const { session, targets, modelCalls } = buildSession({ report, status, streamErrorFirst: true });
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("hit the weekly cap");
+		await session.waitForIdle();
+
+		expect(targets).toEqual([]);
+		expect(modelCalls()).toBe(1);
+	});
+
 	it("redeems the exact live Cedar grant on a blocked retry and immediately recovers", async () => {
 		const { session, targets } = buildSession({
 			report: claudeReport(1),
