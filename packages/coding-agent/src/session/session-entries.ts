@@ -54,6 +54,14 @@ export function modelRoleOf(role: string | undefined): string | undefined {
 		: role;
 }
 
+/** Client other than the terminal that started a session: `chrome` is the omp extension's side panel. */
+export type SessionOrigin = "chrome";
+
+/** `value` as a {@link SessionOrigin}; anything else (absent, unknown client) is the terminal's. */
+export function parseSessionOrigin(value: unknown): SessionOrigin | undefined {
+	return value === "chrome" ? value : undefined;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -69,6 +77,12 @@ export interface SessionHeader {
 	 * this field existed. Mid-session checkouts are not tracked.
 	 */
 	gitBranch?: string;
+	/**
+	 * Set when another client started the session ({@link SessionOrigin}); only that client lists it, so the
+	 * terminal's resume picker, `--continue`, recent sessions and ACP listings skip it. An explicit
+	 * `--resume <id|path>` still opens it.
+	 */
+	origin?: SessionOrigin;
 	/**
 	 * Additional workspace directories beyond `cwd` (multi-root workspace).
 	 * Absolute, normalized, deduplicated. Absent on legacy single-cwd sessions.
@@ -347,7 +361,7 @@ export interface SessionInitEntry extends SessionEntryBase {
 	task: string;
 	/** Tools available to the agent */
 	tools: string[];
-	/** Names in `tools` presented as `xd://` devices instead of top-level tools (absent from older files). */
+	/** Names in `tools` presented as tool commands instead of top-level tools (absent from older files). */
 	mountedTools?: string[];
 	/** Agent definition name (for example `scout` or `reviewer`). */
 	agent?: string;

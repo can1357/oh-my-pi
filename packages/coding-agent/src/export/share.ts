@@ -21,6 +21,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { dropToolCallReasoningDetail } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { dropReasoningDetailsEnvelopes } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
@@ -423,8 +425,10 @@ function redactShareMessage(
 		case "assistant":
 			// Drop opaque provider-replay state (encrypted reasoning / native history) the viewer
 			// never reads and we cannot redact field-by-field: `providerPayload`, any
-			// `redactedThinking` blocks, and native Anthropic server-tool blocks
-			// (`server_tool_use` input / `web_search_tool_result` encrypted_content).
+			// `redactedThinking` blocks, native Anthropic server-tool blocks
+			// (`server_tool_use` input / `web_search_tool_result` encrypted_content),
+			// chat-completions `reasoning_details` envelopes, which hold the raw reasoning text,
+			// and the encrypted entries tool calls keep from them.
 			return {
 				...message,
 				providerPayload: undefined,
@@ -432,28 +436,35 @@ function redactShareMessage(
 					message.errorMessage === undefined
 						? undefined
 						: o.obfuscate(message.errorMessage, sharedRegexSecretValues),
-				content: message.content.flatMap((block): AssistantMessage["content"] => {
-					if (block.type === "redactedThinking" || block.type === "anthropicServerTool") return [];
-					if (block.type === "text") return [{ ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) }];
-					if (block.type === "thinking") {
-						return [{ ...block, thinking: o.obfuscate(block.thinking, sharedRegexSecretValues) }];
-					}
-					if (block.type === "toolCall") {
-						return [
-							{
-								...block,
-								arguments: obfuscateToolArguments(o, block.arguments, sharedRegexSecretValues),
-								intent:
-									block.intent === undefined ? undefined : o.obfuscate(block.intent, sharedRegexSecretValues),
-								rawBlock:
-									block.rawBlock === undefined
-										? undefined
-										: o.obfuscate(block.rawBlock, sharedRegexSecretValues),
-							},
-						];
-					}
-					return [block];
-				}),
+				content: dropReasoningDetailsEnvelopes(
+					message.content.flatMap((block): AssistantMessage["content"] => {
+						if (block.type === "redactedThinking" || block.type === "anthropicServerTool") return [];
+						if (block.type === "text") {
+							return [{ ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) }];
+						}
+						if (block.type === "thinking") {
+							return [{ ...block, thinking: o.obfuscate(block.thinking, sharedRegexSecretValues) }];
+						}
+						if (block.type === "toolCall") {
+							return [
+								{
+									...block,
+									arguments: obfuscateToolArguments(o, block.arguments, sharedRegexSecretValues),
+									thoughtSignature: dropToolCallReasoningDetail(block.thoughtSignature),
+									intent:
+										block.intent === undefined
+											? undefined
+											: o.obfuscate(block.intent, sharedRegexSecretValues),
+									rawBlock:
+										block.rawBlock === undefined
+											? undefined
+											: o.obfuscate(block.rawBlock, sharedRegexSecretValues),
+								},
+							];
+						}
+						return [block];
+					}),
+				),
 			};
 		case "bashExecution":
 			return {

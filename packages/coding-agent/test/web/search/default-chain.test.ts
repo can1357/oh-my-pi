@@ -139,6 +139,18 @@ describe("default web chain", () => {
 		expect(attempted).not.toContain("web/hosted");
 	});
 
+	it("walks the session's web role, not the process-global one (#11296)", async () => {
+		// An ACP session opened for another project carries that project's settings; the global stays default.
+		const session = Settings.isolated({
+			modelRoles: { web: "web/tavily" },
+			"retry.fallbackChains": { web: ["web/exa"] },
+		});
+
+		await runSearchQuery({ query: "anything" }, { authStorage, modelRegistry, settings: session });
+
+		expect(attempted).toEqual(["web/tavily", "web/exa"]);
+	});
+
 	it("rejects a grounded answer without sources so a tool-dropping host cannot pass off a plain reply", async () => {
 		vi.spyOn(provider, "getGroundedSearchProvider").mockResolvedValue({
 			id: "anthropic",

@@ -68,11 +68,15 @@ describe("builtin-defaults rule provider", () => {
 
 		for (const snippet of ["await Bun.sleep(10)", "setTimeout(fn, 0)", "setInterval(fn, 5)"]) {
 			manager.resetBuffer();
-			const matches = manager.checkDelta(snippet, {
-				source: "tool",
-				toolName: "write",
-				filePaths: ["packages/x/test/foo.test.ts"],
-			});
+			const matches = manager.checkDelta(
+				snippet,
+				{
+					source: "tool",
+					toolName: "write",
+					filePaths: ["packages/x/test/foo.test.ts"],
+				},
+				{ final: true },
+			);
 			expect(
 				matches.map(r => r.name),
 				snippet,
@@ -82,11 +86,15 @@ describe("builtin-defaults rule provider", () => {
 		// Same content in a non-test file is out of scope.
 		manager.resetBuffer();
 		expect(
-			manager.checkDelta("await Bun.sleep(10)", {
-				source: "tool",
-				toolName: "write",
-				filePaths: ["packages/x/src/foo.ts"],
-			}),
+			manager.checkDelta(
+				"await Bun.sleep(10)",
+				{
+					source: "tool",
+					toolName: "write",
+					filePaths: ["packages/x/src/foo.ts"],
+				},
+				{ final: true },
+			),
 		).toEqual([]);
 	});
 
@@ -105,21 +113,29 @@ describe("builtin-defaults rule provider", () => {
 		]) {
 			manager.resetBuffer();
 			expect(
-				manager.checkDelta(snippet, {
-					source: "tool",
-					toolName: "write",
-					filePaths: ["packages/x/src/foo.ts"],
-				}),
+				manager.checkDelta(
+					snippet,
+					{
+						source: "tool",
+						toolName: "write",
+						filePaths: ["packages/x/src/foo.ts"],
+					},
+					{ final: true },
+				),
 			).toHaveLength(1);
 		}
 
 		manager.resetBuffer();
 		expect(
-			manager.checkDelta('import { isRecord } from "@oh-my-pi/pi-utils";', {
-				source: "tool",
-				toolName: "write",
-				filePaths: ["packages/x/src/foo.ts"],
-			}),
+			manager.checkDelta(
+				'import { isRecord } from "@oh-my-pi/pi-utils";',
+				{
+					source: "tool",
+					toolName: "write",
+					filePaths: ["packages/x/src/foo.ts"],
+				},
+				{ final: true },
+			),
 		).toEqual([]);
 	});
 
@@ -297,7 +313,9 @@ describe("builtin-defaults rule provider", () => {
 		const ctx: TtsrMatchContext = { source: "tool", toolName: "write", filePaths: ["src/foo.ts"] };
 		const fires = (deltas: string[]) => {
 			manager.resetBuffer();
-			return deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(m => m.name));
+			const names = deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(m => m.name));
+			names.push(...manager.checkDelta("", ctx, { final: true }).map(m => m.name));
+			return [...new Set(names)];
 		};
 
 		for (const deltas of [
