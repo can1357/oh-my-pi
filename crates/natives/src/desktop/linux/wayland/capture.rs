@@ -1,3 +1,5 @@
+pub(super) mod share;
+
 use std::{
 	ffi::c_void,
 	io,
@@ -245,19 +247,32 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
 	unsafe { (pw.pw_stream_queue_buffer)(listener.stream, buffer) };
 }
 
-/// The library objects of one capture, destroyed in reverse order of
+/// A stream listener, paired with the callbacks that read their `data` as it.
+trait StreamListener {
+	fn events() -> &'static StreamEvents;
+}
+
+impl StreamListener for Listener {
+	fn events() -> &'static StreamEvents {
+		&STREAM_EVENTS
+	}
+}
+
+/// The library objects of one stream, destroyed in reverse order of
 /// creation.
-struct Connection {
+struct Connection<L> {
 	pw:        &'static PipeWire,
 	main_loop: *mut pipewire::MainLoop,
+	/// The main loop's loop, which the stream's callbacks run in.
+	pw_loop:   *mut pipewire::Loop,
 	context:   *mut pipewire::Context,
 	core:      *mut pipewire::Core,
 	stream:    *mut pipewire::Stream,
 	hook:      *mut SpaHook,
-	listener:  *mut Listener,
+	listener:  *mut L,
 }
 
-impl Drop for Connection {
+impl<L> Drop for Connection<L> {
 	fn drop(&mut self) {
 		let pw = self.pw;
 		// SAFETY: each pointer is null or an object this connection created and
@@ -284,6 +299,97 @@ impl Drop for Connection {
 	}
 }
 
+impl<L: StreamListener> Connection<L> {
+	/// Connects a stream to the portal's `node` over `fd` with `flags`; its
+	/// callbacks reach the listener `listener` builds for the stream.
+	fn open(
+		pw: &'static PipeWire,
+		node: u32,
+		fd: OwnedFd,
+		flags: u32,
+		listener: impl FnOnce(*mut pipewire::Stream) -> L,
+	) -> CoreResult<Self> {
+		let failed =
+			|object: &str| DesktopError::capture_failed(format!("PipeWire {object}: creation failed"));
+		// SAFETY: pw_main_loop_new accepts null properties.
+		let main_loop = unsafe { (pw.pw_main_loop_new)(ptr::null()) };
+		if main_loop.is_null() {
+			return Err(failed("main loop"));
+		}
+		let mut connection = Self {
+			pw,
+			main_loop,
+			// SAFETY: `main_loop` is live.
+			pw_loop: unsafe { (pw.pw_main_loop_get_loop)(main_loop) },
+			context: ptr::null_mut(),
+			core: ptr::null_mut(),
+			stream: ptr::null_mut(),
+			hook: ptr::null_mut(),
+			listener: ptr::null_mut(),
+		};
+		// SAFETY: `pw_loop` is live; null properties are accepted.
+		connection.context = unsafe { (pw.pw_context_new)(connection.pw_loop, ptr::null_mut(), 0) };
+		if connection.context.is_null() {
+			return Err(failed("context"));
+		}
+		// SAFETY: the context is live and takes the fd, closing it on disconnect
+		// or failure.
+		connection.core = unsafe {
+			(pw.pw_context_connect_fd)(connection.context, fd.into_raw_fd(), ptr::null_mut(), 0)
+		};
+		if connection.core.is_null() {
+			return Err(failed("remote"));
+		}
+		let items = [
+			pipewire::SpaDictItem { key: c"media.type".as_ptr(), value: c"Video".as_ptr() },
+			pipewire::SpaDictItem { key: c"media.category".as_ptr(), value: c"Capture".as_ptr() },
+			pipewire::SpaDictItem { key: c"media.role".as_ptr(), value: c"Screen".as_ptr() },
+		];
+		let dict =
+			pipewire::SpaDict { flags: 0, n_items: items.len() as u32, items: items.as_ptr() };
+		// SAFETY: `dict` and its strings outlive the call, which copies them.
+		// The stream takes ownership of the properties.
+		connection.stream = unsafe {
+			let properties = (pw.pw_properties_new_dict)(&raw const dict);
+			(pw.pw_stream_new)(connection.core, c"omp-computer-capture".as_ptr(), properties)
+		};
+		if connection.stream.is_null() {
+			return Err(failed("stream"));
+		}
+		connection.hook = Box::into_raw(Box::new(SpaHook::new()));
+		connection.listener = Box::into_raw(Box::new(listener(connection.stream)));
+		let format = pipewire::enum_format();
+		let mut params = [format.as_ptr().cast::<SpaPod>()];
+		// SAFETY: the stream is live; the hook and listener stay allocated until
+		// `Connection::drop` has destroyed the stream; the events table is
+		// static and reads `data` as `L`; the stream copies `params` during the
+		// call.
+		let connected = unsafe {
+			(pw.pw_stream_add_listener)(
+				connection.stream,
+				connection.hook,
+				L::events(),
+				connection.listener.cast(),
+			);
+			(pw.pw_stream_connect)(
+				connection.stream,
+				pipewire::SPA_DIRECTION_INPUT,
+				node,
+				flags,
+				params.as_mut_ptr(),
+				params.len() as u32,
+			)
+		};
+		if connected < 0 {
+			return Err(DesktopError::capture_failed(format!(
+				"PipeWire connect: {}",
+				io::Error::from_raw_os_error(-connected)
+			)));
+		}
+		Ok(connection)
+	}
+}
+
 fn grab_pipewire_frame(
 	pw: &'static PipeWire,
 	node: u32,
@@ -291,88 +397,14 @@ fn grab_pipewire_frame(
 	pixels: bool,
 ) -> CoreResult<CapturedFrame> {
 	control::check()?;
-	let failed =
-		|object: &str| DesktopError::capture_failed(format!("PipeWire {object}: creation failed"));
-	// SAFETY: pw_main_loop_new accepts null properties.
-	let main_loop = unsafe { (pw.pw_main_loop_new)(ptr::null()) };
-	if main_loop.is_null() {
-		return Err(failed("main loop"));
-	}
-	let mut connection = Connection {
+	let connection = Connection::open(
 		pw,
-		main_loop,
-		context: ptr::null_mut(),
-		core: ptr::null_mut(),
-		stream: ptr::null_mut(),
-		hook: ptr::null_mut(),
-		listener: ptr::null_mut(),
-	};
-	// SAFETY: `main_loop` is live.
-	let pw_loop = unsafe { (pw.pw_main_loop_get_loop)(main_loop) };
-	// SAFETY: `pw_loop` is live; null properties are accepted.
-	connection.context = unsafe { (pw.pw_context_new)(pw_loop, ptr::null_mut(), 0) };
-	if connection.context.is_null() {
-		return Err(failed("context"));
-	}
-	// SAFETY: the context is live and takes the fd, closing it on disconnect or
-	// failure.
-	connection.core = unsafe {
-		(pw.pw_context_connect_fd)(connection.context, fd.into_raw_fd(), ptr::null_mut(), 0)
-	};
-	if connection.core.is_null() {
-		return Err(failed("remote"));
-	}
-	let items = [
-		pipewire::SpaDictItem { key: c"media.type".as_ptr(), value: c"Video".as_ptr() },
-		pipewire::SpaDictItem { key: c"media.category".as_ptr(), value: c"Capture".as_ptr() },
-		pipewire::SpaDictItem { key: c"media.role".as_ptr(), value: c"Screen".as_ptr() },
-	];
-	let dict =
-		pipewire::SpaDict { flags: 0, n_items: items.len() as u32, items: items.as_ptr() };
-	// SAFETY: `dict` and its strings outlive the call, which copies them. The
-	// stream takes ownership of the properties.
-	connection.stream = unsafe {
-		let properties = (pw.pw_properties_new_dict)(&raw const dict);
-		(pw.pw_stream_new)(connection.core, c"omp-computer-capture".as_ptr(), properties)
-	};
-	if connection.stream.is_null() {
-		return Err(failed("stream"));
-	}
-	connection.hook = Box::into_raw(Box::new(SpaHook::new()));
-	connection.listener = Box::into_raw(Box::new(Listener {
-		pw,
-		stream: connection.stream,
-		pixels,
-		format: None,
-		frame: None,
-	}));
-	let format = pipewire::enum_format();
-	let mut params = [format.as_ptr().cast::<SpaPod>()];
-	// SAFETY: the stream is live; the hook and listener stay allocated until
-	// `Connection::drop` has destroyed the stream; the events table is static;
-	// the stream copies `params` during the call.
-	let connected = unsafe {
-		(pw.pw_stream_add_listener)(
-			connection.stream,
-			connection.hook,
-			&raw const STREAM_EVENTS,
-			connection.listener.cast(),
-		);
-		(pw.pw_stream_connect)(
-			connection.stream,
-			pipewire::SPA_DIRECTION_INPUT,
-			node,
-			pipewire::PW_STREAM_FLAG_AUTOCONNECT | pipewire::PW_STREAM_FLAG_MAP_BUFFERS,
-			params.as_mut_ptr(),
-			params.len() as u32,
-		)
-	};
-	if connected < 0 {
-		return Err(DesktopError::capture_failed(format!(
-			"PipeWire connect: {}",
-			io::Error::from_raw_os_error(-connected)
-		)));
-	}
+		node,
+		fd,
+		pipewire::PW_STREAM_FLAG_AUTOCONNECT | pipewire::PW_STREAM_FLAG_MAP_BUFFERS,
+		|stream| Listener { pw, stream, pixels, format: None, frame: None },
+	)?;
+	let pw_loop = connection.pw_loop;
 	let deadline = Instant::now() + FRAME_TIMEOUT;
 	loop {
 		control::check()?;
@@ -391,16 +423,20 @@ fn grab_pipewire_frame(
 	}
 }
 
+fn loaded(pw: pipewire::Loaded) -> CoreResult<&'static PipeWire> {
+	pw.map_err(|reason| {
+		DesktopError::capture_failed(format!(
+			"Wayland capture needs PipeWire's client library: {reason}"
+		))
+	})
+}
+
 fn capture_stream(
 	pw: pipewire::Loaded,
 	pixels: bool,
 ) -> CoreResult<(CapturedFrame, super::PortalGeometry)> {
 	control::check()?;
-	let pw = pw.map_err(|reason| {
-		DesktopError::capture_failed(format!(
-			"Wayland capture needs PipeWire's client library: {reason}"
-		))
-	})?;
+	let pw = loaded(pw)?;
 	let runtime = super::portal::portal_runtime()?;
 	let ScreenCast { node, fd, position, size, session } = runtime.block_on(open_screencast())?;
 	let captured = grab_pipewire_frame(pw, node, fd, pixels);

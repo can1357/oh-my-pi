@@ -115,7 +115,11 @@ fn load(name: &CStr) -> Result<PipeWire, String> {
 pub(super) const SPA_DIRECTION_INPUT: u32 = 0;
 pub(super) const PW_STREAM_FLAG_AUTOCONNECT: u32 = 1 << 0;
 pub(super) const PW_STREAM_FLAG_MAP_BUFFERS: u32 = 1 << 2;
+pub(super) const PW_STREAM_FLAG_DONT_RECONNECT: u32 = 1 << 7;
 pub(super) const PW_VERSION_STREAM_EVENTS: u32 = 2;
+/// `enum pw_stream_state` values the stream thread acts on.
+pub(super) const PW_STREAM_STATE_ERROR: c_int = -1;
+pub(super) const PW_STREAM_STATE_UNCONNECTED: c_int = 0;
 
 /// `struct spa_dict`.
 #[repr(C)]
@@ -145,18 +149,17 @@ impl SpaHook {
 
 type Unused = Option<unsafe extern "C" fn()>;
 
-/// `struct pw_stream_events` at version 2, with the two callbacks capture
-/// uses.
+/// `struct pw_stream_events` at version 2, with the callbacks capture uses.
 #[repr(C)]
 pub(super) struct StreamEvents {
 	version:       u32,
 	destroy:       Unused,
-	state_changed: Unused,
+	state_changed: Option<unsafe extern "C" fn(*mut c_void, c_int, c_int, *const c_char)>,
 	control_info:  Unused,
 	io_changed:    Unused,
 	param_changed: Option<unsafe extern "C" fn(*mut c_void, u32, *const SpaPod)>,
 	add_buffer:    Unused,
-	remove_buffer: Unused,
+	remove_buffer: Option<unsafe extern "C" fn(*mut c_void, *mut Buffer)>,
 	process:       Option<unsafe extern "C" fn(*mut c_void)>,
 	drained:       Unused,
 	command:       Unused,
@@ -182,6 +185,16 @@ impl StreamEvents {
 			command:       None,
 			trigger_done:  None,
 		}
+	}
+
+	/// The same table, also called when the stream changes state and when it
+	/// frees a buffer.
+	pub(super) const fn with_lifecycle(
+		self,
+		state_changed: unsafe extern "C" fn(*mut c_void, c_int, c_int, *const c_char),
+		remove_buffer: unsafe extern "C" fn(*mut c_void, *mut Buffer),
+	) -> Self {
+		Self { state_changed: Some(state_changed), remove_buffer: Some(remove_buffer), ..self }
 	}
 }
 
