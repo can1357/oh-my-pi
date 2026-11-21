@@ -104,12 +104,17 @@ export interface OutputSinkOptions {
 	 * Per-line byte cap. When > 0, lines wider than `maxColumns` bytes are
 	 * truncated with an ellipsis at write time; remaining bytes up to the next
 	 * `\n` are dropped. Cap state persists across chunks so split-mid-line
-	 * writes still respect the budget. Output that is a single line (one
-	 * trailing `\n` allowed), such as an unformatted JSON payload, is exempt:
-	 * the line is the whole result, and the byte budget still bounds it.
-	 * Default 0 = no per-line cap.
+	 * writes still respect the budget. Default 0 = no per-line cap.
 	 */
 	maxColumns?: number;
+	/**
+	 * Single-line exemption from `maxColumns`. Absent: every line is capped from
+	 * its first byte. Present: output that is a single line (one trailing `\n`
+	 * allowed), such as an unformatted JSON payload, stays uncapped iff this
+	 * returns true at `dump()`; the byte budget still bounds it. A second line
+	 * ends the exemption.
+	 */
+	exemptSingleLine?: () => boolean;
 	onChunk?: (chunk: string) => void;
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
 	chunkThrottleMs?: number;
@@ -967,16 +972,15 @@ export class OutputSink {
 	#columnLastCutLine = 0;
 	/** Set once a cut line's number may not match the artifact; the range is then withheld. */
 	#columnCutLinesUnmapped = false;
-	/** Output so far is at most one line (its newline included); that line stays uncapped until more output follows. */
-	#soleLine = true;
+	/** Output so far is at most one line (its newline included); that line stays uncapped until more output follows or `dump()` denies the exemption. */
+	#soleLine: boolean;
+	readonly #exemptSingleLine?: () => boolean;
 	/** The first line's newline has arrived; any further byte makes the output multi-line. */
 	#soleLineEnded = false;
 	#soleLineBytes = 0;
 	/** Head of the first line, up to `#maxColumns` bytes: its capped form if more output follows. */
 	#soleLinePrefix = "";
 	#soleLinePrefixBytes = 0;
-	/** The open first line is entirely `replace()` text, not raw stream: it is never mirrored to the artifact. Streamed bytes joining it clear this. */
-	#soleLineReplaced = false;
 	#file?: {
 		artifactId: string;
 		sink: Bun.FileSink;
@@ -1030,11 +1034,14 @@ export class OutputSink {
 			chunkThrottleMs = 0,
 			artifactMaxBytes = ARTIFACT_DEFAULT_MAX_BYTES,
 			artifactHeadBytes,
+			exemptSingleLine,
 		} = options ?? {};
 		this.#allocateArtifact = allocateArtifact;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
+		this.#exemptSingleLine = exemptSingleLine;
+		this.#soleLine = this.#maxColumns > 0 && exemptSingleLine !== undefined;
 		this.#onChunk = onChunk;
 		this.#chunkThrottleMs = chunkThrottleMs;
 		this.#artifactMaxBytes = Math.max(0, artifactMaxBytes);
@@ -1115,17 +1122,15 @@ export class OutputSink {
 	}
 
 	/**
-	 * Store one sanitized chunk. The output's first line goes in uncapped while it
-	 * may be the whole output; once a byte follows its newline, it is cut like any line.
+	 * Store one sanitized chunk. With `exemptSingleLine`, the output's first line
+	 * goes in uncapped while it may be the whole output; once a byte follows its
+	 * newline, it is cut like any line.
 	 */
 	#store(chunk: string, inlineChunk: string, substituted: boolean): void {
-		if (this.#soleLine && this.#maxColumns > 0) {
+		if (this.#soleLine) {
 			if (substituted) {
 				this.#endSoleLine();
 			} else {
-				// Bytes before the first newline join the open line, making it raw stream;
-				// a chunk that starts with the newline only ends it.
-				if (!this.#soleLineEnded && chunk.length > 0 && !chunk.startsWith(NL)) this.#soleLineReplaced = false;
 				const nextLine = this.#trackSoleLine(chunk);
 				if (nextLine === -1) {
 					this.#storeSegment(chunk, chunk, false, false);
@@ -1165,9 +1170,10 @@ export class OutputSink {
 	}
 
 	/**
-	 * The output is more than its first line: hold that line to the column cap
-	 * too. Only the first line has been retained, so a wide one replaces the
-	 * inline windows with its capped form; the artifact keeps it verbatim.
+	 * The output is more than its first line, or `dump()` denied the exemption:
+	 * hold that line to the column cap too. Only the first line has been
+	 * retained, so a wide one replaces the inline windows with its capped form;
+	 * the artifact keeps it verbatim.
 	 */
 	#endSoleLine(): void {
 		this.#soleLine = false;
@@ -1180,10 +1186,8 @@ export class OutputSink {
 			return;
 		}
 		// Mirror the verbatim line before the inline windows drop it. A spill
-		// already under way has written it. A line left open by `replace()` that no
-		// streamed bytes joined is replacement text: it is never mirrored (the
-		// artifact, if any, keeps the replaced stream), so it claims no artifact either.
-		if (this.#allocateArtifact && !this.#spilling && !this.#soleLineReplaced) this.#writeToFile("");
+		// already under way has written it.
+		if (this.#allocateArtifact && !this.#spilling) this.#writeToFile("");
 		const kept = truncateHeadBytes(prefix, Math.max(0, max - 3));
 		const capped = `${kept.text}${ELLIPSIS}${this.#soleLineEnded ? NL : ""}`;
 		this.#head = "";
@@ -1577,8 +1581,7 @@ export class OutputSink {
 	 * Replace the in-memory buffer with the given text. Used when an upstream
 	 * minimizer rewrites the captured output after the raw bytes have already
 	 * been streamed.
-	 * The replacement is held to the per-line column cap like streamed output;
-	 * a single-line replacement stays uncapped until more output follows it.
+	 * The replacement is held to the per-line column cap like streamed output.
 	 *
 	 * After this call the buffer is authoritative: streaming counters realign
 	 * to the replacement, the retained head window is cleared, and head
@@ -1589,25 +1592,18 @@ export class OutputSink {
 	 */
 	replace(text: string): void {
 		this.#clearPendingChunkTimer();
+		// A wide first line held uncapped is dropped by this replacement: mirror it
+		// into the artifact now, as the cap would have at push time. A replacement
+		// is never exempt itself (the cap is its only bound), so the sole-line
+		// state ends here.
+		if (this.#soleLine) this.#endSoleLine();
 		this.#currentLineBytes = 0;
 		this.#columnEllipsisAdded = false;
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
 		// The artifact keeps the replaced stream, so later line numbers no longer match it.
 		this.#columnCutLinesUnmapped = true;
-		this.#soleLine = true;
-		this.#soleLineEnded = false;
-		this.#soleLineBytes = 0;
-		this.#soleLinePrefix = "";
-		this.#soleLinePrefixBytes = 0;
-		this.#soleLineReplaced = true;
-		let capped = text;
-		if (this.#maxColumns > 0 && this.#trackSoleLine(text) !== -1) {
-			this.#soleLine = false;
-			this.#soleLineReplaced = false;
-			this.#soleLinePrefix = "";
-			capped = this.#applyColumnCap(text, 0);
-		}
+		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(text, 0) : text;
 		this.#buffer = capped;
 		this.#bufferBytes = Buffer.byteLength(capped, "utf-8");
 		this.#tailUntrimmed = false;
@@ -1771,6 +1767,8 @@ export class OutputSink {
 			this.#pendingCarriageReturn = false;
 			this.push(NL);
 		}
+		// A sole line whose exemption is denied is cut like any other line.
+		if (this.#soleLine && !this.#exemptSingleLine?.()) this.#endSoleLine();
 		const noticeLine = notice ? `[${notice}]\n` : "";
 
 		// Flush any chunk still held back by the throttle so the live preview
