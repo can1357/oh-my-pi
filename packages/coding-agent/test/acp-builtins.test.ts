@@ -27,6 +27,9 @@ import { makeAssistantMessage } from "./session-manager/helpers";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
+	slowMode: boolean;
+	advisorEnabled: boolean;
+	advisorActive: boolean;
 	forcedToolChoice: string | undefined;
 	isStreaming: boolean;
 	sessionFile: string | undefined;
@@ -40,6 +43,12 @@ interface FakeAcpBuiltinSession {
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
+	setSlowMode(enabled: boolean): boolean;
+	isSlowModeEnabled(): boolean;
+	setAdvisorEnabled(enabled: boolean): boolean;
+	isAdvisorEnabled(): boolean;
+	toggleAdvisorEnabled(): boolean;
+	isAdvisorActive(): boolean;
 	isUltrafastModeEnabled(): boolean;
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
@@ -91,6 +100,9 @@ function createRuntime() {
 	const output: string[] = [];
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
+		slowMode: false,
+		advisorEnabled: false,
+		advisorActive: false,
 		forcedToolChoice: undefined as string | undefined,
 		isStreaming: false,
 		sessionFile: undefined,
@@ -116,10 +128,33 @@ function createRuntime() {
 		},
 		setFastMode(enabled: boolean) {
 			this.fastMode = enabled;
+			if (enabled) this.slowMode = false;
 			return true;
 		},
 		isFastModeEnabled() {
 			return this.fastMode;
+		},
+		setSlowMode(enabled: boolean) {
+			this.slowMode = enabled;
+			if (enabled) this.fastMode = false;
+			return true;
+		},
+		isSlowModeEnabled() {
+			return this.slowMode;
+		},
+		setAdvisorEnabled(enabled: boolean) {
+			this.advisorEnabled = enabled;
+			return enabled && this.advisorActive;
+		},
+		isAdvisorEnabled() {
+			return this.advisorEnabled;
+		},
+		toggleAdvisorEnabled() {
+			this.advisorEnabled = !this.advisorEnabled;
+			return this.advisorEnabled;
+		},
+		isAdvisorActive() {
+			return this.advisorEnabled && this.advisorActive;
 		},
 		isUltrafastModeEnabled() {
 			return false;
@@ -284,6 +319,63 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("/fast on emits a config-change notification and enables fast mode", async () => {
+		const { runtime, session } = createRuntime();
+		let configNotified = 0;
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/fast on", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session.fastMode).toBe(true);
+		expect(configNotified).toBe(1);
+	});
+
+	it("/fast status does not emit a config-change notification", async () => {
+		const { runtime } = createRuntime();
+		let configNotified = 0;
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+
+		await executeAcpBuiltinSlashCommand("/fast status", runtime);
+
+		expect(configNotified).toBe(0);
+	});
+
+	it("/slow on emits a config-change notification when switching away from fast mode", async () => {
+		const { runtime, session } = createRuntime();
+		session.fastMode = true;
+		let configNotified = 0;
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/slow on", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session.slowMode).toBe(true);
+		expect(session.fastMode).toBe(false);
+		expect(configNotified).toBe(1);
+	});
+
+	it("/advisor on emits a config-change notification and enables the advisor", async () => {
+		const { runtime, session } = createRuntime();
+		session.advisorActive = true;
+		let configNotified = 0;
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/advisor on", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session.advisorEnabled).toBe(true);
+		expect(configNotified).toBe(1);
 	});
 
 	it("toggles extended context with explicit controls and reports state", async () => {

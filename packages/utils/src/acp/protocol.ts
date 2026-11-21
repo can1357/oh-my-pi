@@ -149,6 +149,7 @@ export interface ClientCapabilities {
 	terminal?: boolean;
 	auth?: { terminal?: boolean };
 	elicitation?: { form?: Record<string, unknown>; url?: Record<string, unknown> };
+	session?: { configOptions?: { boolean?: Record<string, unknown> } };
 	_meta?: Record<string, unknown>;
 }
 /** Implementation identity sent during initialization. */

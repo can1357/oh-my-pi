@@ -132,6 +132,9 @@ const OTHER_SUFFIX = "__other";
 const MODE_CONFIG_ID = "mode";
 const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
+const FAST_CONFIG_ID = "fast";
+const ADVISOR_CONFIG_ID = "advisor";
+const AUTO_COMPACTION_CONFIG_ID = "autoCompaction";
 const THINKING_OFF = "off";
 const SESSION_PAGE_SIZE = 50;
 const SPEECH_MODELS_LIST_METHOD = "speech.models.list";
@@ -1185,19 +1188,38 @@ export class AcpAgent implements Agent {
 
 	async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
-		if (typeof params.value === "boolean") {
-			throw new Error(`Unsupported boolean ACP config option: ${params.configId}`);
-		}
 
+		let fastTierChanged = false;
 		switch (params.configId) {
 			case MODE_CONFIG_ID:
-				this.#applyModeChange(record, params.value);
+				this.#applyModeChange(record, this.#expectSelectValue(params));
 				break;
 			case MODEL_CONFIG_ID:
-				await this.#setModelById(record.session, params.value);
+				await this.#setModelById(record.session, this.#expectSelectValue(params));
 				break;
 			case THINKING_CONFIG_ID:
-				this.#setThinkingLevelById(record.session, params.value);
+				this.#setThinkingLevelById(record.session, this.#expectSelectValue(params));
+				break;
+			case FAST_CONFIG_ID: {
+				const enabled = this.#expectBooleanValue(params);
+				// A client replaying a saved default can ask for fast mode on a
+				// model that has no service-tier family, or replay `true` while
+				// already in `/fast ultra` (which would otherwise downgrade
+				// `ultrafast` to `priority`). Keep non-ultrafast `true` writes
+				// reaching `setFastMode(true)` so a direct Anthropic session in
+				// provider fallback can still re-arm `speed: "fast"`.
+				if (record.session.supportsFastMode() && !(enabled && record.session.isUltrafastModeEnabled())) {
+					const fastBefore = record.session.isFastModeEnabled();
+					record.session.setFastMode(enabled);
+					fastTierChanged = record.session.isFastModeEnabled() !== fastBefore;
+				}
+				break;
+			}
+			case ADVISOR_CONFIG_ID:
+				record.session.setAdvisorEnabled(this.#expectBooleanValue(params));
+				break;
+			case AUTO_COMPACTION_CONFIG_ID:
+				record.session.setAutoCompactionEnabled(this.#expectBooleanValue(params));
 				break;
 			default:
 				throw new Error(`Unknown ACP config option: ${params.configId}`);
@@ -1214,14 +1236,31 @@ export class AcpAgent implements Agent {
 		}
 
 		// Before lifetime delivery is ready, explicit client requests still
-		// receive their config update here. Once ready, the model/thinking
+		// receive their config update here. Once ready, the model/thinking/tier
 		// event supplies that update without a duplicate push.
 		const handledBySubscription =
-			(params.configId === THINKING_CONFIG_ID || params.configId === MODEL_CONFIG_ID) && record.lifetimeUpdatesReady;
+			(params.configId === THINKING_CONFIG_ID ||
+				params.configId === MODEL_CONFIG_ID ||
+				(params.configId === FAST_CONFIG_ID && fastTierChanged)) &&
+			record.lifetimeUpdatesReady;
 		if (!handledBySubscription) {
 			await this.#pushConfigOptionUpdate(record);
 		}
 		return { configOptions: this.#buildConfigOptions(record.session) };
+	}
+
+	#expectSelectValue(params: SetSessionConfigOptionRequest): string {
+		if (typeof params.value === "boolean") {
+			throw new Error(`Unsupported boolean ACP config option: ${params.configId}`);
+		}
+		return params.value;
+	}
+
+	#expectBooleanValue(params: SetSessionConfigOptionRequest): boolean {
+		if (typeof params.value !== "boolean") {
+			throw new Error(`Expected a boolean value for ACP config option: ${params.configId}`);
+		}
+		return params.value;
 	}
 
 	async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -2024,7 +2063,9 @@ export class AcpAgent implements Agent {
 		} else {
 			if (
 				record.lifetimeUpdatesReady &&
-				(event.type === "thinking_level_changed" || event.type === "model_changed")
+				(event.type === "thinking_level_changed" ||
+					event.type === "model_changed" ||
+					event.type === "service_tier_changed")
 			) {
 				this.#trackLifetimeDelivery(record, event.type, this.#pushConfigOptionUpdate(record));
 			}
@@ -2486,6 +2527,44 @@ export class AcpAgent implements Agent {
 			),
 			options: this.#buildThinkingOptions(session),
 		});
+
+		// ACP: agents MUST NOT send `type: "boolean"` options unless the client
+		// advertised support. Appending after mode/model/thinking keeps the
+		// selects first in the array, which clients use both for placement
+		// priority and to resolve category keybinding ties.
+		if (this.#clientCapabilities?.session?.configOptions?.boolean != null) {
+			// A model with no service-tier family has nothing to toggle, and
+			// `setFastMode` would only emit "no service-tier control for /fast to
+			// toggle" — so hide the switch rather than show a dead one.
+			if (session.supportsFastMode()) {
+				configOptions.push({
+					id: FAST_CONFIG_ID,
+					name: "Fast mode",
+					description: "Priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
+					category: "model_config",
+					type: "boolean",
+					currentValue: session.isFastModeEnabled(),
+				});
+			}
+			const advisorEnabled = session.isAdvisorEnabled();
+			configOptions.push({
+				id: ADVISOR_CONFIG_ID,
+				name: "Advisor",
+				description:
+					advisorEnabled && !session.isAdvisorActive()
+						? "A second model reviews each turn — no model is assigned to the 'advisor' role"
+						: "A second model reviews each turn and injects notes",
+				type: "boolean",
+				currentValue: advisorEnabled,
+			});
+			configOptions.push({
+				id: AUTO_COMPACTION_CONFIG_ID,
+				name: "Auto-compaction",
+				description: "Automatically compact the session context before it overflows",
+				type: "boolean",
+				currentValue: session.autoCompactionEnabled,
+			});
+		}
 		return configOptions;
 	}
 

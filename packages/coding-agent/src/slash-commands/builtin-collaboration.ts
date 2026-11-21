@@ -93,6 +93,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				} else {
 					await runtime.output("Advisor disabled.");
 				}
+				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
 			}
 			if (verb === "on") {
@@ -100,11 +101,13 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				await runtime.output(
 					active ? "Advisor enabled." : "Advisor setting enabled, but no model is assigned to the 'advisor' role.",
 				);
+				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
 			}
 			if (verb === "off") {
 				runtime.session.setAdvisorEnabled(false);
 				await runtime.output("Advisor disabled.");
+				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
 			}
 			if (verb === "status") {

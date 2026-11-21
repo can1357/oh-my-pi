@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ClientCapabilities.session.configOptions.boolean` in the ACP protocol types so clients can advertise support for boolean session config options ([#9080](https://github.com/can1357/oh-my-pi/pull/9080) by [@joseotaviorf](https://github.com/joseotaviorf))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
