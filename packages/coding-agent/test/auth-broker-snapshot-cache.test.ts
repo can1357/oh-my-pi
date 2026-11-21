@@ -326,6 +326,9 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 					}),
 				]);
 			await before(requests[0].promise, "the first request");
+			// The 10 s steps and two attempts per fetch follow `DEFAULT_TIMEOUT_MS` and `DEFAULT_MAX_RETRIES` in
+			// packages/ai/src/auth-broker/client.ts. A longer timeout or another retry count leaves a step below
+			// waiting until the test times out; a timeout under 9.5 s fails the in-flight check 1 ms short of 30 s.
 			// At 10 s the request timeout cuts the first attempt, and the client makes its second.
 			vi.advanceTimersByTime(10_000);
 			await before(requests[1].promise, "the second request");
