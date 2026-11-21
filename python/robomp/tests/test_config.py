@@ -185,6 +185,16 @@ def test_release_model_pool_csv_parses(monkeypatch: pytest.MonkeyPatch, env: dic
     assert cfg.release_model_pool == ("release-a", "release-b")
 
 
+def test_pr_review_status_disabled_by_default(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    """Explicit-off contract: with `ROBOMP_PR_REVIEW_STATUS_ENABLED` unset,
+    status posting MUST be off. A regression to on-by-default would 403
+    (logged, swallowed) on every phase post for under-scoped PATs."""
+    monkeypatch.delenv("ROBOMP_PR_REVIEW_STATUS_ENABLED", raising=False)
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    assert cfg.pr_review_status_enabled is False
+
+
 def test_max_concurrency_default_is_8(env: dict[str, str]) -> None:
     cfg = Settings()  # type: ignore[call-arg]
     assert cfg.max_concurrency == 8

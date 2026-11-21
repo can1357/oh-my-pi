@@ -118,5 +118,16 @@ class GitHubBackend(Protocol):
 
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None: ...
 
+    async def create_commit_status(
+        self,
+        repo: str,
+        sha: str,
+        *,
+        state: str,
+        context: str,
+        description: str = "",
+        target_url: str | None = None,
+    ) -> None: ...
+
 
 __all__ = ["GitHubBackend"]
