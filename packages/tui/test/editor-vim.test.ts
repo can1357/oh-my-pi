@@ -1803,54 +1803,21 @@ describe("Editor vim mode", () => {
 			expect(unbalanced.getText()).toBe("foo) (bar)");
 		});
 
-		it("/ walks older prompts that match, n/N step through them, and N past the newest restores the draft", () => {
-			const editor = new Editor(defaultEditorTheme);
-			editor.setVimMode(true);
-			for (const prompt of ["fix the parser bug", "write docs", "parser tests please"]) editor.addToHistory(prompt);
-			editor.setText("my draft");
-			editor.handleInput(ESC);
-			editor.handleInput("/parser");
-			expect(editor.vimPending).toBe("/parser");
-			editor.handleInput("\r");
-			expect(editor.getText()).toBe("parser tests please");
-			editor.handleInput("n");
-			expect(editor.getText()).toBe("fix the parser bug");
-			expect(cursor(editor)).toEqual({ line: 0, col: 8 });
-			// No older match: the entry stays.
-			editor.handleInput("n");
-			expect(editor.getText()).toBe("fix the parser bug");
-			editor.handleInput("NN");
-			expect(editor.getText()).toBe("my draft");
-			expect(editor.vimMode).toBe("normal");
-		});
-
-		it("Escape and Backspace on an empty search line cancel it without touching the buffer", () => {
+		it("/ and ? open the host's history search and leave the draft and Normal mode alone", () => {
 			const editor = vimEditor("draft");
-			editor.addToHistory("draft two");
-			editor.handleInput("/dr");
-			editor.handleInput(ESC);
+			let opened = 0;
+			editor.onHistorySearch = () => opened++;
+			editor.handleInput("/");
+			editor.handleInput("?");
+			expect(opened).toBe(2);
+			// No search line is left half-typed: the next key is a command again.
 			expect(editor.vimPending).toBe("");
-			editor.handleInput("/d");
-			editor.handleInput(BACKSPACE);
-			editor.handleInput(BACKSPACE);
-			expect(editor.vimPending).toBe("");
-			// Back in Normal mode, `x` is a command again rather than search text.
 			editor.handleInput("x");
 			expect(editor.getText()).toBe("raft");
-		});
-
-		it("searches the persistent history when the editor has one", () => {
-			const editor = new Editor(defaultEditorTheme);
-			editor.setHistoryStorage({
-				add: async () => {},
-				getRecent: () => [],
-				search: query => (query === "deploy" ? [{ prompt: "deploy to eu" }, { prompt: "deploy to us" }] : []),
-			});
-			editor.setVimMode(true);
-			editor.handleInput(ESC);
-			editor.handleInput("2/deploy");
-			editor.handleInput("\r");
-			expect(editor.getText()).toBe("deploy to us");
+			// After an operator, `/` (a motion in Vim) is not supported: the operator cancels.
+			editor.handleInput("d/");
+			expect(opened).toBe(2);
+			expect(editor.getText()).toBe("raft");
 		});
 	});
 

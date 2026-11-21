@@ -6813,6 +6813,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
 		// visible at a glance, and the border is where bash/python mode already signal themselves.
 		editor.onVimModeChange = () => this.#syncVimStatus(editor);
+		// Normal-mode `/` and `?` open the same prompt-history search as Ctrl+R.
+		editor.onHistorySearch = () => this.showHistorySearch();
 	}
 
 	/**

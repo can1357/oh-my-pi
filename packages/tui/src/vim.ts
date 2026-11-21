@@ -69,11 +69,8 @@ export type VimCommand =
 	| { kind: "retype"; record: VimInsertRecord; times: number; newline: boolean; overwrite: boolean }
 	/** `3ifoo<Esc>`: type the session that just ended `times` more times (`newline` for `o`/`O`). */
 	| { kind: "insertRepeat"; times: number; newline: boolean }
-	/**
-	 * `/text`, `?text`, `n`, `N`: load the `count`th prompt-history entry containing `query`, older
-	 * than the current one (`older`) or newer, as a shell's vi mode does.
-	 */
-	| { kind: "history"; query: string; older: boolean; count: number }
+	/** `/` and `?`: open the host's prompt-history search (`Ctrl+R`'s), as a shell's vi mode does. */
+	| { kind: "historySearch" }
 	/** `k`/`j` (and `-`/`+`) with no line left above or below: step `count` prompts through history, as zsh's vi mode. */
 	| { kind: "historyStep"; older: boolean; count: number };
 
@@ -751,10 +748,6 @@ export class VimState {
 	/** `"` typed, waiting for the register name; then the named register the command will use. */
 	#registerPending = false;
 	#register: string | null = null;
-	/** `/` or `?` typed: the history-search text being entered, and the count typed before it. */
-	#search: { older: boolean; text: string; count: number } | null = null;
-	/** Last search, so `n` repeats it and `N` reverses it. */
-	#lastSearch: { query: string; older: boolean } | null = null;
 	/** The editor's wrapped-row lookup for `gj`/`gk`; without one they move by lines like `j`/`k`. */
 	screenMove: VimScreenMove | null = null;
 
@@ -789,9 +782,9 @@ export class VimState {
 		this.#insertRepeat = 1;
 	}
 
-	/** True while a count, operator, `g`, text-object, find, `r`, `"x` prefix, or search is half-typed — Escape cancels it. */
+	/** True while a count, operator, `g`, text-object, find, `r`, or `"x` prefix is half-typed — Escape cancels it. */
 	get pending(): boolean {
-		return this.#commandPending() || this.#registerPending || this.#register !== null || this.#search !== null;
+		return this.#commandPending() || this.#registerPending || this.#register !== null;
 	}
 
 	/** A count, operator, `g`, text object, find, or `r` is waiting for the key that finishes the command. */
@@ -811,19 +804,12 @@ export class VimState {
 		return this.#register;
 	}
 
-	/** True while `/` or `?` is reading search text: Enter, Backspace, and Space go to the search line. */
-	get searching(): boolean {
-		return this.#search !== null;
-	}
-
 	/**
 	 * The half-typed command as Vim would echo it (`"2"`, `"d"`, `"2d"`, `"di"`, `"df"`, `"r"`, `"a`) —
 	 * empty when nothing is pending. Hosts render this next to the mode so a partially entered operator
 	 * is visible instead of silently swallowing the next keystroke.
 	 */
 	get pendingText(): string {
-		// The search line replaces the echo, as Vim's command line does.
-		if (this.#search !== null) return `${this.#search.older ? "/" : "?"}${this.#search.text}`;
 		const register = this.#registerPending ? '"' : this.#register !== null ? `"${this.#register}` : "";
 		return `${register}${this.#count}${this.#operator ?? ""}${this.#pendingG ? "g" : ""}${this.#textObject ?? ""}${findPendingKey(this.#findPending)}${this.#replaceChar ? "r" : ""}`;
 	}
@@ -856,8 +842,6 @@ export class VimState {
 		this.#insertRepeat = 1;
 		this.#lastInsertPos = null;
 		this.#lastVisual = null;
-		this.#search = null;
-		this.#lastSearch = null;
 	}
 
 	/** `0` is the line-start motion unless it extends a count already being typed. */
@@ -879,7 +863,6 @@ export class VimState {
 		this.#replaceChar = false;
 		this.#registerPending = false;
 		this.#register = null;
-		this.#search = null;
 	}
 
 	#takeCount(): number {
@@ -909,15 +892,6 @@ export class VimState {
 			return this.#handleEscape(buf);
 		}
 		if (this.mode === "insert") return null;
-		if (this.#search !== null) {
-			const commands = this.#searchKey(key, this.#search);
-			// The search is not a change `.` repeats, so its keys never reach the change record.
-			if (this.#search === null) {
-				this.#cmdKeys = [];
-				this.#cmdCount = "";
-			}
-			return commands;
-		}
 		const recording = this.mode === "normal";
 		const dotIsTarget = this.#findPending !== null || this.#replaceChar;
 		if (recording) {
@@ -1213,27 +1187,6 @@ export class VimState {
 		}
 		// Normal mode with nothing pending: leave Escape to the app (interrupt / clear draft).
 		return null;
-	}
-
-	/**
-	 * A key typed on the `/`/`?` line. Enter runs the search (an empty line reuses the last text,
-	 * as Vim's does); Backspace on an empty line cancels it; anything else is search text.
-	 */
-	#searchKey(key: string, search: { older: boolean; text: string; count: number }): VimCommand[] {
-		if (key === "enter") {
-			this.#search = null;
-			const query = search.text.trim() === "" ? this.#lastSearch?.query : search.text;
-			if (query === undefined) return [];
-			this.#lastSearch = { query, older: search.older };
-			return [{ kind: "history", query, older: search.older, count: search.count }];
-		}
-		if (key === "backspace") {
-			if (search.text === "") this.#search = null;
-			else search.text = search.text.slice(0, prevGraphemeStart(search.text, search.text.length));
-			return [];
-		}
-		search.text += key;
-		return [];
 	}
 
 	/** The key after `g`: `gg`, `gj`/`gk`, `ge`/`gE`, the case operators, `gJ`, `gv`, `gi`, `gp`/`gP`. */
@@ -1860,13 +1813,13 @@ export class VimState {
 			}
 			case "/":
 			case "?":
-				// Prompt history, not the draft: `/` reaches back to older prompts, `?` forward to newer.
+				// Prompt history, not the draft: the host's history search, as a shell's vi mode.
 				if (this.#operator !== null) {
 					this.#clearPending();
 					return [];
 				}
-				this.#search = { older: key === "/", text: "", count: this.#takeCount() };
-				return [];
+				this.#takeCount();
+				return [{ kind: "historySearch" }];
 			case "j":
 			case "k":
 			case "-":
@@ -1878,17 +1831,6 @@ export class VimState {
 					return [];
 				}
 				return [{ kind: "historyStep", older: key === "k" || key === "-", count: this.#takeCount() }];
-			}
-			case "n":
-			case "N": {
-				const last = this.#lastSearch;
-				if (this.#operator !== null || last === null) {
-					this.#clearPending();
-					return [];
-				}
-				return [
-					{ kind: "history", query: last.query, older: last.older === (key === "n"), count: this.#takeCount() },
-				];
 			}
 			case "J": {
 				if (this.#operator !== null) {

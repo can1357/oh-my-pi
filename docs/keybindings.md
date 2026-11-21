@@ -149,8 +149,7 @@ Text boxes in dialogs use the same Vim mode: ask-form textareas, one-line text f
 | `p` `P` / `gp` `gP`                 | Put after / before the cursor; `gp` and `gP` leave the cursor just past the put text                                                                                              |
 | `"x` prefix                         | Use register `x` for the next yank, delete, or put (see [Registers](#registers))                                                                                                  |
 | `u` `Ctrl+R`                        | Undo / redo, with counts (`3u`); a whole Insert session, or a whole `.`, is one step, and the cursor returns to where the change began                                            |
-| `/` `?` + text, `Enter`             | Search prompt history, like a shell's vi mode: `/` loads the newest older prompt containing the text, `?` the next newer one (see [History search](#history-search))             |
-| `n` `N`                             | Repeat the last history search in the same / opposite direction                                                                                                                   |
+| `/` `?`                             | Open prompt-history search, the same one `Ctrl+R` opens                                                                                                                           |
 | `.`                                 | Repeat the last change, including text typed in the Insert session it opened; a count replaces the original one (`3.`)                                                            |
 | `gv`                                | Reselect the last Visual selection                                                                                                                                                |
 
@@ -190,10 +189,6 @@ Every yank also copies to the system clipboard unless **Vim Yanks Copy to Clipbo
 
 A selection that would cut through an attachment placeholder such as `[Image #1, 800x600]` or `[Paste #2, +30 lines]` takes the whole placeholder with it, so a delete can never leave a corrupt fragment behind.
 
-### History search
-
-`/` and `?` search prompt history, the same prompts `Ctrl+R` searches, not the draft. Type the text after `/`, then `Enter`; `Escape`, or `Backspace` on an empty line, cancels. Every space-separated word must appear in the prompt. The match replaces the draft with the cursor on the first word, still in Normal mode. `n` steps to the next older match and `N` to the next newer one; stepping newer past the newest match brings back the draft you started from. A count picks the nth match (`2/deploy`, `3n`). An empty search repeats the last text. `*` and `#` are not supported.
-
 ### Escape
 
 `Escape` is shared with the app-level interrupt, so Vim mode takes it only when it has something to do:
@@ -205,4 +200,4 @@ A selection that would cut through an attachment placeholder such as `[Image #1,
 
 Vim keys never shadow app chords: `Ctrl`-combinations, `Enter`, and `Tab` keep their normal behavior in every mode, so `Enter` still submits from Normal mode. The one exception is `Ctrl+R`, which is Vim's redo in Normal mode; history search stays on it in Insert mode. Such a key also cancels a half-typed command (`d`, `r`, `f`) first, so the command never carries over into the next prompt. In Normal mode `Up`/`Down` are `k`/`j`, history steps included; in Insert mode they browse history as without Vim mode.
 
-Not supported: marks (`m`, `'`, `` ` ``), searching the draft (`/` and `?` search history), `*` and `#`, macros (`q`, `@`), `Ctrl+A` / `Ctrl+X`, line undo (`U`), and Ex commands (`:`).
+Not supported: marks (`m`, `'`, `` ` ``), searching the draft (`/` and `?` open history search), `n` / `N`, `*` and `#`, macros (`q`, `@`), `Ctrl+A` / `Ctrl+X`, line undo (`U`), and Ex commands (`:`).

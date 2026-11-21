@@ -465,9 +465,6 @@ const VIM_NAV_KEYS: Record<string, string | undefined> = {
 	space: "l",
 };
 
-/** History prompts one Vim `/` search fetches; `n` walks this list without asking again. */
-const VIM_HISTORY_SEARCH_LIMIT = 500;
-
 /** Minimum free cells between an end-of-line cursor and a right-aligned placeholder. */
 const PLACEHOLDER_MIN_GAP = 2;
 
@@ -686,8 +683,6 @@ interface HistoryEntry {
 interface HistoryStorage {
 	add(prompt: string, cwd?: string): Promise<void>;
 	getRecent(limit: number): HistoryEntry[];
-	/** Prompts matching every term of `query`, newest first; Vim's `/` searches through it. */
-	search?(query: string, limit: number): HistoryEntry[];
 }
 
 interface LocalHistoryEntry {
@@ -893,6 +888,8 @@ export class Editor implements Component, Focusable {
 	readClipboard?: () => Promise<string>;
 	/** Asks the host to repaint after an edit that lands outside a key event (`"+p` awaiting the clipboard). */
 	requestRender?: () => void;
+	/** Vim's `/` and `?` in Normal mode: the host opens its prompt-history search. Without it they do nothing. */
+	onHistorySearch?: () => void;
 	/** Fired when the modal state changes, so hosts can restyle their chrome (border, status). */
 	onVimModeChange?: (mode: VimMode) => void;
 
@@ -974,8 +971,6 @@ export class Editor implements Component, Focusable {
 	#vimUnnamed: VimRegister | null = null;
 	/** A `"+`/`"*` clipboard read started when the register was named; settles once the text is stored. */
 	#vimClipboardRead: Promise<void> | null = null;
-	/** `/` through prompt history: the query, its matches newest first, the one loaded (-1: the draft), and that draft. */
-	#vimHistory: { query: string; matches: string[]; at: number; draft: string } | null = null;
 	/** The draft `k` stepped away from into history; `j` back past the newest prompt restores it. */
 	#vimHistoryDraft: string | null = null;
 	/** Set by `gj`/`gk` within a key, so the screen column they keep survives it. */
@@ -2703,17 +2698,6 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
-		// The `/` search line takes Space, Backspace, and Enter as text editing; other named keys are
-		// swallowed rather than turned into motions, and control chords cancel it below.
-		if (vim.searching) {
-			if (canonical === "space" || data === " ") return this.#runVimKey(" ", vim);
-			if (canonical === "backspace" || matchesKey(data, "backspace")) return this.#runVimKey("backspace", vim);
-			if (canonical === "enter" || canonical === "return" || data === "\r" || data === "\n") {
-				return this.#runVimKey("enter", vim);
-			}
-			if (canonical !== undefined && VIM_NAV_KEYS[canonical] !== undefined) return true;
-		}
-
 		// `f`/`t`/`r` are waiting for a character. Space is that character; arrows and other named
 		// keys cancel, instead of being rewritten to `h`/`l` and inserted or searched for.
 		const awaitingTarget = /[fFtTr]$/.test(vim.pendingText);
@@ -2722,9 +2706,7 @@ export class Editor implements Component, Focusable {
 		if (awaitingTarget && mapped !== undefined) return this.#runVimKey("escape", vim);
 		if (mapped !== undefined) return this.#runVimKey(mapped, vim);
 		// Vim's redo is the one control chord Normal mode keeps; Insert and Visual leave it to the host.
-		if (canonical === "ctrl+r" && vim.mode === "normal" && !awaitingTarget && !vim.searching) {
-			return this.#runVimKey("ctrl+r", vim);
-		}
+		if (canonical === "ctrl+r" && vim.mode === "normal" && !awaitingTarget) return this.#runVimKey("ctrl+r", vim);
 
 		// Control chords, Enter, and Tab carry no printable text and stay with the host. A half-typed
 		// command (`r`, `f`, `d`) is cancelled first, like character-jump mode, so it cannot outlive a
@@ -2952,8 +2934,8 @@ export class Editor implements Component, Focusable {
 						command.register,
 					);
 					break;
-				case "history":
-					this.#searchVimHistory(command.query, command.older, command.count);
+				case "historySearch":
+					this.onHistorySearch?.();
 					break;
 				case "historyStep":
 					this.#stepVimHistory(command.older, command.count);
@@ -3066,52 +3048,6 @@ export class Editor implements Component, Focusable {
 		const line = older ? this.#state.lines.length - 1 : 0;
 		this.#state.cursorLine = line;
 		this.#setCursorCol(firstNonBlank(this.#state.lines[line] ?? ""));
-	}
-
-	/**
-	 * `/`, `?`, `n`, `N`: load the `count`th prompt-history entry matching `query`, older or newer
-	 * than the one loaded, the way a shell's vi mode does. Stepping newer past the newest match
-	 * brings back the draft the first search left. A move with nowhere to go changes nothing.
-	 */
-	#searchVimHistory(query: string, older: boolean, count: number): void {
-		const text = this.#state.lines.join("\n");
-		let search = this.#vimHistory;
-		// A new query, or a buffer edited since the last load, starts over from what is there now.
-		if (search === null || search.query !== query || text !== (search.matches[search.at] ?? search.draft)) {
-			const matches = this.#historyMatches(query);
-			const at = matches.indexOf(text);
-			search = { query, matches, at, draft: at < 0 ? text : "" };
-			this.#vimHistory = search;
-		}
-		const target = older ? Math.min(search.at + count, search.matches.length - 1) : Math.max(search.at - count, -1);
-		if (target === search.at) return;
-		search.at = target;
-		this.#historyIndex = -1;
-		this.#setTextInternal(search.matches[target] ?? search.draft, "start");
-		if (target < 0) return;
-		// Land on the first query term, as a search lands on its match.
-		const loaded = this.#state.lines.join("\n").toLowerCase();
-		const term = query.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-		const at = term === "" ? -1 : loaded.indexOf(term);
-		const pos = at < 0 ? { line: 0, col: 0 } : offsetToPos(this.#state.lines, at);
-		this.#state.cursorLine = pos.line;
-		this.#setCursorCol(pos.col);
-	}
-
-	/** Prompts containing every term of `query`, newest first: the persistent history, else this editor's own. */
-	#historyMatches(query: string): string[] {
-		const stored = this.#historyStorage?.search?.(query, VIM_HISTORY_SEARCH_LIMIT);
-		if (stored !== undefined) return stored.map(entry => entry.prompt);
-		const terms = query
-			.toLowerCase()
-			.split(/\s+/)
-			.filter(term => term !== "");
-		const matches: string[] = [];
-		for (const entry of this.#history) {
-			const lower = entry.text.toLowerCase();
-			if (!entry.draft && terms.every(term => lower.includes(term))) matches.push(entry.text);
-		}
-		return matches;
 	}
 
 	/** `gj`/`gk`: where `count` wrapped rows away lands, keeping the screen column; null when it cannot move. */
