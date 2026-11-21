@@ -40,7 +40,7 @@ export function loadRelayExtension(): Promise<RelayExtensionBundle> {
 		? Bun.file(embeddedRelayExtensionZstPath)
 				.bytes()
 				.then(bytes => Bun.zstdDecompress(bytes))
-				.then(raw => JSON.parse(Buffer.from(raw).toString("utf8")) as RelayExtensionBundle)
+				.then((raw): RelayExtensionBundle => JSON.parse(raw.toString("utf8")))
 		: Bun.file(GENERATED_EXTENSION)
 				.json()
 				.catch((error: unknown) => {
