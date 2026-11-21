@@ -48,6 +48,7 @@ import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/ski
 import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
+import { leftArrowBackgrounds } from "../../agents-view/host";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { DequeuedMessage, RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -272,13 +273,14 @@ function safeAbort(label: string, fn: () => void): void {
 	}
 }
 
-// In a focused subagent view, double-tap ← on an empty editor returns to the
-// main session. The second tap must land inside this window. The lower bound
-// rejects terminal-synthesized arrow-key bursts: "click to move cursor" /
-// pointer features in iTerm2, WezTerm, kitty, and tmux emit several arrow keys
-// in a single stdin read (sub-millisecond apart) on a stray click. Three or
-// more rapid taps are likewise treated as a burst, not a gesture. A deliberate
-// human double-tap is always tens of milliseconds apart.
+// Double-tap ← on an empty editor opens the Agent Hub (and, in a focused
+// subagent view, ←← returns to the main session). The second tap must land
+// inside this window. The lower bound rejects terminal-synthesized arrow-key
+// bursts: "click to move cursor" / pointer features in iTerm2, WezTerm, kitty,
+// and tmux emit several arrow keys in a single stdin read (sub-millisecond
+// apart) on a stray click, which used to pop the hub with no key ever pressed.
+// Three or more rapid taps are likewise treated as a burst, not a gesture. A
+// deliberate human double-tap is always tens of milliseconds apart.
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
 
@@ -401,8 +403,8 @@ export class InputController {
 		return this.#draftText ?? this.ctx.editor.getText();
 	}
 
-	// Tap counter for the focused-view double-← gesture; reset whenever a quiet
-	// gap (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
+	// Tap counter for the double-← gesture; reset whenever a quiet gap
+	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
 	#leftTapCount = 0;
 	// Single ← on the empty main composer: background the session.
@@ -875,15 +877,28 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.backgroundSession());
 		}
 
-		// Left arrow on an empty editor: backgrounds the session from the main
-		// session (see LeftBackgroundGesture), or — on a double-tap — returns the
-		// focused subagent view to the main session (intentionally matching Esc).
+		// Left arrow on an empty editor. In a focused subagent view a double-tap
+		// returns to the main session (intentionally matching Esc). On the main
+		// session a single ← backgrounds the session (see LeftBackgroundGesture)
+		// when `composer.leftArrowBackground` is on or this is a background session
+		// (where it detaches back to the Agent View); otherwise ←← opens the agent hub.
+		// That hub gesture stays inert when there are no subagents
+		// (requireContent); the explicit hub key still opens the empty roster.
+		// `armCloseTap` hands this gesture's tap state to the hub so the same ←←
+		// that opened it also arms its close (issue #4780).
 		this.ctx.editor.onLeftAtStart = () => {
 			if (this.ctx.focusedAgentId) {
 				this.#handleFocusedLeftTap();
 				return;
 			}
-			this.#backgroundGesture.tap();
+			if (leftArrowBackgrounds(settings)) {
+				this.#backgroundGesture.tap();
+				return;
+			}
+			if (this.#detectLeftDoubleTap()) {
+				hintUsage.record("agents");
+				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true, trayFirst: true });
+			}
 		};
 		// The native composer's viewing header: an ancestor crumb, or back to main.
 		this.ctx.editor.onFocusAgent = id => this.#focusResolvedAgent(id);
@@ -1079,7 +1094,7 @@ export class InputController {
 	 * (`[LEFT_DOUBLE_TAP_MIN_GAP_MS, LEFT_DOUBLE_TAP_MAX_GAP_MS)`). Taps closer
 	 * than the lower bound, or any third-and-later tap before a quiet gap, are a
 	 * burst and never fire — so a stray click that makes the terminal emit a run
-	 * of ← keys cannot leave the focused view.
+	 * of ← keys can no longer pop the Agent Hub.
 	 */
 	#detectLeftDoubleTap(): boolean {
 		const now = Date.now();

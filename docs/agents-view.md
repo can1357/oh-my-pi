@@ -7,7 +7,7 @@ The Agent View lists every live omp session on the machine, from any directory, 
 | Input | Behavior |
 | --- | --- |
 | `omp agents` | Open the view in the current terminal. |
-| `←` on an empty composer | Move the current session to the background and open the view with it selected. In an attached background session, `←` detaches back to the view. |
+| `/bg` (`/background`) | Move the current session to the background and open the view with it selected. With the `composer.leftArrowBackground` setting, a single `←` on an empty composer does the same. In an attached background session, `←` always detaches back to the view. |
 
 `omp agents --json` prints the same sessions as JSON instead; `omp agents --cwd <dir>` limits the list to sessions working in `<dir>`. When stdout is not a terminal, `omp agents` prints a plain table.
 
@@ -22,7 +22,9 @@ Sessions are grouped by what they need, in this order:
 | Working | Running a turn, compacting, or still starting. |
 | Idle | Finished and waiting for the next prompt. |
 
-Each row shows a status glyph (animated while running), the session title, its working directory, what it is doing or asking, and how long ago it was last active. Sessions running in a terminal of their own (foreground sessions) are dimmed and marked `fg`: they are listed but cannot be attached or stopped from the view; press `←` in their terminal to move them to the background. A session that more than one process has open is listed once.
+Each row shows a status glyph (animated while running), the session title, its working directory, what it is doing or asking, and how long ago it was last active. Sessions running in a terminal of their own (foreground sessions) are dimmed and marked `fg`: they are listed but cannot be attached or stopped from the view; run `/bg` in their terminal to move them to the background. A session that more than one process has open is listed once.
+
+Every interactive session publishes this status record so that the view can list foreground sessions too; writes are debounced to at most one every 500 ms. Only background sessions and sessions with `composer.leftArrowBackground` on poll the list (every 10 s) to show how many other sessions wait for input.
 
 The list refreshes every second. When a session starts waiting for input or fails, the terminal bell rings and the window title becomes `N awaiting input · omp agents`.
 
@@ -48,6 +50,6 @@ If the connection drops (for example when the daemon is upgraded), the view repo
 
 ## Environment
 
-A background session starts with a copy of the environment of the terminal that started it (when backgrounding with `←`, or the terminal running the Agent View for new sessions). Terminal-specific variables such as `SSH_*`, `TMUX*`, `ITERM_*`, `KITTY_*` and `VSCODE_*` are dropped. Everything else is kept, provider API keys and proxy settings included. Like every daemon-supervised process, the launch environment is stored in the daemon's private database under `~/.omp/run/daemon` (owner-only) for as long as the unit exists. Later changes in your shell do not reach a running background session; stop it and start it again to pick them up.
+A background session starts with a copy of the environment of the terminal that started it (when backgrounding with `/bg` or `←`, or the terminal running the Agent View for new sessions). Terminal-specific variables such as `SSH_*`, `TMUX*`, `ITERM_*`, `KITTY_*` and `VSCODE_*` are dropped. Everything else is kept, provider API keys and proxy settings included. Like every daemon-supervised process, the launch environment is stored in the daemon's private database under `~/.omp/run/daemon` (owner-only) for as long as the unit exists. Later changes in your shell do not reach a running background session; stop it and start it again to pick them up.
 
 Status records live in `~/.omp/run/agents/status` (owner-only). They hold the session's title, working directory, model and current activity, never its environment.

@@ -10,7 +10,7 @@
  * Add a hint by appending to {@link COMPOSER_HINTS}, extending
  * {@link ComposerHintId}, and recording the gesture where it is handled.
  */
-import { formatKeyHint, type KeybindingsManager } from "../app-keybindings";
+import { formatDoubleTap, formatKeyHint, type KeybindingsManager } from "../app-keybindings";
 import { theme } from "../theme/theme";
 
 /** Stable hint ids; persisted as usage-counter keys, so never rename one. */
@@ -24,6 +24,8 @@ export interface ComposerHintContext {
 	focusedOnAgent: boolean;
 	/** The viewed session already has messages. */
 	conversationStarted: boolean;
+	/** A single ← on the empty composer backgrounds the session (so ←← no longer opens the hub). */
+	leftArrowBackground: boolean;
 	/** The ← background gesture is being advertised (shortly after startup). */
 	backgroundHintActive: boolean;
 	/** Other background sessions waiting for input. */
@@ -64,15 +66,18 @@ export const COMPOSER_HINTS: readonly ComposerHint[] = [
 		},
 	},
 	{
-		// The `app.agents.hub` key, which opens the agent hub.
+		// The ←← gesture in the input controller, which opens the agent hub from the
+		// main session (in a focused view it hops to the parent instead). Where a
+		// single ← backgrounds the session, the `app.agents.hub` key instead.
 		id: "agents",
 		learnedAfter: 3,
 		resolve: ctx => {
 			if (ctx.runningAgents === 0 || ctx.focusedOnAgent) return undefined;
-			const key = ctx.keybindings.getKeys("app.agents.hub")[0];
+			const hubKey = ctx.keybindings.getKeys("app.agents.hub")[0];
+			const key = ctx.leftArrowBackground ? hubKey && formatKeyHint(hubKey) : formatDoubleTap("left");
 			if (!key) return undefined;
 			return {
-				key: formatKeyHint(key),
+				key,
 				label: `to see ${ctx.runningAgents} running ${ctx.runningAgents === 1 ? "agent" : "agents"}`,
 			};
 		},

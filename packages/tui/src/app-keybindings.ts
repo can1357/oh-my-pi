@@ -231,7 +231,7 @@ export const KEYBINDINGS = {
 		description: "Open the agent hub",
 	},
 	"app.session.background": {
-		// The plain ← gesture on an empty composer covers the default; this is the remappable chord.
+		// Unbound by default: `/bg` covers it, and `composer.leftArrowBackground` adds the plain ← gesture.
 		defaultKeys: [],
 		description: "Background this session and open the agent view",
 	},

@@ -150,7 +150,7 @@ async function resumeFromPicker(state: AgentsViewState, query: string): Promise<
 				state.selectedKey = agentRowKey(action.row);
 				state.notice = {
 					tone: "warning",
-					text: `${action.row.title} is running in another terminal; press ← there to move it here.`,
+					text: `${action.row.title} is running in another terminal; run /bg there to move it here.`,
 				};
 				return;
 			case "launch": {

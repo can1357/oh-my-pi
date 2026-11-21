@@ -132,7 +132,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
-import { createSessionPicker, type SessionPicker } from "./session/session-picker";
+import type { SessionPicker } from "./session/session-picker";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -214,6 +214,11 @@ type RunRpcMode = (session: AgentSession, options?: RpcModeOptions) => Promise<n
 /** Interactive-only graph boundary; login dialogs and overlays load on first real use. */
 async function loadInteractiveModeConstructor() {
 	return (await import("./modes/interactive-mode")).InteractiveMode;
+}
+
+/** Resume/import-only graph boundary; ordinary launches never construct a picker. */
+async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
+	return (await import("./session/session-picker")).createSessionPicker(init);
 }
 
 /** Join-only graph boundary; the full built-in slash-command registry is otherwise unnecessary at startup. */
@@ -2164,7 +2169,7 @@ export async function runRootCommand(
 				pauseStartupWatchdog();
 				let selected: SessionInfo | null;
 				try {
-					const selectSessionImpl = deps.selectSession ?? createSessionPicker({ foreign: true });
+					const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker({ foreign: true }));
 					selected = await logger.time(`select${sourceName}Session`, selectSessionImpl, choices, {
 						title: `Import ${sourceName} Session`,
 						scopeLabel: false,
@@ -2285,7 +2290,7 @@ export async function runRootCommand(
 				}
 			}
 			pauseStartupWatchdog();
-			const selectSessionImpl = deps.selectSession ?? createSessionPicker();
+			const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
 			const picked = await logger.time("selectSession", selectSessionImpl, folder.sessions, {
 				completeSessions: folder.complete,
 				allSessions: preloadedAllSessions,

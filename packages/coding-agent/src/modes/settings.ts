@@ -153,6 +153,19 @@ export const cfgComposerTokenRate = register({
 	},
 });
 
+export const cfgComposerLeftArrowBackground = register({
+	id: "composer.leftArrowBackground",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Composer",
+		label: "← Backgrounds Session",
+		description:
+			"A single ← on the empty main composer moves the session into the background and opens the Agent View (`omp agents`). Off: ←← opens the Agent Hub, and `/bg` or the `app.session.background` key backgrounds",
+	},
+});
+
 // Status line
 export const cfgStatusLinePreset = register({
 	id: "statusLine.preset",

@@ -8,6 +8,8 @@ import { setViewerTerminalMultiplexer, TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh
 import { logger } from "@oh-my-pi/pi-utils";
 import { DaemonRejectedError, daemonClient, probeDaemon } from "../daemon/client";
 import { GLOBAL_SCOPE, type UnitRef } from "../daemon/protocol";
+import type { Settings } from "../config/settings";
+import { cfgComposerLeftArrowBackground } from "../modes/settings";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { newAttachToken, VIEWER_ENV_KEYS, type ViewerIdentity } from "./markers";
 
@@ -161,6 +163,11 @@ export function initHostedInstance(): Promise<string | undefined> {
 /** The verified hosted-unit key of this process; undefined until {@link initHostedInstance} resolved, or when not hosted. */
 export function hostedInstanceKey(): string | undefined {
 	return hostedKey;
+}
+
+/** Whether ← on the empty main composer backgrounds this session: always when hosted, else per `composer.leftArrowBackground`. */
+export function leftArrowBackgrounds(settings: Settings): boolean {
+	return hostedKey !== undefined || cfgComposerLeftArrowBackground.get(settings);
 }
 
 /**

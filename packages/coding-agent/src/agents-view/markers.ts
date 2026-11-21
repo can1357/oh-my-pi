@@ -14,6 +14,7 @@
  */
 import { OMP_ATTACH_APC_PREFIX } from "@oh-my-pi/pi-tui/terminal";
 import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { isRecord } from "@oh-my-pi/pi-utils";
 
 /**
  * Environment variables terminal capability detection reads to identify the viewer
@@ -113,13 +114,13 @@ export function parseAttachPayload(payload: string, token: string): ViewerIdenti
 	} catch {
 		return undefined;
 	}
-	if (typeof parsed !== "object" || parsed === null) return undefined;
-	const record = parsed as Record<string, unknown>;
+	if (!isRecord(parsed)) return undefined;
+	const record = parsed;
 	const cols = dimension(record.cols);
 	const rows = dimension(record.rows);
 	if (cols === undefined || rows === undefined) return undefined;
 	const env: Record<string, string> = {};
-	if (typeof record.env === "object" && record.env !== null) {
+	if (isRecord(record.env)) {
 		for (const [name, value] of Object.entries(record.env)) {
 			if (VIEWER_ENV_KEY_SET.has(name) && typeof value === "string" && IDENTITY_VALUE.test(value)) env[name] = value;
 		}

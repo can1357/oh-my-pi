@@ -159,15 +159,23 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 				},
 				{ keys: [act("app.live.toggle")], action: "Start/stop live voice mode (/live)" },
 				{
-					keys: [act("app.agents.hub"), { text: " / " }, act("app.session.observe")],
+					keys: [
+						act("app.agents.hub"),
+						{ text: " / " },
+						act("app.session.observe"),
+						{ text: " / double-tap " },
+						hints(["left"]),
+						{ text: " (empty editor)" },
+					],
 					action: "Open the agent hub",
 				},
 				{
 					keys:
 						bindings.keybindings.getKeys("app.session.background").length > 0
-							? [hints(["left"]), { text: " (empty editor) / " }, act("app.session.background")]
-							: [hints(["left"]), { text: " (empty editor)" }],
-					action: "Background this session (it keeps running) and open the agent view; `/background`",
+							? [{ token: "/bg" }, { text: " / " }, act("app.session.background")]
+							: [{ token: "/bg" }],
+					action:
+						"Background this session (it keeps running) and open the agent view; with `composer.leftArrowBackground`, a single ← on the empty editor does it instead of ←← opening the hub",
 				},
 				{ keys: [{ token: "#<number>" }], action: "GitHub issue/PR reference (e.g. `#3164` → `pr://`/`issue://`)" },
 				{

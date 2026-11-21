@@ -275,6 +275,7 @@ import {
 	hostedInstanceKey,
 	hostedRestartEnv,
 	initHostedInstance,
+	leftArrowBackgrounds,
 } from "../agents-view/host";
 import { encodeDetachMarker, parseAttachPayload } from "../agents-view/markers";
 import { listAgentSessions } from "../agents-view/status";
@@ -5145,6 +5146,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			runningAgents: this.#runningSubagentCount,
 			focusedOnAgent: this.focusedAgentId !== undefined,
 			conversationStarted: this.viewSession.messages.length > 0,
+			leftArrowBackground: leftArrowBackgrounds(this.settings),
 			backgroundHintActive: Date.now() < this.#backgroundHintUntil,
 			backgroundWaiting: this.#backgroundWaiting,
 			keybindings: this.keybindings,
@@ -9932,8 +9934,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Advertise ← for a while, and poll how many other background sessions wait for input. */
+	/**
+	 * Advertise ← for a while, and poll how many other background sessions wait for
+	 * input. Only where ← backgrounds; other sessions pay no polling cost.
+	 */
 	#startBackgroundHints(): void {
+		if (!leftArrowBackgrounds(this.settings)) return;
 		this.#showBackgroundHint();
 		const poll = async (): Promise<void> => {
 			try {

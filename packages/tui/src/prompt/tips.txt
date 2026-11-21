@@ -24,8 +24,8 @@ Press {key:ctrl+r} to search your prompt history and reuse a past message
 `/copy code` grabs the last code block to your clipboard — `/copy cmd` grabs the last shell/python command
 `/shake` rips heavy tool results out of context to reclaim tokens without a full /compact — `/shake images` drops just images
 Pair up live: `/collab` shares your session through an end-to-end encrypted relay link — a teammate runs `/join <link>` to watch tool calls stream and prompt the agent from their own omp
-Press {action:app.agents.hub} to drill into a running or finished agent and inspect its tool calls and transcript
-Press {key:left} on an empty composer to background the session: it keeps running, `omp agents` lists it from any terminal, and Enter reattaches
+Press {tap:left} to drill into a running or finished agent and inspect its tool calls and transcript
+`/bg` moves the session into the background: it keeps running after the terminal or SSH connection closes, `omp agents` lists it from any terminal, and Enter reattaches
 Hit a Codex rate limit? `/usage reset` spends a saved reset credit to immediately restore your quota
 No native tool_calling? Inference provider botches parsing them? `PI_DIALECT=glm|kimi|anthropic…` rolls it locally for them!
 Turn on `/advisor` to attach a second model that reviews every turn and quietly injects advice

@@ -14,7 +14,7 @@ import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { FileSlashCommand } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 
-import { cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgComposerLeftArrowBackground, cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 type Spy = Mock<(...args: unknown[]) => unknown>;
 type StartPendingSubmissionSpy = Mock<InteractiveModeContext["startPendingSubmission"]>;
@@ -1167,9 +1167,41 @@ describe("InputController Ctrl+C behavior", () => {
 	});
 });
 
-describe("InputController ← gesture", () => {
+describe("InputController double-tap ← gesture (default)", () => {
+	function setup() {
+		const { ctx, editor } = createContext();
+		(ctx as { lastLeftTapTime: number }).lastLeftTapTime = 0;
+		const backgroundSession = vi.fn();
+		(ctx as { backgroundSession: () => void }).backgroundSession = backgroundSession;
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		return { backgroundSession, showAgentHub: ctx.showAgentHub as Spy, tap: () => editor.onLeftAtStart?.() };
+	}
+
+	it("opens the Agent Hub on a deliberate double-tap and never backgrounds", () => {
+		const now = vi.spyOn(Date, "now");
+		const { backgroundSession, showAgentHub, tap } = setup();
+		now.mockReturnValue(1_000);
+		tap();
+		now.mockReturnValue(1_200); // 200ms later — a human double-tap
+		tap();
+		expect(showAgentHub).toHaveBeenCalledTimes(1);
+		expect(backgroundSession).not.toHaveBeenCalled();
+	});
+
+	it("ignores a terminal-synthesized burst of ← arrows arriving together", () => {
+		const now = vi.spyOn(Date, "now");
+		const { showAgentHub, tap } = setup();
+		now.mockReturnValue(1_000);
+		for (let i = 0; i < 6; i++) tap();
+		expect(showAgentHub).not.toHaveBeenCalled();
+	});
+});
+
+describe("InputController ← gesture (composer.leftArrowBackground)", () => {
 	function setup(focusedAgentId?: string) {
 		vi.useFakeTimers();
+		cfgComposerLeftArrowBackground.override(Settings.instance, true);
 		const { ctx, editor } = createContext();
 		(ctx as { lastLeftTapTime: number }).lastLeftTapTime = 0;
 		(ctx as { focusedAgentId?: string }).focusedAgentId = focusedAgentId;

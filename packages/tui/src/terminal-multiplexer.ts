@@ -64,7 +64,11 @@ export function setViewerTerminalMultiplexer(id: string | null | undefined): voi
 		viewerMultiplexer = undefined;
 		return;
 	}
-	viewerMultiplexer = id !== null && Object.hasOwn(MULTIPLEXERS_BY_ID, id) ? (id as TerminalMultiplexer) : null;
+	viewerMultiplexer = id !== null && isTerminalMultiplexerId(id) ? id : null;
+}
+
+function isTerminalMultiplexerId(id: string): id is TerminalMultiplexer {
+	return Object.hasOwn(MULTIPLEXERS_BY_ID, id);
 }
 
 /** Whether `multiplexer`'s session is active in `env`, as {@link setViewerTerminalMultiplexer} may override. */

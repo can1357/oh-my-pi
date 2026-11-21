@@ -209,7 +209,7 @@ export class AgentsViewComponent implements Component {
 	#attach(row: AgentsViewRow | undefined): void {
 		if (!row) return;
 		if (!row.attachable || !row.hostKey) {
-			this.#notify("warning", "This session runs in a terminal of its own; press ← there to move it here.");
+			this.#notify("warning", "This session runs in a terminal of its own; run /bg there to move it here.");
 			return;
 		}
 		this.#state.selectedKey = agentRowKey(row);
