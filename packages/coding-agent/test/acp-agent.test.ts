@@ -139,9 +139,8 @@ class FakeAgentSession {
 	queuedMessageCount = 0;
 	systemPrompt = "system";
 	disposed = false;
-	fastMode = false;
-	ultrafastMode = false;
-	setFastModeCalls: boolean[] = [];
+	fastTier: "priority" | "ultrafast" | undefined = undefined;
+	anthropicFastModeFallbackDisabled = false;
 	advisorEnabled = false;
 	advisorActive = false;
 	autoCompactionEnabled = true;
@@ -440,13 +439,27 @@ class FakeAgentSession {
 	}
 
 	toggleFastMode(): boolean {
-		this.fastMode = !this.fastMode;
-		return this.fastMode;
+		const enabled = this.fastTier === undefined;
+		this.setFastMode(enabled);
+		return enabled;
 	}
 
 	setFastMode(enabled: boolean): boolean {
-		this.setFastModeCalls.push(enabled);
-		this.fastMode = enabled;
+		const previous = this.fastTier;
+		if (!enabled) {
+			this.fastTier = undefined;
+		} else {
+			// Mirrors `ModelControls.setFastMode(true)`: always selects `priority`
+			// (which downgrades `ultrafast` if called) and clears any Anthropic
+			// per-session fallback flag so `speed: "fast"` is re-armed.
+			this.anthropicFastModeFallbackDisabled = false;
+			this.fastTier = "priority";
+		}
+		if (this.fastTier !== previous) {
+			for (const listener of this.#listeners) {
+				listener({ type: "service_tier_changed" } as AgentSessionEvent);
+			}
+		}
 		return true;
 	}
 
@@ -454,11 +467,11 @@ class FakeAgentSession {
 	// directly instead of re-deriving it from the model. Whether a given model
 	// has a service-tier family is `ModelControls`' contract, covered there.
 	supportsFastMode(): boolean {
-		return this.fastModeSupported;
+		return this.fastModeSupported || this.fastTier !== undefined;
 	}
 
 	isFastModeEnabled(): boolean {
-		return this.fastMode;
+		return this.fastTier !== undefined;
 	}
 
 	setAdvisorEnabled(enabled: boolean): boolean {
@@ -479,7 +492,7 @@ class FakeAgentSession {
 	}
 
 	isUltrafastModeEnabled(): boolean {
-		return this.ultrafastMode;
+		return this.fastTier === "ultrafast";
 	}
 
 	setForcedToolChoice(toolName: string): void {
@@ -4674,41 +4687,76 @@ describe("ACP boolean config options", () => {
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
 
-		await harness.agent.setSessionConfigOption({
+		const response = await harness.agent.setSessionConfigOption({
 			sessionId: created.sessionId,
 			configId: "fast",
 			value: true,
 		});
-		expect(session.setFastModeCalls).toEqual([]);
+		expect(session.fastTier).toBeUndefined();
+		expect(response.configOptions.some(option => option.id === "fast")).toBe(false);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
 
-	it("skips idempotent fast=true updates when ultrafast is active but still forwards non-ultrafast true writes", async () => {
+	it("preserves ultrafast on fast=true while still re-arming non-ultrafast priority", async () => {
 		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		session.fastMode = true;
-		session.ultrafastMode = true;
+		session.fastTier = "ultrafast";
 
 		const ultraResponse = await harness.agent.setSessionConfigOption({
 			sessionId: created.sessionId,
 			configId: "fast",
 			value: true,
 		});
-		expect(session.setFastModeCalls).toEqual([]);
+		expect(session.fastTier).toBe("ultrafast");
+		expect(session.isUltrafastModeEnabled()).toBe(true);
 		expect(ultraResponse.configOptions.find(option => option.id === "fast")?.currentValue).toBe(true);
 
 		// A direct Anthropic session can be enabled-but-inactive after provider
-		// fallback; repeated `true` writes must still reach `setFastMode(true)`.
-		session.ultrafastMode = false;
+		// fallback; repeated `true` writes must still re-arm `speed: "fast"`.
+		session.fastTier = "priority";
+		session.anthropicFastModeFallbackDisabled = true;
 		await harness.agent.setSessionConfigOption({
 			sessionId: created.sessionId,
 			configId: "fast",
 			value: true,
 		});
-		expect(session.setFastModeCalls).toEqual([true]);
+		expect(session.anthropicFastModeFallbackDisabled).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("pushes config_option_update when the session clears fast mode automatically", async () => {
+		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+		await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "fast",
+			value: true,
+		});
+		const updatesBefore = harness.updates.length;
+		// Simulates provider rejection clearing `anthropic` priority mid-session.
+		session.setFastMode(false);
+		await Bun.sleep(0);
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(configUpdates.length).toBe(1);
+		const update = configUpdates[0]!.update;
+		if (update.sessionUpdate !== "config_option_update") throw new Error("expected config_option_update");
+		expect(update.configOptions.find(option => option.id === "fast")?.currentValue).toBe(false);
+		expectAcpNotifications(configUpdates);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -4717,10 +4765,13 @@ describe("ACP boolean config options", () => {
 	it("rejects wrong value types for select and boolean config options", async () => {
 		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const initialMode = created.modes?.currentModeId;
+		const updatesBefore = harness.updates.length;
 
 		await expect(
 			harness.agent.setSessionConfigOption({ sessionId: created.sessionId, configId: "mode", value: true }),
-		).rejects.toThrow("Unsupported boolean ACP config option: mode");
+		).rejects.toThrow();
 
 		await expect(
 			harness.agent.setSessionConfigOption({
@@ -4728,7 +4779,23 @@ describe("ACP boolean config options", () => {
 				configId: "advisor",
 				value: "on",
 			}),
-		).rejects.toThrow("Expected a boolean value for ACP config option: advisor");
+		).rejects.toThrow();
+
+		expect(session.advisorEnabled).toBe(false);
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(configUpdates).toEqual([]);
+		const after = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "mode",
+			value: initialMode ?? "default",
+		});
+		expect(after.configOptions.find(option => option.id === "mode")?.currentValue).toBe(initialMode);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

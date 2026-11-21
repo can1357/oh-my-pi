@@ -4444,6 +4444,28 @@ func (v ModelChangedEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"model_changed"`, nil)
 }
 
+type ServiceTierChangedEvent struct{}
+
+func (v *ServiceTierChangedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ServiceTierChangedEvent", v.decodeFrom)
+}
+
+func (v *ServiceTierChangedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ServiceTierChangedEvent
+	d := fieldDecoder{raw: raw, owner: "ServiceTierChangedEvent"}
+	d.constant("type", "service_tier_changed")
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ServiceTierChangedEvent) MarshalJSON() ([]byte, error) {
+	type plain ServiceTierChangedEvent
+	return encodeObject(plain(v), `"type":"service_tier_changed"`, nil)
+}
+
 type ConfigWarningsChangedEvent struct{}
 
 func (v *ConfigWarningsChangedEvent) UnmarshalJSON(data []byte) error {
@@ -4766,6 +4788,7 @@ func (CacheWarmingEndEvent) isRpcAgentEvent()        {}
 func (RetryFallbackAppliedEvent) isRpcAgentEvent()   {}
 func (RetryFallbackSucceededEvent) isRpcAgentEvent() {}
 func (ModelChangedEvent) isRpcAgentEvent()           {}
+func (ServiceTierChangedEvent) isRpcAgentEvent()     {}
 func (ConfigWarningsChangedEvent) isRpcAgentEvent()  {}
 func (AdvisorCostChangedEvent) isRpcAgentEvent()     {}
 func (AdvisorYieldedEvent) isRpcAgentEvent()         {}
@@ -4842,6 +4865,8 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[RetryFallbackSucceededEvent](raw)
 	case "model_changed":
 		value, err = decodeVariant[ModelChangedEvent](raw)
+	case "service_tier_changed":
+		value, err = decodeVariant[ServiceTierChangedEvent](raw)
 	case "config_warnings_changed":
 		value, err = decodeVariant[ConfigWarningsChangedEvent](raw)
 	case "advisor_cost_changed":
@@ -7042,6 +7067,7 @@ func (CacheWarmingEndEvent) isRpcNotification()         {}
 func (RetryFallbackAppliedEvent) isRpcNotification()    {}
 func (RetryFallbackSucceededEvent) isRpcNotification()  {}
 func (ModelChangedEvent) isRpcNotification()            {}
+func (ServiceTierChangedEvent) isRpcNotification()      {}
 func (ConfigWarningsChangedEvent) isRpcNotification()   {}
 func (AdvisorCostChangedEvent) isRpcNotification()      {}
 func (AdvisorYieldedEvent) isRpcNotification()          {}
@@ -7155,6 +7181,8 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[RetryFallbackSucceededEvent](raw)
 	case "model_changed":
 		value, err = decodeVariant[ModelChangedEvent](raw)
+	case "service_tier_changed":
+		value, err = decodeVariant[ServiceTierChangedEvent](raw)
 	case "config_warnings_changed":
 		value, err = decodeVariant[ConfigWarningsChangedEvent](raw)
 	case "advisor_cost_changed":
@@ -7247,6 +7275,7 @@ func (CacheWarmingEndEvent) isRpcServerFrame()         {}
 func (RetryFallbackAppliedEvent) isRpcServerFrame()    {}
 func (RetryFallbackSucceededEvent) isRpcServerFrame()  {}
 func (ModelChangedEvent) isRpcServerFrame()            {}
+func (ServiceTierChangedEvent) isRpcServerFrame()      {}
 func (ConfigWarningsChangedEvent) isRpcServerFrame()   {}
 func (AdvisorCostChangedEvent) isRpcServerFrame()      {}
 func (AdvisorYieldedEvent) isRpcServerFrame()          {}
@@ -7370,6 +7399,8 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[RetryFallbackSucceededEvent](raw)
 	case "model_changed":
 		value, err = decodeVariant[ModelChangedEvent](raw)
+	case "service_tier_changed":
+		value, err = decodeVariant[ServiceTierChangedEvent](raw)
 	case "config_warnings_changed":
 		value, err = decodeVariant[ConfigWarningsChangedEvent](raw)
 	case "advisor_cost_changed":

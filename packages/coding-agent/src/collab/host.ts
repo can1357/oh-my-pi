@@ -76,6 +76,7 @@ const STATE_TRIGGER_EVENTS: Record<string, true> = {
 	tool_execution_end: true,
 	thinking_level_changed: true,
 	model_changed: true,
+	service_tier_changed: true,
 	advisor_cost_changed: true,
 	auto_compaction_end: true,
 };

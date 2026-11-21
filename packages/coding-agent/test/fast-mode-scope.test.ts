@@ -176,12 +176,22 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.isUltrafastModeEnabled()).toBe(false);
 	});
 
-	it("refuses /fast on a Codex model whose discovered tiers omit priority", async () => {
+	it("refuses /fast on a Codex model whose discovered tiers omit priority, but exposes it to clear an active fast tier", async () => {
 		const session = await createSessionForModel(codexModel(["ultrafast"]));
 		expect(session.supportsFastMode()).toBe(false);
 		expect(session.setFastMode(true)).toBe(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeActive()).toBe(false);
+
+		// Once ultrafast is active, `supportsFastMode()` exposes the toggle so
+		// ACP clients can still turn it off; clearing hides it again.
+		expect(session.setUltrafastMode(true)).toBe(true);
+		expect(session.supportsFastMode()).toBe(true);
+		expect(session.setFastMode(true)).toBe(false);
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		expect(session.setFastMode(false)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({});
+		expect(session.supportsFastMode()).toBe(false);
 	});
 
 	it("keeps /fast on a Codex model whose discovered tier list is empty", async () => {

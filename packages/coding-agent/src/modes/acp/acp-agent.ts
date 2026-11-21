@@ -1189,6 +1189,7 @@ export class AcpAgent implements Agent {
 	async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
 
+		let fastTierChanged = false;
 		switch (params.configId) {
 			case MODE_CONFIG_ID:
 				this.#applyModeChange(record, this.#expectSelectValue(params));
@@ -1208,7 +1209,9 @@ export class AcpAgent implements Agent {
 				// reaching `setFastMode(true)` so a direct Anthropic session in
 				// provider fallback can still re-arm `speed: "fast"`.
 				if (record.session.supportsFastMode() && !(enabled && record.session.isUltrafastModeEnabled())) {
+					const fastBefore = record.session.isFastModeEnabled();
 					record.session.setFastMode(enabled);
+					fastTierChanged = record.session.isFastModeEnabled() !== fastBefore;
 				}
 				break;
 			}
@@ -1233,10 +1236,13 @@ export class AcpAgent implements Agent {
 		}
 
 		// Before lifetime delivery is ready, explicit client requests still
-		// receive their config update here. Once ready, the model/thinking
+		// receive their config update here. Once ready, the model/thinking/tier
 		// event supplies that update without a duplicate push.
 		const handledBySubscription =
-			(params.configId === THINKING_CONFIG_ID || params.configId === MODEL_CONFIG_ID) && record.lifetimeUpdatesReady;
+			(params.configId === THINKING_CONFIG_ID ||
+				params.configId === MODEL_CONFIG_ID ||
+				(params.configId === FAST_CONFIG_ID && fastTierChanged)) &&
+			record.lifetimeUpdatesReady;
 		if (!handledBySubscription) {
 			await this.#pushConfigOptionUpdate(record);
 		}
@@ -2057,7 +2063,9 @@ export class AcpAgent implements Agent {
 		} else {
 			if (
 				record.lifetimeUpdatesReady &&
-				(event.type === "thinking_level_changed" || event.type === "model_changed")
+				(event.type === "thinking_level_changed" ||
+					event.type === "model_changed" ||
+					event.type === "service_tier_changed")
 			) {
 				this.#trackLifetimeDelivery(record, event.type, this.#pushConfigOptionUpdate(record));
 			}

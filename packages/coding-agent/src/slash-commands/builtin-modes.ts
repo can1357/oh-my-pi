@@ -524,7 +524,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const message = runFastCommand(arg, runtime.session);
 			if (message === undefined) return usage(FAST_USAGE, runtime);
 			await runtime.output(message);
-			if (arg !== "status") await runtime.notifyConfigChanged?.();
+			if (arg !== "status") await runtime.notifyConfigChanged?.({ handledBySessionEvent: true });
 			return commandConsumed();
 		},
 		handleTui: (command, runtime) => {
@@ -554,7 +554,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const message = runSlowCommand(arg, runtime.session);
 			if (message === undefined) return usage("Usage: /slow [on|off|status]", runtime);
 			await runtime.output(message);
-			if (arg !== "status") await runtime.notifyConfigChanged?.();
+			if (arg !== "status") await runtime.notifyConfigChanged?.({ handledBySessionEvent: true });
 			return commandConsumed();
 		},
 		handleTui: (command, runtime) => {

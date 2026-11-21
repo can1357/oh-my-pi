@@ -770,11 +770,11 @@ export class ModelControls {
 	}
 
 	/**
-	 * Whether the active model accepts a `/fast` toggle (`setFastMode(true)`):
-	 * requires a service-tier family, and on the OpenAI family requires the
-	 * model to accept the `priority` tier (e.g. false for Fireworks, which has
+	 * Whether the active model exposes a `/fast` toggle: requires a service-tier
+	 * family, and on the OpenAI family either an existing fast tier to clear or a
+	 * model that accepts the `priority` tier (e.g. false for Fireworks, which has
 	 * its own Providers › Fireworks Tier toggle, and for Codex models whose
-	 * discovered `serviceTiers` omit `priority`).
+	 * discovered `serviceTiers` omit `priority` when no fast tier is active).
 	 *
 	 * Callers that surface a fast-mode control use this to hide it rather than
 	 * offering a switch whose writes {@link setFastMode} would discard.
@@ -783,7 +783,7 @@ export class ModelControls {
 		const model = this.#model;
 		const family = model ? serviceTierFamily(model) : undefined;
 		if (!model || !family) return false;
-		return family !== "openai" || shouldSendServiceTier("priority", model);
+		return this.isFastModeEnabled() || family !== "openai" || shouldSendServiceTier("priority", model);
 	}
 
 	/**
@@ -881,6 +881,7 @@ export class ModelControls {
 		}
 		this.#serviceTierByFamily = next;
 		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry());
+		this.#host.emit({ type: "service_tier_changed" });
 	}
 
 	/**

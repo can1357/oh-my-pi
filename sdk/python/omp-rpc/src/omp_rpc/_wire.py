@@ -1246,6 +1246,11 @@ class ModelChangedEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class ServiceTierChangedEvent:
+    type: Literal["service_tier_changed"] = "service_tier_changed"
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class ConfigWarningsChangedEvent:
     type: Literal["config_warnings_changed"] = "config_warnings_changed"
 
@@ -1802,7 +1807,7 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ServiceTierChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
@@ -2760,6 +2765,13 @@ def parse_model_changed_event(value: object, path: str = "ModelChangedEvent") ->
     )
 
 
+def parse_service_tier_changed_event(value: object, path: str = "ServiceTierChangedEvent") -> ServiceTierChangedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["service_tier_changed"]]', literal(frozenset({"service_tier_changed"}))), path)
+    return ServiceTierChangedEvent(
+    )
+
+
 def parse_config_warnings_changed_event(value: object, path: str = "ConfigWarningsChangedEvent") -> ConfigWarningsChangedEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["config_warnings_changed"]]', literal(frozenset({"config_warnings_changed"}))), path)
@@ -3415,6 +3427,7 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "retry_fallback_applied": parse_retry_fallback_applied_event,
         "retry_fallback_succeeded": parse_retry_fallback_succeeded_event,
         "model_changed": parse_model_changed_event,
+        "service_tier_changed": parse_service_tier_changed_event,
         "config_warnings_changed": parse_config_warnings_changed_event,
         "advisor_cost_changed": parse_advisor_cost_changed_event,
         "advisor_yielded": parse_advisor_yielded_event,
@@ -3474,6 +3487,7 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "retry_fallback_applied": parse_rpc_agent_event,
         "retry_fallback_succeeded": parse_rpc_agent_event,
         "model_changed": parse_rpc_agent_event,
+        "service_tier_changed": parse_rpc_agent_event,
         "config_warnings_changed": parse_rpc_agent_event,
         "advisor_cost_changed": parse_rpc_agent_event,
         "advisor_yielded": parse_rpc_agent_event,
@@ -4140,6 +4154,10 @@ class WireClient:
         """Subscribe to `model_changed` frames."""
         return self._listen("model_changed", listener)
 
+    def on_service_tier_changed(self, listener: Callable[[ServiceTierChangedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `service_tier_changed` frames."""
+        return self._listen("service_tier_changed", listener)
+
     def on_config_warnings_changed(self, listener: Callable[[ConfigWarningsChangedEvent], None]) -> Callable[[], None]:
         """Subscribe to `config_warnings_changed` frames."""
         return self._listen("config_warnings_changed", listener)
@@ -4335,6 +4353,7 @@ __all__ = [
     "RpcNotification",
     "SelectOptionDetail",
     "SelectUiRequest",
+    "ServiceTierChangedEvent",
     "SessionCredits",
     "SessionEntries",
     "SessionInfoUpdateEvent",
@@ -4521,6 +4540,7 @@ __all__ = [
     "parse_rpc_frame_error_event",
     "parse_select_option_detail",
     "parse_select_ui_request",
+    "parse_service_tier_changed_event",
     "parse_session_credits",
     "parse_session_entries",
     "parse_session_info_update_event",
