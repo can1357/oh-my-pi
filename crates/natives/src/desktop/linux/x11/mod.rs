@@ -83,7 +83,9 @@ impl Backend for X11Backend {
 				"unavailable"
 			}
 			.to_string(),
-			display_count: displays.map_or(0, |items| u32::try_from(items.len()).unwrap_or(u32::MAX)),
+			display_count: Some(
+				displays.map_or(0, |items| u32::try_from(items.len()).unwrap_or(u32::MAX)),
+			),
 			screen_locked: false,
 			display_asleep: false,
 		}

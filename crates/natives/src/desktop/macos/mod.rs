@@ -109,7 +109,7 @@ impl Backend for MacosBackend {
 			capture_permission: permission_label(capture_permission),
 			input_permission: permission_label(permission::post_events()),
 			ax_permission: permission_label(ax_trusted),
-			display_count,
+			display_count: Some(display_count),
 			screen_locked: screen.locked,
 			display_asleep: screen.display_asleep,
 		}
