@@ -232,40 +232,126 @@ def dirty_state_reminder(
     )
 
 
+# Total character budget for the conversation thread embedded in a prompt.
+# The thread is one section of a much larger prompt (system prompt, diff
+# context, instructions), so it must stay far below any plausible model
+# context window: ~150_000 chars (~40K tokens) is already a large share of a
+# 128K-token window, and that is the maximum we allow. An over-active PR can
+# carry hundreds of comments, and without a budget the single user prompt can
+# exceed the context window so even a small new review cannot run.
+_THREAD_BUDGET_CHARS = 150_000
+# Headroom reserved for the omission marker + its separators when trimming;
+# the marker is a few dozen characters, so 200 guarantees the trimmed output
+# stays within `_THREAD_BUDGET_CHARS`.
+_THREAD_BUDGET_MARKER_RESERVE = 200
+# Modest additive cap for stored sibling payloads, which sit outside the bounded
+# live-thread section in the prompt.
+_COALESCED_BUDGET_CHARS = 20_000
+# Headroom for the coalesced omission marker and separators.
+_COALESCED_BUDGET_MARKER_RESERVE = 200
+
+
+def _thread_block(m: Any) -> str:
+    """Render one `ThreadMessage` as a markdown block (no joining).
+
+    Duck-typed: any object with `.kind / .author / .body / .created_at` and
+    optional `.path / .line / .state` works.
+    """
+    kind = getattr(m, "kind", "comment")
+    author = getattr(m, "author", "") or "unknown"
+    body = getattr(m, "body", "") or ""
+    ts = getattr(m, "created_at", "") or ""
+    if kind in ("issue_body", "pr_body"):
+        header = f"### @{author} — {'PR body' if kind == 'pr_body' else 'issue body'}"
+    elif kind == "review_comment":
+        path = getattr(m, "path", None)
+        line = getattr(m, "line", None)
+        anchor = f"`{path}`" + (f":L{line}" if isinstance(line, int) else "")
+        header = f"### @{author} — review comment on {anchor}"
+    elif kind == "review":
+        state = getattr(m, "state", None) or "COMMENTED"
+        header = f"### @{author} — review ({state})"
+    else:
+        header = f"### @{author} — comment"
+    if ts:
+        header += f" *({ts})*"
+    return f"{header}\n\n{body.rstrip()}"
+
+
 def _render_thread(messages: tuple) -> str:
     """Render a `tuple[ThreadMessage, ...]` as a markdown block for prompt embed.
 
-    Duck-typed: any object with `.kind / .author / .body / .created_at` and
-    optional `.path / .line / .state` works. Kept here (not in worker.py) so
-    persona owns the prompt-shape.
+    Kept here (not in worker.py) so persona owns the prompt-shape. Output is
+    bounded by `_THREAD_BUDGET_CHARS`: an over-budget thread drops the
+    OLDEST messages first (messages arrive sorted oldest→newest),
+    force-keeps unresolved reviews — also newest-first, so the OLDEST
+    force-keeps are dropped once the budget is exhausted — and emits an
+    explicit marker so the agent knows context was elided.
     """
     if not messages:
         return "(no prior conversation)"
+    blocks = [_thread_block(m) for m in messages]
+    if sum(len(b) for b in blocks) + 2 * (len(blocks) - 1) <= _THREAD_BUDGET_CHARS:
+        return "\n\n".join(blocks).rstrip()
+    # Over budget: keep the newest messages (last in the list) while the
+    # content budget allows; the newest one is always kept.
+    content_budget = _THREAD_BUDGET_CHARS - _THREAD_BUDGET_MARKER_RESERVE
+    truncated_newest_head = 0
+    if len(blocks[-1]) > content_budget:
+        # A single newest message can exceed the whole budget (a giant review
+        # dump). Truncate its HEAD — the tail is the newest text — so the
+        # rendered thread can never blow past `_THREAD_BUDGET_CHARS`, even for
+        # one enormous message. The marker below counts it as elided content.
+        truncated_newest_head = len(blocks[-1]) - content_budget
+        blocks[-1] = (
+            f"…{truncated_newest_head} earlier characters omitted for length…\n\n" + blocks[-1][-content_budget:]
+        )
+    keep = [False] * len(blocks)
+    keep[-1] = True
+    used = len(blocks[-1])
+    for i in range(len(blocks) - 2, -1, -1):
+        if used + len(blocks[i]) + 2 <= content_budget:
+            keep[i] = True
+            used += len(blocks[i]) + 2
+    # Unresolved reviews are open work — keep them even if they fall outside
+    # the recency window. Force-keeps are selected newest-first, but must fit
+    # too. If necessary, evict the oldest selected non-review messages; if only
+    # protected reviews remain, drop this force-keep (the oldest one first).
+    dropped_force_keeps = 0
+    protected_reviews = {
+        i
+        for i, m in enumerate(messages)
+        if getattr(m, "kind", "") == "review" and (getattr(m, "state", None) or "") != "APPROVED"
+    }
+    for i in range(len(blocks) - 2, -1, -1):
+        if keep[i] or i not in protected_reviews:
+            continue
+        if used + len(blocks[i]) + 2 > content_budget:
+            evictable = [j for j in range(len(blocks) - 1) if keep[j] and j not in protected_reviews]
+            need = used + len(blocks[i]) + 2 - content_budget
+            reclaimable = sum(len(blocks[j]) + 2 for j in evictable)
+            if reclaimable < need:
+                # This unresolved review is the newest of the remaining
+                # force-keeps. Once it cannot fit, every older force-keep loses
+                # too, even if a smaller one could be packed into a gap.
+                dropped_force_keeps += sum(1 for j in range(i, -1, -1) if j in protected_reviews and not keep[j])
+                break
+            for j in evictable:
+                keep[j] = False
+                used -= len(blocks[j]) + 2
+                if used + len(blocks[i]) + 2 <= content_budget:
+                    break
+        keep[i] = True
+        used += len(blocks[i]) + 2
+    omitted = sum(1 for k in keep if not k)
     parts: list[str] = []
-    for m in messages:
-        kind = getattr(m, "kind", "comment")
-        author = getattr(m, "author", "") or "unknown"
-        body = getattr(m, "body", "") or ""
-        ts = getattr(m, "created_at", "") or ""
-        if kind in ("issue_body", "pr_body"):
-            header = f"### @{author} — {'PR body' if kind == 'pr_body' else 'issue body'}"
-        elif kind == "review_comment":
-            path = getattr(m, "path", None)
-            line = getattr(m, "line", None)
-            anchor = f"`{path}`" + (f":L{line}" if isinstance(line, int) else "")
-            header = f"### @{author} — review comment on {anchor}"
-        elif kind == "review":
-            state = getattr(m, "state", None) or "COMMENTED"
-            header = f"### @{author} — review ({state})"
-        else:
-            header = f"### @{author} — comment"
-        if ts:
-            header += f" *({ts})*"
-        parts.append(header)
-        parts.append("")
-        parts.append(body.rstrip())
-        parts.append("")
-    return "\n".join(parts).rstrip()
+    if omitted:
+        marker = f"…{omitted} earlier messages omitted for length"
+        if dropped_force_keeps:
+            marker += f" ({dropped_force_keeps} of them unresolved reviews)"
+        parts.append(marker + "…")
+    parts.extend(blocks[i] for i in range(len(blocks)) if keep[i])
+    return "\n\n".join(parts).rstrip()
 
 
 def kickoff_directive(
@@ -321,20 +407,26 @@ def followup_comment(
     pr_status: str,
     pr_number: int | None = None,
     thread: tuple = (),
+    coalesced: tuple[Mapping[str, Any], ...] = (),
 ) -> str:
-    return render(
-        _load("followup_comment.md"),
-        {
-            "repo": repo,
-            "issue": issue,
-            "workspace": workspace,
-            "comment": comment,
-            "thread": _render_thread(thread),
-            "state": {"pr_status": pr_status},
-            "inbound": _inbound_scope(issue, pr_number),
-            "origin": _origin_scope(issue),
-        },
-    )
+    scope: dict[str, Any] = {
+        "repo": repo,
+        "issue": issue,
+        "workspace": workspace,
+        "comment": comment,
+        "thread": _render_thread(thread),
+        "state": {"pr_status": pr_status},
+        "inbound": _inbound_scope(issue, pr_number),
+        "origin": _origin_scope(issue),
+    }
+    if coalesced:
+        # A coalesced reviewer-bot sibling's finding may exist only in its
+        # stored webhook payload when live-thread hydration dropped it; render
+        # it here (deduped against `thread`) so it is never silently lost.
+        section = _render_coalesced_section(coalesced, thread=thread)
+        if section:
+            scope["coalesced_section"] = section
+    return render(_load("followup_comment.md"), scope)
 
 
 def directive(
@@ -346,22 +438,111 @@ def directive(
     directive: Any,
     pr_status: str,
     pr_number: int | None = None,
+    coalesced: tuple[Mapping[str, Any], ...] = (),
 ) -> str:
     """Follow-up flavor for a comment that is a maintainer directive."""
-    return render(
-        _load("directive.md"),
-        {
-            "repo": repo,
-            "issue": issue,
-            "workspace": workspace,
-            "comment": comment,
-            "directive": {"body": directive.body, "author": directive.author},
-            "thread": _render_thread(getattr(directive, "thread", ()) or ()),
-            "state": {"pr_status": pr_status},
-            "inbound": _inbound_scope(issue, pr_number),
-            "origin": _origin_scope(issue),
-        },
-    )
+    d_thread = getattr(directive, "thread", ()) or ()
+    scope: dict[str, Any] = {
+        "repo": repo,
+        "issue": issue,
+        "workspace": workspace,
+        "comment": comment,
+        "directive": {"body": directive.body, "author": directive.author},
+        "thread": _render_thread(d_thread),
+        "state": {"pr_status": pr_status},
+        "inbound": _inbound_scope(issue, pr_number),
+        "origin": _origin_scope(issue),
+    }
+    if coalesced:
+        # Siblings were coalesced into this run; the directive's hydrated
+        # thread is the live thread to dedup against, so a finding already in
+        # the thread is not rendered twice.
+        section = _render_coalesced_section(coalesced, thread=d_thread)
+        if section:
+            scope["coalesced_section"] = section
+    return render(_load("directive.md"), scope)
+
+
+def _coalesced_block(p: Mapping[str, Any]) -> str:
+    """Render one stored sibling payload as a markdown block (no joining)."""
+    author = str(p.get("author") or "") or "unknown"
+    path = str(p.get("path") or "")
+    start = p.get("start_line") or p.get("line")
+    end = p.get("line") or p.get("original_line")
+    if isinstance(start, int) and isinstance(end, int) and start != end:
+        line_range = f":L{start}-L{end}"
+    elif isinstance(end, int):
+        line_range = f":L{end}"
+    else:
+        line_range = ""
+    anchor = f"`{path}`{line_range}" if path else "(no path in stored payload)"
+    body = str(p.get("body") or "")
+    return f"### @{author} — review comment on {anchor}\n\n{body.rstrip()}"
+
+
+def _thread_keys(thread: tuple) -> tuple[set[tuple[str, str]], set[str]]:
+    """Identity sets for the live thread: (author, body) pairs plus bare bodies.
+
+    The bodies a coalesced sibling carries are the same strings GitHub returns
+    in the hydrated thread, so either key proves a sibling is already rendered.
+    Author alone is unreliable (login casing / stored-payload gaps), hence the
+    body-only fallback set.
+    """
+    pairs: set[tuple[str, str]] = set()
+    bodies: set[str] = set()
+    for m in thread or ():
+        body = str(getattr(m, "body", "") or "").rstrip()
+        if not body:
+            continue
+        author = str(getattr(m, "author", "") or "").strip().lower()
+        pairs.add((author, body))
+        bodies.add(body)
+    return pairs, bodies
+
+
+def _render_coalesced_section(payloads: tuple[Mapping[str, Any], ...], *, thread: tuple = ()) -> str:
+    """Render coalesced reviewer-bot payloads as a markdown section for prompt embed.
+
+    Each payload is the stored webhook `comment` of a sibling review event the
+    dispatcher skipped as superseded; its live-thread message may be missing
+    when hydration partially failed, so the stored payload is the only copy.
+    When hydration DID succeed the same comment arrives inside `thread`, so
+    siblings whose text is already in the live thread are skipped here — the
+    section is a fallback, never a second copy.
+
+    Returns "" when nothing is left to render, so callers can omit the section.
+    The section is separately bounded by `_COALESCED_BUDGET_CHARS`: over-budget
+    siblings drop the OLDEST payloads first and an explicit marker counts them.
+    """
+    if not payloads:
+        return ""
+    pairs, bodies = _thread_keys(thread)
+    blocks: list[str] = []
+    for p in payloads:
+        body = str(p.get("body") or "").rstrip()
+        author = str(p.get("author") or "").strip().lower()
+        if body and ((author, body) in pairs or body in bodies):
+            continue
+        blocks.append(_coalesced_block(p))
+    if not blocks:
+        return ""
+    heading = "## Also coalesced into this run — address these findings too"
+    content_budget = _COALESCED_BUDGET_CHARS - _COALESCED_BUDGET_MARKER_RESERVE - len(heading) - 2
+    kept: list[str] = []
+    used = 0
+    # Newest-first selection (payloads/blocks are oldest→newest) so the OLDEST
+    # siblings are the ones dropped when the budget runs out.
+    for block in reversed(blocks):
+        if used + len(block) + 1 > content_budget:
+            break
+        kept.append(block)
+        used += len(block) + 1
+    dropped = len(blocks) - len(kept)
+    parts = [heading, ""]
+    if dropped:
+        parts.extend((f"…{dropped} coalesced findings omitted for length…", ""))
+    parts.extend(reversed(kept))
+    return "\n".join(parts).rstrip()
 
 
 def followup_review(
@@ -373,21 +554,30 @@ def followup_review(
     comment_body: str,
     comment_path: str,
     comment_line_range: str,
+    thread: tuple = (),
+    coalesced: tuple[Mapping[str, Any], ...] = (),
 ) -> str:
-    return render(
-        _load("followup_review.md"),
-        {
-            "repo": repo,
-            "workspace": workspace,
-            "pr": {"number": pr_number},
-            "comment": {
-                "author": comment_author,
-                "body": comment_body,
-                "path": comment_path,
-                "line_range": comment_line_range,
-            },
+    scope: dict[str, Any] = {
+        "repo": repo,
+        "workspace": workspace,
+        "pr": {"number": pr_number},
+        "comment": {
+            "author": comment_author,
+            "body": comment_body,
+            "path": comment_path,
+            "line_range": comment_line_range,
         },
-    )
+        "thread": _render_thread(thread),
+    }
+    if coalesced:
+        # The template has no section conditionals: the whole section (heading
+        # included) is one placeholder, empty in the common no-sibling case.
+        # `thread` is passed so siblings already rendered in the live thread are
+        # not duplicated here; a fully deduped batch renders nothing at all.
+        section = _render_coalesced_section(coalesced, thread=thread)
+        if section:
+            scope["coalesced_section"] = section
+    return render(_load("followup_review.md"), scope)
 
 
 def unable_to_reproduce_comment(*, diagnosis: str, info_needed: str) -> str:
