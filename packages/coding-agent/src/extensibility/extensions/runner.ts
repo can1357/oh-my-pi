@@ -675,11 +675,13 @@ export class ExtensionRunner {
 	#todoQueued = false;
 	/**
 	 * The list the backend last took, which is not sent again, and the registration that took it:
-	 * an id can pass to another extension, which has not seen that list. `undefined` while a call
-	 * runs and after one failed, so the next list is sent whatever it holds; `"none"` until the
-	 * first call, when an empty list has nothing to tell a backend.
+	 * an id can pass to another extension, which has not seen that list, also when both registered
+	 * one shared object. `undefined` while a call runs and after one failed, so the next list is
+	 * sent whatever it holds; `"none"` until the first call, when an empty list has nothing to tell
+	 * a backend.
 	 */
-	#todoSent: { list: TodoBackendList; definition: TodoBackendDefinition } | "none" | undefined = "none";
+	#todoSent: { list: TodoBackendList; extension: Extension; definition: TodoBackendDefinition } | "none" | undefined =
+		"none";
 	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
 	#todoClosed = false;
 	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
@@ -1806,7 +1808,7 @@ export class ExtensionRunner {
 		if (
 			sent === "none"
 				? pending.phases.length === 0
-				: sent?.definition === definition && Bun.deepEquals(sent.list, pending)
+				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending)
 		)
 			return;
 		this.#todoSent = undefined;
@@ -1822,7 +1824,7 @@ export class ExtensionRunner {
 			undefined,
 			this.#todoGivenUp.signal,
 		);
-		if (taken) this.#todoSent = { list: pending, definition };
+		if (taken) this.#todoSent = { list: pending, extension, definition };
 	}
 
 	/**
