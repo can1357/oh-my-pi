@@ -172,6 +172,8 @@ const PICK_ACT = "pick:";
 /** List item key of a group's Other answer (option items are `o<index>`). */
 const OTHER_ITEM = "other";
 const OTHER_PLACEHOLDER = "type your own";
+/** Rows a Vim-mode Other answer grows to (`o` or a linewise put can split it) before it scrolls. */
+const OTHER_MAX_ROWS = 3;
 /** A folded text field's well when the form gives no placeholder. */
 const WELL_PLACEHOLDER = "type your answer";
 
@@ -450,8 +452,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	#noteEditor: OpenNote | undefined;
 	#savedNoteEditor: Editor | undefined;
 	#useTerminalCursor = false;
-	/** The Other answer's text of each group that offers one. */
-	readonly #others = new Map<ChoiceField, Input>();
+	/** The Other answer of each group that offers one: a Vim-mode editor when the host turns Vim mode on, else a one-line input. */
+	readonly #others = new Map<ChoiceField, Input | Editor>();
 	/** Each radio group's Other text as last seen, to notice typing from keys or the terminal. */
 	readonly #otherSeen = new Map<ChoiceField, string>();
 	readonly #editors = new Map<TextField, Editor>();
@@ -527,10 +529,7 @@ export class HtmlFormDialog implements Component, Focusable {
 					if (!option.disabled) this.#stops.push({ kind: "option", field, option: index });
 				});
 				if (field.other) {
-					const input = new Input();
-					input.prompt = "";
-					input.placeholder = OTHER_PLACEHOLDER;
-					this.#others.set(field, input);
+					this.#others.set(field, this.#otherBox());
 					this.#stops.push({ kind: "other", field });
 				}
 			}
@@ -666,11 +665,18 @@ export class HtmlFormDialog implements Component, Focusable {
 			this.#dropdownInput(this.#open, data);
 			return;
 		}
-		// A textarea in Vim mode takes Esc first: it leaves Insert mode or cancels a half-typed command.
+		// A textarea or Other answer in Vim mode takes Esc first: it leaves Insert mode or cancels a half-typed command.
 		const textStop = this.#stops[this.#focus];
-		const textarea = textStop?.kind === "text" && !this.#hidden ? this.#editors.get(textStop.field) : undefined;
-		if (textarea?.vimConsumesEscape() && matchesKey(data, "escape")) {
-			textarea.handleInput(data);
+		const vimBox =
+			this.#hidden || textStop === undefined
+				? undefined
+				: textStop.kind === "text"
+					? this.#editors.get(textStop.field)
+					: textStop.kind === "other"
+						? this.#others.get(textStop.field)
+						: undefined;
+		if (vimBox instanceof Editor && vimBox.vimConsumesEscape() && matchesKey(data, "escape")) {
+			vimBox.handleInput(data);
 			return;
 		}
 		// Esc hands the keys to the composer, where Esc interrupts the turn and so cancels the ask.
@@ -821,7 +827,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	 */
 	describe(_cx: DescribeContext): NativeNode {
 		// Other answers are typed into the terminal's own inputs, which don't pass through handleInput.
-		const others = [...this.#others.values()].map(input => input.getValue()).join("\0");
+		const others = [...this.#others.keys()].map(field => this.#otherText(field)).join("\0");
 		const skip = this.#options.skipNotice?.();
 		const key = `${this.#version}\0${others}\0${skip ?? ""}`;
 		if (this.#native?.key === key) return this.#native.node;
@@ -983,7 +989,7 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	#value(field: FormField): HtmlFormValue | undefined {
 		if (field.kind === "text") return textValue(field, this.#textValue(field));
-		const other = this.#otherChosen(field) ? this.#others.get(field)!.getValue() : undefined;
+		const other = this.#otherChosen(field) ? this.#otherText(field) : undefined;
 		return choiceValue(field, this.#checked.get(field)!, other);
 	}
 
@@ -994,9 +1000,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * keeps the text but sets Other aside.
 	 */
 	#otherChosen(field: ChoiceField): boolean {
-		const input = this.#others.get(field);
-		if (!input) return false;
-		const text = input.getValue();
+		if (!this.#others.has(field)) return false;
+		const text = this.#otherText(field);
 		if (!field.multi && text !== (this.#otherSeen.get(field) ?? "")) {
 			this.#otherSeen.set(field, text);
 			if (text.trim() !== "") this.#checked.get(field)!.clear();
@@ -1337,16 +1342,40 @@ export class HtmlFormDialog implements Component, Focusable {
 			this.#moveStop(matchesSelectDown(data) ? 1 : -1);
 			return;
 		}
-		const input = this.#others.get(field)!;
 		if (getKeybindings().matches(data, "tui.select.confirm")) {
 			// Back on Other after picking an option: Enter makes the kept text the answer again.
-			if (!field.multi && input.getValue().trim() !== "") this.#checked.get(field)!.clear();
+			if (!field.multi && this.#otherText(field).trim() !== "") this.#checked.get(field)!.clear();
 			this.#advance();
 			return;
 		}
-		const before = input.getValue();
-		input.handleInput(data);
-		if (input.getValue() !== before) this.#errors.delete(field);
+		const before = this.#otherText(field);
+		this.#others.get(field)!.handleInput(data);
+		if (this.#otherText(field) !== before) this.#errors.delete(field);
+	}
+
+	/** The Other answer's box. With Vim mode it is an editor, so Vim keys and Esc work as in a textarea. */
+	#otherBox(): Input | Editor {
+		const editor = new Editor(getEditorTheme());
+		this.#options.configureEditor?.(editor);
+		if (editor.vimEnabled) {
+			editor.setBorderVisible(false);
+			editor.setMaxHeight(OTHER_MAX_ROWS);
+			// Enter moves on to the next field (handled before the editor).
+			editor.disableSubmit = true;
+			editor.placeholder = () => OTHER_PLACEHOLDER;
+			editor.onChange = () => this.#resetCountdown();
+			return editor;
+		}
+		const input = new Input();
+		input.prompt = "";
+		input.placeholder = OTHER_PLACEHOLDER;
+		return input;
+	}
+
+	#otherText(field: ChoiceField): string {
+		const box = this.#others.get(field);
+		if (box === undefined) return "";
+		return box instanceof Editor ? box.getExpandedText() : box.getValue();
 	}
 
 	/** A closed dropdown: ←/→ change it, Space opens it, a letter jumps to a matching option. */
@@ -1894,32 +1923,40 @@ export class HtmlFormDialog implements Component, Focusable {
 			lines[0] = `${lines[0] ?? ""}${noteMarker}`;
 			out.push({ lines, stop: !option.disabled });
 		});
-		if (field.other) out.push({ lines: [this.#otherLine(field, focusedStop === stop, width)], stop: true });
+		if (field.other) out.push({ lines: this.#otherLines(field, focusedStop === stop, width), stop: true });
 		if (errorLines.length > 0) out.push({ lines: errorLines, stop: false });
 		return out;
 	}
 
 	/** `○ Other: <text>` — an inline input while focused, else the text or a dim prompt. */
-	#otherLine(field: ChoiceField, focused: boolean, width: number): string {
+	#otherLines(field: ChoiceField, focused: boolean, width: number): string[] {
 		const chosen = this.#otherChosen(field);
-		const input = this.#others.get(field)!;
+		const box = this.#others.get(field)!;
 		const cursor = focused ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 		const marker = theme.fg(chosen ? "success" : "dim", optionMarker(theme, field.multi, chosen));
 		const label = theme.fg(focused ? "accent" : chosen ? "toolOutput" : "text", `${OTHER_LABEL}: `);
 		const prefix = `${cursor}${marker} ${label}`;
 		const inner = Math.max(1, width - visibleWidth(prefix));
-		const value = input.getValue();
+		const value = this.#otherText(field);
+		if (focused && box instanceof Editor) {
+			// Rows past the first sit under the text, not under the label.
+			const indent = " ".repeat(visibleWidth(prefix));
+			return box.render(inner).map((row, index) => `${index === 0 ? prefix : indent}${row}`);
+		}
 		if (focused) {
-			input.cursorOverride =
+			box.cursorOverride =
 				value === ""
 					? `\x1b[7m \x1b[27m${theme.fg("dim", truncateToWidth(OTHER_PLACEHOLDER, Math.max(1, inner - 1)))}`
 					: undefined;
-			return `${prefix}${input.render(inner)[0] ?? ""}`;
+			return [`${prefix}${box.render(inner)[0] ?? ""}`];
 		}
 		const shown = value
-			? theme.fg(chosen ? "toolOutput" : "dim", truncateToWidth(sanitize(value), inner, Ellipsis.Unicode))
+			? theme.fg(
+					chosen ? "toolOutput" : "dim",
+					truncateToWidth(sanitize(value).replace(/\s+/g, " "), inner, Ellipsis.Unicode),
+				)
 			: theme.fg("dim", OTHER_PLACEHOLDER);
-		return `${prefix}${shown}`;
+		return [`${prefix}${shown}`];
 	}
 
 	/** Label rows with the focus cursor, a required star and an optional dim suffix. */
@@ -2185,7 +2222,7 @@ export class HtmlFormDialog implements Component, Focusable {
 					],
 		);
 		if (other) {
-			const typed = sanitize(this.#others.get(field)!.getValue()).replace(/\s+/g, " ").trim();
+			const typed = sanitize(this.#otherText(field)).replace(/\s+/g, " ").trim();
 			pills.push({ label: `${OTHER_LABEL}: ${typed}`, chosen: true, act: `${OPEN_ACT}${index}` });
 		}
 		const notes = this.#notes.get(field);
@@ -2322,7 +2359,7 @@ export class HtmlFormDialog implements Component, Focusable {
 				});
 			});
 			if (field.other) {
-				const typed = sanitize(this.#others.get(field)!.getValue().trim());
+				const typed = sanitize(this.#otherText(field).trim());
 				const chosen = this.#otherChosen(field);
 				items.push(
 					item(OTHER_ITEM, {

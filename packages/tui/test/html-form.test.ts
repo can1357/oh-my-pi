@@ -1157,6 +1157,23 @@ describe("html form", () => {
 			form.dispose();
 		});
 
+		it("in Vim mode the Other answer takes Vim keys, and Esc leaves Insert before it hands the keys back", () => {
+			const releaseKeys = vi.fn();
+			const { form } = dialog(
+				`<form><fieldset><legend>Pick</legend><label><input type="radio" name="db" value="a" checked> A</label><label><input type="radio" name="db" value="b"> B</label></fieldset></form>`,
+				{ releaseKeys, configureEditor: editor => editor.setVimMode(true) },
+			);
+			form.handleInput(DOWN);
+			form.handleInput(DOWN);
+			form.handleInput("my own answer");
+			form.handleInput(ESC);
+			expect(releaseKeys).not.toHaveBeenCalled();
+			form.handleInput("bdw");
+			expect(form.data()).toEqual({ db: "my own" });
+			form.handleInput(ESC);
+			expect(releaseKeys).toHaveBeenCalledTimes(1);
+		});
+
 		it("rows: no footer in the panel; keyHints() gives the focused stop's keys for the host to draw", () => {
 			const { form } = dialog(DB_FORM);
 			const rows = plain(form);
