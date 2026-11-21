@@ -4,7 +4,7 @@
 import type { FoundDownload } from "../../../coding-agent/src/tools/browser/relay/protocol";
 import { DownloadPairing } from "../download-pairing";
 import { onForeignFramesHidden } from "../foreign-frames";
-import { post } from "./relay";
+import { broadcastRelayEvent } from "./relay";
 import { snapshot } from "./tabs";
 
 /** Tabs whose debugger detach the relay asked for, so their `detached` event says so. */
@@ -38,25 +38,25 @@ export function installRelayEvents(): void {
 		if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
 			downloads.report(params.guid, params.url);
 		}
-		post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
+		broadcastRelayEvent({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
 	});
 
 	chrome.debugger.onDetach.addListener((source, reason) => {
 		if (source.tabId === undefined) return;
 		const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
-		post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
+		broadcastRelayEvent({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 	});
 
-	onForeignFramesHidden((tabId, frames) => post({ t: "framesHidden", tabId, frames }));
+	onForeignFramesHidden((tabId, frames) => broadcastRelayEvent({ t: "framesHidden", tabId, frames }));
 
 	chrome.tabs.onCreated.addListener(tab => {
 		const snap = snapshot(tab);
-		if (snap) post({ t: "tabCreated", tab: snap });
+		if (snap) broadcastRelayEvent({ t: "tabCreated", tab: snap });
 	});
 
 	chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 		const snap = snapshot(tab);
-		if (snap) post({ t: "tabUpdated", tab: snap });
+		if (snap) broadcastRelayEvent({ t: "tabUpdated", tab: snap });
 	});
 
 	chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -64,7 +64,7 @@ export function installRelayEvents(): void {
 			.get(tabId)
 			.then(tab => {
 				const snap = snapshot(tab);
-				if (snap) post({ t: "tabUpdated", tab: snap });
+				if (snap) broadcastRelayEvent({ t: "tabUpdated", tab: snap });
 			})
 			.catch(() => {
 				// The tab may have closed before Chrome answered.
@@ -72,6 +72,6 @@ export function installRelayEvents(): void {
 	});
 
 	chrome.tabs.onRemoved.addListener(tabId => {
-		post({ t: "tabRemoved", tabId });
+		broadcastRelayEvent({ t: "tabRemoved", tabId });
 	});
 }

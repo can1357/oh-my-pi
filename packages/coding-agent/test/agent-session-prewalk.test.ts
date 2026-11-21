@@ -9,7 +9,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
 import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import {
+	dispatchToolCommand,
+	type ToolCommandDispatch,
+	type ToolCommandState,
+} from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -1011,73 +1015,72 @@ describe("AgentSession prewalk", () => {
 	it.each([
 		{ tier: "read", tool: "lsp" },
 		{ tier: "exec", tool: "bun-test" },
-	])(
-		"does not switch on a $tier-tier xd:// device dispatched through write (issues #7312, #19002)",
-		async ({ tier, tool }) => {
-			const primary = modelOrThrow("claude-sonnet-4-5");
-			const target = modelOrThrow("claude-sonnet-4-6");
+	])("does not switch on a $tier-tier tool command (issues #7312, #19002)", async ({ tier, tool }) => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
 
-			// A read-only lsp navigation or an exec-tier test run is dispatched as
-			// `write xd://<device>`; the write result carries the wrapped tool's tier.
-			// Like a direct bash step, neither mutates the workspace through `write`,
-			// so neither may arm the hand-off — the model keeps investigating on the
-			// strong model. Mirrors the bounded-continuation flow: one continuation,
-			// four turns, all primary, then a clean stop.
-			const deviceWrite: AgentTool<typeof writeToolSchema, { xdev: { tool: string; mode: string; tier: string } }> =
-				{
-					name: "write",
-					label: "Write",
-					description: "Dispatch a non-mutating device",
-					parameters: writeToolSchema,
-					async execute() {
-						return {
-							content: [{ type: "text", text: "device output" }],
-							details: { xdev: { tool, mode: "execute", tier } },
-						};
-					},
+		// A read-only lsp navigation or an exec-tier test run runs as a `bash`
+		// tool command; the dispatch record carries the wrapped tool's tier.
+		// Like a plain shell step, neither mutates the workspace, so neither may
+		// arm the hand-off — the model keeps investigating on the strong model.
+		// Mirrors the bounded-continuation flow: one continuation, four turns,
+		// all primary, then a clean stop.
+		const dispatchBash: AgentTool<
+			typeof writeToolSchema,
+			{ toolCommands: Array<{ tool: string; mode: string; exitCode: number; tier: string }> }
+		> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a session tool command",
+			parameters: writeToolSchema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "command output" }],
+					details: { toolCommands: [{ tool, mode: "execute", exitCode: 0, tier }] },
 				};
-			const mock = createMockModel({
-				responses: [
-					toolCall("t1", "record"),
-					toolCall("t2", "write"),
-					{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
-					{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
-				],
-			});
-			const requested: string[] = [];
-			const agent = new Agent({
-				getApiKey: () => "test-key",
-				initialState: {
-					model: primary,
-					systemPrompt: ["Test"],
-					tools: [recordTool as AgentTool, deviceWrite as AgentTool],
-					messages: [],
-					thinkingLevel: Effort.Medium,
-				},
-				convertToLlm,
-				streamFn: (model, context, options) => {
-					requested.push(`${model.provider}/${model.id}`);
-					return mock.stream(model, context, options);
-				},
-			});
-			session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings: Settings.isolated({ "compaction.enabled": false }),
-				modelRegistry,
-				toolRegistry: new Map([
-					[recordTool.name, recordTool as AgentTool],
-					[deviceWrite.name, deviceWrite as AgentTool],
-				]),
-				prewalk: { target },
-			});
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				toolCall("t1", "record"),
+				toolCall("t2", "bash"),
+				{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
+				{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
+			],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [recordTool as AgentTool, dispatchBash as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map([
+				[recordTool.name, recordTool as AgentTool],
+				[dispatchBash.name, dispatchBash as AgentTool],
+			]),
+			prewalk: { target },
+		});
 
-			await session.prompt("investigate the code shape");
+		await session.prompt("investigate the code shape");
 
-			expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
-			expect(session.model?.id).toBe(primary.id);
-		},
-	);
+		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
+		expect(session.model?.id).toBe(primary.id);
+	});
 
 	it.each([
 		{ readOnlyHint: true, thirdTurnModel: "claude-sonnet-4-5" },
@@ -1100,7 +1103,7 @@ describe("AgentSession prewalk", () => {
 				inputSchema: { type: "object" },
 				annotations: { readOnlyHint },
 			});
-			const xdevState: XdevState = {
+			const toolCommandState: ToolCommandState = {
 				tools: new Map([
 					[
 						mcp.name,
@@ -1113,35 +1116,32 @@ describe("AgentSession prewalk", () => {
 				builtInNames: new Set(),
 				isActive: () => false,
 			};
-			let writes = 0;
-			const dispatchedWrite: AgentTool<typeof writeToolSchema, { xdev: XdevDispatch } | undefined> = {
-				name: "write",
-				label: "Write",
-				description: "MCP lookup then workspace write",
+			const dispatchedBash: AgentTool<typeof writeToolSchema, { toolCommands: ToolCommandDispatch[] }> = {
+				name: "bash",
+				label: "Bash",
+				description: "MCP lookup",
 				parameters: writeToolSchema,
 				async execute(toolCallId) {
-					if (writes++ === 0) {
-						const { result, xdev } = await dispatchXdevTool(xdevState, mcp.name, "{}", toolCallId);
-						// A tools/list_changed refresh drops the definition before the turn ends; the
-						// gate must classify the tool that ran.
-						xdevState.tools.delete(mcp.name);
-						return { content: result.content, details: { xdev } };
-					}
-					return { content: [{ type: "text", text: "implementation written" }], details: undefined };
+					const { result, dispatch } = await dispatchToolCommand(toolCommandState, mcp.name, {}, toolCallId);
+					// A tools/list_changed refresh drops the definition before the turn ends; the
+					// gate must classify the tool that ran.
+					toolCommandState.tools.delete(mcp.name);
+					return { content: result.content, details: { toolCommands: [dispatch] } };
 				},
 			};
 			const created = createLifecycleSession(
 				[
 					toolCall("todo", "todo"),
-					toolCall("lookup", "write"),
+					toolCall("lookup", "bash"),
 					toolCall("implementation", "write"),
 					{ content: ["done"] },
 				],
 				{
-					tools: [todoTool, dispatchedWrite],
+					tools: [todoTool, writeTool, dispatchedBash],
 					registry: new Map<string, AgentTool>([
 						[todoTool.name, todoTool],
-						[dispatchedWrite.name, dispatchedWrite],
+						[writeTool.name, writeTool],
+						[dispatchedBash.name, dispatchedBash],
 					]),
 				},
 			);
@@ -1206,30 +1206,30 @@ describe("AgentSession prewalk", () => {
 		expect(worker.session.model?.id).toBe(worker.target.id);
 	});
 
-	it("switches on a write-tier xd:// device dispatched through write (issue #7312)", async () => {
+	it("switches on a write-tier tool command (issue #7312)", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
 
-		// An lsp rename is a write-tier device call — it must arm the hand-off
+		// An lsp rename is a write-tier tool command — it must arm the hand-off
 		// just like a direct edit/write: the write turn stays on the strong model,
 		// the next turn runs on the target.
-		const writeDeviceWrite: AgentTool<
+		const dispatchBash: AgentTool<
 			typeof writeToolSchema,
-			{ xdev: { tool: string; mode: string; tier: string } }
+			{ toolCommands: Array<{ tool: string; mode: string; exitCode: number; tier: string }> }
 		> = {
-			name: "write",
-			label: "Write",
-			description: "Dispatch a write-tier device",
+			name: "bash",
+			label: "Bash",
+			description: "Run a write-tier tool command",
 			parameters: writeToolSchema,
 			async execute() {
 				return {
 					content: [{ type: "text", text: "renamed" }],
-					details: { xdev: { tool: "lsp", mode: "execute", tier: "write" } },
+					details: { toolCommands: [{ tool: "lsp", mode: "execute", exitCode: 0, tier: "write" }] },
 				};
 			},
 		};
 		const mock = createMockModel({
-			responses: [toolCall("t1", "record"), toolCall("t2", "write"), { content: ["done"] }],
+			responses: [toolCall("t1", "record"), toolCall("t2", "bash"), { content: ["done"] }],
 		});
 		const requested: string[] = [];
 		const agent = new Agent({
@@ -1237,7 +1237,7 @@ describe("AgentSession prewalk", () => {
 			initialState: {
 				model: primary,
 				systemPrompt: ["Test"],
-				tools: [recordTool as AgentTool, writeDeviceWrite as AgentTool],
+				tools: [recordTool as AgentTool, dispatchBash as AgentTool],
 				messages: [],
 				thinkingLevel: Effort.Medium,
 			},
@@ -1254,7 +1254,7 @@ describe("AgentSession prewalk", () => {
 			modelRegistry,
 			toolRegistry: new Map([
 				[recordTool.name, recordTool as AgentTool],
-				[writeDeviceWrite.name, writeDeviceWrite as AgentTool],
+				[dispatchBash.name, dispatchBash as AgentTool],
 			]),
 			prewalk: { target },
 		});

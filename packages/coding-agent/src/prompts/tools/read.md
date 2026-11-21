@@ -19,5 +19,5 @@ Sources:
 - Directory: complete root; child listings cap at 12 (`… N more`), read child; page via :N-M/:-N.
 - URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.
 - PDF/DOCX/PPTX/XLSX/EPUB: extracted text; notebooks: editable cells; images: decoded inline.
-- Also, with selectors in xd://read/sources (read it before first use):
+- Also, with selectors in help://read/sources (read it before first use):
   - SQLite, archives (ZIP, TAR, 7z, RAR and more), JSON/JSONL by jq filter, executable metadata, video, SVG as image, merge conflicts.

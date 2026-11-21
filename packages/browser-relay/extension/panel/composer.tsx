@@ -4,6 +4,7 @@
  */
 import type { CollabUiRequest, ImageContent } from "@oh-my-pi/pi-wire";
 import {
+	Brain,
 	AppWindow,
 	ArrowUp,
 	CalendarClock,
@@ -43,11 +44,11 @@ import type { Shortcut, TabContext } from "../messages";
 import { Editor, type EditorHandle } from "./editor";
 import { NotAnImageError, prepareImage, prepareWireImage } from "./images";
 import { Lightbox, type LightboxImage } from "./media";
-import { ModelPicker, useModelList } from "./model-picker";
+import { levelLabel, ModelPicker, ThinkingMenu } from "./model-picker";
 import { scheduleCaption } from "./schedule";
-import type { PanelSession, PanelSnapshot, PanelWorker } from "./session";
+import type { PanelSession, PanelSnapshot, PanelWorker, QueuedDraft } from "./session";
 import { sortShortcuts } from "./storage";
-import { hostOf } from "./tab-context";
+import { hostOf, parsePrompt } from "./tab-context";
 import { imageSrc } from "./timeline";
 import { Favicon, IconButton, Menu, type MenuEntry, type MenuHandle } from "./ui";
 
@@ -68,6 +69,8 @@ export interface Outgoing {
 	images: ImageContent[];
 	tabs: TabContext[];
 	shortcutIds: string[];
+	/** Sent with Ctrl+Enter: a running turn takes it once it finishes instead of as steering. */
+	followUp: boolean;
 }
 
 /** Things the slash menu and Actions menu ask the app to do. */
@@ -91,6 +94,8 @@ export interface ComposerHandle {
 	addFiles(files: readonly File[]): void;
 	/** Put a message that could not be sent back: its text and its images. */
 	restore(outgoing: Outgoing): void;
+	/** Put messages a stop took off the queue back before the draft, without their tab context. */
+	restoreQueued(drafts: readonly QueuedDraft[]): void;
 }
 
 interface Attachment {
@@ -103,6 +108,9 @@ interface Attachment {
 }
 
 type TabMode = { kind: "follow" } | { kind: "pinned"; tab: TabContext } | { kind: "none" };
+
+/** Messages that mean "continue", as in omp's composer. */
+const CONTINUE: ReadonlySet<string> = new Set([".", "c"]);
 
 /** What the composer needs from the app. */
 export interface ComposerProps {
@@ -120,6 +128,10 @@ export interface ComposerProps {
 	strip: Strip | null;
 	onDismissStrip(): void;
 	onSend(outgoing: Outgoing): void;
+	/** `.` or `c` sent alone: omp's continue shortcut. */
+	onResume(): void;
+	/** Enter in an empty composer while queued input waits on a running turn: interrupt and send it. */
+	onDeliverQueue(): void;
 	onStop(): void;
 	onCommand(command: ComposerCommand): void;
 	onNotify(level: "info" | "error", message: string): void;
@@ -243,9 +255,8 @@ export function Composer(props: ComposerProps): ReactNode {
 	const [preview, setPreview] = useState<LightboxImage | null>(null);
 	const [tabMode, setTabMode] = useState<TabMode>({ kind: "follow" });
 	const [extraTabs, setExtraTabs] = useState<TabContext[]>([]);
-	const [menu, setMenu] = useState<"actions" | "tab" | "model" | null>(null);
+	const [menu, setMenu] = useState<"actions" | "tab" | "model" | "thinking" | null>(null);
 	const [windowTabs, setWindowTabs] = useState<chrome.tabs.Tab[]>([]);
-	const models = useModelList(session, menu === "model");
 
 	const working = snapshot?.working ?? false;
 	const readOnly = snapshot?.readOnly ?? false;
@@ -255,7 +266,9 @@ export function Composer(props: ComposerProps): ReactNode {
 	const queued = snapshot?.state?.queuedMessageCount ?? 0;
 	const currentModel = snapshot?.state?.model ?? null;
 	// The picker hangs off the model chip, so switching needs a current model to show.
-	const canSwitchModel = session?.listModels !== undefined && session.setModel !== undefined && currentModel !== null;
+	const canSwitchModel = session?.pickModels !== undefined && session.setModel !== undefined && currentModel !== null;
+	const thinking = session?.setThinkingLevel !== undefined ? snapshot?.thinking : undefined;
+	const canSetThinking = thinking !== undefined && thinking.levels.length > 0;
 	const primaryTab = tabMode.kind === "follow" ? activeTab : tabMode.kind === "pinned" ? tabMode.tab : null;
 	const captureTab = primaryTab ?? activeTab;
 	const uploading = attachments.some(attachment => attachment.status === "uploading");
@@ -350,6 +363,20 @@ export function Composer(props: ComposerProps): ReactNode {
 		restore(outgoing) {
 			editorRef.current?.setText(outgoing.display);
 			setAttachments(outgoing.images.map(image => ({ id: ++nextId.current, status: "ready", image })));
+		},
+		restoreQueued(drafts) {
+			const text = drafts
+				// omp lists a message of images alone as `[Image]`; its images come back as attachments.
+				.map(draft => (draft.images.length > 0 && draft.text === "[Image]" ? "" : parsePrompt(draft.text).text))
+				.filter(part => part !== "")
+				.join("\n\n");
+			if (text !== "") editorRef.current?.prepend(text);
+			const images = drafts.flatMap(draft => draft.images);
+			if (images.length > 0)
+				setAttachments(list => [
+					...list,
+					...images.map((image): Attachment => ({ id: ++nextId.current, status: "ready", image })),
+				]);
 		},
 	}));
 
@@ -453,12 +480,28 @@ export function Composer(props: ComposerProps): ReactNode {
 	}, [windowTabs, tabMode, activeTab, primaryTab, extraTabs, props.hasTabGroup, props.onCommand]);
 
 	// ---- sending ----
-	const send = (): void => {
+	const send = (options: { followUp: boolean } = { followUp: false }): void => {
 		const editor = editorRef.current;
-		if (editor === null || !canSend) return;
+		if (editor === null) return;
+		// omp's empty Enter: a running turn with queued input stops and continues with that input.
+		if (empty && attachments.length === 0) {
+			if (canPrompt && working && queued > 0) props.onDeliverQueue();
+			return;
+		}
+		if (!canSend) return;
 		const byId = new Map(props.shortcuts.map(shortcut => [shortcut.id, shortcut]));
 		const content = editor.read(id => byId.get(id)?.prompt);
 		const ready = attachments.filter(attachment => attachment.status === "ready" && attachment.image !== undefined);
+		if (
+			!options.followUp &&
+			ready.length === 0 &&
+			content.shortcutIds.length === 0 &&
+			CONTINUE.has(content.display)
+		) {
+			props.onResume();
+			editor.clear();
+			return;
+		}
 		const captions = ready
 			.map((attachment, index) =>
 				attachment.caption === undefined
@@ -476,6 +519,7 @@ export function Composer(props: ComposerProps): ReactNode {
 			images: ready.flatMap(attachment => (attachment.image === undefined ? [] : [attachment.image])),
 			tabs,
 			shortcutIds: content.shortcutIds,
+			followUp: options.followUp,
 		});
 		editor.clear();
 		setAttachments([]);
@@ -523,6 +567,18 @@ export function Composer(props: ComposerProps): ReactNode {
 					editorRef.current?.resolveSlash(null);
 					// Opens after the slash menu's own close has run.
 					window.setTimeout(() => setMenu("model"), 0);
+				},
+			});
+		if (canSetThinking && matches("thinking", "effort", "reasoning"))
+			commands.push({
+				kind: "item",
+				id: "cmd-thinking",
+				label: "Thinking level",
+				meta: "/thinking",
+				icon: <Brain size={16} />,
+				onSelect: () => {
+					editorRef.current?.resolveSlash(null);
+					window.setTimeout(() => setMenu("thinking"), 0);
 				},
 			});
 		if (matches("export", "markdown", "gif"))
@@ -613,7 +669,7 @@ export function Composer(props: ComposerProps): ReactNode {
 		return groups.flatMap((group, index) =>
 			index === 0 ? group : [{ kind: "separator" as const, id: `sep-${index}` }, ...group],
 		);
-	}, [slashQuery, props.shortcuts, props.onCommand, session, canSwitchModel, capture]);
+	}, [slashQuery, props.shortcuts, props.onCommand, session, canSwitchModel, canSetThinking, capture]);
 
 	const slashOpen = slashQuery !== null && !slashDismissed && slashEntries.length > 0;
 	const onEditorKey = (event: KeyboardEvent<HTMLDivElement>): boolean =>
@@ -807,8 +863,48 @@ export function Composer(props: ComposerProps): ReactNode {
 							/>
 						)}
 					</span>
-					{queued > 0 && <span className="sh-queued pn-queued">queued ×{queued}</span>}
+					{queued > 0 && (
+						<span
+							className="sh-queued pn-queued"
+							data-tip={working ? "Enter with an empty message sends it now; Esc stops and returns it" : undefined}
+							data-tip-side="above"
+						>
+							queued ×{queued}
+						</span>
+					)}
 					<span className="pn-footer-spacer" />
+					{canSetThinking && (
+						<span className="pn-pop-anchor">
+							<button
+								type="button"
+								className="pn-model-chip"
+								aria-haspopup="menu"
+								aria-expanded={menu === "thinking"}
+								aria-label={`Thinking: ${levelLabel(thinking.level)}`}
+								data-tip={menu === "thinking" ? undefined : "Thinking level"}
+								data-tip-side="above"
+								onClick={() => setMenu(open => (open === "thinking" ? null : "thinking"))}
+							>
+								<Brain size={12} />
+								<span className="pn-model-name">{levelLabel(thinking.level)}</span>
+							</button>
+							{menu === "thinking" && (
+								<ThinkingMenu
+									level={thinking.level}
+									levels={thinking.levels}
+									onPick={level => {
+										session?.setThinkingLevel?.(level).catch(error => {
+											props.onNotify(
+												"error",
+												`Couldn’t set thinking: ${error instanceof Error ? error.message : String(error)}`,
+											);
+										});
+									}}
+									onClose={() => setMenu(null)}
+								/>
+							)}
+						</span>
+					)}
 					{canSwitchModel && (
 						<span className="pn-pop-anchor">
 							<button
@@ -821,12 +917,11 @@ export function Composer(props: ComposerProps): ReactNode {
 								<span className="pn-model-name">{currentModel.name || currentModel.id}</span>
 								<ChevronDown size={11} />
 							</button>
-							{menu === "model" && (
+							{menu === "model" && session !== null && (
 								<ModelPicker
-									list={models}
-									current={currentModel}
-									onPick={model => {
-										session?.setModel?.(model).catch(error => {
+									session={session}
+									onPick={(model, options) => {
+										session.setModel?.(model, options).catch(error => {
 											props.onNotify(
 												"error",
 												`Couldn’t switch model: ${error instanceof Error ? error.message : String(error)}`,
@@ -856,7 +951,7 @@ export function Composer(props: ComposerProps): ReactNode {
 							className="pn-send"
 							aria-label={working ? "Queue message" : "Send"}
 							disabled={!canSend}
-							onClick={send}
+							onClick={() => send()}
 						>
 							{uploading ? <span className="pn-send-wait" /> : <ArrowUp size={16} strokeWidth={2.2} />}
 						</button>
