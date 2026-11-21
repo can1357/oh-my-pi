@@ -264,4 +264,71 @@ describe("cloud speech vocalizer", () => {
 		expect(requests).toEqual(["eleven", "eleven"]);
 		expect(recording.written.length).toBe(1);
 	});
+
+	function jsonResult(body: unknown): speech.SpeechResult {
+		return { ...wavResult([], 24_000), audio: new TextEncoder().encode(JSON.stringify(body)) };
+	}
+
+	test.each([
+		{ name: "a reported 503", body: { error: { message: "upstream overloaded", code: 503 } } },
+		{ name: "no status", body: { error: { message: "upstream overloaded", type: "server_error" } } },
+	])("retries a model whose 2xx JSON error body carries $name on the next utterance", async ({ body }) => {
+		const settings = Settings.isolated({
+			"speech.enabled": true,
+			modelRoles: { speech: "gw/eleven" },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = gatewayRegistry(settings);
+		const warnings: string[] = [];
+		vi.spyOn(logger, "warn").mockImplementation(message => {
+			warnings.push(message);
+		});
+		const errors: unknown[] = [];
+		vi.spyOn(logger, "debug").mockImplementation((_message, context) => {
+			errors.push((context as { error?: unknown } | undefined)?.error);
+		});
+		const requests: string[] = [];
+		spyOn(speech, "synthesizeSpeech").mockImplementation(async model => {
+			requests.push(model.id);
+			return requests.length === 1 ? jsonResult(body) : wavResult([0.25], 24_000);
+		});
+		const recording = recordingPlayer();
+		const vocalizer = new Vocalizer(() => recording.player);
+		vocalizer.setModelSource({ settings, registry });
+
+		vocalizer.speak("Hello there.");
+		await vocalizer.idle();
+		vocalizer.speak("Still there?");
+		await vocalizer.idle();
+
+		expect(requests).toEqual(["eleven", "eleven"]);
+		expect(recording.written.length).toBe(1);
+		expect(warnings).not.toContain("vocalizer: speech model failed permanently; skipping it for this session");
+		expect(errors).toContain("gw/eleven speech API returned an error body: upstream overloaded");
+	});
+
+	test("skips a model whose 2xx JSON error body reports a 401 for the rest of the session", async () => {
+		const settings = Settings.isolated({
+			"speech.enabled": true,
+			modelRoles: { speech: "gw/eleven" },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = gatewayRegistry(settings);
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const requests: string[] = [];
+		spyOn(speech, "synthesizeSpeech").mockImplementation(async model => {
+			requests.push(model.id);
+			return jsonResult({ error: { message: "invalid api key", status: "401" } });
+		});
+		const recording = recordingPlayer();
+		const vocalizer = new Vocalizer(() => recording.player);
+		vocalizer.setModelSource({ settings, registry });
+
+		vocalizer.speak("Hello there.");
+		await vocalizer.idle();
+		vocalizer.speak("Still there?");
+		await vocalizer.idle();
+
+		expect(requests).toEqual(["eleven"]);
+	});
 });

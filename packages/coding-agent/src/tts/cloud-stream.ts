@@ -9,7 +9,9 @@
  * permanent failure (missing key, 4xx other than 408/429, audio that is not
  * WAV) is also recorded in the caller's `excluded` set, so later utterances
  * skip that model instead of paying its latency again; transient failures
- * (network, 5xx, 408, 429) are retried on the next utterance. When every
+ * (network, 5xx, 408, 429) are retried on the next utterance. A JSON error body
+ * sent with a 2xx status is classified by the status it reports, and counts as
+ * transient when it reports none. When every
  * candidate has failed the stream closes, so playback ends instead of stalling.
  *
  * The player runs at one rate per utterance, so every chunk is resampled to
@@ -38,6 +40,51 @@ export interface CloudSpeechStreamOptions {
 /** Thrown when a candidate answered with audio the vocalizer cannot decode. */
 class UndecodableSpeechError extends Error {
 	override readonly name = "UndecodableSpeechError";
+}
+
+/**
+ * The error a gateway reported in a 2xx body instead of audio (`{"error": ...}`),
+ * or `undefined` when the body is not such an envelope. A status is taken only
+ * from a numeric (or 3-digit string) `status`/`code` field in the 4xx/5xx range.
+ */
+function readSpeechErrorBody(label: string, body: Uint8Array): Error | undefined {
+	let start = 0;
+	while (
+		start < body.length &&
+		(body[start] === 0x20 || body[start] === 0x09 || body[start] === 0x0a || body[start] === 0x0d)
+	) {
+		start += 1;
+	}
+	if (body[start] !== 0x7b) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(new TextDecoder().decode(body.subarray(start)));
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || !("error" in parsed)) return undefined;
+	const envelope = parsed as { error: unknown; status?: unknown; code?: unknown };
+	const error = envelope.error;
+	const fields = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
+	const detail =
+		typeof error === "string" ? error : typeof fields.message === "string" ? fields.message : JSON.stringify(error);
+	let status: number | undefined;
+	let code: string | undefined;
+	for (const value of [fields.status, fields.code, envelope.status, envelope.code]) {
+		const numeric =
+			typeof value === "number"
+				? value
+				: typeof value === "string" && /^\d{3}$/.test(value)
+					? Number(value)
+					: undefined;
+		if (numeric !== undefined && numeric >= 400 && numeric < 600) {
+			status ??= numeric;
+		} else if (typeof value === "string" && value.length > 0) {
+			code ??= value;
+		}
+	}
+	const message = `${label} speech API returned an error body: ${detail.slice(0, 300)}`;
+	return status === undefined ? new Error(message) : new AIError.ProviderHttpError(message, status, { code });
 }
 
 /** HTTP statuses that may succeed when the same request is sent again. */
@@ -93,6 +140,8 @@ export function createCloudSpeechStream(options: CloudSpeechStreamOptions): TtsS
 					{ text, format: "wav" },
 					{ apiKey: options.resolveApiKey(model), signal },
 				);
+				const bodyError = readSpeechErrorBody(label, result.audio);
+				if (bodyError) throw bodyError;
 				try {
 					return decodeWav(result.audio);
 				} catch (error) {
