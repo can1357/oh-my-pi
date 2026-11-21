@@ -50,7 +50,7 @@ import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
 import { getSubprocessToolRenderer } from "./subprocess";
 import { assembleYieldResult, type YieldSectionShapes } from "./task-yield-assembly";
-import type { TspAgentProps, TspProps, TspTone } from "@oh-my-pi/pi-wire";
+import { type TspAgentProps, type TspProps, type TspTone, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { compact, kv, md, node, propNode, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { OwnerMemo, sameItems } from "../native/memo";
@@ -724,7 +724,7 @@ function renderRouteLine(route: string | undefined, continuePrefix: string, maxW
 
 /** A tool call's own intent, else its argument, with home paths shortened as the subagent HUD does. */
 function toolCallDetail(intent: string | undefined, args: string | undefined, argsKey: string | undefined): string {
-	return intent ? shortenEmbeddedPaths(intent) : shortenToolArgumentPaths(args ?? "", argsKey);
+	return intent ? shortenEmbeddedPaths(toolIntentLabel(intent)) : shortenToolArgumentPaths(args ?? "", argsKey);
 }
 
 /**

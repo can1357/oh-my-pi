@@ -172,9 +172,33 @@ describe("compileLineEdits", () => {
 		);
 	});
 
-	it("tells the model which line holds the text a sub missed", () => {
-		expect(after(SOURCE, '["sub",3,"sum = 0","sum = 1"]')).toContain("the nearest line that does is 2");
+	it("takes a sub's line number as a hint when one line holds the text, and names the nearest lines when several do", () => {
+		// `sum = 0` is on line 2 only; `sum` is on lines 2, 4, 6 and 7.
+		expect(after(SOURCE, '["sub",3,"sum = 0","sum = 1"]')).toBe(SOURCE.replace("sum = 0", "sum = 1"));
+		expect(after(SOURCE, '["sub",3,"sum","total"]')).toContain("the nearest line that does is 2 or 4");
 		expect(after(SOURCE, '["sub","all","nothing","x"]')).toContain("does not contain");
+	});
+
+	it("reads the near-miss forms of delete, swap, indent and dedent", () => {
+		expect(after(SOURCE, '["remove",6]')).toBe(SOURCE.replace("\tconsole.log(sum);\n", ""));
+		const swapped = THREE.replace("return 1;", "return 0;")
+			.replace("return 2;", "return 1;")
+			.replace("return 0;", "return 2;");
+		expect(after(THREE, '["swap",2,6]')).toBe(swapped);
+		expect(after(THREE, '["swap",2,6,6,2]')).toBe(swapped);
+		// No amount is one step of the file's indentation; a negative amount is the opposite shift.
+		expect(after(THREE, '["dedent",2,2]')).toBe(THREE.replace("  return 1;", "return 1;"));
+		expect(after(THREE, '["indent",2,2,-2]')).toBe(THREE.replace("  return 1;", "return 1;"));
+		expect(after(THREE, '["indent",2,2]')).toBe(THREE.replace("  return 1;", "    return 1;"));
+	});
+
+	it("merges inserts at one place in the order given, but never into the place a move lands", () => {
+		expect(after(THREE, '["insert","after",2,"  // one"]\n["insert","before",3,"  // two"]')).toBe(
+			THREE.replace("  return 1;\n", "  return 1;\n  // one\n  // two\n"),
+		);
+		expect(after(THREE, '["move",9,11,"before",1]\n["insert","before",1,"// top"]')).toContain(
+			"insert at the same place",
+		);
 	});
 
 	it("treats blank lines between blocks as separators, whatever the range says about them", () => {
@@ -241,14 +265,15 @@ describe("applyDescribedChange", () => {
 
 	it("sends a rejected reply back with its rejection and applies the corrected one", async () => {
 		const { outcome, requests, read, dispose } = await run([
-			'["sub",3,"sum = 0","sum = 1"]',
+			// Four lines hold `sum`, so the wrong line number cannot be read as a hint.
+			'["sub",3,"sum","total"]',
 			'["sub",2,"sum = 0","sum = 1"]',
 		]);
 		await outcome;
 		expect(requests).toHaveLength(2);
 		expect(requests[0]).not.toContain("<rejection>");
 		// The retry carries the rejected reply and why it was rejected.
-		expect(requests[1]).toContain('["sub",3,"sum = 0","sum = 1"]');
+		expect(requests[1]).toContain('["sub",3,"sum","total"]');
 		expect(requests[1]).toMatch(/<rejection>\n[^<]*line 3 does not contain/);
 		expect(await read()).toBe(SOURCE.replace("let sum = 0;", "let sum = 1;"));
 		dispose();
@@ -470,6 +495,33 @@ describe("edit tool in magic mode", () => {
 			input: "# sample.ts\n- Make total return sum + 1.",
 		});
 		expect(used).toEqual(["role-model"]);
+	});
+
+	it("sizes a completion's output limit to the reply, except for an apply model that can reason", async () => {
+		using tempDir = TempDir.createSync("@omp-magic-edit-limit-");
+		const file = path.join(tempDir.path(), "sample.ts");
+		const limits: Record<string, number | undefined> = {};
+		vi.spyOn(ai, "completeSimple").mockImplementation((model, _context, options) => {
+			limits[model.id] = options?.maxTokens;
+			return Promise.resolve(createAssistantMessage('["sub",7,"sum;","sum + 1;"]'));
+		});
+		for (const reasoning of [false, true]) {
+			await Bun.write(file, SOURCE);
+			const model = { ...APPLY_MODEL, id: reasoning ? "thinker" : "plain", reasoning };
+			const settings = Settings.isolated({ "edit.mode": "magic", "edit.magic.model": `llama.cpp/${model.id}` });
+			const session = makeSession(tempDir.path(), settings, {
+				modelRegistry: {
+					getAvailable: () => [model],
+					getApiKey: async () => "test-key",
+					resolver: () => async () => "test-key",
+				} as unknown as ModelRegistry,
+			});
+			await new EditTool(session).execute("call", { input: "# sample.ts\n- Make total return sum + 1." });
+		}
+		// Reasoning is billed against the same limit, so a reply-sized one would cut the answer off.
+		expect(limits.plain).toBeLessThan(1000);
+		// The apply model's own maximum.
+		expect(limits.thinker).toBe(4096);
 	});
 
 	it("applies each file of a batch on its own and reports the one that was refused", async () => {

@@ -1,5 +1,16 @@
 import { RunTrace } from "@oh-my-pi/pi-natives";
-import { isShellTrace, type ShellTrace, type ShellVizPreferences, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
+import {
+	INTENT_FIELD,
+	isShellTrace,
+	type ShellTrace,
+	type ShellVizPreferences,
+	type ShellVizPresentation,
+	toolIntentLabel,
+	type TspCardStatus,
+	type TspPreview,
+	type TspText,
+	type TspTone,
+} from "@oh-my-pi/pi-wire";
 import {
 	defaultShellVizPreferences,
 	readShellPresentation,
@@ -38,7 +49,6 @@ import {
 	toolRenderers,
 } from "../tools/index";
 import { describeDefaultToolExecution, formatDefaultToolExecution } from "../tools/default-renderer";
-import { INTENT_FIELD, type TspCardStatus, type TspPreview, type TspText, type TspTone } from "@oh-my-pi/pi-wire";
 import { card, col, EMPTY_NODE, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
@@ -1468,7 +1478,7 @@ export class ToolExecutionComponent extends Container {
 				status,
 				age: live ? ms : undefined,
 				took: live ? undefined : ms,
-				intent: typeof intent === "string" && intent ? plainText(intent) : undefined,
+				intent: typeof intent === "string" && intent ? plainText(toolIntentLabel(intent)) : undefined,
 				frame: inline ? "inline" : "card",
 				collapsible: hasBody,
 				collapsed: hasBody ? this.#nativeCollapsed(status, view) : undefined,

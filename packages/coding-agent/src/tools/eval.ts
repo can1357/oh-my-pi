@@ -864,7 +864,6 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 			const sessionFile = session.getSessionFile?.() ?? undefined;
 			const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? undefined;
-			session.assertEvalExecutionAllowed?.();
 			outputSink = new OutputSink({
 				allocateArtifact: session.allocateOutputArtifact,
 				headBytes: resolveOutputSinkHeadBytes(session.settings),

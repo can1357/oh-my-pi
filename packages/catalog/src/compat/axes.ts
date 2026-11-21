@@ -356,6 +356,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["freeform", "function"],
 	},
+	/** Paraphrase model-visible prompt prose per install (`perturbContext` in pi-ai). */
+	"prompt-perturbation": { key: "promptPerturbation", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-native-tools": { key: "requiresNativeTools", set: "catalog", shape: "scalar", values: [true, false] },
 	"tool-schemas-in-context": { key: "toolSchemasInContext", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-tool-free-history-for-tool-opt-out": {

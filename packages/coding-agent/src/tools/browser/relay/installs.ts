@@ -17,11 +17,7 @@ import {
 } from "./extension-files";
 import { discoverRelayEndpoints } from "./discovery";
 import { refreshRelayNativeHost } from "./native-host-manifest";
-import {
-	isOlderOmpVersion,
-	type PanelInstall,
-	RELAY_RECHECK_PATH,
-} from "./protocol";
+import { isOlderOmpVersion, type PanelInstall, RELAY_RECHECK_PATH } from "./protocol";
 
 /** The files this omp writes: its version and extension build. A source checkout changes the build, not the version. */
 async function installStamp(): Promise<string> {
@@ -64,9 +60,7 @@ function installKey(dir: string): string {
 	return process.platform === "win32" ? dir.toLowerCase() : dir;
 }
 
-function resolveLocations(
-	options: RelayInstallLocations,
-): Required<RelayInstallLocations> {
+function resolveLocations(options: RelayInstallLocations): Required<RelayInstallLocations> {
 	return {
 		registryFile: options.registryFile ?? getBrowserRelayInstallRegistryFile(),
 		defaultDir:
@@ -79,7 +73,7 @@ function resolveLocations(
 				? options.relayUrl
 				: options.registryFile
 					? null
-					: discoverRelayEndpoints()[0] ?? null,
+					: (discoverRelayEndpoints()[0] ?? null),
 	};
 }
 
@@ -133,8 +127,7 @@ export async function readRelayInstallRegistry(
 	}
 	return {
 		installs: [...installs.values()],
-		lastSynced:
-			typeof data.lastSynced === "string" ? data.lastSynced : undefined,
+		lastSynced: typeof data.lastSynced === "string" ? data.lastSynced : undefined,
 	};
 }
 
@@ -142,8 +135,7 @@ export async function readRelayInstallRegistry(
 async function readManifestVersion(file: string): Promise<string | null> {
 	try {
 		const data: unknown = await Bun.file(file).json();
-		if (isRecord(data) && typeof data.version_name === "string")
-			return data.version_name;
+		if (isRecord(data) && typeof data.version_name === "string") return data.version_name;
 	} catch (error) {
 		if (isEnoent(error)) return null;
 		if (!(error instanceof SyntaxError)) throw error;
@@ -151,16 +143,10 @@ async function readManifestVersion(file: string): Promise<string | null> {
 	return "";
 }
 
-async function adoptDefaultInstall(
-	registry: RelayInstallRegistry,
-	defaultDir: string,
-): Promise<boolean> {
+async function adoptDefaultInstall(registry: RelayInstallRegistry, defaultDir: string): Promise<boolean> {
 	try {
 		const dir = await fs.realpath(defaultDir);
-		if (
-			registry.installs.some((row) => installKey(row.dir) === installKey(dir))
-		)
-			return false;
+		if (registry.installs.some(row => installKey(row.dir) === installKey(dir))) return false;
 		const manifest = await fs.stat(path.join(dir, "manifest.json"));
 		if (!manifest.isFile()) return false;
 		registry.installs.push({
@@ -176,9 +162,7 @@ async function adoptDefaultInstall(
 }
 
 /** Report known install folders and their recorded versions for the panel diagnostics. */
-export async function readRelayInstalls(
-	options: RelayInstallLocations = {},
-): Promise<PanelInstall[]> {
+export async function readRelayInstalls(options: RelayInstallLocations = {}): Promise<PanelInstall[]> {
 	const { registryFile, defaultDir } = resolveLocations(options);
 	const registry = await readRelayInstallRegistry(registryFile);
 	await adoptDefaultInstall(registry, defaultDir);
@@ -196,20 +180,15 @@ export async function readRelayInstalls(
  * messaging host admits and the extensions a relay may rewrite and reload. Registry dirs are canonical, so each id is
  * the one Chrome derived when the folder was loaded unpacked.
  */
-export async function registeredRelayExtensionIds(
-	options: RelayInstallLocations = {},
-): Promise<string[]> {
+export async function registeredRelayExtensionIds(options: RelayInstallLocations = {}): Promise<string[]> {
 	const { registryFile, defaultDir } = resolveLocations(options);
 	const registry = await readRelayInstallRegistry(registryFile);
 	await adoptDefaultInstall(registry, defaultDir);
-	return registry.installs.map((row) => extensionIdForPath(row.dir));
+	return registry.installs.map(row => extensionIdForPath(row.dir));
 }
 
 /** Install the requested copy, recording its real directory and preserving any existing default installation. */
-export async function installRelayExtension(
-	dir: string,
-	options: RelayInstallLocations = {},
-): Promise<string> {
+export async function installRelayExtension(dir: string, options: RelayInstallLocations = {}): Promise<string> {
 	const { registryFile, defaultDir, relayUrl } = resolveLocations(options);
 	await fs.mkdir(path.dirname(registryFile), { recursive: true });
 	let written = false;
@@ -218,9 +197,7 @@ export async function installRelayExtension(
 		await fs.mkdir(dir, { recursive: true });
 		const canonical = await fs.realpath(dir);
 		written = await writeRelayExtension(canonical, VERSION);
-		const current = registry.installs.find(
-			(row) => installKey(row.dir) === installKey(canonical),
-		);
+		const current = registry.installs.find(row => installKey(row.dir) === installKey(canonical));
 		const updated = !current || written || current.ompVersion !== VERSION;
 		if (!current) {
 			registry.installs.push({
@@ -233,11 +210,7 @@ export async function installRelayExtension(
 			current.writtenAt = Date.now();
 		}
 		const adopted = await adoptDefaultInstall(registry, defaultDir);
-		if (updated || adopted)
-			await writeFileAtomically(
-				registryFile,
-				`${JSON.stringify(registry, null, 2)}\n`,
-			);
+		if (updated || adopted) await writeFileAtomically(registryFile, `${JSON.stringify(registry, null, 2)}\n`);
 		return canonical;
 	});
 	if (written) await recheckRelay(relayUrl);
@@ -250,24 +223,17 @@ export interface RelayInstallSyncOptions extends RelayInstallLocations {
 }
 
 /** Reconcile every known install with this omp's assets without recreating missing directories. */
-export async function syncRelayInstalls(
-	options: RelayInstallSyncOptions = {},
-): Promise<RelayInstallSyncResult[]> {
+export async function syncRelayInstalls(options: RelayInstallSyncOptions = {}): Promise<RelayInstallSyncResult[]> {
 	const { registryFile, defaultDir, relayUrl } = resolveLocations(options);
 	const initial = await readRelayInstallRegistry(registryFile);
-	if (
-		initial.installs.length === 0 &&
-		!(await Bun.file(path.join(defaultDir, "manifest.json")).exists())
-	)
-		return [];
+	if (initial.installs.length === 0 && !(await Bun.file(path.join(defaultDir, "manifest.json")).exists())) return [];
 	// Nothing to write without the extension: a source checkout that never generated it fails here, not per folder.
 	const stamp = await installStamp();
 	if (options.mode === "startup" && initial.lastSynced === stamp) return [];
 	await fs.mkdir(path.dirname(registryFile), { recursive: true });
 	const synced = await withFileLock(registryFile, async () => {
 		const registry = await readRelayInstallRegistry(registryFile);
-		if (options.mode === "startup" && registry.lastSynced === stamp)
-			return [];
+		if (options.mode === "startup" && registry.lastSynced === stamp) return [];
 		let changed = await adoptDefaultInstall(registry, defaultDir);
 		const results: RelayInstallSyncResult[] = [];
 		for (const row of registry.installs) {
@@ -277,14 +243,8 @@ export async function syncRelayInstalls(
 					results.push({ dir, status: "missing" });
 					continue;
 				}
-				const installed = await readManifestVersion(
-					path.join(dir, "manifest.json"),
-				);
-				if (
-					options.mode === "relay" &&
-					installed !== null &&
-					isOlderOmpVersion(VERSION, installed)
-				) {
+				const installed = await readManifestVersion(path.join(dir, "manifest.json"));
+				if (options.mode === "relay" && installed !== null && isOlderOmpVersion(VERSION, installed)) {
 					results.push({ dir, status: "up to date", ompVersion: installed });
 					continue;
 				}
@@ -314,13 +274,10 @@ export async function syncRelayInstalls(
 		if (options.mode !== "relay") {
 			try {
 				await refreshRelayNativeHost(
-					registry.installs.map((row) => extensionIdForPath(row.dir)),
+					registry.installs.map(row => extensionIdForPath(row.dir)),
 					{ dir: path.dirname(registryFile) },
 				);
-				if (
-					registry.lastSynced !== stamp &&
-					!results.some((result) => result.status === "failed")
-				) {
+				if (registry.lastSynced !== stamp && !results.some(result => result.status === "failed")) {
 					registry.lastSynced = stamp;
 					changed = true;
 				}
@@ -330,32 +287,23 @@ export async function syncRelayInstalls(
 				});
 			}
 		}
-		if (changed)
-			await writeFileAtomically(
-				registryFile,
-				`${JSON.stringify(registry, null, 2)}\n`,
-			);
+		if (changed) await writeFileAtomically(registryFile, `${JSON.stringify(registry, null, 2)}\n`);
 		return results;
 	});
 	// The relay's own sync already reloads the extension it ran for.
-	if (
-		options.mode !== "relay" &&
-		synced.some((result) => result.status === "written")
-	)
-		await recheckRelay(relayUrl);
+	if (options.mode !== "relay" && synced.some(result => result.status === "written")) await recheckRelay(relayUrl);
 	return synced;
 }
 
 /** Catch up installs on a normal startup after a version change without delaying the session. */
 export function syncRelayInstallsOnStartup(): void {
 	void syncRelayInstalls({ mode: "startup" })
-		.then((results) => {
+		.then(results => {
 			for (const result of results) {
-				if (result.status === "failed")
-					logger.warn("browser relay install sync failed", result);
+				if (result.status === "failed") logger.warn("browser relay install sync failed", result);
 			}
 		})
-		.catch((error) =>
+		.catch(error =>
 			logger.warn("browser relay install sync failed", {
 				error: String(error),
 			}),

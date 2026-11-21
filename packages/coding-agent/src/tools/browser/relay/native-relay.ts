@@ -89,12 +89,13 @@ class BrowserLink {
 			}
 			pause = RELINK_MIN_MS;
 			this.#upstream = upstream;
-			const unpublish = this.#port.port === 0 && this.#server
-				? await publishRelayEndpoint(this.#server.port).catch(error => {
-					this.#port.log(`cannot publish relay endpoint: ${String(error)}`);
-					return undefined;
-				})
-				: undefined;
+			const unpublish =
+				this.#port.port === 0 && this.#server
+					? await publishRelayEndpoint(this.#server.port).catch(error => {
+							this.#port.log(`cannot publish relay endpoint: ${String(error)}`);
+							return undefined;
+						})
+					: undefined;
 			this.#port.send({ t: "linked" });
 			const reason = await upstream.ended;
 			await unpublish?.();

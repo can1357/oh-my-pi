@@ -4,8 +4,11 @@
 
 ### Added
 
-- `GuestClient.sendPrompt` accepts images and sends them with the prompt.
-- `GuestClient.sendResume`, `GuestClient.sendDeliverQueue` and `sendPrompt`'s `followUp` option: continue the host's agent, interrupt it to send queued messages, or queue a follow-up.
+- Enhanced guest collaboration APIs: `GuestClient.sendPrompt` now supports sending images, while `sendResume`, `sendDeliverQueue`, and the `followUp` option enable continuing the host’s agent, interrupting it to deliver queued messages, or queueing a follow-up prompt.
+
+### Changed
+
+- Tool cards in shared sessions and HTML exports show brief intent labels instead of detailed ranking instructions.
 
 ## [19.0.0] - 2026-11-18
 

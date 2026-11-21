@@ -52,7 +52,9 @@ const REFUSAL = /^CANNOT:\s*(.*)/i;
 /**
  * Output tokens per character of the shown file and the change, plus slack: a
  * reply never needs more than retyping both, so a model that keeps talking is
- * stopped long before the general output limit.
+ * stopped long before the general output limit. Models that can reason are
+ * exempt: reasoning counts against the same limit, and some reason even when
+ * told not to.
  */
 const OUTPUT_TOKENS_PER_CHAR = 0.5;
 const OUTPUT_SLACK_TOKENS = 256;
@@ -265,6 +267,7 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 
 	const timeout = AbortSignal.timeout(APPLY_TIMEOUT_MS);
 	const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+	const ceiling = Math.min(model.maxTokens ?? COMPLETION_MAX_TOKENS, COMPLETION_MAX_TOKENS);
 	const complete = async (request: string, maxTokens: number): Promise<Reply> => {
 		const journal = journalCompletion(session.sessionManager, {
 			purpose: "magic-edit",
@@ -282,7 +285,7 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 					{
 						apiKey: registry.resolver(model, sessionId),
 						sessionId,
-						maxTokens: Math.min(model.maxTokens ?? COMPLETION_MAX_TOKENS, COMPLETION_MAX_TOKENS, maxTokens),
+						maxTokens: model.reasoning ? ceiling : Math.min(ceiling, maxTokens),
 						reasoning,
 						disableReasoning: reasoning === undefined,
 						signal: combined,

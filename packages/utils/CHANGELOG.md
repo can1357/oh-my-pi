@@ -4,21 +4,18 @@
 
 ### Added
 
-- Added `LinearRegExp` (`@oh-my-pi/pi-utils/regex`), a `RegExp` with JavaScript's syntax and matches that cannot backtrack catastrophically, and `RegexStream` for detecting a match in text that arrives in chunks
-- Added `LinearRegExp` support for scoped regex modifiers and Unicode (`u`) mode.
-- Added `LinearRegExp` support for Unicode set operations (`v`), large single-character repetitions, and large literal dictionaries without falling back to native backtracking.
-- Extended `LinearRegExp` to Unicode properties of strings, large fixed-width block counts, and patterns with more character classes.
-- Added `getCodexClientVersionPath()` for the Codex client version cache record, resolving under `$XDG_CACHE_HOME/omp` when that root is initialized ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+- Added `LinearRegExp` (`@oh-my-pi/pi-utils/regex`), a JavaScript-compatible regular expression engine that avoids catastrophic backtracking, with support for scoped modifiers, Unicode modes and properties, Unicode set operations, large repetitions and literal dictionaries, fixed-width block counts, and additional character classes.
+- Added `RegexStream` for detecting regular-expression matches in text received incrementally in chunks.
+- Added `getCodexClientVersionPath()` to locate the Codex client version cache record under the initialized `$XDG_CACHE_HOME/omp` directory.
 
 ### Changed
 
-- Sped up `LinearRegExp` scans with delimiter-separated runs and word backreferences when the pattern can run safely in the native engine.
-- Sped up `LinearRegExp` searches for required literals, lookbehinds, and other patterns on long inputs.
-- Sped up `LinearRegExp` misses for patterns with a required suffix and for patterns with large character alphabets.
+- Improved `LinearRegExp` performance for scans and searches involving delimiters, word backreferences, required literals or suffixes, lookbehinds, and large character alphabets.
 
 ### Fixed
 
-- `formatAge` reads ages of a year or more in years (`23y ago`) instead of months (`282mo ago`)
+- Fixed RAR4 extraction stalling for seconds per filter on archives that declare an out-of-range delta filter channel count; such archives are now rejected as corrupt.
+- Fixed `formatAge` to display durations of one year or more in years, such as `23y ago`, instead of months.
 
 ## [19.0.0] - 2026-11-18
 

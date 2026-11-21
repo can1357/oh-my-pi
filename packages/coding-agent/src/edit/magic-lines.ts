@@ -7,12 +7,15 @@
  * `["move",20,41,"before",3]`, `["swap",20,49,51,74]`, `["dedent",13,17,2]`,
  * `["insert","after",15,"text"]`, `["replace",9,9,"text"]`. The reader accepts
  * the wrappings small models add (fences, an outer array, quoted numbers,
- * commentary after the operations) and nothing that needs a guess.
+ * commentary after the operations) and the near-miss forms {@link normalize}
+ * lists. The line number of a `sub` is a hint when only one shown line holds
+ * its text, and several inserts at one place are one. Nothing else is guessed.
  *
  * All operations compile to one exact `replace` edit of the snapshot. Blank
  * lines between blocks are separators the compiler places itself, so a range
  * that is one blank line off gives the same result.
  */
+import { detectIndentFromContent } from "../lsp/format-options";
 import { blockEnd, type FileView, fileLines } from "./magic-view";
 import type { ReplaceBatchParams } from "./schemas";
 
@@ -141,6 +144,34 @@ function readOperations(reply: string): { operations: unknown[]; commented: bool
 	return { operations, commented };
 }
 
+/**
+ * Near-miss forms models write, rewritten in place to the form the compiler
+ * takes: `remove` for `delete`; one number for a one-line `delete`; two line
+ * numbers, or `a, b, b, a`, for a `swap` of two lines; a negative amount for
+ * the opposite shift; and no amount for one step of the file's indentation.
+ */
+function normalize(operation: unknown[], content: string): void {
+	if (operation[0] === "remove") operation[0] = "delete";
+	const [name, a, b, c, d] = operation;
+	if (name === "delete" && operation.length === 2) {
+		operation.push(a);
+	} else if (
+		name === "swap" &&
+		(operation.length === 3 || (operation.length === 5 && a === d && b === c && a !== b))
+	) {
+		operation.splice(1, operation.length - 1, a, a, b, b);
+	} else if (name === "indent" || name === "dedent") {
+		if (operation.length === 3) {
+			const indent = detectIndentFromContent(content);
+			const step = indent.insertSpaces === false ? "tab" : indent.tabSize;
+			if (step !== undefined) operation.push(step);
+		} else if (typeof c === "number" && c < 0) {
+			operation[0] = name === "indent" ? "dedent" : "indent";
+			operation[3] = -c;
+		}
+	}
+}
+
 /** Inclusive one-based line range. */
 type Range = [first: number, last: number];
 
@@ -224,6 +255,8 @@ export function compileLineEdits(
 	const ranges: Range[] = [];
 	/** Per-line substitutions, applied in order to the original line. */
 	const subs = new Map<number, string>();
+	/** New lines per insertion point, in the order given: several inserts at one place are one. */
+	const inserts = new Map<number, string[]>();
 	// Blank lines separate blocks rather than belong to them. Only shown lines count:
 	// a separator never reaches into lines the model did not see.
 	const isBlank = (index: number) => lines[index].trim() === "" && visible(index, index);
@@ -258,10 +291,11 @@ export function compileLineEdits(
 	};
 
 	for (const [index, operation] of operations.entries()) {
-		const problem = (reason: string) => ({
-			problem: `Operation ${index + 1} (${JSON.stringify(operation)}): ${reason}`,
-		});
+		// Problems quote the operation as the model wrote it.
+		const written = JSON.stringify(operation);
+		const problem = (reason: string) => ({ problem: `Operation ${index + 1} (${written}): ${reason}` });
 		if (!Array.isArray(operation)) return problem("expected an operation array.");
+		normalize(operation, content);
 		const [name] = operation;
 		const form = typeof name === "string" ? FORMS[name] : undefined;
 		if (!form) return problem(`unknown operation; use one of ${Object.keys(FORMS).join(", ")}.`);
@@ -314,13 +348,17 @@ export function compileLineEdits(
 				}
 				if (hidden(line - 1, line)) return problem("line is not shown.");
 				if (!current(line - 1).includes(old)) {
-					let nearest: number[] = [];
+					const holders: number[] = [];
 					for (let at = 0; at < lines.length; at++) {
-						if (!lines[at].includes(old) || !visible(at, at)) continue;
-						const distance = Math.abs(at + 1 - line) - Math.abs((nearest[0] ?? Infinity) - line);
-						if (distance < 0) nearest = [at + 1];
-						else if (distance === 0) nearest.push(at + 1);
+						if (lines[at].includes(old) && visible(at, at)) holders.push(at);
 					}
+					// The line number is a hint: text that only one shown line holds is meant there.
+					if (holders.length === 1) {
+						subs.set(holders[0], current(holders[0]).replaceAll(old, replacement));
+						break;
+					}
+					const gap = Math.min(...holders.map(at => Math.abs(at + 1 - line)));
+					const nearest = holders.filter(at => Math.abs(at + 1 - line) === gap).map(at => at + 1);
 					const where = nearest.length > 0 ? `; the nearest line that does is ${nearest.join(" or ")}` : "";
 					return problem(`line ${line} does not contain ${JSON.stringify(old)}${where}.`);
 				}
@@ -332,7 +370,9 @@ export function compileLineEdits(
 				if (operation.length !== 4 || !isSide(side) || !isLine(line) || !isText(text)) return malformed();
 				if (hidden(line - 1, line)) return problem("anchor line is not shown.");
 				const at = side === "before" ? line - 1 : line;
-				splices.push({ from: at, to: at, lines: text.split("\n") });
+				const added = inserts.get(at) ?? [];
+				inserts.set(at, added);
+				added.push(...text.split("\n"));
 				break;
 			}
 			case "move": {
@@ -401,6 +441,7 @@ export function compileLineEdits(
 		}
 	}
 	for (const [line, text] of subs) splices.push({ from: line, to: line + 1, lines: [text] });
+	for (const [at, added] of inserts) splices.push({ from: at, to: at, lines: added });
 
 	splices.sort((a, b) => a.from - b.from || a.to - b.to);
 	for (let i = 1; i < splices.length; i++) {

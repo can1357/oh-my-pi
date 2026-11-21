@@ -1823,7 +1823,6 @@ describe("Settings", () => {
 		const MODEL_PRIO = roleDefaultModels();
 		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
-			"google-gemini-cli/gemini-2.5-flash",
 			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
@@ -2003,8 +2002,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 2)]).toEqual([
-				"google-gemini-cli/gemini-3.8-flash-high",
+			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 1)]).toEqual([
 				"google-antigravity/gemini-3.8-flash-high",
 				"google/gemini-3.8-flash-high",
 			]);

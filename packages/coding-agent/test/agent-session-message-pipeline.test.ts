@@ -1507,9 +1507,9 @@ describe("AgentSession message pipeline", () => {
 			true,
 		],
 		[
-			"Gemini CLI",
+			"Antigravity",
 			buildModel({
-				...getBundledModel("google-gemini-cli", "gemini-2.5-pro"),
+				...getBundledModel("google-antigravity", "gemini-2.5-pro"),
 				thinking: { mode: "budget", efforts: [Effort.Medium] },
 			}),
 			false,

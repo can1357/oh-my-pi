@@ -30,7 +30,9 @@ export function installChromeStub(sink: FakePort[]): void {
 				const port: FakePort = {
 					disconnected: false,
 					sent,
-					disconnect: () => { port.disconnected = true; },
+					disconnect: () => {
+						port.disconnected = true;
+					},
 					// Frames are recorded; the test answers with `link()`, so a silent host stays silent.
 					postMessage: message => {
 						sent.push(message);

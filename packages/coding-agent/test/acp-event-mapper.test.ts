@@ -1010,6 +1010,12 @@ describe("ACP event mapper", () => {
 		}
 	});
 
+	it("labels a replayed intent without changing its raw input", () => {
+		const args = { i: "Checking timing: Does Retry-After override the timer?" };
+		const update = buildToolCallStartUpdate({ toolCallId: "timing", toolName: "probe", args });
+		expect(update).toMatchObject({ title: "Checking timing", rawInput: { i: args.i } });
+	});
+
 	it("keeps malformed replay arguments as raw input without command content", () => {
 		const replayArgs = normalizeReplayToolArguments("{not json");
 		const update = buildToolCallStartUpdate({

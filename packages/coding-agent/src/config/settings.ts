@@ -3773,11 +3773,7 @@ export class Settings {
 				const selector = bundledSelector(provider, model => model.webSearchModel);
 				return selector ? [selector] : [];
 			};
-			const geminiSelectors = (model: string): string[] => [
-				`google-gemini-cli/${model}`,
-				`google-antigravity/${model}`,
-				`google/${model}`,
-			];
+			const geminiSelectors = (model: string): string[] => [`google-antigravity/${model}`, `google/${model}`];
 			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
