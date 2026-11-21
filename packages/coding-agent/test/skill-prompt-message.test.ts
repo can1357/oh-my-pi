@@ -294,6 +294,60 @@ describe("buildSkillPromptMessage", () => {
 			}
 		});
 
+		test("strips a leading UTF-8 BOM before checking frontmatter and skips nested child skill assets", async () => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-bom-nested-"));
+			const rootFile = path.join(dir, "SKILL.md");
+			const childDir = path.join(dir, "child");
+			const childFile = path.join(childDir, "SKILL.md");
+			await fs.mkdir(childDir, { recursive: true });
+			// BOM-prefixed skill whose only Claude tool name is in frontmatter.
+			await Bun.write(
+				rootFile,
+				"\uFEFF---\nname: root\ndescription: Use TodoWrite.\n---\nReview the code carefully.\n",
+			);
+			await Bun.write(childFile, "---\nname: child\ndescription: child\n---\nTrack tasks with TodoWrite.\n");
+			const rootSkill: Skill = {
+				name: "root",
+				description: "Use TodoWrite.",
+				filePath: rootFile,
+				baseDir: dir,
+				source: "claude:user",
+				_source: sourceFor("claude", dir),
+			};
+			const childSkill: Skill = {
+				name: "child",
+				description: "child",
+				filePath: childFile,
+				baseDir: childDir,
+				source: "claude:user",
+				_source: sourceFor("claude", dir),
+			};
+			try {
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [rootSkill, childSkill],
+				};
+				const bomResult = await new ReadTool(session).execute("read-bom", { path: "skill://root" });
+				const bomText = bomResult.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				expect(bomText).not.toContain(NOTE);
+
+				// Reading child/SKILL.md via the root skill addresses an asset of `root`, not `child`'s instruction URL.
+				const nestedResult = await new ReadTool(session).execute("read-nested-child", {
+					path: "skill://root/child/SKILL.md",
+				});
+				const nestedText = nestedResult.content
+					.flatMap(block => (block.type === "text" ? [block.text] : []))
+					.join("\n");
+				expect(nestedText).not.toContain(NOTE);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
 		test("never annotates skills from other providers", async () => {
 			const { dir, skill } = await createSkill("Track work with TodoWrite.");
 			try {

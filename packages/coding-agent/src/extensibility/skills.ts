@@ -912,8 +912,10 @@ async function isClaudeDialectSkill(skill: SkillFile): Promise<boolean> {
 /** Strip YAML frontmatter from a skill file without rewriting HTML comments or logging diagnostics. */
 export function parseSkillBody(raw: string, filePath: string): string {
 	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
-	// diagnostics to the loader, which already parsed this frontmatter.
-	return parseFrontmatter(raw, { source: filePath, repair: false, level: "off" }).body.trim();
+	// diagnostics to the loader, which already parsed this frontmatter. Strip any
+	// leading UTF-8 BOM (kept by `Buffer.toString`) so opening `---` still parses.
+	const withoutBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+	return parseFrontmatter(withoutBom, { source: filePath, repair: false, level: "off" }).body.trim();
 }
 
 async function claudeSkillToolMappings(

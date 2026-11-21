@@ -334,21 +334,15 @@ export async function skillUrlClaudeCodeToolNote(
 ): Promise<string | undefined> {
 	const skills = context?.skills ?? getActiveSkills();
 	const host = contextRediscoveryHost(skills, context);
-	const resolvedLocated = path.resolve(locatedPath);
-	const candidates = host.skills !== skills ? [...host.skills, ...skills] : skills;
-	let skill = candidates.find(candidate => path.resolve(candidate.filePath) === resolvedLocated);
-	if (!skill) {
-		const named = findKnownUrlSkill(url, host.skills) ?? findKnownUrlSkill(url, skills);
-		if (!named) return undefined;
-		const resolvedSkillFile = path.resolve(named.skill.filePath);
-		const isInstructionUrl =
-			!named.urlPath ||
-			named.urlPath === "/" ||
-			path.resolve(named.skill.baseDir, decodeURIComponent(named.urlPath.slice(1))) === resolvedSkillFile;
-		if (!isInstructionUrl) return undefined;
-		skill = named.skill;
-	}
-	return claudeCodeToolNote(skill, parseSkillBody(rawContent, locatedPath));
+	const named = findKnownUrlSkill(url, host.skills) ?? findKnownUrlSkill(url, skills);
+	if (!named) return undefined;
+	const resolvedSkillFile = path.resolve(named.skill.filePath);
+	const isInstructionUrl =
+		!named.urlPath ||
+		named.urlPath === "/" ||
+		path.resolve(named.skill.baseDir, decodeURIComponent(named.urlPath.slice(1))) === resolvedSkillFile;
+	if (!isInstructionUrl) return undefined;
+	return claudeCodeToolNote(named.skill, parseSkillBody(rawContent, locatedPath));
 }
 
 /**
