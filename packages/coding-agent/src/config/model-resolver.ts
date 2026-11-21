@@ -1594,7 +1594,7 @@ export interface ResolvedModelRoleValue {
 }
 
 export function resolveModelRoleValue(
-	roleValue: string | undefined,
+	roleValue: string | Model<Api> | undefined,
 	availableModels: Model<Api>[],
 	options?: ModelPatternOptions & {
 		settings?: Settings;
@@ -1606,12 +1606,15 @@ export function resolveModelRoleValue(
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 
-	const normalized = roleValue.trim();
+	const normalized = typeof roleValue === "string" ? roleValue.trim() : formatModelString(roleValue);
 	if (!normalized || normalized === DEFAULT_MODEL_ROLE) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 
-	const effectivePatterns = resolveConfiguredModelPatterns(normalized, options?.roleLookup ?? options?.settings);
+	const effectivePatterns =
+		typeof roleValue === "string"
+			? resolveConfiguredModelPatterns(normalized, options?.roleLookup ?? options?.settings)
+			: [normalized];
 	if (!effectivePatterns || effectivePatterns.length === 0) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
@@ -1622,16 +1625,22 @@ export function resolveModelRoleValue(
 	// models) once and reuse it across every fallback pattern instead of
 	// rebuilding it per pattern inside parseModelPattern.
 	const preferenceContext = buildPreferenceContext(availableModels, matchPreferences);
+	const upstream = typeof roleValue === "string" ? undefined : getSingleUpstreamRoute(roleValue);
 	for (const [patternIndex, effectivePattern] of effectivePatterns.entries()) {
-		const resolved = matchPatternWithContext(effectivePattern, availableModels, preferenceContext, options);
+		// A resolved model already carries its pin; don't look it up as part of the ID.
+		const resolved = upstream
+			? parseModelPatternWithContext(effectivePattern, availableModels, preferenceContext, options)
+			: matchPatternWithContext(effectivePattern, availableModels, preferenceContext, options);
 		if (resolved.model) {
+			if (upstream && !supportsUpstreamRouting(resolved.model)) continue;
+			const model = upstream ? applyUpstreamRouting(resolved.model, upstream) : resolved.model;
 			return {
-				model: resolved.model,
+				model,
 				matchedPatternIndex: patternIndex,
 				thinkingLevel: resolved.explicitThinkingLevel
 					? resolved.thinkingLevel === AUTO_THINKING
 						? AUTO_THINKING
-						: (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
+						: (resolveThinkingLevelForModel(model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
 					: resolved.thinkingLevel,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
 				warning: resolved.warning,

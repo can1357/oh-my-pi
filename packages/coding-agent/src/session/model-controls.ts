@@ -21,7 +21,6 @@ import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
 	findScopedModelIndex,
-	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
@@ -86,26 +85,12 @@ export function resolveRoleModelCycle(
 	roleOrder: readonly string[],
 ): RoleModelCycle | undefined {
 	if (availableModels.length === 0 || !currentModel) return undefined;
-	const matchPreferences = getModelMatchPreferences(settings);
+	const options = { settings, matchPreferences: getModelMatchPreferences(settings) };
 	const models: ResolvedRoleModel[] = [];
 	for (const role of roleOrder) {
 		const configuredRole = settings.getModelRole(role);
-		const implicitDefault = role === "default" && configuredRole === undefined;
-		const roleModelStr = implicitDefault ? formatModelStringWithRouting(currentModel) : configuredRole;
-		if (!roleModelStr) continue;
-		const options = { settings, matchPreferences };
-		let resolved = resolveModelRoleValue(roleModelStr, availableModels, options);
-		if (implicitDefault && resolved.model && roleModelStr !== formatModelString(currentModel)) {
-			const selector = roleModelStr.toLowerCase();
-			if (formatModelString(resolved.model).toLowerCase() === selector) {
-				// Explicit selectors prefer literal IDs; here the active model tells us it was a pin.
-				resolved = resolveModelRoleValue(
-					roleModelStr,
-					availableModels.filter(model => formatModelString(model).toLowerCase() !== selector),
-					options,
-				);
-			}
-		}
+		const roleValue = role === "default" ? (configuredRole ?? currentModel) : configuredRole;
+		const resolved = resolveModelRoleValue(roleValue, availableModels, options);
 		if (!resolved.model) continue;
 		models.push({
 			role,

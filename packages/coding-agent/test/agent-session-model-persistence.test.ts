@@ -430,14 +430,20 @@ describe("AgentSession model persistence", () => {
 		]);
 	});
 
-	it.each([["slow"], [undefined]] as const)("cycles from the active pin with recorded role %s", async recordedRole => {
-		const routed = routedModel("cerebras");
-		const literal = { ...routed, id: `${routed.id}@cerebras`, compat: undefined };
-		const selector = formatModelStringWithRouting(routed);
-		expect(formatModelStringWithRouting(literal)).toBe(selector);
+	it.each([
+		["test/model-5-1@cerebras", "slow"],
+		["test/model-5-1@cerebras", undefined],
+		["test/model-5.1@cerebras", "slow"],
+	] as const)("cycles from a pin beside literal %s with role %s", async (literalId, recordedRole) => {
+		const bundled = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!bundled) throw new Error("Expected bundled OpenRouter model");
+		const base = { ...bundled, id: "test/model-5-1" };
+		const selector = `${modelValue(base)}@cerebras`;
+		const routed = parseModelPattern(selector, [base]).model;
+		if (!routed) throw new Error(`Expected routed model ${selector}`);
+		const literal = { ...base, id: literalId };
 		const created = await createSession({ initialModel: routed, modelRoles: { slow: selector } });
-		const available = created.modelRegistry.getAvailable();
-		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue([...available, literal]);
+		const getAvailable = spyOn(created.modelRegistry, "getAvailable").mockReturnValue([base, literal]);
 		try {
 			if (recordedRole) created.session.sessionManager.appendModelChange(selector, recordedRole);
 			expect(created.session.sessionManager.getLastModelChangeRole()).toBe(recordedRole);
