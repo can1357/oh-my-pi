@@ -1162,24 +1162,49 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(dumped.totalBytes).toBe(byteLength(replacement));
 	});
 
-	test("multibyte line: cap counts UTF-8 bytes and the notice says bytes", async () => {
-		// Regression for #10888: a 385-char line is 770 UTF-8 bytes. A char cap of
-		// 768 would leave it untouched; the sink enforces bytes, so it trims. The
-		// notice must name the enforced unit, not "chars".
-		const sink = new OutputSink({ maxColumns: 768, spillThreshold: 100_000 });
-		await sink.push("é".repeat(385));
+	test("streamed bytes joining an open replaced sole line are still mirrored to the artifact", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			maxColumns: 8,
+			spillThreshold: 100_000,
+			allocateArtifact: spillTo(artifactPath, "art-replace-join"),
+		});
+		sink.replace("abc");
+		await sink.push("W".repeat(2000));
+		await sink.push("\nmore\n");
 		const dumped = await sink.dump();
-
+		expect(dumped.output).toBe("abcWW…\nmore\n");
 		expect(dumped.columnTruncatedLines).toBe(1);
-		// 3 bytes reserved for "…" inside the 768-byte cap → 765 bytes of room →
-		// 382 two-byte "é" (764 bytes) kept, then the ellipsis.
-		const keptAccents = (dumped.output.match(/é/g) ?? []).length;
-		expect(keptAccents).toBe(382);
-		expect(dumped.output).toContain("…");
-
-		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
-		expect(formatOutputNotice(meta)).toContain("Some lines truncated to 768 bytes");
+		expect(dumped.artifactId).toBe("art-replace-join");
+		expect(await Bun.file(artifactPath).text()).toBe(`abc${"W".repeat(2000)}\nmore\n`);
 	});
+
+	// Regression for #10888: a 385-char line is 770 UTF-8 bytes. A char cap of
+	// 768 would leave it untouched; the sink enforces bytes, so it trims. The
+	// notice must name the enforced unit, not "chars". Each case drives a distinct
+	// cap branch: a wide first line is cut retroactively (`#endSoleLine`), a wide
+	// later line by the streaming cap (`#applyColumnCap`).
+	for (const [branch, input] of [
+		["first line, retro-cap", `${"é".repeat(385)}\nok`],
+		["later line, streaming cap", `ok\n${"é".repeat(385)}`],
+	] as const) {
+		test(`multibyte line (${branch}): cap counts UTF-8 bytes and the notice says bytes`, async () => {
+			const sink = new OutputSink({ maxColumns: 768, spillThreshold: 100_000 });
+			await sink.push(input);
+			const dumped = await sink.dump();
+
+			expect(dumped.columnTruncatedLines).toBe(1);
+			// 3 bytes reserved for "…" inside the 768-byte cap → 765 bytes of room →
+			// 382 two-byte "é" (764 bytes) kept, then the ellipsis.
+			const keptAccents = (dumped.output.match(/é/g) ?? []).length;
+			expect(keptAccents).toBe(382);
+			expect(dumped.output).toContain("…");
+
+			const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
+			expect(formatOutputNotice(meta)).toContain("Some lines truncated to 768 bytes");
+		});
+	}
 
 	test("legacy metadata without a unit falls back to chars", () => {
 		// Sessions persisted before the unit field carry `{ maxColumn }` only.
@@ -1194,6 +1219,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 
 	test("persists per-line state across chunk boundaries", async () => {
 		const sink = new OutputSink({ maxColumns: 4, spillThreshold: 1000 });
+		await sink.push("top\n"); // keep the wide line off line 1: a first line is cut by the retro-cap, not the streaming cap this test covers
 		await sink.push("ab"); // 2 bytes into the current line
 		await sink.push("cd"); // 4 bytes total — still within cap
 		await sink.push("efgh"); // tips over → ellipsis once, then drop rest
@@ -1202,10 +1228,193 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 
 		const dumped = await sink.dump();
 		const lines = dumped.output.split("\n");
-		expect(lines[0]).toMatch(/^(abcd)?…$|^abcd…$/);
-		expect(lines[1]).toBe("next");
+		expect(lines[1]).toMatch(/^(abcd)?…$|^abcd…$/);
+		expect(lines[2]).toBe("next");
 		expect(dumped.columnTruncatedLines).toBe(1);
 	});
+
+	test("single-line output is exempt: an unformatted JSON payload stays whole", async () => {
+		const sink = new OutputSink({ maxColumns: 64, spillThreshold: 100_000 });
+		const json = JSON.stringify({ items: Array.from({ length: 20 }, (_, id) => ({ id, name: `item-${id}` })) });
+		await sink.push(json.slice(0, 100));
+		await sink.push(`${json.slice(100)}\n`);
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe(`${json}\n`);
+		expect(dumped.columnTruncatedLines).toBeUndefined();
+		expect(dumped.columnDroppedBytes).toBeUndefined();
+	});
+
+	test("a wide first line is cut once output follows it, and the artifact keeps it verbatim", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			maxColumns: 8,
+			spillThreshold: 1000,
+			allocateArtifact: spillTo(artifactPath, "a"),
+		});
+		await sink.push("x".repeat(30));
+		await sink.push(`${"y".repeat(30)}\n`);
+		await sink.push("next\n");
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe("xxxxx…\nnext\n");
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnDroppedBytes).toBe(55);
+		expect(dumped.columnTruncatedRange).toEqual({ first: 1, last: 1 });
+		expect(dumped.artifactId).toBe("a");
+		expect(await Bun.file(artifactPath).text()).toBe(`${"x".repeat(30)}${"y".repeat(30)}\nnext\n`);
+	});
+
+	test("a first line past the spill threshold is cut, not tail-truncated, once a second line arrives", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 20, allocateArtifact: spillTo(artifactPath, "b") });
+		await sink.push("x".repeat(100));
+		await sink.push("\nnext");
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe("xxxxx…\nnext");
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(await Bun.file(artifactPath).text()).toBe(`${"x".repeat(100)}\nnext`);
+	});
+
+	test("a first line cut by the retro-cap also rebuilds the head window, and the artifact stays verbatim", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			maxColumns: 8,
+			spillThreshold: 20,
+			headBytes: 10,
+			allocateArtifact: spillTo(artifactPath, "head"),
+		});
+		await sink.push("x".repeat(100));
+		await sink.push("\nnext");
+		const dumped = await sink.dump();
+
+		// The stale uncapped head must not leak back in: the head is the capped line.
+		expect(dumped.output).toBe("xxxxx…\nnext");
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.elidedBytes).toBeUndefined();
+		expect(await Bun.file(artifactPath).text()).toBe(`${"x".repeat(100)}\nnext`);
+	});
+
+	test("a first line cut by the retro-cap keeps the head, elision marker and tail windows consistent", async () => {
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 40, headBytes: 10 });
+		await sink.push("x".repeat(100));
+		await sink.push("\n");
+		for (let n = 0; n < 20; n++) await sink.push(`line${n}\n`);
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe("xxxxx…\n[…16ln elided…]\nline16\nline17\nline18\nline19\n");
+		expect(dumped.truncated).toBe(true);
+		expect(dumped.elidedBytes).toBe(99);
+		expect(dumped.elidedLines).toBe(16);
+		expect(dumped.outputLines).toBe(7);
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnDroppedBytes).toBe(95);
+	});
+
+	test("a sole line past the spill threshold stays whole in the artifact and is not column-cut", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			maxColumns: 8,
+			spillThreshold: 20,
+			allocateArtifact: spillTo(artifactPath, "sole"),
+		});
+		const line = "y".repeat(60);
+		await sink.push(line);
+		const dumped = await sink.dump();
+
+		// Byte budget applies (D4): output is a bounded slice of the line, no "…" column cut.
+		expect(dumped.truncated).toBe(true);
+		expect(dumped.columnTruncatedLines).toBeUndefined();
+		expect(dumped.columnDroppedBytes).toBeUndefined();
+		expect(dumped.output).toBe("y".repeat(20));
+		expect(dumped.artifactId).toBe("sole");
+		expect(await Bun.file(artifactPath).text()).toBe(line);
+	});
+
+	test("a substituted chunk ends the single-line exemption, and the artifact keeps the raw stream", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			maxColumns: 8,
+			spillThreshold: 1000,
+			allocateArtifact: spillTo(artifactPath, "sub"),
+		});
+		await sink.push("x".repeat(30));
+		await sink.push("yyyy\nmore", { inline: "[sub]" });
+		await sink.push("\nend");
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe("xxxxx…\nend");
+		expect(dumped.truncated).toBe(true);
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(await Bun.file(artifactPath).text()).toBe(`${"x".repeat(30)}yyyy\nmore\nend`);
+	});
+
+	test("a substituted chunk on a narrow first line caps the line it joins", async () => {
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 1000 });
+		await sink.push("abc");
+		await sink.push("zz", { inline: "defghijkl" });
+		await sink.push("\nend");
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe("abcde…\nend");
+		expect(dumped.columnTruncatedLines).toBe(1);
+	});
+
+	test("replace() leaves a single-line replacement uncapped", async () => {
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 1000 });
+		await sink.push("raw\n");
+		const replacement = `${"z".repeat(40)}\n`;
+		sink.replace(replacement);
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe(replacement);
+		expect(dumped.columnTruncatedLines).toBeUndefined();
+	});
+
+	test("replace() with a single line caps it once more output follows", async () => {
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 1000 });
+		await sink.push("raw\n");
+		sink.replace(`${"z".repeat(40)}\n`);
+		await sink.push("more\n");
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe("zzzzz…\nmore\n");
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnTruncatedRange).toBeUndefined();
+	});
+
+	// The footer either follows the replacement's own newline or brings the newline itself.
+	for (const [label, replacement, footer] of [
+		["ends in a newline", `${"z".repeat(40)}\n`, "footer\n"],
+		["is followed by a newline-led chunk", "z".repeat(40), "\nfooter\n"],
+	] as const) {
+		test(`replace() with a single line claims no artifact when more output caps it (replacement ${label})`, async () => {
+			const dir = await createTempDir();
+			const artifactPath = path.join(dir, "output.log");
+			const sink = new OutputSink({
+				maxColumns: 8,
+				spillThreshold: 1000,
+				allocateArtifact: spillTo(artifactPath, "replaced"),
+			});
+			await sink.push("raw\n");
+			sink.replace(replacement);
+			await sink.push(footer);
+			const dumped = await sink.dump();
+
+			// Replacement text is never mirrored, so capping it must not open an artifact.
+			expect(dumped.output).toBe("zzzzz…\nfooter\n");
+			expect(dumped.artifactId).toBeUndefined();
+			expect(await Bun.file(artifactPath).exists()).toBe(false);
+		});
+	}
 
 	test("disabled by default — maxColumns: 0 is a passthrough", async () => {
 		const sink = new OutputSink({ spillThreshold: 4000 });

@@ -1343,7 +1343,10 @@ exit 64
 		});
 		expect(sawChunk).toBe(true);
 		expect(result.totalBytes).toBe(100000);
-		expect(result.outputBytes).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		// The 100KB line is a single line, so the column cap leaves it whole and the
+		// byte budget middle-elides it: head + tail fill the budget, plus the marker.
+		expect(result.outputBytes).toBeLessThanOrEqual(DEFAULT_MAX_BYTES + 1024);
+		expect(result.outputBytes).toBeGreaterThan(DEFAULT_MAX_BYTES / 2);
 		expect(result.output).toContain("a");
 	});
 

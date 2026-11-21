@@ -152,7 +152,7 @@ Cancellation/timeout:
 - tracks total/output lines and bytes
 - optionally spills full output to an artifact file
 - keeps a UTF-8-safe head/tail view within one inline byte budget (50 KiB by default), eliding the middle when head retention is enabled
-- caps individual lines using `tools.outputMaxColumns`, while preserving uncapped sanitized text in the artifact
+- caps individual lines using `tools.outputMaxColumns` (output that is a single line is exempt), while preserving uncapped sanitized text in the artifact
 - reports artifact I/O failures separately and withholds the artifact ID if full capture failed
 
 `eval` converts this metadata into result truncation notices and TUI warnings.
