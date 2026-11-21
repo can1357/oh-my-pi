@@ -1,6 +1,12 @@
 import { RunTrace } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace, type ShellVizPreferences, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
-import { defaultShellVizPreferences, readShellPresentation, shellVisualization } from "../tools/shell-viz";
+import {
+	defaultShellVizPreferences,
+	readShellPresentation,
+	shellTraceStreams,
+	shellVisualization,
+} from "../tools/shell-viz";
+import { type ShellStepView, ShellSteps } from "../tools/shell-steps";
 import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-trace";
 import { ShellVisualizer } from "../apps/shell-visualizer";
 import { chatTranscriptDisplayPreferences } from "./display-preferences";
@@ -388,6 +394,9 @@ export function sharedSpinnerTickerArmed(): boolean {
 	return sharedSpinnerTimer !== undefined;
 }
 
+/** How often a native bash card repaints while its run writes streams (see `ShellSteps`). */
+const SHELL_STREAM_REPAINT_MS = 250;
+
 // Stable per-instance counter so each tool execution's inline images get a
 // graphics id that survives child re-creation (the image budget keys off it).
 let toolExecutionInstanceSeq = 0;
@@ -409,6 +418,14 @@ export class ToolExecutionComponent extends Container {
 	#shellReplayPositioned = false;
 	#shellReplayEpoch = 0;
 	#shellInspector: { hide(): void } | undefined;
+	/** Which output the native card shows: the step the user clicked, else what the run writes now. */
+	readonly #shellSteps = new ShellSteps();
+	/** The run's own output as last seen, and when it last changed (ms since the UNIX epoch). */
+	#shellOutput: { text: string; at: number } | undefined;
+	/** Repaints the native card while the run writes streams, so the shown one and the step it follows stay current. */
+	#shellStreamTicker: NodeJS.Timeout | undefined;
+	/** Counts {@link #shellStreamTicker} ticks; part of the native card's memo key. */
+	#shellStreamTick = 0;
 	#contentBox: Box; // Used for custom tools and bash visual truncation
 	#contentText: WidthAwareText; // Generic fallback (no custom/built-in renderer)
 	// Which container the constructor mounted: bespoke/built-in renderers use
@@ -877,6 +894,10 @@ export class ToolExecutionComponent extends Container {
 		this.#partialResultShapePainted = false;
 		this.#rawDetails = result.details;
 		this.#updateShellTrace(result.details);
+		if (this.#toolName === "bash") {
+			const output = resultText(result);
+			if (output !== this.#shellOutput?.text) this.#shellOutput = { text: output, at: Date.now() };
+		}
 		// Renderers receive sanitized details for display; raw paths are available
 		// separately for links and media through the built-in render context.
 		const details = sanitizeTextDeep(result.details);
@@ -1200,6 +1221,7 @@ export class ToolExecutionComponent extends Container {
 		}
 		this.#stopTodoStrikeAnimation();
 		this.#stopElapsedTicker();
+		this.#syncShellStreamTicker(false);
 		this.#previewReady?.resolve();
 	}
 
@@ -1212,7 +1234,18 @@ export class ToolExecutionComponent extends Container {
 	/** Mirrors the card collapsed or expanded in the terminal, so `Ctrl+O` and native toggles share one state. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization) {
+			// A clicked step shows its output in the card (again: the run's); Show output goes back to it.
+			if (event.type === "action" && event.act === "unpin") {
+				this.#shellSteps.follow();
+				this.#shellChanged();
+				return;
+			}
 			const action = shellVizEventAction(event, this.#shellPreferences);
+			if (action?.startsWith("select:")) {
+				this.#shellSteps.select(action.slice("select:".length));
+				this.#shellChanged();
+				return;
+			}
 			if (action) {
 				this.shellVizAction(action);
 				return;
@@ -1336,6 +1369,7 @@ export class ToolExecutionComponent extends Container {
 			this.#showImages,
 			this.#toolName === "bash" && chatTranscriptDisplayPreferences.shellVisualization,
 			this.#displayInputVersion,
+			this.#shellStreamTick,
 			this.#toolActivityVisible,
 			host.media,
 			host.json,
@@ -1512,6 +1546,42 @@ export class ToolExecutionComponent extends Container {
 		);
 	}
 
+	/**
+	 * The output source the native card shows for its traced command (see
+	 * {@link ShellSteps}), with the run's live streams while it runs; a
+	 * reloaded trace has none, so its steps show their slices of the output.
+	 * While a stream stays open the card repaints on a timer.
+	 */
+	#shellStepView(presentation: ShellVizPresentation | undefined, status: TspCardStatus): ShellStepView | undefined {
+		if (!presentation) return undefined;
+		const trace = this.#shellTrace;
+		const streams = (trace && shellTraceStreams(trace)) ?? [];
+		const settled = status !== "running" && status !== "pending";
+		this.#syncShellStreamTicker(!settled && streams.some(stream => stream.open));
+		return this.#shellSteps.show({
+			trace,
+			presentation,
+			streams,
+			output: this.#result ? this.#getTrimmedTextOutput() : "",
+			outputModified: this.#shellOutput?.at,
+			settled,
+		});
+	}
+
+	/** Start or stop the {@link #shellStreamTicker}. */
+	#syncShellStreamTicker(on: boolean): void {
+		if (on && !this.#shellStreamTicker) {
+			this.#shellStreamTicker = setInterval(() => {
+				this.#shellStreamTick++;
+				this.#ui.requestRender();
+			}, SHELL_STREAM_REPAINT_MS);
+			this.#shellStreamTicker.unref();
+		} else if (!on && this.#shellStreamTicker) {
+			clearInterval(this.#shellStreamTicker);
+			this.#shellStreamTicker = undefined;
+		}
+	}
+
 	#nativeStatus(): TspCardStatus {
 		if (this.#isBenignSkip()) return "cancelled";
 		if (this.#result !== undefined && !this.#isPartial) return this.#result.isError ? "error" : "done";
@@ -1526,6 +1596,7 @@ export class ToolExecutionComponent extends Container {
 	 */
 	#nativeView(host: NativeHostKinds): NativeToolView {
 		const status = this.#nativeStatus();
+		const shellPresentation = this.#getShellPresentation();
 		const options: RenderResultContextOptions = {
 			...host,
 			expanded: this.#expanded,
@@ -1535,9 +1606,10 @@ export class ToolExecutionComponent extends Container {
 			elapsedMs: this.#elapsedMs(status),
 			cancelled: status === "cancelled",
 			renderContext: this.#buildRenderContext(),
-			shellPresentation: this.#getShellPresentation(),
+			shellPresentation,
 			shellTrace: this.#shellTrace,
 			shellReplayEpoch: this.#shellReplayEpoch,
+			shellStep: host.shell ? this.#shellStepView(shellPresentation, status) : undefined,
 		};
 		// Custom tools (MCP, extensions) carry their own describe hooks, mirroring
 		// the ANSI path's preference for the tool's renderCall/renderResult.

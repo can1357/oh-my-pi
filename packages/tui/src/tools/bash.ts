@@ -40,7 +40,10 @@ import {
 	type RunState,
 } from "./native-view";
 import { renderShellVisualization, shellVizText } from "./shell-viz-render";
-import { node } from "../native/describe";
+import { compact, keyed, node, row, span, stableKey, text } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { quietButton } from "../native/overlay";
+import type { ShellStepView } from "./shell-steps";
 
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
@@ -453,6 +456,42 @@ const SHELL_INPUT = { role: "omp.tool.bash.command", lang: "bash", wrap: true } 
 /** Box tint per run state: failed runs read as errors, timed-out ones as warnings. */
 const RUN_BOX_TONE: Partial<Record<RunState, TspTone>> = { failed: "error", "timed-out": "warning" };
 
+/**
+ * The card's output while it shows a step's source instead of the run's own
+ * output: a head naming it (with Show output while the user pinned it) over
+ * its text, or what stands in for text it does not have.
+ */
+function describeStepOutput(step: ShellStepView, previewLines: number): NativeChild[] {
+	const empty =
+		step.text === undefined
+			? "Binary data"
+			: step.text.trim() === ""
+				? step.open
+					? "Nothing written yet"
+					: "Nothing written"
+				: undefined;
+	const head = row(
+		compact<NativeChild>([
+			text(step.label, { role: "omp.tool.bash.step.label", wrap: "none", truncate: "end" }),
+			step.note !== undefined &&
+				text([span(step.note, "mono")], { role: "omp.tool.bash.step.note", wrap: "none", truncate: "end" }),
+			node("spacer", { grow: 1 }),
+			step.pinned && quietButton("Show output", "unpin", "Show the command's own output"),
+		]),
+		{ role: "omp.tool.bash.step", gap: "sm", align: "center" },
+	);
+	return [
+		keyed(head, "step"),
+		empty !== undefined
+			? keyed(text(empty, { role: "omp.tool.bash.nooutput" }), "step-empty")
+			: runOutput((step.text ?? "").trimEnd(), {
+					role: "omp.tool.bash.output",
+					previewLines,
+					key: `step-${stableKey(step.id)}`,
+				}),
+	];
+}
+
 /** The foot state of a shell call from its result. */
 function shellRunState(
 	details: BashToolDetails | undefined,
@@ -771,6 +810,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 											liveOrigin: options.executionStarted,
 											stream: options.argsComplete !== true && options.cancelled !== true,
 											preview: { lines: RUN_INPUT_PREVIEW_LINES },
+											...(options.shellStep ? { steps: true, focus: options.shellStep.focus } : {}),
 										},
 										undefined,
 										"input",
@@ -826,10 +866,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			// segment draws what ran: the live result, or the output retained up
 			// to the replay cursor while one is held. An untraced run has nothing to
 			// replay, so a cursor set on it never hides the result.
-			const shownOutput =
-				trace !== undefined && presentation?.preferences.cursor !== undefined
-					? presentation.output.trimEnd()
-					: output;
+			const replaying = trace !== undefined && presentation?.preferences.cursor !== undefined;
+			const shownOutput = replaying ? presentation.output.trimEnd() : output;
+			// A step the user clicked, or (while the run goes on) a stream it writes now, takes the output's place.
+			const step = presentation ? options.shellStep : undefined;
+			const stepOutput =
+				step && !replaying && (step.pinned || (isPartial && step.stream !== undefined)) ? step : undefined;
 			// Without a trace the presentation parsed the raw command, `cd` and all.
 			const displayWorkdir = formatToolWorkingDirectory(
 				executedScriptArgs(renderArgs, trace === undefined ? undefined : details).cwd,
@@ -848,12 +890,18 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									...(displayWorkdir ? { cwd: displayWorkdir } : {}),
 									lang: "bash",
 									preview: { lines: RUN_INPUT_PREVIEW_LINES },
+									...(step ? { steps: true, focus: step.focus } : {}),
 								},
 								undefined,
 								"input",
 							)
 						: runInput(command, SHELL_INPUT),
-					shownOutput.trim().length > 0 && runOutput(shownOutput, { role: "omp.tool.bash.output", previewLines }),
+					...(stepOutput
+						? describeStepOutput(stepOutput, previewLines)
+						: [
+								shownOutput.trim().length > 0 &&
+									runOutput(shownOutput, { role: "omp.tool.bash.output", previewLines }),
+							]),
 					runFoot({
 						state,
 						exitCode: details?.exitCode,

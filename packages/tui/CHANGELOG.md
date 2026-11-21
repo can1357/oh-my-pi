@@ -17,7 +17,8 @@
 - Native chats no longer show a crossed-out Spotlight star or leave an empty row under unchanged tool results.
 - Native web search cards send their sources as one `omp.tool.sources` grid, answered or not; a search without an answer puts each page excerpt inside its source row (`omp.tool.excerpt`), which Tern shows once the card is unfolded, and titles take up to two lines
 - Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`
-- The background jobs sheet reads a job's output from where its command sends it: a command that pipes (`| tail`) or redirects (`> log`) gets a tab per stream beside Output and opens on the one being written, instead of "No output yet" until it ends
+- The background jobs sheet reads a job's output from where its command sends it: it follows whatever the command writes now (its own output, a pipe it feeds `| tail`, a file it redirects into `> log`) and highlights that step in the command; clicking a step of the command shows that step's output until you click it again or choose Follow live, and a source menu lists every stream, instead of "No output yet" until it ends
+- Clicking a step of a running bash command in the transcript shows the output that step writes (its pipe, its redirected file, or its own slice of the output) in place of the run's output, and while the run writes a stream the card follows it
 - The background jobs sheet draws a job's command as its live shell visualization with the running step in view, and fits what the job is for, its caption and its facts in fewer lines
 
 ### Fixed

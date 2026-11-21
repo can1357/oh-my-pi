@@ -7,6 +7,7 @@ import type { ShellTrace, ShellVizPresentation, TspPreview, TspText, TspTone, Ts
 import type { NativeChild } from "../native/node";
 import type { Component } from "../tui";
 import type { Theme } from "../theme/theme";
+import type { ShellStepView } from "./shell-steps";
 
 /** Display state handed to `renderCall`/`renderResult`. */
 export interface RenderResultOptions {
@@ -49,6 +50,8 @@ export interface RenderResultOptions {
 	shellTrace?: ShellTrace;
 	/** Explicit seeks/resets change this epoch; ordinary playback ticks do not. */
 	shellReplayEpoch?: number;
+	/** The output source of the traced command the card shows: a clicked step's, or what flows now. Native describe hooks only. */
+	shellStep?: ShellStepView;
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */
