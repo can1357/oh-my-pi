@@ -45,6 +45,11 @@
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
 
 ## [18.22.2] - 2026-11-18
+### Fixed
+
+- Fixed Codex models routed through the auth gateway showing no thinking levels and a 272K window when the client's catalog lacks them (e.g. `openai-codex/gpt-6.2-sol`): `/v1/models` now reports `context_window` and the reasoning levels for those models
+
+## [18.22.1] - 2026-11-17
 
 ### Added
 

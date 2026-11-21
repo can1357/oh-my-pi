@@ -30,6 +30,7 @@
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../error/gateway";
@@ -798,6 +799,16 @@ async function handleCredentialsCheck(opts: AuthGatewayRouteOptions, signal: Abo
  * when the catalog explicitly reports `false`; absent means usable). `kind` is
  * emitted for non-chat rows (`judge`, `image`, `tts`, `stt`, `embedding`,
  * `rerank`, `video`) so clients can keep them off chat routes; absent means chat.
+ *
+ * Codex registry fields ride along so a client discovering a provider through
+ * the gateway (`pi-native` codex reads `/models` as a Codex model list) keeps a
+ * model's reasoning and window when its own bundled catalog lacks the id:
+ * `context_window` mirrors `context_length`, and `supported_reasoning_levels`
+ * (`[{ effort }]`) / `default_reasoning_level` carry the effort ladder. The
+ * ladder is advertised only for ids the bundled catalog lacks: discovery takes
+ * an advertised ladder as the row's whole thinking config, which would drop
+ * the provider-scoped thinking facts (signing, adaptive display, effort
+ * routing) a bundled reference supplies.
  */
 interface ModelListRow {
 	id: string;
@@ -807,9 +818,12 @@ interface ModelListRow {
 	kind?: ModelKind;
 	display_name: string;
 	context_length?: number;
+	context_window?: number;
 	max_output_tokens?: number;
 	input_modalities: ("text" | "image")[];
 	supports_tools?: boolean;
+	supported_reasoning_levels?: { effort: Effort }[];
+	default_reasoning_level?: Effort;
 }
 
 function handleModelsList(opts: AuthGatewayRouteOptions): Response {
@@ -828,9 +842,17 @@ function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 			input_modalities: model.input,
 		};
 		if (modelKind(model) !== "chat") row.kind = modelKind(model);
-		if (model.contextWindow != null) row.context_length = model.contextWindow;
+		if (model.contextWindow != null) {
+			row.context_length = model.contextWindow;
+			row.context_window = model.contextWindow;
+		}
 		if (model.maxTokens != null) row.max_output_tokens = model.maxTokens;
 		if (model.supportsTools === false) row.supports_tools = false;
+		const efforts = getSupportedEfforts(model);
+		if (efforts.length > 0 && getBundledModel(model.provider, model.id) === undefined) {
+			row.supported_reasoning_levels = efforts.map(effort => ({ effort }));
+			if (model.thinking?.defaultLevel) row.default_reasoning_level = model.thinking.defaultLevel;
+		}
 		data.push(row);
 	}
 	return json(200, { object: "list", data });
