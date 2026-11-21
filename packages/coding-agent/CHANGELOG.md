@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Browser tabs and frames can wait for a condition in the page with `waitForFunction(fnOrExpression, { timeout?, polling? }, ...args)`, which resolves with the condition's first truthy value, instead of a loop of `evaluate` calls and sleeps; `waitFor` and `waitForSelector` given a function or a number of milliseconds now name the call and the helper to use instead ([#19542](https://github.com/can1357/oh-my-pi/pull/19542) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes

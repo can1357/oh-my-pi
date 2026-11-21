@@ -222,6 +222,9 @@ def _make_browser():
         async def waitForSelector(self, *args, **kwargs):
             return await self._method("waitForSelector", args, kwargs)
 
+        async def waitForFunction(self, *args, **kwargs):
+            return await self._method("waitForFunction", args, kwargs)
+
         async def screenshot(self, *args, **kwargs):
             return await self._method("screenshot", args, kwargs)
 
@@ -385,6 +388,9 @@ def _make_browser():
 
         async def waitForSelector(self, *args, **kwargs):
             return await self._method("waitForSelector", args, kwargs)
+
+        async def waitForFunction(self, *args, **kwargs):
+            return await self._method("waitForFunction", args, kwargs)
 
         async def text(self, *args, **kwargs):
             return await self._method("text", args, kwargs)

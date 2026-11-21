@@ -32,6 +32,7 @@ import {
 	type AriaSnapshotOptions,
 	type AriaSnapshotPayload,
 	assertSelectorString,
+	assertWaitSelector,
 	buildAriaSnapshotPayloadScript,
 } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
@@ -43,7 +44,12 @@ import {
 	pushStateInPage,
 	reloadInPage,
 } from "../navigation";
-import { DEFAULT_STYLE_PROPERTIES } from "../queries";
+import {
+	DEFAULT_STYLE_PROPERTIES,
+	PREDICATE_ANSWER_SOURCE,
+	PREDICATE_CALL_SOURCE,
+	type PredicateAnswer,
+} from "../queries";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -99,6 +105,7 @@ import {
 	mapWaitUntil,
 	serializeEvalWithEnvelope,
 	unwrapEvalEnvelope,
+	wrapEvalEnvelope,
 } from "./rpc";
 import type { CmuxSocketClient } from "./socket-client";
 
@@ -473,6 +480,22 @@ const RESPONSE_OBSERVER_SCRIPT = String.raw`
 	return true;
 })()
 `;
+
+/**
+ * The cmux script for one poll of a page predicate. A function is inlined, so a page whose CSP forbids `eval` still
+ * runs it; a string goes through indirect eval, so its syntax error reaches the envelope instead of failing the
+ * whole script with the daemon's opaque `js_error`. The predicate is evaluated as an argument, in the scope
+ * `tab.evaluate` runs a function in, so its free names reach the page's globals. The daemon evaluates
+ * synchronously: a Promise is handed to the envelope, which reports it, not judged here.
+ */
+function cmuxPredicateScript(
+	fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
+	args: unknown[],
+): string {
+	const predicate = typeof fn === "function" ? `(${String(fn)}\n)` : `(0, eval)(${JSON.stringify(`(${fn}\n)`)})`;
+	const answer = `function (value) { return value && typeof value.then === "function" ? value : (${PREDICATE_ANSWER_SOURCE})(value); }`;
+	return wrapEvalEnvelope(`(${answer})((${PREDICATE_CALL_SOURCE})(${predicate}, ${JSON.stringify(args)}))`);
+}
 
 export class CmuxTab implements InProcessRunTab {
 	/** Guest file-name prefix of cmux runs. */
@@ -1042,12 +1065,14 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async waitFor(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
+		assertWaitSelector("tab.waitFor", selector);
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		await this.#waitForSelector(selector, timeoutMs);
 		return new CmuxElementHandle(this, selector);
 	}
 
 	async waitForSelector(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
+		assertWaitSelector("tab.waitForSelector", selector);
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		await this.#waitForSelector(selector, timeoutMs);
 		return new CmuxElementHandle(this, selector);
@@ -1803,19 +1828,34 @@ export class CmuxTab implements InProcessRunTab {
 
 	async waitForFunction(
 		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
-		opts: { timeout?: number; polling?: number } | undefined,
+		opts?: { timeout?: number; polling?: number },
 		...args: unknown[]
+	): Promise<unknown> {
+		return await this.pollFunction("tab.waitForFunction()", fn, opts, args);
+	}
+
+	/**
+	 * Poll a page predicate until it is truthy; a function, or a string holding one, is called with `args`. Truthiness
+	 * is decided in the page, so a value that cannot be copied out still ends the wait (as `true`).
+	 */
+	async pollFunction(
+		label: string,
+		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
+		opts: { timeout?: number; polling?: number } | undefined,
+		args: unknown[],
 	): Promise<unknown> {
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		const signal = this.#runContext?.signal;
-		const pollingMs = typeof opts?.polling === "number" ? opts.polling : 200;
+		const pollingMs = typeof opts?.polling === "number" && opts.polling > 0 ? opts.polling : 200;
 		const deadline = Date.now() + timeoutMs;
+		const script = cmuxPredicateScript(fn, args);
 		while (Date.now() <= deadline) {
-			const value = typeof fn === "string" ? await this.#evalScript<unknown>(fn) : await this.evaluate(fn, ...args);
-			if (value) return value;
+			const result = (await this.#request("browser.eval", { script })) as CmuxEvalResult;
+			const answer = unwrapEvalEnvelope<PredicateAnswer | undefined>(result.value, label);
+			if (answer?.held) return answer.value;
 			await untilAborted(signal, () => Bun.sleep(pollingMs));
 		}
-		throw new ToolError(`page.waitForFunction() timed out after ${timeoutMs}ms`);
+		throw new ToolError(`${label} timed out after ${timeoutMs}ms`);
 	}
 
 	async #evalScript<R>(script: string, timeoutMs?: number): Promise<R> {
@@ -2474,7 +2514,7 @@ class CmuxPageFacade {
 		opts?: { timeout?: number; polling?: number },
 		...args: unknown[]
 	): Promise<unknown> {
-		return await this.#tab.waitForFunction(fn, opts, ...args);
+		return await this.#tab.pollFunction("page.waitForFunction()", fn, opts, args);
 	}
 
 	async waitForResponse(
