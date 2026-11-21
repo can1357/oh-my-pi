@@ -17,7 +17,7 @@ def _omp_mcp_namespace(name, methods):
         def __getattr__(self, method):
             tool = methods.get(method)
             if tool is None:
-                raise AttributeError(f"{name} has no method {method!r}; read xd://eval/{name}")
+                raise AttributeError(f"{name} has no method {method!r}; read help://eval/{name}")
             label = f"{name}.{method}"
 
             async def _method(args=None, /, **kwargs):
