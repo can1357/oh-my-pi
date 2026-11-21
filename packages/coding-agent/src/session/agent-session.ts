@@ -12120,7 +12120,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return backend === NATIVE_TODO_BACKEND ? undefined : backend;
 	}
 
-	/** Hand the list to the selected todo backend. Native todos never reach the runner. */
+	/**
+	 * Hand the list to the selected todo backend. Native todos never reach the runner. Not ordered
+	 * against `session_*` events: after `/new`, a fork, a branch or tree navigation the list can go
+	 * out before the event, after a resume it follows `session_switch`, and a resume undone after
+	 * `session_switch` may already have sent the other session's list (the old session's follows).
+	 */
 	#mirrorTodoPhases(): void {
 		const backend = this.#todoBackend();
 		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
