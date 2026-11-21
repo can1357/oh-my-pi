@@ -148,6 +148,20 @@ fn to_c(addr: &SockAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
 	(ss, len as libc::socklen_t)
 }
 
+/// A NUL-padded C char array as bytes.
+// `#allow` here is to work around a stupid issue: the cast `c as u8` is a no-op
+// on aarch64, where `c_char` is already `u8`, so it causes a warning there,
+// making `bun check` ultimately fail.
+#[allow(clippy::unnecessary_cast, reason = "c_char bytes")]
+fn c_bytes(chars: &[libc::c_char]) -> BString {
+	chars
+		.iter()
+		.map(|&c| c as u8)
+		.take_while(|&c| c != 0)
+		.collect::<Vec<u8>>()
+		.into()
+}
+
 /// A C socket address as a [`SockAddr`].
 fn from_c(ss: &libc::sockaddr_storage, len: libc::socklen_t) -> io::Result<SockAddr> {
 	match libc::c_int::from(ss.ss_family) {
@@ -156,12 +170,7 @@ fn from_c(ss: &libc::sockaddr_storage, len: libc::socklen_t) -> io::Result<SockA
 			let un = unsafe { &*std::ptr::from_ref(ss).cast::<libc::sockaddr_un>() };
 			let offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
 			let n = (len as usize).saturating_sub(offset).min(un.sun_path.len());
-			let path: Vec<u8> = un.sun_path[..n]
-				.iter()
-				.map(|&c| c as u8)
-				.take_while(|&c| c != 0)
-				.collect();
-			Ok(SockAddr::Unix(BString::from(path)))
+			Ok(SockAddr::Unix(c_bytes(&un.sun_path[..n])))
 		},
 		libc::AF_INET => {
 			// SAFETY: the family says it is a `sockaddr_in`.
@@ -394,12 +403,7 @@ fn reverse(addr: IpAddr) -> Option<BString> {
 	if rc != 0 {
 		return None;
 	}
-	let name: Vec<u8> = host
-		.iter()
-		.map(|&c| c as u8)
-		.take_while(|&c| c != 0)
-		.collect();
-	Some(BString::from(name))
+	Some(c_bytes(&host))
 }
 
 impl Sockets for NativeSockets {

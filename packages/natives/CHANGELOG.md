@@ -8,6 +8,8 @@
 - Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the `computer` tool on Linux Wayland leaving GTK 3 message dialogs (OK/Cancel and Yes/No boxes) out of `windows()`, so their buttons could not be found or pressed ([#19884](https://github.com/can1357/oh-my-pi/pull/19884) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `PtySession` output on Linux sometimes ending with an extra blank line after the command exited
+- Fixed NumLock-off keypad navigation keys (arrows, Home, End, Page Up, Page Down, Insert, Delete, and Clear) being dropped under the kitty keyboard protocol
+- Fixed NumLock-off keypad navigation keys (arrows, Home, End, Page Up, Page Down, Insert, Delete, and Clear) being dropped under the kitty keyboard protocol by [@fsoikin](https://github.com/fsoikin)
 
 ## [19.1.0] - 2026-11-21
 
