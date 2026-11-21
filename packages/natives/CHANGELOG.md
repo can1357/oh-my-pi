@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows `computer` `press()` on a classic button or check box (Win32 and WinForms) bringing its app in front of yours, and `click()` on one reporting success without clicking it ([#19889](https://github.com/can1357/oh-my-pi/pull/19889) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
