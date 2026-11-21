@@ -9,7 +9,10 @@
  * - a compaction is a request whose prompt (input + cache read + cache write) is under 60% of the previous one's;
  * - a rerun is a bash command equal to, extending (pipe, redirect, `&&`), or ≥ 60% token-similar to a recent one;
  *   for any other tool but `read`, a call of the same tool whose argument tokens (`argumentTokens`) are ≥ 60%
- *   similar.
+ *   similar;
+ * - an extra turn costs what it added to the bill: the cache writes the next request reads back are priced at the
+ *   turn's own cache-read rate, since that request would have written them had the turn not run; writes nothing reads
+ *   back keep their full price, and a turn that read no cache keeps its whole cost (see {@link Request.turnUsd}).
  */
 
 import type { Database, Statement } from "bun:sqlite";
@@ -269,7 +272,15 @@ export interface Request {
 	/** Model time of the request (ms). */
 	durationMs: number;
 	context: number;
+	/** Provider cost of the request. */
 	costTotal: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	/**
+	 * What the request added to the bill, as an extra turn: its cost with the cache writes the next request reads back
+	 * priced at its own cache-read rate (see {@link extraTurnUsd}).
+	 */
+	turnUsd: number;
 	compacted: boolean;
 	readRate: number;
 	writeRate: number;
@@ -280,8 +291,8 @@ export interface SessionAnalysis {
 	cwd: string | null;
 	calls: Call[];
 	requests: Request[];
-	/** Request cost by assistant entry id (main-loop requests). */
-	costByEntry: Map<string, number>;
+	/** {@link Request.turnUsd} by assistant entry id (main-loop requests). */
+	turnUsdByEntry: Map<string, number>;
 	agentType: AgentType;
 	edits: EditLog;
 }
@@ -453,16 +464,35 @@ function seenTokens(result: Result | null, resultChars: number | null): number {
 
 function toRequest(row: RequestRow): Request {
 	const inputRate = row.input_tokens > 0 ? row.cost_input / row.input_tokens : 0;
+	const readRate = row.cache_read_tokens > 0 ? row.cost_cache_read / row.cache_read_tokens : inputRate;
+	const writeRate = row.cache_write_tokens > 0 ? row.cost_cache_write / row.cache_write_tokens : inputRate;
 	return {
 		entryId: row.entry_id,
 		timestamp: row.timestamp,
 		durationMs: row.duration,
 		context: row.input_tokens + row.cache_read_tokens + row.cache_write_tokens,
 		costTotal: row.cost_total,
+		cacheReadTokens: row.cache_read_tokens,
+		cacheWriteTokens: row.cache_write_tokens,
+		turnUsd: row.cost_total,
 		compacted: false,
-		readRate: row.cache_read_tokens > 0 ? row.cost_cache_read / row.cache_read_tokens : inputRate,
-		writeRate: row.cache_write_tokens > 0 ? row.cost_cache_write / row.cache_write_tokens : inputRate,
+		readRate,
+		writeRate,
 	};
+}
+
+/**
+ * What `request` added to the bill as an extra turn. Had it not run, `next` would have written the context it reads
+ * back from the turn's cache writes (the previous request's output and tool results, or a rewrite after a cache miss);
+ * with it, `next` reads that context instead, so those writes are priced at the turn's cache-read rate. Writes nothing
+ * reads back (the session's last request, or a next request that misses the cache or compacts) keep their full price.
+ * A request that read no cache bills no read rate to price them at, so it keeps its whole cost.
+ */
+function extraTurnUsd(request: Request, next: Request | undefined): number {
+	if (request.cacheReadTokens <= 0 || next === undefined) return request.costTotal;
+	// The turn wrote the prompt span right after its cached prefix; `next` reuses the part of it its own read covers.
+	const reused = Math.min(request.cacheWriteTokens, Math.max(0, next.cacheReadTokens - request.cacheReadTokens));
+	return request.costTotal - reused * Math.max(0, request.writeRate - request.readRate);
 }
 
 /** Loads and analyzes experiment sessions with one set of prepared statements. */
@@ -567,13 +597,14 @@ class SessionLoader {
 			request.compacted = previous !== undefined && request.context < previous.context * COMPACTION_RATIO;
 			requests.push(request);
 		}
-		const costByEntry = new Map(requests.map(request => [request.entryId, request.costTotal]));
+		for (let i = 0; i < requests.length; i++) requests[i].turnUsd = extraTurnUsd(requests[i], requests[i + 1]);
+		const turnUsdByEntry = new Map(requests.map(request => [request.entryId, request.turnUsd]));
 		const analysis: SessionAnalysis = {
 			session,
 			cwd: session.cwd,
 			calls,
 			requests,
-			costByEntry,
+			turnUsdByEntry,
 			agentType: classifyAgentType(session.session_file),
 			edits: new EditLog(calls),
 		};
@@ -1147,7 +1178,7 @@ function summarize(analysis: SessionAnalysis): SpotlightSessionSummary {
 			if (call.recovery.turn) turnEntries.add(call.entryId);
 		}
 	}
-	for (const entry of turnEntries) recoveryUsd += analysis.costByEntry.get(entry) ?? 0;
+	for (const entry of turnEntries) recoveryUsd += analysis.turnUsdByEntry.get(entry) ?? 0;
 	return {
 		sessionFile: analysis.session.session_file,
 		title: analysis.session.title,
@@ -1375,7 +1406,7 @@ export function buildSpotlightDashboard(
 			point.netUsd -= call.recoveryCarryUsd;
 			if (recovery.turn && !turnsCounted.has(call.entryId)) {
 				turnsCounted.add(call.entryId);
-				const turnUsd = analysis.costByEntry.get(call.entryId) ?? 0;
+				const turnUsd = analysis.turnUsdByEntry.get(call.entryId) ?? 0;
 				for (const totals of [clawback, kind]) {
 					totals.turns++;
 					totals.turnsUsd += turnUsd;
@@ -1597,7 +1628,7 @@ function extraTurnShares(analysis: SessionAnalysis): Map<Call, { turns: number; 
 	const shares = new Map<Call, { turns: number; usd: number }>();
 	for (const [entryId, calls] of byEntry) {
 		if (calls.length !== calls[0].callsInTurn) continue;
-		const usd = analysis.costByEntry.get(entryId) ?? 0;
+		const usd = analysis.turnUsdByEntry.get(entryId) ?? 0;
 		for (const call of calls) {
 			const source = call.recovery?.source;
 			if (!source) continue;

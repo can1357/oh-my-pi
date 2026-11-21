@@ -461,6 +461,77 @@ describe("Spotlight cut economics", () => {
 		);
 		expect(stats.clawback.turns).toBe(1);
 	});
+
+	/** A fetch-back turn that lost the prompt cache: it rewrote 11,500 tokens though its context grew by only 2,000. */
+	function cacheMissDive(b: SpotlightSessionBuilder): void {
+		b.user("go");
+		shortenedRead(b); // context 500 + 10,000 + 500 = 11,000
+		const [dive] = b.request({
+			cacheRead: 1000,
+			cacheWrite: 11_500,
+			calls: [{ name: "read", args: { path: "artifact://0:21-79" } }],
+		});
+		b.result(dive, { text: "x".repeat(400) });
+	}
+	// Input 500 × 5e-6 + output 200 × 25e-6 + reads 1,000 × 0.5e-6, before the 11,500 writes.
+	const diveBase = 0.0025 + 0.005 + 0.0005;
+
+	it("charges the cache writes the next request reads back at the turn's read rate", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		cacheMissDive(b);
+		b.request({ cacheRead: 12_500, cacheWrite: 300 });
+		await write("cache-miss.jsonl", b);
+
+		const stats = await dashboard();
+		// The next request reads all 11,500 writes back: without the dive it would have written them itself.
+		const added = diveBase + 11_500 * 0.5e-6;
+		expect(stats.clawback.turns).toBe(1);
+		expect(stats.clawback.turnsUsd).toBeCloseTo(added, 12);
+		expect(stats.economics.find(e => e.tool === "read")?.turnUsd).toBeCloseTo(added, 12);
+	});
+
+	it("credits only the cache writes the next request reads back", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		cacheMissDive(b);
+		// The next request's cached prefix covers the dive's 1,000 read tokens and the first 5,000 of its writes.
+		b.request({ cacheRead: 6000, cacheWrite: 6800 });
+		await write("partial-reuse.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.clawback.turnsUsd).toBeCloseTo(diveBase + 5000 * 0.5e-6 + 6500 * 6.25e-6, 12);
+	});
+
+	it("keeps the full write price when nothing reads the writes back", async () => {
+		const terminal = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		cacheMissDive(terminal);
+		await write("terminal.jsonl", terminal);
+		// The next request misses the cache too, so it rewrites the context the dive wrote.
+		const missed = new SpotlightSessionBuilder(T0 + DAY).header("/repo").marker();
+		cacheMissDive(missed);
+		missed.request({ cacheWrite: 12_800 });
+		await write("next-miss.jsonl", missed);
+
+		const stats = await dashboard();
+		expect(stats.clawback.turns).toBe(2);
+		expect(stats.clawback.turnsUsd).toBeCloseTo(2 * (diveBase + 11_500 * 6.25e-6), 12);
+	});
+
+	it("keeps a fetch-back turn that read no cache at its whole cost: it bills no read rate to price a rewrite at", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		const [dive] = b.request({
+			cacheWrite: 12_500,
+			calls: [{ name: "read", args: { path: "artifact://0:21-79" } }],
+		});
+		b.result(dive, { text: "x".repeat(400) });
+		b.request({ cacheRead: 12_500, cacheWrite: 300 });
+		await write("full-miss.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.clawback.turns).toBe(1);
+		expect(stats.clawback.turnsUsd).toBeCloseTo(0.0025 + 0.005 + 12_500 * 6.25e-6, 12);
+	});
 });
 
 describe("Spotlight fetch-back gaps", () => {
