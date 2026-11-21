@@ -31,6 +31,7 @@ import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
+import { GoogleFunctionCallStream } from "./google-function-call-stream";
 import type {
 	Content,
 	FinishReason,
@@ -51,6 +52,7 @@ export type {
 	FunctionCallingConfigMode,
 	GenerateContentParameters,
 	GenerateContentResponse,
+	PartialArg,
 	ThinkingConfig,
 } from "./google-types";
 export { normalizeSchemaForGoogle };
@@ -928,74 +930,86 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	onFirstToken?: () => void;
 }): Promise<void> {
 	const { googleStream, output, stream, model, options, onFirstToken } = args;
-	const blocks = output.content;
-	const blockIndex = () => blocks.length - 1;
 	const textBlocks = new GoogleTextBlocks(output, stream, "healed");
+	const toolCalls = new GoogleFunctionCallStream({
+		output,
+		stream,
+		provider: model.provider,
+		allocateId: nextToolCallId,
+		retainSignature: retainThoughtSignature,
+		pushComplete: (toolCall, contentIndex) => pushToolCallEvents(toolCall, contentIndex, output, stream),
+	});
 	let firstTokenSeen = false;
 	let sawFinishReason = false;
 
-	for await (const chunk of googleStream) {
-		if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
-		if (!chunk.candidates?.length && chunk.promptFeedback?.blockReason) {
-			const detail = chunk.promptFeedback.blockReasonMessage;
-			throw new AIError.ProviderResponseError(
-				`Request blocked by Google (${chunk.promptFeedback.blockReason})${detail ? `: ${detail}` : ""}`,
-				{ provider: model.provider, kind: "content-blocked" },
-			);
-		}
-		const candidate = chunk.candidates?.[0];
-		if (candidate?.content?.parts) {
-			for (const part of candidate.content.parts) {
-				if (part.text && !firstTokenSeen) {
-					firstTokenSeen = true;
-					onFirstToken?.();
+	try {
+		for await (const chunk of googleStream) {
+			if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
+			if (!chunk.candidates?.length && chunk.promptFeedback?.blockReason) {
+				const detail = chunk.promptFeedback.blockReasonMessage;
+				throw new AIError.ProviderResponseError(
+					`Request blocked by Google (${chunk.promptFeedback.blockReason})${detail ? `: ${detail}` : ""}`,
+					{ provider: model.provider, kind: "content-blocked" },
+				);
+			}
+			const candidate = chunk.candidates?.[0];
+			const parts = candidate?.content?.parts;
+			const nonStopFinish = candidate?.finishReason !== undefined && candidate.finishReason !== "STOP";
+			if (parts) {
+				let lastFunctionCallIndex = -1;
+				if (nonStopFinish) {
+					for (let i = parts.length - 1; i >= 0; i--) {
+						if (parts[i].functionCall) {
+							lastFunctionCallIndex = i;
+							break;
+						}
+					}
 				}
-				textBlocks.push(part);
+				for (let i = 0; i < parts.length; i++) {
+					const part = parts[i];
+					if ((part.text || part.functionCall) && !firstTokenSeen) {
+						firstTokenSeen = true;
+						onFirstToken?.();
+					}
+					textBlocks.push(part);
 
-				if (part.functionCall) {
-					textBlocks.close();
-
-					// Generate unique ID if not provided or if it's a duplicate
-					const providedId = part.functionCall.id;
-					const needsNewId = !providedId || output.content.some(b => b.type === "toolCall" && b.id === providedId);
-					const toolCallId = needsNewId ? nextToolCallId(part.functionCall.name || "tool") : providedId;
-
-					const toolCall: ToolCall = {
-						type: "toolCall",
-						id: toolCallId,
-						name: part.functionCall.name || "",
-						arguments: (part.functionCall.args ?? {}) as Record<string, any>,
-						...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
-					};
-
-					output.content.push(toolCall);
-					pushToolCallEvents(toolCall, blockIndex(), output, stream);
+					if (part.functionCall) {
+						textBlocks.close();
+						toolCalls.push(part, { deferFinalize: nonStopFinish && i === lastFunctionCallIndex });
+					}
 				}
+			}
+
+			if (candidate?.finishReason) {
+				sawFinishReason = true;
+				const truncatedToolCall = toolCalls.finish(candidate.finishReason);
+				const mapped = mapStopReason(candidate.finishReason);
+				// Only let a completed trailing tool call upgrade benign finishes; SAFETY,
+				// MALFORMED_FUNCTION_CALL, and truncated in-flight calls must never upgrade to toolUse.
+				if (
+					(mapped === "stop" || mapped === "length") &&
+					!truncatedToolCall &&
+					output.content.some(b => b.type === "toolCall")
+				) {
+					output.stopReason = "toolUse";
+				} else {
+					output.stopReason = mapped;
+					if (mapped === "error") {
+						output.errorMessage = `Generation failed with finish reason: ${candidate.finishReason}`;
+					}
+				}
+			}
+
+			if (chunk.usageMetadata) {
+				output.usage = mapGoogleUsage(chunk.usageMetadata);
+				calculateCost(model, output.usage, output.timestamp);
 			}
 		}
 
-		if (candidate?.finishReason) {
-			sawFinishReason = true;
-			const mapped = mapStopReason(candidate.finishReason);
-			// Only let a trailing tool call upgrade benign finishes; SAFETY/MALFORMED_FUNCTION_CALL
-			// and friends must surface as errors even when earlier chunks carried valid tool calls.
-			if ((mapped === "stop" || mapped === "length") && output.content.some(b => b.type === "toolCall")) {
-				output.stopReason = "toolUse";
-			} else {
-				output.stopReason = mapped;
-				if (mapped === "error") {
-					output.errorMessage = `Generation failed with finish reason: ${candidate.finishReason}`;
-				}
-			}
-		}
-
-		if (chunk.usageMetadata) {
-			output.usage = mapGoogleUsage(chunk.usageMetadata);
-			calculateCost(model, output.usage, output.timestamp);
-		}
+		textBlocks.close();
+	} finally {
+		toolCalls.cleanupPartialJson();
 	}
-
-	textBlocks.close();
 
 	if (options?.signal?.aborted) {
 		throw new AIError.AbortError();
@@ -1040,10 +1054,11 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	if (options.topK !== undefined) generationConfig.topK = options.topK;
 	if (options.presencePenalty !== undefined) generationConfig.presencePenalty = options.presencePenalty;
 
+	const tools = context.tools && context.tools.length > 0 ? context.tools : undefined;
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
 		...(systemPrompts.length > 0 && { systemInstruction: { parts: systemPrompts.map(text => ({ text })) } }),
-		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools, model) }),
+		...(tools && { tools: convertTools(tools, model) }),
 	};
 
 	// Gemini API (google-generative-ai) reads the tier from the request body;
@@ -1060,7 +1075,7 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 		config.serviceTier = serviceTier;
 	}
 
-	if (context.tools && context.tools.length > 0 && options.toolChoice) {
+	if (tools && options.toolChoice) {
 		const choice = options.toolChoice;
 		if (typeof choice === "string") {
 			const mode = mapToolChoice(choice);
@@ -1081,6 +1096,25 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 		}
 	} else {
 		config.toolConfig = undefined;
+	}
+
+	// Opt into Vertex AI's incremental `partialArgs` function-call streaming when
+	// enabled by model/provider compat (Gemini 3+ on Vertex, excluding 3.1 Flash-Lite,
+	// or custom Vertex-backed `google-generative-ai` gateways). Skipped when tool
+	// calls are disabled (`NONE`) or no tools are declared (which also keeps
+	// `cachedContent` requests free of incompatible `toolConfig`).
+	if (tools && model.compat.streamFunctionCallArguments === true) {
+		const fcc = config.toolConfig?.functionCallingConfig;
+		if (fcc?.mode !== "NONE") {
+			config.toolConfig = {
+				...config.toolConfig,
+				functionCallingConfig: {
+					mode: fcc?.mode ?? "AUTO",
+					...(fcc?.allowedFunctionNames && { allowedFunctionNames: fcc.allowedFunctionNames }),
+					streamFunctionCallArguments: true,
+				},
+			};
+		}
 	}
 
 	const thinking = options.thinking;

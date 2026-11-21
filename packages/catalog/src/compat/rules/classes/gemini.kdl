@@ -216,6 +216,16 @@ class "gemini" {
 	on-api "google-vertex" {
 		revision ">=3" {
 			requires-skip-thought-signature-on-first-function-call #true
+			// Vertex AI streams function-call arguments as `partialArgs` for Gemini 3+
+			// when requested via `toolConfig.functionCallingConfig.streamFunctionCallArguments`.
+			// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling#streaming-fc
+			stream-function-call-arguments #true
+		}
+		// Documented unsupported on Gemini 3.1 Flash-Lite (3.5 Flash-Lite supports it).
+		family "lite" {
+			revision ">=3.1 <3.2" {
+				stream-function-call-arguments #false
+			}
 		}
 	}
 	on "google-antigravity" {

@@ -72,6 +72,42 @@ describe("ModelsConfigSchema Bedrock compat overrides", () => {
 	});
 });
 
+describe("ModelsConfigSchema Google compat overrides", () => {
+	test("accepts boolean streamFunctionCallArguments and rejects a non-boolean override", () => {
+		const valid = ModelsConfigSchema({
+			providers: {
+				"vertex-proxy": {
+					baseUrl: "https://gateway.example.invalid/gemini/v1beta",
+					apiKey: "K",
+					api: "google-generative-ai",
+					models: [{ id: "gemini-4-argon", compat: { streamFunctionCallArguments: true } }],
+				},
+			},
+		});
+		expect(valid).not.toBeInstanceOf(OmpErrors);
+
+		const invalid = ModelsConfigSchema({
+			providers: {
+				"google-vertex": {
+					models: [
+						{
+							id: "gemini-4-argon",
+							api: "google-vertex",
+							compat: { streamFunctionCallArguments: "false" },
+						},
+					],
+				},
+			},
+		});
+		if (!(invalid instanceof OmpErrors)) throw new Error("expected the schema to reject a string value");
+		expect(invalid.map(error => `${error.path.join(".")}: ${error.problem}`)).toEqual([
+			expect.stringMatching(
+				/^providers\.google-vertex\.models\.0\.compat\.streamFunctionCallArguments: must be boolean/,
+			),
+		]);
+	});
+});
+
 describe("ModelsConfigSchema tokenizer", () => {
 	test("accepts the cl100k tokenizer and rejects an unknown one", () => {
 		const config = (tokenizer: string) => ({

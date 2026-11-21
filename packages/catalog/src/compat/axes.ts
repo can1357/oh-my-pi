@@ -307,6 +307,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"google",
 	]),
 	"base64-skip-thought-signature": wire("base64SkipThoughtSignature", ["google"]),
+	"stream-function-call-arguments": wire("streamFunctionCallArguments", ["google"]),
 	"supports-function-part-id": wire("supportsFunctionPartId", ["google"]),
 
 	// ── wire: shared across surfaces ──
