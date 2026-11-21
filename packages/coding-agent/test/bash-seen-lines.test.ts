@@ -1,0 +1,251 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { bashResultReachesModelWhole } from "@oh-my-pi/pi-coding-agent/tools/bash-seen-lines";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+// Forty lines `line N: value_N`, so every row's content names its own number.
+const SOURCE = `${Array.from({ length: 40 }, (_, i) => `line ${i + 1}: value_${i + 1}`).join("\n")}\n`;
+
+// A bash footer line: `[path#TAG] line(s) <ranges>`.
+const FOOTER = /^\[([^\]#]+)#([0-9A-F]{4})\] lines? (.+)$/gm;
+
+function textOutput(result: AgentToolResult<unknown>): string {
+	return result.content
+		.filter(c => c.type === "text")
+		.map(c => c.text)
+		.join("\n");
+}
+
+function footers(text: string): { path: string; header: string; lines: string }[] {
+	return [...text.matchAll(FOOTER)].map(match => ({
+		path: match[1],
+		header: `[${match[1]}#${match[2]}]`,
+		lines: match[3],
+	}));
+}
+
+function createSession(cwd: string, editMode = "hashline"): ToolSession {
+	return {
+		cwd,
+		hasUI: false,
+		skills: [],
+		getSessionFile: () => path.join(cwd, "session.jsonl"),
+		getSessionSpawns: () => "*",
+		getArtifactsDir: () => path.join(cwd, "artifacts"),
+		getClientBridge: () => undefined,
+		settings: Settings.isolated({
+			"edit.mode": editMode,
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bashInterceptor.enabled": false,
+		}),
+	} as unknown as ToolSession;
+}
+
+async function bash(session: ToolSession, command: string): Promise<string> {
+	return textOutput(await new BashTool(session).execute("bash", { command }));
+}
+
+async function edit(session: ToolSession, input: string): Promise<string> {
+	return textOutput(await new EditTool(session, "hashline").execute("edit", { input }));
+}
+
+describe("bash numbered file views credit seen lines", () => {
+	let cwd: string;
+	let file: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-seen-lines-"));
+		file = path.join(cwd, "values.txt");
+		await Bun.write(file, SOURCE);
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	// Regression (T1): bash output never reached the edit store, so an edit anchored on a line
+	// `grep -n` showed was rejected as never displayed and only the identical resend applied.
+	it("tags a grep -n view and accepts edits on its rows on the first attempt", async () => {
+		const session = createSession(cwd);
+		const output = await bash(session, "grep -n 'value_3[45]$' values.txt");
+		expect(output).toContain("34:line 34: value_34\n35:line 35: value_35");
+		const [footer, ...rest] = footers(output);
+		expect(rest).toEqual([]);
+		expect(footer).toMatchObject({ path: "values.txt", lines: "34-35" });
+		// The footer follows the command output.
+		expect(output.trimEnd().endsWith(footer.lines)).toBe(true);
+
+		const unshown = await edit(session, `${footer.header}\nPUT 20.=20:\n+line 20: changed\n`);
+		expect(unshown).toContain("never displayed");
+		expect(await Bun.file(file).text()).toBe(SOURCE);
+
+		await edit(session, `${footer.header}\nPUT 35.=35:\n+line 35: changed\n`);
+		expect(await Bun.file(file).text()).toBe(SOURCE.replace("line 35: value_35", "line 35: changed"));
+	});
+
+	// `nl -ba` / `cat -n` rows (`   N<TAB>text`) are numbered views too; unparsed, those edits would be rejected.
+	it("tags a cat -n view (tab-separated rows)", async () => {
+		const session = createSession(cwd);
+		const output = await bash(session, "cat -n values.txt | sed -n '12,13p'");
+		expect(footers(output)).toMatchObject([{ path: "values.txt", lines: "12-13" }]);
+	});
+
+	// T2: unnumbered views would make the model count offsets; the guard must still catch a miscount.
+	it("does not credit an unnumbered sed -n view", async () => {
+		const session = createSession(cwd);
+		const read = textOutput(await new ReadTool(session).execute("read", { path: "values.txt:30-31" }));
+		const header = read.split("\n")[0];
+		expect(header).toMatch(/^\[values\.txt#[0-9A-F]{4}\]$/);
+
+		const output = await bash(session, "sed -n 7p values.txt");
+		expect(output).toContain("line 7: value_7");
+		expect(footers(output)).toEqual([]);
+
+		expect(await edit(session, `${header}\nPUT 7.=7:\n+line 7: changed\n`)).toContain("never displayed");
+		expect(await Bun.file(file).text()).toBe(SOURCE);
+	});
+
+	// T3: a row whose number is wrong is not a view of that line, even when its text is a real line of the file
+	// (a miscount). Nothing is recorded either: an empty seen set would lift the guard for the whole file, which a
+	// later read (same content, same tag) cannot narrow again.
+	it("does not credit a numbered row whose text belongs to another line", async () => {
+		const session = createSession(cwd);
+		const output = await bash(session, "printf '7:line 8: value_8\\n' && test -f values.txt");
+		expect(output).toContain("7:line 8: value_8");
+		expect(footers(output)).toEqual([]);
+
+		const read = textOutput(await new ReadTool(session).execute("read", { path: "values.txt:30-31" }));
+		const header = read.split("\n")[0];
+		expect(await edit(session, `${header}\nPUT 7.=7:\n+line 7: changed\n`)).toContain("never displayed");
+		expect(await Bun.file(file).text()).toBe(SOURCE);
+	});
+
+	// grep context rows (`N-text`) are shown lines too; unparsed, edits on them would be rejected.
+	it("credits grep context rows", async () => {
+		const session = createSession(cwd);
+		const output = await bash(session, "grep -n -A1 'value_34$' values.txt");
+		expect(output).toContain("35-line 35: value_35");
+		expect(footers(output)).toMatchObject([{ path: "values.txt", lines: "34-35" }]);
+	});
+
+	// A failed exit still shows its rows (here `false` fails after grep matched); limiting credit to exit 0 would
+	// reject edits on them.
+	it("credits rows of a command that exits non-zero", async () => {
+		const session = createSession(cwd);
+		const output = await bash(session, "grep -n 'value_35$' values.txt; false");
+		expect(output).toContain("35:line 35: value_35");
+		expect(footers(output)).toMatchObject([{ path: "values.txt", lines: "35" }]);
+	});
+
+	// A result over the async follow-up limit reaches a backgrounded job's model only as a preview, so its rows are
+	// not credited: crediting them would let an edit anchor a line the model never saw.
+	it("credits nothing when the result is too long to reach the model whole", async () => {
+		const session = createSession(cwd);
+		const big = path.join(cwd, "big.txt");
+		const lines = Array.from({ length: 1000 }, (_, i) => `row ${i + 1} of the big file`);
+		await Bun.write(big, `${lines.join("\n")}\n`);
+		const output = await bash(session, "grep -n 'of the big file' big.txt");
+		expect(output).toContain("500:row 500 of the big file");
+		expect(footers(output)).toEqual([]);
+
+		const read = textOutput(await new ReadTool(session).execute("read", { path: "big.txt:1-2" }));
+		const header = read.split("\n")[0];
+		expect(await edit(session, `${header}\nPUT 500.=500:\n+changed\n`)).toContain("never displayed");
+		expect(await Bun.file(big).text()).toBe(`${lines.join("\n")}\n`);
+	});
+
+	// Two later cuts: the tool wrapper middle-elides text over the spill threshold (bytes, before notices), and an
+	// async follow-up over 12,000 characters, counting the output notice a job's delivered text appends, becomes a
+	// preview. Either one drops rows, so either one must block crediting.
+	it("treats a result over the spill threshold or the follow-up limit as cut", () => {
+		const small = Settings.isolated({ "tools.artifactSpillThreshold": 1 });
+		expect(bashResultReachesModelWhole("a".repeat(1024), "", small)).toBe(true);
+		expect(bashResultReachesModelWhole("a".repeat(1025), "", small)).toBe(false);
+		expect(bashResultReachesModelWhole("界".repeat(400), "", small)).toBe(false);
+
+		const large = Settings.isolated({ "tools.artifactSpillThreshold": 100 });
+		expect(bashResultReachesModelWhole("a".repeat(12_000), "", large)).toBe(true);
+		expect(bashResultReachesModelWhole("a".repeat(12_001), "", large)).toBe(false);
+		expect(bashResultReachesModelWhole("a".repeat(11_990), "\n\n[notice text]", large)).toBe(false);
+	});
+
+	// The footer lists at most 12 ranges, so many scattered rows cannot bloat it; rows past the listed ranges are
+	// still credited.
+	it("summarizes footer ranges past the cap and still credits the unlisted rows", async () => {
+		const session = createSession(cwd);
+		const output = await bash(session, "grep -n '[13579]$' values.txt");
+		expect(output).toContain("39:line 39: value_39");
+		expect(footers(output)).toMatchObject([
+			{ path: "values.txt", lines: "1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23 (+8 more ranges)" },
+		]);
+
+		const [footer] = footers(output);
+		await edit(session, `${footer.header}\nPUT 39.=39:\n+line 39: changed\n`);
+		expect(await Bun.file(file).text()).toBe(SOURCE.replace("line 39: value_39", "line 39: changed"));
+	});
+
+	// Bare rows name no file; with two files named, crediting either would credit rows that may be the other's.
+	it("ignores bare rows when the command names more than one file", async () => {
+		const session = createSession(cwd);
+		await Bun.write(path.join(cwd, "other.txt"), SOURCE);
+		const output = await bash(session, "grep -h -n 'value_35$' values.txt other.txt");
+		expect(output).toContain("35:line 35: value_35");
+		expect(footers(output)).toEqual([]);
+	});
+
+	// Without hashline edits there is no tag to show or guard to satisfy.
+	it("does nothing outside hashline mode", async () => {
+		const session = createSession(cwd, "replace");
+		const output = await bash(session, "grep -n 'value_35$' values.txt");
+		expect(output).toContain("35:line 35: value_35");
+		expect(footers(output)).toEqual([]);
+	});
+
+	// T4: path-prefixed rows credit every file they name, one footer line each.
+	it("credits each file of a recursive grep -rn", async () => {
+		const session = createSession(cwd);
+		await Bun.write(path.join(cwd, "src", "a.txt"), "alpha\nneedle a\nomega\n");
+		await Bun.write(path.join(cwd, "src", "b.txt"), "needle b\nbeta\n");
+		const output = await bash(session, "grep -rn needle src");
+		expect(output).toContain("src/a.txt:2:needle a");
+		expect(output).toContain("src/b.txt:1:needle b");
+		const found = footers(output);
+		expect(found.map(footer => [footer.path, footer.lines]).sort()).toEqual([
+			["src/a.txt", "2"],
+			["src/b.txt", "1"],
+		]);
+		const byPath = new Map(found.map(footer => [footer.path, footer]));
+
+		await edit(session, `${byPath.get("src/b.txt")?.header}\nPUT 1.=1:\n+needle changed\n`);
+		expect(await Bun.file(path.join(cwd, "src", "b.txt")).text()).toBe("needle changed\nbeta\n");
+	});
+
+	// T5: two paths to the same file. The tool hoists a leading `cd sub &&` into the command's cwd, so the first
+	// row checks that rows resolve against the cwd the command ran in; the second keeps its `cd` in the command
+	// and checks the literal `cd` target as a resolution base.
+	it.each(["cd sub && grep -n needle f.txt", "test -d sub && cd sub && grep -n needle f.txt"])(
+		"credits a file named relative to a cd target: %s",
+		async command => {
+			const session = createSession(cwd);
+			const target = path.join(cwd, "sub", "f.txt");
+			await Bun.write(target, "first\nneedle here\nlast\n");
+			const output = await bash(session, command);
+			expect(output).toContain("2:needle here");
+			const [footer, ...rest] = footers(output);
+			expect(rest).toEqual([]);
+			expect(footer).toMatchObject({ path: "sub/f.txt", lines: "2" });
+
+			await edit(session, `${footer.header}\nPUT 2.=2:\n+needle moved\n`);
+			expect(await Bun.file(target).text()).toBe("first\nneedle moved\nlast\n");
+		},
+	);
+});

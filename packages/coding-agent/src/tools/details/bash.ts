@@ -49,6 +49,11 @@ export interface BashToolDetails {
 	toolCommands?: ToolCommandRenderDispatch[];
 	/** What the session's Spotlight shaping did to the output. */
 	spotlight?: SpotlightDetails;
+	/**
+	 * `[path#TAG] lines …` lines the result ends with: files whose rows the output showed with line numbers,
+	 * credited to the edit guard. Model-facing, so renderers strip them.
+	 */
+	editTags?: string[];
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {

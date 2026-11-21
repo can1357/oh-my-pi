@@ -53,4 +53,30 @@ test.each(["local://7.log", "local://7.log:raw"])("moves a persisted %s spill no
 	expect(rows.findLast(Boolean)).toContain("local://7.log");
 });
 
+// The edit tags end the model-facing text after the raw-output notice; left in, they hide that notice from the
+// footer fold (losing the raw-output link) and fill the preview with tag lines.
+test("strips edit tags so the raw output notice still folds into the footer", () => {
+	const env = staticEnvironment(loadThemeSync("dark", { symbolPreset: "nerd" }));
+	const tag = "[src/a.ts#AB12] lines 1-2";
+	const call = new ToolCall({
+		id: "bash-1",
+		name: "bash",
+		presenter: bashPresenter,
+		args: { command: "grep -rn x src" },
+	});
+	call.updateResult(
+		{
+			content: [{ type: "text", text: `a.ts:1:x\na.ts:2:y\n[raw output: local://13.log]\n\n${tag}` }],
+			details: { timeoutSeconds: 300, editTags: [tag] },
+		},
+		false,
+	);
+	const rows = plainToolRows(call, env);
+	const rendered = rows.join("\n");
+	expect(rendered).toContain("a.ts:2:y");
+	expect(rendered).not.toContain("[src/a.ts#AB12]");
+	expect(rendered).not.toContain("[raw output:");
+	expect(rows.findLast(Boolean)).toContain("local://13.log");
+});
+
 export type { BashArgs };
