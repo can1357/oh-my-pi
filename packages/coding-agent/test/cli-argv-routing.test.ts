@@ -9,6 +9,7 @@
  * flags.
  */
 import { describe, expect, test } from "bun:test";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resolveCliArgv } from "@oh-my-pi/pi-coding-agent/cli-commands";
 
 describe("resolveCliArgv routes subcommands hidden behind leading global flags", () => {
@@ -90,5 +91,15 @@ describe("resolveCliArgv strips launch-global flags before non-launch subcommand
 
 	test("launch-shaped `acp` still receives forwarded launch-global flags", () => {
 		expect(resolveCliArgv(["--cwd", "/x", "acp"])).toEqual({ argv: ["acp", "--cwd", "/x"] });
+	});
+
+	test("extension-shadowable `--plan` before another flag does not hide a trailing subcommand", () => {
+		expect(resolveCliArgv(["--plan", "--cwd", "/tmp", "update"])).toEqual({ argv: ["update"] });
+		const acpResolved = resolveCliArgv(["--plan", "--model", "opus", "acp"]);
+		expect(acpResolved).toEqual({ argv: ["acp", "--plan", "--model", "opus"] });
+		if ("argv" in acpResolved) {
+			expect(parseArgs(acpResolved.argv.slice(1)).model).toBe("opus");
+		}
+		expect(resolveCliArgv(["--plan", "acp"])).toEqual({ argv: ["launch", "--plan", "acp"] });
 	});
 });
