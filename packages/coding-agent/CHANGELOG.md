@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `startup.scratchDir` and `/scratch` to choose the directory omp starts in when launched from your home directory, instead of the system temp directory ([#14150](https://github.com/can1357/oh-my-pi/pull/14150) by [@jaredlyon](https://github.com/jaredlyon))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))

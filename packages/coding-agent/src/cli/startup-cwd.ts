@@ -1,9 +1,44 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { directoryExists, getProjectDir, normalizePathForComparison, setProjectDir } from "@oh-my-pi/pi-utils";
+import {
+	directoryExists,
+	getAgentDir,
+	getProjectDir,
+	MAIN_CONFIG_FILENAMES,
+	normalizePathForComparison,
+	setProjectDir,
+} from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
+import { readFile } from "../capability/fs";
+import { expandTilde } from "../tools/path-utils";
 import type { Args } from "./args";
 
-async function maybeAutoChdir(parsed: Args): Promise<void> {
+async function readScratchDir(home: string): Promise<string | undefined> {
+	for (const filename of MAIN_CONFIG_FILENAMES) {
+		const content = await readFile(path.join(getAgentDir(), filename));
+		if (content === null) continue;
+		let parsed: unknown;
+		try {
+			parsed = YAML.parse(content);
+		} catch {
+			return undefined;
+		}
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return undefined;
+		}
+		// Keep these YAML keys aligned with cfgStartupScratchDir.
+		const startup = "startup" in parsed ? parsed.startup : undefined;
+		if (startup === null || typeof startup !== "object" || Array.isArray(startup)) {
+			return undefined;
+		}
+		const raw = "scratchDir" in startup ? startup.scratchDir : undefined;
+		if (typeof raw !== "string" || !raw.trim()) return undefined;
+		return path.resolve(home, expandTilde(raw, home));
+	}
+	return undefined;
+}
+
+async function maybeAutoChdir(parsed: Args): Promise<string | undefined> {
 	if (parsed.allowHome || parsed.cwd) {
 		return;
 	}
@@ -21,6 +56,20 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 		return;
 	}
 
+	const scratchDir = await readScratchDir(home);
+	let warning: string | undefined;
+	if (scratchDir) {
+		try {
+			if (await directoryExists(scratchDir)) {
+				setProjectDir(scratchDir);
+				return undefined;
+			}
+		} catch {
+			// Use the default fallback when the configured directory cannot be entered.
+		}
+		warning = `Scratch directory ${scratchDir} (startup.scratchDir) is not an existing directory; using the default fallback.`;
+	}
+
 	const candidates =
 		process.platform === "win32" ? [path.join(home, "tmp")] : [path.join(home, "tmp"), "/tmp", "/var/tmp"];
 	for (const candidate of candidates) {
@@ -29,7 +78,7 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 				continue;
 			}
 			setProjectDir(candidate);
-			return;
+			return warning;
 		} catch {
 			// Try next candidate.
 		}
@@ -43,9 +92,10 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 	} catch {
 		// Ignore fallback errors.
 	}
+	return warning;
 }
 
-export async function applyStartupCwd(parsed: Args): Promise<void> {
+export async function applyStartupCwd(parsed: Args): Promise<string | undefined> {
 	if (parsed.cwd) {
 		try {
 			setProjectDir(parsed.cwd);
@@ -65,7 +115,7 @@ export async function applyStartupCwd(parsed: Args): Promise<void> {
 		// so downstream consumers (buildSessionOptions, settings/discovery, session
 		// persistence) don't re-resolve a relative string against the new cwd.
 		parsed.cwd = getProjectDir();
-		return;
+		return undefined;
 	}
-	await maybeAutoChdir(parsed);
+	return await maybeAutoChdir(parsed);
 }
