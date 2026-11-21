@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import {
 	buildTrayItems,
@@ -748,13 +749,21 @@ describe("Tray", () => {
 		f.jobs.push(job("bg_1"));
 		for (let i = 0; i < 53; i++) f.refs.push(ref(`Old${i}`, "idle", i));
 		// Finished in this run: the observer knows how it went and what it last said.
-		f.refs.push({ ...ref("Fresh", "idle", 100), sessionFile: "/tmp/fresh.jsonl" });
+		// Its session was switched to another model after the run; the list names the one it ran on.
+		const switched = { model: { id: "gpt-5.5", thinking: true }, thinkingLevel: "low" };
+		f.refs.push({
+			...ref("Fresh", "idle", 100),
+			sessionFile: "/tmp/fresh.jsonl",
+			session: switched as unknown as AgentRecordLike["session"],
+		});
 		f.sessions.push(
 			observed("Fresh", "failed", {
 				durationMs: 252_000,
 				toolCount: 38,
 				cost: 0.12,
 				recentOutput: ["", "Tests fail in auth"],
+				resolvedModel: "anthropic/claude-opus-4-5",
+				resolvedThinkingLevel: ThinkingLevel.High,
 			}),
 		);
 		// Restored from disk: its persisted history and summary.
@@ -790,7 +799,7 @@ describe("Tray", () => {
 			role: "omp.tray.done.item",
 			status: "failed",
 			actions: { click: "tray.open=Fresh" },
-			aria: "Fresh, failed, 4m12s · 38 tools · $0.120, Tests fail in auth",
+			aria: "Fresh, failed, claude-opus-4-5 · high · 4m12s · 38 tools · $0.120, Tests fail in auth",
 		});
 		expect(
 			children(fresh).map(node => [
@@ -800,7 +809,7 @@ describe("Tray", () => {
 		).toEqual([
 			["omp.tray.dot", [{ t: "●", s: "error" }]],
 			["omp.tray.name", "Fresh"],
-			["omp.tray.meta", [{ t: "4m12s · 38 tools · $0.120", s: "dim" }]],
+			["omp.tray.meta", [{ t: "claude-opus-4-5 · high · 4m12s · 38 tools · $0.120", s: "dim" }]],
 			["omp.tray.line", "Tests fail in auth"],
 		]);
 		// Unknown numbers are left out rather than printed as zeros.

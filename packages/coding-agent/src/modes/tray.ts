@@ -118,7 +118,7 @@ export interface TrayDoneEntry {
 	readonly id: string;
 	readonly name: string;
 	readonly status: "done" | "failed" | "stopped";
-	/** `4m 12s · 38 tools · $0.12`, of what is known; empty when nothing is. */
+	/** `opus-4.5 · high · 4m 12s · 38 tools · $0.12`: the model it ran on, then its run, of what is known; empty when nothing is. */
 	readonly meta: string;
 	/** Its last output or result line; empty when nothing has one. */
 	readonly line: string;
@@ -423,6 +423,11 @@ function agentDoing(
 function agentModel(session: ObservableSession | undefined, ref: AgentRecordLike | undefined): string {
 	const live = ref?.session && liveModelChip(ref.session);
 	if (live) return line(live.level ? `${live.text} · ${live.level}` : live.text, TRUNCATE_LENGTHS.TITLE);
+	return servedModel(session, ref);
+}
+
+/** `sonnet-5.5 · low`: the model that produced the agent's work, whatever its session points at now. */
+function servedModel(session: ObservableSession | undefined, ref: AgentRecordLike | undefined): string {
 	// An agent only the observer knows gets a stand-in ref, so its badge resolves the same way.
 	const record: AgentRecordLike | undefined =
 		ref ??
@@ -438,9 +443,9 @@ function agentModel(session: ObservableSession | undefined, ref: AgentRecordLike
 		});
 	const chip = record && modelChip(record, session);
 	if (!chip) return "";
-	const configured = session?.progress?.resolvedThinkingLevel;
-	const level =
-		chip.level ?? (configured && configured !== "off" && configured !== "inherit" ? configured : undefined);
+	// The level it ran at, not the one its session holds now (the chip's fallback for a selector without one).
+	const served = session?.progress?.resolvedThinkingLevel;
+	const level = served ? (served !== "off" && served !== "inherit" ? served : undefined) : chip.level;
 	return line(level ? `${chip.text} · ${level}` : chip.text, TRUNCATE_LENGTHS.TITLE);
 }
 
@@ -736,6 +741,7 @@ function doneEntry(
 	const tools = progress?.toolCount || metrics?.tools || 0;
 	const cost = progress?.cost || metrics?.cost || 0;
 	const meta = [
+		servedModel(session, ref),
 		duration > 0 ? formatDuration(duration) : "",
 		tools > 0 ? formatCount("tool", tools) : "",
 		cost > 0 ? formatCost(cost) : "",
