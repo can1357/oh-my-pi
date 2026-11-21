@@ -23,6 +23,7 @@
 ### Fixed
 
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
+- Transcript rows no longer go missing between the scrollback and the screen while a todo list, subagent panel, queued-message band, multi-line draft or extension widget stays up during a run, which made tool cards look cut off after their first rows; the editor moves up when one of them closes until new output fills the rows
 - The terminal cursor no longer blinks off and on with every spinner tick in kitty
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))

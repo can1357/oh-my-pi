@@ -640,14 +640,15 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
-	it("refills the screen when a tall HUD closes a frame after the answer finalizes", async () => {
+	it("refills the screen when a tall HUD closes inside the settle window", async () => {
 		const rows = 30;
 		const h = makeHarness(COLUMNS, rows, 0);
 		await h.scheduler.settle(h.terminal);
-		h.hud.rows = 23;
 		await streamFinalizedAnswer(h);
-		// The HUD outlives the finalizing paint by a frame, as a loader does when
-		// the turn-end event trails the message-end event.
+		// A HUD that opens and closes within a few frames never gets billed.
+		h.hud.rows = 23;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
 		h.hud.rows = 0;
 		h.composer.ui.requestRender();
 		await h.scheduler.advance(h.terminal, 300);
@@ -656,30 +657,39 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
-	it("keeps turn-scoped chrome out of the floor across a mid-run gap with no streaming block", async () => {
+	it("retires the rows turn-scoped chrome displaces once it outlives the settle window mid-run, and floats the editor when it closes", async () => {
 		const rows = 30;
 		const h = makeHarness(COLUMNS, rows, 0);
 		await h.scheduler.settle(h.terminal);
 		h.composer.setRunActive(true);
-		h.hud.rows = 23;
+		// An extension widget or a deferred command preview mounted for the rest of the run.
+		h.hud.rows = 12;
 		await streamFinalizedAnswer(h);
-		// A tool runs between assistant blocks for longer than the settle window.
-		await h.scheduler.advance(h.terminal, 300);
+		const lines = Array.from({ length: 110 }, (_, i) => `line${i}`);
+		const shown = (): string[] =>
+			h.terminal
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trim())
+				.filter(row => /^line\d+$/.test(row));
+		expect(shown()).toEqual(lines);
 		h.hud.rows = 0;
 		h.composer.setRunActive(false);
 		await h.scheduler.advance(h.terminal, 300);
-		expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+		expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1 - 12);
 		expect(blankBand(h.terminal)).toBeLessThanOrEqual(1);
+		expect(shown()).toEqual(lines);
 		h.composer.stop();
 	});
 
-	it("keeps a draft left open after the run out of the floor", async () => {
+	it("keeps a draft opened after the run out of the floor", async () => {
 		const rows = 30;
 		const h = makeHarness(COLUMNS, rows, 0);
 		h.composer.setRuntimeChildren([h.transcript, h.hud, h.editor], { transientChrome: [h.editor] });
 		await h.scheduler.settle(h.terminal);
-		h.widget.rows = 15;
 		await streamFinalizedAnswer(h);
+		await h.scheduler.advance(h.terminal, 300);
+		h.widget.rows = 15;
+		h.composer.ui.requestRender();
 		await h.scheduler.advance(h.terminal, 300);
 		// Submitting or clearing the draft collapses the editor surface.
 		h.widget.rows = 0;
@@ -687,6 +697,31 @@ describe("composer inline shrink (#11007)", () => {
 		await h.scheduler.settle(h.terminal);
 		expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
 		expect(blankBand(h.terminal)).toBeLessThanOrEqual(1);
+		h.composer.stop();
+	});
+
+	it("retires the rows a draft displaces while output streams past it, and floats the editor when it closes", async () => {
+		const rows = 30;
+		const h = makeHarness(COLUMNS, rows, 0);
+		h.composer.setRuntimeChildren([h.transcript, h.hud, h.editor], { transientChrome: [h.editor] });
+		await h.scheduler.settle(h.terminal);
+		// A queued-message band or a draft typed mid-run stays up while the answer streams.
+		h.widget.rows = 15;
+		await streamFinalizedAnswer(h);
+		const lines = Array.from({ length: 110 }, (_, i) => `line${i}`);
+		const shown = (): string[] =>
+			h.terminal
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trim())
+				.filter(row => /^line\d+$/.test(row));
+		// Every line is on screen or in scrollback while the draft is still open.
+		expect(shown()).toEqual(lines);
+		h.widget.rows = 0;
+		h.composer.ui.requestRender();
+		await h.scheduler.advance(h.terminal, 300);
+		expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1 - 15);
+		expect(blankBand(h.terminal)).toBeLessThanOrEqual(1);
+		expect(shown()).toEqual(lines);
 		h.composer.stop();
 	});
 
@@ -886,7 +921,7 @@ describe("composer inline shrink (#11007)", () => {
 		}
 	});
 
-	it("holds a transient HUD's rows back during the run, bills the HUD once it outlives the idle settle window, and floats the editor when it clears", async () => {
+	it("holds a transient HUD's rows back until it outlives the settle window, then bills it, and floats the editor when it clears", async () => {
 		const rows = 30;
 		const shell = Array.from({ length: 12 }, (_, i) => `shell${i}`);
 		const terminal = new VirtualTerminal(COLUMNS, rows);
@@ -921,7 +956,7 @@ describe("composer inline shrink (#11007)", () => {
 			for (const row of answer) transcript.addChild({ render: () => [row] });
 			composer.ui.requestRender();
 			await h.scheduler.settle(h.terminal);
-			// Mid-run the HUD is not billed; the rows it displaces are held back for it to clear.
+			// Inside the settle window the HUD is not billed; the rows it displaces are held back for it to clear.
 			composer.setRunActive(false);
 			await h.scheduler.advance(h.terminal, 300);
 

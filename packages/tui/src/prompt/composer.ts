@@ -29,8 +29,8 @@ import { type VersionUpdate, WelcomeComponent } from "./welcome";
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
-// How long idle chrome must hold its height after a turn before it is treated as permanent.
-const IDLE_CHROME_SETTLE_MS = 250;
+// How long chrome must hold its height before retirement bills it.
+const CHROME_SETTLE_MS = 250;
 
 /** Live settings that affect the composer before and after session adoption. */
 export interface ComposerPreferences {
@@ -123,6 +123,9 @@ export interface RuntimeChildrenOptions {
 	 * Below-transcript roots the user opens and closes (the editor surface that
 	 * drafts and dialogs swap into, docked reports). Their rows never become
 	 * part of the post-run chrome floor, so collapsing them refills the screen.
+	 * Rows one holds above its resting height through the settle window during a
+	 * run are billed while it keeps them: the rows they displace retire to
+	 * scrollback, and the editor moves up when it shrinks.
 	 */
 	readonly transientChrome?: readonly Component[];
 	/**
@@ -130,10 +133,12 @@ export interface RuntimeChildrenOptions {
 	 * Their first paint can be their tallest, e.g. a restored todo list on a
 	 * resumed session, so unlike {@link transientChrome} it is never treated as
 	 * their resting height: their rows start outside the floor, and the rows they
-	 * displace are held back for them to clear. One still up once the idle settle
-	 * window has passed is billed like any other idle chrome, so the rows it
-	 * displaces retire to scrollback instead of staying hidden. Roots listed here
-	 * are transient and need not also appear in `transientChrome`.
+	 * displace are held back for them to clear. One that holds its height through
+	 * the settle window is billed, during a run as well as after it, so the rows
+	 * it displaces retire to scrollback instead of staying hidden for as long as
+	 * it is up; when it then shrinks, the editor moves up into the rows it gave
+	 * up. Roots listed here are transient and need not also appear in
+	 * `transientChrome`.
 	 */
 	readonly selfClearingChrome?: readonly Component[];
 	/**
@@ -306,20 +311,27 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#retiredHeaderStart = 0;
 	#resizeRetiredHeaderStart: number | undefined;
 	#lastNormalRows = 0;
-	// Retirement bills below-transcript chrome at this floor, not its current
-	// height. It follows contractions immediately and promotes stable eligible
-	// growth only while idle. Transient roots count at their minimum painted
+	// Retirement bills persistent below-transcript chrome at this floor, not its
+	// current height. It follows contractions immediately and promotes growth
+	// that holds through the settle window. Transient roots count at their minimum painted
 	// height: a growing dialog or draft clips the live tail without committing
-	// displaced rows, so those rows refill the screen when it shrinks (#11007).
+	// displaced rows, so those rows refill the screen when it shrinks (#11007),
+	// unless it settles during a run (see #transientBilled).
 	// Displaced rows reach history when newer output pushes them past the floor
-	// or persistent idle chrome settles and raises it.
+	// or persistent chrome settles and raises it.
 	// With `completeScrollback`, rows the chrome pushes off screen go straight
 	// to scrollback, and when it shrinks the freed rows stay blank.
 	// The floor is terminal-height independent — chrome heights do not scale
 	// with rows — so it is retained across resizes rather than rediscovered
 	// from whatever chrome is expanded when the height changes.
 	#chromeFloor: number | undefined;
-	// Settled idle chrome has retired rows; contraction must preserve native history.
+	// Self-clearing rows retirement bills on top of the floor: none until a HUD
+	// has held its height through the settle window, then all of them.
+	#hudFloor = 0;
+	// Transient rows above their resting height that retirement bills: those
+	// that held their height through the settle window during a run.
+	#transientBilled = 0;
+	// Settled chrome has retired rows; contraction must preserve native history.
 	#chromeFloorPromoted = false;
 	#runActive = false;
 	// Billed-chrome rows the last composition counted toward retirement; see renderFrame.
@@ -343,12 +355,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// paints before replay. Only valid while the shape is unchanged.
 	#bootstrapEditorRows: number | undefined;
 	#bootstrapEditorStyle: string | undefined;
-	// Idle chrome height awaiting the settle window, and whether it has elapsed.
-	// Turn-scoped HUDs can close a few frames after the last block finalizes;
-	// billing them first would commit rows they cover and strand a band.
-	#idleChrome: number | undefined;
-	#idleChromeSettled = false;
-	#idleChromeTimer: RenderTimer | undefined;
+	// Floors awaiting the settle window, and whether it has elapsed. A HUD can
+	// close a few frames after it opens or after the last block finalizes;
+	// billing it first would commit rows it covers and strand a band.
+	#settlingChrome: { readonly persistent: number; readonly hud: number; readonly transient: number } | undefined;
+	#chromeSettled = false;
+	#chromeSettleTimer: RenderTimer | undefined;
 	/** Rows the chrome below each below-transcript root took in the last frame (see {@link rowsBelow}). */
 	#rowsBelow = new Map<Component, number>();
 	#lastInterruptAt = 0;
@@ -422,7 +434,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.ui.setFocus(this.editor);
 		// A settle timer that fires while the TUI is stopped (external editor, suspend) is dropped;
 		// forget it on restart so the next frame re-arms instead of waiting on it forever.
-		this.ui.addStartListener(() => this.#resetIdleChrome());
+		this.ui.addStartListener(() => this.#resetSettlingChrome());
 	}
 	/**
 	 * Rows the below-transcript chrome under `root` (editor, status line, …)
@@ -478,21 +490,33 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
 		const transientFloor = this.#syncTransientFloor(transientRows);
-		// Billable chrome excludes user-driven transient rows above their resting height and every
-		// billed row (those count at their current height below). Eligible chrome also excludes
-		// every self-clearing row: those start outside the floor, so the rows a HUD displaces are
-		// held back for it to clear. A HUD that is still up once the idle settle window has passed
-		// is billed like any other idle chrome (see #rebaselineChromeFloor): held back rows are on
-		// no screen and in no scrollback, and a restored todo list or a subagent panel can stay up
-		// for the rest of the session.
-		const billableChrome = after.length - (transientRows - transientFloor) - billedRows;
-		const eligibleChrome = billableChrome - selfClearingRows;
-		const promotedChromeContracted = this.#chromeFloorPromoted && billableChrome < (this.#chromeFloor ?? 0);
-		// Contraction follows immediately: the floor never exceeds what is billable now, and before a
-		// promotion it never exceeds the eligible chrome either.
-		const floorCap = this.#chromeFloorPromoted ? billableChrome : eligibleChrome;
-		this.#chromeFloor = Math.min(this.#chromeFloor ?? eligibleChrome, floorCap);
-		this.#rebaselineChromeFloor(this.#runActive || transcript.hasActiveBlock(), billableChrome);
+		// Persistent chrome excludes user-driven transient rows above their resting height, every
+		// billed row (those count at their current height below) and every self-clearing row. Those
+		// have a floor of their own: a HUD starts outside it, so the rows it displaces are held back
+		// for it to clear, and it is billed once it has held its height through the settle window
+		// (see #rebaselineChromeFloor). Held back rows are on no screen and in no scrollback, so
+		// while output keeps arriving the rows right under the scrollback seam are always missing,
+		// and a todo list or a subagent panel can stay up for a whole run. Transient rows above
+		// their resting height are billed the same way, but only once they settle during a run (a
+		// queued-message band, a draft typed while output streams): while idle nothing retires, so
+		// a dialog or draft keeps handing its rows back.
+		const transientExcess = transientRows - transientFloor;
+		const persistentChrome = after.length - transientExcess - billedRows - selfClearingRows;
+		const promotedChromeContracted =
+			this.#chromeFloorPromoted &&
+			(persistentChrome < (this.#chromeFloor ?? 0) ||
+				selfClearingRows < this.#hudFloor ||
+				transientExcess < this.#transientBilled);
+		// Contraction follows immediately: no floor exceeds its chrome now.
+		this.#chromeFloor = Math.min(this.#chromeFloor ?? persistentChrome, persistentChrome);
+		this.#hudFloor = Math.min(this.#hudFloor, selfClearingRows);
+		this.#transientBilled = Math.min(this.#transientBilled, transientExcess);
+		this.#rebaselineChromeFloor(
+			this.#runActive || transcript.hasActiveBlock(),
+			persistentChrome,
+			selfClearingRows,
+			transientExcess,
+		);
 		// The working row grows and shrinks with every run, so a floor (its
 		// smallest height) undercounts it whenever it is taller: retirement would
 		// clip that many finished rows off the top of the viewport before they
@@ -506,7 +530,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const completeScrollback = this.#preferences.completeScrollback;
 		if (!completeScrollback && billedRows < this.#billedChromeRows) this.#billedChromeContracted = true;
 		this.#billedChromeRows = billedRows;
-		const belowFloor = completeScrollback ? after.length : this.#chromeFloor + billedRows;
+		const belowFloor = completeScrollback
+			? after.length
+			: this.#chromeFloor + this.#hudFloor + this.#transientBilled + billedRows;
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
@@ -888,33 +914,45 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 	}
 
-	/** Raise the floor to eligible idle chrome that survives the settle window, even if it appeared after the run. */
-	#rebaselineChromeFloor(busy: boolean, chrome: number): void {
-		if (busy || chrome <= (this.#chromeFloor ?? chrome)) {
-			this.#resetIdleChrome();
+	/**
+	 * Raise each floor to chrome that held its height through the settle window, during a run as
+	 * well as after it: chrome that stays up holds the rows it displaces off both screen and
+	 * scrollback for as long as it does. Transient rows above their resting height rise only
+	 * during a run, where output keeps retiring past them; while idle they refill the screen.
+	 */
+	#rebaselineChromeFloor(busy: boolean, persistent: number, hud: number, transientExcess: number): void {
+		const floor = this.#chromeFloor ?? persistent;
+		const target = Math.max(floor, persistent);
+		const transient = busy ? transientExcess : this.#transientBilled;
+		if (target === floor && hud === this.#hudFloor && transient === this.#transientBilled) {
+			this.#resetSettlingChrome();
 			return;
 		}
-		if (this.#idleChromeSettled && this.#idleChrome === chrome) {
+		const pending = this.#settlingChrome;
+		const settling = pending?.persistent === target && pending.hud === hud && pending.transient === transient;
+		if (settling && this.#chromeSettled) {
 			this.#chromeFloorPromoted = true;
-			this.#chromeFloor = chrome;
-			this.#resetIdleChrome();
+			this.#chromeFloor = target;
+			this.#hudFloor = hud;
+			this.#transientBilled = transient;
+			this.#resetSettlingChrome();
 			return;
 		}
-		if (this.#idleChrome === chrome && this.#idleChromeTimer !== undefined) return;
-		this.#resetIdleChrome();
-		this.#idleChrome = chrome;
-		this.#idleChromeTimer = this.ui.scheduleAfter(IDLE_CHROME_SETTLE_MS, () => {
-			this.#idleChromeTimer = undefined;
-			this.#idleChromeSettled = true;
+		if (settling && this.#chromeSettleTimer !== undefined) return;
+		this.#resetSettlingChrome();
+		this.#settlingChrome = { persistent: target, hud, transient };
+		this.#chromeSettleTimer = this.ui.scheduleAfter(CHROME_SETTLE_MS, () => {
+			this.#chromeSettleTimer = undefined;
+			this.#chromeSettled = true;
 			this.ui.requestRender();
 		});
 	}
 
-	#resetIdleChrome(): void {
-		this.#idleChromeTimer?.cancel();
-		this.#idleChromeTimer = undefined;
-		this.#idleChrome = undefined;
-		this.#idleChromeSettled = false;
+	#resetSettlingChrome(): void {
+		this.#chromeSettleTimer?.cancel();
+		this.#chromeSettleTimer = undefined;
+		this.#settlingChrome = undefined;
+		this.#chromeSettled = false;
 	}
 
 	/** Track the empty editor's pre-mount height per shape; a shape change restarts the measurement. */
@@ -1175,8 +1213,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	/**
 	 * Mark whether a host agent run is in flight. Mid-run gaps with no streaming
-	 * block (tool arguments not yet parseable, between tool calls) then do not
-	 * count as the run ending when the post-run chrome floor is decided.
+	 * block (tool arguments not yet parseable, between tool calls) then still
+	 * count as the run, during which settled transient chrome is billed.
 	 */
 	setRunActive(active: boolean): void {
 		if (this.#runActive === active) return;
@@ -1235,8 +1273,10 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	setRuntimeChildren(children: readonly Component[], options: RuntimeChildrenOptions = {}): void {
 		if (this.#stopped) return;
 		this.#chromeFloor = undefined;
+		this.#hudFloor = 0;
+		this.#transientBilled = 0;
 		this.#chromeFloorPromoted = false;
-		this.#resetIdleChrome();
+		this.#resetSettlingChrome();
 		this.#nativeDock = options.nativeDock;
 		this.#nativeTail = options.nativeTail ?? [];
 		this.#transientChrome = new Set(options.transientChrome);

@@ -235,6 +235,62 @@ describe("transcript rows under chrome that outlives the turn", () => {
 		}
 	});
 
+	// A todo list created mid-run stays up until the run ends, which can be hours later. While it
+	// was held outside the chrome floor for the whole run, the rows right below the scrollback seam
+	// were on no screen and in no scrollback: a tool card read as cut off after its top rows.
+	it("leaves no row off both screen and scrollback under a HUD that outlives the settle window mid-run", async () => {
+		const terminal = new VirtualTerminal(COLUMNS, 30);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		const hud = new TurnChrome();
+		const editor = new Container();
+		editor.addChild(new Text("EDITOR", 0, 0));
+		composer.setRuntimeChildren([transcript, hud, editor], { selfClearingChrome: [hud] });
+		composer.start({ playWelcomeIntro: false });
+		try {
+			await scheduler.settle(terminal);
+			composer.setRunActive(true);
+			hud.rows = 7;
+			const lines: string[] = [];
+			const stream = async (count: number): Promise<void> => {
+				for (let i = 0; i < count; i++) {
+					const line = `QZR${String(lines.length).padStart(3, "0")}`;
+					lines.push(line);
+					transcript.addChild({ render: () => [line] });
+					composer.ui.requestRender();
+					await scheduler.advance(terminal, 20);
+				}
+			};
+			const shown = (): string[] =>
+				terminal
+					.getScrollBuffer()
+					.map(row => Bun.stripANSI(row).trim())
+					.filter(row => row.startsWith("QZR"));
+			await stream(60);
+			// The run is still going and the HUD is still up.
+			expect(shown()).toEqual(lines);
+			expect(terminal.getViewport().filter(row => row.includes("Turn chrome row ")).length).toBe(7);
+
+			// Tasks close and the list clears while output keeps arriving: the rows it was billed
+			// for stay in scrollback, and newer output fills the rows it gives up.
+			hud.rows = 4;
+			await stream(30);
+			hud.rows = 0;
+			await stream(30);
+			composer.setRunActive(false);
+			await scheduler.advance(terminal, 300);
+			expect(shown()).toEqual(lines);
+			expect(terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(29);
+		} finally {
+			composer.stop();
+		}
+	});
+
 	// A self-clearing HUD (a restored todo list, a subagent panel) starts outside the chrome floor,
 	// so the rows it displaces are held back for it to clear rather than retired. Held back rows
 	// are on no screen and in no scrollback. A HUD that stays up for the rest of the session left a
