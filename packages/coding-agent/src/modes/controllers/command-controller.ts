@@ -45,6 +45,7 @@ import {
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { promptCacheDetails } from "@oh-my-pi/pi-tui/status-line/prompt-cache";
@@ -903,7 +904,7 @@ export class CommandController {
 			const agent = row.agent && row.agent.id !== job.id ? ` ${theme.bold(row.agent.id)}` : "";
 			info += `${guide}${renderJobLine(job, now)}${agent}\n`;
 			// What the job is for leads; full mode follows it with what the command does and the whole command.
-			const text = full ? (job.command ?? job.label) : (job.intent ?? job.label);
+			const text = full ? (job.command ?? job.label) : jobDisplayLabel(job);
 			if (text === job.id) continue;
 			const indent = jobTreeIndent(row, theme);
 			const prefix = theme.fg("dim", indent);
@@ -990,7 +991,7 @@ export class CommandController {
 	handleToolsCommand(): void {
 		const tools = buildToolsMarkdown({
 			tools: this.ctx.session.agent.state.tools,
-			xdevTools: this.ctx.session.getXdevToolEntries(),
+			mountedCommands: this.ctx.session.getToolCommandEntries(),
 		});
 		this.#showMarkdownPanel("Available Tools", tools);
 	}
@@ -2253,45 +2254,49 @@ export class CommandController {
 			!background || (this.ctx.viewSession === session && this.ctx.sessionManager.getSessionId() === sessionId);
 
 		const cancelHint = `(${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
-		const label = isAuto ? "Auto-compacting context" : "Compacting context";
-		let compactingLoader: Loader | undefined;
+		const verb = isAuto ? "Auto-compacting context" : "Compacting context";
+		const label = background ? `${verb} in the background` : verb;
+		const startedAt = Date.now();
+		const loader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			`${label}… ${cancelHint}`,
+			getSymbolTheme().spinnerFrames,
+		);
+		loader.setWorkingRow(
+			() => ({
+				label: `${label}…`,
+				startedAt,
+				variant: { kind: "compaction" },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
+		);
 		if (background) {
-			this.ctx.showStatus(`${label} in the background… ${cancelHint}`);
+			// The composer stays free: the run takes the status row only while no turn holds it.
+			this.ctx.backgroundCompaction.start({ loader, label: `${label} ${cancelHint}`, startedAt, inView });
 		} else {
 			if (this.ctx.loadingAnimation) {
 				this.ctx.loadingAnimation.stop();
 				this.ctx.loadingAnimation = undefined;
 			}
 			this.ctx.statusContainer.disposeChildren();
-			compactingLoader = new Loader(
-				this.ctx.ui,
-				spinner => theme.fg("accent", spinner),
-				text => theme.fg("muted", text),
-				`${label}… ${cancelHint}`,
-				getSymbolTheme().spinnerFrames,
-			);
-			const startedAt = Date.now();
-			compactingLoader.setWorkingRow(
-				() => ({
-					label: `${label}…`,
-					startedAt,
-					variant: { kind: "compaction" },
-					interruptKey: this.ctx.maintenanceInterruptKey(),
-				}),
-				() => this.ctx.interruptFromPointer(),
-			);
-			this.ctx.statusContainer.addChild(compactingLoader);
-			this.ctx.ui.requestRender();
+			this.ctx.statusContainer.addChild(loader);
 		}
+		this.ctx.ui.requestRender();
 
 		let outcome: CompactionOutcome = "ok";
 		try {
 			try {
 				await session.compact(instructions, options);
 			} finally {
-				if (compactingLoader) {
-					compactingLoader.stop();
-					this.ctx.statusContainer.removeChild(compactingLoader);
+				if (background) {
+					this.ctx.backgroundCompaction.stop();
+					this.ctx.ui.requestRender();
+				} else {
+					loader.stop();
+					this.ctx.statusContainer.removeChild(loader);
 				}
 			}
 			if (inView()) {

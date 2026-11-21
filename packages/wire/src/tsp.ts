@@ -1191,6 +1191,18 @@ export interface TspShellProps {
 	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first visible line.
 	 */
 	preview?: { lines: number };
+	/**
+	 * Step mode: every segment with an execution node (`executionNode ?? node ?? row.node`) is a click target
+	 * (pointer, `role=button`, Enter/Space) sending the `shell-viz` action `select:<executionNode>`; hovering one
+	 * highlights every segment of that step. Chips with `expanded` keep sending `expand:<node>` only. No details
+	 * panel and no gutter Inspect command button; effect chips and annotations keep their text as a tooltip.
+	 */
+	steps?: boolean;
+	/**
+	 * Execution-node keys of the step whose output the host shows now: every segment drawn under one of them is
+	 * marked focused, re-applied whenever this changes even when the rows did not.
+	 */
+	focus?: readonly string[];
 }
 
 /** Kind-specific props, indexed by kind. */

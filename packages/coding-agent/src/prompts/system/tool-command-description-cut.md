@@ -1,0 +1,1 @@
+… (full text: `{{name}} --help`)
