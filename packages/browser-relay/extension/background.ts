@@ -116,7 +116,7 @@ chrome.tabs.onRemoved.addListener(tabId => void forgetTab(tabId));
 
 chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(alarm => {
-	// Revives a reaped worker and reconnects a lost native port; a no-op while the port is open.
+	// Revives a reaped worker and reconnects a lost native port; a no-op while the relay serves this browser.
 	if (alarm.name === "omp-relay-keepalive") connectRelay();
 });
 
