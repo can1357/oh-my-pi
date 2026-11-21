@@ -104,7 +104,12 @@ async function runTurn(
 	steps: Buffer[][],
 	options: Partial<CursorOptions> = {},
 	onTerminalEvent: () => void = () => {},
-): Promise<{ contexts: Map<number, string[]>; wrappedUp: boolean; answeredSteering?: AnsweredSteeringEntry[] }> {
+): Promise<{
+	contexts: Map<number, string[]>;
+	wrappedUp: boolean;
+	answeredSteering?: AnsweredSteeringEntry[];
+	stopReason: string;
+}> {
 	const contextsByExecId = new Map<number, string[]>();
 	const server = http2.createServer();
 	servers.push(server);
@@ -116,7 +121,7 @@ async function runTurn(
 		let nextStep = 0;
 		const sendNextStep = () => {
 			const step = steps[nextStep++];
-			if (step?.at(-1) === END_STREAM_FRAME) providerStream.end(Buffer.concat(step));
+			if (step && ((step.at(-1)?.[0] ?? 0) & 0x02) !== 0) providerStream.end(Buffer.concat(step));
 			else if (step) providerStream.write(Buffer.concat(step));
 			else providerStream.end(turnEndedFrame());
 		};
@@ -172,6 +177,7 @@ async function runTurn(
 		contexts: contextsByExecId,
 		wrappedUp: message.contextBudgetWrapUp === true,
 		answeredSteering: message.answeredSteering,
+		stopReason: message.stopReason,
 	};
 }
 
@@ -311,4 +317,22 @@ it("hands steering back when the server ends the stream before the result can be
 
 	expect(contexts.has(1)).toBe(false);
 	expect(steering.outcomes).toEqual(["rejected"]);
+});
+
+it("preserves answeredSteering on the error message when the stream fails after absorbing steering", async () => {
+	const steering = queuedSteering("stop and use the staging bucket");
+	const payload = Buffer.from(JSON.stringify({ error: { code: "internal", message: "boom" } }));
+	const errorEndFrame = Buffer.alloc(5 + payload.length);
+	errorEndFrame[0] = 0x02;
+	errorEndFrame.writeUInt32BE(payload.length, 1);
+	errorEndFrame.set(payload, 5);
+
+	const { contexts, answeredSteering, stopReason } = await runTurn([[execReadFrame(1, true)], [errorEndFrame]], {
+		liveSteering: steering.source,
+	});
+
+	expect(contexts.get(1)).toEqual(["stop and use the staging bucket"]);
+	expect(steering.outcomes).toEqual(["absorbed"]);
+	expect(stopReason).toBe("error");
+	expect(answeredSteering).toEqual([{ text: "stop and use the staging bucket", beforeContentIndex: 1 }]);
 });

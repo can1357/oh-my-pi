@@ -803,10 +803,15 @@ function parseConnectEndStream(data: Uint8Array): Error | null {
 	}
 }
 
+interface CursorAdditionalContext {
+	content: string;
+	onDelivered?: () => void;
+}
+
 interface CursorMessageWriter {
-	write(frame: Uint8Array): void;
-	/** Context the host wants the model to read with the next tool result that accepts it. */
-	takeAdditionalContexts?(): string[];
+	write(frame: Uint8Array, onDelivered?: () => void): void;
+	/** Contexts the host wants the model to read with the next tool result that accepts them. */
+	takeAdditionalContexts?(): CursorAdditionalContext[];
 }
 
 interface CursorRunTransport extends CursorMessageWriter {
@@ -836,8 +841,11 @@ function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTrans
 		get writable() {
 			return !request.writableEnded && !request.closed;
 		},
-		write(frame) {
-			if (!request.writableEnded) request.write(frame);
+		write(frame, onDelivered) {
+			if (!request.writableEnded && !request.closed) {
+				request.write(frame);
+				onDelivered?.();
+			}
 		},
 		close() {
 			request.close();
@@ -873,6 +881,7 @@ interface CursorHttp1RunTransportOptions {
 interface CursorPendingAppend {
 	seqno: bigint;
 	data: Uint8Array;
+	onDelivered?: () => void;
 }
 
 const CURSOR_HTTP1_APPEND_CONCURRENCY = 16;
@@ -936,6 +945,7 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
 		});
 		if (response.ok) {
+			append.onDelivered?.();
 			await response.body?.cancel();
 			return;
 		}
@@ -999,11 +1009,12 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		get closed() {
 			return closed;
 		},
-		write(frame) {
+		write(frame, onDelivered) {
 			if (closed || ended) return;
 			pendingAppends.push({
 				seqno: appendSeqno++,
 				data: readConnectFrameMessage(frame),
+				onDelivered,
 			});
 			pumpAppends();
 		},
@@ -1625,20 +1636,32 @@ function streamCursorWithWireMode(
 			// call and runs the handler twice. KV blob replies bypass this writer —
 			// they are idempotent and the server re-requests them on resume.
 			// Heartbeats and the run request write the transport directly.
+			let wrapUpDelivered = false;
 			const resultTransport = runTransport;
 			const resultWriter: CursorMessageWriter = {
-				write(frame) {
+				write(frame, onDelivered) {
 					progressVersion++;
 					checkpointCoversTurn = false;
-					resultTransport.write(frame);
+					resultTransport.write(frame, onDelivered);
 				},
 				takeAdditionalContexts: () => {
 					// A result written after the server's end is dropped; the notice and
 					// steering would never reach the model, so both stay pending.
 					if (!resultTransport.writable) return [];
+					const contexts: CursorAdditionalContext[] = [];
 					const notice = contextBudget?.takeNotice(output.usage.contextTokens);
-					if (notice !== undefined) output.contextBudgetWrapUp = true;
-					return [notice, steering?.take(output.content.length)].filter(context => context !== undefined);
+					if (notice !== undefined) {
+						contexts.push({
+							content: notice,
+							onDelivered: () => {
+								wrapUpDelivered = true;
+								output.contextBudgetWrapUp = true;
+							},
+						});
+					}
+					const steered = steering?.take(output.content.length);
+					if (steered !== undefined) contexts.push({ content: steered });
+					return contexts;
 				},
 			};
 
@@ -1926,7 +1949,7 @@ function streamCursorWithWireMode(
 						return false;
 					}
 					const latestContextTokens = output.usage.contextTokens;
-					const wrappedForBudget = output.contextBudgetWrapUp === true;
+					const wrappedForBudget = wrapUpDelivered || output.contextBudgetWrapUp === true;
 					({ context, options, stream } = resumption);
 					steering = options.liveSteering ? new CursorSteeringRelay(options.liveSteering) : undefined;
 					if (steering) await Bun.sleep(0);
@@ -2346,6 +2369,7 @@ function streamCursorWithWireMode(
 			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			if (steering && steering.absorbed.length > 0) output.answeredSteering = [...steering.absorbed];
 			await steering?.close();
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
@@ -2378,21 +2402,32 @@ function streamCursorWithWireMode(
 /**
  * The results a request brings for a parked run's held calls, by call id, or
  * `undefined` when the request does not continue the run: its history must end
- * on an assistant message followed by exactly one result for each held call.
+ * on an assistant message followed by exactly one result for each held call
+ * (ignoring host copies of steering that assistant response already absorbed).
  */
 function collectRelayedResults(
 	messages: readonly Message[],
 	held: ReadonlyMap<string, CursorHeldCall>,
 ): Map<string, ToolResultMessage> | undefined {
+	let assistantIndex = messages.length - 1;
+	while (assistantIndex >= 0 && messages[assistantIndex].role !== "assistant") assistantIndex--;
+	if (assistantIndex < 0) return undefined;
+	const assistant = messages[assistantIndex];
+	const answeredCopies = new Set<number>();
+	if (assistant.role === "assistant" && assistant.answeredSteering) {
+		const matched = findSteeringCopies(messages, assistantIndex, assistant.answeredSteering);
+		if (!matched.complete) return undefined;
+		for (const copy of matched.copies) answeredCopies.add(copy.copyIndex);
+	}
 	const results = new Map<string, ToolResultMessage>();
-	let index = messages.length - 1;
-	for (; index >= 0; index--) {
+	for (let index = assistantIndex + 1; index < messages.length; index++) {
+		if (answeredCopies.has(index)) continue;
 		const message = messages[index];
-		if (message.role !== "toolResult") break;
+		if (message.role !== "toolResult") return undefined;
 		if (!held.has(message.toolCallId) || results.has(message.toolCallId)) return undefined;
 		results.set(message.toolCallId, message);
 	}
-	if (results.size !== held.size || messages[index]?.role !== "assistant") return undefined;
+	if (results.size !== held.size) return undefined;
 	return results;
 }
 
@@ -4085,17 +4120,30 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
 		id: execMsg.id,
 		execId: execMsg.execId,
 		message: { case: messageCase, value } as ExecClientMessage["message"],
-		hookAdditionalContexts: additionalContexts.map(content => ({ hookEventName: "postToolUse", content })),
+		hookAdditionalContexts: additionalContexts.map(({ content }) => ({ hookEventName: "postToolUse", content })),
 	});
-	if (additionalContexts.length > 0)
-		log("execClientMessage", "additionalContext", { id: execMsg.id, additionalContexts });
+	if (additionalContexts.length > 0) {
+		log("execClientMessage", "additionalContext", {
+			id: execMsg.id,
+			additionalContexts: additionalContexts.map(({ content }) => content),
+		});
+	}
 
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "execClientMessage", value: execClientMessage },
 	});
 
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	runTransport.write(frameConnectMessage(responseBytes));
+	const onDeliveredCallbacks = additionalContexts
+		.map(item => item.onDelivered)
+		.filter((cb): cb is () => void => cb !== undefined);
+	const onDelivered =
+		onDeliveredCallbacks.length > 0
+			? () => {
+					for (const cb of onDeliveredCallbacks) cb();
+				}
+			: undefined;
+	runTransport.write(frameConnectMessage(responseBytes), onDelivered);
 
 	log("execClientMessage", messageCase, value);
 }
@@ -6512,6 +6560,13 @@ function isTextOnlyMessage(message: UserMessage | DeveloperMessage): boolean {
 	return typeof message.content === "string" || message.content.every(part => part.type === "text");
 }
 
+function isSteeringCopyCandidate(message: Message): message is UserMessage | DeveloperMessage {
+	return (
+		(message.role === "user" || (message.role === "developer" && message.attribution !== "agent")) &&
+		isTextOnlyMessage(message)
+	);
+}
+
 /**
  * The host's copies of a turn's absorbed steering: the text-only user or
  * developer messages that follow the turn (past its tool results and the
@@ -6521,38 +6576,43 @@ function isTextOnlyMessage(message: UserMessage | DeveloperMessage): boolean {
  * placed inside the fallback rebuild so Cursor does not act on them twice.
  */
 function findSteeringCopies(
-	messages: Message[],
+	messages: readonly Message[],
 	turnIndex: number,
 	answeredSteering: readonly AnsweredSteeringEntry[],
 ): { copies: Array<{ copyIndex: number; beforeContentIndex?: number }>; complete: boolean } {
+	const slots: number[] = [];
+	for (let index = turnIndex + 1; index < messages.length && slots.length < answeredSteering.length; index++) {
+		const message = messages[index];
+		if (message.role === "assistant") break;
+		if (precedesSteeringCopy(message)) continue;
+		slots.push(index);
+	}
 	const copies: Array<{ copyIndex: number; beforeContentIndex?: number }> = [];
-	let complete = true;
-	let index = turnIndex + 1;
+	let complete = slots.length === answeredSteering.length;
+	let cursor = 0;
 	for (const entry of answeredSteering) {
-		while (index < messages.length && precedesSteeringCopy(messages[index], entry.text)) index++;
-		const copy = messages[index];
-		if (
-			index >= messages.length ||
-			(copy.role !== "user" && copy.role !== "developer") ||
-			!isTextOnlyMessage(copy) ||
-			extractUserMessageText(copy) !== entry.text
-		) {
+		let matchedSlot = -1;
+		for (let slot = cursor; slot < slots.length; slot++) {
+			const candidate = messages[slots[slot]];
+			if (isSteeringCopyCandidate(candidate) && extractUserMessageText(candidate) === entry.text) {
+				matchedSlot = slot;
+				break;
+			}
+		}
+		if (matchedSlot === -1) {
 			complete = false;
 			continue;
 		}
-		copies.push({ copyIndex: index++, beforeContentIndex: entry.beforeContentIndex });
+		if (matchedSlot !== cursor) complete = false;
+		copies.push({ copyIndex: slots[matchedSlot], beforeContentIndex: entry.beforeContentIndex });
+		cursor = matchedSlot + 1;
 	}
 	return { copies, complete };
 }
 
 /** What the host appends between a turn and its steering copies: tool results and passive tool context. */
-function precedesSteeringCopy(message: Message, steeringText: string): boolean {
-	if (message.role === "toolResult") return true;
-	return (
-		message.role === "developer" &&
-		message.attribution === "agent" &&
-		(!isTextOnlyMessage(message) || extractUserMessageText(message) !== steeringText)
-	);
+function precedesSteeringCopy(message: Message): boolean {
+	return message.role === "toolResult" || (message.role === "developer" && message.attribution === "agent");
 }
 
 /**

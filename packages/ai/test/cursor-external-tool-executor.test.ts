@@ -1230,4 +1230,65 @@ describe("Cursor runs relayed across an external executor's requests", () => {
 			expect(second.answeredSteering).toEqual([{ text: "switch to tabs", beforeContentIndex: 0 }]);
 		});
 	});
+
+	it("resumes a parked run in-band when the previous resumed response recorded answeredSteering", async () => {
+		const cursor = drivenCursor();
+		const states = new Map<string, ProviderSessionState>();
+		let claimed = false;
+		const secondChannel = {
+			wait: async (signal: AbortSignal) => {
+				if (claimed && !signal.aborted) {
+					const deferred = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => deferred.resolve(), { once: true });
+					await deferred.promise;
+				}
+			},
+			claim: async () => {
+				if (claimed) return undefined;
+				claimed = true;
+				return {
+					messages: [{ role: "user" as const, content: "switch to tabs", timestamp: 2 }],
+					accept: () => {},
+					absorb: () => {},
+					reject: () => {},
+				};
+			},
+		};
+
+		await withCursorServer(cursor.serve, async baseUrl => {
+			const firstReply = respond(baseUrl, [user], relayOptions(states));
+			const run = await cursor.run(0);
+			await run.send(
+				Buffer.concat([readStarted(1), execFrame(2, { case: "mcpArgs", value: readArgs(1) }, true), listed(1)]),
+			);
+			const first = await firstReply;
+
+			// Second request delivers steering on mcpResult(1) and parks again on mcpCall(2).
+			const secondReply = respond(
+				baseUrl,
+				[user, first, fileResult(1)],
+				relayOptions(states, { liveSteering: secondChannel }),
+			);
+			await run.answered(1);
+			await run.send(
+				Buffer.concat([readStarted(2), execFrame(3, { case: "mcpArgs", value: readArgs(2) }, true), listed(1)]),
+			);
+			const second = await secondReply;
+			expect(second.answeredSteering).toEqual([{ text: "switch to tabs", beforeContentIndex: 0 }]);
+
+			// Agent appends the host steering copy after fileResult(2); the parked run must still resume in-band.
+			const steeringCopy: Message = { role: "user", content: "switch to tabs", timestamp: 2 };
+			const thirdReply = respond(
+				baseUrl,
+				[user, first, fileResult(1), second, fileResult(2), steeringCopy],
+				relayOptions(states),
+			);
+			await run.answered(2);
+			run.end(finished("Done after second park."));
+			const third = await thirdReply;
+
+			expect(cursor.runs).toHaveLength(1);
+			expect(text(third)).toBe("Done after second park.");
+		});
+	});
 });

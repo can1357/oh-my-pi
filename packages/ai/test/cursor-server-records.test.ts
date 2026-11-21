@@ -511,6 +511,45 @@ describe("Cursor server records", () => {
 		expect(recordsWith(records, "drop comments")).toEqual([records[6]]);
 	});
 
+	it("keeps an unchanged later steering inside the rebuilt turn when an earlier copy is edited", async () => {
+		const [assistant, toolResult] = await steeredK3Turn(["use tabs", "keep comments"]);
+		const history = [firstUser, assistant, toolResult, userText("use spaces"), userText("keep comments"), secondUser];
+
+		const { ids, records } = await rootPromptIds(model("kimi-k3"), history);
+
+		expect(ids.slice(2, 2 + SPAN.length)).not.toEqual(SPAN_IDS);
+		// The unchanged second copy stays inside the turn (before its final assistant reply),
+		// while the edited first copy stays outside after the assistant as new user input.
+		expect(records.map(record => JSON.parse(record).role)).toEqual([
+			"system",
+			"user",
+			"assistant",
+			"tool",
+			"user",
+			"assistant",
+			"user",
+		]);
+		expect(recordsWith(records, "keep comments")).toEqual([records[4]]);
+		expect(recordsWith(records, "use spaces")).toEqual([records[6]]);
+	});
+
+	it("skips agent passive context even when its text matches the absorbed steering", async () => {
+		const [assistant, toolResult] = await steeredK3Turn(["use tabs"]);
+		const passiveContext: Message = {
+			role: "developer",
+			content: [{ type: "text", text: "use tabs" }],
+			attribution: "agent",
+			timestamp: 2,
+		};
+		const history = [firstUser, assistant, toolResult, passiveContext, userText("use tabs"), secondUser];
+
+		const { ids, records } = await rootPromptIds(model("kimi-k3"), history);
+
+		expect(ids.slice(2, 2 + SPAN.length)).toEqual(SPAN_IDS);
+		// Only the passive developer context remains outside the replayed records; the user copy is absorbed.
+		expect(recordsWith(records, "use tabs")).toHaveLength(1);
+	});
+
 	it("invalidates answered steering when an image is added to the host copy", async () => {
 		const [assistant, toolResult] = await steeredK3Turn(["use tabs"]);
 		const editedWithImage: Message = {

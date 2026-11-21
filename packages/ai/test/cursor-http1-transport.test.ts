@@ -8,7 +8,11 @@ import {
 	AgentServerMessageSchema,
 	BidiAppendRequestSchema,
 	BidiRequestIdSchema,
+	ConversationStateStructureSchema,
+	ConversationTokenDetailsSchema,
+	ExecServerMessageSchema,
 	InteractionUpdateSchema,
+	ReadArgsSchema,
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -242,6 +246,108 @@ it(
 		} finally {
 			server.stop(true);
 		}
+	},
+	SETTLE_TIMEOUT_MS,
+);
+
+it(
+	"sets contextBudgetWrapUp on HTTP/1 only after the BidiAppend carrying the wrap-up notice is accepted",
+	async () => {
+		const runCase = async (acceptAppend: boolean) => {
+			const streamReady = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+			const holdAppend = Promise.withResolvers<void>();
+			const server = Bun.serve({
+				port: 0,
+				async fetch(request) {
+					const url = new URL(request.url);
+					const body = new Uint8Array(await request.arrayBuffer());
+					if (url.pathname === "/agent.v1.AgentService/RunSSE") {
+						return new Response(
+							new ReadableStream<Uint8Array>({
+								start(controller) {
+									streamReady.resolve(controller);
+								},
+							}),
+							{ headers: { "content-type": "application/connect+proto" } },
+						);
+					}
+					if (url.pathname === "/aiserver.v1.BidiService/BidiAppend") {
+						const append = fromBinary(BidiAppendRequestSchema, body);
+						const clientMsg = fromBinary(AgentClientMessageSchema, append.dataBinary);
+						const controller = await streamReady.promise;
+						if (clientMsg.message.case === "runRequest") {
+							const checkpoint = frameConnectMessage(
+								toBinary(
+									AgentServerMessageSchema,
+									create(AgentServerMessageSchema, {
+										message: {
+											case: "conversationCheckpointUpdate",
+											value: create(ConversationStateStructureSchema, {
+												tokenDetails: create(ConversationTokenDetailsSchema, { usedTokens: 70_000 }),
+											}),
+										},
+									}),
+								),
+							);
+							const readExec = frameConnectMessage(
+								toBinary(
+									AgentServerMessageSchema,
+									create(AgentServerMessageSchema, {
+										message: {
+											case: "execServerMessage",
+											value: create(ExecServerMessageSchema, {
+												id: 1,
+												execId: "exec-1",
+												acceptHookAdditionalContexts: true,
+												message: { case: "readArgs", value: create(ReadArgsSchema, { path: "a.ts" }) },
+											}),
+										},
+									}),
+								),
+							);
+							controller.enqueue(Buffer.concat([checkpoint, readExec]));
+							return new Response(null, { status: 200 });
+						}
+						if (clientMsg.message.case === "execClientMessage") {
+							if (acceptAppend) {
+								// Let the 200 OK response reach the client before finishing the SSE stream,
+								// mirroring a server that accepts the tool result and then streams a wrap-up reply.
+								setTimeout(() => {
+									controller.enqueue(Buffer.concat([textDeltaFrame("wrapped"), turnEndedFrame()]));
+									controller.close();
+								}, 25);
+								return new Response(null, { status: 200 });
+							}
+							// Finish the SSE stream while BidiAppend is still unaccepted.
+							controller.enqueue(Buffer.concat([textDeltaFrame("ended early"), turnEndedFrame()]));
+							controller.close();
+							await holdAppend.promise;
+							return new Response(null, { status: 200 });
+						}
+						return new Response(null, { status: 200 });
+					}
+					return new Response(null, { status: 404 });
+				},
+			});
+			try {
+				const response = streamCursor(makeModel(server.url.toString()), context, {
+					apiKey: "test-token",
+					transport: "http1",
+					contextBudgetTokens: 60_000,
+				});
+				const { result } = await drain(response);
+				return result;
+			} finally {
+				holdAppend.resolve();
+				server.stop(true);
+			}
+		};
+
+		const dropped = await runCase(false);
+		expect(dropped.contextBudgetWrapUp).toBeUndefined();
+
+		const accepted = await runCase(true);
+		expect(accepted.contextBudgetWrapUp).toBe(true);
 	},
 	SETTLE_TIMEOUT_MS,
 );

@@ -8237,7 +8237,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * a start the threshold pass deferred to a running speculative summary, which
 	 * can only land at the boundary the wrap-up provides.
 	 */
-	cursorContextBudgetTokens(model: Model): number | undefined {
+	async cursorContextBudgetTokens(model: Model, signal?: AbortSignal): Promise<number | undefined> {
 		const budgetTokens = resolveCursorContextBudgetTokens(
 			this.settings,
 			model,
@@ -8246,7 +8246,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (budgetTokens === undefined) return undefined;
 		if (
 			this.#maintenance.fixedContextExceedsRecoveryBand(model) &&
-			!this.#maintenance.hasContextPromotionCandidate(model)
+			!(await this.#maintenance.hasAuthenticatedContextPromotionTarget(model, signal))
 		) {
 			return undefined;
 		}

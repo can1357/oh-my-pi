@@ -3978,7 +3978,19 @@ export class SessionMaintenance {
 		}
 	}
 
-	#resolveContextPromotionCandidate(currentModel: Model, contextWindow: number): Model | undefined {
+	/** Whether context promotion is enabled and has an authenticated strictly larger target for `model`. */
+	async hasAuthenticatedContextPromotionTarget(model: Model, signal?: AbortSignal): Promise<boolean> {
+		if (!cfgContextPromotionEnabled.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
+		const contextWindow = model.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+		return (await this.resolveContextPromotionTarget(model, contextWindow, signal)) !== undefined;
+	}
+
+	async resolveContextPromotionTarget(
+		currentModel: Model,
+		contextWindow: number,
+		signal?: AbortSignal,
+	): Promise<Model | undefined> {
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
@@ -3998,23 +4010,6 @@ export class SessionMaintenance {
 		) {
 			return undefined;
 		}
-		return candidate;
-	}
-
-	/** Whether context promotion is enabled and has a strictly larger candidate for `model`. */
-	hasContextPromotionCandidate(model: Model): boolean {
-		if (!cfgContextPromotionEnabled.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
-		const contextWindow = model.contextWindow ?? 0;
-		return contextWindow > 0 && this.#resolveContextPromotionCandidate(model, contextWindow) !== undefined;
-	}
-
-	async resolveContextPromotionTarget(
-		currentModel: Model,
-		contextWindow: number,
-		signal?: AbortSignal,
-	): Promise<Model | undefined> {
-		const candidate = this.#resolveContextPromotionCandidate(currentModel, contextWindow);
-		if (!candidate) return undefined;
 		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
 		if (!apiKey) return undefined;
 		return candidate;
