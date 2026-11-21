@@ -288,6 +288,7 @@ import { supportsExternalThinking } from "../tools/think";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolGuard } from "../tools/tool-guard";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
 import { prewarmSubagentWorker } from "../thread/subagent-worker";
@@ -2834,6 +2835,35 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			after: (toolCallId, result, context) => this.#ttsr.afterBridgedToolCall(toolCallId, result, context),
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
 		});
+		this.#extensionRunner?.setToolGuard?.(
+			new ToolGuard({
+				settings: this.settings,
+				cwd: () => this.sessionManager.getCwd(),
+				messages: () => this.agent.state.messages,
+				judge: () => {
+					const judge = resolveJudge({
+						settings: this.settings,
+						registry: this.#modelRegistry,
+						sessionModel: this.model,
+						sessionId: this.sessionId,
+						metadataResolver: provider => this.agent.metadataForProvider(provider),
+						purpose: "tool-guard",
+						onUsage: journalJudgmentUsage(this.sessionManager),
+						telemetry: this.agent.telemetry,
+						cache: sharedJudgmentCache(),
+						costGate: this.#costGate,
+					});
+					// The judgment carries the user's requests, so it follows the session's credential redaction.
+					const redact = cfgSecretsEnabled.get(this.settings);
+					return {
+						judge: (request, options) => withCredentialRedaction(redact, () => judge.judge(request, options)),
+					};
+				},
+				stop: reason => {
+					void this.abort({ reason });
+				},
+			}),
+		);
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
 		this.agent.setOnModelCallSystemPrompt(prompt => {
 			this.#tools.recordPrimaryModelCall(prompt);

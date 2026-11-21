@@ -10,6 +10,7 @@ import {
 	type AgentToolUpdateCallback,
 	isNonBlankContext,
 	joinAdditionalContext,
+	type ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -145,6 +146,14 @@ export interface ToolCallPreflight {
 		context?: AgentToolContext,
 	) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined;
 	cancel?: (toolCallId: string) => void;
+}
+
+/**
+ * Screens a call the approval gate allowed, against the arguments that will run. Returns the
+ * refusal shown to the model in place of the result, or undefined to run the call.
+ */
+export interface ToolCallGuard {
+	check(tool: AgentTool, args: unknown, tier: ToolTier, signal?: AbortSignal): Promise<string | undefined>;
 }
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
@@ -769,6 +778,7 @@ export class ExtensionRunner {
 	 */
 	#nativeToolResolver?: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined;
 	#toolCallPreflight?: ToolCallPreflight;
+	#toolGuard?: ToolCallGuard;
 
 	/** Wires the native-tool resolver used by {@link invokeNativeTool}. */
 	setNativeToolResolver(
@@ -779,6 +789,20 @@ export class ExtensionRunner {
 
 	setToolCallPreflight(preflight: ToolCallPreflight | undefined): void {
 		this.#toolCallPreflight = preflight;
+	}
+
+	setToolGuard(guard: ToolCallGuard | undefined): void {
+		this.#toolGuard = guard;
+	}
+
+	/** The installed tool guard's refusal for an approved call; undefined when none is installed or it allows the call. */
+	async runToolGuard(
+		tool: AgentTool,
+		args: unknown,
+		tier: ToolTier,
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
+		return this.#toolGuard?.check(tool, args, tier, signal);
 	}
 
 	async runToolCallPreflightBefore(

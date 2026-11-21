@@ -525,6 +525,25 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
+		// 3. The tool guard screens calls the approval gate let through on its own. A call the user just
+		// approved in a prompt was asked for and skips it, and so does a device call (`xd://`) whose
+		// carrier call the user approved, while the device input flows through unchanged.
+		const userApproved = approvalCheck.required || (xdevBypass && context?.promptApproved === true);
+		if (!userApproved) {
+			let refusal: string | undefined;
+			try {
+				refusal = await this.runner.runToolGuard?.(this.tool, resolvedArgs, resolved.tier, signal);
+			} catch (err) {
+				cancelPreflight();
+				throw err;
+			}
+			if (refusal !== undefined) {
+				cancelPreflight();
+				throw new Error(refusal);
+			}
+		}
+		const runContext = approvalCheck.required && context ? { ...context, promptApproved: true } : context;
+
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
@@ -536,7 +555,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// a runner exists.
 			result = await this.runner.runScoped(() =>
 				withFileMutationSession(this.runner.sessionId, () =>
-					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, runContext),
 				),
 			);
 		} catch (err) {
