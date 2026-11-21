@@ -5,6 +5,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { type CompactionPreparation, resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -1386,6 +1387,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// When the larger promotion target actually resolves credentials, budgeting stays active.
 		getApiKeySpy.mockResolvedValue("valid-key");
 		expect(await session.cursorContextBudgetTokens(promotableCursor)).toBe(10_000);
+
+		// A session restricted to an OAuth pool that cannot serve the target throws; that is "unavailable", not a crash.
+		getApiKeySpy.mockRejectedValue(new MissingApiKeyError(largerModel.provider));
+		expect(await session.cursorContextBudgetTokens(promotableCursor)).toBeUndefined();
 	});
 
 	it("settles an overlapping successful stop but resumes a thinking-only length stop", async () => {

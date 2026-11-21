@@ -251,11 +251,10 @@ it(
 );
 
 it(
-	"sets contextBudgetWrapUp on HTTP/1 only after the BidiAppend carrying the wrap-up notice is accepted",
+	"records the HTTP/1 wrap-up only when its BidiAppend is accepted, even if the reply streams back first",
 	async () => {
-		const runCase = async (acceptAppend: boolean) => {
+		const runCase = async (appendStatus: number) => {
 			const streamReady = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
-			const holdAppend = Promise.withResolvers<void>();
 			const server = Bun.serve({
 				port: 0,
 				async fetch(request) {
@@ -309,20 +308,11 @@ it(
 							return new Response(null, { status: 200 });
 						}
 						if (clientMsg.message.case === "execClientMessage") {
-							if (acceptAppend) {
-								// Let the 200 OK response reach the client before finishing the SSE stream,
-								// mirroring a server that accepts the tool result and then streams a wrap-up reply.
-								setTimeout(() => {
-									controller.enqueue(Buffer.concat([textDeltaFrame("wrapped"), turnEndedFrame()]));
-									controller.close();
-								}, 25);
-								return new Response(null, { status: 200 });
-							}
-							// Finish the SSE stream while BidiAppend is still unaccepted.
-							controller.enqueue(Buffer.concat([textDeltaFrame("ended early"), turnEndedFrame()]));
+							// The server streams its reply and ends the stream before it answers the append.
+							controller.enqueue(Buffer.concat([textDeltaFrame("wrapped"), turnEndedFrame()]));
 							controller.close();
-							await holdAppend.promise;
-							return new Response(null, { status: 200 });
+							await Bun.sleep(50);
+							return new Response(null, { status: appendStatus });
 						}
 						return new Response(null, { status: 200 });
 					}
@@ -338,15 +328,15 @@ it(
 				const { result } = await drain(response);
 				return result;
 			} finally {
-				holdAppend.resolve();
 				server.stop(true);
 			}
 		};
 
-		const dropped = await runCase(false);
-		expect(dropped.contextBudgetWrapUp).toBeUndefined();
+		const rejected = await runCase(500);
+		expect(rejected.stopReason).toBe("stop");
+		expect(rejected.contextBudgetWrapUp).toBeUndefined();
 
-		const accepted = await runCase(true);
+		const accepted = await runCase(200);
 		expect(accepted.contextBudgetWrapUp).toBe(true);
 	},
 	SETTLE_TIMEOUT_MS,
