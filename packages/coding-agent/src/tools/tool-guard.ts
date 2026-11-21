@@ -31,7 +31,6 @@ import type { Settings } from "../config/settings";
 import questionFile from "../prompts/judge/tool-guard.json" with { type: "json" };
 import refusedTemplate from "../prompts/tools/tool-guard-refused.md" with { type: "text" };
 import { operatorTitleText, textFromContent } from "../session/messages";
-import { isMCPToolName } from "./builtin-names";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
 	cfgToolGuardAllowances,
@@ -136,6 +135,10 @@ const RUNNERS = wordTable("uv poetry pipenv pdm hatch rye");
 const SCRIPT_SUFFIX = /\.(?:py|sh|js|mjs|ts|rb|pl)$/;
 /** Interpreter options that take a value before the script. */
 const SCRIPT_VALUE_OPTIONS = wordTable("-o +o -O +O -W -X -I --require");
+/** Node options that load a module before the script; a local file named there runs first. */
+const NODE_PRELOADS = wordTable("-r --require --import --loader --experimental-loader");
+/** A preload that names a file rather than a package (`./hook.js`, `/tmp/x.cjs`, `hook.mjs`; not `dotenv/config`). */
+const LOCAL_MODULE = /^(?:\.{0,2}\/|~\/)|\.[cm]?[jt]s$/;
 /** The system's own programs (`/usr/bin/env`), never shown as scripts. */
 const SYSTEM_TREES = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/System", "/nix", "/opt/homebrew"];
 
@@ -192,14 +195,6 @@ function stringArg(args: unknown, key: string): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
 	const value = (args as Record<string, unknown>)[key];
 	return typeof value === "string" ? value : undefined;
-}
-
-/** The string arguments that name a file: `path` and any `..._path` (`output_path`). */
-function pathArguments(args: unknown): string[] {
-	if (!args || typeof args !== "object") return [];
-	return Object.entries(args as Record<string, unknown>).flatMap(([key, value]) =>
-		/(?:^|_)path$/i.test(key) && typeof value === "string" && value.length > 0 ? [value] : [],
-	);
 }
 
 /** `word` resolved against `base` (with `~/` as the home directory); undefined when it needs expansion. */
@@ -497,35 +492,41 @@ export function isReadOnlyCommand(command: string): boolean {
 	return segments.length > 0 && segments.every(segment => readOnlySegment(segment.text));
 }
 
-/** The file a simple command runs as code, as written; undefined for code in the call or a module. */
-function scriptFile(words: string[]): string | undefined {
+/** The files a simple command runs as code, as written: a node preload (`-r ./hook.js`) before its script. Code in the call or a module is none. */
+function scriptFiles(words: string[]): string[] {
 	const command = unwrapCommand(words, SCRIPT_WRAPPERS);
 	const program = command[0];
-	if (program === undefined) return undefined;
+	if (program === undefined) return [];
 	const name = path.basename(program);
 	const args = command.slice(1);
 	// A sourced file (`source .env`) is often credentials; the judge reasons from the call text alone.
-	if (name === "source" || name === ".") return undefined;
+	if (name === "source" || name === ".") return [];
 	if (inTable(RUNNERS, name) && args[0] === "run") {
 		const rest = args.slice(1);
 		while (rest.length > 0 && rest[0].startsWith("-")) rest.shift();
-		if (rest.length === 0) return undefined;
-		return SCRIPT_SUFFIX.test(rest[0]) ? rest[0] : scriptFile(rest);
+		if (rest.length === 0) return [];
+		return SCRIPT_SUFFIX.test(rest[0]) ? [rest[0]] : scriptFiles(rest);
 	}
 	const shell = inTable(SHELLS, name);
-	if (!shell && !INTERPRETER.test(name)) return program.includes("/") ? program : undefined;
+	if (!shell && !INTERPRETER.test(name)) return program.includes("/") ? [program] : [];
+	const files: string[] = [];
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
-		if (arg === "-") return undefined;
-		if (inTable(SCRIPT_VALUE_OPTIONS, arg)) {
+		if (arg === "-") return files;
+		const option = arg.split("=", 1)[0];
+		if (name === "node" && inTable(NODE_PRELOADS, option)) {
+			const value = option === arg ? args[++i] : arg.slice(option.length + 1);
+			if (value !== undefined && LOCAL_MODULE.test(value)) files.push(value);
+		} else if (inTable(SCRIPT_VALUE_OPTIONS, arg)) {
 			i++;
 		} else if (!arg.startsWith("-") && !arg.startsWith("+")) {
-			return arg;
+			files.push(arg);
+			return files;
 		} else if (!arg.startsWith("--") && (shell ? arg.slice(1).includes("c") : /[cemrE]/.test(arg.slice(1)))) {
-			return undefined; // code in the call (`-c`, `-e`) or a module (`-m`)
+			return files; // code in the call (`-c`, `-e`) or a module (`-m`)
 		}
 	}
-	return undefined;
+	return files;
 }
 
 /** Files a command writes by redirection or `tee`; a script it writes itself is shown in the call. */
@@ -593,11 +594,12 @@ export function scriptsRun(command: string, cwd: string): string[] {
 			base = sequential ? changedDirectory(plain, base) : undefined;
 			continue;
 		}
-		const script = scriptFile(segment.words);
-		const file = script === undefined ? undefined : resolveWord(script, base);
-		if (file === undefined || written.has(file) || found.includes(file)) continue;
-		if (SYSTEM_TREES.some(tree => file === tree || file.startsWith(`${tree}/`))) continue;
-		found.push(file);
+		for (const script of scriptFiles(segment.words)) {
+			const file = resolveWord(script, base);
+			if (file === undefined || written.has(file) || found.includes(file)) continue;
+			if (SYSTEM_TREES.some(tree => file === tree || file.startsWith(`${tree}/`))) continue;
+			found.push(file);
+		}
 	}
 	return found.slice(0, SCRIPTS_SHOWN);
 }
@@ -630,13 +632,14 @@ export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 	if (call.tier === "write") {
 		const targets = call.targets ?? [];
 		if (targets.length > 0) return targets.some(target => !staysInside(target, cwd));
-		// An MCP tool can act anywhere. Built-in write-tier tools without targets keep session state, unless a path
-		// argument (`tts` `output_path`) names a file outside the working directory.
-		if (isMCPToolName(call.toolName)) return true;
-		return pathArguments(call.args).some(file => !staysInside(file, cwd));
+		// A write-tier tool without targets is judged unless it only keeps this session's own state.
+		return !inTable(SESSION_STATE_TOOLS, call.toolName);
 	}
 	return true;
 }
+
+/** Write-tier tools without targets that change only the session's own state: its notebook, its context, and fresh temp images. */
+const SESSION_STATE_TOOLS = wordTable("context_notes new_context generate_image");
 
 /** Internal URLs that are the session's own artifacts (`local://`) or dispatch a call the guard sees on its own (`xd://`). */
 const SESSION_URL = /^(?:local|xd):\/\//;
@@ -653,18 +656,28 @@ function staysInside(target: string, cwd: string): boolean {
 }
 
 /**
- * The directory a bash call's process runs in, as bash resolves it: its `cwd` (`~` expanded), or a leading
- * `cd DIR &&` / `cd DIR;` bash hoists into one. A URL directory, or one that does not exist, leaves the
- * session's directory.
+ * The directory a bash call's process runs in, as bash resolves it: its `cwd` (`~` expanded), moved by a leading
+ * `cd DIR &&` / `cd DIR;` (bash hoists one into the directory when no `cwd` is given; with one, the shell starts
+ * there and then moves). A URL directory, or one that does not exist, leaves the session's directory.
  */
 function processDirectory(command: string | undefined, runIn: string | undefined, cwd: string): string {
-	let dir: string | undefined;
-	if (runIn) dir = runIn.includes("://") ? undefined : resolveToCwd(runIn, cwd);
-	else if (command !== undefined) {
-		const cd = extractLeadingCdTarget(command);
-		if (cd && !cd.path.includes("://")) dir = resolveShellDirectory(cd.path, cwd);
+	if (runIn?.includes("://")) return cwd;
+	const isDirectory = (dir: string): boolean => fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory() === true;
+	let dir = runIn ? resolveToCwd(runIn, cwd) : cwd;
+	if (!isDirectory(dir)) return cwd;
+	const cd = command === undefined ? null : extractLeadingCdTarget(command);
+	if (cd && !cd.path.includes("://")) {
+		const moved = resolveShellDirectory(cd.path, dir);
+		if (isDirectory(moved)) dir = moved;
 	}
-	return dir !== undefined && fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory() ? dir : cwd;
+	return dir;
+}
+
+/** How far a judge's distribution may sum from 1 through rounding before the answer counts as malformed. */
+const DISTRIBUTION_SLACK = 0.05;
+
+function isProbability(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 /** The refusal for `answers`, when the named risks reach `thresholds.risk` and P(asked) stays below `thresholds.asked`. */
@@ -675,15 +688,19 @@ export function guardVerdict(
 	const { risk, asked } = answers;
 	if (risk?.type !== "choice" || asked?.type !== "noul") return undefined;
 	const probabilities: Record<string, number> = risk.probabilities ?? { [risk.choice]: 1 };
+	// A malformed answer (a value outside 0-1, or a distribution that does not sum to 1) lets the call through.
+	const values = Object.values(probabilities);
+	if (!values.every(isProbability) || Math.abs(values.reduce((sum, p) => sum + p, 0) - 1) > DISTRIBUTION_SLACK) {
+		return undefined;
+	}
 	let riskProbability = 0;
 	let top: RiskLabel | undefined;
 	for (const label of RISK_LABELS) {
 		const p = probabilities[label] ?? 0;
-		if (!Number.isFinite(p)) return undefined;
 		riskProbability += p;
 		if (top === undefined || p > (probabilities[top] ?? 0)) top = label;
 	}
-	if (top === undefined || !Number.isFinite(asked.noul)) return undefined;
+	if (top === undefined || !isProbability(asked.noul)) return undefined;
 	if (riskProbability < thresholds.risk || asked.noul >= thresholds.asked) return undefined;
 	const rubric = QUESTIONS.risk.criteria[top] ?? top;
 	return {

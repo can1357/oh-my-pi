@@ -24,14 +24,15 @@ import { createAssistantMessage } from "../helpers/agent-session-setup";
 
 type Probabilities = Partial<Record<string, number>>;
 
-/** A judge answering every request with the given risk distribution and P(asked). */
+/** A judge answering every request with the given risk distribution (`routine` takes the rest) and P(asked). */
 function fakeJudge(risk: Probabilities, asked: number): GuardJudge & { requests: JudgmentRequest<Questions>[] } {
 	const requests: JudgmentRequest<Questions>[] = [];
 	return {
 		requests,
 		judge: (async (request: JudgmentRequest<Questions>) => {
 			requests.push(request);
-			const probabilities = { routine: 0, ...risk } as Record<string, number>;
+			const rest = 1 - Object.values(risk).reduce((sum: number, p) => sum + (p ?? 0), 0);
+			const probabilities = { routine: Math.max(0, rest), ...risk } as Record<string, number>;
 			const choice = Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0][0];
 			return {
 				api: "test",
@@ -165,20 +166,22 @@ describe("tool guard", () => {
 		expect(judge.requests).toHaveLength(4);
 	});
 
-	it("judges a targetless write-tier tool whose path argument leaves the working directory", async () => {
+	it("judges a write-tier tool without targets unless it only keeps the session's own state", async () => {
 		const judge = fakeJudge({ routine: 1 }, 0);
 		const { guard } = guardWith(judge);
-		const tts = tool("tts", "write");
 
-		await guard.check(tts, { text: "hi", output_path: "out/hello.mp3" }, "write");
-		await guard.check(tts, { text: "hi", output_path: path.join(cwd, "hello.wav") }, "write");
 		await guard.check(tool("context_notes", "write"), { text: "notes" }, "write");
+		await guard.check(tool("new_context", "write"), {}, "write");
+		await guard.check(tool("generate_image", "write"), { prompt: "a cat" }, "write");
 		expect(judge.requests).toHaveLength(0);
 
-		await guard.check(tts, { text: "hi", output_path: "/etc/hosts" }, "write");
-		await guard.check(tts, { text: "hi", output_path: "~/.bashrc" }, "write");
-		await guard.check(tts, { text: "hi", output_path: "../outside.mp3" }, "write");
-		expect(judge.requests).toHaveLength(3);
+		// `manage_skill` rewrites skills outside the workspace; `tts` writes `output_path` wherever it points.
+		await guard.check(tool("manage_skill", "write"), { action: "delete", name: "deploy" }, "write");
+		await guard.check(tool("tts", "write"), { text: "hi", output_path: "out/hello.mp3" }, "write");
+		await guard.check(tool("tts", "write"), { text: "hi", output_path: "/etc/hosts" }, "write");
+		await guard.check(tool("security_publish", "write"), { scanId: "s1" }, "write");
+		await guard.check(tool("my_extension_tool", "write"), { name: "x" }, "write");
+		expect(judge.requests).toHaveLength(5);
 	});
 
 	it("judges a write through a symlinked parent to a file not yet there", async () => {
@@ -187,9 +190,8 @@ describe("tool guard", () => {
 		const outside = TempDir.createSync("@omp-tool-guard-outside-");
 		try {
 			fs.symlinkSync(outside.path(), path.join(cwd, "out"));
-			await guard.check(tool("tts", "write"), { text: "hi", output_path: "out/new.wav" }, "write");
 			await guard.check(write, { path: path.join(cwd, "out/new.ts") }, "write");
-			expect(judge.requests).toHaveLength(2);
+			expect(judge.requests).toHaveLength(1);
 		} finally {
 			outside.removeSync();
 		}
@@ -204,13 +206,11 @@ describe("tool guard", () => {
 
 		await guard.check(remote, { url: "local://notes.md" }, "write");
 		await guard.check(remote, { url: "xd://tts" }, "write");
-		await guard.check(tool("tts", "write"), { text: "hi", output_path: "local://hello.mp3" }, "write");
 		expect(judge.requests).toHaveLength(0);
 
 		await guard.check(remote, { url: "https://api.example/resource" }, "write");
 		await guard.check(remote, { url: "ssh://prod/etc/hosts" }, "write");
-		await guard.check(tool("tts", "write"), { text: "hi", output_path: "ssh://prod/x.mp3" }, "write");
-		expect(judge.requests).toHaveLength(3);
+		expect(judge.requests).toHaveLength(2);
 	});
 
 	it("classifies only reading commands as read-only", () => {
@@ -540,6 +540,20 @@ describe("tool guard", () => {
 		]);
 	});
 
+	it("shows the judge a local module node preloads before its script", () => {
+		expect(scriptsRun("node --require /tmp/preload.js main.js", cwd)).toEqual([
+			"/tmp/preload.js",
+			path.join(cwd, "main.js"),
+		]);
+		expect(scriptsRun("node -r ./hook.cjs --import=./esm.mjs app.js", cwd)).toEqual([
+			path.join(cwd, "hook.cjs"),
+			path.join(cwd, "esm.mjs"),
+			path.join(cwd, "app.js"),
+		]);
+		// A package name is not a file to show.
+		expect(scriptsRun("node -r dotenv/config app.js", cwd)).toEqual([path.join(cwd, "app.js")]);
+	});
+
 	it("resolves the scripts a command runs in the directory it moved to", () => {
 		expect(scriptsRun("cd job && python task.py", cwd)).toEqual([path.join(cwd, "job/task.py")]);
 		expect(scriptsRun("cd /tmp/job; ./run.sh", cwd)).toEqual(["/tmp/job/run.sh"]);
@@ -602,6 +616,7 @@ describe("tool guard", () => {
 		const { guard } = guardWith(judge);
 		const outside = TempDir.createSync("@omp-tool-guard-disk-");
 		fs.mkdirSync(path.join(cwd, "sub"));
+		fs.mkdirSync(path.join(outside.path(), "deep"));
 		try {
 			await guard.check(bash, { command: "bun test" }, "exec");
 			await guard.check(bash, { command: "bun test", cwd: "sub" }, "exec");
@@ -615,6 +630,8 @@ describe("tool guard", () => {
 			// A directory that does not exist leaves the session's, whose pressure can still be read.
 			await guard.check(bash, { command: "bun test", cwd: "missing" }, "exec");
 			await guard.check(bash, { command: "cd missing; bun test" }, "exec");
+			// With a `cwd`, the shell starts there and a leading `cd` then moves it.
+			await guard.check(bash, { command: "cd deep && bun test", cwd: outside.path() }, "exec");
 
 			expect(pressureDirs).toEqual([
 				cwd,
@@ -626,6 +643,7 @@ describe("tool guard", () => {
 				path.join(cwd, "sub"),
 				cwd,
 				cwd,
+				path.join(outside.path(), "deep"),
 			]);
 		} finally {
 			outside.removeSync();
@@ -867,6 +885,18 @@ describe("guardVerdict", () => {
 		// `routine` and `unclear` never count as risk.
 		expect(guardVerdict(answers({ unclear: 0.7, routine: 0.3 }, 0), thresholds)).toBeUndefined();
 		// Thresholds are configurable.
-		expect(guardVerdict(answers({ destroys_data: 0.7 }, 0), { risk: 0.8, asked: 0.3 })).toBeUndefined();
+		expect(guardVerdict(answers({ destroys_data: 0.7, routine: 0.3 }, 0), { risk: 0.8, asked: 0.3 })).toBeUndefined();
+	});
+
+	it("lets a malformed answer through", () => {
+		// Each value finite, but the distribution sums to 1.6: no refusal on it.
+		expect(guardVerdict(answers({ destroys_data: 0.8, exfiltrates: 0.8 }, 0.1), thresholds)).toBeUndefined();
+		expect(guardVerdict(answers({ destroys_data: 0.7 }, 0.1), thresholds)).toBeUndefined();
+		expect(guardVerdict(answers({ destroys_data: 1.2, routine: -0.2 }, 0.1), thresholds)).toBeUndefined();
+		expect(guardVerdict(answers({ destroys_data: 0.9, routine: 0.1 }, -0.5), thresholds)).toBeUndefined();
+		// Rounding that leaves the sum near 1 still counts.
+		expect(guardVerdict(answers({ destroys_data: 0.67, routine: 0.34 }, 0.1), thresholds)).toMatchObject({
+			risk: "destroys_data",
+		});
 	});
 });
