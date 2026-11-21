@@ -371,6 +371,20 @@ export const cfgToolsRestrictedFolders = register({
 	},
 });
 
+// Fixed guard rules (`tools/guard-rules.ts`): off by default.
+export const cfgToolsGuardRules = register({
+	id: "tools.guardRules",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Guard Rules",
+		description:
+			"Ask before top-level bash commands that read credentials or send secrets over the network, and before read/grep of credential files, the way critical commands ask. A best-effort convenience, not a security boundary: nested commands (bash -c, eval, substitutions, groups) are not checked. No effect under yolo unless a tools.approval policy applies",
+	},
+});
+
 // Todo tool
 // Todo settings deliberately have no `protocolDefault`: protocol embedders need project-level opt-outs
 // for reminder/prelude prompt injection.

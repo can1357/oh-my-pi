@@ -78,6 +78,7 @@ import {
 	tokenizeShellSegments,
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
+import { findPipelineGuardHits, findShellGuardHit, type GuardHit, type GuardScope } from "./guard-rules";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -90,6 +91,7 @@ import {
 	cfgGlobEnabled,
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
+	cfgToolsGuardRules,
 	cfgToolsMaxTimeout,
 } from "./settings";
 import {
@@ -764,9 +766,38 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
+		const guardHit = this.#guardHit(command, input.cwd);
+		if (guardHit) return { tier: "exec", override: true, reason: guardHit.reason };
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
 	};
+	/**
+	 * The fixed guard rule (`tools.guardRules`) `command` breaks over its top-level commands, or
+	 * `undefined`, as always with the setting off. The critical patterns are not among the rules:
+	 * they match the raw command line either way.
+	 */
+	#guardHit(command: string, cwd: unknown): GuardHit | undefined {
+		return cfgToolsGuardRules.get(this.session.settings)
+			? findShellGuardHit(command, this.#guardScope(cwd))
+			: undefined;
+	}
+	/**
+	 * Where the fixed guard rules see a call run: its `cwd` argument (resolved like execution
+	 * resolves it) or the session cwd. A `cwd` execution cannot resolve (`@local://notes`) is left
+	 * for execution to report, and the rules see the session cwd.
+	 */
+	#guardScope(cwd: unknown): GuardScope {
+		const sessionCwd = this.session.cwd ?? process.cwd();
+		let commandCwd = sessionCwd;
+		if (typeof cwd === "string" && cwd !== "" && !InternalUrlRouter.instance().canHandle(cwd)) {
+			try {
+				commandCwd = resolveToCwd(cwd, sessionCwd);
+			} catch {
+				commandCwd = sessionCwd;
+			}
+		}
+		return { cwd: commandCwd, home: os.homedir() };
+	}
 	/**
 	 * `bash.patterns` rules and env allowlist for the session (`session`) and for the operator layers
 	 * alone (`authority`, from `Settings.grantAuthority()`); `authority` is `session` when they agree.
@@ -796,7 +827,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		};
 	}
 
-	#formatCompoundApprovalDetails(command: string): string[] | null {
+	#formatCompoundApprovalDetails(command: string, cwd: unknown): string[] | null {
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
 			: undefined;
@@ -827,12 +858,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command)) &&
 			!segmentCritical.some(Boolean);
 		if (wholeChainOnlyCritical) return null;
+		// Each segment is one pipeline of the guard's parse of the whole chain, checked from the directory
+		// the segments before it leave. A hit no segment can carry (`size_limit`), or a parse with more
+		// pipelines than segments, leaves the chain to the plain command row.
+		const segmentGuards = cfgToolsGuardRules.get(this.session.settings)
+			? findPipelineGuardHits(command, this.#guardScope(cwd))
+			: [];
+		if (segmentGuards.length > segments.length || (!segmentGuards.some(Boolean) && this.#guardHit(command, cwd))) {
+			return null;
+		}
 
 		let chainUntainted = true;
 		const rows: string[] = [];
 		for (let i = 0; i < segments.length; i++) {
 			const segment = segments[i]!;
 			const isCritical = segmentCritical[i]!;
+			const guardRule = segmentGuards[i]?.rule;
 			const segmentRule = findBashApprovalPatternRule(segment.text, policy.rules, policy.allowedEnvVars);
 			const authorityRule =
 				authority === policy
@@ -848,6 +889,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				chainUntainted &&
 				segment.literal !== null &&
 				!isCritical &&
+				!guardRule &&
 				!promptRule &&
 				authorityRule?.approval !== "deny" &&
 				segmentRule?.approval === "allow";
@@ -859,7 +901,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					? `prompt: ${promptRule.match}`
 					: isCritical
 						? "critical pattern"
-						: "requires approval";
+						: (guardRule ?? "requires approval");
 				rows.push(`  ? ${truncateForPrompt(segment.text)} (${reason})`);
 			}
 		}
@@ -867,10 +909,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const rawCommand = (args as Partial<BashToolInput>).command;
+		const input = args as Partial<BashToolInput>;
+		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "(missing)";
 		if (typeof rawCommand === "string") {
-			const compound = this.#formatCompoundApprovalDetails(command);
+			const compound = this.#formatCompoundApprovalDetails(command, input.cwd);
 			if (compound) return compound;
 		}
 		return [`Command: ${truncateForPrompt(command)}`];

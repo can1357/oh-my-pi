@@ -13,7 +13,7 @@ import type {
 	ToolSpeculationCommitContext,
 	ToolSpeculationDiscardContext,
 	ToolSpeculationExecutionContext,
-	ToolTier,
+	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import {
@@ -88,6 +88,8 @@ import {
 } from "./conflict-detect";
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget, type ReadUrlEntry } from "./fetch";
 import { approvalDirectoryKey } from "./approval-cache";
+import { fileToolApproval } from "./guard-rules";
+import { approvalRootCandidates } from "./search-approval-targets";
 import { approvalTargetKey, approvalTargetNamesFile, isApprovalPublicUrl } from "./approval-targets";
 import {
 	postProcessToolResult,
@@ -98,6 +100,7 @@ import {
 import {
 	expandPath,
 	formatPathRelativeToCwd,
+	normalizePathLikeInput,
 	probeLiteralPathExists,
 	resolveReadPathAsync,
 	specialFileKind,
@@ -207,6 +210,7 @@ import {
 	cfgReadRenderMarkdown,
 	cfgReadSummarizeEnabled,
 	cfgReadSummarizeProse,
+	cfgToolsGuardRules,
 } from "./settings";
 import { cfgImagesAutoResize } from "../modes/settings";
 
@@ -1251,14 +1255,21 @@ function isSingleWebUrl(readPath: string): boolean {
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
 	readonly readsSkillUris = true;
-	readonly approval = (args: unknown): ToolTier => {
+	readonly approval = (args: unknown): ToolApprovalDecision => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
+		// Execution reads a `;`, `,` or whitespace list part by part, as grep searches its roots, so the
+		// guard rules check every part, not only the whole string. Each is checked trimmed and unquoted:
+		// a list part is, and a missing path with trailing blanks (`.netrc `) is found by suffix match.
+		const targets = cfgToolsGuardRules.get(this.session.settings)
+			? approvalRootCandidates(readPath).map(part => splitImageQuestionTarget(normalizePathLikeInput(part)).path)
+			: [];
 		const urlTier = InternalUrlRouter.instance().readTier(readPath);
-		if (urlTier !== "read") return urlTier;
+		if (urlTier !== "read") return fileToolApproval(urlTier, targets, this.session.cwd);
 		readPath = splitImageQuestionTarget(readPath).path;
 		const target = splitPathAndSel(readPath);
-		return target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
+		const tier = target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
+		return fileToolApproval(tier, targets, this.session.cwd);
 	};
 	/**
 	 * `always-ask-cached` key: the file this read targets, with every selector
