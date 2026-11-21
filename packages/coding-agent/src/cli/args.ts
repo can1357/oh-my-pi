@@ -10,6 +10,7 @@ import type { ApprovalMode } from "../tools/approval";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
+	EXTENSION_SHADOWABLE_STRING_FLAGS,
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
 	type ParseDeps,
@@ -310,14 +311,26 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 					result.unknownFlags.set(flagName, args[++i]);
 				}
 			}
+		} else if (EXTENSION_SHADOWABLE_STRING_FLAGS.has(arg)) {
+			// Bare `--plan` mirrors extension string-flag consumption before
+			// extensions load: a value-like token (`--plan opus`) sets the built-in
+			// field, while a flag-looking token (`--plan --restore sid`,
+			// `--plan --model opus`) stays a flag of its own. Inline `--plan=value`
+			// always consumes its explicit value.
+			if (
+				i + 1 < args.length &&
+				args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG &&
+				(equalsValueIndex !== -1 || !args[i + 1].startsWith("-"))
+			) {
+				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
+				i = consumed.index;
+				STRING_SETTERS[arg](result, consumed.value, parseDeps);
+			}
 		} else if (STRING_VALUE_FLAGS.has(arg)) {
 			if (arg === "--trusted-extension") trustedFlagCount++;
 			// Built-in string flags consume the next token even when it is flag-looking
-			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile").
-			// The one token they must never absorb is the profile bootstrap's internal
-			// boundary sentinel: an extension-shadowable built-in like `--plan` (parsed
-			// here only when its boolean extension is NOT loaded) would otherwise swallow
-			// the marker as its value and drop the user's trailing message.
+			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile"),
+			// except for the profile bootstrap's internal boundary sentinel.
 			if (
 				arg === "--goal" &&
 				(i + 1 >= args.length ||

@@ -9,7 +9,13 @@ import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-co
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
-import { type HostObservations, instrumentRelay, makeHostContext, makeSnapshot, waitFor } from "./helpers/throttled-host";
+import {
+	type HostObservations,
+	instrumentRelay,
+	makeHostContext,
+	makeSnapshot,
+	waitFor,
+} from "./helpers/throttled-host";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {

@@ -57,7 +57,7 @@ import {
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { noticeRow, TranscriptNotice } from "@oh-my-pi/pi-tui/chrome/transcript-notice";
 import { span } from "@oh-my-pi/pi-tui/native/describe";
-import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { createToolCallBlock } from "../../modes/controllers/tool-call-block";
@@ -251,6 +251,8 @@ export class UiHelpers {
 	#textRendererSetVersion = 0;
 	/** The text renderer set changed while a replay was in flight; the commit retires stale scrollback. */
 	#textRendererSetChangedDuringReplay = false;
+	/** The latest line of each keyed status ({@link ShowStatusOptions.key}). */
+	readonly #keyedStatuses = new Map<string, StatusNotice>();
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -260,7 +262,8 @@ export class UiHelpers {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam. A repeat of the
 	 * exact same text replaces the line with a fresh notice: an in-place update with identical props sends
-	 * nothing to a native terminal, so its expired toast would never show again.
+	 * nothing to a native terminal, so its expired toast would never show again. `key` and `collapse`
+	 * opt out of that positional merge; see {@link ShowStatusOptions}.
 	 */
 	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
@@ -270,8 +273,23 @@ export class UiHelpers {
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
 		const notice = { styleFn, toast: options?.toast, action: options?.action };
+		const key = options?.key;
 
-		if (last && last === this.ctx.lastStatus) {
+		if (key !== undefined) {
+			const keyed = this.#keyedStatuses.get(key);
+			if (keyed && this.ctx.chatContainer.canRemoveBlock(keyed) && this.#onlyNoticesBelow(keyed)) {
+				keyed.setMessage(message, notice);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			const status = new StatusNotice(message, notice);
+			this.ctx.present([status]);
+			this.#keyedStatuses.set(key, status);
+			return;
+		}
+
+		const collapse = options?.collapse ?? true;
+		if (collapse && last && last === this.ctx.lastStatus) {
 			if (this.ctx.lastStatus.message !== message) {
 				this.ctx.lastStatus.setMessage(message, notice);
 				this.ctx.ui.requestRender();
@@ -282,7 +300,19 @@ export class UiHelpers {
 
 		const status = new StatusNotice(message, notice);
 		this.ctx.present([status]);
-		this.ctx.lastStatus = status;
+		if (collapse) this.ctx.lastStatus = status;
+	}
+
+	/** Whether `status` is still in the chat with nothing but notices after it. */
+	#onlyNoticesBelow(status: StatusNotice): boolean {
+		const children = this.ctx.chatContainer.children;
+		const index = children.lastIndexOf(status);
+		if (index === -1) return false;
+		for (let i = index + 1; i < children.length; i++) {
+			const child = children[i];
+			if (!(child instanceof StatusNotice || child instanceof TranscriptNotice)) return false;
+		}
+		return true;
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
@@ -567,6 +597,10 @@ export class UiHelpers {
 		let pendingReadUsageCallIds: string[] | undefined;
 		let pendingUsageTurnElapsed: number | undefined;
 		let turnStartedAt: number | undefined;
+		// Rebuild-time mirror of the controller's turn tally: the message that ends
+		// a run gets the turn's totals, and with them the native footer under its
+		// answer (`⧉ · 12.4s · 19K tok this turn`) whose Copy copies the answer.
+		const turnUsage = new TurnUsageTally();
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usageAttached =
@@ -684,6 +718,8 @@ export class UiHelpers {
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
+				// The turn's footer goes under the last answer drawn, as live.
+				let lastSegment: AssistantMessageComponent | undefined;
 				const appendAssistantSegment = (toolCallId: string) => {
 					const segment = timeline.afterToolCalls.get(toolCallId);
 					if (!segment || !assistantHasVisibleContent(segment)) return;
@@ -694,6 +730,7 @@ export class UiHelpers {
 						timeline.contentOffsets.get(toolCallId),
 					);
 					this.ctx.chatContainer.addChild(component);
+					lastSegment = component;
 				};
 
 				// Render tool call components
@@ -802,6 +839,8 @@ export class UiHelpers {
 						new StrippedToolCallsPlaceholder(strippedToolCalls, !this.ctx.hideToolActivity),
 					);
 				}
+				const turnSummary = turnUsage.add(message, turnStartedAt);
+				if (turnSummary) (lastSegment ?? assistantComponent)?.setTurnUsage(turnSummary);
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(this.ctx.settings) && assistantUsageIsBilled(message.usage)
 						? message.usage
@@ -928,7 +967,10 @@ export class UiHelpers {
 				if (message.role === "user") resolveTodoSnapshot();
 				// Only genuinely user-attributed prompts anchor the delta; a mid-run
 				// agent-attributed `user` message (advisor tool-loop redirect) must not.
-				if (message.role === "user" && message.attribution !== "agent") turnStartedAt = message.timestamp;
+				if (message.role === "user" && message.attribution !== "agent") {
+					turnStartedAt = message.timestamp;
+					turnUsage.reset();
+				}
 				// A synthetic developer message initiates a fresh run (auto-continue,
 				// /goal, approved plan): replay must not inherit the preceding user
 				// prompt's timestamp, mirroring the live agent_start clear. Same-turn
@@ -939,9 +981,11 @@ export class UiHelpers {
 					// turn's own prompt: anchor the delta to it instead of clearing.
 					if (message.userInitiated) turnStartedAt = message.timestamp;
 					else turnStartedAt = undefined;
+					turnUsage.reset();
 				}
 				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
 					turnStartedAt = message.timestamp;
+					turnUsage.reset();
 				}
 				// All other messages use standard rendering
 				this.ctx.addMessageToChat(message, { reuseSettledComponent: options.reuseSettledComponents });
