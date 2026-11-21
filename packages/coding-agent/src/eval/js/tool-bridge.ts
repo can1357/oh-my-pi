@@ -234,10 +234,12 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
+/** Serve one eval bridge call from a running cell. */
 export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	return withEvalBridgeToolCall(options.session.xdev, () => dispatchSessionTool(name, args, options));
 }
 
+/** Host side of one eval bridge call. */
 async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
