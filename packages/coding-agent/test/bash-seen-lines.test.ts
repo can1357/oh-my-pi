@@ -254,23 +254,74 @@ describe("bash numbered file views credit seen lines", () => {
 		expect(await Bun.file(path.join(cwd, "src", "b.txt")).text()).toBe("needle changed\nbeta\n");
 	});
 
-	// T5: two paths to the same file. The tool hoists a leading `cd sub &&` into the command's cwd, so the first
-	// row checks that rows resolve against the cwd the command ran in; the second keeps its `cd` in the command
-	// and checks the literal `cd` target as a resolution base.
-	it.each(["cd sub && grep -n needle f.txt", "test -d sub && cd sub && grep -n needle f.txt"])(
-		"credits a file named relative to a cd target: %s",
+	// T5: paths to the same file. The tool hoists a leading `cd sub &&` into the command's cwd, so the first row
+	// checks that rows resolve against the cwd the command ran in; the others keep their `cd` in the command and
+	// check the literal `cd` targets as resolution bases: chained (`cd a && cd b` is `a/b`, no single target names
+	// it) and after a failed `cd` (`cd missing || cd b` runs `cd b` from the cwd, not from `missing`).
+	it.each([
+		["cd sub && grep -n needle f.txt", "sub"],
+		["test -d sub && cd sub && grep -n needle f.txt", "sub"],
+		["test -d a && cd a && cd b && grep -n needle f.txt", "a/b"],
+		["cd missing || cd b && grep -n needle f.txt", "b"],
+	])("credits a file named relative to a cd target: %s", async (command, dir) => {
+		const session = createSession(cwd);
+		const target = path.join(cwd, dir, "f.txt");
+		await Bun.write(target, "first\nneedle here\nlast\n");
+		const output = await bash(session, command);
+		expect(output).toContain("2:needle here");
+		const [footer, ...rest] = footers(output);
+		expect(rest).toEqual([]);
+		expect(footer).toMatchObject({ path: `${dir}/f.txt`, lines: "2" });
+
+		await edit(session, `${footer.header}\nPUT 2.=2:\n+needle moved\n`);
+		expect(await Bun.file(target).text()).toBe("first\nneedle moved\nlast\n");
+	});
+
+	// D14: a subshell group makes the whole command "non-flat"; its `cd` target and file words still count.
+	it("credits a file named inside a parenthesized subshell", async () => {
+		const session = createSession(cwd);
+		await Bun.write(path.join(cwd, "sub", "f.txt"), "first\nneedle here\nlast\n");
+		const output = await bash(session, "(cd sub && grep -n needle f.txt)");
+		expect(output).toContain("2:needle here");
+		expect(footers(output)).toMatchObject([{ path: "sub/f.txt", lines: "2" }]);
+	});
+
+	// D13: shell output carries no tool-input prefixes. A leading `:` is part of the printed path, so
+	// `:/abs/values.txt` names no file (tool-input normalization would strip it and credit values.txt).
+	it("does not strip a leading colon from a path printed in a row", async () => {
+		const session = createSession(cwd);
+		const plain = await bash(session, `printf '%s:35:line 35: value_35\\n' '${file}'`);
+		expect(footers(plain)).toMatchObject([{ path: "values.txt", lines: "35" }]);
+
+		const colon = await bash(session, `printf ':%s:35:line 35: value_35\\n' '${file}'`);
+		expect(colon).toContain(":35:line 35: value_35");
+		expect(footers(colon)).toEqual([]);
+	});
+
+	// A comment names no file: its words are neither candidates (which would make two files named and drop the bare
+	// rows) nor a `cd` base, and an apostrophe in one must not open a quote that swallows the command. The last row is
+	// non-flat (`${...}`), where the whole command is tokenized without the extractor's comment handling.
+	it.each([
+		"# Let's look\ngrep -n 'value_35$' values.txt",
+		"grep -n 'value_35$' values.txt # compare with other.txt",
+		`PAT=value_35; grep -n \${PAT} values.txt # compare with other.txt`,
+	])("ignores comment text when naming files: %s", async command => {
+		const session = createSession(cwd);
+		await Bun.write(path.join(cwd, "other.txt"), SOURCE);
+		const output = await bash(session, command);
+		expect(output).toContain("35:line 35: value_35");
+		expect(footers(output)).toMatchObject([{ path: "values.txt", lines: "35" }]);
+	});
+
+	// A quoted `#` is an argument, not a comment: dropping the words after it would lose the file name. Flat
+	// command first, then one the extractor declines (a subshell), which takes the comment-aware fallback.
+	it.each(["grep -n '#*value_35$' values.txt", "(grep -n '#*value_35$' values.txt)"])(
+		"keeps words after a quoted # argument: %s",
 		async command => {
 			const session = createSession(cwd);
-			const target = path.join(cwd, "sub", "f.txt");
-			await Bun.write(target, "first\nneedle here\nlast\n");
 			const output = await bash(session, command);
-			expect(output).toContain("2:needle here");
-			const [footer, ...rest] = footers(output);
-			expect(rest).toEqual([]);
-			expect(footer).toMatchObject({ path: "sub/f.txt", lines: "2" });
-
-			await edit(session, `${footer.header}\nPUT 2.=2:\n+needle moved\n`);
-			expect(await Bun.file(target).text()).toBe("first\nneedle moved\nlast\n");
+			expect(output).toContain("35:line 35: value_35");
+			expect(footers(output)).toMatchObject([{ path: "values.txt", lines: "35" }]);
 		},
 	);
 

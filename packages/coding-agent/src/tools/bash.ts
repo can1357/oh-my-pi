@@ -1414,8 +1414,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (recorded.length === 0) return built;
 		const editTags =
 			recorded.length === seenFiles.length ? candidateTags : formatBashSeenLinesFooter(recorded, this.session.cwd);
-		built.content[0] = { type: "text", text: withTags(editTags) };
-		return { ...built, details: { ...details, editTags } };
+		return {
+			...built,
+			content: [{ type: "text", text: withTags(editTags) }, ...built.content.slice(1)],
+			details: { ...(built.details ?? details), editTags },
+		};
 	}
 
 	/**
