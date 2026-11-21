@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import * as credentials from "@oh-my-pi/pi-ai/providers/antigravity-cli/credentials";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
@@ -18,7 +19,15 @@ import {
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
-import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	ProviderSessionState,
+	Tool,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -666,6 +675,36 @@ describe("AgyHost stateful steps", () => {
 		await restarted.prompts.next();
 		restarted.exit.resolve(24);
 		await expect(next.done).rejects.toThrow("exited with code 24");
+	});
+
+	it("returns a text-only report through streamSimple without exposing tools", async () => {
+		const state = await fixture();
+		const apiKey = JSON.stringify({
+			token: "fixture-access",
+			refreshToken: "fixture-refresh",
+			expiresAt: Date.now() + 3_600_000,
+			email: "wrapup@example.test",
+		});
+		const sessionId = "wrap-up";
+		const sessions = new Map<string, ProviderSessionState>([
+			[`antigravity-acp:${credentials.agyCredentialKey(apiKey)}:${sessionId}`, state.host],
+		]);
+		const staging = spyOn(credentials, "stageAgyCredentials").mockResolvedValue(undefined);
+		try {
+			const stream = streamSimple(
+				model,
+				{ messages: [user("Tools disabled. Report now.")], tools },
+				{ apiKey, sessionId, providerSessionState: sessions, toolChoice: "none" },
+			);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			expect(fake.options.tools).toEqual([]);
+			fake.text("Final report.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			expect((await stream.result()).content).toEqual([{ type: "text", text: "Final report." }]);
+		} finally {
+			staging.mockRestore();
+		}
 	});
 
 	it("disables tools for a text-only step and restores them on the next step", async () => {

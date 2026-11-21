@@ -2465,7 +2465,12 @@ function mapOptionsForApi<TApi extends Api>(
 				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && agyModel.reasoning
 					? requireSupportedEffort(agyModel, options.reasoning)
 					: undefined;
-			return castApi<"antigravity-acp">({ ...base, cwd: options?.cwd, reasoning });
+			return castApi<"antigravity-acp">({
+				...base,
+				cwd: options?.cwd,
+				reasoning,
+				toolChoice: options?.toolChoice,
+			});
 		}
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);
