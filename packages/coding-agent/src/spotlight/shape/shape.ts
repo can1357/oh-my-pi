@@ -37,7 +37,7 @@ import { outlineBash, outlineRead } from "./outline";
 import { alignedTo, bump, headTail, noteRank, noteWhy, type Origin, type Run, scoreLines } from "./run";
 import { noteCall, noteShown, type ShapeState } from "./state";
 import { shapeTestRun } from "./test-runs";
-import { fileSpans, runSpan, type Span, type View } from "./view";
+import { fileSpans, runSpan, type SourcePeak, type Span, type View } from "./view";
 import {
 	fillSmallGaps,
 	foldDividers,
@@ -45,9 +45,9 @@ import {
 	lineShape,
 	uniformShape,
 	COMMIT,
-	coverHotPassages,
 	DENSITY_PARTS,
 	rankLines,
+	peakLines,
 	frameLines,
 	isDiff,
 	isGrid,
@@ -217,25 +217,30 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 	let text = input.text;
 	const steps: string[] = [];
 	let recovery = false;
+	let peaks: SourcePeak[] | undefined;
+	let scores: (number | null)[] | undefined;
 	if (input.tool === "bash") {
 		const code = await outlineBash(run, text);
 		recovery = code.recovery;
 		if (code.text !== undefined) {
 			text = code.text;
+			peaks = code.peaks;
+			scores = code.scores;
 			steps.push("outline");
 		}
-		const docs = await foldBashDocs(run, text);
+		const docs = await foldBashDocs(run, text, peaks);
 		if (docs !== undefined) {
 			text = docs;
 			steps.push("docs");
 		}
 		if (isTestRun(command)) {
-			const tests = await shapeTestRun(run, text);
+			const tests = await shapeTestRun(run, text, peaks);
 			if (tests !== undefined) {
 				text = tests;
 				steps.push("tests");
 			}
 		}
+		if (code.text !== text) scores = undefined;
 	}
 	if (!steps.length) {
 		const dump = await shapeDumpOutput(run, text);
@@ -244,7 +249,11 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 			steps.push("dump");
 		}
 	}
-	return { view: steps.length ? { lines: text.split("\n"), spans: null } : subject.view, steps, recovery };
+	return {
+		view: steps.length ? { lines: text.split("\n"), spans: null, peaks, scores } : subject.view,
+		steps,
+		recovery,
+	};
 }
 
 /**
@@ -506,12 +515,12 @@ async function shapeSubject(
 	// Why the valve shows or hides each line; undefined: shown, as the base layers decided.
 	let why: (SpotlightReason | undefined)[] = witnessed.map(w => (w ? "r" : undefined));
 	let frame: { chosen: Window; density: number[] } | undefined;
-	let budget = WINDOW_BUDGET * scale;
 	let uniform: { shapes: string[]; differs: boolean[]; edges: boolean[] } | undefined;
 	if (cut) {
-		const spot = await scoreLines(run, lines, origin);
+		const source = b.view.peaks?.filter(p => !witnessed[p.line]);
+		const spot = b.view.scores ?? (await scoreLines(run, lines, origin));
 		const { density, order } = rankLines(lines, spot ?? headTail(lines.length));
-		uniform = input.read ? undefined : uniformShape(lines, witnessed);
+		uniform = input.read || source?.length ? undefined : uniformShape(lines, witnessed);
 		// The lines the call asks for: those its intent names and command output's last line.
 		const asked = intentLines(run, lines).map((named, i) => named || keep[i]);
 		const forced = lines.map(
@@ -539,19 +548,26 @@ async function shapeSubject(
 		lines.forEach((_, i) => {
 			if (namedBody(i)) bodies += width[i] + 1;
 		});
-		budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + bodies);
+		const budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + bodies);
+		const peaks =
+			spot && !uniform && (!b.view.scores || !source?.length) ? peakLines(lines, witnessed, spot, order) : undefined;
 		const chosen = frameLines(width, lines, witnessed, scores, {
 			budget,
 			// Neighbours of a line that differs in uniform output are routine lines themselves.
 			ctx: uniform ? 0 : 1,
 			head: 3,
 			tail: 4,
+			source: !uniform ? source : undefined,
+			passages: peaks?.length
+				? {
+						peaks,
+						named: i => asked[i] || namedBody(i),
+						previewChars: folded ? undefined : previewChars,
+					}
+				: undefined,
 			// In uniform output only the lines that say something new are picked; the rest are routine samples.
 			...(uniform ? { pick: forced } : {}),
 		});
-		if (spot && !uniform && !folded) {
-			budget = coverHotPassages(chosen, lines, width, witnessed, spot, order, budget, previewChars);
-		}
 		frame = { chosen, density };
 		why = chosen.why;
 		if (!shapesItself(input.tool) || (input.tool === "read" && !input.read)) keepHeadings(lines, why);
@@ -582,7 +598,7 @@ async function shapeSubject(
 			values: [frame.density],
 			why,
 			floor: 1,
-			budget,
+			budget: frame.chosen.budget,
 			used: frame.chosen.used,
 			last: frame.chosen.last,
 		});

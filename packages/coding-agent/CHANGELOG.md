@@ -42,7 +42,8 @@
 
 ### Fixed
 
-- Spotlight keeps high-relevance passages with their neighbours on long results, without displacing previously selected evidence.
+- Spotlight keeps short relevant passages from multiple large function bodies together with their signatures, even when a code outline is cut again.
+- Spotlight keeps more high-relevance lines with their neighbours in long results and large code outlines, while preserving visible intent matches within the window budget.
 
 - Fixed Tern tray cards and subagent live previews showing stale calls, models, or thinking states while an agent was running or after a model switch; completed cards now retain the model and thinking level used.
 - Fixed extension side-panel sessions launching omp's own browser instead of driving only the user's Chrome window.
