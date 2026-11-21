@@ -71,6 +71,11 @@ export type WorkerOutbound =
 	| { type: "shadow-run"; id: string; eligible: boolean; reason?: string }
 	| { type: "closed" };
 
+/** Process output is synchronously handed off before its IPC notification is sent. */
+export const JS_EVAL_OUTBOX_ENV = "PI_JS_EVAL_OUTBOX";
+export type ProcessWorkerOutput = Extract<WorkerOutbound, { type: "text" | "display" }>;
+export type ProcessWorkerOutbound = WorkerOutbound | { type: "output-ready"; sequence: number };
+
 /**
  * First raw message a Bun Worker host posts to its worker (worker-thread mode only): the port the
  * worker sends every {@link WorkerOutbound} on instead of `parentPort`. A terminated Bun Worker drops
