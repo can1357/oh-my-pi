@@ -4,7 +4,7 @@
 //! (any `scheme://` registered in [`PathPolicy::url_schemes`], or the
 //! single-slash `scheme:/` spelling of a [`PathPolicy::url_alias_schemes`]
 //! entry) are opaque here: their backing files come from host answers
-//! ([`UrlResolution`]) keyed by the canonical `scheme://` URL. Any other
+//! ([`UrlAnswer`]) keyed by the canonical `scheme://` URL. Any other
 //! URI-shaped target (`scheme:/x` of a non-alias scheme, an unregistered
 //! `scheme://x` other than `file://`) is refused the way `write` refuses it,
 //! never edited as a working-tree path.
@@ -20,22 +20,38 @@ use omp_xfs::{FileType, pattern::Glob};
 use regex::Regex;
 
 use crate::{
-	engine::{FileOp, Resolved},
+	engine::{FileOp, Location, Resolved},
 	error::{EditError, EditResult},
 };
 
 /// Host answer for one internal URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UrlResolution {
-	/// Absolute backing file; `None` → the URL has no local file (the edit
-	/// fails with `error` or a generic message).
-	pub absolute:      Option<PathBuf>,
-	/// Model-facing refusal (read-only scheme, immutable, disabled…); wins
-	/// over `absolute`.
-	pub error:         Option<String>,
-	/// Writable while plan mode is active (the scheme's write scope is the
-	/// session sandbox).
-	pub plan_writable: bool,
+pub enum UrlAnswer {
+	/// A local backing file; normal filesystem canonicalization and stamps
+	/// apply.
+	Backed { path: PathBuf, plan_writable: bool },
+	/// Host-owned text, keyed as an opaque identity without filesystem access.
+	Hosted {
+		/// Identity shared by aliases and the snapshot store; never a local
+		/// backing file.
+		key:           String,
+		/// Full UTF-8 text, or `None` for a host target that does not exist.
+		content:       Option<String>,
+		plan_writable: bool,
+	},
+	/// Resolution requires execution approval; preview only this target later.
+	Pending,
+	/// A model-facing host refusal, propagated verbatim.
+	Refused(String),
+}
+
+impl UrlAnswer {
+	const fn plan_writable(&self) -> bool {
+		matches!(
+			self,
+			Self::Backed { plan_writable: true, .. } | Self::Hosted { plan_writable: true, .. }
+		)
+	}
 }
 
 /// Session-wide path policy supplied by the host once per tool call.
@@ -83,26 +99,25 @@ impl PathPolicy {
 	pub fn resolve(
 		&self,
 		authored: &str,
-		urls: &HashMap<String, UrlResolution>,
+		urls: &HashMap<String, UrlAnswer>,
 	) -> EditResult<Resolved> {
 		let display = unwrap_hashline_header_path(authored).to_owned();
-		let absolute = match self.address(&display) {
+		let location = match self.address(&display) {
 			Address::Url(url) => {
 				let resolution = urls
 					.get(url.as_ref())
 					.ok_or_else(|| EditError::UnresolvedUrl(url.as_ref().to_owned()))?;
-				if let Some(error) = &resolution.error {
-					return Err(EditError::apply(error.clone()));
+				match resolution {
+					UrlAnswer::Backed { path, .. } => Location::Disk(path.clone()),
+					UrlAnswer::Hosted { key, .. } => Location::Hosted(key.clone()),
+					UrlAnswer::Pending => return Err(EditError::DeferredUrl(url.into_owned())),
+					UrlAnswer::Refused(error) => return Err(EditError::apply(error.clone())),
 				}
-				resolution
-					.absolute
-					.clone()
-					.ok_or_else(|| EditError::apply(format!("No local file backs {url}")))?
 			},
-			Address::Path => self.resolve_path(&display),
+			Address::Path => Location::Disk(self.resolve_path(&display)),
 			Address::Refused(message) => return Err(EditError::apply(message)),
 		};
-		Ok(Resolved { absolute, display })
+		Ok(Resolved { location, display })
 	}
 
 	/// [`Self::url_target`] for an already-unwrapped display path.
@@ -178,7 +193,7 @@ impl PathPolicy {
 		display: &str,
 		op: FileOp,
 		move_to: Option<&str>,
-		urls: &HashMap<String, UrlResolution>,
+		urls: &HashMap<String, UrlAnswer>,
 	) -> EditResult<()> {
 		if !self.plan_active {
 			return Ok(());
@@ -191,9 +206,7 @@ impl PathPolicy {
 		}
 		let display = unwrap_hashline_header_path(display);
 		let writable = match self.address(display) {
-			Address::Url(url) => urls
-				.get(url.as_ref())
-				.is_some_and(|resolution| resolution.plan_writable),
+			Address::Url(url) => urls.get(url.as_ref()).is_some_and(UrlAnswer::plan_writable),
 			Address::Path => self.in_plan_writable_root(&self.resolve_path(display)),
 			Address::Refused(_) => false,
 		};
@@ -691,8 +704,12 @@ mod tests {
 		}
 	}
 
-	fn answer(absolute: Option<PathBuf>, error: Option<&str>, plan_writable: bool) -> UrlResolution {
-		UrlResolution { absolute, error: error.map(str::to_owned), plan_writable }
+	fn answer(absolute: Option<PathBuf>, error: Option<&str>, plan_writable: bool) -> UrlAnswer {
+		match (absolute, error) {
+			(_, Some(error)) => UrlAnswer::Refused(error.into()),
+			(Some(path), None) => UrlAnswer::Backed { path, plan_writable },
+			(None, None) => panic!("test answer must provide a path or refusal"),
+		}
 	}
 
 	#[test]
@@ -709,20 +726,26 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let p = policy(tmp.path());
 		let urls = HashMap::new();
-		assert_eq!(p.resolve("/", &urls).unwrap().absolute, tmp.path());
-		assert_eq!(p.resolve("@~/x", &urls).unwrap().absolute, tmp.path().join("home/x"));
-		assert_eq!(p.resolve(":./x", &urls).unwrap().absolute, tmp.path().join("./x"));
+		assert_eq!(p.resolve("/", &urls).unwrap().location.key(), tmp.path());
+		assert_eq!(p.resolve("@~/x", &urls).unwrap().location.key(), tmp.path().join("home/x"));
+		assert_eq!(p.resolve(":./x", &urls).unwrap().location.key(), tmp.path().join("./x"));
 		// The file URL's `/tmp/...` path maps to a POSIX root; on Windows it
 		// resolves onto the current drive instead (`C:\tmp\...`).
 		#[cfg(unix)]
 		assert_eq!(
-			p.resolve("file:///tmp/a%20b", &urls).unwrap().absolute,
+			p.resolve("file:///tmp/a%20b", &urls)
+				.unwrap()
+				.location
+				.key(),
 			PathBuf::from("/tmp/a b")
 		);
 		// Scheme-colon names without a slash, Windows drives, and `./`-prefixed
 		// URI-shaped names are plain paths.
-		assert_eq!(p.resolve("sbx:x", &urls).unwrap().absolute, tmp.path().join("sbx:x"));
-		assert_eq!(p.resolve("./other://x", &urls).unwrap().absolute, tmp.path().join("other:/x"));
+		assert_eq!(p.resolve("sbx:x", &urls).unwrap().location.key(), tmp.path().join("sbx:x"));
+		assert_eq!(
+			p.resolve("./other://x", &urls).unwrap().location.key(),
+			tmp.path().join("other:/x")
+		);
 		assert!(p.resolve("C:/x", &urls).is_ok());
 		assert!(matches!(
 			p.resolve("[@SBX://x.md#AB12]", &urls),
@@ -818,7 +841,10 @@ mod tests {
 		let dotted = sandbox.join("link/../plan.md");
 		assert!(!refused(dotted.clone()));
 		assert_eq!(
-			p.resolve(dotted.to_str().unwrap(), &urls).unwrap().absolute,
+			p.resolve(dotted.to_str().unwrap(), &urls)
+				.unwrap()
+				.location
+				.key(),
 			sandbox.join("plan.md")
 		);
 	}
@@ -837,7 +863,7 @@ mod tests {
 		let backing = tmp.path().join("elsewhere/plan.md");
 		files.provide("sbx://plan.md".into(), answer(Some(backing.clone()), None, true));
 		let resolved = files.resolve("[sbx://plan.md#AB12]", true).unwrap();
-		assert_eq!(resolved.absolute, backing);
+		assert_eq!(resolved.location.key(), backing);
 		assert_eq!(resolved.display, "sbx://plan.md");
 
 		files.provide(
@@ -848,7 +874,10 @@ mod tests {
 			files.resolve("ro://a.md", false).unwrap_err().to_string(),
 			"ro://a.md is read-only"
 		);
-		files.provide("ro://gone.md".into(), answer(None, None, false));
+		files.provide(
+			"ro://gone.md".into(),
+			UrlAnswer::Refused("No local file backs ro://gone.md".into()),
+		);
 		assert_eq!(
 			files
 				.resolve("ro://gone.md", false)
