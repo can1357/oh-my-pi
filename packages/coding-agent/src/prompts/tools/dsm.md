@@ -1,6 +1,6 @@
 Open, inspect, edit, and script binary analysis databases.
 
-The `dsm` object exists in JavaScript and Python Eval; it is not a standalone tool. `disassembler.backend` selects IDA, Ghidra, or Binary Ninja.
+The `dsm` object exists in JavaScript and Python Eval; it is not a standalone tool. `disassembler.backend` selects IDA, radare2, Ghidra, or Binary Ninja (auto prefers IDA, then radare2, then Ghidra; Binary Ninja is opt-in).
 
 <instruction>
 - Bare `read <binary>` shows on-disk Mach-O/ELF/PE metadata only; it never opens an analysis database or downloads a backend.
@@ -13,7 +13,7 @@ The `dsm` object exists in JavaScript and Python Eval; it is not a standalone to
 - Every `open` or `get` owns one independent reference. `close()` releases only that reference; the final release closes the database. Child close/disposal cannot close another owner's live reference.
 - `db.handle()` returns a printable reference bound to this live database incarnation. Pass that exact string in a child's task/context; the child MUST `await dsm.open(handle)` and close its returned handle in `finally`. Keep the parent's reference until the children finish.
 - Portable handles work from any project on the same machine, even when a child's cwd/worktree differs. The selected backend must match; an expired handle never creates or reopens a database.
-- Databases appear in `omp ps` labelled `<Backend label> <ref>` (`IDA …`, `Ghidra …`, `Binary Ninja …`); unit ids are UUIDs. Owner references are saved/released on session disposal or conversation/backend change; resumable children retain theirs until explicit close or disposal.
+- Databases appear in `omp ps` labelled `<Backend label> <ref>` (`IDA …`, `radare2 …`, `Ghidra …`, `Binary Ninja …`); unit ids are UUIDs. Owner references are saved/released on session disposal or conversation/backend change; resumable children retain theirs until explicit close or disposal.
 - Handles expose `id`, `backend`, `ref`, `path`, and `info`. Closed references require another `dsm.open(path or handle)` or `dsm.get(id)`.
 
 JavaScript:
@@ -61,7 +61,9 @@ await db.close(save=True)
 - IDA additionally preloads `db` (ida_domain Database), `ida_domain`, `ida_*`, `idautils`; `help_ida()` lists its helpers. `setType`/`set_type` accepts a C declaration.
 - Ghidra additionally preloads `program` / `currentProgram`, `project`, `flat`, `monitor`, `pyghidra`, `jpype`; `help_ghidra()` lists its helpers. Types are C prototypes at function entries and type expressions (`char[16]`, `uint32_t *`) elsewhere.
 - Binary Ninja additionally preloads `bv` (the BinaryView), `binaryninja`, `wait_analysis()`; `help_binja()` lists its helpers. Types work as for Ghidra: a C prototype at a function entry, a type expression elsewhere. `repeatable` on comments is accepted and ignored. Inside a function an address comment is that function's (`func.get_comment_at(ea)`), not a view comment (`bv.get_comment_at(ea)`). A function, its PLT entry and its import slot share one name: `callers`/`xrefs_to` on the function include calls through the other two.
-- Default exec timeout is 120 s; an unresponsive worker is killed after cancellation. Ghidra pseudocode falls back to disassembly when its decompiler is unavailable.
+- Radare2 additionally preloads `r2` / `radare2` (the r2pipe session); `help_radare2()` lists its helpers.
+- Radare2 has no repeatable-comment flag: `comment(t, text, repeatable=True)` writes the text at the target and at every address returned by `axtj`, appending into one comment per address. `rename` leaves the old flag in place and adds a new one.
+- Default exec timeout is 120 s; an unresponsive worker is killed after cancellation. Ghidra pseudocode falls back to disassembly when its decompiler is unavailable. Radare2 pseudocode tries `pdgj` (r2ghidra) and falls back to `pdcj` (core pseudo-C) without surfacing an error.
 - Retained references pin against idle-close and LRU eviction; close every owned handle when done. `disassembler.maxOpen` bounds databases across all backends; unreferenced idle databases may be evicted or closed by `disassembler.idleCloseSec`.
 </instruction>
 
@@ -71,5 +73,6 @@ await db.close(save=True)
 - Binary Ninja exec code MUST wait with `wait_analysis()`; NEVER call `bv.update_analysis_and_wait()` (cannot be interrupted) or `bv.abort_analysis()` (permanently degrades the open database).
 - Dirty databases autosave after ~10 s idle; `save()` forces it. `close()` requests saving by default; the final release honors any owner's save request. Unsaved changes are discarded only if every released reference chose `save: false`.
 - An `exec` counts as a possible edit: a saving close after one can rewrite the database file even when the code only read. Close with `save: false` after read-only work on a file that must stay byte-identical.
+- Radare2 cancellation SIGKILLs and reaps the r2 child and abandons its in-memory session: changes since the last save are lost, while the saved project on disk remains.
 - Orderly `omp ps stop` saves; a crash, forced kill, or unresponsive timeout loses changes since the last save.
 </critical>

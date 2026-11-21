@@ -42,7 +42,7 @@ const SLICE_PREFIX = "@";
 const XREFS_PREFIX = "xrefs:";
 const ASM_SUFFIX = ":asm";
 const VIEW_TIMEOUT_MS = 120_000;
-/** Every value of `disassembler.backend` that enables analysis: "auto, ida, ghidra, or binja". */
+/** Every value of `disassembler.backend` that enables analysis. */
 const BACKEND_CHOICES = new Intl.ListFormat("en", { type: "disjunction" }).format(["auto", ...DISASM_BACKEND_IDS]);
 
 /**

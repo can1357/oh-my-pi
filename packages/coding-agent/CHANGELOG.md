@@ -42,6 +42,9 @@
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - The jobs sheet and a bash call's card show the output of the command step you click (the pipe it feeds, the file it redirects into, or its own output) and otherwise follow whichever of them the command is writing now
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added radare2 as a third `dsm` backend alongside IDA and Ghidra, with the same open, view, exec, annotate, save and close actions, managed radare2 projects, and a free scriptable option for binary analysis ([#19612](https://github.com/can1357/oh-my-pi/pull/19612) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
+- Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 
 ### Changed
 
@@ -230,6 +233,9 @@
 ### Changed
 
 - Model registries in one process (SDK embedders, tests) now share discovered-model builds, so refreshing another registry skips rebuilding models an earlier one already built
+### Added
+
+- Added `notify` to the `bash` tool: a regex whose matching output lines are reported to the agent while a background command or a named service runs, waking an idle session or ending a blocked `wait`; the command's result or the service's exit notice still follows
 
 ### Fixed
 
