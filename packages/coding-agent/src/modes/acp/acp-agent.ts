@@ -1204,8 +1204,10 @@ export class AcpAgent implements Agent {
 				// A client replaying a saved default can ask for fast mode on a
 				// model that has no service-tier family, or replay `true` while
 				// already in `/fast ultra` (which would otherwise downgrade
-				// `ultrafast` to `priority`).
-				if (record.session.supportsFastMode() && enabled !== record.session.isFastModeEnabled()) {
+				// `ultrafast` to `priority`). Keep non-ultrafast `true` writes
+				// reaching `setFastMode(true)` so a direct Anthropic session in
+				// provider fallback can still re-arm `speed: "fast"`.
+				if (record.session.supportsFastMode() && !(enabled && record.session.isUltrafastModeEnabled())) {
 					record.session.setFastMode(enabled);
 				}
 				break;

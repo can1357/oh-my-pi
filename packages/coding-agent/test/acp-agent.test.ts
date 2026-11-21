@@ -140,6 +140,7 @@ class FakeAgentSession {
 	systemPrompt = "system";
 	disposed = false;
 	fastMode = false;
+	ultrafastMode = false;
 	setFastModeCalls: boolean[] = [];
 	advisorEnabled = false;
 	advisorActive = false;
@@ -478,7 +479,7 @@ class FakeAgentSession {
 	}
 
 	isUltrafastModeEnabled(): boolean {
-		return false;
+		return this.ultrafastMode;
 	}
 
 	setForcedToolChoice(toolName: string): void {
@@ -4684,19 +4685,30 @@ describe("ACP boolean config options", () => {
 		await Bun.sleep(0);
 	});
 
-	it("skips idempotent fast=true updates so an active ultrafast tier is not downgraded", async () => {
+	it("skips idempotent fast=true updates when ultrafast is active but still forwards non-ultrafast true writes", async () => {
 		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
 		session.fastMode = true;
+		session.ultrafastMode = true;
 
-		const response = await harness.agent.setSessionConfigOption({
+		const ultraResponse = await harness.agent.setSessionConfigOption({
 			sessionId: created.sessionId,
 			configId: "fast",
 			value: true,
 		});
 		expect(session.setFastModeCalls).toEqual([]);
-		expect(response.configOptions.find(option => option.id === "fast")?.currentValue).toBe(true);
+		expect(ultraResponse.configOptions.find(option => option.id === "fast")?.currentValue).toBe(true);
+
+		// A direct Anthropic session can be enabled-but-inactive after provider
+		// fallback; repeated `true` writes must still reach `setFastMode(true)`.
+		session.ultrafastMode = false;
+		await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "fast",
+			value: true,
+		});
+		expect(session.setFastModeCalls).toEqual([true]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
