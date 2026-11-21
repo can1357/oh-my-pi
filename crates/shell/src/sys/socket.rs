@@ -149,10 +149,14 @@ fn to_c(addr: &SockAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
 }
 
 /// A NUL-padded C char array as bytes.
-// `#allow` here is to work around a stupid issue: the cast `c as u8` is a no-op
-// on aarch64, where `c_char` is already `u8`, so it causes a warning there,
-// making `bun check` ultimately fail.
-#[allow(clippy::unnecessary_cast, reason = "c_char bytes")]
+// `#allow` here is to work around an issue of questionable sanity: the cast
+// `c as u8` is a no-op on aarch64, where `c_char` is already `u8`, so it causes
+// a warning there, making `bun check` ultimately fail.
+#[allow(
+	clippy::unnecessary_cast,
+	reason = "c_char is already u8 on aarch64, so the cast causes warning; but the cast is still \
+	          needed on other platforms"
+)]
 fn c_bytes(chars: &[libc::c_char]) -> BString {
 	chars
 		.iter()
