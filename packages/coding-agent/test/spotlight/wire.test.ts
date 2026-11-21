@@ -1215,7 +1215,7 @@ describe("spotlight call context", () => {
 			name: "bash",
 			arguments: { command },
 		});
-		const fullIntent = "[Checking retry timing]: Does http.py:42 honor Retry-After?";
+		const fullIntent = "Checking retry timing: Does http.py:42 honor Retry-After?";
 		const messages = [
 			{ role: "user", content: "fix the flaky test", timestamp: 0 },
 			{ role: "assistant", content: [bash("a", "ls"), bash("b", "git status")] },

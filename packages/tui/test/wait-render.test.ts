@@ -456,7 +456,7 @@ describe("job renderer task-result preview", () => {
 		});
 
 		it("renders the headline of a sealed fallback widget without rewriting its saved title", () => {
-			const intent = "[Checking timing]: Compare the retry delay with the deadline";
+			const intent = "Checking timing: Compare the retry delay with the deadline";
 			const widget = {
 				title: `${intent.slice(0, 47)}…`,
 				blocks: [],

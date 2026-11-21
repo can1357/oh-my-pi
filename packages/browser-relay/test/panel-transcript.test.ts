@@ -78,7 +78,7 @@ describe("step labels", () => {
 		expect(describeStep("bash", { command: "bun test\necho done" }, undefined).done).toBe("Ran `bun test`");
 		expect(describeStep("mystery_tool", {}, "Checking the queue").live).toBe("Checking the queue");
 		expect(
-			describeStep("mystery_tool", { i: "[Checking the queue]: How many jobs remain?" }, undefined),
+			describeStep("mystery_tool", { i: "Checking the queue: How many jobs remain?" }, undefined),
 		).toMatchObject({
 			live: "Checking the queue",
 			done: "Checking the queue",

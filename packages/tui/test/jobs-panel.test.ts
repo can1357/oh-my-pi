@@ -302,7 +302,7 @@ describe("JobsSheet", () => {
 	it("leads a job with its intent and caption over the command, and drops a widget with nothing beyond its title", async () => {
 		await initTheme();
 		const label = "Waiting for stock watch";
-		const intent = `[${label}]: Report when the service stops`;
+		const intent = `${label}: Report when the service stops`;
 		const command = "ssh pc-worker 'while systemctl --user is-active -q watch; do sleep 60; done'";
 		const caption = "Checks pc-worker every 60s until the watch service stops";
 		const job: JobsPanelJob = {

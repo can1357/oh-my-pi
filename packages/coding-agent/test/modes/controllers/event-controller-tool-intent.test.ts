@@ -55,7 +55,7 @@ describe("EventController tool intent", () => {
 
 	it("shows the intent on a card created by tool_execution_start", async () => {
 		const { controller, pendingTools, ctx } = fixture();
-		await controller.handleEvent(start("[Listing the working tree...]: Which files have changed?"));
+		await controller.handleEvent(start("Listing the working tree...: Which files have changed?"));
 		const card = pendingTools.get("tc-bash");
 		if (!card) throw new Error("no card for the call");
 		expect(toolNode(card).p).toMatchObject({
@@ -67,7 +67,7 @@ describe("EventController tool intent", () => {
 
 	it("keeps the intent when tool_execution_start refreshes a streamed card", async () => {
 		const { controller, pendingTools, ctx } = fixture();
-		const args = { command: "ls -la", i: "[Listing the working tree]: Which files have changed?" };
+		const args = { command: "ls -la", i: "Listing the working tree: Which files have changed?" };
 		const message = createAssistantMessage("");
 		message.content = [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: args }];
 		ctx.streamingComponent = new AssistantMessageComponent();

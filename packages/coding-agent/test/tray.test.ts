@@ -448,7 +448,7 @@ describe("tray items", () => {
 		};
 		expect(doing({})).toEqual(["edit", "src/norm.py"]);
 		expect(doing({ streaming: writing })).toEqual(["write", "tests/test_norm.py"]);
-		expect(doing({ streaming: { ...writing, intent: "[Writing the norm test]: Cover the zero vector" } })).toEqual([
+		expect(doing({ streaming: { ...writing, intent: "Writing the norm test: Cover the zero vector" } })).toEqual([
 			"write",
 			"Writing the norm test",
 		]);

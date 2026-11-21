@@ -61,7 +61,7 @@ const SAVED: SpotlightDetails = {
 		task: "Why does ingest\nstall?",
 		commands: ["make build", "./ingest.sh --dry-run"],
 		said: "",
-		intent: "[Find the failing step]: Which ingest step failed, and why?",
+		intent: "Find the failing step: Which ingest step failed, and why?",
 		source: "./ingest.sh",
 		probe: "The most important line in this output is: `",
 		model: "whiskers-latest",

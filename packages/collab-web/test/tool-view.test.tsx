@@ -3,13 +3,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ToolView } from "../src/tool-render/ToolView";
 
 it("renders just the intent label before and after execution metadata arrives", () => {
-	const raw = "[Checking timing]: Did Retry-After override the timer?";
+	const raw = "Checking http.py:42: Did Retry-After override the timer?";
 	for (const props of [
 		{ args: { i: raw }, running: true },
 		{ intent: raw, result: { content: [] } },
 	]) {
 		const html = renderToStaticMarkup(<ToolView name="bash" defaultOpen {...props} />);
-		expect(html).toContain('class="tv-intent">Checking timing</div>');
+		expect(html).toContain('class="tv-intent">Checking http.py:42</div>');
 		expect(html).not.toContain("Retry-After");
 	}
 });

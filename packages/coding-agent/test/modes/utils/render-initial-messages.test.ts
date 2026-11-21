@@ -237,7 +237,7 @@ function makeRenderCtx(
 
 describe("UiHelpers.renderInitialMessages — transcript source", () => {
 	it("shows only the brief intent on a settled shell card restored from raw arguments", async () => {
-		const args = { command: "ls -la", i: "[Listing files]: Which files have changed?" };
+		const args = { command: "ls -la", i: "Listing files: Which files have changed?" };
 		const transcript = transcriptWith([
 			assistantToolCall("ls", "bash", args),
 			{
@@ -254,7 +254,7 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 		const rendered = Bun.stripANSI(chatContainer.render(100).join("\n"));
 		expect(rendered).toContain("Listing files");
 		expect(rendered).not.toContain("Which files have changed?");
-		expect(args.i).toBe("[Listing files]: Which files have changed?");
+		expect(args.i).toBe("Listing files: Which files have changed?");
 	});
 
 	it("renders the collapsed live display transcript, never the LLM context", async () => {

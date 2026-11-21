@@ -80,7 +80,7 @@ describe("bash native run box", () => {
 				details: { wallTimeMs: 1500, timeoutSeconds: 300 },
 			},
 			{ ...done, elapsedMs: 1720 },
-			{ command: "make", env: { CI: "1" }, i: "[Building the project]: Which target fails?" },
+			{ command: "make", env: { CI: "1" }, i: "Building the project: Which target fails?" },
 		);
 		expect(view.tool).toMatchObject({ target: "Building the project", targetKind: "text", command: 'CI="1" make' });
 		expect(view.preview).toBe("children");
