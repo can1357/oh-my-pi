@@ -149,6 +149,11 @@ export interface ClientCapabilities {
 	terminal?: boolean;
 	auth?: { terminal?: boolean };
 	elicitation?: { form?: Record<string, unknown>; url?: Record<string, unknown> };
+	/**
+	 * RFD child-session support. Supplying an object advertises it; the agent
+	 * must not send `subagent_update` without it. Unstable and experimental.
+	 */
+	subagents?: SubagentCapabilities | null;
 	_meta?: Record<string, unknown>;
 }
 /** Implementation identity sent during initialization. */
@@ -336,12 +341,44 @@ export type SessionUpdate =
 			size: number;
 			used: number;
 			cost?: { amount: number; currency: string } | null;
-	  } & Meta);
+	  } & Meta)
+	| ({ sessionUpdate: "subagent_update" } & SubagentUpdate);
 /** Notification containing a session update. */
 export interface SessionNotification extends Meta {
 	sessionId: SessionId;
 	update: SessionUpdate;
 }
+/**
+ * Marker for RFD child-session support. Supplying `{}` advertises support for
+ * child association and state updates. Unstable and experimental.
+ */
+export type SubagentCapabilities = Meta;
+/** Cancel a child session's current work without ending the session. `{}` = supported. Unstable and experimental. */
+export type SessionCancelCapabilities = Meta;
+/** Client-initiated mutations permitted for a child. Only `cancel` is defined. Unstable and experimental. */
+export type SubagentSessionCapabilities = { cancel?: SessionCancelCapabilities | null } & Meta;
+/** Foreground work in progress. Unstable and experimental. */
+export type RunningStateUpdate = { state: "running" } & Meta;
+/** Foreground work finished; `stopReason` says why. Unstable and experimental. */
+export type IdleStateUpdate = { state: "idle"; stopReason?: string | null; error?: unknown } & Meta;
+/** Foreground work blocked on user action. Unstable and experimental. */
+export type RequiresActionStateUpdate = { state: "requires_action" } & Meta;
+/** Activity currently unobservable. Unstable and experimental. */
+export type UnknownStateUpdate = { state: "unknown" } & Meta;
+/** Foreground-work snapshot of a reusable child. Unstable and experimental. */
+export type StateUpdate = RunningStateUpdate | IdleStateUpdate | RequiresActionStateUpdate | UnknownStateUpdate;
+/**
+ * Patch for a parent's child association. First sighting announces the child;
+ * omitted fields keep values, explicit `null` clears them. Unstable and experimental.
+ */
+export type SubagentUpdate = {
+	/** Child ACP session id. */
+	sessionId: SessionId;
+	title?: string | null;
+	description?: string | null;
+	capabilities?: SubagentSessionCapabilities | null;
+	state?: StateUpdate | null;
+} & Meta;
 /** Prompt request. */
 export interface PromptRequest extends Meta {
 	sessionId: SessionId;
