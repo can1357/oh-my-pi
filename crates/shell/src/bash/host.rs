@@ -22,7 +22,7 @@ use bstr::{BStr, BString};
 use serde::{Deserialize, Serialize};
 
 use crate::bash::{
-	event::Event,
+	event::{Event, NodeRef},
 	fd::FdRef,
 	fs::{File, Fs, OpenFlags},
 	ids::{CmdTag, IntrinsicId, JobId, ModeId, NativeRef, ToolRef, Vpid},
@@ -640,18 +640,37 @@ pub trait ExtProc: Send {
 	fn cont(&mut self) -> io::Result<()>;
 }
 
+/// Where the writer of a tapped stream is in the script: the pipeline stage
+/// writing into a pipe, or the command whose redirection opened a file.
+///
+/// `vpid` runs `node`'s unit and announced it to the event sinks
+/// ([`EventData::UnitCompiled`](crate::bash::EventData::UnitCompiled)) before
+/// the tap is asked: an observer folding those events (a
+/// [`RunTrace`](crate::bash::trace::RunTrace)) resolves the site as it
+/// resolves the node of an event of `vpid`.
+#[derive(Clone, Copy, Debug)]
+pub struct TapSite<'a> {
+	/// The vproc running the writer's unit.
+	pub vpid: Vpid,
+	/// The writer's syntax node; `None` when the unit records none for it.
+	pub node: Option<NodeRef>,
+	/// Source text of `node` as written (empty without one).
+	pub text: &'a BStr,
+}
+
 /// Opens a [`PipeMirror`] per pipeline pipe ([`Host::pipe_tap`]), and learns
 /// of the files output is redirected into.
 pub trait PipeTap: Send + Sync {
-	/// A new pipe from stage `producer` to stage `consumer` (their source
-	/// text as written); `None` leaves this pipe untapped.
-	fn open(&self, producer: &BStr, consumer: &BStr) -> Option<Arc<dyn PipeMirror>>;
-	/// An output redirection of `command` (its source text as written)
-	/// opened the regular file at the absolute `path` (`>`, `>>`, `>|`,
-	/// `&>`, `&>>`). What is written there crosses no pipe to mirror: a tap
-	/// that wants it reads the file. Not told of a `{var}` fd's file, nor of
-	/// one a spawned process opens itself ([`SpawnSpec::redirs`]).
-	fn file(&self, _command: &BStr, _path: &BStr) {}
+	/// A new pipe from stage `producer` to stage `consumer` (the consuming
+	/// stage's source text as written); `None` leaves this pipe untapped.
+	fn open(&self, producer: TapSite<'_>, consumer: &BStr) -> Option<Arc<dyn PipeMirror>>;
+	/// An output redirection of `command` (the smallest statement around the
+	/// redirection) opened the regular file at the absolute `path` (`>`,
+	/// `>>`, `>|`, `&>`, `&>>`). What is written there crosses no pipe to
+	/// mirror: a tap that wants it reads the file. Not told of a `{var}` fd's
+	/// file, nor of one a spawned process opens itself
+	/// ([`SpawnSpec::redirs`]).
+	fn file(&self, _command: TapSite<'_>, _path: &BStr) {}
 }
 
 /// Receives the bytes crossing one tapped pipe.
