@@ -1,11 +1,7 @@
 import { discoverRelayEndpoints } from "../../src/tools/browser/relay/discovery";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	createBrowserPrelude,
-	resolveBrowserKind,
-	resolveRelayKind,
-} from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { createBrowserPrelude, resolveBrowserKind, resolveRelayKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import type { BrowserKindTag } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
@@ -16,7 +12,10 @@ describe("resolveRelayKind", () => {
 	});
 
 	it("resolves the default endpoint when the setting enables it", () => {
-		expect(resolveRelayKind({ settingEnabled: true }, {})).toEqual({ kind: "relay", cdpUrl: (discoverRelayEndpoints()[0] ?? "") });
+		expect(resolveRelayKind({ settingEnabled: true }, {})).toEqual({
+			kind: "relay",
+			cdpUrl: discoverRelayEndpoints()[0] ?? "",
+		});
 	});
 
 	it("uses the configured URL and trims trailing slashes", () => {
@@ -29,7 +28,7 @@ describe("resolveRelayKind", () => {
 	it("falls back to the default endpoint for a blank URL", () => {
 		expect(resolveRelayKind({ settingEnabled: true, url: "   " }, {})).toEqual({
 			kind: "relay",
-			cdpUrl: (discoverRelayEndpoints()[0] ?? ""),
+			cdpUrl: discoverRelayEndpoints()[0] ?? "",
 		});
 	});
 
@@ -40,14 +39,14 @@ describe("resolveRelayKind", () => {
 	it("PI_BROWSER_RELAY=only enables the relay when the setting is off", () => {
 		expect(resolveRelayKind({ settingEnabled: false }, { PI_BROWSER_RELAY: "only" })).toEqual({
 			kind: "relay",
-			cdpUrl: (discoverRelayEndpoints()[0] ?? ""),
+			cdpUrl: discoverRelayEndpoints()[0] ?? "",
 		});
 	});
 
 	it("PI_BROWSER_RELAY=1 enables the relay when the setting is off", () => {
 		expect(resolveRelayKind({ settingEnabled: false }, { PI_BROWSER_RELAY: "1" })).toEqual({
 			kind: "relay",
-			cdpUrl: (discoverRelayEndpoints()[0] ?? ""),
+			cdpUrl: discoverRelayEndpoints()[0] ?? "",
 		});
 	});
 });
