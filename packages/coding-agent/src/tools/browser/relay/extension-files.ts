@@ -67,8 +67,11 @@ type ExtensionFiles = Record<string, string | Buffer> & {
  *
  * @throws Error when the extension is missing (see {@link loadRelayExtension}) or lacks its manifest or service worker.
  */
-export async function relayExtensionFiles(ompVersion: string): Promise<ExtensionFiles> {
-	const { build, files: assets } = await loadRelayExtension();
+export async function relayExtensionFiles(
+	ompVersion: string,
+	bundle: Promise<RelayExtensionBundle> = loadRelayExtension(),
+): Promise<ExtensionFiles> {
+	const { build, files: assets } = await bundle;
 	const manifest = assets["manifest.json"];
 	const script = assets["background.js"];
 	if (typeof manifest !== "string" || typeof script !== "string")
@@ -96,10 +99,15 @@ export function defaultRelayExtensionDir(): string {
  * partly written file: a reload that meets a broken manifest unloads the
  * extension until the user reloads it by hand. Publish the manifest after its
  * assets and `background.js` last, so a write that fails midway leaves the
- * worker reporting the old version. Returns whether any file was published.
+ * worker reporting the old version. Returns whether any file was published. Callers writing several folders pass
+ * one `bundle` so the extension loads once.
  */
-export async function writeRelayExtension(dir: string, ompVersion: string): Promise<boolean> {
-	const files = await relayExtensionFiles(ompVersion);
+export async function writeRelayExtension(
+	dir: string,
+	ompVersion: string,
+	bundle?: Promise<RelayExtensionBundle>,
+): Promise<boolean> {
+	const files = await relayExtensionFiles(ompVersion, bundle);
 	let changed = false;
 	for (const name in files) {
 		if (name === "background.js" || name === "manifest.json") continue;

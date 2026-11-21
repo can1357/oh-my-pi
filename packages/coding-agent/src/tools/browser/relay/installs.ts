@@ -13,15 +13,20 @@ import {
 	defaultRelayExtensionDir,
 	extensionIdForPath,
 	loadRelayExtension,
+	type RelayExtensionBundle,
 	writeRelayExtension,
 } from "./extension-files";
 import { discoverRelayEndpoints } from "./discovery";
+import { embeddedRelayExtensionBuild } from "./embedded-extension";
 import { refreshRelayNativeHost } from "./native-host-manifest";
 import { isOlderOmpVersion, type PanelInstall, RELAY_RECHECK_PATH } from "./protocol";
 
-/** The files this omp writes: its version and extension build. A source checkout changes the build, not the version. */
-async function installStamp(): Promise<string> {
-	return `${VERSION}+${(await loadRelayExtension()).build}`;
+/**
+ * The files this omp writes: its version and extension build. A source checkout changes the build, not the version.
+ * Builds carry the build id beside the embedded asset, so only a source checkout calls `load` here.
+ */
+async function installStamp(load: () => Promise<RelayExtensionBundle>): Promise<string> {
+	return `${VERSION}+${embeddedRelayExtensionBuild ?? (await load()).build}`;
 }
 
 /** Managed extension directory and the last asset version omp wrote there. */
@@ -227,8 +232,11 @@ export async function syncRelayInstalls(options: RelayInstallSyncOptions = {}): 
 	const { registryFile, defaultDir, relayUrl } = resolveLocations(options);
 	const initial = await readRelayInstallRegistry(registryFile);
 	if (initial.installs.length === 0 && !(await Bun.file(path.join(defaultDir, "manifest.json")).exists())) return [];
+	// Loaded at most once per sync, on the first folder written, and released when the sync returns.
+	let bundle: Promise<RelayExtensionBundle> | undefined;
+	const load = (): Promise<RelayExtensionBundle> => (bundle ??= loadRelayExtension());
 	// Nothing to write without the extension: a source checkout that never generated it fails here, not per folder.
-	const stamp = await installStamp();
+	const stamp = await installStamp(load);
 	if (options.mode === "startup" && initial.lastSynced === stamp) return [];
 	await fs.mkdir(path.dirname(registryFile), { recursive: true });
 	const synced = await withFileLock(registryFile, async () => {
@@ -248,7 +256,7 @@ export async function syncRelayInstalls(options: RelayInstallSyncOptions = {}): 
 					results.push({ dir, status: "up to date", ompVersion: installed });
 					continue;
 				}
-				const written = await writeRelayExtension(dir, VERSION);
+				const written = await writeRelayExtension(dir, VERSION, load());
 				if (written || row.ompVersion !== VERSION) {
 					row.ompVersion = VERSION;
 					row.writtenAt = Date.now();

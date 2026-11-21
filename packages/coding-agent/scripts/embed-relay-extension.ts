@@ -16,12 +16,16 @@ let generated: Promise<string> | undefined;
 /**
  * Bun.build `files` that compile the omp extension into a binary or bundle as a zstd-compressed file asset, read only
  * when the extension is installed or synced. Generates it once per process (which also refreshes the checkout's
- * `extension.generated.json`, shipped in the npm package's `src`) and swaps a path to the asset in for the null
- * placeholder.
+ * `extension.generated.json`, shipped in the npm package's `src`) and swaps a path to the asset and the extension's
+ * build id in for the null placeholder.
  */
 export async function embeddedRelayExtensionFiles(): Promise<Record<string, string | Uint8Array>> {
 	generated ??= generateEmbeddedExtension();
-	const compressed = await Bun.zstdCompress(Buffer.from(await generated, "utf8"), { level: EMBEDDED_RELAY_EXTENSION_ZSTD_LEVEL });
+	const text = await generated;
+	const bundle: unknown = JSON.parse(text);
+	if (typeof bundle !== "object" || bundle === null || !("build" in bundle) || typeof bundle.build !== "string")
+		throw new Error("The generated omp extension has no build id");
+	const compressed = await Bun.zstdCompress(Buffer.from(text, "utf8"), { level: EMBEDDED_RELAY_EXTENSION_ZSTD_LEVEL });
 	return {
 		[EMBEDDED_ZST]: compressed,
 		// A compiled binary gets an absolute `$bunfs` path, which `path.resolve` keeps; the npm bundle gets one relative
@@ -29,6 +33,7 @@ export async function embeddedRelayExtensionFiles(): Promise<Record<string, stri
 		[PLACEHOLDER]:
 			'import * as path from "node:path";\n' +
 			'import zstPath from "./extension.generated.json.zst" with { type: "file" };\n' +
-			"export const embeddedRelayExtensionZstPath: string | null = path.resolve(import.meta.dir, zstPath);\n",
+			"export const embeddedRelayExtensionZstPath: string | null = path.resolve(import.meta.dir, zstPath);\n" +
+			`export const embeddedRelayExtensionBuild: string | null = ${JSON.stringify(bundle.build)};\n`,
 	};
 }
