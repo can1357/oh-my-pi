@@ -152,10 +152,14 @@ impl EditError {
 
 	/// Whether this is a deferred host resolution, including per-file wrappers.
 	pub fn is_deferred(&self) -> bool {
+		self.deferred_url().is_some()
+	}
+
+	pub(crate) fn deferred_url(&self) -> Option<&str> {
 		match self {
-			Self::DeferredUrl(_) => true,
-			Self::InFile { source, .. } => source.is_deferred(),
-			_ => false,
+			Self::DeferredUrl(url) => Some(url),
+			Self::InFile { source, .. } => source.deferred_url(),
+			_ => None,
 		}
 	}
 

@@ -311,6 +311,48 @@ async fn deferred_remote_preview_keeps_local_diff_and_apply_stays_atomic() {
 	}
 }
 
+#[tokio::test]
+async fn final_patch_preview_defers_sections_that_depend_on_a_pending_move() {
+	let destination = "ssh://host/destination.txt";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	ws.write("move.txt", "before\n");
+	ws.write("local.txt", "before\n");
+	let mut session = ws.session();
+	let input = format!(
+		"*** Begin Patch\n*** Update File: move.txt\n*** Move to: \
+		 {destination}\n@@\n-before\n+moved\n*** Update File: ./move.txt\n*** Move to: \
+		 chained.txt\n@@\n-before\n+chained\n*** Update File: \
+		 chained.txt\n@@\n-chained\n+later\n*** Update File: local.txt\n@@\n-before\n+after\n*** \
+		 End Patch"
+	);
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	session.provide(destination.into(), UrlAnswer::Pending);
+
+	let preview = session.preview();
+	assert_eq!(preview.files.len(), 1, "{preview:?}");
+	assert_eq!(preview.files[0].display, "local.txt");
+	assert!(preview.files[0].diff.is_some(), "{preview:?}");
+	assert_eq!(ws.read("move.txt").as_deref(), Some("before\n"));
+
+	assert_eq!(session.begin_apply_url_targets(), [destination]);
+	session.provide(destination.into(), UrlAnswer::Hosted {
+		key:           destination.into(),
+		content:       None,
+		plan_writable: false,
+	});
+	let writer = DiskWriter::default();
+	let error = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("the later move cannot read the removed source");
+	assert!(error.to_string().contains("File not found"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(ws.read("move.txt").as_deref(), Some("before\n"));
+	assert_eq!(ws.read("local.txt").as_deref(), Some("before\n"));
+}
+
 #[test]
 fn streaming_patch_omits_pending_targets_and_moves_to_pending_destinations() {
 	let url = "ssh://host/file.txt";

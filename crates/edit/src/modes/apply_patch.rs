@@ -284,11 +284,40 @@ impl VirtualFile {
 /// every section has staged; tombstones prevent suffix recovery from reviving
 /// a path that an earlier section deleted or moved.
 struct VirtualFiles<'a> {
-	source: &'a mut dyn FileSource,
-	state:  HashMap<Location, Option<VirtualFile>>,
+	source:   &'a mut dyn FileSource,
+	state:    HashMap<Location, Option<VirtualFile>>,
+	/// Targets whose contents or existence depend on an earlier preview section.
+	deferred: HashMap<Location, String>,
 }
 
 impl VirtualFiles<'_> {
+	fn resolve_target(&mut self, authored: &str, must_exist: bool) -> Result<Resolved, EditError> {
+		let resolved = self.source.resolve(authored, false)?;
+		let key = resolved.location.canonical_key();
+		if !must_exist || self.state.contains_key(&key) || self.deferred.contains_key(&key) {
+			return Ok(resolved);
+		}
+		self.source.resolve(authored, true)
+	}
+
+	fn defer(&mut self, authored: &str, must_exist: bool, url: &str) {
+		if let Ok(resolved) = self.resolve_target(authored, must_exist) {
+			self
+				.deferred
+				.entry(resolved.location.canonical_key())
+				.or_insert_with(|| url.to_owned());
+		}
+	}
+
+	fn check_deferred(&self, location: &Location) -> Result<(), EditError> {
+		if !self.deferred.is_empty()
+			&& let Some(url) = self.deferred.get(&location.canonical_key())
+		{
+			return Err(EditError::DeferredUrl(url.clone()));
+		}
+		Ok(())
+	}
+
 	fn record(&mut self, file: &StagedFile) {
 		if file.op == FileOp::Delete || file.move_to.is_some() {
 			self.state.insert(file.location.canonical_key(), None);
@@ -319,11 +348,9 @@ impl FileSource for VirtualFiles<'_> {
 	}
 
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> Result<Resolved, EditError> {
-		let resolved = self.source.resolve(authored, false)?;
-		if self.state.contains_key(&resolved.location.canonical_key()) || !must_exist {
-			return Ok(resolved);
-		}
-		self.source.resolve(authored, true)
+		let resolved = self.resolve_target(authored, must_exist)?;
+		self.check_deferred(&resolved.location)?;
+		Ok(resolved)
 	}
 
 	fn exists(&mut self, location: &Location) -> bool {
@@ -344,6 +371,7 @@ impl FileSource for VirtualFiles<'_> {
 	}
 
 	fn try_read(&mut self, resolved: &Resolved) -> Result<Option<Arc<FileRead>>, EditError> {
+		self.check_deferred(&resolved.location)?;
 		let key = resolved.location.canonical_key();
 		let state = match self.state.remove(&key) {
 			Some(state) => state,
@@ -399,6 +427,7 @@ impl FileSource for VirtualFiles<'_> {
 
 	fn clear(&mut self) {
 		self.state.clear();
+		self.deferred.clear();
 		self.source.clear();
 	}
 }
@@ -414,7 +443,8 @@ fn stage_entries(
 		return Err(EditError::apply("No files were modified."));
 	}
 	let multiple_files = distinct_paths(entries) > 1;
-	let mut files = VirtualFiles { source: files, state: HashMap::new() };
+	let mut files =
+		VirtualFiles { source: files, state: HashMap::new(), deferred: HashMap::new() };
 	let engine = PatchEngine { allow_fuzzy, fuzzy_threshold: threshold, first_match: true };
 	let mut staged = Vec::with_capacity(entries.len());
 	let mut index = 0;
@@ -475,10 +505,18 @@ fn stage_entries(
 				}
 				staged.append(&mut next);
 			},
-			// An unapproved remote target must not hide independent local
-			// previews. Apply still requires every section to stage atomically.
-			Err(error) if preview && error.is_deferred() => {},
-			Err(error) => return Err(wrap_file_error(path, error, multiple_files)),
+			Err(error) => {
+				if preview && let Some(url) = error.deferred_url() {
+					// Later sections must wait for the source and destination of a
+					// pending move. Other targets can still be previewed.
+					files.defer(path, group[0].op != Operation::Create, url);
+					if let Some(rename) = &group[0].rename {
+						files.defer(rename, false, url);
+					}
+				} else {
+					return Err(wrap_file_error(path, error, multiple_files));
+				}
+			},
 		}
 	}
 	Ok(staged)
@@ -704,7 +742,8 @@ mod tests {
 			"a.txt".into(),
 			Some(Resolved { location: target.into(), display: "nested/a.txt".into() }),
 		);
-		let mut files = VirtualFiles { source: &mut source, state: HashMap::new() };
+		let mut files =
+			VirtualFiles { source: &mut source, state: HashMap::new(), deferred: HashMap::new() };
 		let missing = files.resolve("a.txt", false).unwrap();
 		assert!(files.try_read(&missing).unwrap().is_none());
 		let recovered = files
