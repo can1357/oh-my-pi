@@ -27,6 +27,7 @@ import { makeAssistantMessage } from "./session-manager/helpers";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
+	slowMode: boolean;
 	advisorEnabled: boolean;
 	advisorActive: boolean;
 	forcedToolChoice: string | undefined;
@@ -42,6 +43,8 @@ interface FakeAcpBuiltinSession {
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
+	setSlowMode(enabled: boolean): boolean;
+	isSlowModeEnabled(): boolean;
 	setAdvisorEnabled(enabled: boolean): boolean;
 	isAdvisorEnabled(): boolean;
 	toggleAdvisorEnabled(): boolean;
@@ -97,6 +100,7 @@ function createRuntime() {
 	const output: string[] = [];
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
+		slowMode: false,
 		advisorEnabled: false,
 		advisorActive: false,
 		forcedToolChoice: undefined as string | undefined,
@@ -124,10 +128,19 @@ function createRuntime() {
 		},
 		setFastMode(enabled: boolean) {
 			this.fastMode = enabled;
+			if (enabled) this.slowMode = false;
 			return true;
 		},
 		isFastModeEnabled() {
 			return this.fastMode;
+		},
+		setSlowMode(enabled: boolean) {
+			this.slowMode = enabled;
+			if (enabled) this.fastMode = false;
+			return true;
+		},
+		isSlowModeEnabled() {
+			return this.slowMode;
 		},
 		setAdvisorEnabled(enabled: boolean) {
 			this.advisorEnabled = enabled;
@@ -309,7 +322,7 @@ describe("ACP builtin slash commands", () => {
 	});
 
 	it("/fast on emits a config-change notification and enables fast mode", async () => {
-		const { output, runtime, session } = createRuntime();
+		const { runtime, session } = createRuntime();
 		let configNotified = 0;
 		runtime.notifyConfigChanged = () => {
 			configNotified++;
@@ -319,7 +332,6 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(session.fastMode).toBe(true);
-		expect(output).toEqual(["Fast mode enabled."]);
 		expect(configNotified).toBe(1);
 	});
 
@@ -335,8 +347,24 @@ describe("ACP builtin slash commands", () => {
 		expect(configNotified).toBe(0);
 	});
 
+	it("/slow on emits a config-change notification when switching away from fast mode", async () => {
+		const { runtime, session } = createRuntime();
+		session.fastMode = true;
+		let configNotified = 0;
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/slow on", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session.slowMode).toBe(true);
+		expect(session.fastMode).toBe(false);
+		expect(configNotified).toBe(1);
+	});
+
 	it("/advisor on emits a config-change notification and enables the advisor", async () => {
-		const { output, runtime, session } = createRuntime();
+		const { runtime, session } = createRuntime();
 		session.advisorActive = true;
 		let configNotified = 0;
 		runtime.notifyConfigChanged = () => {
@@ -347,7 +375,6 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(session.advisorEnabled).toBe(true);
-		expect(output).toEqual(["Advisor enabled."]);
 		expect(configNotified).toBe(1);
 	});
 

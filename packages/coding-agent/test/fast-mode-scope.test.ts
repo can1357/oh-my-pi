@@ -131,6 +131,7 @@ describe("/fast targets the current model's service-tier family", () => {
 				maxTokens: 64_000,
 			}),
 		);
+		expect(session.supportsFastMode()).toBe(false);
 		expect(session.setFastMode(true)).toBe(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeEnabled()).toBe(false);
@@ -177,6 +178,7 @@ describe("/fast targets the current model's service-tier family", () => {
 
 	it("refuses /fast on a Codex model whose discovered tiers omit priority", async () => {
 		const session = await createSessionForModel(codexModel(["ultrafast"]));
+		expect(session.supportsFastMode()).toBe(false);
 		expect(session.setFastMode(true)).toBe(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeActive()).toBe(false);
@@ -184,6 +186,7 @@ describe("/fast targets the current model's service-tier family", () => {
 
 	it("keeps /fast on a Codex model whose discovered tier list is empty", async () => {
 		const session = await createSessionForModel(codexModel([]));
+		expect(session.supportsFastMode()).toBe(true);
 		expect(session.setFastMode(true)).toBe(true);
 		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
 		expect(session.isFastModeActive()).toBe(true);

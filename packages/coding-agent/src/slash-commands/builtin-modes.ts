@@ -550,9 +550,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.session.isSlowModeEnabled() ? "Slow mode: on" : "Slow mode: off",
 		handle: async (command, runtime) => {
-			const message = runSlowCommand(command.args.trim().toLowerCase(), runtime.session);
+			const arg = command.args.trim().toLowerCase();
+			const message = runSlowCommand(arg, runtime.session);
 			if (message === undefined) return usage("Usage: /slow [on|off|status]", runtime);
 			await runtime.output(message);
+			if (arg !== "status") await runtime.notifyConfigChanged?.();
 			return commandConsumed();
 		},
 		handleTui: (command, runtime) => {

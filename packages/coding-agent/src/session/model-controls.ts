@@ -770,16 +770,20 @@ export class ModelControls {
 	}
 
 	/**
-	 * Whether the active model exposes a service-tier family at all, i.e.
-	 * whether a `/fast` toggle would do anything. False when no model is
-	 * selected or the provider has no service tiers (e.g. Fireworks, which
-	 * carries its own Providers › Fireworks Tier toggle instead).
+	 * Whether the active model accepts a `/fast` toggle (`setFastMode(true)`):
+	 * requires a service-tier family, and on the OpenAI family requires the
+	 * model to accept the `priority` tier (e.g. false for Fireworks, which has
+	 * its own Providers › Fireworks Tier toggle, and for Codex models whose
+	 * discovered `serviceTiers` omit `priority`).
 	 *
 	 * Callers that surface a fast-mode control use this to hide it rather than
 	 * offering a switch whose writes {@link setFastMode} would discard.
 	 */
 	supportsFastMode(): boolean {
-		return this.#model !== undefined && serviceTierFamily(this.#model) !== undefined;
+		const model = this.#model;
+		const family = model ? serviceTierFamily(model) : undefined;
+		if (!model || !family) return false;
+		return family !== "openai" || shouldSendServiceTier("priority", model);
 	}
 
 	/**

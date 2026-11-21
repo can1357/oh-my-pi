@@ -4684,6 +4684,24 @@ describe("ACP boolean config options", () => {
 		await Bun.sleep(0);
 	});
 
+	it("skips idempotent fast=true updates so an active ultrafast tier is not downgraded", async () => {
+		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.fastMode = true;
+
+		const response = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "fast",
+			value: true,
+		});
+		expect(session.setFastModeCalls).toEqual([]);
+		expect(response.configOptions.find(option => option.id === "fast")?.currentValue).toBe(true);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("rejects wrong value types for select and boolean config options", async () => {
 		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });

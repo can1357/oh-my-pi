@@ -1202,9 +1202,10 @@ export class AcpAgent implements Agent {
 			case FAST_CONFIG_ID: {
 				const enabled = this.#expectBooleanValue(params);
 				// A client replaying a saved default can ask for fast mode on a
-				// model that has no service-tier family; skip rather than let
-				// `setFastMode` emit an operator notice for a no-op.
-				if (record.session.supportsFastMode()) {
+				// model that has no service-tier family, or replay `true` while
+				// already in `/fast ultra` (which would otherwise downgrade
+				// `ultrafast` to `priority`).
+				if (record.session.supportsFastMode() && enabled !== record.session.isFastModeEnabled()) {
 					record.session.setFastMode(enabled);
 				}
 				break;
