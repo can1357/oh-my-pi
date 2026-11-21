@@ -1089,6 +1089,16 @@ describe("devin catalog pricing", () => {
 			cacheRead: 0.8,
 			cacheWrite: 10,
 		});
+		const solFast = buildModel(
+			spec("gpt-5-6-sol-max-priority", { input: 10, output: 60, cacheRead: 1, cacheWrite: 0 }),
+		);
+		expect(solFast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 16,
+			output: 60,
+			cacheRead: 1.6,
+			cacheWrite: 20,
+		});
 	});
 
 	it("doubles every Grok leg but raises Gemini Pro output only 1.5x above 200K", () => {
