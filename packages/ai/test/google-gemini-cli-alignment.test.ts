@@ -460,13 +460,10 @@ describe("Google Gemini CLI alignment", () => {
 			expect(second.agentId).toBe(first.agentId);
 			expect(second.trajectoryId).toBe(first.trajectoryId);
 			expect(second.sessionId).toBe(first.sessionId);
+			expect(first.step).toBe("1");
+			expect(second.step).toBe("2");
+			expect(first.labels.request_id).toBe(`${first.trajectoryId}-0`);
 			expect(second.labels.request_id).toBe(`${first.trajectoryId}-1`);
-			const flat = state.get("google-antigravity-session-state") as {
-				agentId?: string;
-				identities?: Map<string, unknown>;
-			};
-			expect(flat.agentId).toBe(first.agentId);
-			expect(flat.identities).toBeUndefined();
 		});
 
 		it("echoes each account's own last response id as last_execution_id", async () => {
