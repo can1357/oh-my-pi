@@ -141,6 +141,8 @@ export interface HtmlFormDialogOptions {
 	claimKeys?(): void;
 	/** Esc, or Tab past Submit: the host hands the keyboard to the composer under the form. */
 	releaseKeys?(): void;
+	/** Called on every multi-line editor the form creates (textareas, option notes), e.g. to turn on Vim mode. */
+	configureEditor?(editor: Editor): void;
 	onSubmit(data: HtmlFormData, notes: OptionNote[]): void;
 	onCancel(): void;
 }
@@ -664,6 +666,13 @@ export class HtmlFormDialog implements Component, Focusable {
 			this.#dropdownInput(this.#open, data);
 			return;
 		}
+		// A textarea in Vim mode takes Esc first: it leaves Insert mode or cancels a half-typed command.
+		const textStop = this.#stops[this.#focus];
+		const textarea = textStop?.kind === "text" && !this.#hidden ? this.#editors.get(textStop.field) : undefined;
+		if (textarea?.vimConsumesEscape() && matchesKey(data, "escape")) {
+			textarea.handleInput(data);
+			return;
+		}
 		// Esc hands the keys to the composer, where Esc interrupts the turn and so cancels the ask.
 		if (matchesSelectCancel(data)) {
 			this.#options.releaseKeys?.();
@@ -940,6 +949,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	#initText(field: TextField): void {
 		if (field.multiline) {
 			const editor = new Editor(getEditorTheme());
+			this.#options.configureEditor?.(editor);
 			editor.setBorderVisible(false);
 			editor.setMaxHeight(this.#textareaRows(field));
 			// Enter leaves the field (handled before the editor); Shift+Enter inserts newlines.
@@ -1113,6 +1123,9 @@ export class HtmlFormDialog implements Component, Focusable {
 			target ?? (stop.kind === "option" ? stop.option : (this.#open?.highlight ?? this.#current(stop.field)));
 		if (option === undefined || stop.field.options[option]?.disabled !== false) return;
 		const editor = (this.#savedNoteEditor ??= new Editor(getEditorTheme()));
+		// Each note opens in Insert mode, wherever Vim mode was left when the last one closed.
+		if (editor.vimEnabled) editor.setVimMode(false);
+		this.#options.configureEditor?.(editor);
 		editor.setBorderVisible(false);
 		editor.setMaxHeight(4);
 		editor.disableSubmit = true;
@@ -1174,8 +1187,10 @@ export class HtmlFormDialog implements Component, Focusable {
 				return;
 			}
 		}
-		if (matchesSelectCancel(data)) this.#closeNote();
-		else if (getKeybindings().matches(data, "tui.input.submit")) this.#requestSave();
+		// In Vim mode the first Esc leaves Insert mode (or a half-typed command); the next closes the note.
+		if (matchesSelectCancel(data) && !(note.editor.vimConsumesEscape() && matchesKey(data, "escape"))) {
+			this.#closeNote();
+		} else if (getKeybindings().matches(data, "tui.input.submit")) this.#requestSave();
 		else note.editor.handleInput(data);
 	}
 

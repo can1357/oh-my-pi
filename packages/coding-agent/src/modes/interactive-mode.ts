@@ -12,6 +12,7 @@ import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
 	AutocompleteProvider,
 	Component,
+	Editor,
 	EditorTheme,
 	KeyId,
 	LoaderMessageColorFn,
@@ -256,7 +257,7 @@ import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { wrapTreeLine } from "@oh-my-pi/pi-tui/render/hanging-wrap";
 import { WidthAwareText } from "@oh-my-pi/pi-tui/render/width-aware-text";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
-import { copyToClipboard } from "../utils/clipboard";
+import { copyToClipboard, readTextFromClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
@@ -472,6 +473,7 @@ import {
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
+	cfgTuiVimYankToClipboard,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
@@ -6813,15 +6815,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** Apply the `tui.vimMode` setting to an editor and route Visual-mode yanks to the clipboard. */
+	/** Apply the `tui.vimMode` setting to an editor and route its clipboard registers. */
 	#applyVimMode(editor: CustomEditor): void {
-		editor.setVimMode(cfgTuiVimMode.get(settings));
-		editor.onYank = text => {
-			void this.#copyYankToClipboard(text);
-		};
+		this.#wireVimEditor(editor);
 		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
 		// visible at a glance, and the border is where bash/python mode already signal themselves.
 		editor.onVimModeChange = () => this.#syncVimStatus(editor);
+	}
+
+	/**
+	 * Vim mode plus clipboard routing: a yank reaches the system clipboard when it names `"+`/`"*`,
+	 * or always under `tui.vimYankToClipboard`; `"+p`/`"*p` read it back.
+	 */
+	#wireVimEditor(editor: Editor): void {
+		editor.setVimMode(cfgTuiVimMode.get(settings));
+		editor.onYank = (text, register) => {
+			if (register === "+" || register === "*" || cfgTuiVimYankToClipboard.get(settings)) {
+				void this.#copyYankToClipboard(text);
+			}
+		};
+		editor.readClipboard = readTextFromClipboard;
+		editor.requestRender = () => this.ui.requestRender();
+	}
+
+	configureDialogEditor(editor: Editor): void {
+		this.#wireVimEditor(editor);
+		// Dialogs have no status line of their own; the cursor shape is what shows the mode.
+		editor.onVimModeChange = mode => this.ui.terminal.setCursorShape?.(mode === "insert" ? "bar" : "block");
+		if (editor.vimEnabled) this.ui.terminal.setCursorShape?.("bar");
+	}
+
+	syncComposerVimStatus(): void {
+		this.#syncVimStatus(this.editor);
 	}
 
 	/**

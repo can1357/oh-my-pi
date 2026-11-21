@@ -465,6 +465,9 @@ const VIM_NAV_KEYS: Record<string, string | undefined> = {
 	space: "l",
 };
 
+/** History prompts one Vim `/` search fetches; `n` walks this list without asking again. */
+const VIM_HISTORY_SEARCH_LIMIT = 500;
+
 /** Minimum free cells between an end-of-line cursor and a right-aligned placeholder. */
 const PLACEHOLDER_MIN_GAP = 2;
 
@@ -683,6 +686,8 @@ interface HistoryEntry {
 interface HistoryStorage {
 	add(prompt: string, cwd?: string): Promise<void>;
 	getRecent(limit: number): HistoryEntry[];
+	/** Prompts matching every term of `query`, newest first; Vim's `/` searches through it. */
+	search?(query: string, limit: number): HistoryEntry[];
 }
 
 interface LocalHistoryEntry {
@@ -866,9 +871,16 @@ export class Editor implements Component, Focusable {
 	/** Vim-style modal editing (opt-in, see the `tui.vimMode` setting). `null` when disabled, in
 	 *  which case every code path below behaves exactly as it did before the mode existed. */
 	#vim: VimState | null = null;
-	/** Called with the selected text when Visual mode yanks, so hosts can reach the system
-	 *  clipboard — `packages/tui` deliberately has no clipboard dependency of its own. */
-	onYank?: (text: string) => void;
+	/**
+	 * Called with the text of every Vim yank, and of any command naming `"+` or `"*`, so hosts can
+	 * reach the system clipboard — `packages/tui` deliberately has no clipboard dependency of its
+	 * own. `register` is the `"x` the command named, if any; linewise text ends in a newline.
+	 */
+	onYank?: (text: string, register?: string) => void;
+	/** Reads the system clipboard for Vim's `"+p`/`"*p`; without it they put the last `"+y`. */
+	readClipboard?: () => Promise<string>;
+	/** Asks the host to repaint after an edit that lands outside a key event (`"+p` awaiting the clipboard). */
+	requestRender?: () => void;
 	/** Fired when the modal state changes, so hosts can restyle their chrome (border, status). */
 	onVimModeChange?: (mode: VimMode) => void;
 
@@ -946,6 +958,12 @@ export class Editor implements Component, Focusable {
 	#vimRegisters = new Map<string, VimRegister>();
 	/** What Vim last stored as unnamed; the kill ring decides whether it is still the newest. */
 	#vimUnnamed: VimRegister | null = null;
+	/** A `"+`/`"*` clipboard read started when the register was named; settles once the text is stored. */
+	#vimClipboardRead: Promise<void> | null = null;
+	/** `/` through prompt history: the query, its matches newest first, the one loaded (-1: the draft), and that draft. */
+	#vimHistory: { query: string; matches: string[]; at: number; draft: string } | null = null;
+	/** Set by `gj`/`gk` within a key, so the screen column they keep survives it. */
+	#vimScreenMoved = false;
 	/** States `u` stepped back from, newest last; Vim's `Ctrl-R` replays them until the next edit. */
 	#redoStack: EditorState[] = [];
 	#suspendUndo = false;
@@ -1143,6 +1161,7 @@ export class Editor implements Component, Focusable {
 		this.#pinnedUndo = null;
 		this.#vim = enabled ? new VimState() : null;
 		if (this.#vim) {
+			this.#vim.screenMove = count => this.#vimScreenMove(count);
 			this.#vim.mode = "insert";
 			const mark = this.#undoMark();
 			this.#pinnedUndo = mark;
@@ -2632,6 +2651,17 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		// The `/` search line takes Space, Backspace, and Enter as text editing; other named keys are
+		// swallowed rather than turned into motions, and control chords cancel it below.
+		if (vim.searching) {
+			if (canonical === "space" || data === " ") return this.#runVimKey(" ", vim);
+			if (canonical === "backspace" || matchesKey(data, "backspace")) return this.#runVimKey("backspace", vim);
+			if (canonical === "enter" || canonical === "return" || data === "\r" || data === "\n") {
+				return this.#runVimKey("enter", vim);
+			}
+			if (canonical !== undefined && VIM_NAV_KEYS[canonical] !== undefined) return true;
+		}
+
 		// `f`/`t`/`r` are waiting for a character. Space is that character; arrows and other named
 		// keys cancel, instead of being rewritten to `h`/`l` and inserted or searched for.
 		const awaitingTarget = /[fFtTr]$/.test(vim.pendingText);
@@ -2640,7 +2670,9 @@ export class Editor implements Component, Focusable {
 		if (awaitingTarget && mapped !== undefined) return this.#runVimKey("escape", vim);
 		if (mapped !== undefined) return this.#runVimKey(mapped, vim);
 		// Vim's redo is the one control chord Normal mode keeps; Insert and Visual leave it to the host.
-		if (canonical === "ctrl+r" && vim.mode === "normal" && !awaitingTarget) return this.#runVimKey("ctrl+r", vim);
+		if (canonical === "ctrl+r" && vim.mode === "normal" && !awaitingTarget && !vim.searching) {
+			return this.#runVimKey("ctrl+r", vim);
+		}
 
 		// Control chords, Enter, and Tab carry no printable text and stay with the host. A half-typed
 		// command (`r`, `f`, `d`) is cancelled first, like character-jump mode, so it cannot outlive a
@@ -2694,6 +2726,7 @@ export class Editor implements Component, Focusable {
 		const pinHere = this.#vimSession === null;
 		if (pinHere) this.#pinnedUndo = mark;
 		const revisionBefore = this.#textRevision;
+		this.#vimScreenMoved = false;
 		const commands = vim.handleKey(key, this.#state);
 		if (commands === null) {
 			if (pinHere) this.#pinnedUndo = null;
@@ -2723,6 +2756,12 @@ export class Editor implements Component, Focusable {
 		// command — so all three have to be compared or the indicator goes stale mid-selection.
 		if (vim.mode !== before || vim.pendingText !== pendingBefore || this.vimSelectedLines !== selectedLinesBefore) {
 			this.onVimModeChange?.(vim.mode);
+		}
+		// `gj`/`gk` keep their screen column across consecutive moves; any finished command but them resets it.
+		if (!this.#vimScreenMoved && vim.pendingText === "") this.#preferredVisualCol = null;
+		const clipboard = vim.pendingText.slice(0, 2);
+		if ((clipboard === '"+' || clipboard === '"*') && !pendingBefore.startsWith(clipboard)) {
+			this.#prefetchVimClipboard(clipboard.charAt(1));
 		}
 		if (before === "replace" && vim.mode !== "replace") this.#replaceLog.length = 0;
 		if (vim.mode === "replace" && before !== "replace") this.#replaceLog.length = 0;
@@ -2834,10 +2873,7 @@ export class Editor implements Component, Focusable {
 					break;
 				case "yank": {
 					const body = this.#sliceRange(command.from, command.to, command.linewise);
-					if (body || command.linewise) {
-						this.#writeVimRegister(body, command.linewise, true, command.register);
-						if (command.register !== "_") this.onYank?.(command.linewise ? `${body}\n` : body);
-					}
+					if (body || command.linewise) this.#writeVimRegister(body, command.linewise, true, command.register);
 					break;
 				}
 				case "delete":
@@ -2847,9 +2883,11 @@ export class Editor implements Component, Focusable {
 					this.#openVimLine(command.below);
 					break;
 				case "paste":
+					if (this.#deferVimClipboard(command)) break;
 					this.#pasteVimRegister(command.after, command.count, command.cursorAfter, command.register);
 					break;
 				case "visualPut":
+					if (this.#deferVimClipboard(command)) break;
 					this.#putOverVimSelection(
 						command.from,
 						command.to,
@@ -2857,6 +2895,9 @@ export class Editor implements Component, Focusable {
 						command.keepRegister,
 						command.register,
 					);
+					break;
+				case "history":
+					this.#searchVimHistory(command.query, command.older, command.count);
 					break;
 				case "undo":
 					for (let i = 0; i < command.count && this.#undoStack.length > 0; i++) this.#applyUndo();
@@ -2894,6 +2935,102 @@ export class Editor implements Component, Focusable {
 		}
 		this.#clampVimCursor();
 		this.invalidate();
+	}
+
+	/** `"+`/`"*` named: start reading the clipboard now, so it has usually landed by the `p` that follows. */
+	#prefetchVimClipboard(name: string): void {
+		const read = this.readClipboard;
+		if (read === undefined) return;
+		const pending = read()
+			.then(
+				text => {
+					// Clipboard text carries no type; like Vim, a trailing newline makes it linewise.
+					if (text === "") this.#vimRegisters.delete(name);
+					else
+						this.#vimRegisters.set(
+							name,
+							text.endsWith("\n") ? { text: text.slice(0, -1), linewise: true } : { text, linewise: false },
+						);
+				},
+				() => {},
+			)
+			.finally(() => {
+				if (this.#vimClipboardRead === pending) this.#vimClipboardRead = null;
+			});
+		this.#vimClipboardRead = pending;
+	}
+
+	/** A `"+p` that beat its clipboard read runs once the read lands. */
+	#deferVimClipboard(command: Extract<VimCommand, { kind: "paste" | "visualPut" }>): boolean {
+		const read = this.#vimClipboardRead;
+		if (read === null || (command.register !== "+" && command.register !== "*")) return false;
+		void read.then(() => {
+			this.#applyVimCommands([command]);
+			this.requestRender?.();
+		});
+		return true;
+	}
+
+	/**
+	 * `/`, `?`, `n`, `N`: load the `count`th prompt-history entry matching `query`, older or newer
+	 * than the one loaded, the way a shell's vi mode does. Stepping newer past the newest match
+	 * brings back the draft the first search left. A move with nowhere to go changes nothing.
+	 */
+	#searchVimHistory(query: string, older: boolean, count: number): void {
+		const text = this.#state.lines.join("\n");
+		let search = this.#vimHistory;
+		// A new query, or a buffer edited since the last load, starts over from what is there now.
+		if (search === null || search.query !== query || text !== (search.matches[search.at] ?? search.draft)) {
+			const matches = this.#historyMatches(query);
+			const at = matches.indexOf(text);
+			search = { query, matches, at, draft: at < 0 ? text : "" };
+			this.#vimHistory = search;
+		}
+		const target = older ? Math.min(search.at + count, search.matches.length - 1) : Math.max(search.at - count, -1);
+		if (target === search.at) return;
+		search.at = target;
+		this.#historyIndex = -1;
+		this.#setTextInternal(search.matches[target] ?? search.draft, "start");
+		if (target < 0) return;
+		// Land on the first query term, as a search lands on its match.
+		const loaded = this.#state.lines.join("\n").toLowerCase();
+		const term = query.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+		const at = term === "" ? -1 : loaded.indexOf(term);
+		const pos = at < 0 ? { line: 0, col: 0 } : offsetToPos(this.#state.lines, at);
+		this.#state.cursorLine = pos.line;
+		this.#setCursorCol(pos.col);
+	}
+
+	/** Prompts containing every term of `query`, newest first: the persistent history, else this editor's own. */
+	#historyMatches(query: string): string[] {
+		const stored = this.#historyStorage?.search?.(query, VIM_HISTORY_SEARCH_LIMIT);
+		if (stored !== undefined) return stored.map(entry => entry.prompt);
+		const terms = query
+			.toLowerCase()
+			.split(/\s+/)
+			.filter(term => term !== "");
+		const matches: string[] = [];
+		for (const entry of this.#history) {
+			const lower = entry.text.toLowerCase();
+			if (!entry.draft && terms.every(term => lower.includes(term))) matches.push(entry.text);
+		}
+		return matches;
+	}
+
+	/** `gj`/`gk`: where `count` wrapped rows away lands, keeping the screen column; null when it cannot move. */
+	#vimScreenMove(count: number): VimPosition | null {
+		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
+		const current = this.#findCurrentVisualLine(visualLines);
+		const target = Math.max(0, Math.min(visualLines.length - 1, current + count));
+		if (target === current) return null;
+		const { cursorLine, cursorCol } = this.#state;
+		// Reuses Up/Down's column rules (and their sticky column), then hands the position back as a motion.
+		this.#moveToVisualLine(visualLines, current, target);
+		const to = { line: this.#state.cursorLine, col: this.#state.cursorCol };
+		this.#state.cursorLine = cursorLine;
+		this.#state.cursorCol = cursorCol;
+		this.#vimScreenMoved = true;
+		return to;
 	}
 
 	#replaceVimSpan(from: VimPosition, to: VimPosition, text: string): void {
@@ -3079,10 +3216,11 @@ export class Editor implements Component, Focusable {
 	 * Store a yank or delete the way Vim does: `"x` into that register (`"X` appends), `"_` nowhere,
 	 * otherwise yanks into `"0` and deletes into `"1`–`"9` (whole lines or several) or `"-` (within a
 	 * line). The unnamed register always follows, and the kill ring too, so an Insert-mode `Ctrl+Y`
-	 * can yank what Vim deleted.
+	 * can yank what Vim deleted. Yanks, and anything stored into `"+`/`"*`, go to {@link onYank}.
 	 */
 	#writeVimRegister(text: string, linewise: boolean, yank: boolean, name: string | undefined): void {
 		if (name === "_") return;
+		if (yank || name === "+" || name === "*") this.onYank?.(linewise ? `${text}\n` : text, name);
 		let entry: VimRegister = { text, linewise };
 		const named = name !== undefined && /^[a-zA-Z]$/.test(name) ? name.toLowerCase() : undefined;
 		if (named !== undefined) {
@@ -3095,7 +3233,7 @@ export class Editor implements Component, Focusable {
 						: { text: previous.text + text, linewise: false };
 			}
 			this.#vimRegisters.set(named, entry);
-		} else if (name !== undefined && /^[0-9-]$/.test(name)) {
+		} else if (name !== undefined && /^[0-9+*-]$/.test(name)) {
 			this.#vimRegisters.set(name, entry);
 		} else if (yank) {
 			this.#vimRegisters.set("0", entry);
@@ -3115,7 +3253,8 @@ export class Editor implements Component, Focusable {
 	/**
 	 * What `p` would put from register `name`. The unnamed register is the kill ring's newest entry,
 	 * so text killed in Insert mode is puttable too; Vim's own entry keeps its linewise flag. `"+`
-	 * and `"*` are write-only here (every yank reaches the clipboard); the terminal's paste reads it.
+	 * and `"*` hold the clipboard as read when the register was named (see {@link readClipboard}),
+	 * else the last text stored into them.
 	 */
 	#readVimRegister(name: string | undefined): VimRegister | null {
 		if (name === undefined || name === '"') {
@@ -3125,7 +3264,7 @@ export class Editor implements Component, Focusable {
 			if (own && (own.linewise ? `${own.text}\n` : own.text) === top) return own;
 			return top.endsWith("\n") ? { text: top.slice(0, -1), linewise: true } : { text: top, linewise: false };
 		}
-		if (!/^[a-zA-Z0-9-]$/.test(name)) return null;
+		if (!/^[a-zA-Z0-9+*-]$/.test(name)) return null;
 		return this.#vimRegisters.get(name.toLowerCase()) ?? null;
 	}
 

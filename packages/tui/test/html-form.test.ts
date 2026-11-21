@@ -1124,6 +1124,39 @@ describe("html form", () => {
 			expect(onCancel).not.toHaveBeenCalled();
 		});
 
+		it("in Vim mode Esc in a textarea leaves Insert first; only a quiet Normal mode hands the keys back", () => {
+			const releaseKeys = vi.fn();
+			const { form } = dialog(`<form><label>Notes<textarea name="notes"></textarea></label></form>`, {
+				releaseKeys,
+				configureEditor: editor => editor.setVimMode(true),
+			});
+			form.handleInput("draft");
+			form.handleInput(ESC);
+			expect(releaseKeys).not.toHaveBeenCalled();
+			form.handleInput("x");
+			expect(form.data()).toEqual({ notes: "draf" });
+			form.handleInput(ESC);
+			expect(releaseKeys).toHaveBeenCalledTimes(1);
+		});
+
+		it("in Vim mode Esc in an option note leaves Insert, so Enter still saves it; a reopened note types again", () => {
+			const { form } = dialog(DB_FORM, { configureEditor: editor => editor.setVimMode(true) });
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			form.handleInput("why postgres");
+			form.handleInput(ESC);
+			expect(form.debugState().noteEdit).toBe("db=pg");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres" } });
+			// Closed from Normal mode, the note still reopens in Insert mode.
+			form.handleInput("n");
+			form.handleInput("!");
+			form.handleInput(ESC);
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres!" } });
+			form.dispose();
+		});
+
 		it("rows: no footer in the panel; keyHints() gives the focused stop's keys for the host to draw", () => {
 			const { form } = dialog(DB_FORM);
 			const rows = plain(form);

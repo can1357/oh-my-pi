@@ -1688,5 +1688,98 @@ describe("Editor vim mode", () => {
 			shifted.handleInput('dddd"2p');
 			expect(shifted.getText()).toBe("three\none");
 		});
+
+		it('reports which register a yank named, and "+p puts the clipboard', async () => {
+			const yanked: Array<string | undefined> = [];
+			const editor = vimEditor("alpha beta");
+			editor.onYank = (_text, register) => yanked.push(register);
+			editor.handleInput('yw"+yw"adw');
+			// A plain yank, then `"+`; the delete into `"a` is no clipboard write.
+			expect(yanked).toEqual([undefined, "+"]);
+			// Clipboard text ending in a newline puts as a whole line, as Vim does.
+			editor.readClipboard = async () => "from clipboard\n";
+			const rendered = Promise.withResolvers<void>();
+			editor.requestRender = () => rendered.resolve();
+			editor.handleInput('"+p');
+			// The read is still in flight when `p` arrives; the put lands with it and asks for a repaint.
+			await rendered.promise;
+			expect(editor.getText()).toBe("beta\nfrom clipboard");
+		});
+	});
+
+	describe("Vim screen rows, text objects ahead, history search", () => {
+		it("gj/gk move by wrapped rows and keep the screen column; j/k stay on lines", () => {
+			const editor = vimEditor("aaaa bbbb cccc dddd eeee ffff gggg hhhh\nxyz");
+			editor.render(20);
+			editor.handleInput("llgj");
+			expect(cursor(editor)).toEqual({ line: 0, col: 17 });
+			editor.handleInput("gjgk");
+			expect(cursor(editor)).toEqual({ line: 0, col: 17 });
+			editor.handleInput("j");
+			expect(cursor(editor)).toEqual({ line: 1, col: 2 });
+		});
+
+		it("brackets ahead of the cursor are the object when none encloses it, as in Vim 9.2", () => {
+			const editor = vimEditor("foo (bar) baz");
+			editor.handleInput("di(");
+			expect(editor.getText()).toBe("foo () baz");
+			const nextLine = vimEditor("foo\n(bar)");
+			nextLine.handleInput("ci(X");
+			expect(nextLine.getText()).toBe("foo\n(X)");
+			// A stray closer ahead of the opener cancels it out, so nothing is selected.
+			const unbalanced = vimEditor("foo) (bar)");
+			unbalanced.handleInput("di(");
+			expect(unbalanced.getText()).toBe("foo) (bar)");
+		});
+
+		it("/ walks older prompts that match, n/N step through them, and N past the newest restores the draft", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			for (const prompt of ["fix the parser bug", "write docs", "parser tests please"]) editor.addToHistory(prompt);
+			editor.setText("my draft");
+			editor.handleInput(ESC);
+			editor.handleInput("/parser");
+			expect(editor.vimPending).toBe("/parser");
+			editor.handleInput("\r");
+			expect(editor.getText()).toBe("parser tests please");
+			editor.handleInput("n");
+			expect(editor.getText()).toBe("fix the parser bug");
+			expect(cursor(editor)).toEqual({ line: 0, col: 8 });
+			// No older match: the entry stays.
+			editor.handleInput("n");
+			expect(editor.getText()).toBe("fix the parser bug");
+			editor.handleInput("NN");
+			expect(editor.getText()).toBe("my draft");
+			expect(editor.vimMode).toBe("normal");
+		});
+
+		it("Escape and Backspace on an empty search line cancel it without touching the buffer", () => {
+			const editor = vimEditor("draft");
+			editor.addToHistory("draft two");
+			editor.handleInput("/dr");
+			editor.handleInput(ESC);
+			expect(editor.vimPending).toBe("");
+			editor.handleInput("/d");
+			editor.handleInput(BACKSPACE);
+			editor.handleInput(BACKSPACE);
+			expect(editor.vimPending).toBe("");
+			// Back in Normal mode, `x` is a command again rather than search text.
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("raft");
+		});
+
+		it("searches the persistent history when the editor has one", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({
+				add: async () => {},
+				getRecent: () => [],
+				search: query => (query === "deploy" ? [{ prompt: "deploy to eu" }, { prompt: "deploy to us" }] : []),
+			});
+			editor.setVimMode(true);
+			editor.handleInput(ESC);
+			editor.handleInput("2/deploy");
+			editor.handleInput("\r");
+			expect(editor.getText()).toBe("deploy to us");
+		});
 	});
 });

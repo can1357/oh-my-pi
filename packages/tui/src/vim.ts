@@ -31,6 +31,12 @@ export interface VimBuffer {
 }
 
 /**
+ * Where `count` screen rows down (negative: up) from the cursor lands on the editor's wrapped
+ * layout, keeping the screen column as `gj`/`gk` do; null when the cursor cannot move at all.
+ */
+export type VimScreenMove = (count: number) => VimPosition | null;
+
+/**
  * An edit the editor should apply. `to` is always an *exclusive* end offset, so ranges compose the
  * same way regardless of whether the originating motion was inclusive (`e`) or exclusive (`w`).
  */
@@ -62,7 +68,12 @@ export type VimCommand =
 	| { kind: "indent"; fromLine: number; toLine: number; out: boolean }
 	| { kind: "retype"; record: VimInsertRecord; times: number; newline: boolean; overwrite: boolean }
 	/** `3ifoo<Esc>`: type the session that just ended `times` more times (`newline` for `o`/`O`). */
-	| { kind: "insertRepeat"; times: number; newline: boolean };
+	| { kind: "insertRepeat"; times: number; newline: boolean }
+	/**
+	 * `/text`, `?text`, `n`, `N`: load the `count`th prompt-history entry containing `query`, older
+	 * than the current one (`older`) or newer, as a shell's vi mode does.
+	 */
+	| { kind: "history"; query: string; older: boolean; count: number };
 
 /** What an Insert/Replace session typed, relative to where it started; `.` replays it. */
 export interface VimInsertRecord {
@@ -311,9 +322,10 @@ export function offsetToPos(lines: readonly string[], offset: number): VimPositi
 }
 
 /**
- * `i(`/`a{`… — the innermost pair enclosing the cursor, counting nesting and spanning lines. A
- * cursor sitting on either delimiter counts as being on that pair. Charwise in both variants;
- * Vim's linewise-ish `i{` reshaping is deliberately not reproduced.
+ * `i(`/`a{`… — the innermost pair enclosing the cursor, counting nesting and spanning lines, or the
+ * next pair ahead when none encloses it. A cursor sitting on either delimiter counts as being on
+ * that pair. Charwise in both variants; Vim's linewise-ish `i{` reshaping is deliberately not
+ * reproduced.
  */
 function bracketObject(buf: VimBuffer, open: string, close: string, around: boolean): TextObjectRange | null {
 	const { text, cursor } = flatten(buf);
@@ -328,6 +340,21 @@ function bracketObject(buf: VimBuffer, open: string, close: string, around: bool
 				break;
 			}
 			depth--;
+		}
+	}
+	if (openAt < 0) {
+		// Vim 9.2: outside any pair, the first unclosed opener after the cursor, any line ahead.
+		depth = 0;
+		for (let i = cursor + 1; i < text.length; i++) {
+			const ch = text.charAt(i);
+			if (ch === close) depth++;
+			else if (ch === open) {
+				if (depth === 0) {
+					openAt = i;
+					break;
+				}
+				depth--;
+			}
 		}
 	}
 	if (openAt < 0) return null;
@@ -716,6 +743,12 @@ export class VimState {
 	/** `"` typed, waiting for the register name; then the named register the command will use. */
 	#registerPending = false;
 	#register: string | null = null;
+	/** `/` or `?` typed: the history-search text being entered, and the count typed before it. */
+	#search: { older: boolean; text: string; count: number } | null = null;
+	/** Last search, so `n` repeats it and `N` reverses it. */
+	#lastSearch: { query: string; older: boolean } | null = null;
+	/** The editor's wrapped-row lookup for `gj`/`gk`; without one they move by lines like `j`/`k`. */
+	screenMove: VimScreenMove | null = null;
 
 	/**
 	 * Vim's "desired column": `j`/`k` remember the column you started from, so descending through a
@@ -748,7 +781,7 @@ export class VimState {
 		this.#insertRepeat = 1;
 	}
 
-	/** True while a count, operator, `g`, text-object, find, `r`, or `"x` prefix is half-typed — Escape cancels it. */
+	/** True while a count, operator, `g`, text-object, find, `r`, `"x` prefix, or search is half-typed — Escape cancels it. */
 	get pending(): boolean {
 		return (
 			this.#count.length > 0 ||
@@ -758,8 +791,14 @@ export class VimState {
 			this.#findPending !== null ||
 			this.#replaceChar ||
 			this.#registerPending ||
-			this.#register !== null
+			this.#register !== null ||
+			this.#search !== null
 		);
+	}
+
+	/** True while `/` or `?` is reading search text: Enter, Backspace, and Space go to the search line. */
+	get searching(): boolean {
+		return this.#search !== null;
 	}
 
 	/**
@@ -768,6 +807,8 @@ export class VimState {
 	 * is visible instead of silently swallowing the next keystroke.
 	 */
 	get pendingText(): string {
+		// The search line replaces the echo, as Vim's command line does.
+		if (this.#search !== null) return `${this.#search.older ? "/" : "?"}${this.#search.text}`;
 		const register = this.#registerPending ? '"' : this.#register !== null ? `"${this.#register}` : "";
 		return `${register}${this.#count}${this.#operator ?? ""}${this.#pendingG ? "g" : ""}${this.#textObject ?? ""}${findPendingKey(this.#findPending)}${this.#replaceChar ? "r" : ""}`;
 	}
@@ -789,6 +830,8 @@ export class VimState {
 		this.#insertRepeat = 1;
 		this.#lastInsertPos = null;
 		this.#lastVisual = null;
+		this.#search = null;
+		this.#lastSearch = null;
 	}
 
 	/** `0` is the line-start motion unless it extends a count already being typed. */
@@ -810,6 +853,7 @@ export class VimState {
 		this.#replaceChar = false;
 		this.#registerPending = false;
 		this.#register = null;
+		this.#search = null;
 	}
 
 	#takeCount(): number {
@@ -839,6 +883,15 @@ export class VimState {
 			return this.#handleEscape(buf);
 		}
 		if (this.mode === "insert") return null;
+		if (this.#search !== null) {
+			const commands = this.#searchKey(key, this.#search);
+			// The search is not a change `.` repeats, so its keys never reach the change record.
+			if (this.#search === null) {
+				this.#cmdKeys = [];
+				this.#cmdCount = "";
+			}
+			return commands;
+		}
 		const recording = this.mode === "normal";
 		const dotIsTarget = this.#findPending !== null || this.#replaceChar;
 		if (recording) {
@@ -1143,7 +1196,28 @@ export class VimState {
 		return null;
 	}
 
-	/** The key after `g`: `gg`, `ge`/`gE`, the case operators, `gJ`, `gv`, `gi`, `gp`/`gP`. */
+	/**
+	 * A key typed on the `/`/`?` line. Enter runs the search (an empty line reuses the last text,
+	 * as Vim's does); Backspace on an empty line cancels it; anything else is search text.
+	 */
+	#searchKey(key: string, search: { older: boolean; text: string; count: number }): VimCommand[] {
+		if (key === "enter") {
+			this.#search = null;
+			const query = search.text.trim() === "" ? this.#lastSearch?.query : search.text;
+			if (query === undefined) return [];
+			this.#lastSearch = { query, older: search.older };
+			return [{ kind: "history", query, older: search.older, count: search.count }];
+		}
+		if (key === "backspace") {
+			if (search.text === "") this.#search = null;
+			else search.text = search.text.slice(0, prevGraphemeStart(search.text, search.text.length));
+			return [];
+		}
+		search.text += key;
+		return [];
+	}
+
+	/** The key after `g`: `gg`, `gj`/`gk`, `ge`/`gE`, the case operators, `gJ`, `gv`, `gi`, `gp`/`gP`. */
 	#handleGKey(key: string, buf: VimBuffer): VimCommand[] | null {
 		const count = this.#count.length > 0 ? Number.parseInt(this.#count, 10) : 1;
 		switch (key) {
@@ -1153,6 +1227,19 @@ export class VimState {
 				const line = Math.min(this.#takeCount() - 1, buf.lines.length - 1);
 				const to = { line, col: firstNonBlank(buf.lines[line] ?? "") };
 				return this.#applyMotion(buf, { to, inclusive: false, linewise: true });
+			}
+			case "j":
+			case "k": {
+				// Screen rows of a wrapped line, exclusive and charwise like Vim's `nv_screengo`. A count
+				// past the first or last row stops there; only a move that goes nowhere fails.
+				if (this.screenMove === null) {
+					const motion = this.#resolveMotion(key, buf);
+					if (motion === null) break;
+					return this.#applyMotion(buf, motion);
+				}
+				const to = this.screenMove(key === "j" ? count : -count);
+				if (to === null) break;
+				return this.#applyMotion(buf, { to, inclusive: false, linewise: false });
 			}
 			case "e":
 			case "E": {
@@ -1751,6 +1838,26 @@ export class VimState {
 				}
 				const dotCount = this.#count.length > 0 ? this.#takeCount() : null;
 				return this.#repeat(buf, dotCount);
+			}
+			case "/":
+			case "?":
+				// Prompt history, not the draft: `/` reaches back to older prompts, `?` forward to newer.
+				if (this.#operator !== null) {
+					this.#clearPending();
+					return [];
+				}
+				this.#search = { older: key === "/", text: "", count: this.#takeCount() };
+				return [];
+			case "n":
+			case "N": {
+				const last = this.#lastSearch;
+				if (this.#operator !== null || last === null) {
+					this.#clearPending();
+					return [];
+				}
+				return [
+					{ kind: "history", query: last.query, older: last.older === (key === "n"), count: this.#takeCount() },
+				];
 			}
 			case "J": {
 				if (this.#operator !== null) {
