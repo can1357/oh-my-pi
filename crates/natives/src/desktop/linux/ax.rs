@@ -42,6 +42,9 @@ pub struct AtSpiAx {
 	/// The display server's own list of windows, where it knows where each one
 	/// is (X11).
 	native:        Option<Box<dyn NativeWindows>>,
+	/// Wayland lists message dialogs by AT-SPI identity, without native title
+	/// matching.
+	alert_windows: bool,
 	frames:        FrameCache,
 }
 
@@ -319,6 +322,7 @@ impl AtSpiAx {
 			connection,
 			reply_timeout: REPLY_TIMEOUT,
 			native: None,
+			alert_windows: false,
 			frames: FrameCache::default(),
 		})
 	}
@@ -327,6 +331,12 @@ impl AtSpiAx {
 	/// where `native` says their window is.
 	pub(crate) fn with_native_windows(mut self, native: Box<dyn NativeWindows>) -> Self {
 		self.native = Some(native);
+		self
+	}
+
+	/// Lists GTK message dialogs where no native title matching is needed.
+	pub(crate) const fn with_alert_windows(mut self) -> Self {
+		self.alert_windows = true;
 		self
 	}
 
@@ -393,7 +403,9 @@ impl AtSpiAx {
 				let Ok(app) = self.app_for_window(window).await else {
 					return false;
 				};
-				let Ok(frames) = Self::frames(&self.connection, &app, self.reply_timeout).await else {
+				let Ok(frames) =
+					Self::frames(&self.connection, &app, self.reply_timeout, self.alert_windows).await
+				else {
 					return false;
 				};
 				for frame in frames {
@@ -443,7 +455,7 @@ impl AtSpiAx {
 			if !self
 				.reply(frame_proxy.get_role())
 				.await?
-				.is_ok_and(|role| top_level_role(role, true))
+				.is_ok_and(|role| top_level_role(role, true, self.alert_windows))
 			{
 				continue;
 			}
@@ -578,6 +590,7 @@ impl AtSpiAx {
 		connection: &Connection,
 		app: &ObjectRefOwned,
 		reply_timeout: Duration,
+		alert_windows: bool,
 	) -> CoreResult<Vec<ObjectRefOwned>> {
 		let proxy = answered("the application", reply_timeout, app.as_accessible_proxy(connection))
 			.await?
@@ -593,7 +606,7 @@ impl AtSpiAx {
 					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
 			if answered("the application", reply_timeout, child_proxy.get_role())
 				.await?
-				.is_ok_and(|role| top_level_role(role, true))
+				.is_ok_and(|role| top_level_role(role, true, alert_windows))
 			{
 				frames.push(child);
 			}
@@ -648,6 +661,7 @@ impl AtSpiAx {
 		connection: &Connection,
 		mut object: ObjectRefOwned,
 		reply_timeout: Duration,
+		alert_windows: bool,
 	) -> CoreResult<ObjectRefOwned> {
 		for _ in 0..64 {
 			let proxy =
@@ -657,13 +671,13 @@ impl AtSpiAx {
 			let role = answered("the application", reply_timeout, proxy.get_role())
 				.await?
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
-			if top_level_role(role, false) {
+			if top_level_role(role, false, alert_windows) {
 				return Ok(object);
 			}
 			let parent = answered("the application", reply_timeout, proxy.parent())
 				.await?
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window parent: {err}")))?;
-			if top_level_role(role, true)
+			if top_level_role(role, true, alert_windows)
 				&& Self::is_application(connection, &parent, reply_timeout).await?
 			{
 				return Ok(object);
@@ -771,7 +785,7 @@ impl AtSpiAx {
 		bounds: WalkBounds,
 		children: Option<u32>,
 	) -> CoreResult<(AxProps, Vec<ObjectRefOwned>)> {
-		let Self { rt, connection, native, frames, reply_timeout } = self;
+		let Self { rt, connection, native, frames, reply_timeout, .. } = self;
 		rt.block_on(cancellable(answered(
 			"the application",
 			*reply_timeout,
@@ -1563,13 +1577,14 @@ fn native_window_for_frame(windows: &[DesktopWindow], pid: u32, title: &str) -> 
 }
 
 /// Whether `role` marks a top-level window: `Frame`, `Dialog` and `Window`
-/// anywhere, and `FileChooser` as a child of the application. GTK3 gives its
-/// Open and Save dialogs that role and gives it to the file chooser widget
-/// inside them too.
-const fn top_level_role(role: Role, child_of_application: bool) -> bool {
+/// anywhere, and `FileChooser` as a child of the application. GTK3 message
+/// dialogs are `Alert`s; include them only without native window matching,
+/// since their accessible name need not match their native title.
+const fn top_level_role(role: Role, child_of_application: bool, alert_windows: bool) -> bool {
 	match role {
 		Role::Frame | Role::Dialog | Role::Window => true,
 		Role::FileChooser => child_of_application,
+		Role::Alert => child_of_application && alert_windows,
 		_ => false,
 	}
 }
@@ -1667,7 +1682,8 @@ impl AxBackend for AtSpiAx {
 		self
 			.run(async {
 				let app = self.app_for_window(win).await?;
-				let frames = Self::frames(&self.connection, &app, self.reply_timeout).await?;
+				let frames =
+					Self::frames(&self.connection, &app, self.reply_timeout, self.alert_windows).await?;
 				let mut matches = Vec::new();
 				for frame in frames {
 					let id = atspi_window_id(&frame);
@@ -1707,7 +1723,8 @@ impl AxBackend for AtSpiAx {
 		let object = Self::object(h).clone();
 		self.run(async {
 			let connection = &self.connection;
-			let object = Self::top_level(connection, object, self.reply_timeout).await?;
+			let object =
+				Self::top_level(connection, object, self.reply_timeout, self.alert_windows).await?;
 			// The ancestry scan is per-reply; the following single-window
 			// identification keeps its operation budget.
 			answered("the application", self.reply_timeout, async {
@@ -1909,7 +1926,7 @@ impl AxBackend for AtSpiAx {
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>> {
 		let x = x.round() as i32;
 		let y = y.round() as i32;
-		let Self { rt, connection, native, frames: cache, reply_timeout } = self;
+		let Self { rt, connection, native, frames: cache, reply_timeout, alert_windows } = self;
 		cache.refresh();
 		rt.block_on(cancellable(async {
 			let bus = &*connection;
@@ -1918,7 +1935,7 @@ impl AxBackend for AtSpiAx {
 				.await
 				.map_err(DesktopError::ax_failed)?
 			{
-				let frames = Self::frames(connection, &app, *reply_timeout).await?;
+				let frames = Self::frames(connection, &app, *reply_timeout, *alert_windows).await?;
 				for frame in frames {
 					// This probes one frame, not the traversal: retain its
 					// single-element operation budget.
@@ -3073,11 +3090,11 @@ mod tests {
 			let (server, client) = tokio::try_join!(server.build(), client).unwrap();
 			let object = |path| ObjectRefOwned::from_static_str_unchecked(PEER, path);
 			let path = |object: ObjectRefOwned| object.path_as_str().to_owned();
-			let top_levels = AtSpiAx::frames(&client, &object("/app"), REPLY_TIMEOUT).await;
+			let top_levels = AtSpiAx::frames(&client, &object("/app"), REPLY_TIMEOUT, false).await;
 			let mut owners = Vec::new();
 			for element in ["/open", "/dialog", "/ok"] {
 				owners.push(
-					AtSpiAx::top_level(&client, object(element), REPLY_TIMEOUT)
+					AtSpiAx::top_level(&client, object(element), REPLY_TIMEOUT, false)
 						.await
 						.map(path)
 						.ok(),
@@ -3985,7 +4002,14 @@ mod tests {
 				tokio::try_join!(serve(server).build(), client).unwrap()
 			});
 			(
-				AtSpiAx { rt, connection, reply_timeout, native: None, frames: FrameCache::default() },
+				AtSpiAx {
+					rt,
+					connection,
+					reply_timeout,
+					native: None,
+					alert_windows: false,
+					frames: FrameCache::default(),
+				},
 				server,
 			)
 		}
@@ -4335,6 +4359,166 @@ mod tests {
 			assert_eq!(listed.windows.len(), 1);
 			assert_eq!(listed.windows[0].window.title, "Document");
 			assert_eq!(listed.unanswered, [":1.8"]);
+		}
+
+		/// An element of a GTK 3 app: its role, name, parent and children.
+		struct Gtk3 {
+			role:     Role,
+			name:     &'static str,
+			parent:   &'static str,
+			children: Vec<&'static str>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Gtk3 {
+			fn get_role(&self) -> u32 {
+				self.role as u32
+			}
+
+			fn get_state(&self) -> Vec<u32> {
+				let dialog = self.role == Role::Alert && self.parent == "/app";
+				let bits = if dialog {
+					StateSet::new(State::Focused).bits()
+				} else {
+					0
+				};
+				vec![bits as u32, (bits >> 32) as u32]
+			}
+
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				self
+					.children
+					.iter()
+					.map(|child| (PEER.to_owned(), path(child)))
+					.collect()
+			}
+
+			#[allow(clippy::unused_self, reason = "every element belongs to the one app")]
+			fn get_application(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), path("/app"))
+			}
+
+			#[zbus(property)]
+			fn name(&self) -> String {
+				self.name.to_owned()
+			}
+
+			#[zbus(property)]
+			fn parent(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), path(self.parent))
+			}
+		}
+
+		/// The bus daemon's process lookup: the app is process 7.
+		struct Bus;
+
+		#[interface(name = "org.freedesktop.DBus")]
+		impl Bus {
+			#[zbus(name = "GetConnectionUnixProcessID")]
+			#[allow(clippy::unused_self, reason = "one process")]
+			fn pid(&self, name: String) -> u32 {
+				assert_eq!(name, PEER);
+				7
+			}
+		}
+
+		/// A GTK 3 app with a window titled `main`, holding a banner (an alert
+		/// inside the window), and a message dialog, which accessibility names
+		/// "Question" when it has no title.
+		fn app_with_message_dialog(main: &'static str) -> (AtSpiAx, Connection) {
+			let node = |role, name, parent, children| Gtk3 { role, name, parent, children };
+			let frame = || Extents { x: 10, y: 20, delay: Duration::ZERO };
+			backend(HUNG_CALL_TIMEOUT, |server| {
+				server
+					.serve_at("/org/freedesktop/DBus", Bus)
+					.unwrap()
+					.serve_at(
+						"/org/a11y/atspi/accessible/root",
+						node(Role::DesktopFrame, "main", "/org/a11y/atspi/null", vec!["/app"]),
+					)
+					.unwrap()
+					.serve_at(
+						"/app",
+						node(Role::Application, "tdlg", "/org/a11y/atspi/null", vec!["/main", "/alert"]),
+					)
+					.unwrap()
+					.serve_at("/main", Gtk3 {
+						role:     Role::Frame,
+						name:     main,
+						parent:   "/app",
+						children: vec!["/banner"],
+					})
+					.unwrap()
+					.serve_at("/banner", node(Role::Alert, "Saved", "/main", vec!["/dismiss"]))
+					.unwrap()
+					.serve_at("/dismiss", node(Role::Button, "Dismiss", "/banner", vec![]))
+					.unwrap()
+					.serve_at("/main", frame())
+					.unwrap()
+					.serve_at("/alert", node(Role::Alert, "Question", "/app", vec!["/yes"]))
+					.unwrap()
+					.serve_at("/alert", frame())
+					.unwrap()
+					.serve_at("/yes", node(Role::Button, "Yes", "/alert", vec![]))
+					.unwrap()
+			})
+		}
+
+		#[test]
+		fn wayland_lists_a_message_dialog_and_resolves_its_button() {
+			let (ax, _server) = app_with_message_dialog("TDLG");
+			let mut ax = ax.with_alert_windows();
+			let listed: Vec<_> = ax
+				.windows()
+				.unwrap()
+				.windows
+				.into_iter()
+				.map(|entry| entry.window)
+				.collect();
+			let titles: Vec<_> = listed.iter().map(|window| window.title.as_str()).collect();
+			assert_eq!(titles, ["TDLG", "Question"]);
+			let yes = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/yes"));
+			assert_eq!(ax.window_id(&yes, &listed).unwrap(), listed[1].id);
+			let AxHandle::AtSpi(root) = ax.window_root(&listed[1]).unwrap() else {
+				panic!("expected AT-SPI root");
+			};
+			assert_eq!(root.path_as_str(), "/alert");
+		}
+
+		#[test]
+		fn native_windows_leave_alert_ownership_as_on_main() {
+			let (mut ax, _server) = app_with_message_dialog("Main");
+			let windows = [window("1", "Question", 0, 0), window("2", "tdlg.py", 0, 0)];
+			// Menu operations construct the default backend without a native
+			// provider.
+			assert!(ax.window_root(&windows[0]).is_err());
+			let yes = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/yes"));
+			assert!(ax.window_id(&yes, &windows).is_err());
+			let mut ax = ax.with_native_windows(Box::new(Native::new(&[
+				("1", "Question", 0, 0),
+				("2", "tdlg.py", 0, 0),
+			])));
+			let listed = ax.windows().unwrap();
+			let titles: Vec<_> = listed
+				.windows
+				.iter()
+				.map(|entry| entry.window.title.as_str())
+				.collect();
+			assert_eq!(titles, ["Main"]);
+			let element =
+				|path| AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, path));
+			assert!(ax.window_id(&element("/yes"), &windows).is_err());
+			assert!(ax.window_root(&windows[0]).is_err());
+			let main = window("1", "Main", 0, 0);
+			assert_eq!(
+				ax.window_id(&element("/dismiss"), std::slice::from_ref(&main))
+					.unwrap(),
+				"1"
+			);
+			let AxHandle::AtSpi(root) = ax.window_root(&main).unwrap() else {
+				panic!("expected AT-SPI root");
+			};
+			assert_eq!(root.path_as_str(), "/main");
 		}
 
 		#[test]
