@@ -2588,8 +2588,8 @@ mod tests {
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn gnu_basic_alternation_and_color_aliases_are_supported() {
-		let input = "\"tools.xdev\": {}\n\"tools.toolbox\": {}\n\"tools.other\": {}\n";
-		let (code, out, err) = run(&["-c", r"tools.xdev\|tools.toolbox"], input).await;
+		let input = "\"tools.commands\": {}\n\"tools.toolbox\": {}\n\"tools.other\": {}\n";
+		let (code, out, err) = run(&["-c", r"tools.commands\|tools.toolbox"], input).await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "2\n");
 		for color in ["--color=auto", "--color=always", "--color=never", "--color"] {

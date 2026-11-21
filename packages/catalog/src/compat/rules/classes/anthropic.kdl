@@ -792,7 +792,7 @@ class "anthropic" {
 	}
 
 	// Cloud Code Assist exposes Claude through Google's wire envelope.
-	on "google-antigravity" "google-gemini-cli" {
+	on "google-antigravity" {
 		supports-function-part-id #true
 		cca-legacy-parameters-schema #true
 	}

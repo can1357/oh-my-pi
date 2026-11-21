@@ -366,10 +366,10 @@ If you want runtime conversion into a richer Python type, pass `decode=` to
 `host_tool(...)`. That lets you keep the JSON Schema contract on the wire while
 parsing the incoming argument object into a dataclass or model in the handler.
 
-`tool_execution_update`/`tool_execution_end` events for a top-level or
-`xd://` device dispatch carry the host tool's name, but a call made through the
-eval bridge only surfaces as the enclosing `eval` call. To observe which host
-tools actually ran regardless of dispatch path, subscribe with
+`tool_execution_update`/`tool_execution_end` events for a top-level call or a
+tool command run inside a `bash` call carry the host tool's name, but a call
+made through the eval bridge only surfaces as the enclosing `eval` call. To
+observe which host tools actually ran regardless of dispatch path, subscribe with
 `client.on_host_tool_completed(...)`; it receives a
 `HostToolCompletedEvent(tool_name, tool_call_id)` after `execute()` returns
 without raising.

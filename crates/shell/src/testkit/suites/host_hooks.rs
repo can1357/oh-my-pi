@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 use crate::{
 	bash::{
 		Budget, CallOutcome, Cx, ExitStatus, ExtProc, PipeMirror, PipeTap, Script, ShellApi, Signal,
-		SpawnFuture, SpawnSpec, Step,
+		SpawnFuture, SpawnSpec, Step, TapSite,
 	},
 	testkit::{
 		FakeHost, Rig,
@@ -48,15 +48,18 @@ struct Recorder {
 
 struct Stream {
 	producer: String,
+	/// The producer's site named its node.
+	located:  bool,
 	consumer: String,
 	/// Bytes mirrored, and whether the pipe was closed.
 	state:    Mutex<(Vec<u8>, bool)>,
 }
 
 impl PipeTap for Recorder {
-	fn open(&self, producer: &BStr, consumer: &BStr) -> Option<Arc<dyn PipeMirror>> {
+	fn open(&self, producer: TapSite<'_>, consumer: &BStr) -> Option<Arc<dyn PipeMirror>> {
 		let stream = Arc::new(Stream {
-			producer: producer.to_string(),
+			producer: producer.text.to_string(),
+			located:  producer.node.is_some(),
 			consumer: consumer.to_string(),
 			state:    Mutex::new((Vec::new(), false)),
 		});
@@ -80,7 +83,8 @@ impl PipeMirror for Stream {
 }
 
 // Failure mode: a tapped pipeline loses or duplicates bytes, names the wrong
-// stages, or leaves its stream open after the pipeline ended.
+// stages (or no producer node), or leaves its stream open after the pipeline
+// ended.
 #[test]
 fn a_pipe_tap_mirrors_each_pipe_between_stages() {
 	let recorder = Arc::new(Recorder::default());
@@ -97,6 +101,7 @@ fn a_pipe_tap_mirrors_each_pipe_between_stages() {
 	assert!(streams[0].consumer.starts_with("while"), "{}", streams[0].consumer);
 	assert!(streams[1].producer.starts_with("while"), "{}", streams[1].producer);
 	assert!(streams[1].consumer.starts_with("{ read"), "{}", streams[1].consumer);
+	assert!(streams.iter().all(|stream| stream.located), "a producer site without its node");
 	assert_eq!(*streams[0].state.lock(), (b"a\nb\n".to_vec(), true));
 	assert_eq!(*streams[1].state.lock(), (b"<a>\n<b>\n".to_vec(), true));
 }

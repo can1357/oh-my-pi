@@ -24,6 +24,7 @@ mod word;
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 
+pub(crate) use self::lex::RESERVED_WORDS;
 pub use self::lex::looks_like_assignment;
 use self::{
 	cursor::{Frame, Skip},
