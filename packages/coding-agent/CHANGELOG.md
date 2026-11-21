@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `skills.compressDescriptions` (default `true`). Set it to `false` to render skill descriptions in the system prompt exactly as authored, without the 100-character preview, the `skill-descriptions.db` cache, or background compression calls to the smol model ([#13291](https://github.com/can1357/oh-my-pi/issues/13291), [#13385](https://github.com/can1357/oh-my-pi/pull/13385) by [@mttzzz](https://github.com/mttzzz))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
