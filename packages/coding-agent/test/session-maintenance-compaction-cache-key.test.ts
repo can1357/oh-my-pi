@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { normalizeOpenAIPromptCacheKey } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { toOpenCodeSessionToken } from "@oh-my-pi/pi-catalog/wire/opencode";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -155,8 +156,9 @@ describe("session-maintenance V2 compaction cache-key provenance", () => {
 	 * The one compaction request that went over the wire must carry:
 	 * - body `prompt_cache_key` = the normalized wire cache id (`pc_…` hash of
 	 *   the long session id) — unchanged by this fix;
-	 * - `x-opencode-session` = the RAW child conversation id, never the derived
-	 *   hash (the session-id-derived cache id must not feed family affinity).
+	 * - `x-opencode-session` = the raw child conversation id formatted to the
+	 *   gate's `ses_` shape, never the derived hash (the session-id-derived
+	 *   cache id must not feed family affinity).
 	 */
 	function expectRawChildHeaderNormalizedBodyKey(): void {
 		expect(session.agent.promptCacheKey).toBeUndefined();
@@ -167,8 +169,9 @@ describe("session-maintenance V2 compaction cache-key provenance", () => {
 		if (!normalized?.startsWith("pc_")) throw new Error("Expected the long session id to normalize to pc_…");
 		expect(normalized).not.toBe(RAW_SESSION_ID);
 		expect(request.body.prompt_cache_key).toBe(normalized);
-		expect(request.sessionHeader).toBe(RAW_SESSION_ID);
+		expect(request.sessionHeader).toBe(toOpenCodeSessionToken(RAW_SESSION_ID));
 		expect(request.sessionHeader).not.toBe(request.body.prompt_cache_key);
+		expect(request.sessionHeader).not.toBe(RAW_SESSION_ID);
 		expect(request.url.endsWith("/responses")).toBe(true);
 	}
 
@@ -241,7 +244,7 @@ describe("session-maintenance V2 compaction cache-key provenance", () => {
 		if (!request) throw new Error("Expected a V2 compaction request");
 		// The gateway affinity header and the body cache key must both carry the
 		// family identity — never the child conversation id.
-		expect(request.sessionHeader).toBe(familyKey);
+		expect(request.sessionHeader).toBe(toOpenCodeSessionToken(familyKey));
 		expect(request.body.prompt_cache_key).toBe(familyKey);
 		expect(request.url.endsWith("/responses")).toBe(true);
 	}

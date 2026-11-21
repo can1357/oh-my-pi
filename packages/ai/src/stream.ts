@@ -92,6 +92,7 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withResolvedHeaders } from "./utils/model-headers";
+import { withOpenCodeGateShape } from "./utils/opencode-gate";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
 
@@ -899,11 +900,12 @@ function streamDispatch<TApi extends Api>(
 	// A provider turned off in its auth rules is never called, even with a key passed in directly.
 	context = perturbContext(model, context);
 	assertProviderEnabled(model.provider);
-	const requestOptions = withSupportedSamplingParams(
+	let requestOptions = withSupportedSamplingParams(
 		model,
 		withTransportFetch(model, (options || {}) as StreamOptions),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
+	({ context, requestOptions } = withOpenCodeGateShape(model, context, requestOptions));
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
@@ -1149,7 +1151,15 @@ function isRetryableUpstreamError(
 	// `parseRateLimitReason` and stay in the provider's own backoff layer
 	// instead of burning siblings.
 	if (AIError.isModelEntitlementDenial(error, model.provider, model.id)) return true;
-	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
+	if (
+		status === 401 ||
+		(status === 403 &&
+			!isConcurrencyCapExclusion(status, message) &&
+			// OpenCode's free-tier gate denial is model-scoped client policy —
+			// the same key keeps serving paid SKUs, so rotation cannot fix it.
+			!AIError.isOpencodeFreeTierGateMessage(message))
+	)
+		return true;
 	return isUsageLimitOutcome(status, message);
 }
 
@@ -1268,10 +1278,11 @@ function streamSimpleRequest<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const requestOptions = withSupportedSamplingParams(
+	let requestOptions = withSupportedSamplingParams(
 		model,
 		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
 	);
+	({ context, requestOptions } = withOpenCodeGateShape(model, context, requestOptions));
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {

@@ -6,6 +6,7 @@ import {
 	isAccountPolicyError,
 	isClinePassSurfaceGateMessage,
 	isOAuthExpiry,
+	isOpencodeFreeTierGateMessage,
 	isUsageLimit,
 } from "./flags";
 import { OAuthError } from "./oauth";
@@ -67,6 +68,9 @@ export function isAuthRetryableError(error: unknown): boolean {
 	// A Cline surface-gate 403 is per-model client policy, not a credential
 	// problem: sibling keys fail identically, so rotation only burns them.
 	if (isClinePassSurfaceGateMessage(message)) return false;
+	// OpenCode's free-tier gate denial is likewise model-scoped client policy:
+	// the key keeps serving paid SKUs, so sibling keys fail identically.
+	if (isOpencodeFreeTierGateMessage(message)) return false;
 	if (status === 401 || status === 403) return true;
 	return isUsageLimitOutcome(status, message);
 }
