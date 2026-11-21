@@ -42,6 +42,7 @@
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - The jobs sheet and a bash call's card show the output of the command step you click (the pipe it feeds, the file it redirects into, or its own output) and otherwise follow whichever of them the command is writing now
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- `/advisor on`, `/advisor off` and the bare toggle now flip the advisor of the focused subagent you are viewing instead of the main session's, and its autocomplete line describes that agent's advisor ([#15055](https://github.com/can1357/oh-my-pi/issues/15055), [#15171](https://github.com/can1357/oh-my-pi/pull/15171) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
