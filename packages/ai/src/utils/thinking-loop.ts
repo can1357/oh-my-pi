@@ -670,7 +670,9 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 
 /** Structured answer content: a segment whose text is mostly JSON key/value fields
  *  (a record, or a fragment of one cut mid-line), or whose non-blank lines are mostly
- *  pipe-delimited table rows. Bullet and numbered lists are not structured here. */
+ *  markdown table rows. A table row leads with a pipe: prose that merely contains two
+ *  pipes (a union type such as `A | B`, a shell pipeline such as `cat f | grep x`) is
+ *  reasoning and must still trip. Bullet and numbered lists are not structured here. */
 function isStructuredSegment(segment: string): boolean {
 	const masked = segment.replace(JSON_STRING_TAIL, '""').replace(JSON_STRING, '""');
 	let fields = 0;
@@ -682,7 +684,10 @@ function isStructuredSegment(segment: string): boolean {
 	if (fields >= JSON_MIN_FIELDS && fieldChars >= masked.trim().length * JSON_MIN_FIELD_SHARE) return true;
 	const lines = segment.split("\n").filter(line => line.trim() !== "");
 	if (lines.length < TABLE_MIN_LINES) return false;
-	const tableRows = lines.filter(line => (line.match(/\|/g)?.length ?? 0) >= TABLE_ROW_MIN_PIPES).length;
+	// A table row leads with a pipe (GFM). A line that only contains two pipes is prose —
+	// a union type or a shell pipeline — and counts as reasoning, not as a table row.
+	const tableRows = lines
+		.filter(line => /^\s*\|/.test(line) && (line.match(/\|/g)?.length ?? 0) >= TABLE_ROW_MIN_PIPES).length;
 	return tableRows >= lines.length * TABLE_ROW_MIN_SHARE;
 }
 

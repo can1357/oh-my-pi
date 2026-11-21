@@ -495,6 +495,26 @@ describe("ThinkingLoopDetector", () => {
 		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
 	});
 
+	test("still trips on a reasoning loop whose lines name a union type", () => {
+		// Two pipes make a union type, not a table row: a table row leads with a pipe.
+		const lines = Array.from(
+			{ length: 80 },
+			(_, i) =>
+				`Attempt ${i}: the result is a ChartOptions | TableOptions | null union, so I will narrow it again before the next call.`,
+		);
+		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
+	});
+
+	test("still trips on a reasoning loop whose lines are shell pipelines", () => {
+		// Two pipes in a pipeline are still prose: a table row leads with a pipe.
+		const lines = Array.from(
+			{ length: 80 },
+			(_, i) =>
+				`Attempt ${i}: I will run cat report.log | grep case | wc -l and compare the count before I decide.`,
+		);
+		expect(feed(lines.join("\n"), 20)).toContain("near-identical segments");
+	});
+
 	test("still trips on a reasoning loop where half the lines are table rows", () => {
 		// Rows must reach 60% of a segment's non-blank lines. An even mix of rows and prose
 		// is reasoning, so it must still trip.
