@@ -73,7 +73,7 @@ export const JUDGED_RULE_THRESHOLD = 0.7;
 export const JUDGED_CONTENT_MAX_TOKENS = 32_000;
 
 /** Longest prefix of `text` within `maxTokens` Jev tokens, never ending on half a surrogate pair. */
-function jevPrefix(text: string, maxTokens: number): string {
+export function jevPrefix(text: string, maxTokens: number): string {
 	if (countTokens(text, Encoding.Jev) <= maxTokens) return text;
 	// Counts grow with length up to whole-word jitter, so bisect; `lo` always fits, `hi` never does.
 	let lo = 0;
