@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS background drags reporting success when their slider or scroll bar did not move. A web slider with no thumb position (Chrome and Electron range inputs) is hit-tested before it is read, so Chromium publishes the value its page took, and one not at the release is pressed once on its track at the path's end, if it is still under that point, and its value read back; such a slider is never stepped, and one the drag did not move to a value the release can mean throws `InputFailed` naming the value read. Sliders that expose their thumb are stepped toward the release; geometry steps confirm value changes without waiting for fifteen unchanged positions, and undo a step that moves away from the release ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
