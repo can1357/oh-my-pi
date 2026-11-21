@@ -92,7 +92,7 @@ function startProcess(
 			getApiKeyForProvider: async () => undefined,
 			resolver: () => async () => undefined,
 		},
-		getXdevToolEntries: () => [],
+		getToolCommandEntries: () => [],
 		emitNotice: vi.fn(),
 		getHindsightSessionState: () => undefined,
 		subscribe: () => () => {},

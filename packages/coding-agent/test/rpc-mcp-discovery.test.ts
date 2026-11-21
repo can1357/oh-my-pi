@@ -8,8 +8,7 @@ import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { isRecord, ptree, readLines, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { isAlive, waitFor } from "./fixtures/daemon-harness";
 
-const device = "mcp__stub_regression_announce";
-const deviceUri = `xd://${device}`;
+const toolCommand = "mcp__stub_regression_announce";
 const cli = path.join(import.meta.dir, "../src/cli.ts");
 const peer = path.join(import.meta.dir, "fixtures/rpc-mcp-server.ts");
 const fakeModel = path.join(import.meta.dir, "rpc-wire/fake-openai-server.ts");
@@ -125,30 +124,35 @@ describe("CLI RPC MCP discovery", () => {
 					try {
 						await client.start();
 						const state = await client.getState();
-						expect(state.dumpTools?.map(tool => tool.name)).toEqual(expect.arrayContaining(["read", "write"]));
-						expect(state.dumpTools?.some(tool => tool.name === device)).toBe(false);
-						const listing = toolResult(await client.promptAndWait("read_uri xd://"), "read", { path: "xd://" });
+						expect(state.dumpTools?.map(tool => tool.name)).toEqual(
+							expect.arrayContaining(["read", "write", "bash"]),
+						);
+						expect(state.dumpTools?.some(tool => tool.name === toolCommand)).toBe(false);
+						const invokeCommand = `${toolCommand} -j '{}'`;
 						if (phase === "disabled") {
-							expect(listing).not.toContain(device);
-							const events = await client.promptAndWait(`write_uri ${deviceUri} {}`);
-							const error = toolResult(events, "write", { path: deviceUri, content: "{}" });
+							const events = await client.promptAndWait(`run_command ${invokeCommand}`);
+							expect(toolResult(events, "bash", { command: invokeCommand })).not.toContain("rpc-mcp-invoked");
 							expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({ isError: true });
-							expect(error).toContain(`No such tool: ${deviceUri}`);
 							expect(await auditEntries(audit)).toEqual([]);
 						} else {
-							expect(listing).toContain(device);
-							const docs = toolResult(await client.promptAndWait(`read_uri ${deviceUri}`), "read", {
-								path: deviceUri,
+							// Deferred discovery may land after the first turn starts: wait until the command is mounted.
+							const probe = `type ${toolCommand}`;
+							for (let attempt = 0; attempt < 20; attempt++) {
+								const seen = toolResult(await client.promptAndWait(`run_command ${probe}`), "bash", {
+									command: probe,
+								});
+								if (!seen.includes("not found")) break;
+							}
+							const help = toolResult(await client.promptAndWait(`run_command ${toolCommand} --help`), "bash", {
+								command: `${toolCommand} --help`,
 							});
-							expect(docs).toContain("Return an independently audited invocation marker.");
+							expect(help).toContain("Return an independently audited invocation marker.");
 							const invoke = async () => {
 								const before = (await auditEntries(audit)).filter(
 									entry => entry.method === "tools/call",
 								).length;
-								const events = await client.promptAndWait(`write_uri ${deviceUri} {}`);
-								expect(toolResult(events, "write", { path: deviceUri, content: "{}" })).toContain(
-									"rpc-mcp-invoked",
-								);
+								const events = await client.promptAndWait(`run_command ${invokeCommand}`);
+								expect(toolResult(events, "bash", { command: invokeCommand })).toContain("rpc-mcp-invoked");
 								expect(events.find(event => event.type === "tool_execution_end")).toMatchObject({
 									isError: false,
 								});

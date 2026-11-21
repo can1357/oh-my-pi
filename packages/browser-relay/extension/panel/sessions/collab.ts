@@ -1,12 +1,12 @@
 /**
  * Panel session that joins a running interactive omp as a collab guest. collab-web's `GuestClient` already keeps
- * the replica; this adapter only narrows it to {@link PanelSession}. Guests can prompt, stop and answer, but not
+ * the replica; this adapter only narrows it to {@link PanelSession}. Guests can prompt, continue, stop and answer, but not
  * switch models or compact, so those members are absent.
  */
 import { GuestClient } from "@oh-my-pi/collab-web/src/lib/client";
 import { parseCollabLink } from "@oh-my-pi/collab-web/src/lib/link";
 import type { CollabUiResponseValue, ImageContent } from "@oh-my-pi/pi-wire";
-import type { PanelSession, PanelSnapshot } from "../session";
+import type { PanelSession, PanelSnapshot, QueuedDraft } from "../session";
 
 /** How long `abort()` waits for the host's turn to end before giving up. */
 const ABORT_TIMEOUT_MS = 30_000;
@@ -40,20 +40,28 @@ export class CollabPanelSession implements PanelSession {
 		return this.#client.getSnapshot();
 	}
 
-	prompt(text: string, images: readonly ImageContent[]): void {
-		this.#client.sendPrompt(text, images);
+	prompt(text: string, images: readonly ImageContent[], options?: { followUp?: boolean }): void {
+		this.#client.sendPrompt(text, images, options);
 	}
 
-	abort(): Promise<void> {
+	resume(): void {
+		this.#client.sendResume();
+	}
+
+	deliverQueue(): void {
+		this.#client.sendDeliverQueue();
+	}
+
+	abort(): Promise<readonly QueuedDraft[]> {
 		if (this.#client.getSnapshot().phase !== "live") return Promise.reject(new Error("not connected to the host"));
 		this.#client.sendAbort();
-		if (!this.#client.getSnapshot().working) return Promise.resolve();
-		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		if (!this.#client.getSnapshot().working) return Promise.resolve([]);
+		const { promise, resolve, reject } = Promise.withResolvers<readonly QueuedDraft[]>();
 		const settle = (error?: Error) => {
 			unsubscribe();
 			clearTimeout(timer);
 			if (error) reject(error);
-			else resolve();
+			else resolve([]);
 		};
 		const unsubscribe = this.#client.subscribe(() => {
 			const snapshot = this.#client.getSnapshot();

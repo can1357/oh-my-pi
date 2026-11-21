@@ -59,12 +59,17 @@ unsafe impl Sync for Chunk {}
 impl Chunk {
 	fn new(cap: usize) -> Self {
 		let boxed: Box<[MaybeUninit<u8>]> = Box::new_uninit_slice(cap);
-		Self { ptr: Box::into_non_null(boxed).cast::<MaybeUninit<u8>>(), cap }
+		let chunk = Self { ptr: Box::into_non_null(boxed).cast::<MaybeUninit<u8>>(), cap };
+		#[cfg(test)]
+		seam::born(&chunk);
+		chunk
 	}
 }
 
 impl Drop for Chunk {
 	fn drop(&mut self) {
+		#[cfg(test)]
+		seam::died(self);
 		let slice = NonNull::slice_from_raw_parts(self.ptr, self.cap);
 		// SAFETY: `ptr`/`cap` came from `Box::into_non_null` of a slice of this
 		// length in `Chunk::new`, and are released exactly once.
@@ -116,5 +121,46 @@ impl Arena {
 		}
 		self.used += len;
 		Bytes { ptr: start, len }
+	}
+}
+
+/// Test seam: which arena chunks are allocated, so a test can tell whether
+/// the bytes behind a [`Bytes`] were freed without reading them.
+#[cfg(test)]
+pub(crate) mod seam {
+	use std::{
+		collections::BTreeMap,
+		sync::atomic::{AtomicU64, Ordering},
+	};
+
+	use parking_lot::Mutex;
+
+	use super::{Bytes, Chunk};
+
+	/// Live chunks by start address: (end address, id). Ids are never reused.
+	static LIVE: Mutex<BTreeMap<usize, (usize, u64)>> = Mutex::new(BTreeMap::new());
+	static NEXT: AtomicU64 = AtomicU64::new(0);
+
+	pub(super) fn born(chunk: &Chunk) {
+		let start = chunk.ptr.as_ptr() as usize;
+		let id = NEXT.fetch_add(1, Ordering::Relaxed);
+		LIVE.lock().insert(start, (start + chunk.cap, id));
+	}
+
+	pub(super) fn died(chunk: &Chunk) {
+		LIVE.lock().remove(&(chunk.ptr.as_ptr() as usize));
+	}
+
+	/// The id of the live chunk holding `bytes`, if any.
+	pub(crate) fn chunk_of(bytes: Bytes) -> Option<u64> {
+		let at = bytes.ptr.as_ptr() as usize;
+		let live = LIVE.lock();
+		let (_, &(end, id)) = live.range(..=at).next_back()?;
+		(at + bytes.len <= end).then_some(id)
+	}
+
+	/// Whether the chunk `id` is still allocated.
+	pub(crate) fn is_live(id: u64) -> bool {
+		LIVE.lock().values().any(|&(_, live)| live == id)
 	}
 }
