@@ -5795,7 +5795,7 @@ export interface FetchLiteLLMRichModelsOptions<TApi extends Api> {
 }
 
 type LiteLLMRichModelEntry = Record<string, unknown>;
-type LiteLLMApiRoute = "openai" | "other" | "unknown";
+type LiteLLMApiRoute = "openai" | "anthropic" | "other" | "unknown";
 type LiteLLMRichEndpointModel<TApi extends Api> = {
 	model: ModelSpec<TApi>;
 	apiRoute: LiteLLMApiRoute;
@@ -6010,40 +6010,57 @@ function getLiteLLMProviders(entry: LiteLLMRichModelEntry): string[] | undefined
 	return providers.length > 0 ? providers : undefined;
 }
 
+function isLikelyAnthropicModelId(id: string): boolean {
+	return classifyModel("litellm", id, { lenient: true }).class === "anthropic";
+}
+
+function liteLLMProviderRoute(provider: string, model: string): LiteLLMApiRoute {
+	if (provider === "openai") return "openai";
+	if (provider === "anthropic" || isLikelyAnthropicModelId(model)) return "anthropic";
+	return "other";
+}
+
 function classifyLiteLLMApiRoute(entry: LiteLLMRichModelEntry | undefined, id: string): LiteLLMApiRoute {
 	if (entry) {
 		const providers = getLiteLLMProviders(entry);
 		if (providers) {
-			return providers.every(provider => provider === "openai") ? "openai" : "other";
+			if (providers.every(provider => provider === "openai")) return "openai";
+			if (providers.every(provider => provider === "anthropic") || isLikelyAnthropicModelId(id)) return "anthropic";
+			return "other";
 		}
 
 		const params = getLiteLLMParams(entry);
+		const backendModel = toNonEmptyString(params?.model);
 		const configuredProvider = toNonEmptyString(params?.custom_llm_provider)?.toLowerCase();
 		if (configuredProvider) {
-			return configuredProvider === "openai" ? "openai" : "other";
+			return liteLLMProviderRoute(configuredProvider, backendModel ?? id);
 		}
 
-		const backendModel = toNonEmptyString(params?.model);
 		const backendSeparator = backendModel?.indexOf("/") ?? -1;
 		if (backendModel && backendSeparator > 0) {
-			return backendModel.slice(0, backendSeparator).toLowerCase() === "openai" ? "openai" : "other";
+			return liteLLMProviderRoute(backendModel.slice(0, backendSeparator).toLowerCase(), backendModel);
 		}
 
 		const baseModel = toNonEmptyString(getLiteLLMMetadataValue(entry, "base_model"));
 		const baseSeparator = baseModel?.indexOf("/") ?? -1;
 		if (baseModel && baseSeparator > 0) {
-			return baseModel.slice(0, baseSeparator).toLowerCase() === "openai" ? "openai" : "other";
+			return liteLLMProviderRoute(baseModel.slice(0, baseSeparator).toLowerCase(), baseModel);
 		}
 	}
 
+	// Without provider metadata, the id is the only routing evidence.
 	const modelId = id.toLowerCase().startsWith("openai/") ? id.slice("openai/".length) : id;
-	return isLikelyOpenAIResponsesModelId(modelId) ? "openai" : "unknown";
+	if (isLikelyOpenAIResponsesModelId(modelId)) return "openai";
+	if (isLikelyAnthropicModelId(id)) return "anthropic";
+	return "unknown";
 }
 
 /**
  * Transport for a LiteLLM model group: `mode: "decisions"` answers only on the
- * proxy's `/v1/decisions` route, OpenAI-backed groups use Responses, and every
- * other group uses `fallbackApi`.
+ * proxy's `/v1/decisions` route, OpenAI-backed groups use Responses, Claude
+ * groups use the proxy's Anthropic Messages route (`/v1/messages`) so they keep
+ * `cache_control` breakpoints and native thinking, and every other group uses
+ * `fallbackApi`.
  */
 export function resolveLiteLLMApi(
 	entry: Record<string, unknown> | undefined,
@@ -6053,7 +6070,10 @@ export function resolveLiteLLMApi(
 	if (entry && getLiteLLMMetadataValue(entry, "mode") === "decisions") {
 		return "openai-decisions";
 	}
-	return classifyLiteLLMApiRoute(entry, id) === "openai" ? "openai-responses" : fallbackApi;
+	const route = classifyLiteLLMApiRoute(entry, id);
+	if (route === "openai") return "openai-responses";
+	if (route === "anthropic") return "anthropic-messages";
+	return fallbackApi;
 }
 
 /** `kind` a LiteLLM row takes on `api`: runner apis (Decisions → judge) leave the chat roster; chat transports add nothing. */
@@ -6248,17 +6268,22 @@ function mergeLiteLLMCompat<TApi extends Api>(
 function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 	existing: LiteLLMRichEndpointModel<TApi>,
 	next: LiteLLMRichEndpointModel<TApi>,
+	fallbackApi: TApi,
 ): LiteLLMRichEndpointModel<TApi> {
-	const apiRoute =
-		existing.apiRoute === "other" || next.apiRoute === "other"
-			? "other"
-			: existing.apiRoute === "openai" || next.apiRoute === "openai"
-				? "openai"
-				: "unknown";
+	// Endpoints that disagree on a known route (OpenAI-only vs Claude-only)
+	// describe a mixed group, which takes the fallback api.
+	const apiRoute: LiteLLMApiRoute =
+		existing.apiRoute === "unknown"
+			? next.apiRoute
+			: next.apiRoute === "unknown" || next.apiRoute === existing.apiRoute
+				? existing.apiRoute
+				: "other";
 	// Only a group's `mode` selects a runner api, and an endpoint omitting the
 	// mode carries no news for it, so a runner api reported by either side wins.
 	const runnerApi = [next.model.api, existing.model.api].find(api => runnerApiKind(api) !== undefined);
-	const api = runnerApi ?? (next.apiRoute === apiRoute ? next.model.api : existing.model.api);
+	const api =
+		runnerApi ??
+		(next.apiRoute === apiRoute ? next.model.api : existing.apiRoute === apiRoute ? existing.model.api : fallbackApi);
 	const model: ModelSpec<TApi> = {
 		...existing.model,
 		api,
@@ -6423,7 +6448,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 				reportedCost: getLiteLLMReportedCost(entry),
 			};
 			const existing = deduped.get(model.id);
-			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
+			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next, options.api) : next);
 		}
 	}
 	if (deduped.size === 0 && excludedModelIds.size === 0) {
@@ -6487,7 +6512,7 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 					}
 					continue;
 				}
-				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next));
+				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next, options.api));
 			}
 			if (deduped.size === 0) {
 				continue;

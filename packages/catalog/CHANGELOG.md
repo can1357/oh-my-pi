@@ -19,6 +19,10 @@
 - Added the `prompt-perturbation` catalog axis, which opts a provider or model into per-install prompt paraphrasing.
 - Added the `uncached-instructions` compatibility flag for GPT-6.2 models across all hosts, moving system prompts out of the uncached Responses `instructions` field.
 
+### Changed
+
+- LiteLLM discovery now routes Claude model groups through the proxy's Anthropic Messages endpoint (`/v1/messages`), so Claude keeps prompt caching and native thinking ([#19927](https://github.com/can1357/oh-my-pi/pull/19927) by [@cassfij](https://github.com/cassfij))
+
 ### Fixed
 
 - Fixed Vercel AI Gateway model refreshes so public models remain discoverable when a stored API key has expired.

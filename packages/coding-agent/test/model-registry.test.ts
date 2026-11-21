@@ -3673,11 +3673,11 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Rows from rich-v6 may contain only the first /v2/model/info page;
-				// decisions-mode routing was already corrected in that namespace.
+				// Rows from rich-v7 may route Claude groups over an OpenAI transport;
+				// earlier namespaces were invalidated for their own discovery fixes.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v6",
+						"litellm-proxy:litellm-rich-v7",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -3688,7 +3688,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v7",
+						"litellm-proxy:litellm-rich-v8",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
