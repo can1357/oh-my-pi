@@ -837,9 +837,9 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe(false);
 	});
 
-	it("folds user text into the preceding tool result only for Gemini 4 Neon", () => {
-		// Neon ends requests closing on user text after a function response with an
-		// empty MALFORMED_RESPONSE; Gemini 4 Argon does not.
+	it("folds user text into the preceding tool result for Gemini 4 models only", () => {
+		// Gemini 4 ends requests closing on user text after a function response with
+		// an empty MALFORMED_RESPONSE; Gemini 3.x does not.
 		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-neon" })).compat.foldUserAfterToolResult).toBe(
 			true,
 		);
@@ -849,6 +849,9 @@ describe("openai-completions wire-quirk compat detection", () => {
 			).compat.foldUserAfterToolResult,
 		).toBe(true);
 		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-argon" })).compat.foldUserAfterToolResult).toBe(
+			true,
+		);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-3.1-pro" })).compat.foldUserAfterToolResult).toBe(
 			false,
 		);
 	});
