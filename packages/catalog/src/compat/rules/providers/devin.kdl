@@ -278,13 +278,19 @@ provider "devin" {
 	}
 	// Devin bills Gemini images at a fixed ~1,089 tokens from 512 px to 4,096 px
 	// (Google's fixed `media_resolution` budget passed through), under the
-	// lineage's unverified 1,120. verified: billing matched across 8 sizes on
-	// Gemini 3.7 Flash, 4 Carbon and 4 Neon; 3.5/3.8 Flash and 4 Hydrogen/Argon
-	// billed 1,089-1,091 in a single two-point check and stay on the lineage
-	// rule until measured.
+	// lineage's unverified 1,120. verified: billing matched across 8 sizes, and
+	// real frames billed 1,089-1,091 each, on Gemini 3.5, 3.7 and 3.8 Flash and
+	// 4 Carbon, Neon, Hydrogen and Argon. 3.6 Flash is not measured.
 	class "gemini" {
 		family "flash" {
-			revision ">=3.7 <3.8" {
+			revision ">=3.5 <3.6" {
+				image-tokenization {
+					regime "fixed"
+					verified #true
+					tokens 1089
+				}
+			}
+			revision ">=3.7 <3.9" {
 				image-tokenization {
 					regime "fixed"
 					verified #true
@@ -293,9 +299,14 @@ provider "devin" {
 			}
 		}
 	}
-	// residue: Carbon and Neon share their class rank with Argon and Hydrogen
-	// and have no family; the lists name each logical id plus its raw effort uids.
-	models "gemini-4-carbon" "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high" "gemini-4-neon" "gemini-4-neon-low" "gemini-4-neon-medium" "gemini-4-neon-high" "gemini-4-neon-xhigh" {
+	// residue: Gemini 4 Carbon, Neon, Hydrogen and Argon have no family, and a
+	// bare class revision rank would also verify later Gemini 4 lines nobody
+	// measured; the list names each logical id plus its raw effort uids.
+	models "gemini-4-carbon" "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high" \
+		"gemini-4-neon" "gemini-4-neon-low" "gemini-4-neon-medium" "gemini-4-neon-high" "gemini-4-neon-xhigh" \
+		"gemini-4-hydrogen" "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" \
+		"gemini-4-hydrogen-xhigh" \
+		"gemini-4-argon" "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high" {
 		image-tokenization {
 			regime "fixed"
 			verified #true
