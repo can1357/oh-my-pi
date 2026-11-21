@@ -1284,6 +1284,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			toolCallId?: string;
 			/** Tool command dispatches of the run, in invocation order. */
 			toolCommands?: readonly ToolCommandDispatch[];
+			/**
+			 * A program (eval `tool.bash`, the shell tool-command bridge), not the model, reads the result. Skips the
+			 * seen-lines step: crediting rows the model never saw would mark unseen lines as seen, and the tag footer
+			 * would corrupt output the script parses.
+			 */
+			programmatic?: boolean;
 		},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -1388,6 +1394,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (!shaped?.whole) resultBuilder.truncationFromSummary(result, { direction: "tail" });
 		if (failedExit) resultBuilder.error();
 		const built = resultBuilder.done();
+		if (options.programmatic) return built;
 
 		// Rows the result shows with their line numbers count as displayed for the edit guard, but only when the
 		// result reaches the model uncut: a later spill or follow-up preview would drop credited rows. The tag
@@ -1707,6 +1714,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						replies: backgrounded ? undefined : replies,
 						toolCallId: options.toolCallId,
 						toolCommands: toolCommandRecorder.list(),
+						programmatic: options.context?.programmatic === true,
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -2329,6 +2337,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						notices: pendingNotices,
 						wallTimeMs: performance.now() - bridgeWallTimeStart,
 						toolCallId,
+						programmatic: ctx?.programmatic === true,
 					});
 				}
 
@@ -2417,6 +2426,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							notices: pendingNotices,
 							wallTimeMs: performance.now() - bridgeWallTimeStart,
 							toolCallId,
+							programmatic: ctx?.programmatic === true,
 						});
 					}
 
@@ -2490,6 +2500,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 					toolCallId,
+					programmatic: ctx?.programmatic === true,
 				});
 			} finally {
 				clearTimeout(timeoutTimer);
@@ -2621,6 +2632,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			replies,
 			toolCommands: toolCommandRecorder.list(),
 			toolCallId,
+			programmatic: ctx?.programmatic === true,
 		});
 	}
 }

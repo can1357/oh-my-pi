@@ -273,4 +273,28 @@ describe("bash numbered file views credit seen lines", () => {
 			expect(await Bun.file(target).text()).toBe("first\nneedle moved\nlast\n");
 		},
 	);
+
+	// T6 (D11): a program (eval `tool.bash`, the shell tool-command bridge) reads the result, not the model. Crediting
+	// its rows would mark lines the model never saw as seen, and the footer would corrupt what the script parses.
+	it("neither tags nor credits a programmatic call's rows", async () => {
+		const session = createSession(cwd);
+		const result = await new BashTool(session).execute(
+			"bash",
+			{ command: "grep -n 'value_35$' values.txt" },
+			undefined,
+			undefined,
+			{ programmatic: true } as unknown as Parameters<BashTool["execute"]>[4],
+		);
+		const output = textOutput(result);
+		expect(output.trimEnd()).toBe("35:line 35: value_35");
+		expect(output).not.toContain("[values.txt#");
+		expect(footers(output)).toEqual([]);
+		expect(result.details?.editTags).toBeUndefined();
+
+		const read = textOutput(await new ReadTool(session).execute("read", { path: "values.txt:30-31" }));
+		const header = read.split("\n")[0];
+		expect(header).toMatch(/^\[values\.txt#[0-9A-F]{4}\]$/);
+		expect(await edit(session, `${header}\nPUT 35.=35:\n+line 35: changed\n`)).toContain("never displayed");
+		expect(await Bun.file(file).text()).toBe(SOURCE);
+	});
 });
