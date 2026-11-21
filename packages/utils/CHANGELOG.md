@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Added
 
 - Added `LinearRegExp` (`@oh-my-pi/pi-utils/regex`), a JavaScript-compatible regular expression engine that avoids catastrophic backtracking, with support for scoped modifiers, Unicode modes and properties, Unicode set operations, large repetitions and literal dictionaries, fixed-width block counts, and additional character classes.

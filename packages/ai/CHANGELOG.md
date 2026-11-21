@@ -2,13 +2,14 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Added
 
 - Added provider hooks (`setProviderHooks` in `@oh-my-pi/pi-ai/provider-hooks`), which replace a provider's stream adapter or image generation while its models keep their api.
 - Added opt-in prompt perturbation: model-visible prompt prose and tool descriptions use a per-install wording chosen from a committed paraphrase pool covering every static system- and tool-prompt line. Models enable it with the `prompt-perturbation` KDL axis; `OMP_PROMPT_PERTURBATION=1`/`0` forces it on or off.
 
 ### Changed
-
 
 - The Cursor provider forwards `bash` instead of `write` so staged previews can be finalized
 - Increased provider stream watchdog defaults from 5 to 15 minutes, preventing slow one-shot completions from being interrupted prematurely.
@@ -2182,29 +2183,4 @@
 - Fixed model switches to Devin rejecting foreign provider response IDs, reasoning signatures, and empty interrupted turns as invalid Cascade history.
 - Classified zero-output Devin `invalid_argument` trailers as context overflow when the serialized message history is already large, routing cumulative tool-output payload failures through context maintenance—including artifact-backed shake rescue—instead of retrying the same rejected history.
 
-## [17.0.5] - 2026-07-18
-
-### Changed
-
-- Changed Anthropic API-key requests to default to a 1-hour prompt-cache retention (using the extended-cache-ttl-2025-04-11 beta) to prevent cold-misses during idle sessions, with support for PI_CACHE_RETENTION values "short" and "none" to override this behavior.
-
-### Fixed
-
-- Fixed transient OpenAI stream truncations by retrying once before output becomes replay-unsafe, preventing recoverable transport errors from failing the turn.
-- Fixed native Kimi Code K3 thinking being disabled during named function selection by utilizing generic required tool choice.
-- Fixed /login moonshot validating China-platform API keys against the international host instead of honoring MOONSHOT_BASE_URL.
-- Fixed Anthropic session stickiness suppressing usage-based re-ranking indefinitely by gating stickiness on a 1-hour cache warmth window (configurable via ANTHROPIC_SESSION_STICKY_CACHE_WARM_MS) to restore proactive multi-account load balancing after long idle periods.
-- Fixed credential ranking where clockless Anthropic usage windows incorrectly outranked clocked sibling credentials.
-- Fixed tool request failures (HTTP 400) on local grammar-constrained OpenAI-compatible backends (such as llama.cpp, LM Studio, and vLLM) by widening bare boolean subschemas into a value-accepting primitive union.
-- Fixed custom OAuth Anthropic-compatible endpoints receiving generated Claude Code fingerprint headers even when explicit header overrides were provided.
-- Fixed active sessions for plan-gated OpenAI Codex models (Sol/Luna) silently re-routing to sibling OAuth accounts when usage headroom changed, ensuring session stickiness is preserved as long as the preferred credential remains usable and eligible.
-
-## [17.0.4] - 2026-07-18
-
-### Fixed
-
-- Fixed Kimi Code usage reports dropping the 5h window reset time (`omp usage` showed no "resets in …" for the 5h limit): the API returns `resetTime` on the limit `detail`, not on `window`, so the parsed row-level reset is now carried onto the window when the window itself has none.
-- Made Kimi device-id persistence best-effort: a missing or unwritable `~/.omp/agent` directory no longer throws during Kimi header construction, which silently nulled every `kimi-code` usage probe on fresh installs.
-- Coerced boolean tool-schema subschemas to MFJS object forms for native Moonshot/Kimi endpoints, preventing the task tool's `outputSchema` field from causing HTTP 400 responses ([#5952](https://github.com/can1357/oh-my-pi/issues/5952)).
-
-Older entries are archived in [packages/ai/CHANGELOG.md@ac0941e8dfc1](https://github.com/can1357/oh-my-pi/blob/ac0941e8dfc1f7aa14869360cf5b9b83d8b0dc9c/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@de21c0ac454b](https://github.com/can1357/oh-my-pi/blob/de21c0ac454b1a66d8dfff32b0ed4751a08f809b/packages/ai/CHANGELOG.md).

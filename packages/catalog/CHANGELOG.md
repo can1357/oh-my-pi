@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Breaking Changes
 
 - Removed the built-in Gemini CLI OAuth provider (`google-gemini-cli`). Google Antigravity and Antigravity CLI remain available.

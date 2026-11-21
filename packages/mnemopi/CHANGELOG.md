@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Fixed
 
 - Improved diagnostics when a configured embedding provider fails, making provider errors visible in logs while preserving the existing fallback behavior.

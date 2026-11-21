@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Breaking Changes
 
 - The omp extension now uses a pinned Chrome extension ID and connects to the browser relay through its native host. Reinstall the extension using Chrome’s “Load unpacked” flow; the relay port and token options have been removed.

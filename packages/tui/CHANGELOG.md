@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Breaking Changes
 
 - Retired the `ComposerPreferences.completeScrollback`, `TranscriptContainer.completeScrollback`, and `Composer.setRunActive` APIs, along with the `transientChrome`, `selfClearingChrome`, and `billedChrome` options of `Composer.setRuntimeChildren`. Retirement now consistently uses the height left by on-screen chrome.
@@ -15,8 +17,8 @@
 - The UI now responds to terminal `features` events without waiting for a new hello message.
 
 ### Changed
-- Tool commands run inside a bash call render as nested tool cards in the bash card
 
+- Tool commands run inside a bash call render as nested tool cards in the bash card
 - Tool activity and job titles show the brief label of a structured intent; the Spotlight inspector still exposes the full request.
 - Improved transcript layout around docked reports, waiting asks, completion lists, dialogs, todo lists, subagent panels, queued messages, and other lower-screen chrome so visible content and reclaimed rows behave more predictably.
 - Native chat and web search cards now present tool results and sources more clearly, including expandable page excerpts, multi-line titles, and a unified sources grid.

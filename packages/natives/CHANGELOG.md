@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Added
 
 - Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`

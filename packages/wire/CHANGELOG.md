@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.1.0] - 2026-11-21
+
 ### Added
 
 - Added `toolIntentLabel` for displaying the brief prefix of a structured tool-call intent.
