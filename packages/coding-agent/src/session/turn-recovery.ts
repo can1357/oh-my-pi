@@ -312,6 +312,13 @@ export interface TurnRecoveryHost {
 		generation?: number;
 		shouldContinue?: () => boolean;
 		onError?: (error: unknown) => void;
+		/**
+		 * Run-owner token of the turn this continue retries (`AgentState.runOwner`
+		 * of the run whose terminal event scheduled it). The continuation claim
+		 * re-records it, so a client prompt's retry keeps admitting steers while a
+		 * background turn's retry never inherits a client owner.
+		 */
+		owner?: unknown;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
 	appendSessionMessage(message: AssistantMessage): void;
@@ -688,13 +695,16 @@ export class TurnRecovery {
 	}
 
 	/** Handles empty terminal assistant turns and schedules bounded recovery. */
-	handleEmptyAssistantStop(message: AssistantMessage): Promise<"continue" | "terminal" | undefined> {
-		return this.#handleEmptyAssistantStop(message);
+	handleEmptyAssistantStop(
+		message: AssistantMessage,
+		runOwner?: unknown,
+	): Promise<"continue" | "terminal" | undefined> {
+		return this.#handleEmptyAssistantStop(message, runOwner);
 	}
 
 	/** Classifies suspicious terminal stops and schedules bounded recovery. */
-	handleUnexpectedAssistantStop(message: AssistantMessage): Promise<boolean> {
-		return this.#handleUnexpectedAssistantStop(message);
+	handleUnexpectedAssistantStop(message: AssistantMessage, runOwner?: unknown): Promise<boolean> {
+		return this.#handleUnexpectedAssistantStop(message, runOwner);
 	}
 
 	/**
@@ -708,7 +718,7 @@ export class TurnRecovery {
 	 * output, append a corrective developer message, and resume. Bounded per
 	 * prompt; past the cap the error surfaces as before.
 	 */
-	handleMalformedFunctionCallStop(message: AssistantMessage): boolean {
+	handleMalformedFunctionCallStop(message: AssistantMessage, runOwner?: unknown): boolean {
 		if (message.stopReason !== "error") return false;
 		const id = this.#classifyRetryMessage(message);
 		if (!AIError.is(id, AIError.Flag.MalformedFunctionCall)) {
@@ -750,6 +760,7 @@ export class TurnRecovery {
 		this.#host.scheduleAgentContinue({
 			source: "malformed-function-call-retry",
 			generation: this.#host.promptGeneration(),
+			owner: runOwner,
 		});
 		return true;
 	}
@@ -769,7 +780,7 @@ export class TurnRecovery {
 	 * Codex native-lane steer rejection: the server dropped the response over our
 	 * own `response.steer`, and the rejected steer drains as ordinary input next.
 	 */
-	handleCommittedTextStreamStall(message: AssistantMessage): boolean {
+	handleCommittedTextStreamStall(message: AssistantMessage, runOwner?: unknown): boolean {
 		const id = this.#classifyRetryMessage(message);
 		const socketClosed =
 			message.stopReason === "error" &&
@@ -823,6 +834,7 @@ export class TurnRecovery {
 		this.#host.scheduleAgentContinue({
 			source: "stream-stall-continue",
 			generation: this.#host.promptGeneration(),
+			owner: runOwner,
 		});
 		return true;
 	}
@@ -857,8 +869,8 @@ export class TurnRecovery {
 	}
 
 	/** Applies automatic retry, credential rotation, and model fallback policy. */
-	handleRetryableError(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
-		return this.#handleRetryableError(message, options);
+	handleRetryableError(message: AssistantMessage, options?: RetryPolicyOptions, runOwner?: unknown): Promise<boolean> {
+		return this.#handleRetryableError(message, options, runOwner);
 	}
 
 	/**
@@ -932,7 +944,7 @@ export class TurnRecovery {
 	 *  caller mark the exact moment its own run went live. */
 	promptAgentWithIdleRetry(
 		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
+		options?: { toolChoice?: ToolChoice; owner?: unknown },
 		onClaimed?: () => void,
 	): Promise<void> {
 		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
@@ -1147,7 +1159,10 @@ export class TurnRecovery {
 		);
 	}
 
-	async #handleEmptyAssistantStop(assistantMessage: AssistantMessage): Promise<"continue" | "terminal" | undefined> {
+	async #handleEmptyAssistantStop(
+		assistantMessage: AssistantMessage,
+		runOwner?: unknown,
+	): Promise<"continue" | "terminal" | undefined> {
 		const providerEmptyOutput = this.#isRecoverableProviderEmptyOutput(assistantMessage);
 		if (!isEmptyAssistantStop(assistantMessage) && !providerEmptyOutput) {
 			this.#emptyStopRetryCount = 0;
@@ -1222,6 +1237,7 @@ export class TurnRecovery {
 		this.#host.scheduleAgentContinue({
 			source: "empty-stop-retry",
 			generation: this.#host.promptGeneration(),
+			owner: runOwner,
 		});
 		return "continue";
 	}
@@ -1232,7 +1248,7 @@ export class TurnRecovery {
 			maxRetries: EMPTY_STOP_MAX_RETRIES,
 		});
 	}
-	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
+	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage, runOwner?: unknown): Promise<boolean> {
 		const mode = cfgFeaturesUnexpectedStopDetection.get(this.#host.settings);
 		if (mode === "none") {
 			return false;
@@ -1318,6 +1334,7 @@ export class TurnRecovery {
 		this.#host.scheduleAgentContinue({
 			source: "unexpected-stop-retry",
 			generation: this.#host.promptGeneration(),
+			owner: runOwner,
 		});
 		return true;
 	}
@@ -1607,7 +1624,10 @@ export class TurnRecovery {
 	 * Own the exact Responses request-body-read timeout so terminal special outcomes
 	 * cannot fall through to the generic 408 replay path.
 	 */
-	async handleResponsesRequestBodyReadTimeout(message: AssistantMessage): Promise<RequestBodyReadTimeoutRecovery> {
+	async handleResponsesRequestBodyReadTimeout(
+		message: AssistantMessage,
+		runOwner?: unknown,
+	): Promise<RequestBodyReadTimeoutRecovery> {
 		if (message.stopReason !== "error" || !AIError.isResponsesRequestBodyReadTimeout(message)) {
 			return "not-applicable";
 		}
@@ -1641,7 +1661,9 @@ export class TurnRecovery {
 		) {
 			return terminal();
 		}
-		return (await this.#handleRetryableError(message, { allowModelFallback: false })) ? "handled-retry" : terminal();
+		return (await this.#handleRetryableError(message, { allowModelFallback: false }, runOwner))
+			? "handled-retry"
+			: terminal();
 	}
 
 	/**
@@ -2761,9 +2783,13 @@ export class TurnRecovery {
 	 * the error without a same-model backoff retry.
 	 * @returns true if retry was initiated, false if max retries exceeded or disabled
 	 */
-	async #handleRetryableError(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
+	async #handleRetryableError(
+		message: AssistantMessage,
+		options?: RetryPolicyOptions,
+		runOwner?: unknown,
+	): Promise<boolean> {
 		try {
-			return await this.#applyRetryPolicy(message, options);
+			return await this.#applyRetryPolicy(message, options, runOwner);
 		} catch (error) {
 			// The policy's dead ends close their own saga through
 			// #closeRetrySaga, so a write that throws there has already closed
@@ -2784,7 +2810,11 @@ export class TurnRecovery {
 	 * The retry policy {@link #handleRetryableError} applies. A throw outside
 	 * its dead ends leaves the saga for the caller to close.
 	 */
-	async #applyRetryPolicy(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
+	async #applyRetryPolicy(
+		message: AssistantMessage,
+		options?: RetryPolicyOptions,
+		runOwner?: unknown,
+	): Promise<boolean> {
 		const retrySettings = cfgRetry.get(this.#host.settings);
 		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
@@ -3403,6 +3433,7 @@ export class TurnRecovery {
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
+			owner: runOwner,
 			shouldContinue: () => this.#retryAttempt > 0,
 			onError: error =>
 				void this.#failRetryAfterLocalContinueError(message, error).catch(failure =>
@@ -3532,7 +3563,7 @@ export class TurnRecovery {
 
 	async #promptAgentWithIdleRetry(
 		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
+		options?: { toolChoice?: ToolChoice; owner?: unknown },
 		onClaimed?: () => void,
 	): Promise<void> {
 		const deadline = Date.now() + 30_000;

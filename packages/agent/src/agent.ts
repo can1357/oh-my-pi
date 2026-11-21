@@ -379,6 +379,19 @@ export interface AgentOptions {
 
 export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
+	/**
+	 * Opaque token identifying the dispatcher that claims this run; recorded on
+	 * `AgentState.runOwner` at the streaming claim (synchronously, before the
+	 * run's first await). Hosts use it to attribute the live run — e.g. to keep
+	 * steering admissions tied to the dispatch that started the run. Omitted by
+	 * autonomous claimants, which resets the attribution.
+	 */
+	owner?: unknown;
+}
+
+export interface AgentContinueOptions {
+	/** Opaque owner token recorded on `AgentState.runOwner` for this continuation. */
+	owner?: unknown;
 }
 
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
@@ -1811,12 +1824,12 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	continue(signal?: AbortSignal): Promise<void> {
+	continue(signal?: AbortSignal, options?: AgentContinueOptions): Promise<void> {
 		// Queued-message hooks run before the loop and are this agent's work too.
-		return this.#inLogContext(() => this.#continue(signal));
+		return this.#inLogContext(() => this.#continue(signal, options));
 	}
 
-	async #continue(signal?: AbortSignal) {
+	async #continue(signal?: AbortSignal, options?: AgentContinueOptions) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
@@ -1826,6 +1839,9 @@ export class Agent {
 		this.#resolveRunningPrompt = resolve;
 		const continuationAbortController = new AbortController();
 		this.#abortController = continuationAbortController;
+		// Claim: stamp the owner synchronously (before the first await below) so
+		// `state.runOwner` always names the live run — see AgentState.runOwner.
+		this.#state.runOwner = options?.owner;
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
@@ -1921,6 +1937,13 @@ export class Agent {
 		const loopSignal = continuationSignal
 			? AbortSignal.any([loopAbortController.signal, continuationSignal])
 			: loopAbortController.signal;
+		if (!runStateClaimed) {
+			// First claim of this run (the prompt() path; #continue claims in its
+			// own synchronous prefix and passes runStateClaimed=true): stamp the
+			// claiming caller's owner. Every claim overwrites it, so a value read
+			// while streaming always names the live run.
+			this.#state.runOwner = options?.owner;
+		}
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;

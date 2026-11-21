@@ -1049,6 +1049,13 @@ export interface AgentState {
 	tools: AgentTool<any>[];
 	messages: AgentMessage[]; // Can include attachments + custom message types
 	isStreaming: boolean;
+	/**
+	 * Opaque owner token the claiming caller passed (`AgentPromptOptions.owner` /
+	 * `Agent.continue(signal, { owner })`); `undefined` for autonomous claims. Every
+	 * streaming claim overwrites it synchronously before its first await, so a
+	 * value read while `isStreaming` is true always names the live run's owner.
+	 */
+	runOwner?: unknown;
 	streamMessage: AgentMessage | null;
 	pendingToolCalls: Set<string>;
 	error?: string;

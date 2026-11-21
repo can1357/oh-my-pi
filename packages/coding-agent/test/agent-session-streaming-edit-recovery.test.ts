@@ -24,7 +24,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 const emptyUsage = (): AssistantMessage["usage"] => ({
 	input: 0,
@@ -80,10 +80,11 @@ const streamingEditFailureStream = (opts: {
 };
 
 /** Second-call stream: the re-driven turn answers with plain text. */
-const textStream = (opts: { model: Model<Api>; text: string }): AssistantMessageEventStream => {
-	const { model, text } = opts;
+const textStream = (opts: { model: Model<Api>; text: string; gate?: Promise<void> }): AssistantMessageEventStream => {
+	const { model, text, gate } = opts;
 	const stream = new AssistantMessageEventStream();
-	queueMicrotask(() => {
+	queueMicrotask(async () => {
+		await gate;
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text }],
@@ -160,6 +161,8 @@ describe("AgentSession streaming edit preview recovery", () => {
 			const model = createMockModel({ provider: "anthropic", id: "claude-streaming-edit-recovery" }).model;
 			settings.setModelRole("default", `${model.provider}/${model.id}`);
 			const contexts: Context[] = [];
+			const recoveryStarted = Promise.withResolvers<void>();
+			const releaseRecovery = Promise.withResolvers<void>();
 			let call = 0;
 			const agent = new Agent({
 				getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
@@ -167,12 +170,21 @@ describe("AgentSession streaming edit preview recovery", () => {
 				streamFn: (streamModel, context) => {
 					contexts.push(context);
 					call += 1;
-					return call === 1
-						? streamingEditFailureStream({
-								model: streamModel,
-								args: { path: "sample.txt", edits: [{ diff: "@@\n-missing\n+replacement\n" }] },
-							})
-						: textStream({ model: streamModel, text: "Recovered after preview failure." });
+					if (call === 1) {
+						return streamingEditFailureStream({
+							model: streamModel,
+							args: { path: "sample.txt", edits: [{ diff: "@@\n-missing\n+replacement\n" }] },
+						});
+					}
+					if (call === 2) {
+						recoveryStarted.resolve();
+						return textStream({
+							model: streamModel,
+							text: "Recovered after preview failure.",
+							gate: releaseRecovery.promise,
+						});
+					}
+					return textStream({ model: streamModel, text: "Answered the recovery steer." });
 				},
 				convertToLlm,
 			});
@@ -189,12 +201,24 @@ describe("AgentSession streaming edit preview recovery", () => {
 				if (event.type === "notice") notices.push(event);
 			});
 
-			await active.prompt("Fix sample.txt");
+			const promptDone = active.prompt("Fix sample.txt");
+			await withTimeout(recoveryStarted.promise, 2_000, "Streaming edit recovery never streamed");
+			expect(active.agent.state.isStreaming).toBe(true);
+
+			// The recovery continues the client prompt's turn, so a steer joins
+			// that run instead of parking until the bracket drains and refusing.
+			const admitted = await withTimeout(
+				active.joinActiveTurn("steer the streaming edit recovery"),
+				1_000,
+				"Steer was not admitted into streaming edit recovery",
+			).finally(() => releaseRecovery.resolve());
+			expect(admitted).toBe(true);
+			await promptDone;
 			await active.waitForIdle();
 
-			// The failed run was followed by a second model call: the guard
-			// re-drove the turn instead of ending the prompt with nothing.
-			expect(call).toBe(2);
+			// The failed run was followed by recovery and steered model calls: the
+			// guard re-drove the turn and the admitted steer received an answer.
+			expect(call).toBe(3);
 
 			// The second call carried the hidden recovery prompt as a developer
 			// message naming the diagnostic and the way out.
@@ -234,7 +258,8 @@ describe("AgentSession streaming edit preview recovery", () => {
 				(m): m is AssistantMessage => m.role === "assistant" && m.stopReason === "stop" && !m.errorMessage,
 			);
 			if (!finalAssistant) throw new Error("expected a recovered final assistant message");
-			expect(messageText(finalAssistant)).toContain("Recovered");
+			expect(messages.some(m => m.role === "assistant" && messageText(m).includes("Recovered"))).toBe(true);
+			expect(messageText(finalAssistant)).toContain("Answered the recovery steer");
 		} finally {
 			await removeWithRetries(dir);
 		}

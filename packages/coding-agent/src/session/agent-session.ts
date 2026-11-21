@@ -646,6 +646,14 @@ const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
 const AGENT_START_POLICY_MAX_ATTEMPTS = 3;
 /**
+ * Run-owner token stamped on every run a client prompt dispatch (`session.prompt`
+ * — the ACP `session/prompt` path) claims, and inherited by that turn's recovery
+ * retries. `AgentState.runOwner` carries it while the run streams; steering
+ * admission (`joinActiveTurn`) requires it so a steer only ever injects into a
+ * run whose answer the owning client prompt forwards.
+ */
+const CLIENT_PROMPT_RUN_OWNER = Symbol("clientPromptRunOwner");
+/**
  * How long the first turn waits for deferred UI/RPC MCP startup (the sdk's startup barrier
  * uses it too): covers the 250ms startup window, config load, and servers that connect soon
  * after, while a hung server costs at most 1.5s.
@@ -655,6 +663,14 @@ export const MCP_DISCOVERY_TURN_WAIT_MS = 1500;
 const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
+/**
+ * Owner of the agent run whose events are being dispatched. Held for that
+ * dispatch's awaits and for the post-prompt tasks it schedules, so a compaction
+ * or rule continuation of the run keeps the same owner. Overlapping dispatches
+ * each keep their own store: a background retry waiting on a save cannot pick
+ * up a client run that claimed in between.
+ */
+const continuationOwnerScope = new AsyncLocalStorage<unknown>();
 /**
  * One session transition in its session's tree of transitions. Transitions it starts itself queue
  * on its `childTail`; it hands its parent's queue on once it and every one in `nested` settled.
@@ -898,6 +914,16 @@ type ScheduledAgentContinueOptions = {
 	onError?: (error: unknown) => void;
 	/** Messages the continued turn answers, handed to the turn observer (see `#startTurnObservation`). */
 	turnRecords?: AgentMessage[];
+	/**
+	 * Run-owner token of the turn this continue retries: `AgentState.runOwner` of
+	 * the run whose terminal event scheduled it, captured synchronously with the
+	 * event dispatch (see `#dispatchAgentEvent`). `#runAgentContinue` re-records it
+	 * on the continuation claim, so the retry stays steerable exactly when the
+	 * turn it retries was — a background turn's retry can never inherit a client
+	 * prompt's owner, even when unrelated runs claim and settle while the retry is
+	 * still being scheduled or waiting.
+	 */
+	owner?: unknown;
 };
 
 type ScheduledAgentContinueRequest = {
@@ -2867,6 +2893,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			promptSequence: () => this.#promptSequence,
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
+			continueAgent: signal => {
+				const owner = continuationOwnerScope.getStore();
+				const claimed = this.agent.continue(signal, { owner });
+				if (owner !== undefined) this.#wakeDispatchLiveWaiters();
+				return claimed;
+			},
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
@@ -4418,6 +4450,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * the recovery wait always sees the in-flight handler and blocks until it — and
 	 * everything it schedules — settles. */
 	#dispatchAgentEvent = async (event: AgentEvent): Promise<void> => {
+		// Run ownership for everything this event's handlers schedule, read
+		// SYNCHRONOUSLY with the emit: every agent claim overwrites
+		// `AgentState.runOwner` before its first await, so reading it after any
+		// await could name a newer run. Recovery retries scheduled from this
+		// event inherit exactly this token — a background turn's retry never
+		// inherits a client prompt's owner even when unrelated runs claim and
+		// settle while the retry is still being scheduled (e.g. behind the
+		// empty-stop durable-drop await).
+		const eventRunOwner = this.agent.state.runOwner;
 		// Revoke before the first await: delayed end-of-turn maintenance must
 		// never revoke a foreground-control grant acquired by a later prompt.
 		const computerControlRevocation =
@@ -4440,7 +4481,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 		if (event.type !== "agent_end") {
-			const processing = this.#processAgentEvent(event);
+			const processing = continuationOwnerScope.run(eventRunOwner, () =>
+				this.#processAgentEvent(event, eventRunOwner),
+			);
 			if ((event.type === "message_start" || event.type === "message_end") && isAdvisorCard(event.message)) {
 				this.#advisors.trackCardEvent(processing);
 			}
@@ -4454,7 +4497,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Maintenance starts now, not behind the revocation ack: it classifies this run's end
 			// against live abort state, and a deferred start lets `abort()` settle first, so a
 			// deliberate empty abort reads as a reasonless one and is auto-retried.
-			await Promise.all([this.#processAgentEvent(event), computerControlRevocation]);
+			await Promise.all([
+				continuationOwnerScope.run(eventRunOwner, () => this.#processAgentEvent(event, eventRunOwner)),
+				computerControlRevocation,
+			]);
 		} catch (error) {
 			// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
 			// publishing the settle. Without it the run never reports idle and every
@@ -4880,7 +4926,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !dropped.has(message));
 	}
 
-	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
+	#processAgentEvent = async (event: AgentEvent, eventRunOwner?: unknown): Promise<void> => {
 		const eventPromptGeneration = this.#promptGeneration;
 		// Snapshot before any await: a loop end routed after a newer loop started is folded into the run.
 		const loopEpoch = this.#runEpoch;
@@ -5448,7 +5494,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// tool_result and corrupts message history. The handler also
 			// schedules its own retry, so a real empty stop never needs the
 			// active-goal threshold pre-empt below.
-			const emptyOutputRecovery = await this.#recovery.handleEmptyAssistantStop(msg);
+			const emptyOutputRecovery = await this.#recovery.handleEmptyAssistantStop(msg, eventRunOwner);
 			if (emptyOutputRecovery === "continue") {
 				maintenanceRoute("empty-stop-handled");
 				endLoop({ continuing: true });
@@ -5474,7 +5520,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					(AIError.isPayloadRejection(msg) || AIError.isContextOverflow(msg, this.model?.contextWindow ?? 0)) &&
 					this.#recovery.isHardErrorFallbackEligible(msg)
 				) {
-					const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
+					const didRetry = await this.#recovery.handleRetryableError(
+						msg,
+						{ hardErrorFallback: true },
+						eventRunOwner,
+					);
 					if (didRetry) {
 						endLoop({ continuing: true });
 						return;
@@ -5503,7 +5553,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			}
 
-			if (await this.#recovery.handleUnexpectedAssistantStop(msg)) {
+			if (await this.#recovery.handleUnexpectedAssistantStop(msg, eventRunOwner)) {
 				maintenanceRoute("unexpected-stop-handled");
 				endLoop({ continuing: true });
 				return;
@@ -5516,6 +5566,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					resolvedInterruptedToolTurn === "reasonless-abort"
 						? { allowModelFallback: false, preserveFailedTurn: true }
 						: { allowModelFallback: false },
+					eventRunOwner,
 				);
 				if (didRetry) {
 					endLoop({ continuing: true });
@@ -5532,7 +5583,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				endLoop(ttsrAbortPendingAtAgentEnd ? { continuing: true } : undefined);
 				return;
 			}
-			const requestBodyTimeoutRecovery = await this.#recovery.handleResponsesRequestBodyReadTimeout(msg);
+			const requestBodyTimeoutRecovery = await this.#recovery.handleResponsesRequestBodyReadTimeout(
+				msg,
+				eventRunOwner,
+			);
 			if (requestBodyTimeoutRecovery === "handled-retry") {
 				maintenanceRoute("responses-request-body-timeout-retry");
 				endLoop({ continuing: true });
@@ -5543,7 +5597,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// including hard router errors the generic retry classifier rejects — so
 			// run this gate before the standard retryability check.
 			if (!requestBodyTimeoutTerminal && this.#recovery.isFireworksFastFallbackEligible(msg)) {
-				const didRetry = await this.#recovery.handleRetryableError(msg, { fireworksFastFallback: true });
+				const didRetry = await this.#recovery.handleRetryableError(
+					msg,
+					{ fireworksFastFallback: true },
+					eventRunOwner,
+				);
 				if (didRetry) {
 					endLoop({ continuing: true });
 					return;
@@ -5554,19 +5612,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const didRetry = await this.#recovery.handleRetryableError(
 					msg,
 					resumeResolvedStreamStall ? { preserveFailedTurn: true } : undefined,
+					eventRunOwner,
 				);
 				if (didRetry) {
 					endLoop({ continuing: true });
 					return;
 				}
-			} else if (!requestBodyTimeoutTerminal && this.#recovery.handleMalformedFunctionCallStop(msg)) {
+			} else if (!requestBodyTimeoutTerminal && this.#recovery.handleMalformedFunctionCallStop(msg, eventRunOwner)) {
 				// A malformed call with committed text cannot be replayed, but it
 				// never executed anything either: keep the turn and continue with a
 				// corrective reminder rather than stopping on a pinned error.
 				maintenanceRoute("malformed-function-call-handled");
 				endLoop({ continuing: true });
 				return;
-			} else if (!requestBodyTimeoutTerminal && this.#recovery.handleCommittedTextStreamStall(msg)) {
+			} else if (!requestBodyTimeoutTerminal && this.#recovery.handleCommittedTextStreamStall(msg, eventRunOwner)) {
 				// The stream died after text rendered: replay would duplicate it and
 				// a trailing assistant prefill is rejected, so keep the partial turn
 				// and continue from where it stopped.
@@ -5579,7 +5638,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// DIFFERENT model is a fresh chance — consult the chain before
 				// surfacing the failure. #handleRetryableError bails out (no
 				// backoff-retry of the failing model) when no switch happens.
-				const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
+				const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true }, eventRunOwner);
 				if (didRetry) {
 					endLoop({ continuing: true });
 					return;
@@ -5709,6 +5768,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): void {
 		const delayMs = options?.delayMs ?? 0;
 		const signal = this.#postPromptTasksAbortController.signal;
+		// Captured now, before this task's own awaits: the dispatch that
+		// scheduled it may have moved on by the time the task runs. A rule
+		// interrupt schedules its continue from this task and must still name
+		// the run the rule interrupted.
+		const owner = continuationOwnerScope.getStore();
 		const scheduled = (async () => {
 			if (delayMs > 0) {
 				try {
@@ -5726,7 +5790,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				options.onSkip?.("stale-generation");
 				return;
 			}
-			await task(signal);
+			await (owner === undefined ? task(signal) : continuationOwnerScope.run(owner, () => task(signal)));
 		})();
 		this.#trackPostPromptTask(scheduled);
 	}
@@ -5788,7 +5852,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			for (;;) {
 				try {
 					if (!this.agent.state.isStreaming) onStart?.();
-					await this.agent.continue(signal);
+					// The claim happens synchronously in continue()'s prefix, so the
+					// inherited owner is already on AgentState.runOwner by the time
+					// this line runs. Wake parked steers only for a client-owned
+					// retry — they admit into this run, never an autonomous one.
+					const claimed = this.agent.continue(signal, { owner: request.options.owner });
+					if (request.options.owner !== undefined) this.#wakeDispatchLiveWaiters();
+					await claimed;
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
@@ -5826,9 +5896,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#scheduleAgentContinue(options: ScheduledAgentContinueOptions): void {
+		// A caller that already named an owner (a recovery retry, captured with
+		// the terminal event) wins. Otherwise inherit the dispatch in progress:
+		// compaction and rule continuations are scheduled from that dispatch,
+		// possibly after awaits, and must keep its owner.
+		const owner = options.owner ?? continuationOwnerScope.getStore();
 		const request: ScheduledAgentContinueRequest = {
 			schedulerToken: ++this.#agentContinueSchedulerToken,
-			options,
+			options: owner === undefined ? options : { ...options, owner },
 		};
 		logger.debug("agent.continue scheduled", {
 			source: options.source,
@@ -5943,6 +6018,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#scheduleAutoContinuePrompt(generation: number): boolean {
+		// The compaction that schedules this runs inside the ended run's event
+		// dispatch. Capture that owner now; the prompt itself runs later, from a
+		// post-prompt task.
+		const owner = continuationOwnerScope.getStore();
 		const continuePrompt = async () => {
 			// Compaction summarizes away the first-message eager preludes, so re-assert the
 			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
@@ -5964,6 +6043,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
+					runOwner: owner,
 				},
 			);
 		};
@@ -5975,6 +6055,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					this.#scheduleAgentContinue({
 						source: "auto-continue-queued-message",
 						generation,
+						owner,
 						shouldContinue: () => this.agent.hasQueuedMessages(),
 					});
 					return;
@@ -6069,7 +6150,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
 		const runner = this.#extensionRunner;
 		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
-		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
+		// Code rules run in the agent loop, outside the event dispatch that owns
+		// continuationOwnerScope. Bind the live run before the check: the
+		// interrupt retry is scheduled from here, after awaits, and must keep
+		// that owner or a steer into the retry waits until it ends and is refused.
+		const owner = this.agent.state.runOwner;
+		const ttsrResult = await continuationOwnerScope.run(owner, () => this.#ttsr.beforeToolCall(ctx));
 		if (ttsrResult) {
 			runner?.clearLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
 			return ttsrResult;
@@ -9464,6 +9550,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
+				// The one call site that runs under #prompt's client-ownership
+				// bracket: its run (and that turn's retries) are the steerable ones.
+				runOwner: CLIENT_PROMPT_RUN_OWNER,
 				followUpBatch: followUps,
 				images: normalizedImages,
 				prependMessages:
@@ -9938,6 +10027,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			acceptTerminalEmptyStop?: boolean;
 			/** Follow-ups held until this run goes live; queued behind it then. */
 			followUpBatch?: PromptFollowUps;
+			/**
+			 * Run-owner token claimed with this dispatch's run. Set only by the
+			 * `#prompt` call site (the client-prompt path whose bracket raises
+			 * `#clientPromptInFlightCount`); autonomous callers (auto-continue,
+			 * queued-hidden drain) leave it unset so their runs stay unsteerable.
+			 */
+			runOwner?: unknown;
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
@@ -10183,7 +10279,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			}
 
-			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
+			// The owner token marks the run this dispatch claims as client-owned:
+			// steering admission (`joinActiveTurn`) requires it, and the turn's
+			// recovery retries inherit it (see `#dispatchAgentEvent` /
+			// `#runAgentContinue`). Only the client-prompt call site sets it.
+			const agentPromptOptions =
+				options?.toolChoice || options?.runOwner
+					? { toolChoice: options.toolChoice, owner: options.runOwner }
+					: undefined;
 			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
 			const contextWindow = this.model?.contextWindow ?? 0;
 			const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
@@ -10589,14 +10692,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#throwIfExtensionCommand(text);
 		}
 		// Park-until-live: a steer that lands while the owning prompt is
-		// still dispatching (setup awaits; `agent.state.isStreaming` not
-		// yet raised) cannot inject mid-dispatch, and refusing it back to
-		// the host loses it — agent-shell answers `promptRequired` while
-		// busy by interrupting the very turn the steer targeted. Hold it
-		// until the owning prompt goes live, then admit: the steer injects
-		// at the first batch boundary of the run it was meant for, and the
-		// ACP bridge answers `injected`.
-		if (!this.agent.state.isStreaming) {
+		// still dispatching (setup awaits; its run not claimed yet) cannot
+		// inject mid-dispatch, and refusing it back to the host loses it —
+		// agent-shell answers `promptRequired` while busy by interrupting the
+		// very turn the steer targeted. Hold it until the owning prompt's OWN
+		// run goes live, then admit: the steer injects at the first batch
+		// boundary of the run it was meant for, and the ACP bridge answers
+		// `injected`.
+		if (!this.#clientRunIsLive()) {
 			for (;;) {
 				await this.#waitForPromptDispatchLive();
 				// The owning prompt settled without going live (setup
@@ -10604,12 +10707,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// keep the caller's content instead of injecting into a
 				// dead run.
 				if (this.#abortInProgress || this.#clientPromptInFlightCount === 0) return false;
-				if (this.agent.state.isStreaming) break;
-				// The client prompt is still dispatching behind an
-				// autonomous run (e.g. an IRC wake its busy-retry is
-				// waiting out) that has since ended: keep parking — only
-				// the client run's own claim (the dispatch-live wake)
-				// admits, never an autonomous run's streaming.
+				if (this.#clientRunIsLive()) break;
+				// Still no client-owned run: either the prompt is dispatching
+				// behind an autonomous run (an IRC wake, an idle yield, a
+				// scheduler turn its busy-retry is waiting out), or that run
+				// ended and only autonomous successors stream. Keep parking —
+				// only the client run's own claim (or a retry that inherited
+				// its owner) admits, never an autonomous run's streaming: the
+				// steer would mutate a run whose answer never reaches the
+				// client that asked.
 			}
 		}
 		const mode = options?.queue === "followUp" ? "followUp" : "steer";
@@ -10742,16 +10848,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// `joinActiveTurn` admission: after every await above, the run that was
 		// live at call time may have settled — or `abort()` may have started
 		// (its `#abortInProgress` flag is raised synchronously at entry, while
-		// `isStreaming` can stay true until cleanup drains) — or, with
-		// `requireActiveRun`, the CLIENT turn that admitted this steer may
-		// have settled during the preprocessing awaits while an autonomous
-		// wake (IRC, scheduler) took over `isStreaming`. Classify either as
-		// not-admitted so the caller (the ACP bridge) keeps its content for the
-		// host; the enqueue below is synchronous, so nothing interleaves
-		// between this check and the message landing on the queue.
+		// `isStreaming` can stay true until cleanup drains) — or the CLIENT turn
+		// that admitted this steer may have settled during the preprocessing
+		// awaits while an autonomous wake (IRC, scheduler, a background retry)
+		// took over the stream. Ownership (`AgentState.runOwner`, see
+		// `#clientRunIsLive`) catches that takeover where bare `isStreaming`
+		// cannot. Classify any of them as not-admitted so the caller (the ACP
+		// bridge) keeps its content for the host; the enqueue below is
+		// synchronous, so nothing interleaves between this check and the message
+		// landing on the queue.
 		if (
 			options?.requireActiveRun &&
-			(this.#abortInProgress || !this.isStreaming || this.#clientPromptInFlightCount === 0)
+			(this.#abortInProgress || !this.#clientRunIsLive() || this.#clientPromptInFlightCount === 0)
 		) {
 			return false;
 		}
@@ -10871,15 +10979,35 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Whether the currently streaming run belongs to a client prompt dispatch:
+	 * claimed by `#promptWithMessage` itself (the `owner` it passes to
+	 * `agent.prompt`) or by a recovery retry that inherited that owner
+	 * (`#runAgentContinue` re-records it on the continuation claim). Autonomous
+	 * runs — IRC wakes, idle yields, scheduler and agent-initiated turns,
+	 * background retries, queued-message drains — claim with no owner, so this
+	 * is `false` for them even while they stream and even while a client prompt
+	 * is dispatching behind them.
+	 *
+	 * Correctness rests on the claim protocol in `Agent`: every streaming claim
+	 * overwrites `AgentState.runOwner` synchronously, before the run's first
+	 * await, so the owner read while `isStreaming` is true always names the
+	 * live run — never a previous one.
+	 */
+	#clientRunIsLive(): boolean {
+		return this.agent.state.isStreaming && this.agent.state.runOwner === CLIENT_PROMPT_RUN_OWNER;
+	}
+
+	/**
 	 * Resolvers parked on reserved-but-dispatching client prompts going live
 	 * (or settling without streaming): `joinActiveTurn` parks a mid-dispatch
 	 * steer here instead of refusing it, so the steer injects at the owning
 	 * run's first batch boundary. Fired from the client prompt's own
 	 * `agent.prompt` claim (the `onClaimed` hook in
 	 * `#promptAgentWithIdleRetry` — an autonomous run's streaming never
-	 * fires it), and from `#endInFlight`/`#resetInFlight` when the count
-	 * drains without the client run ever going live (setup failure, abort,
-	 * disposal).
+	 * fires it), from `#runAgentContinue` or a stream-guard continuation when a
+	 * retry that inherited the client owner claims, and from
+	 * `#endInFlight`/`#resetInFlight` when the count drains without the client
+	 * run ever going live (setup failure, abort, disposal).
 	 */
 	#dispatchLiveWaiters = new Set<() => void>();
 
