@@ -27,6 +27,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { getInternalUrlSuggestions } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
@@ -210,6 +211,24 @@ describe("history:// protocol", () => {
 		const resource = await InternalUrlRouter.instance().resolve("history://current");
 
 		expect(resource.content).toContain("named current transcript");
+	});
+
+	it("still opens an agent named session and completes the separate browse URL", async () => {
+		AgentRegistry.global().register({
+			id: "Session",
+			displayName: "named session",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "named agent transcript", timestamp: 1 }]),
+			status: "idle",
+		});
+		const router = InternalUrlRouter.instance();
+		const progress = resourceText(await router.resolve("agent://Session"));
+		const link = progress.match(/`(history:\/\/[^`]+)`/)?.[1];
+		if (!link) throw new Error("Expected an agent transcript link");
+		expect((await router.resolve(link)).content).toContain("named agent transcript");
+		expect((await router.resolve("history://session")).content).toContain("named agent transcript");
+		const result = await getInternalUrlSuggestions("read history://session/br");
+		expect(result?.items.map(item => item.value)).toEqual(["history://session/browse"]);
 	});
 
 	it("renders full execution output and metadata in current-branch history", () => {
@@ -714,7 +733,8 @@ describe("history:// protocol", () => {
 			await Bun.write(candidate, "not a directory");
 			registerArtifactsDir(candidate);
 
-			await expect(new HistoryProtocolHandler().complete()).resolves.toEqual([]);
+			const completions = await new HistoryProtocolHandler().complete();
+			expect(completions.map(completion => completion.value)).toEqual(["session/browse"]);
 		});
 	});
 

@@ -470,6 +470,20 @@ export function resolveSessionLeafId(entries: readonly SessionEntry[]): string |
 	return lastSelfSelectedLeafId(entries);
 }
 
+/** Walk a branch in transcript order, stopping at the first repeat in a corrupt journal. */
+export function walkSessionBranch(
+	leaf: SessionEntry | undefined,
+	byId: ReadonlyMap<string, SessionEntry>,
+): SessionEntry[] {
+	const branch: SessionEntry[] = [];
+	const seen = new Set<string>();
+	for (let entry = leaf; entry && !seen.has(entry.id); entry = entry.parentId ? byId.get(entry.parentId) : undefined) {
+		seen.add(entry.id);
+		branch.push(entry);
+	}
+	return branch.reverse();
+}
+
 /** Raw logical file entry after loaders strip any fixed-width title slot. */
 export type FileEntry = SessionHeader | SessionEntry;
 

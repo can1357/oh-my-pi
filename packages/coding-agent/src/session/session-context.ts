@@ -31,6 +31,7 @@ import {
 	resolveSessionLeafId,
 	type SessionEntry,
 	type SessionMessageEntry,
+	walkSessionBranch,
 } from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
@@ -315,17 +316,7 @@ export function buildSessionContext(
 		};
 	}
 
-	// Walk from leaf to root, collecting path. Corrupt/pre-fix files can contain
-	// parent cycles; stop at the first repeat so session load is bounded.
-	const path: SessionEntry[] = [];
-	const seenPathIds = new Set<string>();
-	let current: SessionEntry | undefined = leaf;
-	while (current && !seenPathIds.has(current.id)) {
-		seenPathIds.add(current.id);
-		path.push(current);
-		current = current.parentId ? byId.get(current.parentId) : undefined;
-	}
-	path.reverse();
+	const path = walkSessionBranch(leaf, byId);
 
 	// Extract settings and find compaction
 	let thinkingLevel: string | undefined = "off";

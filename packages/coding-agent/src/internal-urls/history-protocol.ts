@@ -15,6 +15,7 @@
  * URL forms:
  * - history:// - Index of all registry + on-disk agents (id, status, kind, last activity)
  * - history://<agentId> - Concise markdown transcript of that agent
+ * - history://session/browse[/<sessionId>] - List or read persisted top-level sessions
  * - history://current/full - Full, caller-bound current branch history (experimental);
  *   bare history://current reads the same unless an agent is named `current`
  */
@@ -24,6 +25,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
+import { isBlobRef } from "../session/blob-store";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import {
 	bashExecutionToText,
@@ -36,10 +38,19 @@ import {
 	type HookMessage,
 	type PythonExecutionMessage,
 } from "../session/messages";
-import { loadSessionMessagesReadOnly } from "../session/session-loader";
+import { loadSessionBranchReadOnly, loadSessionMessagesReadOnly } from "../session/session-loader";
 import type { SessionEntry } from "../session/session-entries";
 import historyPromptDoc from "../prompts/internal-urls/history.md" with { type: "text" };
 import { artifactsDirsFromRegistry, sessionFilesFromDisk } from "./registry-helpers";
+import {
+	findHistorySession,
+	historySessionTitle,
+	listHistorySessions,
+	parseSessionHistory,
+	renderHistorySessionIndex,
+	SESSION_HISTORY_TARGET,
+	type SessionHistoryRequest,
+} from "./session-history";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -161,7 +172,8 @@ function appendRawMessage(lines: string[], message: AgentMessage): void {
 				} else if (block.type === "image") {
 					// Metadata only: base64 bytes are not recoverable text and would
 					// dominate the rendered history.
-					lines.push(`[image: ${block.mimeType}, ${block.data.length} base64 chars omitted]`);
+					const omitted = isBlobRef(block.data) ? "externalized bytes" : `${block.data.length} base64 chars`;
+					lines.push(`[image: ${block.mimeType}, ${omitted} omitted]`);
 				} else if (block.type === "fallback") {
 					lines.push(`[provider fallback: ${block.from.model} to ${block.to.model}]`);
 				}
@@ -291,12 +303,15 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
  * and branch rewinds.
  */
 export function formatCurrentBranchFullHistory(entries: readonly SessionEntry[]): string {
-	const lines = [
-		"# Current branch — full history",
-		"",
+	return formatFullHistory(
+		entries,
+		"Current branch — full history",
 		"Source: caller-bound live session branch. Context-window boundaries are retained below; this view never uses a registry or on-disk fallback.",
-		"",
-	];
+	);
+}
+
+function formatFullHistory(entries: readonly SessionEntry[], title: string, source: string): string {
+	const lines = [`# ${title}`, "", source, ""];
 	for (const entry of entries) {
 		renderRawEntry(lines, entry);
 		lines.push("");
@@ -325,6 +340,12 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * do live agents without a session file and unknown ids.
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
+		const request = parseSessionHistory(url);
+		if (request?.kind === "index") return null;
+		if (request) {
+			const sessions = await listHistorySessions(request.scope, context);
+			return findHistorySession(sessions, request, true)?.path ?? null;
+		}
 		const current = currentRoute(url);
 		if (current === "full") return null;
 		const agentId = url.rawHost || url.hostname;
@@ -376,6 +397,44 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		return { ref, visible, preferredArtifactDir };
 	}
 
+	async #resolveSessionHistory(
+		url: InternalUrl,
+		request: SessionHistoryRequest,
+		context?: ResolveContext,
+	): Promise<InternalResource> {
+		const sessions = await listHistorySessions(request.scope, context);
+		if (request.kind === "index") {
+			const content = renderHistorySessionIndex(sessions, request, context?.sessionId);
+			return {
+				url: url.href,
+				content,
+				contentType: "text/markdown",
+				size: Buffer.byteLength(content, "utf-8"),
+				immutable: true,
+			};
+		}
+
+		const session = findHistorySession(sessions, request);
+		const title = historySessionTitle(session);
+		const source = "Source: persisted session file (read-only)";
+		const content = request.full
+			? formatFullHistory(
+					await loadSessionBranchReadOnly(session.path, session.id),
+					`${title} — full history`,
+					source,
+				)
+			: formatSessionHistoryMarkdown(await loadSessionMessagesReadOnly(session.path, session.id), { title });
+		return {
+			url: url.href,
+			content,
+			contentType: "text/markdown",
+			size: Buffer.byteLength(content, "utf-8"),
+			immutable: true,
+			sourcePath: session.path,
+			notes: [source],
+		};
+	}
+
 	#resolveCurrentFull(url: InternalUrl, context: ResolveContext | undefined): InternalResource {
 		if (!context?.experimentalContextManagement) {
 			throw new Error(
@@ -397,6 +456,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		};
 	}
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		const request = parseSessionHistory(url);
+		if (request) return this.#resolveSessionHistory(url, request, context);
 		const current = currentRoute(url);
 		if (current === "full") return this.#resolveCurrentFull(url, context);
 		const agentId = url.rawHost || url.hostname;
@@ -539,7 +600,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(): Promise<UrlCompletion[]> {
-		const completions: UrlCompletion[] = [];
+		const completions: UrlCompletion[] = [
+			{ value: SESSION_HISTORY_TARGET, description: "top-level session history" },
+		];
 		const seen = new Set<string>();
 		for (const ref of AgentRegistry.global().list()) {
 			if (ref.kind === "advisor") continue;
