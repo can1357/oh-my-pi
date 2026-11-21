@@ -131,6 +131,18 @@ fn scroll_steps(delta: f64) -> i32 {
 	}
 }
 
+const WHEEL_DELTA: i32 = 120;
+
+/// Both background routes accept only wheel steps that fit one posted message.
+fn background_scroll(delta: f64) -> CoreResult<(i32, i16)> {
+	let steps = scroll_steps(delta);
+	let wheel = steps.saturating_mul(WHEEL_DELTA);
+	let wheel = i16::try_from(wheel).map_err(|_| {
+		DesktopError::input_failed(format!("scroll delta {wheel} exceeds Win32 range"))
+	})?;
+	Ok((steps, wheel))
+}
+
 fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button, count, modifiers } => {
@@ -250,7 +262,6 @@ mod background {
 	const MK_LBUTTON: usize = 0x0001;
 	const MK_RBUTTON: usize = 0x0002;
 	const MK_MBUTTON: usize = 0x0010;
-	const WHEEL_DELTA: i32 = 120;
 
 	/// Time between a posted button press and its release.
 	const CLICK_HOLD: Duration = Duration::from_millis(35);
@@ -408,11 +419,8 @@ mod background {
 		}
 	}
 
-	fn wheel_wparam(delta: i32) -> CoreResult<WPARAM> {
-		let delta = i16::try_from(delta).map_err(|_| {
-			DesktopError::input_failed(format!("scroll delta {delta} exceeds Win32 range"))
-		})?;
-		Ok(usize::from(u16::from_ne_bytes(delta.to_ne_bytes())) << 16)
+	const fn wheel_wparam(delta: i16) -> WPARAM {
+		(u16::from_ne_bytes(delta.to_ne_bytes()) as usize) << 16
 	}
 
 	/// Posts pointer input to the deepest child window under the point.
@@ -551,12 +559,14 @@ mod background {
 				})
 			},
 			PointerEvent::Scroll { x, y, dx, dy } => {
+				let (horizontal_steps, horizontal) = super::background_scroll(dx)?;
+				let (vertical_steps, vertical) = super::background_scroll(dy)?;
 				let point = screen_point(x, y);
 				// Wheel messages carry screen coordinates; unhandled wheel input
 				// bubbles from the child up its parent chain.
 				let (target, _) = child_under(root, point)?;
 				if wpf_scroll && (target == root || is_wpf_class(&window::class_name(target))) {
-					let (horizontal, vertical) = (super::scroll_steps(dx), super::scroll_steps(dy));
+					let (horizontal, vertical) = (horizontal_steps, vertical_steps);
 					if ax.scroll_at_point(root, point, horizontal, vertical)? {
 						return Ok(());
 					}
@@ -573,13 +583,11 @@ mod background {
 					DesktopError::input_failed("cannot map wheel coordinates to the target's DPI")
 				})?;
 				let location = packed_point(point.x, point.y)?;
-				let horizontal = super::scroll_steps(dx).saturating_mul(WHEEL_DELTA);
-				let vertical = super::scroll_steps(dy).saturating_mul(-WHEEL_DELTA);
 				if horizontal != 0 {
-					post(target, WM_MOUSEHWHEEL, wheel_wparam(horizontal)?, location)?;
+					post(target, WM_MOUSEHWHEEL, wheel_wparam(horizontal), location)?;
 				}
 				if vertical != 0 {
-					post(target, WM_MOUSEWHEEL, wheel_wparam(vertical)?, location)?;
+					post(target, WM_MOUSEWHEEL, wheel_wparam(-vertical), location)?;
 				}
 				Ok(())
 			},
@@ -1930,4 +1938,26 @@ pub(super) fn raise_window(id: &str) -> CoreResult<()> {
 	window::wait_for_foreground(hwnd, Duration::from_millis(500))?.ok_or_else(|| {
 		DesktopError::input_failed(format!("Windows refused to raise window {id} (foreground lock)"))
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn background_scroll_keeps_the_posted_wheel_range() {
+		for (delta, expected) in [
+			(0.0, Some((0, 0))),
+			(27_300.0, Some((273, 32_760))),
+			(-27_300.0, Some((-273, -32_760))),
+			(27_400.0, None),
+			(f64::MAX, None),
+		] {
+			assert_eq!(
+				background_scroll(delta).map_err(|error| error.code),
+				expected.ok_or(super::super::super::error::ErrorCode::InputFailed),
+				"{delta}"
+			);
+		}
+	}
 }
