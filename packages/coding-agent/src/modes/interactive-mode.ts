@@ -671,6 +671,7 @@ type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
 const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
+const PRE_PLAN_REVIEW_ROLE = "pre-plan";
 
 const CFG_APPROVE_SESSION = "Always for this session";
 const CFG_APPROVE_ONCE = "Allow once";
@@ -8112,22 +8113,29 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#notifyModeChanged();
 		}
 
-		// Model-tier slider: let the operator pick which configured role model
-		// (smol/default/slow/…) executes the approved plan. The slider always starts
-		// on the `default` tier so execution defaults to the default model no matter
-		// which model drove the planning conversation. Left/right move it from there;
-		// hidden when fewer than two role models resolve — a lone tier is no choice.
-		// `selectedTierIndex` tracks the live slider position.
+		// Model-tier slider: the pre-plan model/thinking level is the initial target, followed
+		// by the configured role models (smol/default/slow/…). Keep pre-plan as its own target
+		// even when it resolves to the same model as a role.
 		const cycle = this.session.getRoleModelCycle(cfgCycleOrder.get(this.session.settings));
-		const defaultTierIndex = cycle ? cycle.models.findIndex(entry => entry.role === "default") : -1;
+		const previousModel = this.#planModePreviousModelState;
+		const prePlanEntry: ResolvedRoleModel | undefined = previousModel
+			? {
+					role: PRE_PLAN_REVIEW_ROLE,
+					model: previousModel.model,
+					thinkingLevel: previousModel.thinkingLevel,
+					explicitThinkingLevel: true,
+				}
+			: undefined;
+		const tiers = [...(prePlanEntry ? [prePlanEntry] : []), ...(cycle?.models ?? [])];
+		const defaultTierIndex = prePlanEntry ? 0 : tiers.findIndex(entry => entry.role === "default");
 		const startTierIndex = defaultTierIndex >= 0 ? defaultTierIndex : (cycle?.currentIndex ?? 0);
 		let selectedTierIndex = startTierIndex;
 		const slider: HookSelectorSlider | undefined =
-			cycle && cycle.models.length > 1
+			tiers.length > 1
 				? {
 						caption: "continue with",
 						index: startTierIndex,
-						segments: cycle.models.map(entry => ({
+						segments: tiers.map(entry => ({
 							label: entry.role,
 							detail: entry.model.name || entry.model.id,
 						})),
@@ -8143,9 +8151,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// slider shows, else the pre-plan model #exitPlanMode restores. The overlay offers Refine
 		// only while the plan has feedback; an extension may always refine with its own feedback,
 		// so the reported options keep it.
-		const restoredModel = this.#planModePreviousModelState?.model ?? this.session.model;
+		const restoredModel = previousModel?.model ?? this.session.model;
 		const choicesAt = (tierIndex: number): { options: PlanReviewOption[]; choices: PlanReviewOverlayChoice[] } => {
-			const keep = this.#planKeepContextChoice(slider ? cycle!.models[tierIndex]?.model : restoredModel);
+			const keep = this.#planKeepContextChoice(slider ? tiers[tierIndex]?.model : restoredModel);
 			return {
 				options: [
 					{ id: "execute", label: "Approve and execute", disabled: false },
@@ -8186,7 +8194,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			planContent,
 			options: initialChoices.options,
 			tiers: slider
-				? cycle!.models.map(entry => ({
+				? tiers.map(entry => ({
 						role: entry.role,
 						provider: entry.model.provider,
 						model: entry.model.id,
@@ -8217,7 +8225,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// it would switch the session back to the plan model.
 			selectTier: slider
 				? (role, choice) => {
-						const index = cycle!.models.findIndex(entry => entry.role === role);
+						const index = tiers.findIndex(entry => entry.role === role);
 						if (index < 0 || choicesAt(index).options.find(option => option.id === choice)?.disabled)
 							return false;
 						this.#planReviewOverlay?.setSliderIndex(index);
@@ -8301,30 +8309,21 @@ export class InteractiveMode implements InteractiveModeContext {
 				// applies it AFTER #exitPlanMode. #exitPlanMode normally restores
 				// #planModePreviousModelState (the model from before plan mode), so
 				// applying the slider choice any earlier would be silently reverted.
-				// Pass executionModel only when the slider was actually shown — a
-				// singleton cycle (e.g. only modelRoles.plan is configured, so
-				// getRoleModelCycle synthesizes a lone `default` entry from the
-				// currently active plan model) hides the slider, the operator made
-				// no selection, and the pre-plan model is not in the cycle. Pinning
-				// that singleton would silently switch the session back to the plan
-				// model after #exitPlanMode restored the pre-plan model.
-				// Treat the choice as implicit only when applying the selected role
-				// would land on the same end state as the restore — same model AND
-				// the same effective thinking level. A role with an explicit thinking
-				// suffix that differs from the restored thinking level must still go
-				// through applyRoleModel, otherwise approving on the same model with a
-				// different configured thinking level silently keeps the pre-plan level.
+				// Pass executionModel only when the slider was actually shown and the selection
+				// differs from the exact pre-plan state. The `pre-plan` target remains distinct
+				// from role entries even when both point at the same model.
 				const restoredState = this.#planModePreviousModelState;
 				const restoredIndex =
-					cycle && restoredState?.model
-						? cycle.models.findIndex(entry => {
-								if (!routedModelsAreEqual(entry.model, restoredState.model)) return false;
-								if (!entry.explicitThinkingLevel) return true;
-								return entry.thinkingLevel === restoredState.thinkingLevel;
-							})
-						: -1;
-				const executionModel =
-					slider && cycle && selectedTierIndex !== restoredIndex ? cycle.models[selectedTierIndex] : undefined;
+					restoredState && prePlanEntry
+						? 0
+						: restoredState
+							? tiers.findIndex(entry => {
+									if (!routedModelsAreEqual(entry.model, restoredState.model)) return false;
+									if (!entry.explicitThinkingLevel) return true;
+									return entry.thinkingLevel === restoredState.thinkingLevel;
+								})
+							: -1;
+				const executionModel = slider && selectedTierIndex !== restoredIndex ? tiers[selectedTierIndex] : undefined;
 				const executionDispatched = await this.#approvePlan(latestPlanContent, {
 					planFilePath,
 					title: details.title,

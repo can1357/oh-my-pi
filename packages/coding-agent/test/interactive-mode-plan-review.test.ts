@@ -491,11 +491,48 @@ describe("InteractiveMode plan review rendering", () => {
 		);
 		expect(answered).toBe(true);
 		expect(requested?.tiers).toEqual([
+			{ role: "pre-plan", provider: "anthropic", model: def.id },
 			{ role: "default", provider: "anthropic", model: def.id },
 			{ role: "slow", provider: "anthropic", model: slow.id },
 		]);
 		expect(resolved).toMatchObject({ reviewId: requested?.reviewId, choice: "keep", by: "extension" });
 		expect(session.model?.id).toBe(slow.id);
+	});
+	it("defaults review approval to the pre-plan model and thinking level, distinct from a matching role", async () => {
+		const def = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!def) throw new Error("Expected sonnet to exist in registry");
+		session.setThinkingLevel(ThinkingLevel.High);
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5:xhigh");
+		session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5:xhigh");
+
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nRun this on the original target.");
+		await mode.handlePlanModeCommand();
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		const { promise: requestedPromise, resolve: resolveRequested } =
+			Promise.withResolvers<PlanReviewRequestedEvent>();
+		const recorder = planReviewRecorder("pre-plan-default", event => resolveRequested(event));
+		await loadExtensions(recorder.extension);
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const requested = await requestedPromise;
+		expect(requested.tiers?.slice(0, 2)).toEqual([
+			{ role: "pre-plan", provider: "anthropic", model: def.id, thinkingLevel: ThinkingLevel.High },
+			{ role: "default", provider: "anthropic", model: def.id, thinkingLevel: ThinkingLevel.XHigh },
+		]);
+		expect(requested.tiers?.[0]?.role).not.toBe(requested.tiers?.[1]?.role);
+		const answered = mode.resolvePlanReview(requested.reviewId, "keep");
+		expect(answered).toBe(true);
+		await approval;
+		await recorder.resolved;
+
+		expect(session.model?.id).toBe(def.id);
+		expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
 	});
 
 	it("refuses a remote approval naming no selectable tier and keeps the review open", async () => {
@@ -1518,30 +1555,39 @@ describe("InteractiveMode plan review rendering", () => {
 		return planFilePath;
 	}
 
-	it("re-measures keep-context approval as the slider moves between context tiers", async () => {
+	it("re-measures keep-context approval across pre-plan and role targets", async () => {
 		const planFilePath = await openTieredPlanReview();
+		let prePlanKeepLabel: string | undefined;
+		let prePlanKeepDisabled: boolean | undefined;
+		let keepLabelOnDefault: string | undefined;
 		let keptOnDefault: boolean | undefined;
 		let keepLabelOnSlow: string | undefined;
-		let keptBackOnDefault: boolean | undefined;
 		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
 			const overlay = component as PlanReviewOverlay;
+			prePlanKeepLabel = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
+			prePlanKeepDisabled = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.disabled;
+			overlay.handleInput("\x1b[C");
+			keepLabelOnDefault = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
 			keptOnDefault = overlay.selectOption("keep");
 			overlay.handleInput("\x1b[C");
 			keepLabelOnSlow = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
-			overlay.handleInput("\x1b[D");
-			keptBackOnDefault = overlay.selectOption("keep");
-			overlay.handleInput("\x1b[C");
 			overlay.selectOption("keep");
 			return { hide: vi.fn() } as never;
 		});
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
+		expect(prePlanKeepLabel).toBe(
+			`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(200_000)})`,
+		);
+		expect(prePlanKeepDisabled).toBe(true);
+		expect(keepLabelOnDefault).toBe(
+			`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(200_000)})`,
+		);
 		expect(keptOnDefault).toBe(false);
 		expect(keepLabelOnSlow).toBe(
 			`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(1_000_000)})`,
 		);
-		expect(keptBackOnDefault).toBe(false);
 		expect(session.model?.id).toBe("claude-opus-4-6");
 		expect(session.getPlanModeState()?.enabled).not.toBe(true);
 	});
@@ -1960,7 +2006,7 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		expect(observedSegments).toEqual(["default", "slow"]);
+		expect(observedSegments).toEqual(["pre-plan", "default", "slow"]);
 		// The load-bearing assertion: the approved plan executes on the operator's
 		// selected tier, not the restored default.
 		expect(session.model?.id).toBe(slow.id);
@@ -2098,17 +2144,14 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
-	it("falls back to the pre-plan model when only plan is configured and the slider is hidden", async () => {
+	it("defaults the lone configured plan role review to the pre-plan target", async () => {
 		const sonnet = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		const opus = session.modelRegistry.find("anthropic", "claude-opus-4-5");
 		if (!sonnet || !opus) throw new Error("Expected sonnet + opus to exist in registry");
 		expect(session.model?.id).toBe(sonnet.id);
 
-		// Only the plan role is configured. getRoleModelCycle synthesizes a
-		// singleton `default` entry from the active plan model (opus), so the
-		// slider is hidden — the operator made no selection and approval must
-		// fall through to the pre-plan sonnet restore instead of pinning the
-		// lone plan tier.
+		// A plan-only configuration leaves the cycle's synthetic default on the active
+		// plan model. The pre-plan target remains its own first selection alongside it.
 		session.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
 
 		const planFilePath = "local://PLAN.md";
@@ -2116,7 +2159,7 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nNo slider, restore default.");
+		await Bun.write(resolvedPlanPath, "# Plan\n\nKeep the original target.");
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(opus.id);
@@ -2134,7 +2177,8 @@ describe("InteractiveMode plan review rendering", () => {
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
-		expect(sliderShown).toBeUndefined();
+		expect(sliderShown?.index).toBe(0);
+		expect(sliderShown?.segments.map(segment => segment.label)).toEqual(["pre-plan", "default"]);
 		expect(session.model?.id).toBe(sonnet.id);
 	});
 

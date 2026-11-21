@@ -1472,12 +1472,13 @@ export interface PlanReviewOption {
 	label: string;
 	disabled: boolean;
 }
-/** An execution tier selectable in the plan review's model slider; pass `role` back as `input.role` to `ctx.resolvePlanReview`. */
+/** An execution target selectable in the plan-review model slider; pass `role` back as `input.role` to `ctx.resolvePlanReview`. */
 export interface PlanReviewTier {
+	/** Role name, or `pre-plan` for the model/thinking level active before plan mode. */
 	role: string;
 	provider: string;
 	model: string;
-	/** Thinking level the role's configured model pins (a `provider/model:high` suffix); absent when it inherits. */
+	/** Thinking level the target pins; absent when a role inherits the configured level. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 }
 
