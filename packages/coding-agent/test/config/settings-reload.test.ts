@@ -9,7 +9,11 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 
 import { cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
-import { cfgProvidersMaxInFlightRequests, cfgTemperature } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgProvidersMaxInFlightRequests,
+	cfgProvidersStreamStallContinueMaxRetries,
+	cfgTemperature,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("Settings layer refresh", () => {
 	let state: SettingsTestState | undefined;
@@ -52,6 +56,17 @@ describe("Settings layer refresh", () => {
 		await writeConfig({ providers: { maxInFlightRequests: { openai: 0 } } });
 		await expect(settings.reloadFromDisk()).rejects.toThrow("Provider request limits must be positive numbers");
 		expect(cfgProvidersMaxInFlightRequests.get(settings)).toEqual({ openai: 2 });
+	});
+
+	it("rejects an on-disk stream stall continue cap that is not a non-negative integer", async () => {
+		await writeConfig({ providers: { streamStallContinueMaxRetries: 2 } });
+		const settings = await Settings.init({ cwd: startProject, agentDir });
+
+		await writeConfig({ providers: { streamStallContinueMaxRetries: 1.5 } });
+		await expect(settings.reloadFromDisk()).rejects.toThrow(
+			"providers.streamStallContinueMaxRetries must be a non-negative integer",
+		);
+		expect(cfgProvidersStreamStallContinueMaxRetries.get(settings)).toBe(2);
 	});
 
 	it("reloads the persisted layers behind an overlay only when asked, keeping its own overrides", async () => {

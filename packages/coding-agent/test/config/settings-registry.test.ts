@@ -9,6 +9,7 @@ import { YAML } from "bun";
 
 import {
 	cfgProvidersMaxInFlightRequests,
+	cfgProvidersStreamStallContinueMaxRetries,
 	cfgTemperature,
 	cfgTopK,
 	cfgTopP,
@@ -431,6 +432,20 @@ describe("settings registry", () => {
 		).toThrow("Invalid task.agentCompactionThresholdOverrides.scout");
 		expect(() => Settings.isolated({ temperature: "hot" })).toThrow("Invalid value for temperature");
 		expect(cfgModelRoles.get(Settings.isolated({ modelRoles: { smol: "a/b" } }))).toEqual({ smol: "a/b" });
+	});
+
+	it("rejects a stream stall continue cap that is not a non-negative integer", () => {
+		expect(
+			cfgProvidersStreamStallContinueMaxRetries.get(
+				Settings.isolated({ "providers.streamStallContinueMaxRetries": 2 }),
+			),
+		).toBe(2);
+		expect(() => Settings.isolated({ "providers.streamStallContinueMaxRetries": 1.5 })).toThrow(
+			"providers.streamStallContinueMaxRetries must be a non-negative integer",
+		);
+		expect(() => Settings.isolated({ "providers.streamStallContinueMaxRetries": -1 })).toThrow(
+			"providers.streamStallContinueMaxRetries must be a non-negative integer",
+		);
 	});
 
 	it("resolves path-scoped object entries in bash.patterns and bashInterceptor.patterns across cwd changes", async () => {
