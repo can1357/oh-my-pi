@@ -167,33 +167,46 @@ impl T {
 	}
 }
 
-/// Reserved words (`word_token_alist`).
-const fn reserved(text: &[u8]) -> Option<T> {
-	Some(match text {
-		b"if" => T::If,
-		b"then" => T::Then,
-		b"else" => T::Else,
-		b"elif" => T::Elif,
-		b"fi" => T::Fi,
-		b"case" => T::Case,
-		b"esac" => T::Esac,
-		b"for" => T::For,
-		b"select" => T::Select,
-		b"while" => T::While,
-		b"until" => T::Until,
-		b"do" => T::Do,
-		b"done" => T::Done,
-		b"in" => T::In,
-		b"function" => T::Function,
-		b"time" => T::Time,
-		b"{" => T::LBrace,
-		b"}" => T::RBrace,
-		b"!" => T::Bang,
-		b"[[" => T::CondStart,
-		b"]]" => T::CondEnd,
-		b"coproc" => T::Coproc,
-		_ => return None,
-	})
+/// The reserved words (`word_token_alist`): [`RESERVED_WORDS`] and
+/// [`reserved`] from one table.
+macro_rules! reserved_words {
+	($($word:literal => $tok:ident,)*) => {
+		/// Every reserved word, in `word_token_alist` order.
+		pub(crate) const RESERVED_WORDS: &[&[u8]] = &[$($word),*];
+
+		/// The token of reserved word `text`.
+		const fn reserved(text: &[u8]) -> Option<T> {
+			Some(match text {
+				$($word => T::$tok,)*
+				_ => return None,
+			})
+		}
+	};
+}
+
+reserved_words! {
+	b"if" => If,
+	b"then" => Then,
+	b"else" => Else,
+	b"elif" => Elif,
+	b"fi" => Fi,
+	b"case" => Case,
+	b"esac" => Esac,
+	b"for" => For,
+	b"select" => Select,
+	b"while" => While,
+	b"until" => Until,
+	b"do" => Do,
+	b"done" => Done,
+	b"in" => In,
+	b"function" => Function,
+	b"time" => Time,
+	b"{" => LBrace,
+	b"}" => RBrace,
+	b"!" => Bang,
+	b"[[" => CondStart,
+	b"]]" => CondEnd,
+	b"coproc" => Coproc,
 }
 
 /// One token: a small `Copy` handle that the lookahead slot, `take` and

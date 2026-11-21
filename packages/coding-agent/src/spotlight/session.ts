@@ -30,7 +30,7 @@ import {
 
 /**
  * Schema description of the tool-call intent field `i` in experiment sessions. Spotlight ranks output against the
- * intent, so it asks what the agent wants from the call's output; `PI_INTENT_DESC` still overrides it.
+ * full intent, while the UI shows its brief label; `PI_INTENT_DESC` still overrides it.
  */
 export const SPOTLIGHT_INTENT_DESCRIPTION: string = intentField.trim();
 

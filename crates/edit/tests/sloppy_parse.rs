@@ -410,13 +410,16 @@ async fn incomplete_block_replacement_never_becomes_a_deletion() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	let content = "alpha\nfunction keep() {\n  beta();\n}\n";
 	workspace.write("a.ts", content);
-	let input = "*** Edit File: a.ts\n*** Find\nalpha\n*** Replace\nALPHA\n*** Replace Block: \
-	             function keep";
+	let input =
+		"*** Edit File: a.ts\n*** Find\nalpha\n*** Replace\nALPHA\n*** Replace Block: function keep";
 	let partial = ArgSnapshot { input: Some(input.to_owned()), ..ArgSnapshot::default() };
 	let engine = SloppyEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
 	let mut files = FileCache::new(workspace.config.policy.clone());
 	let preview = engine.preview(&partial, true, &mut files, &workspace.store);
-	let diff = preview[0].diff.as_deref().expect("finished Find should preview");
+	let diff = preview[0]
+		.diff
+		.as_deref()
+		.expect("finished Find should preview");
 	assert!(diff.contains("+1|ALPHA") && !diff.contains("-2|function keep"), "{diff}");
 	let writer = DiskWriter::default();
 	let error = workspace

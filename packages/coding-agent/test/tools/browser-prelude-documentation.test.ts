@@ -41,14 +41,14 @@ function codeIdentifiers(markdown: string): Set<string> {
 	const names = new Set<string>();
 	for (const [, block, inline] of markdown.matchAll(/```\n([\s\S]*?)```|`([^`\n]+)`/g)) {
 		const span = block ?? inline;
-		if (span.startsWith("xd://")) continue;
+		if (span.startsWith("help://")) continue;
 		for (const [name] of span.matchAll(/[A-Za-z_$][\w$]*/g)) names.add(name);
 	}
 	return names;
 }
 
 describe("browser core documentation", () => {
-	// The core arrives in a hidden session message; the full doc stays the `xd://eval/browser` topic. Every helper,
+	// The core arrives in a hidden session message; the full doc stays the `help://eval/browser` topic. Every helper,
 	// option and parameter the core names must also be in the full doc, so a rename there cannot leave the core stale.
 	it("names only helpers, options and parameters the full browser doc names", () => {
 		const definition = createBrowserPreludeDefinition({ settings: Settings.isolated() } as ToolSession, {
