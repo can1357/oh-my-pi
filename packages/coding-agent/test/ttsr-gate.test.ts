@@ -458,6 +458,53 @@ describe("TTSR gate rules", () => {
 		expect(execute).not.toHaveBeenCalled();
 	});
 
+	it("[gate-26] judges a bridged call under both the tool's name and its wire name", async () => {
+		const { judge } = fakeJudge({ [DELETES]: 0.9 });
+		const settings = Settings.isolated({ "tools.approvalMode": "yolo" });
+		for (const scope of ["tool:apply_patch", "tool:edit"]) {
+			const { coordinator } = setup([gateRule("no-rm-patch", { scope: [scope] })], judge, settings);
+			const runner = new ExtensionRunner(
+				[],
+				new ExtensionRuntime(),
+				"/work",
+				SessionManager.inMemory(),
+				{} as ModelRegistry,
+			);
+			runner.setToolGuard(guardOver(coordinator, settings));
+			const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+			const patcher = {
+				...bash,
+				name: "edit",
+				customWireName: "apply_patch",
+				approval: "write",
+				execute,
+			} as AgentTool;
+			const wrapped = new ExtensionToolWrapper(patcher, runner) as ExtensionToolWrapper<any>;
+			// An eval cell's `tool.edit(…)`: the batch holds the eval call, not this one.
+			const toolCall = { batchId: "batch-1", index: 0, total: 1, toolCalls: [{ id: "call-1", name: "eval" }] };
+
+			await expect(
+				wrapped.execute("js-edit-1", RM, undefined, undefined, { settings, toolCall } as AgentToolContext),
+			).rejects.toThrow("no-rm-patch guidance");
+			expect(execute).not.toHaveBeenCalled();
+		}
+	});
+
+	it("[gate-27] takes a probability outside 0..1 as no answer, leaving the call to onJudgeError", async () => {
+		for (const noul of [-1, 1.5]) {
+			const { judge } = fakeJudge({ [DELETES]: noul });
+			const blocking = setup([gateRule("no-rm", { onJudgeError: "block" })], judge, Settings.isolated());
+			const allowing = setup([gateRule("no-rm", {})], judge, Settings.isolated());
+
+			expect(
+				(await blocking.coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).refusal,
+			).toContain("no-rm guidance");
+			expect(
+				(await allowing.coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-2" })).refusal,
+			).toBeUndefined();
+		}
+	});
+
 	it("[gate-18] judges the whole edit call, so a file it deletes beside an added line cannot slip past", async () => {
 		const edit = applyPatchTool();
 		const DELETES_FILE = "Does this call delete a file?";

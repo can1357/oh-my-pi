@@ -155,7 +155,10 @@ export interface ToolGuardCall {
 	tier: ToolTier;
 	/** The user approved this call in a prompt. */
 	prompted?: boolean;
-	/** The name the model called the tool by: its custom wire name (`apply_patch`) when it used that; else `tool.name`. */
+	/**
+	 * The name the model called the tool by (`tool.name`, or its custom wire name `apply_patch`); unset for a
+	 * call that is not the model's own (bridged from an eval cell), which may have used either.
+	 */
 	name?: string;
 }
 

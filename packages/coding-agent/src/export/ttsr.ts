@@ -790,7 +790,8 @@ export class TtsrManager {
 		return false;
 	}
 
-	#matchesScope(entry: TtsrEntry, context: TtsrMatchContext): boolean {
+	/** `toolAliases` (lowercase) are further names a tool scope matches besides `context.toolName`. */
+	#matchesScope(entry: TtsrEntry, context: TtsrMatchContext, toolAliases?: readonly string[]): boolean {
 		if (context.source === "text") {
 			return entry.scope.allowText;
 		}
@@ -805,7 +806,7 @@ export class TtsrManager {
 
 		const toolName = context.toolName?.trim().toLowerCase();
 		for (const toolScope of entry.scope.toolScopes) {
-			if (toolScope.toolName && toolScope.toolName !== toolName) {
+			if (toolScope.toolName && toolScope.toolName !== toolName && !toolAliases?.includes(toolScope.toolName)) {
 				continue;
 			}
 			if (toolScope.pathGlob && !this.#matchesGlob(toolScope.pathGlob, context.filePaths)) {
@@ -1084,9 +1085,14 @@ export class TtsrManager {
 	/**
 	 * Gate rules to ask about one tool call before it runs: in scope, inside the
 	 * rule's path globs, and past the `condition`/`astCondition` prefilter. No
-	 * repeat gate: a refused call retried unchanged is judged again.
+	 * repeat gate: a refused call retried unchanged is judged again. Tool scopes
+	 * match `context.toolName` or any of `toolAliases` (lowercase).
 	 */
-	async gateCandidates(content: string, context: TtsrMatchContext): Promise<JudgedCandidate[]> {
+	async gateCandidates(
+		content: string,
+		context: TtsrMatchContext,
+		toolAliases?: readonly string[],
+	): Promise<JudgedCandidate[]> {
 		if (!this.hasGateRules()) {
 			return [];
 		}
@@ -1095,7 +1101,7 @@ export class TtsrManager {
 			if (
 				!entry.gate ||
 				!entry.question ||
-				!this.#matchesScope(entry, context) ||
+				!this.#matchesScope(entry, context, toolAliases) ||
 				!this.#matchesGlobalPaths(entry, context) ||
 				!(await this.#passesPrefilter(entry, content, context))
 			) {
