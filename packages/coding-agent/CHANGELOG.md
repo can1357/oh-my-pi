@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A background wake can retry its own empty model responses even if the previous turn exhausted its retries ([#19997](https://github.com/can1357/oh-my-pi/pull/19997) by [@ashtacore](https://github.com/ashtacore))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes

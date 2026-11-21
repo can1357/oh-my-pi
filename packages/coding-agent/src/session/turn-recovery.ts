@@ -1164,6 +1164,7 @@ export class TurnRecovery {
 		this.#emptyStopRetryCount++;
 		if (this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES) {
 			const attempts = this.#emptyStopRetryCount - 1;
+			this.#emptyStopRetryCount = 0;
 			const outputTokens = assistantMessage.usage.output;
 			const outputTokensExcludingKnownReasoning = Math.max(
 				0,
