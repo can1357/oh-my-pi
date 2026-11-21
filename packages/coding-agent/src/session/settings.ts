@@ -220,6 +220,34 @@ effect(cfgProvidersMaxInFlightRequests, limits =>
 	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
 );
 
+/** Cap on automatic turn continuations after mid-reply stream stalls (`providers.streamStallContinueMaxRetries`). */
+export const cfgProvidersStreamStallContinueMaxRetries = register({
+	id: "providers.streamStallContinueMaxRetries",
+	type: "number",
+	default: 3,
+	validate: raw => {
+		if (raw === undefined) return;
+		if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0) {
+			throw new Error("providers.streamStallContinueMaxRetries must be a non-negative integer");
+		}
+	},
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Stream Stall Continue Retries",
+		description:
+			"How many consecutive mid-stream stalls auto-continue a turn that already rendered text before the failure is surfaced; raise it for flaky providers",
+		options: [
+			{ value: "0", label: "Off" },
+			{ value: "1", label: "1 continue" },
+			{ value: "2", label: "2 continues" },
+			{ value: "3", label: "3 continues" },
+			{ value: "5", label: "5 continues" },
+			{ value: "10", label: "10 continues" },
+		],
+	},
+});
+
 export const cfgImagesDescribeForTextModels = register({
 	id: "images.describeForTextModels",
 	type: "boolean",

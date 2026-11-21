@@ -38,6 +38,16 @@ describe("settings layout", () => {
 		expect(violations).toEqual([]);
 	});
 
+	it("exposes the stream stall continue retry cap in the providers tab", () => {
+		const def = getSettingsForTab(createSettingsHost().entries, "providers").find(
+			candidate => candidate.path === "providers.streamStallContinueMaxRetries",
+		);
+
+		expect(def).toMatchObject({ type: "submenu" });
+		const values = def?.type === "submenu" ? def.options.map(option => option.value) : [];
+		expect(values).toEqual(expect.arrayContaining(["0", "3"]));
+	});
+
 	it("getSettingsForTab returns contiguous groups in TAB_GROUPS order", () => {
 		for (const tab of SETTING_TABS) {
 			const defs = getSettingsForTab(createSettingsHost().entries, tab);
