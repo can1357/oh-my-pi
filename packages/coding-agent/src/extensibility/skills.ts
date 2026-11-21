@@ -38,7 +38,7 @@ import claudeCodeToolNoteTemplate from "../prompts/skills/claude-code-tool-note.
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";
 import type { SkillPromptDetails } from "../session/messages";
-import { CLAUDE_CODE_TOOL_NAMES } from "../tools/builtin-names";
+import { CLAUDE_CODE_TOOL_MAPPINGS } from "../tools/builtin-names";
 import { expandTilde } from "../tools/path-utils";
 
 export { allowsSkillTokens, SKILL_TOKEN_RE };
@@ -863,22 +863,15 @@ export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pic
  */
 export type SkillFile = Pick<Skill, "filePath"> & Partial<Pick<Skill, "_source">>;
 
-/**
- * Claude Code tool names distinctive enough to be recognized without backticks or a following
- * `tool`: everyday words (`Task`, `Read`, `Edit`) only count when written as a tool reference.
- */
-const DISTINCTIVE_CLAUDE_TOOL_NAMES = [
-	"TodoWrite",
-	"TodoRead",
-	"AskUserQuestion",
-	"WebFetch",
-	"WebSearch",
-	"MultiEdit",
-	"NotebookEdit",
-	"NotebookRead",
-];
-const GENERIC_CLAUDE_TOOL_NAMES = ["Task", "Agent", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "LS", "Skill"];
+const CLAUDE_TOOL_OMP_NAME = new Map(CLAUDE_CODE_TOOL_MAPPINGS.map(entry => [entry.claudeName, entry.ompName]));
+const DISTINCTIVE_CLAUDE_TOOL_NAMES = CLAUDE_CODE_TOOL_MAPPINGS.filter(entry => entry.distinctive).map(
+	entry => entry.claudeName,
+);
+const GENERIC_CLAUDE_TOOL_NAMES = CLAUDE_CODE_TOOL_MAPPINGS.filter(entry => !entry.distinctive).map(
+	entry => entry.claudeName,
+);
 // Case-sensitive: only Claude Code's exact PascalCase names are tool references.
+// Everyday words (`Task`, `Read`, `Edit`) only count when backticked or followed by `tool`.
 const CLAUDE_TOOL_MENTION_RE = new RegExp(
 	`\\b(?:${DISTINCTIVE_CLAUDE_TOOL_NAMES.join("|")})\\b|\`(${GENERIC_CLAUDE_TOOL_NAMES.join("|")})\`|\\b(${GENERIC_CLAUDE_TOOL_NAMES.join("|")})\\s+tool\\b`,
 	"g",
@@ -926,11 +919,11 @@ export function parseSkillBody(raw: string, filePath: string): string {
 async function claudeSkillToolMappings(
 	skill: SkillFile,
 	body: string,
-): Promise<Array<{ claude: string; omp: string | undefined }> | undefined> {
+): Promise<Array<{ claude: string; omp: string }> | undefined> {
 	if (!(await isClaudeDialectSkill(skill))) return undefined;
 	const names = claudeToolMentions(body);
 	if (names.length === 0) return undefined;
-	return names.map(claude => ({ claude, omp: CLAUDE_CODE_TOOL_NAMES.get(claude.toLowerCase()) }));
+	return names.map(claude => ({ claude, omp: CLAUDE_TOOL_OMP_NAME.get(claude)! }));
 }
 
 const renderClaudeCodeToolNote = prompt.compile(claudeCodeToolNoteTemplate.trimEnd());

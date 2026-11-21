@@ -856,6 +856,8 @@ interface FilesystemReadOptions {
 	toolContext?: AgentToolContext;
 	/** Page a whole-file read as the plain result does, though the session shapes output (a held-out result). */
 	plainWindow?: boolean;
+	/** Set when the filesystem pipeline fell back to `#handleInternalUrl` (which already ran protocol resolution). */
+	protocolFallback?: { handled: boolean };
 }
 
 /**
@@ -2279,6 +2281,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		// A located URL reads its backing file through the filesystem pipeline (images, `:img`,
 		// `?q=`, archives, sqlite, streaming, paging) while the URL stays the read's identity.
+		const protocolFallback = { handled: false };
 		const result = await this.#readFilesystemPath(located.path, {
 			located,
 			question,
@@ -2286,6 +2289,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			signal,
 			toolContext,
 			plainWindow,
+			protocolFallback,
 		});
 		const details: ReadToolDetails = result.details ?? {};
 		details.resolvedPath ??= located.path;
@@ -2299,7 +2303,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// The TUI falls back to this block when no structured display content exists.
 			if (firstText) firstText.text = `${provenance}\n${firstText.text}`;
 			else result.content.unshift({ type: "text", text: provenance });
-			if (located.sel === undefined) {
+			if (located.sel === undefined && !protocolFallback.handled) {
 				const note = await skillUrlClaudeCodeToolNote(
 					parseInternalUrl(located.url),
 					sessionResolveContext(this.session, { signal }),
@@ -2482,6 +2486,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			// A located file vanished after routing: the handler owns the canonical not-found error.
 			if (located && isNotFoundError(error)) {
+				if (options.protocolFallback) options.protocolFallback.handled = true;
 				return this.#handleInternalUrl(located, parsed, question, signal, toolContext);
 			}
 			if (isNotFoundError(error)) {
@@ -2569,7 +2574,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (isDirectory) {
 			if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 			// A located directory lists through its handler, which names entries by URL.
-			if (located) return this.#handleInternalUrl(located, parsed, undefined, signal, toolContext);
+			if (located) {
+				if (options.protocolFallback) options.protocolFallback.handled = true;
+				return this.#handleInternalUrl(located, parsed, undefined, signal, toolContext);
+			}
 			if (isMultiRange(parsed)) {
 				throw new ToolError("Multi-range line selectors are not supported for directory listings.");
 			}

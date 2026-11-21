@@ -1,10 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSkillPromptMessage, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -214,6 +215,38 @@ describe("buildSkillPromptMessage", () => {
 					skills: [claudeSkill],
 				});
 				expect(resolved.content).toBe(`${raw}\n\n${NOTE} TodoWrite → todo.`);
+			} finally {
+				await removeWithRetries(dir);
+			}
+		});
+
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		test("does not duplicate the Claude tool note when ReadTool falls back to protocol resolution", async () => {
+			const { dir, skill } = await createSkill("Track tasks with TodoWrite.");
+			const claudeSkill = { ...skill, _source: sourceFor("claude", dir) };
+			try {
+				const router = InternalUrlRouter.instance();
+				const originalTarget = router.target.bind(router);
+				vi.spyOn(router, "target").mockImplementationOnce(async (input, context) => {
+					const located = await originalTarget(input, context);
+					if (!located || located.kind !== "file") return located;
+					return { ...located, path: path.join(dir, "vanished", "SKILL.md") };
+				});
+
+				const session: ToolSession = {
+					cwd: dir,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					skills: [claudeSkill],
+				};
+				const result = await new ReadTool(session).execute("read-claude-fallback", { path: "skill://reviewer" });
+				const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+				expect(text.split(NOTE).length - 1).toBe(1);
 			} finally {
 				await removeWithRetries(dir);
 			}
