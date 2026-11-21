@@ -583,25 +583,32 @@ describe("advisor-view shortening label (#12777)", () => {
 		expect(output).toMatch(/\[…\d+ln elided…\]/);
 	});
 
-	it("makes no completeness claim when the read result carries a structural summary", () => {
-		const details = { summary: { lines: 150, elidedSpans: 1, elidedLines: 70 } };
-		const output = formatSessionHistoryMarkdown(readTranscript(complete, details), { expandToolIO: true });
-
-		expect(output).toContain(`Tool result (${ELIDED_HERE}):\n`);
-	});
-
-	it("makes no completeness claim when a column cap shortened the read result", () => {
-		const details = { meta: { limits: { columnTruncated: { maxColumn: 200, unit: "chars" } } } };
-		const output = formatSessionHistoryMarkdown(readTranscript(complete, details), { expandToolIO: true });
-
-		expect(output).toContain(`Tool result (${ELIDED_HERE}):\n`);
-	});
-
-	it("makes no completeness claim when a match limit shortened the read result", () => {
+	// One representative case for tool-side metadata (summary or meta.limits): the formatter
+	// never reads these shapes, so the label is the same for every one of them.
+	it("makes no completeness claim when the read result carries tool-side metadata", () => {
 		const details = { meta: { limits: { matchLimit: { reached: 150, suggestion: 300 } } } };
 		const output = formatSessionHistoryMarkdown(readTranscript(complete, details), { expandToolIO: true });
 
 		expect(output).toContain(`Tool result (${ELIDED_HERE}):\n`);
+	});
+
+	it("names the tool's own truncation on a small result the advisor view did not shorten", () => {
+		const details = {
+			meta: {
+				truncation: {
+					direction: "middle",
+					truncatedBy: "middle",
+					totalLines: 300,
+					totalBytes: 9000,
+					outputLines: 20,
+					outputBytes: 600,
+				},
+			},
+		};
+		const small = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+		const output = formatSessionHistoryMarkdown(readTranscript(small, details), { expandToolIO: true });
+
+		expect(output).toContain("Tool result (the tool itself truncated its output):\n");
 	});
 
 	it("names the tool's own truncation when the tool already truncated the output", () => {

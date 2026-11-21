@@ -19,7 +19,6 @@ import type {
 	HookMessage,
 	PythonExecutionMessage,
 } from "./messages";
-import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 export interface HistoryFormatOptions {
@@ -376,13 +375,17 @@ function toolCallLine(
 				const bounded = boundedFencedToolContext(resultText, "text");
 				// The cut lines were part of the result the main thread received, so the label says only
 				// that this view cut them. The tool's own limits (summary, meta.limits) are not checked
-				// here, so no completeness is claimed; a tool-side truncation (meta.truncation) is named.
-				const toolTruncated = (result.details as { meta?: OutputMeta } | undefined)?.meta?.truncation !== undefined;
-				const label = !bounded.truncated
-					? "Tool result:"
-					: toolTruncated
+				// here, so no completeness is claimed; a tool-side truncation (meta.truncation) is named
+				// independently of this view's cap, so a small tool-truncated result is not mislabelled.
+				const toolTruncated =
+					isRecord(result.details) && isRecord(result.details.meta) && result.details.meta.truncation !== undefined;
+				const label = toolTruncated
+					? bounded.truncated
 						? "Tool result (shortened here for advisor view only; the tool itself truncated its output):"
-						: "Tool result (shortened here for advisor view only; the omitted lines were part of the result the main thread received):";
+						: "Tool result (the tool itself truncated its output):"
+					: bounded.truncated
+						? "Tool result (shortened here for advisor view only; the omitted lines were part of the result the main thread received):"
+						: "Tool result:";
 				sections.push(`${label}\n${bounded.content}`);
 			}
 		}
