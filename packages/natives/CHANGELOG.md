@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows AX `press()` (no chord) and `perform()` calls without a menu path reporting `Timeout` instead of `AxUnconfirmed` when dispatch may have begun but the provider did not reply before the native reply wait ended, and prevented those calls from dispatching after that wait ended without dispatch ([#19871](https://github.com/can1357/oh-my-pi/pull/19871) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
