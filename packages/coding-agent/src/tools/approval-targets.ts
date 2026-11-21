@@ -4,7 +4,7 @@
  * Shared by every path-based tool (`read`, `write`, `edit`) so one approved
  * target maps to one key: a filesystem path resolved against the session cwd
  * (case-folded on case-insensitive platforms via {@link approvalCacheKeyForPath}),
- * a registered internal URL (`xd://`, `local://`, …) kept in its normalized
+ * a registered internal URL (`help://`, `local://`, …) kept in its normalized
  * form, or a readable web URL kept as written.
  */
 import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";

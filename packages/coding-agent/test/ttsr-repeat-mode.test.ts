@@ -37,7 +37,7 @@ function completeTurn(manager: TtsrManager, text: string): string[] {
 function harness(frontmatter: string, { retryTaskFirst = false }: { retryTaskFirst?: boolean } = {}) {
 	const messages: AgentMessage[] = [];
 	const queued: AgentMessage[] = [];
-	let postPromptTask: (() => Promise<void>) | undefined;
+	let postPromptTask: ((signal: AbortSignal) => Promise<void>) | undefined;
 	const scheduleAgentContinue = vi.fn();
 	const host = {
 		agent: {
@@ -47,6 +47,7 @@ function harness(frontmatter: string, { retryTaskFirst = false }: { retryTaskFir
 			hasQueuedMessages: () => queued.length > 0,
 			replaceMessages: (next: AgentMessage[]) => messages.splice(0, messages.length, ...next),
 			appendMessage: (message: AgentMessage) => messages.push(message),
+			waitForIdle: async () => undefined,
 		} as unknown as Agent,
 		sessionManager: {
 			getCwd: () => "/tmp",
@@ -54,7 +55,7 @@ function harness(frontmatter: string, { retryTaskFirst = false }: { retryTaskFir
 			appendTtsrInjection: vi.fn(),
 		} as unknown as SessionManager,
 		emitSessionEvent: vi.fn(async () => undefined),
-		schedulePostPromptTask: (task: () => Promise<void>) => {
+		schedulePostPromptTask: (task: (signal: AbortSignal) => Promise<void>) => {
 			postPromptTask = task;
 		},
 		scheduleAgentContinue,
@@ -90,9 +91,9 @@ function harness(frontmatter: string, { retryTaskFirst = false }: { retryTaskFir
 			...message,
 			stopReason: interrupted ? "aborted" : "stop",
 		} as AssistantMessage);
-		if (interrupted && retryTaskFirst) await postPromptTask?.();
+		if (interrupted && retryTaskFirst) await postPromptTask?.(new AbortController().signal);
 		coordinator.onTurnEnd();
-		if (interrupted && !retryTaskFirst) await postPromptTask?.();
+		if (interrupted && !retryTaskFirst) await postPromptTask?.(new AbortController().signal);
 		postPromptTask = undefined;
 		return interrupted;
 	}
