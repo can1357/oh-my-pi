@@ -18,6 +18,7 @@ import {
 	resolveModelOverride,
 } from "../config/model-resolver";
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
+import { formatModelRoleAlias } from "../config/model-roles";
 import {
 	type CompactionThresholdPair,
 	validateAgentCompactionThresholdOverrides,
@@ -146,6 +147,14 @@ export interface StructuredSubagentRequest {
 	 * operator-approved models.
 	 */
 	perCallModel?: string;
+	/**
+	 * Workload role from the model-facing surfaces (task items, eval `agent()` and
+	 * `workpool()` workers): one of {@link SUBAGENT_MODEL_ROLES}, routed through
+	 * stock role resolution in place of the agent's own model. Not gated by
+	 * `task.perCallModel` and grants no exact model. Raw caller value; blank is
+	 * absent and anything else is refused by {@link resolveEffectiveSubagentPolicy}.
+	 */
+	modelRole?: string;
 
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
@@ -399,6 +408,61 @@ export function invalidModelSelectorReason(
 	return undefined;
 }
 
+/** Workload roles a delegating caller may request with `modelRole`: routine versus complex work. */
+export const SUBAGENT_MODEL_ROLES = ["smol", "slow"] as const;
+
+/** A workload role from {@link SUBAGENT_MODEL_ROLES}. */
+export type SubagentModelRole = (typeof SUBAGENT_MODEL_ROLES)[number];
+
+/**
+ * The caller's `modelRole`: `undefined` when absent or blank (JSON callers pad optional
+ * fields), the role when it is one bare {@link SUBAGENT_MODEL_ROLES} name. Aliases,
+ * thinking suffixes, other roles and model selectors are refused before discovery.
+ */
+function requestedModelRole(value: unknown): SubagentModelRole | undefined {
+	if (value === undefined || (typeof value === "string" && value.trim() === "")) return undefined;
+	const role = typeof value === "string" ? value.trim() : undefined;
+	const known = SUBAGENT_MODEL_ROLES.find(candidate => candidate === role);
+	if (known) return known;
+	throw new StructuredSubagentError(
+		"preflight",
+		`Invalid \`modelRole\` value ${JSON.stringify(value)}. Use "smol" for routine, easy-to-verify work or "slow" for complex or consequential work, or omit it to keep the agent's configured model.`,
+	);
+}
+
+/**
+ * A requested role replaces only the agent's own model route. Every explicit model
+ * choice outranks it, so a combination fails before dispatch instead of one silently winning.
+ */
+function assertModelRoleCompatible(
+	request: StructuredSubagentRequest,
+	agent: AgentDefinition,
+	operatorPinned: boolean,
+	userTagged: boolean,
+): void {
+	const fail = (message: string): never => {
+		throw new StructuredSubagentError("preflight", message);
+	};
+	if (request.perCallModel !== undefined) {
+		fail(
+			"A call cannot supply both `modelRole` and `model`. Use `modelRole` for a workload tier or `model` for one exact model.",
+		);
+	}
+	if (normalizeModelSelector(request.model) !== undefined) {
+		fail("`modelRole` conflicts with the host model chosen for this call. Omit modelRole.");
+	}
+	if (operatorPinned) {
+		fail(
+			`\`modelRole\` conflicts with task.agentModelOverrides for agent "${agent.name}". Omit modelRole to use the configured override.`,
+		);
+	}
+	if (userTagged) {
+		fail(
+			`\`modelRole\` conflicts with the user-tagged model agent "${agent.name}". Omit modelRole to use the model the user tagged.`,
+		);
+	}
+}
+
 /** Gate, validate and approve a per-call `model`; returns the grants the running child stays held to. */
 function preflightPerCallModel(
 	request: StructuredSubagentRequest,
@@ -514,6 +578,7 @@ export async function resolveEffectiveSubagentPolicy(
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
+	const requestedRole = requestedModelRole(request.modelRole);
 
 	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
 	const sessionAgents = request.session.getSessionAgents?.() ?? [];
@@ -568,6 +633,15 @@ export async function resolveEffectiveSubagentPolicy(
 		: undefined;
 	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(request.session.settings));
 	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
+	if (requestedRole) {
+		assertModelRoleCompatible(
+			request,
+			agent,
+			Object.hasOwn(agentModelOverrides, agentName) &&
+				normalizeModelSelector(agentModelOverrides[agentName]) !== undefined,
+			sessionAgents.includes(agent),
+		);
+	}
 	const perCallSelector: unknown = request.perCallModel;
 	const parentActiveModel = request.session.getActiveModel?.();
 	const userTaggedEffort =
@@ -593,7 +667,10 @@ export async function resolveEffectiveSubagentPolicy(
 	const modelResolution = {
 		requestModel: request.model,
 		settingsOverride: agentModelOverrides[agentName],
-		agentModel: effectiveAgent.model,
+		// A requested role stands in for the agent's own route, resolved exactly as if the
+		// agent declared `@<role>`: same defaults and parent fallback, and the role identity
+		// below keys the child's retry-fallback chain. Every outranking choice was refused above.
+		agentModel: requestedRole ? [formatModelRoleAlias(requestedRole)] : effectiveAgent.model,
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),

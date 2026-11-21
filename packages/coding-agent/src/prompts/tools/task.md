@@ -53,6 +53,7 @@ Run one agent synchronously.
 {{#if evalToolsEnabled}}
 - `tools`: eval-defined, run in your kernel.
 {{/if}}
+- `modelRole`: choose `"smol"` for routine work with a clear check, `"slow"` for consequential decisions or hard-to-verify work. Both retain role fallback. Omit to use the agent default; omit for pinned or model-tagged agents. Do not combine with `model`.
 {{#if effortEnabled}}
 - `effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
 {{/if}}

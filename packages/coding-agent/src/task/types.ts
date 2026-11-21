@@ -70,6 +70,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"modelRole?": "string",
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -80,6 +81,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"modelRole?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -92,6 +94,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"modelRole?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -103,6 +106,7 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"modelRole?": "string",
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
@@ -171,6 +175,9 @@ function createTaskSchema(options: {
 	// undeclared `model` still reaches preflight (root keys survive lenient
 	// validation; batch items keep it via keepItemModelKey) and is refused there.
 	const gatedFields = options.perCallModel ? { "model?": "string" } : {};
+	// A workload `modelRole` is never gated: it picks a stock role, not an exact model.
+	// Declared as a string so every value reaches the shared preflight's refusal.
+	const roleField = { "modelRole?": "string" };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -182,6 +189,7 @@ function createTaskSchema(options: {
 				...schemaFields,
 				...toolsField,
 				...gatedFields,
+				...roleField,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -202,6 +210,7 @@ function createTaskSchema(options: {
 			...schemaFields,
 			...toolsField,
 			...gatedFields,
+			...roleField,
 			"+": "delete",
 		});
 		return guardBatchAgent(
@@ -222,6 +231,7 @@ function createTaskSchema(options: {
 			...schemaFields,
 			...toolsField,
 			...gatedFields,
+			...roleField,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -235,6 +245,7 @@ function createTaskSchema(options: {
 		...schemaFields,
 		...toolsField,
 		...gatedFields,
+		...roleField,
 		"+": "delete",
 	});
 }

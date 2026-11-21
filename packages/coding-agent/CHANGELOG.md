@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Subagents can use the `smol` or `slow` workload role per task, eval agent, or workpool, retaining the selected role's fallback chain.
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes

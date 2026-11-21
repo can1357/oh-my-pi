@@ -293,3 +293,53 @@ describe("python workpool model selection", () => {
 		}
 	});
 });
+
+describe("python model_role", () => {
+	it("forwards model_role as modelRole, keeps malformed values, and preserves omission", async () => {
+		const requests: Array<{ name: string; args: Record<string, unknown> }> = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				const body = (await request.json()) as { name: string; args: Record<string, unknown> };
+				requests.push({ name: body.name, args: body.args });
+				return Response.json({
+					ok: true,
+					value:
+						body.name === "__agent__"
+							? { id: "role", agent: "task" }
+							: { name: "pool", agent: "scout", limit: 2 },
+				});
+			},
+		});
+		try {
+			const result = await runPrelude(
+				[
+					'agent("work", model_role="smol")',
+					'agent("work", model_role=42)',
+					'agent("work")',
+					'workpool("scout", model_role="slow")',
+					'workpool("scout", model_role="")',
+					'workpool("scout")',
+				].join("\n"),
+				{
+					PI_TOOL_BRIDGE_URL: server.url.toString(),
+					PI_TOOL_BRIDGE_TOKEN: "test-token",
+					PI_TOOL_BRIDGE_SESSION: "test-session",
+				},
+			);
+			expect(result.stderr).toBe("");
+			expect(result.exitCode).toBe(0);
+			expect(requests).toEqual([
+				{ name: "__agent__", args: { prompt: "work", modelRole: "smol" } },
+				{ name: "__agent__", args: { prompt: "work", modelRole: 42 } },
+				{ name: "__agent__", args: { prompt: "work" } },
+				{ name: "__workpool__", args: { op: "create", agent: "scout", modelRole: "slow" } },
+				{ name: "__workpool__", args: { op: "create", agent: "scout", modelRole: "" } },
+				{ name: "__workpool__", args: { op: "create", agent: "scout" } },
+			]);
+		} finally {
+			server.stop(true);
+		}
+	});
+});

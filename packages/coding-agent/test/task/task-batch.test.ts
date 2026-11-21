@@ -1032,3 +1032,169 @@ describe("batch model placement", () => {
 		},
 	);
 });
+
+describe("task workload model role", () => {
+	const ROLES = { smol: "mock/fast", slow: "mock/deep", task: "mock/task-route" };
+	const routedAgent: AgentDefinition = { ...taskAgent, model: ["@task"] };
+	const roleSettings = (settings: Record<string, unknown> = {}) => ({
+		"async.enabled": false,
+		"task.perCallModel": "off",
+		modelRoles: ROLES,
+		...settings,
+	});
+
+	afterEach(() => vi.restoreAllMocks());
+
+	function recordDispatch() {
+		const seen = new Map<string, { model: unknown; role: unknown; grants: unknown }>();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			seen.set(options.id ?? "?", {
+				model: options.modelOverride,
+				role: options.modelRole,
+				grants: options.perCallModelGrants,
+			});
+			return makeResult(options.id ?? "?");
+		});
+		return { seen, run };
+	}
+
+	async function promptWith(tool: TaskTool, args: Record<string, unknown>) {
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "role-call", name: "task", arguments: args }] },
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [tool as unknown as AgentTool],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		await agent.prompt("go");
+		const result = agent.state.messages.find(message => message.role === "toolResult");
+		if (result?.role !== "toolResult") throw new Error("expected a task tool result");
+		return result;
+	}
+
+	it.each([
+		{ structured: true, isolation: false },
+		{ structured: false, isolation: true },
+	])(
+		"routes each batch item by its own role through the agent loop with per-call model off: $structured $isolation",
+		async ({ structured, isolation }) => {
+			mockDiscovery(routedAgent);
+			const { seen } = recordDispatch();
+			const tool = await TaskTool.create(
+				createSession({
+					settings: roleSettings({
+						"task.batch": true,
+						"task.structured": structured,
+						"task.isolation.enabled": isolation,
+					}),
+				}),
+			);
+			const result = await promptWith(tool, {
+				context: "ctx",
+				tasks: [
+					{ name: "Alpha", task: "Rename a field.", solutionSpace: "one edit", modelRole: "smol" },
+					{ name: "Beta", task: "Redesign the cache.", solutionSpace: "open", modelRole: "slow" },
+					{ name: "Gamma", task: "Fix a typo.", solutionSpace: "one edit" },
+				],
+			});
+			expect(result.isError).toBe(false);
+			expect(Object.fromEntries(seen)).toEqual({
+				Alpha: { model: [ROLES.smol], role: "smol", grants: undefined },
+				Beta: { model: [ROLES.slow], role: "slow", grants: undefined },
+				Gamma: { model: [ROLES.task], role: "task", grants: undefined },
+			});
+		},
+	);
+
+	it("routes a flat call by its role through the agent loop", async () => {
+		mockDiscovery(routedAgent);
+		const { seen } = recordDispatch();
+		const tool = await TaskTool.create(createSession({ settings: roleSettings({ "task.batch": false }) }));
+		const result = await promptWith(tool, {
+			name: "Solo",
+			agent: "task",
+			task: "Audit the migration.",
+			solutionSpace: "open",
+			modelRole: "slow",
+		});
+		expect(result.isError).toBe(false);
+		expect(Object.fromEntries(seen)).toEqual({ Solo: { model: [ROLES.slow], role: "slow", grants: undefined } });
+	});
+
+	it.each([
+		{
+			label: "an invalid role",
+			second: { name: "Beta", task: "Do B.", solutionSpace: "c", modelRole: "@slow" },
+			refusal: "Invalid `modelRole`",
+		},
+		{
+			label: "a role for an operator-pinned agent",
+			second: { name: "Beta", agent: "pinned", task: "Do B.", solutionSpace: "c", modelRole: "slow" },
+			refusal: 'task.agentModelOverrides for agent "pinned"',
+		},
+	])("starts no sibling when one batch item carries $label", async ({ second, refusal }) => {
+		mockDiscovery([routedAgent, { ...taskAgent, name: "pinned" }]);
+		const { run } = recordDispatch();
+		const tool = await TaskTool.create(
+			createSession({
+				settings: roleSettings({ "task.batch": true, "task.agentModelOverrides": { pinned: "mock/pinned" } }),
+			}),
+		);
+		const result = await promptWith(tool, {
+			context: "ctx",
+			tasks: [{ name: "Alpha", task: "Do A.", solutionSpace: "c", modelRole: "smol" }, second],
+		});
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toContain(refusal);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("rejects a top-level role in the batch shape before dispatch", async () => {
+		mockDiscovery(routedAgent);
+		const { run } = recordDispatch();
+		const tool = await TaskTool.create(createSession({ settings: roleSettings({ "task.batch": true }) }));
+		const result = await tool.execute("batch-role", {
+			context: "ctx",
+			modelRole: "slow",
+			tasks: [{ task: "Do work", solutionSpace: "c" }],
+		});
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).toContain("Set `tasks[].modelRole` instead");
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("dispatches a batch with a blank top-level role like one without it", async () => {
+		mockDiscovery(routedAgent);
+		const { seen } = recordDispatch();
+		const tool = await TaskTool.create(createSession({ settings: roleSettings({ "task.batch": true }) }));
+		const result = await tool.execute("batch-blank-role", {
+			context: "ctx",
+			modelRole: "  ",
+			tasks: [{ name: "Alpha", task: "Do work", solutionSpace: "c" }],
+		});
+		expect(result.isError).not.toBe(true);
+		expect(Object.fromEntries(seen)).toEqual({ Alpha: { model: [ROLES.task], role: "task", grants: undefined } });
+	});
+
+	it("names each item's role in the approval details", async () => {
+		mockDiscovery(routedAgent);
+		const tool = await TaskTool.create(createSession({ settings: roleSettings({ "task.batch": true }) }));
+		const details = tool.formatApprovalDetails({
+			context: "ctx",
+			tasks: [
+				{ task: "Do A.", modelRole: "smol" },
+				{ task: "Do B.", modelRole: "slow" },
+			],
+		});
+		expect(details).toContain("Task 1 model role: smol");
+		expect(details).toContain("Task 2 model role: slow");
+	});
+});
