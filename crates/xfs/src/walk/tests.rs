@@ -322,7 +322,8 @@ async fn wide_trees_agree_on_every_worker_count() {
 /// waiting forever, and its walk with it. The machine's CPU count caps the
 /// walk's workers and the runtime's threads, and with them the test's power:
 /// against the old stop it hung on 8 and 16 CPUs, and was not seen in 5 runs
-/// on 4.
+/// on 4. `stopping_a_walk_closes_its_job_queue` checks the same fix on any
+/// number of CPUs.
 #[tokio::test(flavor = "multi_thread")]
 async fn walks_end_when_a_waiting_worker_misses_a_wakeup() {
 	let tmp = make_tree("ends", &["a.txt", "d1/x", "d2/y", "d3/z", "d4/w", "d5/v/u"]);
@@ -402,6 +403,41 @@ async fn a_panicking_visitor_ends_the_walk_on_every_worker() {
 		panicked >= 1_000,
 		"{panicked} of 2,000 walks reached the visitor panic; {skipped} could not open their root \
 		 or a directory"
+	);
+}
+
+/// Stopping a walk closes its job queue, so every worker still waiting on it
+/// leaves, also one whose wakeup flume lost: flume 0.12's `recv_async` checks
+/// again for a closed queue after it re-registers to wait (`src/async.rs`,
+/// lines 432-446). One stop message per worker left the queue open, and such
+/// a worker waiting forever. Unlike the stress test, this needs no lost
+/// wakeup, so it fails against the old stop on any number of CPUs.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_walk_closes_its_job_queue() {
+	let (_mem, blocking) = MemFs::with_files(&[
+		("mem://stop-closes/dir/a.txt", ""),
+		("mem://stop-closes/dir/sub/b.txt", ""),
+	]);
+	let fs = Fs::Provider(blocking);
+	let keep = parallel::CollectSink::new(|_: &mut Worker<'_>, _: &mut Entry<'_>| Action::Continue);
+	let started = parallel::start(
+		&fs,
+		Path::new("mem://stop-closes/dir"),
+		&Options::default(),
+		keep,
+		false,
+		None,
+		None,
+	)
+	.await
+	.expect("walk");
+	tokio::time::timeout(Duration::from_secs(30), started.finished())
+		.await
+		.expect("the walk ends");
+	assert!(
+		started.queue_closed(),
+		"the job queue was still open after the walk stopped; an open queue leaves a worker still \
+		 waiting on it waiting forever"
 	);
 }
 
