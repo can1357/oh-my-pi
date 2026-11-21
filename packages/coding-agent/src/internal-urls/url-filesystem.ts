@@ -8,7 +8,7 @@
  * links, and metadata are the host filesystem's own. Other schemes are
  * read-only files holding their rendered resource bytes (or directories, for
  * enumerable containers). Writes reach mutable file-written schemes (`local://`)
- * natively and handler-written schemes (`proc://`, `agent://`, `cfg://`, `xd://`,
+ * natively and handler-written schemes (`proc://`, `agent://`, `cfg://`,
  * `out://`, …) through write-only handles whose bytes become one handler write
  * when the handle closes, all within the tier the command was approved at.
  *
@@ -36,9 +36,8 @@ import {
 	type ShellFsResponse,
 } from "@oh-my-pi/pi-natives";
 import { isFsError } from "@oh-my-pi/pi-utils";
-import { resolveApproval, TIER_RANK } from "../tools/approval";
+import { TIER_RANK } from "../tools/approval";
 import { type ParsedSelector, parseSel, resolveTailSelector } from "../tools/read-selector";
-import { cfgToolsApproval } from "../tools/settings";
 import { UrlContainmentError } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
 import { InternalUrlRouter } from "./router";
@@ -323,7 +322,7 @@ export interface InternalUrlFilesystemOptions {
 	onReply?: (text: string) => void;
 	/**
 	 * Receives the handler's answer to each write a command made to another handler-written URL
-	 * (`proc://<id>/kill`, `agent://<id>`, `xd://<tool>`, …), including refusals: on Unix the shell
+	 * (`proc://<id>/kill`, `agent://<id>`, …), including refusals: on Unix the shell
 	 * reports only the errno, so this is where the reason surfaces. Absent: such URLs refuse writes
 	 * (EROFS), so search and edit tools never act through a handler.
 	 */
@@ -334,7 +333,7 @@ export interface InternalUrlFilesystemOptions {
 	 * and a redirection's target, once the command is done with it. Absent: changes are not tracked.
 	 */
 	onFileChange?: (change: ShellFileChange) => void;
-	/** Tool call the command runs under; device writes (`xd://<tool>`) dispatch their tool as part of it. */
+	/** Tool call the command runs under; handler writes carry its id. */
 	toolCallId?: string;
 }
 
@@ -644,7 +643,7 @@ export class InternalUrlFilesystem {
 		if (open.read === true) {
 			throw this.#refuseSink(sink, new UrlFsError("EACCES", `${scheme}:// write handles are write-only: ${url}`));
 		}
-		// Devices and message channels hold no content, so appending to one is writing to it.
+		// Reply, process and message channels hold no content, so appending to one is writing to it.
 		if (open.truncate !== true && spec.backing !== "device" && spec.write?.scope !== "coordination") {
 			throw this.#refuseSink(
 				sink,
@@ -677,7 +676,7 @@ export class InternalUrlFilesystem {
 				new UrlFsError("EINVAL", `${schemeOf(sink.url)}:// writes take UTF-8 text: ${sink.url}`),
 			);
 		}
-		// Device writes resolve their dispatched tool and its tier only from the payload.
+		// A handler write's tier is resolved from its payload, which the sink holds only once it closes.
 		const refusal = this.#tierRefusal(sink.url, text);
 		if (refusal) throw this.#refuseSink(sink, refusal);
 		if (sink.reply) {
@@ -1022,8 +1021,7 @@ export class InternalUrlFilesystem {
 
 	/**
 	 * Why the write gate refuses writing `content` (unknown before a handle closes) to `url`: a
-	 * denying scheme, a user policy other than `allow` for the tool a device write dispatches
-	 * (the shell cannot ask), or a tier above this command's. Undefined when it allows the write.
+	 * denying scheme, or a tier above this command's. Undefined when it allows the write.
 	 */
 	#tierRefusal(url: string, content?: string): UrlFsError | undefined {
 		const session = this.#context.session;
@@ -1031,18 +1029,6 @@ export class InternalUrlFilesystem {
 		const scheme = schemeOf(url);
 		if (typeof decision !== "string" && decision.policy === "deny") {
 			return new UrlFsError("EROFS", decision.reason ?? `${scheme}:// is read-only: ${url}`);
-		}
-		if (typeof decision !== "string" && decision.policyKey && session?.settings) {
-			const key = decision.policyKey;
-			const userPolicies: Record<string, unknown> = cfgToolsApproval.get(session.settings);
-			const { policy } = resolveApproval({ name: key, approval: decision }, undefined, "yolo", userPolicies);
-			if (policy === "deny") return new UrlFsError("EACCES", `tools.approval.${key} denies ${url}`);
-			if (policy === "prompt") {
-				return new UrlFsError(
-					"EACCES",
-					`tools.approval.${key} asks before each dispatch and the shell cannot ask; write ${url} with the write tool`,
-				);
-			}
 		}
 		const tier = typeof decision === "string" ? decision : decision.tier;
 		if (TIER_RANK[tier] > TIER_RANK[this.#tier]) {

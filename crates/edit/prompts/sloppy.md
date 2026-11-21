@@ -5,15 +5,17 @@ One `input` string = one complete patch. Start `*** Edit File: path`; repeat ope
 ```text
 *** Edit File: queue.ts
 *** Replace Block: if (useLegacyQueue) {
+if (useLegacyQueue) {
   drain(queue);
+}
 *** Delete Block: function obsolete(
 *** Cut Block: async function flushPending(
 *** Paste Before Block: export function shutdown(
 ```
 
-`Replace Block:` takes the final code once. `Delete Block:` has no body. To remove one of two adjacent identical copies, name the duplicated opener. Otherwise the opening-line prefix must be unique. Cut takes whole lines; paste once in the same file. To land beside one line instead of a block use `*** Find` plus `*** Paste Before`/`*** Paste After`.
+`Replace Block:` uses the header only to locate the old block. Give the complete final code below it, including the opening line if it stays. `Delete Block:` has no body. To remove one of two adjacent identical copies, name the duplicated opener. Otherwise the opening-line prefix must be unique. Cut takes whole lines; paste once in the same file. To land beside one line instead of a block use `*** Find` plus `*** Paste Before`/`*** Paste After`.
 
-**Small changes:** `*** Find` is the old side, not a search call. Append the action AND its body to the SAME string before sending. Use the shortest unique fragment. `*** Find all` renames every whole-word match of a bare identifier:
+**Small changes:** `*** Find` is the old side, not a search call. Append the action AND its body to the SAME string before sending. Use the shortest unique fragment. Editing a one-line doc comment? Quote its actual delimiters, not a ` * ` continuation. `*** Find all` renames every whole-word match of a bare identifier:
 
 ```text
 *** Edit File: jobs.ts

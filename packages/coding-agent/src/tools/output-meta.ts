@@ -818,7 +818,7 @@ async function wrappedExecute(
 
 /**
  * Whether call `toolCallId` of `tool` is one the agent made: the loop's batch lists it under this tool's name. Calls
- * dispatched under another tool's call (an `xd://` device behind `write`) or outside the loop (eval's tool bridge, an
+ * dispatched under another tool's call (a tool command inside `bash`) or outside the loop (eval's tool bridge, an
  * advisor) are not.
  */
 function isAgentCall(tool: AgentTool, toolCallId: string, context: AgentToolContext): boolean {
