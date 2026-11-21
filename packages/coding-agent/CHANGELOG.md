@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- A plugin entry or directory the process may not read no longer vanishes silently; the skip now warns with the entry path, while a missing entry stays quiet ([#13484](https://github.com/can1357/oh-my-pi/issues/13484)).
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
 - Fixed AST edits and searches across several targets duplicating explicit `local://` file names (such as `local://example.ts/example.ts`) or replacing symlinked file names in previews, search results, and the edit journal ([#20025](https://github.com/can1357/oh-my-pi/pull/20025) by [@eggpeat](https://github.com/eggpeat))
