@@ -285,15 +285,25 @@ pub fn unwrap_hashline_header_path(target: &str) -> &str {
 	if path.is_empty() { target } else { path }
 }
 
-/// Snapshot key: realpath, parent realpath plus basename, or input.
+/// Snapshot key: the deepest existing ancestor canonicalized (symlinks
+/// resolved, Windows verbatim prefix stripped) with the missing tail
+/// re-appended, so a path keeps one key before and after it is created.
+///
+/// Falls back to `realpath`, parent realpath plus basename, or the input
+/// unchanged only when a missing tail component is a dangling symlink or
+/// otherwise unresolvable entry, whose destination cannot be judged; that
+/// case keeps the previous behavior.
 pub fn canonical_key(absolute: &Path) -> PathBuf {
-	// 正常路径与「父目录缺失」都走 physical_path：向上找最深存在的祖先，
-	// canonicalize 后把缺失尾部逐段拼回，因而「写前算」与「写后算」一致。
+	// Existing paths and paths under a missing parent both go through
+	// `physical_path`: it canonicalizes the deepest existing ancestor and
+	// re-appends the missing tail, so a key computed before the write matches
+	// the one computed after it.
 	if let Some(real) = physical_path(absolute) {
 		return real;
 	}
-	// physical_path 返回 None 的唯一情形：缺失尾部里有 dangling symlink，
-	// 目的地无法判定。保留旧回落，行为零变化。
+	// `physical_path` returns `None` only when a missing tail component is a
+	// dangling symlink (or otherwise unresolvable entry), so the destination
+	// cannot be judged. Keep the old fallback unchanged.
 	let resolved = std::fs::canonicalize(absolute)
 		.or_else(|_| {
 			let parent = absolute.parent().ok_or(std::io::ErrorKind::NotFound)?;
@@ -1093,14 +1103,15 @@ mod tests {
 		let link = tmp.path().join("link");
 		std::os::unix::fs::symlink(&real, &link).unwrap();
 
-		// a/b 都不存在 + 父链含软链 → macOS 与 Linux 都能测出问题
+		// Neither `a` nor `b` exists yet and the parent chain crosses a
+		// symlink, so macOS and Linux both expose the old instability.
 		let target = link.join("a/b/new.txt");
 		let before = canonical_key(&target);
 		std::fs::create_dir_all(target.parent().unwrap()).unwrap();
 		std::fs::write(&target, "x").unwrap();
 		let after = canonical_key(&target);
 
-		assert_eq!(before, after, "canonical_key 对同一路径必须时间稳定");
+		assert_eq!(before, after, "canonical_key must stay stable for one path");
 	}
 
 	#[test]
@@ -1109,8 +1120,9 @@ mod tests {
 		let file = tmp.path().join("exists.txt");
 		std::fs::write(&file, "x").unwrap();
 
-		// 已存在路径：必须与「strip_verbatim(canonicalize(p))」完全一致，
-		// 证明复用 physical_path 没有改变最常见路径的行为。
+		// An existing path must equal `strip_verbatim(canonicalize(p))`
+		// exactly, proving the `physical_path` reuse left the common case
+		// unchanged.
 		assert_eq!(
 			canonical_key(&file),
 			strip_windows_verbatim_path(std::fs::canonicalize(&file).unwrap())

@@ -135,8 +135,9 @@ fn expands_home_targets_outside_cwd() {
 fn canonical_snapshot_key_resolves_missing_tail_against_existing_ancestor() {
 	let root = tempfile::tempdir().expect("tempdir");
 	let missing = root.path().join("missing-parent/child/file.txt");
-	// 路径不存在时，canonical_key 应规范化最深已存在祖先并拼回缺失尾部，
-	// 这样写前/写后对同一路径得到一致 key（即使祖先位于软链路径下）。
+	// For a path that does not exist, `canonical_key` must canonicalize the
+	// deepest existing ancestor and re-append the missing tail, so the key
+	// matches before and after the write (even under a symlinked ancestor).
 	assert_eq!(
 		canonical_key(&missing),
 		canonical_key(root.path()).join("missing-parent/child/file.txt")
