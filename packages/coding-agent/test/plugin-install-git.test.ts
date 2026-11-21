@@ -471,6 +471,45 @@ describe("PluginManager.install with git sources", () => {
 		expect(result.version).toBe("1.0.0");
 	});
 
+	for (const [input, expected] of [
+		["git:github.com/foo/bar", "https://github.com/foo/bar"],
+		["git:git@github.com:foo/bar@v1", "git@github.com:foo/bar#v1"],
+	]) {
+		test(`installs pi-style GitHub source ${input}`, async () => {
+			await Bun.write(pluginsPkgJson, JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }));
+
+			vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+				expect(cmd[0]).toBe(process.execPath);
+				expect(cmd[1]).toBe("install");
+				expect(cmd[2]).toBe(expected);
+
+				const prepare = (async () => {
+					await Bun.write(
+						pluginsPkgJson,
+						JSON.stringify({ name: "omp-plugins", private: true, dependencies: { "gh-plugin": expected } }),
+					);
+					const installedDir = path.join(pluginsNodeModules, "gh-plugin");
+					await fs.mkdir(installedDir, { recursive: true });
+					await Bun.write(
+						path.join(installedDir, "package.json"),
+						JSON.stringify({ name: "gh-plugin", version: "1.0.0" }),
+					);
+				})();
+
+				return {
+					pid: 1,
+					stdout: emptyStream(),
+					stderr: emptyStream(),
+					exited: prepare.then(() => 0),
+				} as Subprocess;
+			}) as typeof Bun.spawn);
+
+			const installed = await new PluginManager(tmpRoot).install(input);
+			expect(installed.name).toBe("gh-plugin");
+			expect(installed.version).toBe("1.0.0");
+		});
+	}
+
 	test("forwards GitHub URLs verbatim, including inline credentials", async () => {
 		await Bun.write(
 			pluginsPkgJson,
@@ -907,6 +946,52 @@ describe("PluginManager.install with git sources", () => {
 		]);
 		const lock = await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).json();
 		expect(lock.plugins["ida-mcp"]).toEqual({ version: "2.0.0", enabledFeatures: null, enabled: false });
+	});
+
+	test("rolls a failed upgrade of a linked plugin back to the link, leaving its directory intact (#16844)", async () => {
+		const manifestBefore = JSON.stringify(
+			{ name: "omp-plugins", private: true, dependencies: { "ida-mcp": "github:HexRaysSA/ida-mcp#latest" } },
+			null,
+			2,
+		);
+		await Bun.write(pluginsPkgJson, manifestBefore);
+		const devDir = path.join(tmpRoot, "developer plugin");
+		await fs.mkdir(devDir);
+		await Bun.write(path.join(devDir, "package.json"), JSON.stringify({ name: "ida-mcp", version: "1.0.0-dev" }));
+		await Bun.write(path.join(devDir, "sentinel.txt"), "keep");
+		const linkPath = path.join(pluginsNodeModules, "ida-mcp");
+		await new PluginManager(tmpRoot).link(devDir);
+		const cacheDir = path.join(tmpRoot, "bun-cache");
+		await fs.mkdir(cacheDir);
+
+		// `bun install` replaces the link with the fetched package, whose
+		// declared extension is missing, so validation fails after install.
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			const stdout = cmd[1] === "pm" ? textStream(`${cacheDir}\n`) : emptyStream();
+			const prepare =
+				cmd[1] === "install"
+					? fs
+							.rm(linkPath, { recursive: true, force: true })
+							.then(() =>
+								Bun.write(
+									path.join(linkPath, "package.json"),
+									JSON.stringify({ name: "ida-mcp", version: "2.0.0", omp: { extensions: ["./missing.ts"] } }),
+								),
+							)
+					: Promise.resolve(0);
+			return { pid: 1, stdout, stderr: emptyStream(), exited: prepare.then(() => 0) } as Subprocess;
+		}) as typeof Bun.spawn);
+
+		await expect(new PluginManager(tmpRoot).upgrade("ida-mcp")).rejects.toThrow(/extension validation failed/);
+
+		expect((await fs.lstat(linkPath)).isSymbolicLink()).toBe(true);
+		expect(await fs.realpath(linkPath)).toBe(await fs.realpath(devDir));
+		expect(await Bun.file(path.join(devDir, "package.json")).json()).toEqual({
+			name: "ida-mcp",
+			version: "1.0.0-dev",
+		});
+		expect(await Bun.file(path.join(devDir, "sentinel.txt")).text()).toBe("keep");
+		expect(await Bun.file(pluginsPkgJson).text()).toBe(manifestBefore);
 	});
 
 	test("reports a git plugin on a moving ref as changed when only the bun.lock pin moves", async () => {

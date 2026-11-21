@@ -71,7 +71,7 @@ describe("InteractiveMode MCP connection status", () => {
 			modelRegistry,
 		});
 		eventBus = new EventBus();
-		mode = new InteractiveMode(session, "test", undefined, () => {}, [], undefined, eventBus);
+		mode = new InteractiveMode(session, "test", () => {}, [], undefined, eventBus);
 		// This contract is the banner wiring, not git branch watching; a real
 		// fs.watch in a parallel Bun worker can trip an unrelated-worker SIGTRAP.
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
@@ -100,7 +100,7 @@ describe("InteractiveMode MCP connection status", () => {
 				connectedServers: [],
 				failedServers: [],
 			}),
-			{ toast: false },
+			{ toast: false, key: "mcp-status" },
 		);
 	});
 
@@ -174,8 +174,55 @@ describe("InteractiveMode MCP connection status", () => {
 
 		expect(showStatusSpy).toHaveBeenLastCalledWith(
 			"Connected: alpha. Failed: broken: bad config. Still connecting: retry…",
-			{ toast: false },
+			{ toast: false, key: "mcp-status" },
 		);
+	});
+
+	it("keeps extension info notices shown during MCP startup and updates one MCP line", () => {
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connecting",
+			serverNames: ["alpha"],
+		} satisfies McpConnectionStatusEvent);
+		mode.showHookNotify("A loaded", "info");
+		mode.showHookNotify("B loaded", "info");
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connected",
+			serverName: "alpha",
+		} satisfies McpConnectionStatusEvent);
+
+		const transcript = mode.chatContainer.render(120).join("\n");
+		expect(transcript).toContain("A loaded");
+		expect(transcript).toContain("B loaded");
+		expect(transcript).toContain("Connected to MCP server: alpha.");
+		expect(transcript).not.toContain("Connecting to MCP servers");
+	});
+
+	it("appends the completed MCP status after its connecting line retired into scrollback", () => {
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connecting",
+			serverNames: ["alpha"],
+		} satisfies McpConnectionStatusEvent);
+		const connecting = mode.chatContainer.children.at(-1);
+		if (!connecting) throw new Error("Expected the connecting status to be shown");
+		mode.showHookNotify("A loaded", "info");
+		mode.showHookNotify("B loaded", "info");
+
+		const batch = mode.chatContainer.peekFinalizedBatch(120, 2);
+		if (!batch) throw new Error("Expected startup notices to retire the connecting status");
+		expect(batch.rows.join("\n")).toContain("Connecting to MCP servers: alpha");
+		expect(batch.rows.join("\n")).toContain("A loaded");
+		mode.chatContainer.acknowledgeFinalizedBatch(batch.id);
+		expect(mode.chatContainer.children).toContain(connecting);
+		expect(mode.chatContainer.canRemoveBlock(connecting)).toBe(false);
+
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connected",
+			serverName: "alpha",
+		} satisfies McpConnectionStatusEvent);
+		const visible = mode.chatContainer.renderViewport(120, 10, { tick: 0, now: 0 }).join("\n");
+		expect(visible).not.toContain("Connecting to MCP servers");
+		expect(visible).toContain("B loaded");
+		expect(visible).toContain("Connected to MCP server: alpha.");
 	});
 
 	it("rejects a malformed mcp:connection-status payload via the guard instead of letting it throw", () => {

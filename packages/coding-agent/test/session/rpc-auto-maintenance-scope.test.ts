@@ -213,7 +213,7 @@ describe("AgentSession auto-maintenance controls and cache-warming retention", (
 
 	it("disabling cache warming cancels the live timer through the settings override", async () => {
 		vi.useFakeTimers();
-		warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "short" } }, () => true);
+		warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "short" } }, () => undefined);
 		session.setCacheWarmingMode("off");
 		expect(warmer.status).toMatchObject({ state: "inactive", reason: "cache warming disabled" });
 		vi.advanceTimersByTime(2_000);
@@ -225,17 +225,24 @@ describe("AgentSession auto-maintenance controls and cache-warming retention", (
 		vi.useFakeTimers();
 		const events: AgentSessionEvent[] = [];
 		session.subscribe(event => events.push(event));
-		warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "short" } }, () => true);
+		warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "short" } }, () => undefined);
 		vi.advanceTimersByTime(1_000);
 		for (let i = 0; i < 100; i++) await Promise.resolve();
 		const entries = session.sessionManager.getEntries().filter(entry => entry.type === "model_usage");
 		expect(entries).toHaveLength(1);
 		expect(entries[0]?.purpose).toBe("cache-warm");
 		expect(events).toEqual([
-			{ type: "cache_warming_start", phase: "streaming", provider: model.provider, model: model.id },
+			{
+				type: "cache_warming_start",
+				phase: "streaming",
+				method: "prewarm",
+				provider: model.provider,
+				model: model.id,
+			},
 			{
 				type: "cache_warming_end",
 				phase: "streaming",
+				method: "prewarm",
 				provider: model.provider,
 				model: model.id,
 				outcome: "hit",

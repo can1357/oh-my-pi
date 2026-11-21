@@ -153,3 +153,25 @@ describe("model hub assign mode scope filtering (#12692)", () => {
 		expect(rendered).toContain("chat-only");
 	});
 });
+
+describe("model hub scope after a catalog refresh", () => {
+	test("a scope that resolves during the hub's own catalog refresh narrows the open hub", async () => {
+		const catalog = () => [webModel, chatModel];
+		const registry: ModelHubRegistry = { ...registryStub, getAll: catalog, getAvailable: catalog };
+		const callbacks: ModelHubCallbacks = {
+			onAssign: () => true,
+			onUnassign: () => {},
+			onCancel: () => {},
+			onCatalogRefreshed: () => [{ model: webModel }],
+		};
+		const hub = new ModelHubComponent(tuiStub, createSource(), registry, [], callbacks);
+		const body = () => hub.render(120).join("\n").replace(ANSI_PATTERN, "");
+		expect(body()).toContain("chat-only");
+
+		await Bun.sleep(0);
+
+		expect(body()).toContain("web-search-pro");
+		expect(body()).not.toContain("chat-only");
+		hub.dispose();
+	});
+});

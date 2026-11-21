@@ -13,6 +13,28 @@ function userTexts(messages: readonly AgentMessage[]): string[] {
 	});
 }
 
+interface QueueView {
+	steering: AgentMessage[];
+	followUp: AgentMessage[];
+	liveSteered: AgentMessage[];
+}
+
+/** The queue display's source of truth: pending queue contents plus live steering
+ *  the provider already holds. Listeners recompute this on every notification. */
+function queueView(agent: Agent): QueueView {
+	return {
+		steering: [...agent.peekSteeringQueue()],
+		followUp: [...agent.peekFollowUpQueue()],
+		liveSteered: [...agent.peekLiveSteeredMessages()],
+	};
+}
+
+function trackQueueViews(agent: Agent): { views: QueueView[]; latest: () => QueueView | undefined } {
+	const views: QueueView[] = [];
+	agent.onQueueChange(() => views.push(queueView(agent)));
+	return { views, latest: () => views.at(-1) };
+}
+
 describe("queued message preparation", () => {
 	it("prepares a fresh opening steering batch after independent gates and appends context exactly once", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
@@ -105,6 +127,157 @@ describe("queued message preparation", () => {
 		]);
 	});
 
+	it.each(["steering", "followUp"] as const)(
+		"does not leave a stale queue notification listing a delivered batch when a later %s arrives during preparation",
+		async queue => {
+			const mock = createMockModel({ handler: { content: ["done"] } });
+			const agent = new Agent({
+				streamFn: mock.stream,
+				initialState: { model: mock.model },
+				steeringMode: "all",
+				followUpMode: "all",
+			});
+			const first = createUserMessage("first");
+			const second = createUserMessage("second");
+			const later = createUserMessage("later");
+			const enqueue = (message: AgentMessage) =>
+				queue === "steering" ? agent.steer(message) : agent.followUp(message);
+			const peek = () => (queue === "steering" ? agent.peekSteeringQueue() : agent.peekFollowUpQueue());
+			const otherPeek = () => (queue === "steering" ? agent.peekFollowUpQueue() : agent.peekSteeringQueue());
+			const tracked = trackQueueViews(agent);
+			const started = Promise.withResolvers<void>();
+			const releasePreparation = Promise.withResolvers<void>();
+			const atFirstModelCall = Promise.withResolvers<void>();
+			const releaseModel = Promise.withResolvers<void>();
+			const prepared: string[][] = [];
+			agent.prepareQueuedMessages = async messages => {
+				prepared.push(userTexts(messages));
+				if (prepared.length === 1) {
+					started.resolve();
+					await releasePreparation.promise;
+				}
+				return { commit: () => [createUserMessage(`prepared ${prepared.length}`)] };
+			};
+			let modelCalls = 0;
+			agent.addBeforeModelCallHook(async () => {
+				if (modelCalls++ > 0) return;
+				atFirstModelCall.resolve();
+				await releaseModel.promise;
+			});
+			enqueue(first);
+			enqueue(second);
+			const running = agent.continue();
+			await started.promise;
+
+			let assertionFailed = false;
+			try {
+				// The claim must be visible before the later enqueue: a notification
+				// emitted before the claim is installed would leave an empty snapshot
+				// that the enqueue below then contradicts.
+				expect(peek()).toEqual([first, second]);
+				expect(tracked.latest()).toEqual(queueView(agent));
+
+				enqueue(later);
+				expect(peek()).toEqual([first, second, later]);
+				expect(otherPeek()).toEqual([]);
+				expect(tracked.latest()).toEqual(queueView(agent));
+				expect(prepared).toEqual([["first", "second"]]);
+
+				releasePreparation.resolve();
+				await atFirstModelCall.promise;
+
+				// The batch committed; the new notification must show only `later`,
+				// never resurrect the two originals that are already on their way to
+				// the transcript.
+				expect(prepared).toEqual([["first", "second"]]);
+				expect(mock.calls).toHaveLength(0);
+				expect(peek()).toEqual([later]);
+				expect(otherPeek()).toEqual([]);
+				const committedView = tracked.latest();
+				expect(committedView).toEqual(queueView(agent));
+				expect([...(committedView?.steering ?? []), ...(committedView?.followUp ?? [])]).not.toContain(first);
+				expect([...(committedView?.steering ?? []), ...(committedView?.followUp ?? [])]).not.toContain(second);
+
+				releaseModel.resolve();
+				await running;
+
+				expect(prepared).toEqual([["first", "second"], ["later"]]);
+				expect(mock.calls.map(call => userTexts(call.context.messages))).toEqual([
+					["first", "second", "prepared 1"],
+					["first", "second", "prepared 1", "later", "prepared 2"],
+				]);
+				expect(agent.state.messages.map(message => message.role)).toEqual([
+					"user",
+					"user",
+					"user",
+					"assistant",
+					"user",
+					"user",
+					"assistant",
+				]);
+				expect(agent.state.messages.filter(message => message === first)).toHaveLength(1);
+				expect(agent.state.messages.filter(message => message === second)).toHaveLength(1);
+				expect(agent.state.messages.filter(message => message === later)).toHaveLength(1);
+				expect(userTexts(agent.state.messages)).toEqual(["first", "second", "prepared 1", "later", "prepared 2"]);
+				expect(queueView(agent)).toEqual({ steering: [], followUp: [], liveSteered: [] });
+				expect(tracked.latest()).toEqual(queueView(agent));
+				expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+				expect(agent.hasQueuedMessages()).toBe(false);
+			} catch (error) {
+				assertionFailed = true;
+				throw error;
+			} finally {
+				releasePreparation.resolve();
+				releaseModel.resolve();
+				await running.catch(error => {
+					if (!assertionFailed) throw error;
+				});
+			}
+		},
+	);
+
+	it("notifies an accurate pending view on the no-preparation fast path and records delivered messages once", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({
+			streamFn: mock.stream,
+			initialState: { model: mock.model },
+			steeringMode: "all",
+			followUpMode: "all",
+		});
+		const tracked = trackQueueViews(agent);
+		const steering = createUserMessage("fast steering");
+		const followUp = createUserMessage("fast follow-up");
+		agent.steer(steering);
+		agent.followUp(followUp);
+
+		await agent.continue();
+
+		expect(mock.calls.map(call => userTexts(call.context.messages))).toEqual([
+			["fast steering"],
+			["fast steering", "fast follow-up"],
+		]);
+		expect(userTexts(agent.state.messages)).toEqual(["fast steering", "fast follow-up"]);
+		expect(agent.state.messages.filter(message => message === steering)).toHaveLength(1);
+		expect(agent.state.messages.filter(message => message === followUp)).toHaveLength(1);
+		expect(queueView(agent)).toEqual({ steering: [], followUp: [], liveSteered: [] });
+		expect(tracked.latest()).toEqual(queueView(agent));
+		expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+		expect(agent.hasQueuedMessages()).toBe(false);
+
+		// Once the fast path has drained both queues, a normal run must not
+		// restore anything it already recorded (no message reappears in a later
+		// notification).
+		const firstEmpty = tracked.views.findIndex(
+			view => view.steering.length === 0 && view.followUp.length === 0 && view.liveSteered.length === 0,
+		);
+		expect(firstEmpty).toBeGreaterThanOrEqual(0);
+		expect(
+			tracked.views
+				.slice(firstEmpty)
+				.every(view => view.steering.length === 0 && view.followUp.length === 0 && view.liveSteered.length === 0),
+		).toBe(true);
+	});
+
 	it.each(["abort", "throw", "replace"] as const)(
 		"restores only owned earlier batches when later preparation ends with %s",
 		async failure => {
@@ -119,6 +292,7 @@ describe("queued message preparation", () => {
 			const followUp = createUserMessage("following batch");
 			const laterSteering = createUserMessage("newer steering");
 			const laterFollowUp = createUserMessage("newer follow-up");
+			const tracked = trackQueueViews(agent);
 			const started = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
 			agent.setOnBeforeYield(() => {
@@ -149,6 +323,7 @@ describe("queued message preparation", () => {
 				failure === "replace" ? [laterSteering] : [steering, steering, laterSteering],
 			);
 			expect(agent.peekFollowUpQueue()).toEqual(failure === "replace" ? [laterFollowUp] : [followUp, laterFollowUp]);
+			expect(tracked.latest()).toEqual(queueView(agent));
 			agent.prepareQueuedMessages = undefined;
 			await agent.continue();
 			expect(userTexts(mock.calls.at(-1)!.context.messages)).toEqual([
@@ -164,7 +339,11 @@ describe("queued message preparation", () => {
 			expect(agent.state.messages.filter(message => message === followUp)).toHaveLength(
 				failure === "replace" ? 0 : 1,
 			);
+			expect(agent.state.messages.filter(message => message === laterSteering)).toHaveLength(1);
+			expect(agent.state.messages.filter(message => message === laterFollowUp)).toHaveLength(1);
 			expect(agent.hasQueuedMessages()).toBe(false);
+			expect(queueView(agent)).toEqual({ steering: [], followUp: [], liveSteered: [] });
+			expect(tracked.latest()).toEqual(queueView(agent));
 		},
 	);
 
@@ -493,6 +672,7 @@ describe("queued message preparation", () => {
 		const started = Promise.withResolvers<AbortSignal>();
 		const release = Promise.withResolvers<void>();
 		const original = createUserMessage("follow-up");
+		const tracked = trackQueueViews(agent);
 		let commits = 0;
 		agent.prepareQueuedMessages = async (_messages, signal) => {
 			started.resolve(signal);
@@ -516,9 +696,13 @@ describe("queued message preparation", () => {
 		expect(mock.calls).toHaveLength(1);
 		expect(userTexts(agent.state.messages)).toEqual(["ordinary"]);
 		expect(agent.peekFollowUpQueue()).toEqual([original]);
+		expect(tracked.latest()).toEqual(queueView(agent));
 		agent.prepareQueuedMessages = undefined;
 		await agent.continue();
 		expect(userTexts(mock.calls[1].context.messages)).toEqual(["ordinary", "follow-up"]);
+		expect(agent.state.messages.filter(message => message === original)).toHaveLength(1);
+		expect(queueView(agent)).toEqual({ steering: [], followUp: [], liveSteered: [] });
+		expect(tracked.latest()).toEqual(queueView(agent));
 	});
 
 	for (const clear of ["clearFollowUpQueue", "clearAllQueues"] as const) {
@@ -664,5 +848,85 @@ describe("queued message preparation", () => {
 		await agent.continue();
 		expect(userTexts(agent.state.messages)).toEqual(["ordinary", "first steer"]);
 		expect(ends[1]).toContain(first);
+	});
+});
+
+describe("queued message gate", () => {
+	it("drops the candidates it vetoes and delivers the recomputed batch", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		const first = createUserMessage("first");
+		const second = createUserMessage("second");
+		const candidates: AgentMessage[][] = [];
+		const released: AgentMessage[] = [];
+		agent.queuedMessageGate = {
+			claim: (queue, batch) => {
+				expect(queue).toBe("followUp");
+				candidates.push([...batch]);
+				return batch.filter(message => message === first);
+			},
+			release: messages => released.push(...messages),
+		};
+		agent.followUp(first);
+		agent.followUp(second);
+
+		await agent.continue();
+
+		expect(candidates).toEqual([[first], [second]]);
+		expect(released).toEqual([]);
+		expect(mock.calls.map(call => userTexts(call.context.messages))).toEqual([["second"]]);
+		expect(agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("releases what it claimed when the final batch no longer holds it", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		const lead = createUserMessage("lead");
+		const vetoed = createUserMessage("vetoed");
+		const tail = createUserMessage("tail");
+		// One delivery unit while `vetoed` sits between the others; `lead` and `tail` alone are separate units.
+		agent.setQueuedMessageGrouping((previous, next) => (previous === lead && next === vetoed) || previous === vetoed);
+		const released: AgentMessage[] = [];
+		agent.queuedMessageGate = {
+			claim: (_queue, batch) => batch.filter(message => message === vetoed),
+			release: messages => released.push(...messages),
+		};
+		agent.followUp(lead);
+		agent.followUp(vetoed);
+		agent.followUp(tail);
+
+		await agent.continue();
+
+		expect(released).toEqual([tail]);
+		expect(mock.calls.map(call => userTexts(call.context.messages))).toEqual([["lead"], ["lead", "tail"]]);
+	});
+
+	it("releases a claimed batch that goes back to its queue undelivered", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		const first = createUserMessage("first");
+		const released: AgentMessage[][] = [];
+		const preparing = Promise.withResolvers<void>();
+		agent.queuedMessageGate = { claim: () => [], release: messages => released.push([...messages]) };
+		agent.prepareQueuedMessages = async (_messages, signal) => {
+			preparing.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => resolve(), { once: true });
+			await promise;
+			return undefined;
+		};
+		agent.followUp(first);
+		const running = agent.continue();
+		await preparing.promise;
+
+		expect(agent.popLastFollowUp()).toBe(first);
+		// Nothing is left to continue with once the only follow-up is taken back.
+		await expect(running).rejects.toThrow("Cannot continue");
+
+		expect(released).toEqual([[first]]);
+		expect(mock.calls).toHaveLength(0);
 	});
 });

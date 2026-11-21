@@ -82,7 +82,7 @@ describe("TTSR eval near-miss controls", () => {
 			getActiveModel: () => mock.model,
 			getEvalSessionId: () => `ttsr-${kind}-near-miss`,
 			getEvalKernelOwnerId: () => `ttsr-${kind}-near-miss`,
-			getEvalBridgeToolNames: () => sessionRef.current?.getEvalBridgeToolNames() ?? [],
+			getAdvertisedEvalToolNames: () => sessionRef.current?.getAdvertisedEvalToolNames() ?? [],
 			getToolForEvalBridge: name => sessionRef.current?.getToolForEvalBridge(name),
 			getToolContext: () => ({ settings, autoApprove: true }) as never,
 		};

@@ -7,7 +7,7 @@ import { createRequire, isBuiltin } from "node:module";
 import * as path from "node:path";
 import * as url from "node:url";
 import type { ParseResult, ParserPlugin } from "@babel/parser";
-import { parse as parseBabel } from "@babel/parser";
+import type * as BabelParser from "@babel/parser";
 import {
 	getDbBusyTimeoutMs,
 	getLegacyPiExtensionCacheDbPath,
@@ -17,6 +17,7 @@ import {
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
+import { assertBunCanImport } from "../module-path";
 
 const USE_BUNDLED_PI_MODULES = isCompiledBinary() || Boolean(process.env.PI_BUNDLED);
 
@@ -62,6 +63,8 @@ interface ExtensionSpecifierReference {
 }
 
 function parseExtensionSource(source: string, importerPath: string): ParseResult {
+	// Installing specifier hooks needs no parser; only a real source rewrite does.
+	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
 	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {
@@ -1187,8 +1190,8 @@ async function rewriteLegacyExtensionSource(
 		}
 	}
 	// Resolve `require()` targets against the original source rather than the
-	// import-rewritten text: the rewrite embeds a per-load `?mtime=` tag, which
-	// would give every load a fresh parse-cache key and force a Babel reparse.
+	// import-rewritten text: the rewrite embeds the load's `?mtime=` tag, which
+	// changes on every same-process reload and would force a Babel reparse.
 	// Import and require references never overlap, so one pass applies both.
 	replacements.push(...(await collectExtensionSpecifierReplacements(source, importerPath)));
 	return applySpecifierReplacements(source, replacements);
@@ -2052,10 +2055,6 @@ async function moduleRequiresNativeAddonUncached(modulePath: string): Promise<bo
 	return false;
 }
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 // Source modules in an extension graph are discovered from parsed static,
 // dynamic, re-export, and direct CommonJS require specifiers. Parsing keeps
 // import-looking text in strings, templates, regex literals, and comments out
@@ -2200,11 +2199,34 @@ export function ensureGraphCommonJsRequireRegistered(): void {
 
 ensureGraphCommonJsRequireRegistered();
 
-let legacyPiLoadTag = 0;
+declare global {
+	/**
+	 * Process-wide load counts per entry realpath, behind {@link nextLegacyPiLoadTag}.
+	 * Kept on `globalThis` for the reason {@link ensureGraphCommonJsRequireRegistered}
+	 * is: a second instance of this module must continue the host's counts, or it
+	 * would reissue a tag the host already used and get the host's evaluated graph.
+	 */
+	var __ompLegacyPiLoadCounts: Map<string, number> | undefined;
+}
 
-function nextLegacyPiLoadTag(): string {
-	legacyPiLoadTag = Math.max(legacyPiLoadTag + 1, Date.now());
-	return String(legacyPiLoadTag);
+/**
+ * Build the `?mtime=` tag for one {@link loadLegacyPiModule} call: the entry
+ * path's hash followed by how many times this process has loaded that entry.
+ *
+ * Every call in a process gets a tag no earlier call used, so Bun evaluates the
+ * graph again and picks up edits. The tag never reads the clock: a new process
+ * that loads unchanged files emits the same rewritten sources, so Bun's runtime
+ * transpiler cache, which is keyed by source text and never evicted, serves them
+ * instead of storing another copy of every rewritten module on each launch.
+ */
+function nextLegacyPiLoadTag(entryRealPath: string): string {
+	const counts = (globalThis.__ompLegacyPiLoadCounts ??= new Map<string, number>());
+	const count = (counts.get(entryRealPath) ?? 0) + 1;
+	counts.set(entryRealPath, count);
+	// The fixed-width hash keeps the tag digits-only (the graph hooks match
+	// `\?mtime=\d+`) and unambiguous, and keeps one entry's graph apart from
+	// another's when both import the same file.
+	return `${Bun.hash(entryRealPath).toString().padStart(20, "0")}${count}`;
 }
 
 /** Resolve symlinks in a path, falling back to the input if realpath fails. */
@@ -2544,7 +2566,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (asyncModules.size > 0) {
-		const alternation = [...asyncModules.keys()].map(escapeRegExp).join("|");
+		const alternation = [...asyncModules.keys()].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0async\0${[...asyncModules.keys()].join("\0")}`).toString(36);
 		Bun.plugin({
@@ -2585,7 +2607,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (commonJsPaths.size > 0) {
-		const alternation = [...commonJsPaths].map(escapeRegExp).join("|");
+		const alternation = [...commonJsPaths].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0commonjs\0${[...commonJsPaths].join("\0")}`).toString(36);
 		Bun.plugin({
@@ -2614,7 +2636,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (synchronousSourcePaths.size > 0) {
-		const alternation = [...synchronousSourcePaths].map(escapeRegExp).join("|");
+		const alternation = [...synchronousSourcePaths].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0sync-source\0${[...synchronousSourcePaths].join("\0")}`).toString(36);
 		Bun.plugin({
@@ -2728,13 +2750,20 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
  * the entry) resolve exactly as they do under the original Pi runtime — no
  * temp-directory mirroring and no asset copying. Graph-scoped `onLoad` hooks
  * rewrite ESM/TS sources and expose evaluated CommonJS namespaces directly.
+ *
+ * Each call re-evaluates the module graph so an edited extension is picked up
+ * (`reload`, the default). With `reload: false` the entry and its relative
+ * imports keep their plain paths, so Bun evaluates them once per process and
+ * every importer shares them, as a native `import()` would.
  */
-export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown> {
+export async function loadLegacyPiModule(resolvedPath: string, options: { reload?: boolean } = {}): Promise<unknown> {
 	// Bun reports the realpath of a loaded module to `onLoad` and exposes it as
 	// `import.meta.url`. Resolve symlinks here too (macOS `/var`→`/private/var`,
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
+	// The entry is imported by its real path, so that is the one Bun must read.
+	if (!isBundledVirtualSpecifier(entryRealPath)) await assertBunCanImport(entryRealPath);
 	await ensureLegacyPiOverridesReady();
 	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
 	try {
@@ -2745,7 +2774,8 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 		const entrySpecifier = isBundledVirtualSpecifier(entryRealPath)
 			? toImportSpecifier(entryRealPath)
 			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
-		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
+		if (options.reload === false) return await import(entrySpecifier);
+		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag(entryRealPath)}`);
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only
 		// reached by lazy dynamic imports must be read from disk at their actual

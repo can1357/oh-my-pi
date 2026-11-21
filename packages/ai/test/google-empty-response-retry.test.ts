@@ -23,6 +23,14 @@ function genaiChunk(text: string): Record<string, unknown> {
 	};
 }
 
+/** A Gemini finish the SDK's enum lacks: the backend failed to produce a response. */
+function malformedResponseChunk(): Record<string, unknown> {
+	return {
+		candidates: [{ content: { parts: [{ text: "Partial" }] }, finishReason: "MALFORMED_RESPONSE" }],
+		usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+	};
+}
+
 /** `{ response: { candidates } }` envelope (Cloud Code Assist: google-gemini-cli / antigravity). */
 function ccaChunk(text: string): Record<string, unknown> {
 	return { response: genaiChunk(text) };
@@ -104,9 +112,16 @@ const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 
 const antigravityModel: Model<"google-gemini-cli"> = buildModel({
-	...cliModel,
+	id: "gemini-3-flash",
+	name: "Gemini 3 Flash (Antigravity)",
+	api: "google-gemini-cli",
 	provider: "google-antigravity",
 	baseUrl: ANTIGRAVITY_DAILY_ENDPOINT,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 32_000,
 });
 
 function withResponseUrl(response: Response, endpoint: string): Response {
@@ -151,6 +166,16 @@ describe("Google empty-response retry (public + Vertex path)", () => {
 		expect(calls).toBe(3); // MAX_EMPTY_STREAM_RETRIES (2) + 1 initial attempt
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("empty response");
+	});
+
+	it("ends a MALFORMED_RESPONSE finish as a transient error that keeps the turn's usage", async () => {
+		const fetchMock: FetchImpl = async () => sse(malformedResponseChunk());
+
+		const result = await streamGoogle(genaiModel, context, { apiKey: "k", fetch: fetchMock }).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.usage.input).toBe(10);
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
 	});
 
 	it("accepts an empty STOP when silence is a valid caller result", async () => {
@@ -303,6 +328,22 @@ describe("Google empty-response retry (Cloud Code Assist path)", () => {
 		void events;
 	});
 
+	it("classifies a MALFORMED_RESPONSE finish as transient, as on the public path", async () => {
+		const fetchMock: FetchImpl = async () => {
+			const response = sse({ response: malformedResponseChunk() });
+			Object.defineProperty(response, "url", { value: "https://example.com/v1internal:streamGenerateContent" });
+			return response;
+		};
+
+		const result = await streamGoogleGeminiCli(cliModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
+	});
+
 	it("surfaces thought-only STOP immediately for session-level final-output recovery", async () => {
 		let calls = 0;
 		const fetchMock: FetchImpl = async () => {
@@ -372,7 +413,7 @@ describe("Google empty-response retry (Cloud Code Assist path)", () => {
 			return response;
 		};
 
-		const stream = streamGoogleGeminiCli(cliModel, context, {
+		const stream = streamGoogleGeminiCli(antigravityModel, context, {
 			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
 			fetch: fetchMock,
 			acceptEmptyResponse: true,

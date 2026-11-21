@@ -1,6 +1,7 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { ElementHandle, Page } from "puppeteer-core";
+import { isNavigatedContextError } from "./navigation";
 
 /** Default computed-style properties returned by `tab.styles()`. */
 export const DEFAULT_STYLE_PROPERTIES = [
@@ -284,17 +285,23 @@ export async function waitForPageText(
 	const deadline = Date.now() + opts.timeout;
 	while (Date.now() <= deadline) {
 		let content: string | null;
-		if (opts.selector) {
-			content = await queryText(page, opts.selector, opts.signal);
-		} else {
-			content = (await untilAborted(opts.signal, () =>
-				page.evaluate(() => {
-					const pageGlobal = globalThis as unknown as {
-						document: { body?: { innerText?: string } };
-					};
-					return pageGlobal.document.body?.innerText ?? "";
-				}),
-			)) as string;
+		try {
+			if (opts.selector) {
+				content = await queryText(page, opts.selector, opts.signal);
+			} else {
+				content = (await untilAborted(opts.signal, () =>
+					page.evaluate(() => {
+						const pageGlobal = globalThis as unknown as {
+							document: { body?: { innerText?: string } };
+						};
+						return pageGlobal.document.body?.innerText ?? "";
+					}),
+				)) as string;
+			}
+		} catch (error) {
+			// The text may well be on the page a navigation is bringing in; read that one on the next poll.
+			if (opts.signal.aborted || !isNavigatedContextError(error)) throw error;
+			content = null;
 		}
 		if (content !== null) {
 			const candidate = content.trim();

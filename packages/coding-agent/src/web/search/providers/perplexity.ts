@@ -21,7 +21,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { $env, asRecord, readSseJson } from "@oh-my-pi/pi-utils";
+import { $env, asRecord, readSseJson, tryParseJson } from "@oh-my-pi/pi-utils";
 import type { PerplexityRequest, PerplexitySearchResult } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -216,14 +216,6 @@ function mergeOAuthEventSnapshot(
 	return merged;
 }
 
-function parseJson(text: string): unknown | null {
-	try {
-		return JSON.parse(text);
-	} catch {
-		return null;
-	}
-}
-
 function textFromChunks(value: unknown): string | null {
 	if (!Array.isArray(value) || value.length === 0) return null;
 	let text = "";
@@ -257,7 +249,7 @@ function answerFromTextPayload(payload: Record<string, unknown>): string | null 
 }
 
 function parseOAuthTextPayload(text: string): Record<string, unknown> | null {
-	const parsed = parseJson(text);
+	const parsed = tryParseJson(text);
 	const direct = asRecord(parsed);
 	if (direct) return direct;
 	if (!Array.isArray(parsed)) return null;
@@ -267,7 +259,7 @@ function parseOAuthTextPayload(text: string): Record<string, unknown> | null {
 		const content = asRecord(step?.content);
 		const answer = content?.answer;
 		if (typeof answer !== "string" || answer.length === 0) continue;
-		const payload = asRecord(parseJson(answer));
+		const payload = asRecord(tryParseJson(answer));
 		if (payload) return payload;
 	}
 	return null;
@@ -280,7 +272,7 @@ function parseOAuthTextAnswer(text: string): string {
 		if (answer) return answer;
 	}
 
-	const parsed = parseJson(text);
+	const parsed = tryParseJson(text);
 	if (!Array.isArray(parsed)) return text;
 	for (const item of parsed) {
 		const step = asRecord(item);
@@ -469,7 +461,7 @@ function collectPerplexityMetadataFromRecord(
 
 function collectPerplexityMetadata(metadata: PerplexityApiStreamMetadata, data: string): void {
 	if (data === "[DONE]") return;
-	const record = asRecord(parseJson(data));
+	const record = asRecord(tryParseJson(data));
 	if (record) collectPerplexityMetadataFromRecord(metadata, record);
 }
 
@@ -812,19 +804,31 @@ async function callPerplexityAsk(
 	}
 	const answer = answerSource ? materializeOAuthAnswer(answerSource) : "";
 
-	// Anonymous quota exhaustion answers HTTP 200 with a short signup-wall
-	// message ("Sign up and repeat your request.", localized by the upstream
-	// service) and zero sources. A grounded anonymous ask (skip_search_enabled
-	// false + always_search_override) always returns web_results, so a
-	// source-less anonymous response is almost always the wall. Either way an
-	// unsourced answer is useless, so classify it as a provider failure and let
-	// the fallback chain advance, matching the DuckDuckGo/Startpage/Google/SearXNG
-	// wall paths. The check is locale-independent (no text match).
-	if (auth.type === "anonymous" && sourcesByUrl.size === 0) {
+	// A signed-out ask answers HTTP 200 with a short signup-wall message ("Sign
+	// up and repeat your request.", localized by the upstream service) and zero
+	// sources: anonymous quota exhaustion, or a stored session cookie the service
+	// no longer honors (it degrades to signed-out instead of returning 401). A
+	// grounded ask (skip_search_enabled false + always_search_override) always
+	// returns web_results, so a source-less response is almost always the wall.
+	// Either way an unsourced answer is useless, so classify it as a provider
+	// failure and let the fallback chain advance, matching the
+	// DuckDuckGo/Startpage/Google/SearXNG wall paths. The check is
+	// locale-independent (no text match). The signed-in case is not an auth
+	// status: a 401 would force-refresh and rotate OAuth credentials on a guess.
+	if (sourcesByUrl.size === 0) {
+		if (auth.type === "anonymous") {
+			throw new SearchProviderError(
+				"perplexity",
+				"Perplexity anonymous ask returned no sources (likely signup wall or exhausted anonymous quota); sign in with `/login perplexity` or configure another provider.",
+				429,
+			);
+		}
 		throw new SearchProviderError(
 			"perplexity",
-			"Perplexity anonymous ask returned no sources (likely signup wall or exhausted anonymous quota); sign in with `/login perplexity` or configure another provider.",
-			429,
+			auth.type === "oauth"
+				? "Perplexity ask returned no sources (likely signup wall: the stored session is signed out); re-run `/login perplexity` or configure another provider."
+				: "Perplexity ask returned no sources (likely signup wall: `PERPLEXITY_COOKIES` is signed out); refresh the cookies or configure another provider.",
+			204,
 		);
 	}
 
@@ -1047,6 +1051,11 @@ export class PerplexityProvider extends SearchProvider {
 	 */
 	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;
+	}
+
+	/** Without a direct credential, search runs on the anonymous ask endpoint. */
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return !this.isAvailable(authStorage);
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

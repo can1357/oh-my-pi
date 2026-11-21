@@ -130,7 +130,7 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 				cwd: projectRoot,
 				searchPath: srcRoot,
 				scopePath: "src",
-				displayContent: ["# src/", "## interactive-mode.ts#abcd", "*12│const needle = true;"].join("\n"),
+				displayContent: ["# src/", "## interactive-mode.ts#ABCD", "*12│const needle = true;"].join("\n"),
 			},
 		};
 		const rendered = grepToolRenderer

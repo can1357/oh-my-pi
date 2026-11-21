@@ -24,27 +24,23 @@ describe("LSP symbols expanded tree", () => {
 		const rows = lspToolRenderer
 			.renderResult({ content: [{ type: "text", text }] }, { expanded: true, isPartial: false }, theme)
 			.render(80)
-			.map(row =>
-				Bun.stripANSI(row)
-					.replace(/^│/, "")
-					.replace(/\s*│$/, ""),
-			);
-		const start = rows.findIndex(row => row.includes("in src/a.ts"));
-		expect(rows.slice(start + 1, start + 15)).toEqual([
-			"  ├─ class Alpha",
-			"  │  line 1",
-			"  │  ├─ method one",
-			"  │  │  line 2",
-			"  │  │  └─ var inner",
-			"  │  │     line 3",
-			"  │  └─ method two",
-			"  │     line 5",
-			"  ├─ class Beta",
-			"  │  line 10",
-			"  │  └─ method three",
-			"  │     line 11",
-			"  └─ function gamma",
-			"     line 20",
+			.map(row => Bun.stripANSI(row).trimEnd());
+		expect(rows[0]).toEndWith("7 symbols · in src/a.ts");
+		expect(rows.slice(1)).toEqual([
+			"├─ class Alpha",
+			"│  line 1",
+			"│  ├─ method one",
+			"│  │  line 2",
+			"│  │  └─ var inner",
+			"│  │     line 3",
+			"│  └─ method two",
+			"│     line 5",
+			"├─ class Beta",
+			"│  line 10",
+			"│  └─ method three",
+			"│     line 11",
+			"└─ function gamma",
+			"   line 20",
 		]);
 	});
 });

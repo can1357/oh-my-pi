@@ -2,7 +2,7 @@ import type { StatusLineHost, StatusLineSession } from "@oh-my-pi/pi-tui/status-
 import { Settings, settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import { getSessionCompactionBoundaries } from "../session/context-usage-runtime";
-import { classifyResetExpiry, formatResetExpiryNotice } from "../session/reset-expiry";
+import { claimResetExpiryNotice, classifyResetExpiry } from "../session/reset-expiry";
 import { limitMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 import { resolveActiveRepoContextSync } from "../utils/active-repo-context";
 import { GH_COMMAND_TIMEOUT_MS, github } from "../utils/github";
@@ -53,8 +53,20 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	getSessionSettingsIdentity: session => session.settings,
 	getSessionSettingsRevision: session => session.settings?.revision ?? 0,
 	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),
-	activeAccount: (session, provider) =>
-		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
+	activeAccount: (session, provider) => {
+		const authStorage = session.modelRegistry?.authStorage;
+		const oauthIdentity = authStorage?.oauth?.identity(provider, session.sessionId);
+		if (oauthIdentity) return oauthIdentity;
+		// API-key credentials have no OAuth identity (resolveCredentialIdentityKey
+		// is OAuth-only), so nothing above can attribute the session's usage.
+		// Fall back to the stored row the router actually serves this session
+		// from; usage reports probed from stored rows carry metadata.credentialId
+		// for exactly this match. Without a sticky row (env/runtime key, or a
+		// seam that does not expose it) attribution stays unknown, matching the
+		// previous behavior.
+		const sticky = authStorage?.sessions?.sticky?.(provider, session.sessionId);
+		return sticky?.credentialId !== undefined ? { credentialId: sticky.credentialId } : undefined;
+	},
 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
 	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
 	resolveActiveRepo: resolveActiveRepoContextSync,
@@ -63,7 +75,14 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	calculateTokensPerSecond,
 	limitMatchesActiveAccount,
 	classifyResetExpiry,
-	resetExpiryNotice: formatResetExpiryNotice,
+	resetExpiryNotice: (session, reports, nowMs) => {
+		// agent.db records which resets were warned about across omp processes; without it, stay quiet
+		// rather than repeat the warning on every refresh.
+		const storage = (session.settings ?? settings).getStorage();
+		return storage
+			? claimResetExpiryNotice(reports, nowMs, (key, expiresAtMs) => storage.claimNotice(key, expiresAtMs))
+			: undefined;
+	},
 	computeCompactionBoundaries: (session, contextWindow, model) =>
 		getSessionCompactionBoundaries(session.settings ?? settings, contextWindow, model),
 };

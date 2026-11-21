@@ -9,7 +9,7 @@ Native Rust functionality via N-API.
 - **SIXEL**: Terminal image encoding for SIXEL-capable terminals (decode, resize, encode in one pass)
 - **Audio**: Cross-platform low-latency microphone capture and gapless speaker playback
 - **WebRTC**: Native Opus media, SDP offer/answer negotiation, and data-channel events for live sessions
-- **File locking**: Process-owned cross-process locks with in-memory kernel names on Linux/Windows and `flock(2)` sidecars on other Unix platforms
+- **File locking**: Process-owned cross-process locks with in-memory kernel names on Windows, open-file-description lock sidecars on Linux and `flock(2)` sidecars on other Unix platforms
 - **Local IPC**: `IpcServer`/`IpcConnection` over Unix sockets and Windows named pipes — owner-only access, single-instance binding with stale-endpoint takeover, newline or raw framing; `ipcEndpoint(dir, name)` names endpoints per platform
 - **PDF**: In-memory PDF-to-Markdown extraction with OCR-page classification via `pdf-inspector`
 - **Binary patches**: `applyBinaryPatch(oldPath, patchPath, outPath)` applies an HDiffPatch single-stream patch (HDIFFSF20, zstd or uncompressed), streaming from files; callers verify digests
@@ -57,6 +57,14 @@ without applying alpha twice. Fully transparent pixels remain transparent;
 unscaled images retain their existing blending path. Re-encode when the terminal
 background RGB changes.
 
+### PTY dimensions
+
+`normalizePtyDimensions(cols, rows)` returns `{ cols, rows }` with fractional
+values truncated toward zero and dimensions clamped to 20–400 columns and
+5–200 rows. It shares the native bounds used by `PtySession.start`,
+`startArgv`, and `resize`. Use the returned dimensions when sizing a screen
+emulator so its viewport matches the native PTY.
+
 ### Lazy Windows path helpers
 
 Import `expandWindowsLongPath` and `getWindowsShortPath` from
@@ -81,7 +89,7 @@ bun run check
 platform-specific optional dependency packages:
 
 ```
-crates/pi-natives/       # Rust source (workspace member)
+crates/natives/       # Rust source (workspace member)
   src/lib.rs             # N-API exports
   src/sixel.rs           # SIXEL terminal-image encoding
   Cargo.toml             # Rust dependencies

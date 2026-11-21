@@ -1,5 +1,5 @@
+import { type } from "@oh-my-pi/omptype";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
 import type { ConfiguredThinkingLevel } from "../render/render-utils";
 import type { ToolRenderer } from "./renderer";
@@ -23,11 +23,13 @@ import {
 	capPreviewLines,
 	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
+	formatCount,
 	formatDuration,
 	formatExpandHint,
 	formatFeedModelBadge,
 	formatMoreItems,
 	formatNumber,
+	formatStatusIcon,
 	isFeedModelBadgeEnabled,
 	pluralize,
 	previewLine,
@@ -48,14 +50,15 @@ import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
 import { getSubprocessToolRenderer } from "./subprocess";
 import { assembleYieldResult, type YieldSectionShapes } from "./task-yield-assembly";
-import type { TspAgentProps, TspTone } from "@oh-my-pi/pi-wire";
-import { compact, kv, md, node, span, text } from "../native/describe";
+import { type TspAgentProps, type TspProps, type TspTone, toolIntentLabel } from "@oh-my-pi/pi-wire";
+import { compact, kv, md, node, propNode, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { OwnerMemo, sameItems } from "../native/memo";
 import { plainText } from "../native/spans";
 import { errorText, noteText, resultText } from "./native-view";
-import { describeJsonTree } from "./json-tree";
+import { describeJsonValue } from "./json-tree";
 import { taskSummary } from "../overlays/agent-hub-renderer";
+import { agentColored } from "../overlays/agent-identity";
 import type { NativeToolView, ToolRenderResult } from "./renderer";
 
 /** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
@@ -127,9 +130,8 @@ function extractIncrementalReviewResult(
 		data: item.data,
 		type: item.type,
 		status: item.status === "aborted" ? "aborted" : item.status === "success" ? "success" : undefined,
-		useLastTurn: item.useLastTurn,
 	}));
-	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_SECTION_SHAPES);
+	const assembled = assembleYieldResult(yieldItems, REVIEWER_SECTION_SHAPES);
 	const data = assembled?.data;
 	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
 	const record = data as Record<string, unknown>;
@@ -157,7 +159,6 @@ interface RenderYieldItem {
 	data?: unknown;
 	type?: string | string[];
 	status?: string;
-	useLastTurn?: boolean;
 }
 
 /**
@@ -196,7 +197,6 @@ function normalizeYieldData(value: unknown): RenderYieldItem[] {
 			data: record.data,
 			type,
 			status: typeof record.status === "string" ? record.status : undefined,
-			useLastTurn: record.useLastTurn === true ? true : undefined,
 		});
 	}
 	return normalized;
@@ -217,8 +217,7 @@ function getRenderYieldLabels(type: RenderYieldItem["type"]): string[] {
 }
 
 function formatYieldPreview(item: RenderYieldItem): string {
-	if (item.useLastTurn === true && item.data === undefined) return "last assistant turn";
-	if (item.data === undefined) return "last assistant turn";
+	if (item.data === undefined) return "finalize sections";
 	if (typeof item.data === "string") return previewLine(sanitizeText(item.data), 70);
 	try {
 		return previewLine(sanitizeText(JSON.stringify(item.data) ?? "null"), 70);
@@ -351,7 +350,7 @@ function renderOutputSection(
 	if (warning) {
 		lines.push(`${continuePrefix}${theme.fg("dim", "Output")}`);
 		lines.push(
-			`${continuePrefix}  ${theme.fg("warning", theme.status.warning)} ${theme.fg(
+			`${continuePrefix}  ${formatStatusIcon("warning", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(sanitizeText(warning), 80, expanded),
 			)}`,
@@ -483,6 +482,12 @@ function renderTaskSection(
 	return lines;
 }
 
+/** A spawn's preview text: its `task`, else its first streamed step. */
+function taskPreviewText(task: unknown, steps: unknown): string {
+	if (typeof task === "string") return task;
+	return Array.isArray(steps) && typeof steps[0] === "string" ? steps[0] : "";
+}
+
 /**
  * First line of a streamed `task` brief, trimmed — a row's secondary text.
  * The args stream in token by token, so non-string values fall through to "".
@@ -512,6 +517,12 @@ export function agentTypeBadge(agent: string | undefined, theme: Theme): string 
 	return ` ${theme.fg("dim", `${theme.format.bracketLeft}${trimmed}${theme.format.bracketRight}`)}`;
 }
 
+/** Dim `[N steps]` badge for a spawn with sequential `steps`; empty without any. */
+function stepsBadge(steps: unknown, theme: Theme): string {
+	if (!Array.isArray(steps) || steps.length === 0) return "";
+	return theme.fg("dim", ` [${formatCount("step", steps.length)}]`);
+}
+
 /**
  * Render the call preview lines for the single spawned agent. The
  * args stream in token by token, so every field access is defensive.
@@ -523,13 +534,14 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 
 	const rawName = typeof args.name === "string" ? args.name.trim() : "";
 	const idLabel = rawName ? formatTaskId(rawName) : "";
-	const brief = taskFirstLine(args.task);
+	const brief = taskFirstLine(taskPreviewText(args.task, args.steps));
 	if (idLabel || brief) {
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel || "agent"))}`;
 		if (brief) {
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(args.agent, theme);
+		line += stepsBadge(args.steps, theme);
 		lines.push(line);
 	}
 	lines.push(...renderTaskItemLines(args.tasks, theme));
@@ -559,11 +571,12 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 		const rawName = typeof item?.name === "string" ? item.name.trim() : "";
 		const idLabel = rawName ? formatTaskId(rawName) : `#${i + 1}`;
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel))}`;
-		const brief = taskFirstLine(item?.task);
+		const brief = taskFirstLine(taskPreviewText(item?.task, item?.steps));
 		if (brief) {
 			line += `: ${theme.fg("muted", previewLine(brief, 64))}`;
 		}
 		line += agentTypeBadge(item?.agent, theme);
+		line += stepsBadge(item?.steps, theme);
 		if (item?.isolated === true) {
 			line += theme.fg("dim", " [isolated]");
 		}
@@ -597,11 +610,20 @@ function createAssignmentSectionRenderer(
 	// `renderResult` receives the raw tool args (unlike `renderCall`, which is
 	// fed through `repairTaskParams`), so undo any per-field double-encoding
 	// here too. The repair is idempotent on already-clean text.
-	const assignment = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : ""),
-	).trim();
+	const brief = typeof args?.task === "string" ? repairDoubleEncodedJsonString(args.task) : stepsMarkdown(args?.steps);
+	const assignment = sanitizeText(brief).trim();
 	if (!assignment) return undefined;
 	return createMarkdownSectionRenderer(assignment, theme);
+}
+
+/** A flat call's `steps` as numbered Markdown sections; skips entries still streaming in as non-strings. */
+function stepsMarkdown(steps: unknown): string {
+	if (!Array.isArray(steps)) return "";
+	return steps
+		.flatMap((step, index) =>
+			typeof step === "string" ? [`**Step ${index + 1}**\n\n${repairDoubleEncodedJsonString(step)}`] : [],
+		)
+		.join("\n\n");
 }
 
 /**
@@ -702,7 +724,7 @@ function renderRouteLine(route: string | undefined, continuePrefix: string, maxW
 
 /** A tool call's own intent, else its argument, with home paths shortened as the subagent HUD does. */
 function toolCallDetail(intent: string | undefined, args: string | undefined, argsKey: string | undefined): string {
-	return intent ? shortenEmbeddedPaths(intent) : shortenToolArgumentPaths(args ?? "", argsKey);
+	return intent ? shortenEmbeddedPaths(toolIntentLabel(intent)) : shortenToolArgumentPaths(args ?? "", argsKey);
 }
 
 /**
@@ -736,6 +758,7 @@ function renderAgentProgress(
 			status: progress.status,
 			prefix,
 			id: formatTaskId(progress.id),
+			agentId: progress.id,
 			width: maxWidth,
 			model: progress.resolvedModelIdentity ?? progress.resolvedModel,
 			thinkingLevel: progress.resolvedThinkingLevel,
@@ -764,6 +787,15 @@ function renderAgentProgress(
 
 	// Current tool (if running) or most recent completed tool
 	if (progress.status === "running") {
+		if (progress.stage) {
+			lines.push(
+				truncateTaskRow(
+					`${continuePrefix}${theme.fg("muted", replaceTabs(sanitizeText(progress.stage)))}`,
+					maxWidth,
+					"",
+				),
+			);
+		}
 		if (progress.currentTool) {
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", sanitizeText(progress.currentTool))}`;
 			const toolDetail = toolCallDetail(
@@ -943,9 +975,7 @@ function renderReviewResult(
 	// Verdict line
 	const verdictColor = summary.overall_correctness === "correct" ? "success" : "error";
 	const isCorrect = summary.overall_correctness === "correct";
-	const verdictIcon = isCorrect
-		? theme.styledSymbol("status.done", "accent")
-		: theme.fg(verdictColor, theme.status.error);
+	const verdictIcon = formatStatusIcon(isCorrect ? "success" : "error", theme);
 	lines.push(
 		`${continuePrefix} Patch is ${theme.fg(verdictColor, summary.overall_correctness)} ${verdictIcon} ${theme.fg(
 			"dim",
@@ -1044,13 +1074,15 @@ function renderAgentResult(
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
 	const needsWarning = Boolean(missingCompleteWarning) && success;
-	const icon = aborted
-		? theme.status.aborted
-		: needsWarning
-			? theme.status.warning
+	// A merge failure is a warning: the agent's work succeeded, only folding it back did not.
+	const iconStatus: ToolUIStatus = aborted
+		? "aborted"
+		: needsWarning || mergeFailed
+			? "warning"
 			: success
-				? theme.styledSymbol("status.done", "text")
-				: theme.status.error;
+				? "success"
+				: "error";
+	const icon = formatStatusIcon(iconStatus, theme);
 	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
 	const statusText = aborted
 		? "aborted"
@@ -1093,11 +1125,10 @@ function renderAgentResult(
 		visibleWidth(`${indent}${icon} ${modelLead}${displayId}: ${fullDescription}${badges}`) <= maxWidth
 			? fullDescription
 			: undefined;
-	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
-	let statusLine = `${indent}${theme.fg(iconColor, icon)} ${modelLead}${theme.fg(
-		success && !needsWarning ? "text" : "accent",
-		titlePart,
-	)}${badges}`;
+	const titleColor = success && !needsWarning ? "text" : "accent";
+	const name = agentColored(theme, result.id, description ? theme.bold(displayId) : displayId);
+	const title = description ? `${name}${theme.fg(titleColor, `: ${description}`)}` : name;
+	let statusLine = `${indent}${icon} ${modelLead}${title}${badges}`;
 	statusLine += formatAgentStatRun(
 		{
 			requests: result.requests,
@@ -1123,7 +1154,7 @@ function renderAgentResult(
 
 	if (aborted && result.abortReason) {
 		lines.push(
-			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg(
+			`${continuePrefix}${formatStatusIcon("aborted", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(flattenLine(sanitizeText(result.abortReason)), 80, expanded),
 			)}`,
@@ -1215,7 +1246,7 @@ function renderAgentResult(
 
 	if (hasCustomRendering && missingCompleteWarning) {
 		lines.push(
-			`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg(
+			`${continuePrefix}${formatStatusIcon("warning", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(sanitizeText(missingCompleteWarning), 80, expanded),
 			)}`,
@@ -1355,16 +1386,10 @@ export function renderResult(
 	if (!details) {
 		const text = result.content.find(c => c.type === "text")?.text || "";
 		const errored = result.isError === true;
-		const header = errored
-			? renderStatusLine({ icon: "error", title: "Task", description: agentLabel }, theme)
-			: renderStatusLine(
-					{
-						iconOverride: theme.styledSymbol("status.done", "accent"),
-						title: "Task",
-						description: agentLabel,
-					},
-					theme,
-				);
+		const header = renderStatusLine(
+			{ icon: errored ? "error" : "success", title: "Task", description: agentLabel },
+			theme,
+		);
 		return framedToolCard(theme, ({ width }) => ({
 			header,
 			sections: [
@@ -1409,16 +1434,11 @@ export function renderResult(
 	const metaLabel = countLabel ?? agentLabel;
 	const header = renderStatusLine(
 		{
-			icon: icon === "success" || icon === "running" ? undefined : icon,
 			// While agents are in flight the header shows the dispatch glyph, not a
 			// spinner: async spawns return immediately, so "running" means
 			// "delegated to peers", not "this call is blocking the turn".
-			iconOverride:
-				icon === "running"
-					? theme.styledSymbol("tool.task", "accent")
-					: icon === "success"
-						? theme.styledSymbol("status.done", "accent")
-						: undefined,
+			icon: icon === "running" ? undefined : icon,
+			iconOverride: icon === "running" ? theme.styledSymbol("tool.task", "accent") : undefined,
 			title: "Task",
 			meta: metaLabel ? [metaLabel] : undefined,
 		},
@@ -1792,7 +1812,7 @@ function describeContext(raw: unknown): NativeNode | undefined {
 	return line ? text([span(line, "muted")], { wrap: "word", lines: 2, role: "omp.tool.context" }) : undefined;
 }
 
-/** The full assignment, markdown, as the first expanded child of an agent. */
+/** The full assignment, markdown: an agent's first expanded child and its row's hover card. */
 function describeAssignment(raw: string | undefined): NativeNode | undefined {
 	const source = raw ? sanitizeText(repairDoubleEncodedJsonString(raw)).trim() : "";
 	return source ? md(source, { role: "omp.task.assignment" }) : undefined;
@@ -1824,6 +1844,8 @@ interface AgentDescribeState {
 	readonly nowMs: number;
 	readonly expanded: boolean;
 	readonly background: boolean;
+	/** The host draws the `json` kind. */
+	readonly json: boolean;
 }
 
 /** Settled and in-flight child snapshots a subagent carries, as nested agent nodes. */
@@ -1853,8 +1875,26 @@ function describeNestedTasks(
 	return out;
 }
 
-function agentNode(p: TspAgentProps, children: readonly (NativeNode | undefined)[], key: string): NativeNode {
-	return node("agent", p, compact(children), key);
+/** Earliest start seen per running subagent (`nowMs - durationMs`), so a snapshot with a stale or zero `durationMs` can't restart its timer. */
+const runStartMs = new Map<string, number>();
+
+function runningAge(progress: { id: string; durationMs: number }, nowMs: number): number {
+	const start = nowMs - Math.max(0, progress.durationMs);
+	const known = runStartMs.get(progress.id);
+	const anchor = known === undefined ? start : Math.min(known, start);
+	runStartMs.set(progress.id, anchor);
+	return Math.max(0, nowMs - anchor);
+}
+
+/** An `agent` node; its row's hover card shows the whole `assignment` the row only summarizes. */
+function agentNode(
+	p: TspAgentProps,
+	assignment: NativeNode | undefined,
+	children: readonly (NativeNode | undefined)[],
+	key: string,
+): NativeNode {
+	const props: TspProps<"agent"> = assignment ? { ...p, hovercard: propNode(assignment) } : p;
+	return node("agent", props, compact(children), key);
 }
 
 function describeProgressAgent(progress: AgentProgress, state: AgentDescribeState, depth: number): NativeNode {
@@ -1873,6 +1913,10 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 					age: progress.currentToolStartMs ? Math.max(0, nowMs - progress.currentToolStartMs) : undefined,
 				}
 			: null;
+	const summary = taskSummary(progress.description || progress.assignment || progress.task);
+	// The agent's own stage line (from its completion probe) rides beside the task while it runs.
+	const stage = running && progress.stage ? plainText(progress.stage) : "";
+	const assignment = describeAssignment(progress.assignment ?? progress.task);
 	const retry =
 		running && progress.retryState
 			? {
@@ -1887,7 +1931,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 		{
 			name: formatTaskId(progress.id),
 			agent: progress.agent || undefined,
-			task: taskSummary(progress.description || progress.assignment || progress.task) || undefined,
+			task: stage ? (summary ? [span(summary), span(` · ${stage}`, "muted")] : stage) : summary || undefined,
 			status,
 			model: progress.resolvedModelIdentity ?? progress.resolvedModel,
 			thinking: thinkingToken(progress.resolvedThinkingLevel),
@@ -1899,7 +1943,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				...contextStats(progress.contextTokens, progress.contextWindow),
 				done: running && progress.completionPercent !== undefined ? progress.completionPercent / 100 : undefined,
 				cost: progress.cost > 0 ? progress.cost : undefined,
-				...(running ? { age: progress.durationMs } : { took: progress.durationMs }),
+				...(running ? { age: runningAge(progress, nowMs) } : { took: progress.durationMs }),
 			},
 			retry,
 			badges: agentBadges(state.background, undefined),
@@ -1907,8 +1951,9 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 			collapsible: true,
 			collapsed: !state.expanded,
 		},
+		assignment,
 		[
-			describeAssignment(progress.assignment ?? progress.task),
+			assignment,
 			progress.resolvedModelRoute ? noteText(progress.resolvedModelRoute, "dim") : undefined,
 			!running && progress.retryFailure
 				? text(
@@ -1942,6 +1987,7 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 	else if (warning && success) badges.push({ text: "warning", tone: "warning" });
 	if (result.truncated) badges.push({ text: "truncated", tone: "warning" });
 	const cost = result.usage?.cost.total ?? 0;
+	const assignment = describeAssignment(result.assignment ?? result.task);
 	return agentNode(
 		{
 			name: formatTaskId(result.id),
@@ -1964,15 +2010,17 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			collapsible: true,
 			collapsed: !state.expanded,
 		},
+		assignment,
 		[
-			describeAssignment(result.assignment ?? result.task),
+			assignment,
 			result.resolvedModelRoute ? noteText(result.resolvedModelRoute, "dim") : undefined,
 			aborted && result.abortReason ? errorLine(result.abortReason) : undefined,
 			warning ? errorLine(warning, "warning") : undefined,
 			result.error ? errorLine(result.error) : undefined,
 			result.retryFailure ? errorLine(`auto-retry gave up: ${result.retryFailure.errorMessage}`) : undefined,
+			// The structured result is the agent's answer: its containers open one level, as in the fallback tree.
 			structured !== undefined
-				? describeJsonTree(structured)
+				? describeJsonValue(structured, { native: state.json, open: 1 })
 				: output
 					? md(output, { role: "omp.task.output" })
 					: undefined,
@@ -2018,16 +2066,18 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 				status: "pending",
 				badges: agentBadges(false, isolated === true),
 			},
+			describeAssignment(typeof brief === "string" ? brief : undefined),
 			[],
 			key,
 		);
 	const flatName = typeof args?.name === "string" ? args.name.trim() : "";
-	if (flatName || taskFirstLine(args?.task)) {
+	const flatBrief = taskPreviewText(args?.task, args?.steps);
+	if (flatName || taskFirstLine(flatBrief)) {
 		agents.push(
 			pending(
 				flatName ? formatTaskId(flatName) : "agent",
 				args?.agent,
-				args?.task,
+				flatBrief,
 				args?.isolated,
 				flatName || "agent",
 			),
@@ -2040,7 +2090,7 @@ function describeTaskCall(args: TaskParams | undefined): NativeToolView {
 				pending(
 					name ? formatTaskId(name) : `#${index + 1}`,
 					entry?.agent,
-					entry?.task,
+					taskPreviewText(entry?.task, entry?.steps),
 					entry?.isolated,
 					name || `#${index + 1}`,
 				),
@@ -2085,6 +2135,7 @@ function describeTaskResult(
 			nowMs: options.renderContext?.nowMs ?? Date.now(),
 			expanded: options.expanded,
 			background,
+			json: options.json === true,
 		},
 		0,
 	);
@@ -2157,7 +2208,7 @@ export const taskToolRenderer = {
 		options: TaskRenderOptions,
 		args?: TaskParams,
 	): NativeToolView | undefined {
-		return taskResultMemo.get(result, [options.renderContext?.nowMs, options.expanded], () =>
+		return taskResultMemo.get(result, [options.renderContext?.nowMs, options.expanded, options.json], () =>
 			describeTaskResult(result, options, args),
 		);
 	},
@@ -2206,12 +2257,12 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
-	model?: string | string[];
-	/** The work; required by the schema. */
+	/** One exact per-call model, gated by `task.perCallModel`. */
+	model?: string;
+	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
+	/** Ordered stages sent instead of `task` (`task.steps`), each once the child delivered the previous (several share a prompt past four). */
+	steps?: string[];
 	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
@@ -2237,12 +2288,12 @@ export interface TaskParams {
 	name?: string;
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
-	model?: string | string[];
+	/** See {@link TaskItem.model}. */
+	model?: string;
 	/** The work (flat form). */
 	task?: string;
+	/** Ordered stages (flat form); see {@link TaskItem.steps}. */
+	steps?: string[];
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
@@ -2310,8 +2361,6 @@ export interface YieldItem {
 	error?: string;
 	/** A string label is terminal; a non-empty array of labels is incremental. */
 	type?: string | string[];
-	/** Resolve this yield's payload from the latest durable assistant text instead of `data`. */
-	useLastTurn?: boolean;
 	/** True when an incremental workpool yield completed every item in its batch. */
 	complete?: boolean;
 	/**
@@ -2321,6 +2370,15 @@ export interface YieldItem {
 	 */
 	schemaOverridden?: boolean;
 }
+
+/**
+ * What an agent's model is producing while a response streams: its reasoning, its prose, or a tool
+ * call it is still writing, with the call's argument preview and intent so far.
+ */
+export type AgentStreaming =
+	| { kind: "thinking" }
+	| { kind: "text" }
+	| { kind: "call"; tool: string; args?: string; argsKey?: string; intent?: string };
 
 /** Progress tracking for a single agent */
 export interface AgentProgress {
@@ -2340,6 +2398,11 @@ export interface AgentProgress {
 	/** Intent the model attached to the current call; undefined when that call carried none. */
 	currentToolIntent?: string;
 	currentToolStartMs?: number;
+	/**
+	 * What the model is producing now, while a response streams. A call it finished writing stays
+	 * until it starts running ({@link currentTool}); reasoning and prose clear when the response ends.
+	 */
+	streaming?: AgentStreaming;
 	recentTools: Array<{
 		tool: string;
 		args: string;
@@ -2355,10 +2418,13 @@ export interface AgentProgress {
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;
 	/**
-	 * Current per-turn context size: latest assistant message's `usage.totalTokens`.
-	 * This is the number to compare against `contextWindow` — what compaction
-	 * decides on, what the user typically reads as "how full is the context".
-	 * Distinct from `tokens`, which is a lifetime billing-volume counter.
+	 * Current per-turn occupied context: the latest assistant message's
+	 * provider-reported `usage.contextTokens` when present, else its billable
+	 * `totalTokens` minus orchestration tokens (the same accounting session
+	 * compaction uses). This is the number to compare against `contextWindow` —
+	 * what compaction decides on, what the user typically reads as "how full
+	 * is the context". Distinct from `tokens`, which is a lifetime
+	 * billing-volume counter.
 	 */
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. Lets the UI render `<curr>/<window>` gauges. */
@@ -2383,6 +2449,18 @@ export interface AgentProgress {
 	advisor?: boolean;
 	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbe` side request. */
 	completionPercent?: number;
+	/**
+	 * The agent's current step in its own words (one line, ≤ 80 chars), from the
+	 * same probe reply as {@link completionPercent}. Running rows prefer it over
+	 * `lastIntent`; the job widget uses it as its stage line.
+	 */
+	stage?: string;
+	/**
+	 * What the agent says shows its progress live (one line, ≤ 200 chars), e.g.
+	 * "BENCH lines in bg_2 pipe:1, tok_s higher is better, target 70% of roofline";
+	 * from the probe reply. Feeds the job widget author's brief; never rendered.
+	 */
+	watch?: string;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -2577,55 +2655,22 @@ export interface FindingDetails {
 	line_end: number;
 }
 
-function normalizeFindingPriority(value: unknown): FindingPriority | undefined {
-	if (isFindingPriority(value)) return value;
-	if (value === 0) return "P0";
-	if (value === 1) return "P1";
-	if (value === 2) return "P2";
-	if (value === 3) return "P3";
-	return undefined;
-}
+const FindingDetailsShape = type({
+	"+": "delete",
+	title: "string",
+	body: "string",
+	// Older reports wrote the severity as its ordinal.
+	priority: type("'P0' | 'P1' | 'P2' | 'P3'").or(type("0 | 1 | 2 | 3").pipe(ordinal => PRIORITY_LABELS[ordinal])),
+	confidence: "0 <= number <= 1",
+	file_path: "string > 0",
+	line_start: "number",
+	line_end: "number",
+});
 
 /** Validates and normalizes a persisted review finding. */
 export function parseFindingDetails(value: unknown): FindingDetails | undefined {
-	if (!isRecord(value)) return undefined;
-
-	const title = typeof value.title === "string" ? value.title : undefined;
-	const body = typeof value.body === "string" ? value.body : undefined;
-	const priority = normalizeFindingPriority(value.priority);
-	const confidence =
-		typeof value.confidence === "number" &&
-		Number.isFinite(value.confidence) &&
-		value.confidence >= 0 &&
-		value.confidence <= 1
-			? value.confidence
-			: undefined;
-	const filePath = typeof value.file_path === "string" && value.file_path.length > 0 ? value.file_path : undefined;
-	const lineStart =
-		typeof value.line_start === "number" && Number.isFinite(value.line_start) ? value.line_start : undefined;
-	const lineEnd = typeof value.line_end === "number" && Number.isFinite(value.line_end) ? value.line_end : undefined;
-
-	if (
-		title === undefined ||
-		body === undefined ||
-		priority === undefined ||
-		confidence === undefined ||
-		filePath === undefined ||
-		lineStart === undefined ||
-		lineEnd === undefined
-	) {
-		return undefined;
-	}
-
-	return {
-		title,
-		body,
-		priority,
-		confidence,
-		file_path: filePath,
-		line_start: lineStart,
-		line_end: lineEnd,
-	};
+	const details = FindingDetailsShape(value);
+	return details instanceof type.errors ? undefined : details;
 }
 /** SubmitReviewDetails - used for rendering review results from yield tool */
 export interface SubmitReviewDetails {

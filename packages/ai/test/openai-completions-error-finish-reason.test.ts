@@ -7,6 +7,7 @@
 // stopping with a pinned error banner.
 import { describe, expect, it } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { getNativeFinishReasonError } from "@oh-my-pi/pi-ai/providers/native-finish-reason";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
@@ -195,6 +196,131 @@ describe("finish_reason: error", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toMatch(RETRYABLE_PATTERN);
 	}, 10_000);
+});
+
+describe("native_finish_reason", () => {
+	const toolDelta = {
+		role: "assistant",
+		tool_calls: [
+			{
+				index: 0,
+				id: "call_read",
+				type: "function",
+				function: { name: "read", arguments: '{"path":"hello.txt"}' },
+			},
+		],
+	};
+
+	it("rejects a billed malformed response normalized to stop, retaining trailing usage and response ID", async () => {
+		const usage = { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 };
+		const stream = streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			maxHttpAttempts: 1,
+			fetch: createSseFetch([
+				completionChunk({
+					choices: [{ index: 0, delta: {}, finish_reason: "stop", native_finish_reason: "MALFORMED_RESPONSE" }],
+					usage,
+				}),
+				// A later clean finish must not revive the failed generation.
+				completionChunk({
+					choices: [{ index: 0, delta: {}, finish_reason: "stop", native_finish_reason: "STOP" }],
+				}),
+				completionChunk({
+					choices: [],
+					usage: { ...usage, prompt_tokens_details: { cached_tokens: 20 } },
+				}),
+				"[DONE]",
+			]),
+		});
+		const eventTypes: string[] = [];
+		for await (const event of stream) eventTypes.push(event.type);
+		const result = await stream.result();
+
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Provider returned error (native_finish_reason: MALFORMED_RESPONSE)");
+		expect(result.errorMessage).toMatch(RETRYABLE_PATTERN);
+		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+		expect(result.responseId).toBe("chatcmpl-error-finish");
+		expect(result.usage).toMatchObject({ input: 80, output: 40, cacheRead: 20, totalTokens: 140 });
+		expect(result.usage.cost.total).toBeGreaterThan(0);
+	});
+
+	it.each(["malformed_function_call", "Unexpected_Tool_Call", "NETWORK_ERROR"])(
+		"rejects %s despite an earlier valid tool call and a normalized tool_calls finish",
+		async nativeFinishReason => {
+			const stream = streamOpenAICompletions(completionsModel, baseContext(), {
+				apiKey: "test-key",
+				fetch: createSseFetch([
+					completionChunk({ choices: [{ index: 0, delta: toolDelta }] }),
+					completionChunk({
+						choices: [
+							{
+								index: 0,
+								delta: {},
+								finish_reason: "tool_calls",
+								native_finish_reason: nativeFinishReason,
+							},
+						],
+					}),
+					completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+					completionChunk({
+						choices: [],
+						usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 },
+					}),
+					"[DONE]",
+				]),
+			});
+			const eventTypes: string[] = [];
+			for await (const event of stream) eventTypes.push(event.type);
+			const result = await stream.result();
+
+			expect(eventTypes.at(-1)).toBe("error");
+			expect(eventTypes).not.toContain("done");
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe(`Provider returned error (native_finish_reason: ${nativeFinishReason})`);
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+			expect(result.content.find(block => block.type === "toolCall")).toMatchObject({
+				type: "toolCall",
+				id: "call_read",
+				name: "read",
+				arguments: { path: "hello.txt" },
+			});
+			expect(result.responseId).toBe("chatcmpl-error-finish");
+			expect(result.usage).toMatchObject({ input: 100, output: 40, totalTokens: 140 });
+		},
+	);
+
+	it.each([
+		{ branch: "success", native: "STOP", normalized: "stop", expected: "stop", tools: false },
+		{ branch: "length", native: "MAX_TOKENS", normalized: "length", expected: "length", tools: false },
+		{ branch: "continuation", native: "TOOL_CALLS", normalized: "tool_calls", expected: "toolUse", tools: true },
+		{ branch: "unknown", native: "FUTURE_VENDOR_REASON", normalized: "stop", expected: "stop", tools: false },
+	])("preserves normalized $branch behavior for native $native", async ({ native, normalized, expected, tools }) => {
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: createSseFetch([
+				completionChunk({
+					choices: [{ index: 0, delta: tools ? toolDelta : { role: "assistant", content: "Hello" } }],
+				}),
+				completionChunk({
+					choices: [{ index: 0, delta: {}, finish_reason: normalized, native_finish_reason: native }],
+				}),
+				"[DONE]",
+			]),
+		}).result();
+
+		expect(result.stopReason).toBe(expected);
+		expect(result.errorMessage).toBeUndefined();
+		if (tools) expect(result.content.some(block => block.type === "toolCall")).toBe(true);
+		else expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it("ignores absent and non-string native reasons without coercion", () => {
+		for (const reason of [undefined, null, 42, {}, ["MALFORMED_RESPONSE"]]) {
+			expect(getNativeFinishReasonError(reason)).toBeUndefined();
+		}
+	});
 });
 
 describe("in-band SSE error envelope", () => {

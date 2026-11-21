@@ -23,6 +23,12 @@ export function parseQueueShorthand(text: string): string | undefined {
 	return prefix ? text.slice(prefix.length).trim() : undefined;
 }
 
+/** Render messages as `->` / `=>` shorthand that {@link parseQueueShorthand} and {@link splitQueuedMessages} read back as the same messages. */
+export function formatQueueShorthand(messages: readonly string[]): string {
+	if (messages.length === 1) return `=> ${messages[0]}`;
+	return `=>\n${messages.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`).join("\n")}`;
+}
+
 function parseEnumeratedItem(line: string, lineIndex: number): EnumeratedItem | undefined {
 	const match = QUEUE_LIST_MARKER_RE.exec(line);
 	if (!match) return undefined;

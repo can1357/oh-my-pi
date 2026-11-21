@@ -1,10 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, prompt, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
-import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
 import type { ToolSession } from ".";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
@@ -20,9 +19,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	readonly approval = "read" as const;
 	readonly label = "Recall";
 	get description(): string {
-		return prompt.render(recallDescription, {
-			toolRefs: sessionMemoryToolRefs(this.session),
-		});
+		return prompt.render(recallDescription);
 	}
 	readonly parameters = memoryRecallSchema;
 	readonly strict = true;
@@ -67,7 +64,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 					};
 				} catch (err) {
 					logger.warn("recall failed", { backend: "mnemopi", bank: state.config.bank, error: String(err) });
-					throw err instanceof Error ? err : new Error(String(err));
+					throw toError(err);
 				}
 			}
 
@@ -104,7 +101,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 				};
 			} catch (err) {
 				logger.warn("recall failed", { bankId: state.bankId, error: String(err) });
-				throw err instanceof Error ? err : new Error(String(err));
+				throw toError(err);
 			}
 		});
 	}

@@ -1,9 +1,11 @@
 /**
  * Registry read/write operations for the marketplace plugin system.
  *
- * Two registries:
+ * Three registries:
  *   - marketplaces.json at getMarketplacesRegistryPath() — which catalogs the user has added
  *   - installed_plugins.json under getPluginsDir() — which plugins are installed
+ *   - project_registries.json next to it — which project installed_plugins.json files
+ *     link into the shared user plugin cache
  *
  * Read/write functions accept explicit file paths so callers control the
  * location. Path helpers compute the default paths from the dir singleton.
@@ -126,6 +128,37 @@ export async function readInstalledPluginsRegistry(filePath: string): Promise<In
 
 export async function writeInstalledPluginsRegistry(filePath: string, reg: InstalledPluginsRegistry): Promise<void> {
 	await atomicWriteJson(filePath, reg);
+}
+
+// ── Project registries index ─────────────────────────────────────────
+
+/**
+ * Path of the user-level index of project `installed_plugins.json` files.
+ * Project-scope installs link into the shared user plugin cache, so cache
+ * cleanup must consult every project registry, not only the cwd one.
+ */
+export function getProjectRegistriesIndexPath(userRegistryPath: string): string {
+	return path.join(path.dirname(userRegistryPath), "project_registries.json");
+}
+
+/** Reads the indexed project registry paths; a missing or malformed index reads as empty. */
+export async function readProjectRegistriesIndex(filePath: string): Promise<string[]> {
+	try {
+		const data = tryParseJson<{ registries?: unknown }>(await Bun.file(filePath).text());
+		const registries = data?.registries;
+		if (!Array.isArray(registries)) {
+			logger.warn("Invalid project registries index, returning empty", { path: filePath });
+			return [];
+		}
+		return registries.filter((r): r is string => typeof r === "string");
+	} catch (err) {
+		if (isEnoent(err)) return [];
+		throw err;
+	}
+}
+
+export async function writeProjectRegistriesIndex(filePath: string, registries: readonly string[]): Promise<void> {
+	await atomicWriteJson(filePath, { version: 1, registries });
 }
 
 // ── Marketplace CRUD ─────────────────────────────────────────────────

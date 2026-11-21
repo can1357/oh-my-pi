@@ -63,7 +63,7 @@ describe("capture failure across background and cancellation boundaries", () => 
 		if (!(error instanceof Error)) throw new Error("Expected cancellation error");
 		expect(error.message).toContain("partial command output");
 		expect(error.message).toContain("not saved completely");
-		expect(error.message).not.toContain("artifact://");
+		expect(error.message).not.toMatch(/local:\/\/\d+\.log/);
 	});
 
 	it("delivers capture warnings for successful async bash without changing its outcome", async () => {
@@ -96,7 +96,7 @@ describe("capture failure across background and cancellation boundaries", () => 
 			await manager.drainDeliveries();
 			expect(manager.getJob(jobId)?.status).toBe("completed");
 			expect(deliveries[0]).toContain("not saved completely");
-			expect(deliveries[0]).not.toContain("artifact://");
+			expect(deliveries[0]).not.toMatch(/local:\/\/\d+\.log/);
 		} finally {
 			await manager.dispose();
 			await sessionManager.close();
@@ -141,7 +141,7 @@ describe("capture failure across background and cancellation boundaries", () => 
 			expect(manager.getJob(jobId)?.status).toBe("completed");
 			expect(deliveries[0]).toContain("completed cell");
 			expect(deliveries[0]).toContain("not saved completely");
-			expect(deliveries[0]).not.toContain("artifact://");
+			expect(deliveries[0]).not.toMatch(/local:\/\/\d+\.log/);
 		} finally {
 			await manager.dispose();
 		}

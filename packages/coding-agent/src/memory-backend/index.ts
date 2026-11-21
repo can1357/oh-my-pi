@@ -4,6 +4,7 @@ export type {
 	MnemopiMemoryEditOptions,
 	MnemopiMemoryEditResult,
 	MnemopiSessionState,
+	MnemopiSessionStateApi,
 	MnemopiSessionStateOptions,
 } from "../mnemopi/state";
 export * from "./local-backend";

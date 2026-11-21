@@ -22,6 +22,7 @@ import {
 	MAX_RAW_QUERY_ROWS,
 	openSqliteReadConnection,
 	parseSqlitePathCandidates,
+	parseSqliteSelectorBoundaryCandidates,
 	parseSqliteSelector,
 	queryRows,
 	renderRow,
@@ -88,6 +89,16 @@ export async function resolveSqliteReadPath(
 				}
 			}
 		}
+	}
+
+	// A SQLite file without a database extension is recognized by its header alone.
+	for (const candidate of parseSqliteSelectorBoundaryCandidates(readPath)) {
+		const absolutePath = resolveReadPath(candidate.sqlitePath, session.cwd);
+		const stat = await Bun.file(absolutePath)
+			.stat()
+			.catch(() => null);
+		if (!stat?.isFile() || !(await isSqliteFile(absolutePath))) continue;
+		return { absolutePath, sqliteSubPath: candidate.subPath, queryString: candidate.queryString };
 	}
 
 	return null;
@@ -189,7 +200,7 @@ export async function readSqlite(
 					.done();
 			}
 			case "raw": {
-				const result = executeReadQuery(db, selector.sql);
+				const result = executeReadQuery(db, selector.sql, selector.page);
 				let output = renderTable(result.columns, result.rows, {
 					totalCount: result.rows.length,
 					offset: 0,
@@ -197,7 +208,14 @@ export async function readSqlite(
 					table: "query",
 					dbPath: resolvedSqlitePath.absolutePath,
 				});
-				if (result.truncated) {
+				if (result.truncated && selector.page) {
+					const next = new URLSearchParams({
+						q: selector.sql,
+						limit: String(selector.page.limit),
+						offset: String(selector.page.offset + result.rows.length),
+					});
+					output += `\n[More rows; append ?${next} to the database path to continue]`;
+				} else if (result.truncated) {
 					output += `\n[Output capped at ${MAX_RAW_QUERY_ROWS} rows; add a LIMIT/OFFSET clause to the query to page through more]`;
 				}
 				return toolResult<ReadToolDetails>(details)

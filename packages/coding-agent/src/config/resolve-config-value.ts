@@ -110,8 +110,8 @@ export async function resolveConfigValue(valueConfig: string): Promise<string | 
 /**
  * Run one command-backed value with isolated stdio and a bounded process tree.
  * POSIX uses an absolute shell, a detached process group, and Linux subreaper
- * supervision so descendants cannot survive timeout. Windows retains Brush's
- * established shell grammar and native process-tree cancellation.
+ * supervision so descendants cannot survive timeout. Windows runs the command
+ * in the embedded bash engine with native process-tree cancellation.
  */
 export async function runShellCommand(
 	command: string,

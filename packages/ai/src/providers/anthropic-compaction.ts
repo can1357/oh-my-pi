@@ -1,4 +1,5 @@
 import { isBedrockAnthropicRoute, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isBedrockRouteUrl } from "@oh-my-pi/pi-catalog/hosts";
 import type { Model } from "../types";
 import type { AnthropicMessagesClientLike } from "./anthropic-client";
 import { normalizeAnthropicBaseUrl, resolveDirectAnthropicBaseUrl } from "./anthropic-state";
@@ -7,7 +8,7 @@ function isCompactionCapableModel(model: Model<"anthropic-messages">): boolean {
 	return model.compat.supportsServerCompaction === true && model.remoteCompaction?.enabled !== false;
 }
 
-/** Supported Anthropic Messages deployments; gateways require an explicit opt-in. */
+/** Anthropic Messages deployments known to implement on-demand compaction. */
 function isSupportedCompactionEndpoint(baseUrl: string | undefined): boolean {
 	if (isOfficialAnthropicApiUrl(baseUrl)) return true;
 	if (!baseUrl) return false;
@@ -29,6 +30,17 @@ export function resolvesToOfficialAnthropicEndpoint(model: Model<"anthropic-mess
 	const baseUrl =
 		model.provider === "anthropic" ? resolveDirectAnthropicBaseUrl(model) : normalizeAnthropicBaseUrl(model.baseUrl);
 	return isOfficialAnthropicApiUrl(baseUrl);
+}
+
+/**
+ * Whether a model declares that its configured endpoint serves Anthropic
+ * Messages on-demand compaction: `remoteCompaction: { api: "anthropic-messages",
+ * enabled: true }`, `api` naming the compaction endpoint's adapter family as it
+ * does for the OpenAI lanes. This is the opt-in for a gateway outside the known
+ * deployments, and for a custom api that dispatches to Anthropic Messages.
+ */
+export function declaresAnthropicCompactionEndpoint(model: Model): boolean {
+	return model.remoteCompaction?.api === "anthropic-messages" && model.remoteCompaction.enabled === true;
 }
 
 /** Whether model policy and the effective deployment support on-demand compaction. */
@@ -55,12 +67,30 @@ export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, 
 	) {
 		return true;
 	}
+	// A gateway outside the known deployments qualifies only by declaring that its own
+	// endpoint serves the compaction protocol; `enabled` alone keeps it excluded, and a
+	// reroute away from the configured endpoint still has to reach a known deployment.
+	if (declaresAnthropicCompactionEndpoint(model) && route === normalizeAnthropicBaseUrl(model.baseUrl)) {
+		return true;
+	}
 	return (
 		isSupportedCompactionEndpoint(route) &&
 		(model.compat.firstPartyProvider === true ||
 			model.provider === "google-vertex" ||
 			model.remoteCompaction?.enabled === true)
 	);
+}
+
+/**
+ * Whether a Bedrock Converse model compacts through a Bedrock Runtime
+ * `InvokeModelWithResponseStream` side request. AWS bedrock-runtime origins
+ * (public, FIPS, PrivateLink) qualify by default; any other `baseUrl` is a
+ * gateway that may implement only Converse, so it needs
+ * `remoteCompaction.enabled: true`. `enabled: false` always opts out.
+ */
+export function supportsBedrockConverseCompaction(model: Model<"bedrock-converse-stream">): boolean {
+	if (model.compat.supportsServerCompaction !== true) return false;
+	return model.remoteCompaction?.enabled ?? (!model.baseUrl || isBedrockRouteUrl(model.baseUrl, "runtime"));
 }
 
 /** Read a caller-owned client's endpoint for request and compaction routing. */

@@ -269,6 +269,26 @@ describe("anthropic head caching (general API-key path)", () => {
 		expect(findCachedMessageIndices(withTools)).toEqual([28, 64]);
 	});
 
+	it("shares the cached reply prefix between a side request and the next user turn", async () => {
+		const persisted: Message[] = [
+			{ role: "user", content: "Fix the issue", timestamp: 1 },
+			assistantMessage("Fixed.", 2),
+		];
+		const reminder: Message = { role: "developer", content: "No tools", timestamp: 3 };
+		const sidePrompt: Message = { role: "user", content: "Predict the next user message", timestamp: 4 };
+		markPerCallContextMessage(reminder);
+		markPerCallContextMessage(sidePrompt);
+		const side = await captureWireBody(undefined, { ...CONTEXT, messages: [...persisted, reminder, sidePrompt] });
+		const nextTurn = await captureWireBody(undefined, {
+			...CONTEXT,
+			messages: [...persisted, { role: "user", content: "Review the test", timestamp: 5 }],
+		});
+
+		expect(findCachedMessageIndices(side).filter(index => index >= 1)).toEqual([1]);
+		expect(findCachedMessageIndices(nextTurn)).toContain(1);
+		expect(side.messages[1]?.content).toEqual(nextTurn.messages[1]?.content);
+	});
+
 	it("bounds the stable prefix at the oldest of several per-call marks", async () => {
 		// 40 turns with per-call marks after turns 32 and 36. Only the prefix
 		// before the OLDEST mark repeats next request, so decimation counts and

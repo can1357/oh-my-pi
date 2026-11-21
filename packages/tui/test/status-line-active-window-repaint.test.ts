@@ -1,5 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { setNativeRendering } from "../src/native/state";
+import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC, setSpinnerInterval } from "../src/spinner-clock";
 import { StatusLineComponent } from "../src/status-line/component";
 import type { StatusLineHost, StatusLineSession } from "../src/status-line/host";
 import type { StatusLineSettings } from "../src/status-line/types";
@@ -50,16 +51,23 @@ function createComponent(settings?: StatusLineSettings) {
  * loader reference) froze the animation until the next keystroke.
  */
 describe("status line active-window repaint ticker", () => {
+	beforeEach(() => {
+		// Ticks land on the shared spinner clock's boundaries, a whole number of spinner frames
+		// apart. A 250 ms spinner makes the period the safety net itself, so the lifecycle
+		// tests below count in plain 250 ms steps; the cadence contract has its own tests.
+		setSpinnerInterval(250);
+	});
 	afterEach(() => {
 		vi.useRealTimers();
 		setNativeRendering(false);
+		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 	});
 	beforeAll(async () => {
 		await initTheme();
 	});
 
 	it("repaints on its own cadence while a turn window is open, with no loader running", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const { component, repaint } = createComponent();
 
 		component.markActivityStart();
@@ -76,7 +84,7 @@ describe("status line active-window repaint ticker", () => {
 	});
 
 	it("stays silent while idle, re-arms for the next turn, and stops on dispose", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const { component, repaint } = createComponent();
 
 		vi.advanceTimersByTime(1000);
@@ -97,7 +105,7 @@ describe("status line active-window repaint ticker", () => {
 	});
 
 	it("re-arms when focus returns to a session whose turn is still running", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const main = createSession(true);
 		const component = new StatusLineComponent(main, createHost());
 		const repaint = vi.fn();
@@ -124,7 +132,7 @@ describe("status line active-window repaint ticker", () => {
 	});
 
 	it("re-arms when a native surface that suppressed the ticker is revoked mid-turn", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const { component, repaint } = createComponent();
 
 		// The turn starts while a TSP surface renders the status area, so
@@ -140,6 +148,87 @@ describe("status line active-window repaint ticker", () => {
 		vi.advanceTimersByTime(250);
 		expect(repaint.mock.calls.length).toBe(1);
 
+		component.dispose();
+	});
+
+	it("follows the spinner clock: a slower or static spinner stops the 4 Hz wakeups", () => {
+		vi.useFakeTimers({ now: 0 });
+		const { component, repaint } = createComponent();
+
+		// A spinner slower than the safety net sets the pace.
+		setSpinnerInterval(500);
+		component.markActivityStart();
+		vi.advanceTimersByTime(1000);
+		expect(repaint.mock.calls.length).toBe(2);
+
+		// Static spinners (`tui.motion: none`): the armed tick lands at t=1500, then only the one-second
+		// turn timer moves (2000, 3000, 4000).
+		setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+		repaint.mockClear();
+		vi.advanceTimersByTime(3000);
+		expect(repaint.mock.calls.length).toBe(4);
+
+		component.dispose();
+		vi.advanceTimersByTime(2000);
+		expect(repaint.mock.calls.length).toBe(4);
+		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+	});
+
+	it("ticks a whole number of spinner frames apart, on the clock's boundaries, whenever the turn started", () => {
+		vi.useFakeTimers({ now: 0 });
+		const { component, repaint } = createComponent();
+
+		// Default 80 ms spinner: the safety net rounds up to 320 ms. A turn opened at t=120 ticks at
+		// 320, 640, 960 and 1280 — never at 370, 620, … from its own start.
+		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+		vi.advanceTimersByTime(120);
+		component.markActivityStart();
+		vi.advanceTimersByTime(199);
+		expect(repaint.mock.calls.length).toBe(0);
+		vi.advanceTimersByTime(1);
+		expect(repaint.mock.calls.length).toBe(1);
+		vi.advanceTimersByTime(960);
+		expect(repaint.mock.calls.length).toBe(4);
+
+		// A 100 ms spinner: three frames per tick (300 ms), realigned live — from t=1280 the next
+		// boundaries are 1500, 1800 and 2100.
+		setSpinnerInterval(100);
+		repaint.mockClear();
+		vi.advanceTimersByTime(1000);
+		expect(repaint.mock.calls.length).toBe(3);
+
+		component.dispose();
+	});
+});
+
+/**
+ * Contract: a spinner frame inside one second redraws only the brand glyph, and
+ * the line it yields is byte-for-byte the line a full rebuild draws at that
+ * moment, in every layout that embeds the brand.
+ */
+describe("status line spinner redraw", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("matches a full rebuild on every spinner frame, across the turn timer's seconds", () => {
+		vi.useFakeTimers({ now: 10_000 });
+		const component = new StatusLineComponent(createSession(true), createHost());
+		component.markActivityStart();
+		const lines = new Set<string>();
+		for (let frame = 0; frame < 30; frame++) {
+			const followed = [component.getBandTopBorder(100).content, component.getTopBorder(100).content];
+			// invalidate() forces the full rebuild the redraw must reproduce, at the same instant.
+			component.invalidate();
+			expect(followed).toEqual([component.getBandTopBorder(100).content, component.getTopBorder(100).content]);
+			lines.add(followed[0]!);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+		}
+		// The spinner moved: these were redraws, not one cached line.
+		expect(lines.size).toBeGreaterThan(3);
 		component.dispose();
 	});
 });

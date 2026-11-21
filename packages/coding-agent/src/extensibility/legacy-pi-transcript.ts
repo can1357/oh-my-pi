@@ -43,7 +43,7 @@ interface TranscriptToolReferenceLike {
 }
 
 /** Extract and join text from message content (upstream `text.ts`). */
-function contentText(content: unknown, separator = "\n"): string {
+export function contentText(content: unknown, separator = "\n"): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	const parts: string[] = [];
@@ -63,7 +63,7 @@ function contentText(content: unknown, separator = "\n"): string {
 }
 
 /** Render a system message as a complete prompt: its content followed by its sections. */
-function getSystemMessageText(message: TranscriptMessageLike): string {
+export function getSystemMessageText(message: TranscriptMessageLike): string {
 	const parts = [contentText(message.content)];
 	for (const text of Object.values(message.sections ?? {})) {
 		if (text !== null) parts.push(text);

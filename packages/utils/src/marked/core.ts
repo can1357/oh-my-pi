@@ -4,6 +4,7 @@ import {
 	canOpenDelimiter,
 	escapedAt,
 	InlineClosers,
+	matchDestination,
 	PUNCTUATION,
 } from "./inline-closers";
 import { TextRun, TextStops } from "./inline-text";
@@ -418,30 +419,6 @@ function findDelimiter(src: string, delimiter: string, from: number): number {
 	while (at !== -1 && escapedAt(src, at)) at = src.indexOf(delimiter, at + delimiter.length);
 	return at;
 }
-
-/**
- * The autolink at the start of `src`, a suffix of `closers`' source: "<", a URL or an address, ">". A URL runs from its
- * scheme to the first " " or ">", which must be a ">"; an address holds no " ", "<", ">" or second "@". An address
- * that matches after a scheme ends where the URL does, so only the URL is tried there.
- */
-function autolinkPrefix(src: string, closers: InlineClosers): string | undefined {
-	const scheme = /^<(?:https?:\/\/|ftp:\/\/)/i.exec(src);
-	if (!scheme) return /^<[^ <>@]+@[^ <>@]+>/.exec(src)?.[0];
-	const close = closers.closeUrlAutolink(src, scheme[0].length);
-	return close === -1 ? undefined : src.slice(0, close + 1);
-}
-
-/** The inline HTML (a tag or a comment) at the start of `src`, a suffix of `closers`' source, or `undefined`. */
-function inlineHtmlPrefix(src: string, closers: InlineClosers): string | undefined {
-	if (src.startsWith("<!--")) {
-		const end = closers.closeComment(src);
-		return end === -1 ? undefined : src.slice(0, end + 3);
-	}
-	if (!/^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>)/.test(src)) return undefined;
-	const end = closers.closeTag(src);
-	return end === -1 ? undefined : src.slice(0, end + 1);
-}
-
 /** Tokenizes the built-in inline Markdown surface. */
 export class Tokenizer {
 	options: MarkedOptions;
@@ -515,13 +492,10 @@ function matchLink(src: string, lexer: Lexer, closers: InlineClosers): NestedMat
 	if (src[labelEnd + 1] === "(") {
 		const destinationEnd = closers.closeRound(src, labelEnd + 2);
 		if (destinationEnd === -1) return undefined;
-		const inside = src.slice(labelEnd + 2, destinationEnd).trim();
-		let href = inside;
-		let title: string | null = null;
-		const titleMatch = /^(<[^>]*>|\S+?)(?:\s+(?:"([\s\S]*)"|'([\s\S]*)'|\(([\s\S]*)\)))?$/.exec(inside);
+		const titleMatch = matchDestination(src.slice(labelEnd + 2, destinationEnd));
 		if (!titleMatch) return undefined;
-		href = cleanUrl(titleMatch[1]!);
-		title = titleMatch[2] ?? titleMatch[3] ?? titleMatch[4] ?? null;
+		const href = cleanUrl(titleMatch[1]!);
+		const title = titleMatch[2] ?? titleMatch[3] ?? titleMatch[4] ?? null;
 		const raw = src.slice(0, destinationEnd + 1);
 		// An image's text is its label unescaped. Nested images each unescape their label, so a label without an escape
 		// is taken as it is instead of read again.
@@ -581,7 +555,7 @@ function matchEmphasis(rest: string, output: Token[], closers: InlineClosers): N
 	const previous = output.at(-1)?.raw.at(-1) ?? "\n";
 	if (marker !== "*" && marker !== "_") return undefined;
 	if (rest.startsWith(marker.repeat(3)) && canOpenDelimiter(rest, 0, 3, marker, previous)) {
-		const end = findDelimiter(rest, marker.repeat(3), 3);
+		const end = closers.findDelimiter(rest, marker.repeat(3), 3);
 		if (end !== -1 && canCloseDelimiter(rest, end, marker)) {
 			// The text between the delimiters inside the outer two markers of each: `**inner**`.
 			const text = rest.slice(1, end + 2);
@@ -606,7 +580,18 @@ function matchEmphasis(rest: string, output: Token[], closers: InlineClosers): N
 }
 
 function trimBareUrl(candidate: string): string {
+	// A URL runs to the next space, so in text without spaces between words (Korean, Japanese, Chinese) an unbalanced
+	// ")" closing the parentheses around the URL is followed by the next word: the URL ends at that ")".
+	let depth = 0;
 	let end = candidate.length;
+	for (let i = 0; i < end; i++) {
+		const char = candidate[i]!;
+		if (char === "(") depth++;
+		else if (char === ")" && depth > 0) depth--;
+		else if (char === ")" && i + 1 < end && candidate.charCodeAt(i + 1) > 0x7f) end = i;
+	}
+	candidate = candidate.slice(0, end);
+	end = candidate.length;
 	while (end > 0 && ".,:;!?".includes(candidate[end - 1]!)) end--;
 	let out = candidate.slice(0, end);
 	let opens = 0;
@@ -655,55 +640,66 @@ function lexToNested(lex: InlineLex): NestedMatch | undefined {
 	// The context is shared with the sources nested in this one, which move its end while they are lexed.
 	context.end = closers.end;
 	let rest = lex.rest;
+	// A token the lexer consumed ends the walk, so the backticks left where the next token starts are a string of their
+	// own even when the run they belong to began earlier: an extension, an override or an escape token may leave the
+	// scan inside a run, and a code span opens there. Only the text step's own advance leaves the scan inside a run
+	// without consuming a token, and no span opens at such a position.
+	let resumed = false;
+	/** Pushes `token` and moves past its raw, which is where the next token starts. */
+	const consumeToken = (token: Token): void => {
+		output.push(token);
+		rest = rest.slice(token.raw.length);
+		resumed = true;
+	};
 	while (rest !== "") {
+		const resumedHere = resumed;
+		resumed = false;
 		let custom: Tokens.Generic | undefined;
 		for (const extension of lexer.extensions.inline) {
 			custom = extension.tokenizer.call(context, rest, output);
 			if (custom?.raw) break;
 		}
 		if (custom?.raw) {
-			output.push(custom);
-			rest = rest.slice(custom.raw.length);
+			consumeToken(custom);
 			continue;
 		}
 
 		const escaped = /^\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/.exec(rest);
 		if (escaped) {
-			output.push({ type: "escape", raw: escaped[0], text: escaped[1]! });
-			rest = rest.slice(2);
+			consumeToken({ type: "escape", raw: escaped[0], text: escaped[1]! });
 			continue;
 		}
 		const br = lexer.options.breaks ? /^(?: {2,}|\\)?\n/.exec(rest) : /^(?: {2,}|\\)\n/.exec(rest);
 		if (br) {
-			output.push({ type: "br", raw: br[0] });
-			rest = rest.slice(br[0].length);
+			consumeToken({ type: "br", raw: br[0] });
 			continue;
 		}
 		if (rest[0] === "`") {
-			const width = closers.codeOpenerWidth(rest);
+			const width = closers.codeOpenerWidth(rest, resumedHere);
 			const end = closers.closeCode(rest, width);
 			if (end !== -1) {
 				const raw = rest.slice(0, end + width);
 				let text = rest.slice(width, end).replace(/\n/g, " ");
 				if (/^ .* $/.test(text) && text.trim() !== "") text = text.slice(1, -1);
-				output.push({ type: "codespan", raw, text });
-				rest = rest.slice(raw.length);
+				consumeToken({ type: "codespan", raw, text });
 				continue;
 			}
 		}
-		const auto = autolinkPrefix(rest, closers);
-		if (auto) {
-			const text = auto.slice(1, -1);
-			const href = text.includes("@") && !/^[a-z][a-z+.-]*:\/\//i.test(text) ? `mailto:${text}` : text;
-			output.push({ type: "link", raw: auto, text, href, tokens: [{ type: "text", raw: text, text }] });
-			rest = rest.slice(auto.length);
-			continue;
-		}
-		const html = inlineHtmlPrefix(rest, closers);
-		if (html) {
-			output.push({ type: "html", raw: html, inLink: false, inRawBlock: false, block: false, text: html });
-			rest = rest.slice(html.length);
-			continue;
+		if (rest.startsWith("<")) {
+			const autolink = closers.autolinkLength(rest);
+			if (autolink !== -1) {
+				const raw = rest.slice(0, autolink);
+				const text = raw.slice(1, -1);
+				const href = text.includes("@") && !/^[a-z][a-z+.-]*:\/\//i.test(text) ? `mailto:${text}` : text;
+				consumeToken({ type: "link", raw, text, href, tokens: [{ type: "text", raw: text, text }] });
+				continue;
+			}
+			const html = closers.htmlLength(rest);
+			if (html !== -1) {
+				const raw = rest.slice(0, html);
+				consumeToken({ type: "html", raw, inLink: false, inRawBlock: false, block: false, text: raw });
+				continue;
+			}
 		}
 		const nested = matchLink(rest, lexer, closers) ?? matchEmphasis(rest, output, closers);
 		if (nested) {
@@ -716,8 +712,7 @@ function lexToNested(lex: InlineLex): NestedMatch | undefined {
 			if (override) del = override.call(lexer.tokenizer, rest, rest);
 			if (del === false || !override) del = lexer.tokenizer.del(rest);
 			if (del) {
-				output.push(del);
-				rest = rest.slice(del.raw.length);
+				consumeToken(del);
 				continue;
 			}
 		}
@@ -744,8 +739,7 @@ function lexToNested(lex: InlineLex): NestedMatch | undefined {
 			}
 		}
 		if (url) {
-			output.push(url);
-			rest = rest.slice(url.raw.length);
+			consumeToken(url);
 			continue;
 		}
 

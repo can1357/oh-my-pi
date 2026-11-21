@@ -13,6 +13,8 @@ import {
 	type SnapshotResponse,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -500,6 +502,69 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(remote.listAuthCredentials("openai-codex")).toHaveLength(1);
 	});
 
+	test("a broker-refreshed Kiro login keeps the routing fields its API key needs", async () => {
+		const kiro = getProviderDefinition("kiro")!;
+		vi.spyOn(kiro, "refreshToken").mockImplementation(async current => ({
+			...current,
+			access: "access-fresh",
+			expires: Date.now() + 3_600_000,
+		}));
+		await storage!.credentials.upsert("kiro", {
+			type: "oauth",
+			access: "access-stale",
+			refresh: "refresh-kiro",
+			expires: Date.now() - 1_000,
+			region: "us-east-1",
+			accountId: "login-a",
+		});
+		remote = new RemoteAuthCredentialStore({ client: new AuthBrokerClient({ url: handle!.url, token }) });
+		await waitUntil(() => remote!.snapshot.credentials.some(entry => entry.provider === "kiro"));
+		const clientStorage = new AuthStorage(remote);
+		try {
+			await clientStorage.credentials.reload();
+			// `accessAll` refreshes the expired row in `tryOAuth`, without the key-selection preflight.
+			const [access] = await clientStorage.oauth.accessAll("kiro");
+			expect(access).toMatchObject({ ok: true, accessToken: "access-fresh", accountId: "login-a" });
+			const apiKey = await clientStorage.keys.get("kiro", "kiro-session");
+			expect(decodeKiroCredential(apiKey ?? "", {})).toMatchObject({
+				token: "access-fresh",
+				region: "us-east-1",
+				loginId: "login-a",
+			});
+		} finally {
+			clientStorage.close();
+		}
+	});
+
+	test("an allow-list pool hides unlisted providers and API keys over snapshots and SSE", async () => {
+		await storage!.credentials.upsert("anthropic", { type: "api_key", key: "hidden-anthropic-key" });
+		await storage!.credentials.upsert("openai-codex", mintOAuthCredential("codex", Date.now() + 120_000));
+		await storage!.credentials.upsert("openrouter", { type: "api_key", key: "visible-openrouter-key" });
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await client.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
+		remote = new RemoteAuthCredentialStore({
+			client,
+			initialSnapshot: initialResult.snapshot,
+			accountPool: new Map([
+				["*", { accounts: new Set<string>(), apiKeys: false }],
+				["anthropic", { apiKeys: false }],
+				["openrouter", {}],
+			]),
+		});
+		const visible = () =>
+			remote!
+				.listAuthCredentials()
+				.map(entry => `${entry.provider}:${entry.credential.type}`)
+				.sort();
+		expect(visible()).toEqual(["anthropic:oauth", "openrouter:api_key"]);
+
+		const initialGeneration = remote.snapshot.generation;
+		await storage!.credentials.upsert("moonshot", { type: "api_key", key: "hidden-moonshot-key" });
+		await waitUntil(() => remote!.snapshot.generation > initialGeneration);
+		expect(visible()).toEqual(["anthropic:oauth", "openrouter:api_key"]);
+	});
+
 	test("loads the account pool once for broker-backed discovery", async () => {
 		await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 		const client = new AuthBrokerClient({ url: handle!.url, token });
@@ -531,6 +596,56 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 				} finally {
 					discovered.close();
 				}
+			},
+		);
+	});
+
+	test("loads allow-list rules from the account pool file", async () => {
+		await storage!.credentials.upsert("anthropic", { type: "api_key", key: "hidden-anthropic-key" });
+		await storage!.credentials.upsert("openrouter", { type: "api_key", key: "visible-openrouter-key" });
+		await storage!.credentials.upsert("moonshot", { type: "api_key", key: "hidden-moonshot-key" });
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await client.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
+		const allowed = initialResult.snapshot.credentials.find(entry => entry.identityKey?.includes("a@example.com"));
+		if (!allowed?.identityKey) throw new Error("expected OAuth identity key");
+		const poolPath = path.join(tempDir, "account-pool.json");
+		await Bun.write(
+			poolPath,
+			JSON.stringify({
+				"*": false,
+				anthropic: { accounts: [allowed.identityKey], apiKeys: false },
+				openrouter: true,
+			}),
+		);
+
+		await withEnv(
+			{
+				OMP_AUTH_BROKER_URL: handle!.url,
+				OMP_AUTH_BROKER_TOKEN: token,
+				OMP_AUTH_BROKER_ACCOUNT_POOL_FILE: poolPath,
+			},
+			async () => {
+				const discovered = await discoverAuthStorage({
+					agentDir: tempDir,
+					cachePath: path.join(tempDir, "allow-list-snapshot-cache.enc"),
+				});
+				try {
+					expect(discovered.oauth.accounts("anthropic").map(account => account.email)).toEqual(["a@example.com"]);
+					expect(
+						discovered.credentials
+							.snapshot()
+							.credentials.map(entry => `${entry.provider}:${entry.credential.type}`)
+							.sort(),
+					).toEqual(["anthropic:oauth", "openrouter:api_key"]);
+				} finally {
+					discovered.close();
+				}
+
+				await Bun.write(poolPath, JSON.stringify({ anthropic: { apiKeys: "no" } }));
+				await expect(
+					discoverAuthStorage({ agentDir: tempDir, cachePath: path.join(tempDir, "invalid-cache.enc") }),
+				).rejects.toThrow('"apiKeys" that is not a boolean');
 			},
 		);
 	});

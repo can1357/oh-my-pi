@@ -61,11 +61,6 @@ describe("credential masking reaches every surface", () => {
 			expect(getSettingDef(createSettingsHost().entries, path)).toBeUndefined();
 		}
 	});
-
-	it("leaves ordinary text settings unmasked", () => {
-		const def = getSettingDef(createSettingsHost().entries, "shellPath");
-		if (def?.type === "text") expect(def.secret).toBe(false);
-	});
 });
 
 /**

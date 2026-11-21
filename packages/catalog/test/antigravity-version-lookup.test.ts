@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { ensureAntigravityVersion } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { ensureAntigravityVersion, getAntigravityPlatform } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 const RETRY_WINDOW_MS = 10 * 60_000;
 // The lookup state is process-wide; every test starts on a fresh clock past any
@@ -65,5 +65,17 @@ describe("ensureAntigravityVersion", () => {
 		release.resolve(new Response("unavailable", { status: 503 }));
 		await concurrent;
 		expect(calls()).toBe(1);
+	});
+});
+
+describe("getAntigravityPlatform", () => {
+	it("reports the native build shipped for each host OS, not the host arch", () => {
+		expect(getAntigravityPlatform("darwin")).toEqual({ os: "darwin", arch: "arm64" });
+		expect(getAntigravityPlatform("linux")).toEqual({ os: "linux", arch: "amd64" });
+		expect(getAntigravityPlatform("win32")).toEqual({ os: "windows", arch: "amd64" });
+	});
+
+	it("falls back to the Linux build on an OS without a native client", () => {
+		expect(getAntigravityPlatform("freebsd")).toEqual({ os: "linux", arch: "amd64" });
 	});
 });

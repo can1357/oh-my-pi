@@ -284,6 +284,7 @@ describe("buildShareSnapshot", () => {
 					meta: {
 						source: { type: "path", value: `/home/${secret}/log` },
 						diagnostics: { summary: `diag ${secret}`, messages: [`msg ${secret}`] },
+						minimized: { filter: `lint-${secret}`, inputBytes: 1960, outputBytes: 27, artifactId: "2" },
 					},
 					timestamp: 2,
 				},
@@ -308,6 +309,97 @@ describe("buildShareSnapshot", () => {
 		expect(flat).not.toContain(serverToolSentinel);
 		// Source entries keep the real values; redaction is share-only.
 		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
+	test("drops chat-completions reasoning_details envelopes, which hold the raw reasoning text", () => {
+		const secret = "share-details-secret-ABCDE";
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{
+							type: "thinking",
+							thinking: `Use ${secret} now.`,
+							thinkingSignature: JSON.stringify({
+								reasoningDetails: [{ type: "reasoning.text", text: `Use ${secret} now.`, index: 0 }],
+								field: "reasoning",
+							}),
+						},
+					],
+					api: "openai-completions",
+					provider: "openrouter",
+					model: "google/gemini-3-pro-preview",
+					stopReason: "stop",
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "a1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(secret);
+		expect(flat).toContain('"thinkingSignature":"reasoning"');
+	});
+
+	test("drops the encrypted reasoning_details entry a tool call keeps, but not its Gemini signature", () => {
+		const blob = "share-encrypted-reasoning-blob";
+		const geminiSignature = JSON.stringify({ perCall: { google: { thought_signature: "gemini-call-signature" } } });
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "call_1",
+							name: "get_weather",
+							arguments: { city: "Paris" },
+							thoughtSignature: JSON.stringify({
+								perCall: { type: "reasoning.encrypted", id: "call_1", data: blob, index: 1 },
+							}),
+						},
+						{
+							type: "toolCall",
+							id: "call_2",
+							name: "get_weather",
+							arguments: { city: "Rome" },
+							thoughtSignature: geminiSignature,
+						},
+					],
+					api: "openai-completions",
+					provider: "openrouter",
+					model: "google/gemini-3-pro-preview",
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "a1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: "share-unused-secret" }]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(blob);
+		expect(flat).toContain(JSON.stringify(geminiSignature));
 	});
 
 	test("redacts every title-change field before sharing", () => {
@@ -378,6 +470,46 @@ describe("buildShareSnapshot", () => {
 		expect(flat).not.toContain(friendlyTitle);
 		expect(flat).not.toContain(friendlyPreviousTitle);
 		expect(flat).not.toContain(friendlyTrigger);
+	});
+
+	test("includes the bash minimizer filter in the regex collision pre-scan", () => {
+		const plainSecret = "PLAIN_FILTER_SECRET";
+		const friendlyName = "TOKFILTERABC";
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "b1",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:00.000Z",
+				message: {
+					role: "bashExecution",
+					command: "pnpm lint",
+					output: "1 error",
+					exitCode: 1,
+					cancelled: false,
+					truncated: false,
+					meta: { minimized: { filter: "tok_filter_abc", inputBytes: 1960, outputBytes: 27, artifactId: "2" } },
+					timestamp: 2,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => ({ ...sessionData([], "x").header, title: `investigating ${plainSecret}` }),
+			getEntries: () => entries,
+			getLeafId: () => "b1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_filter_[a-z]+" },
+		]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+		const flat = JSON.stringify(snapshot);
+
+		expect(flat).not.toContain("tok_filter_abc");
+		expect(flat).not.toContain(friendlyName);
+		expect(flat).toContain('"inputBytes":1960');
+		expect(flat).toContain('"artifactId":"2"');
 	});
 
 	test("collects regex-protected values across the whole snapshot so an earlier field's friendly-name placeholder cannot leak a later field's secret", () => {

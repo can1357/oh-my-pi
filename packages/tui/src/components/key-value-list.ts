@@ -2,7 +2,15 @@ import { compactText, styleSpans } from "../native/spans";
 import { node } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
-import { Ellipsis, getWidthConfigEpoch, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
+import {
+	Ellipsis,
+	finiteWidth,
+	getWidthConfigEpoch,
+	singleLine,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../utils";
 
 /** One label/value entry in a {@link KeyValueList}. */
 export interface KeyValueRow {
@@ -19,14 +27,6 @@ export interface KeyValueListOptions {
 	readonly gap?: string;
 	readonly minValueWidth?: number;
 	readonly labelOverflow?: "allow" | "truncate";
-}
-
-function finiteWidth(width: number): number {
-	return Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : 0;
-}
-
-function singleLine(text: string): string {
-	return replaceTabs(text).replace(/[\r\n]+/g, " ");
 }
 
 /** A bounded ANSI-aware label/value list with replaceable rows and aligned wrapped continuations. */

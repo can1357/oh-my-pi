@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatDuration } from "@oh-my-pi/pi-utils/format";
+import { formatAge, formatDuration } from "@oh-my-pi/pi-utils/format";
 
 describe("formatDuration", () => {
 	// Codex's wham/usage endpoint returns the prior window's reset_at until the
@@ -29,5 +29,15 @@ describe("formatDuration", () => {
 		expect(formatDuration(59_940)).toBe("59.9s");
 		expect(formatDuration(59_960)).toBe("1m");
 		expect(formatDuration(119_600)).toBe("1m59s");
+	});
+});
+
+describe("formatAge", () => {
+	const day = 86_400;
+	// Ages past a year once read as hundreds of months ("282mo ago").
+	it("switches from months to years at 365 days", () => {
+		expect(formatAge(364 * day)).toBe("12mo ago");
+		expect(formatAge(365 * day)).toBe("1y ago");
+		expect(formatAge(8_600 * day)).toBe("23y ago");
 	});
 });

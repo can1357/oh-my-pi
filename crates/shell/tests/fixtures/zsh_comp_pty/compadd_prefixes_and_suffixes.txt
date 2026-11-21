@@ -1,0 +1,10 @@
+### ": hidal\u{14}"
+% : ign-pre-hidalp.x
+@ 0,18
+### "\u{14}"
+% : ign-pre-hidalp.x
+@ 0,20
+### "\u{15}: hid\u{18}l"
+% : hid
+alpha  alps
+@ 0,7

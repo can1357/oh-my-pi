@@ -1,15 +1,18 @@
+import type { ToolTier } from "@oh-my-pi/pi-agent-core";
 import { extractUriScheme } from "../internal-urls/parse";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
+import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
 import {
+	expandTilde,
 	hasFsCode,
 	isEnoent,
 	isEnotdir,
+	isRecord,
 	isWsl,
 	stripWindowsExtendedLengthPathPrefix,
 	windowsPathToWslMount,
@@ -101,17 +104,7 @@ function stripFileUrl(filePath: string): string {
 	}
 }
 
-export function expandTilde(filePath: string, home?: string): string {
-	const h = home ?? os.homedir();
-	if (filePath === "~") return h;
-	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
-		return h + filePath.slice(1);
-	}
-	if (filePath.startsWith("~")) {
-		return path.join(h, filePath.slice(1));
-	}
-	return filePath;
-}
+export { expandTilde };
 
 export function expandPath(filePath: string): string {
 	// Some models intermittently prefix an otherwise-valid path with a stray
@@ -256,7 +249,9 @@ export async function probeLiteralPathExists(filePath: string, cwd: string): Pro
  * filenames or NTFS alternate data streams, so a confirmed `lstat` always
  * preserves the literal path. Ambiguous probe errors preserve the literal on
  * POSIX, where colon filenames are valid, but fall back to the strict split on
- * Windows, where only a confirmed alternate data stream can be literal.
+ * Windows, where only a confirmed alternate data stream can be literal. A list
+ * repeating its colon (`a:1-30,:-30`) folds into one selector unless the path
+ * before the last colon (`a:1-30,`) names an existing file.
  */
 export async function splitPathAndSelPreferringLiteral(
 	rawPath: string,
@@ -265,7 +260,11 @@ export async function splitPathAndSelPreferringLiteral(
 	const strict = splitPathAndSel(rawPath);
 	if (strict.sel === undefined) return strict;
 	const probe = await probeLiteralPathExists(rawPath, cwd);
-	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
+	if (probe === "exists" || (probe === "unknown" && process.platform !== "win32")) return { path: rawPath };
+	const unfolded = splitPathAndSel(rawPath, { foldListColons: false });
+	if (unfolded.path !== strict.path && (await probeLiteralPathExists(unfolded.path, cwd)) === "exists")
+		return unfolded;
+	return strict;
 }
 
 /**
@@ -294,7 +293,10 @@ export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: strin
 	const strict = splitPathAndSel(rawPath);
 	if (strict.sel === undefined) return strict;
 	const probe = probeLiteralPathExistsSync(rawPath, cwd);
-	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
+	if (probe === "exists" || (probe === "unknown" && process.platform !== "win32")) return { path: rawPath };
+	const unfolded = splitPathAndSel(rawPath, { foldListColons: false });
+	if (unfolded.path !== strict.path && probeLiteralPathExistsSync(unfolded.path, cwd) === "exists") return unfolded;
+	return strict;
 }
 
 function assertNotInternalUrl(expanded: string, original: string): void {
@@ -315,19 +317,28 @@ function isInternalUrlPath(filePath: string): boolean {
  *
  * A bare root slash is treated as a workspace-root alias for tool inputs. Users
  * often pass `/` to mean “search from here”, and letting tools escape to the
- * filesystem root is almost never what they intended.
+ * filesystem root is almost never what they intended. A shell `cd` target is
+ * not a tool input: use {@link resolveShellDirectory}.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, true);
+}
+
+/**
+ * Resolve a directory a shell command named (`cd <path>`), relative to `cwd`.
+ *
+ * Same expansion as {@link resolveToCwd}, except a bare root (`/`, `//`, `///`)
+ * is the filesystem root. Explicit tool path inputs keep the workspace alias.
+ */
+export function resolveShellDirectory(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, false);
+}
+
+function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boolean): string {
 	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath));
-
 	assertNotInternalUrl(expanded, filePath);
-
-	if (/^\/+$/.test(expanded)) {
-		return cwd;
-	}
-	if (path.isAbsolute(expanded)) {
-		return expanded;
-	}
+	if (aliasWorkspaceRoot && /^\/+$/.test(expanded)) return cwd;
+	if (path.isAbsolute(expanded)) return expanded;
 	return path.resolve(cwd, expanded);
 }
 
@@ -550,6 +561,18 @@ export function resolveSearchResultPath(base: string, rel: string): string {
 	return router.canHandle(base) ? joinUrlPath(base, rel) : path.resolve(base, rel);
 }
 
+/**
+ * Absolute path of a native result for one resolved search target.
+ * Directory results are walk-relative and join onto `basePath`. A file
+ * target's display path is only its name, so the file is `basePath` itself.
+ */
+export function resolveTargetResultPath(
+	target: { basePath: string; isDirectory: boolean },
+	displayPath: string,
+): string {
+	return target.isDirectory ? resolveSearchResultPath(target.basePath, displayPath) : target.basePath;
+}
+
 /** `target` relative to the host directory `base` with `/` separators; `target` itself when either is an internal URL. */
 export function relativeSearchResultPath(base: string, target: string): string {
 	const router = InternalUrlRouter.instance();
@@ -687,12 +710,64 @@ async function tryDelimitedPathSplit(
  * string. Existing paths are kept intact, so real filenames containing spaces,
  * commas, or semicolons win over delimiter recovery.
  */
+/** A `!glob` exclusion part of a path list, which search tools take beside URLs. */
+function isExclusionPart(part: string): boolean {
+	return part.length > 1 && part.startsWith("!") && !part.includes("://");
+}
+
+const MISSING_OR_INVALID_URL_CODES = new Set(["ENOENT", "ENOTDIR", "ENAMETOOLONG", "EINVAL"]);
+
+async function probeInternalUrlTarget(
+	url: string,
+	filesystem: InternalUrlFilesystem,
+	requireDirectory = false,
+): Promise<boolean> {
+	try {
+		const stat = await filesystem.stat(url);
+		// A missing JSON field stats as a file of the "null" sentinel. Readers keep
+		// that sentinel; only this probe treats it as not found.
+		if (stat.absent === true) return false;
+		return !requireDirectory || stat.type === "directory";
+	} catch (err) {
+		return !(err instanceof UrlFsError && MISSING_OR_INVALID_URL_CODES.has(err.code));
+	}
+}
+
+async function internalUrlEntryResolves(entry: string, filesystem: InternalUrlFilesystem): Promise<boolean> {
+	const router = InternalUrlRouter.instance();
+	const peeledUrl = router.split(expandPath(entry)).path;
+	if (router.isGlob(peeledUrl)) {
+		let parsedUrl: ParsedSearchPath | undefined;
+		try {
+			parsedUrl = parseUrlSearchPath(peeledUrl);
+		} catch {
+			return false;
+		}
+		if (parsedUrl?.glob !== undefined) {
+			const rawGlobTail = peeledUrl.slice(parsedUrl.basePath.length);
+			if (splitTopLevelDelimitedPath(rawGlobTail, "semicolon").length === 1) {
+				return probeInternalUrlTarget(parsedUrl.basePath, filesystem, true);
+			}
+		}
+	}
+	return probeInternalUrlTarget(peeledUrl, filesystem);
+}
+
 export async function splitDelimitedPathEntry(
 	entry: string,
 	cwd: string,
 	options: {
 		splitter?: PathEntrySplitter;
 		routedUrlPredicate?: (entry: string) => boolean;
+		/** Let `!glob` exclusion parts sit beside URLs in a `;` list (grep's path syntax). */
+		exclusionParts?: boolean;
+		/**
+		 * Filesystem that probes a `;` list starting with an internal URL and also
+		 * naming local paths or globs (`local://1.log;src/*.ts`). Search tools pass
+		 * the filesystem they search with. Omit it so a `;` inside one internal
+		 * URL cannot select an extra file.
+		 */
+		mixedLocalPaths?: InternalUrlFilesystem;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
@@ -700,9 +775,40 @@ export async function splitDelimitedPathEntry(
 	const splitter = options.splitter ?? parseSearchPath;
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts?.every(options.routedUrlPredicate) ? parts : null;
+		const routed = options.routedUrlPredicate;
+		return parts?.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
+			? parts
+			: null;
 	}
-	if (isInternalUrlPath(normalizedEntry)) return null;
+	if (options.mixedLocalPaths !== undefined && isInternalUrlPath(normalizedEntry)) {
+		// Before the all-internal branch, which keeps the whole string when any
+		// part is not itself an internal URL. All-URL lists always split. For a
+		// mixed list, probe the range-free URL (or its non-glob base directory)
+		// and split only on confirmed missing or invalid targets so semicolons
+		// inside real URLs and read/permission/size errors stay intact.
+		const isUrlPart = (part: string): boolean =>
+			isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part));
+		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
+		if (!parts || parts.length <= 1) return null;
+		if (parts.every(isUrlPart)) return parts;
+		// No resolve cache: a URL that does resolve is read again during the search.
+		// Only mixed `;` lists pay that second read, including ssh:// and mcp://.
+		return (await internalUrlEntryResolves(normalizedEntry, options.mixedLocalPaths)) ? null : parts;
+	}
+	if (isInternalUrlPath(normalizedEntry)) {
+		// A `;` list of internal URLs (`local://44.log;local://43.log`) names
+		// several resources: the router resolves one URI per entry, so the list
+		// must split before dispatch (issue #14091). Split only when every part
+		// is itself an internal URL or a `!glob` exclusion (`local://notes;!*.test.ts`)
+		// — a URL whose own path contains `;` stays whole, and a single URL ending
+		// in `;` (`local://report;`) names one resource.
+		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
+		return parts &&
+			parts.length > 1 &&
+			parts.every(part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)))
+			? parts
+			: null;
+	}
 	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
 	// resolves — or is only ambiguous — so downstream literal-preferring
@@ -714,6 +820,9 @@ export async function splitDelimitedPathEntry(
 	// with glob syntax (`a;b[1].md:1-2`). Check the exact peeled path before the
 	// search splitter interprets those characters and semicolon fan-out wins.
 	if (selectorSplit.sel !== undefined && (await probeLiteralPathExists(peeledEntry, cwd)) !== "missing") return null;
+	// `a:1-30,:-30` may name a literal `a:1-30,` with a tail selector instead of `a` with a list.
+	const unfoldedPath = splitPathAndSel(normalizedEntry, { foldListColons: false }).path;
+	if (unfoldedPath !== peeledEntry && (await probeLiteralPathExists(unfoldedPath, cwd)) !== "missing") return null;
 	if (!hasGlobPathChars(peeledEntry) && (await delimitedPathPartResolves(normalizedEntry, cwd, splitter))) {
 		return null;
 	}
@@ -763,7 +872,11 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
-	options: { splitter?: PathEntrySplitter } = {},
+	options: {
+		splitter?: PathEntrySplitter;
+		exclusionParts?: boolean;
+		mixedLocalPaths?: InternalUrlFilesystem;
+	} = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];
 	for (const entry of entries) {
@@ -784,12 +897,16 @@ export interface ParsedFindPattern {
 	basePath: string;
 	globPattern: string;
 	hasGlob: boolean;
+	/** A trailing separator restricts glob matches to directories. */
+	directoryOnly?: boolean;
 }
 
 export interface ResolvedSearchTarget {
 	basePath: string;
 	glob?: string;
 	bareGlob?: boolean;
+	/** `basePath` is a directory. A file target's native display path is only its name. */
+	isDirectory: boolean;
 }
 
 export interface ResolvedMultiSearchPath {
@@ -804,6 +921,7 @@ export interface ResolvedFindTarget {
 	basePath: string;
 	globPattern: string;
 	hasGlob: boolean;
+	directoryOnly?: boolean;
 }
 
 export interface ResolvedMultiFindPattern {
@@ -900,6 +1018,12 @@ export async function parseSearchPathPreferringLiteral(filePath: string, cwd: st
 	}
 }
 
+function globFindPattern(basePath: string, globPattern: string): ParsedFindPattern {
+	return globPattern.endsWith("/")
+		? { basePath, globPattern: globPattern.replace(/\/+$/, ""), hasGlob: true, directoryOnly: true }
+		: { basePath, globPattern, hasGlob: true };
+}
+
 // Parse a find pattern into a base directory path and a glob pattern.
 // Examples:
 //   src/app/**/\*.tsx -> { basePath: "src/app", globPattern: "**/*.tsx", hasGlob: true }
@@ -914,7 +1038,7 @@ export function parseFindPattern(pattern: string): ParsedFindPattern {
 		// A URL names its root explicitly, so its glob stays anchored there like `dir/*`.
 		return urlPath.glob === undefined
 			? { basePath: urlPath.basePath, globPattern: "**/*", hasGlob: false }
-			: { basePath: urlPath.basePath, globPattern: urlPath.glob, hasGlob: true };
+			: globFindPattern(urlPath.basePath, urlPath.glob);
 	}
 	const normalizedPattern = normalizePathSeparators(pattern);
 	const segments = normalizedPattern.split("/");
@@ -926,18 +1050,10 @@ export function parseFindPattern(pattern: string): ParsedFindPattern {
 
 	if (firstGlobIndex === 0) {
 		const needsRecursive = !normalizedPattern.startsWith("**/");
-		return {
-			basePath: ".",
-			globPattern: needsRecursive ? `**/${normalizedPattern}` : normalizedPattern,
-			hasGlob: true,
-		};
+		return globFindPattern(".", needsRecursive ? `**/${normalizedPattern}` : normalizedPattern);
 	}
 
-	return {
-		basePath: segments.slice(0, firstGlobIndex).join("/"),
-		globPattern: segments.slice(firstGlobIndex).join("/"),
-		hasGlob: true,
-	};
+	return globFindPattern(segments.slice(0, firstGlobIndex).join("/"), segments.slice(firstGlobIndex).join("/"));
 }
 
 export function combineSearchGlobs(prefixGlob?: string, suffixGlob?: string): string | undefined {
@@ -1083,6 +1199,7 @@ async function resolveSearchPathItems(
 					basePath: item.absoluteBasePath,
 					glob: item.parsedPath.glob ? combineSearchGlobs(item.parsedPath.glob, suffixGlob) : suffixGlob,
 					bareGlob: isBareSearchGlob(item.raw, item.parsedPath),
+					isDirectory: item.type === "directory",
 				}))
 			: undefined;
 
@@ -1124,6 +1241,7 @@ async function resolveFindPatternItems(
 			basePath: resolveSearchBase(parsedPattern.basePath, cwd),
 			globPattern: parsedPattern.globPattern,
 			hasGlob: parsedPattern.hasGlob,
+			directoryOnly: parsedPattern.directoryOnly,
 		};
 	});
 
@@ -1396,6 +1514,20 @@ export interface ToolScopeResolution {
 	immutableSourcePaths: Set<string>;
 }
 
+/** Approval tier for a search tool's raw `path` (or legacy `paths`) input: the highest scheme read tier named anywhere in it. */
+export function searchPathTier(args: unknown): ToolTier {
+	const raw = isRecord(args) ? (args.path ?? args.paths) : undefined;
+	// The tools decode JSON-encoded arrays (`["ssh:\/\/host"]`) the same way before resolving.
+	const entries =
+		typeof raw === "string"
+			? toPathList(raw)
+			: Array.isArray(raw)
+				? raw.filter(entry => typeof entry === "string")
+				: [];
+	// Substring scan over the raw entries: delimited lists are only split after approval.
+	return InternalUrlRouter.instance().readTier(entries.join("\n"));
+}
+
 /**
  * Shared path-input pipeline for `search`, `ast_grep`, and `ast_edit`:
  *  1. normalize + reject empty paths,
@@ -1514,7 +1646,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	try {
 		isDirectory = (await opts.filesystem.stat(searchPath)).type === "directory";
 	} catch (error) {
-		// A URL failure carries its handler's diagnosis (`Artifact 9 not found. Available: 4`).
+		// A URL failure carries its handler's diagnosis (`Not found: reviewer_9`).
 		if (internalRouter.canHandle(searchPath)) {
 			throw new ToolError(
 				`Cannot ${internalUrlAction} ${searchPath}: ${error instanceof Error ? error.message : String(error)}`,

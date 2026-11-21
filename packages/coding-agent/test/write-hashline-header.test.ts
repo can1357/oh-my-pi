@@ -132,4 +132,37 @@ describe("write tool hashline header", () => {
 		const result = await tool.execute("call-1", { path: filePath, content });
 		expect(resultText(result)).toBe(`Successfully wrote 6 bytes to ${path.relative(tmpDir, filePath)}`);
 	});
+
+	it("writes numbered data verbatim but still strips copied read rows", async () => {
+		const session = createSession(tmpDir);
+		const tool = new WriteTool(session);
+		const dump = "100000000: 30 00 00 54 bc.eq 0x100000004\n100000004: c0 03 5f d6 ret\n";
+		const dumpPath = path.join(tmpDir, "disassembly.txt");
+		const dumpResult = await tool.execute("call-1", { path: dumpPath, content: dump });
+		expect(resultText(dumpResult)).not.toContain("auto-stripped");
+		expect(await Bun.file(dumpPath).text()).toBe(dump);
+
+		const tsvPath = path.join(tmpDir, "manual_000.tsv");
+		const tsv = "1|alpha\tone\n2|beta\ttwo\n";
+		const tsvResult = await tool.execute("call-2", { path: tsvPath, content: tsv });
+		expect(resultText(tsvResult)).not.toContain("auto-stripped");
+		expect(await Bun.file(tsvPath).text()).toBe(tsv);
+
+		const headerPath = path.join(tmpDir, "header.ts");
+		await tool.execute("call-3", {
+			path: headerPath,
+			content: "[header.ts#1A2B]\n1:const a = 1;\n2:const b = 2;\n",
+		});
+		expect(await Bun.file(headerPath).text()).toBe("const a = 1;\nconst b = 2;\n");
+
+		const echoPath = path.join(tmpDir, "echo.ts");
+		await Bun.write(echoPath, "const a = 1;\nconst b = 2;\n");
+		getEditStore(session).recordSnapshot(echoPath, "const a = 1;\nconst b = 2;\n");
+		const echoResult = await tool.execute("call-4", {
+			path: echoPath,
+			content: "1:const a = 1;\n2:const b = 2;\n3:const c = 3;\n",
+		});
+		expect(resultText(echoResult)).toContain("auto-stripped");
+		expect(await Bun.file(echoPath).text()).toBe("const a = 1;\nconst b = 2;\nconst c = 3;\n");
+	});
 });

@@ -1,26 +1,24 @@
-import { SEANCE_SLASH_COMMAND } from "./seance";
-import { clearSubmittedText } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
-import { rebindMemoryBackendForCwd } from "../hindsight/backend";
+import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
-import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
-import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
-import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveResumableSession } from "../session/session-listing";
-import { toggleSessionPin } from "../session/session-pins";
+import { continuesConversation } from "../modes/utils/conversation-position";
+import type { FreshSessionResult } from "../session/agent-session";
+import { COMPACT_MODES, findCompactMode, type ParsedCompactArgs, parseCompactArgs } from "../session/compact-modes";
+import { isInterruptReason } from "../session/messages";
+import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
+import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
 	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
-	type SessionWorktree,
 } from "../session/session-worktree";
+import type { SessionWorktree } from "../worktree/backend";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -31,6 +29,81 @@ import type {
 	SlashCommandSpec,
 	TuiSlashCommandRuntime,
 } from "./types";
+
+function parseCompactionCommand(command: ParsedSlashCommand): ParsedCompactArgs | { error: string } {
+	return command.name === "handoff"
+		? { mode: "handoff", instructions: command.args || undefined }
+		: parseCompactArgs(command.args);
+}
+
+async function handleCompact(command: ParsedSlashCommand, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const parsed = parseCompactionCommand(command);
+	if ("error" in parsed) return usage(parsed.error, runtime);
+	let failed = false;
+	const run = async (): Promise<void> => {
+		const before = runtime.session.getContextUsage?.()?.tokens;
+		try {
+			const { mode, instructions } = parsed;
+			await runtime.session.compact(
+				instructions,
+				runtime.signal ? { mode, signal: runtime.signal } : mode ? { mode } : undefined,
+			);
+		} catch (err) {
+			// Don't append an out-of-turn notice after the host already reported its interrupt.
+			if (err instanceof CompactionCancelledError && (isInterruptReason(err.cause) || runtime.signal?.aborted)) {
+				return;
+			}
+			const message = errorMessage(err);
+			logger.error("Compaction failed", { error: message });
+			failed = true;
+			await runtime.output(`Compaction failed: ${message}`);
+			return;
+		}
+		const after = runtime.session.getContextUsage?.()?.tokens;
+		await runtime.output(
+			before == null || after == null
+				? "Compaction complete."
+				: `Compaction complete. Tokens: ${before} -> ${after} (saved ${before - after}).`,
+		);
+	};
+	if (runtime.runCommandInBackground) {
+		runtime.runCommandInBackground(run);
+		return commandConsumed();
+	}
+	await run();
+	return commandConsumed({ failed });
+}
+
+async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime): Promise<void> {
+	const parsed = parseCompactionCommand(command);
+	if (!("error" in parsed) && parsed.mode === "handoff" && refuseImages(command, runtime)) return;
+	clearSubmittedText(runtime);
+	if ("error" in parsed) {
+		runtime.ctx.showWarning(parsed.error);
+		return;
+	}
+	const { ctx } = runtime;
+	const origin = runtime.followUp;
+	// A switch still applying (or rolling back) decides which conversation is live.
+	if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
+	if (origin && !continuesConversation(ctx.sessionManager, origin)) {
+		restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+		ctx.showWarning(`Conversation changed before /${command.name} ran; returned it to the editor`);
+		return;
+	}
+	const background = parsed.mode && findCompactMode(parsed.mode)?.background;
+	if (background) {
+		// Background compaction doesn't hold the submission slot or its follow-ups.
+		void ctx.handleCompactCommand(parsed.instructions, parsed.mode);
+	} else if (origin && ctx.session.isStreaming) {
+		ctx.yieldCompaction = { ...origin, text: command.text, instructions: parsed.instructions, mode: parsed.mode };
+		ctx.updatePendingMessagesDisplay();
+		ctx.showStatus("Queued compaction for when the agent yields");
+		ctx.runYieldCompaction();
+	} else {
+		await ctx.handleCompactCommand(parsed.instructions, parsed.mode);
+	}
+}
 
 function formatFreshSessionResult(result: FreshSessionResult): string {
 	const stateLabel = result.closedProviderSessions === 1 ? "provider state" : "provider states";
@@ -132,6 +205,22 @@ async function relocateHeadlessSession(
 	return undefined;
 }
 
+/** Session id `/pin` and `/unpin` act on (the argument's match, else the active session), or the usage result. */
+async function resolvePinTarget(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+	verb: "pin" | "unpin",
+): Promise<string | SlashCommandResult> {
+	const sessionArg = command.args.trim();
+	if (sessionArg) {
+		const match = await resolveResumableSession(sessionArg, runtime.cwd, runtime.sessionManager.getSessionDir(), {
+			allowGlobalFallback: true,
+		});
+		return match ? match.session.id : usage(`Session "${sessionArg}" not found.`, runtime);
+	}
+	return runtime.sessionManager.getSessionId() || usage(`No active session to ${verb}.`, runtime);
+}
+
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "ssh",
@@ -223,55 +312,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			const usage = runtime.ctx.session.getContextUsage();
 			return usage ? `Compact: context ${Math.round(usage.percent)}% used` : "Compact: context unavailable";
 		},
-		handle: async (command, runtime) => {
-			const parsed = parseCompactArgs(command.args);
-			if ("error" in parsed) return usage(parsed.error, runtime);
-			const runCompact = async (): Promise<void> => {
-				const before = runtime.session.getContextUsage?.();
-				const beforeTokens = before?.tokens;
-				try {
-					await runtime.session.compact(parsed.instructions, parsed.mode ? { mode: parsed.mode } : undefined);
-				} catch (err) {
-					// RPC `abort` and ACP `session/cancel` propagate their explicit
-					// USER_INTERRUPT_LABEL through the compaction abort signal. The client
-					// already saw the interrupt it sent; emitting anything here would
-					// append an out-of-turn chunk. Other cancellations (including an
-					// extension veto) remain visible.
-					if (err instanceof CompactionCancelledError && err.cause === USER_INTERRUPT_LABEL) return;
-					// Compaction precondition failures (no model, already compacted, too
-					// small) and provider errors propagate as plain Errors; surface them
-					// via runtime.output so they don't fail the ACP prompt turn.
-					await runtime.output(`Compaction failed: ${errorMessage(err)}`);
-					return;
-				}
-				const after = runtime.session.getContextUsage?.();
-				const afterTokens = after?.tokens;
-				if (beforeTokens != null && afterTokens != null) {
-					const saved = beforeTokens - afterTokens;
-					await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
-				} else {
-					await runtime.output("Compaction complete.");
-				}
-			};
-			// Provider-backed: background-dispatch under RPC so the serialized command
-			// queue stays free for `abort` (SlashCommandRuntime.runCommandInBackground).
-			// ACP/TUI have no such hook and keep the inline await.
-			if (runtime.runCommandInBackground) {
-				runtime.runCommandInBackground(runCompact);
-				return commandConsumed();
-			}
-			await runCompact();
-			return commandConsumed();
-		},
-		handleTui: async (command, runtime) => {
-			const parsed = parseCompactArgs(command.args);
-			clearSubmittedText(runtime);
-			if ("error" in parsed) {
-				runtime.ctx.showWarning(parsed.error);
-				return;
-			}
-			await runtime.ctx.handleCompactCommand(parsed.instructions, parsed.mode);
-		},
+		handle: handleCompact,
+		handleTui: handleCompactTui,
 	},
 	{
 		name: "shake",
@@ -305,71 +347,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "handoff",
 		icon: "handoff",
-		description: "Summarize the session into a handoff document and compact in place",
-		acpDescription: "Summarize the session into a handoff document and compact in place",
+		description: "Compact in the background with a handoff summary (alias for /compact handoff)",
 		inlineHint: "[focus instructions]",
 		allowArgs: true,
-		handle: async (command, runtime) => {
-			if (runtime.session.isStreaming) {
-				return usage("Wait for the current response to finish or abort it before handing off.", runtime);
-			}
-			if (runtime.session.isGeneratingHandoff) {
-				return usage("Handoff generation is already in progress.", runtime);
-			}
-			const runHandoff = async (): Promise<void> => {
-				let result: HandoffResult | undefined;
-				try {
-					result = await runtime.session.handoff(command.args || undefined);
-				} catch (err) {
-					const message = errorMessage(err);
-					// A user interrupt (ACP `session/cancel`, TUI Esc) already settled the
-					// owning turn: `AgentSession.abort()` forwards its reason into the
-					// handoff abort controller, and `throwIfHandoffAborted` rethrows a
-					// reasoned abort verbatim — so the throw arrives as
-					// `USER_INTERRUPT_LABEL`, not "Handoff cancelled". Emitting anything
-					// here would append an out-of-turn chunk after the client already saw
-					// `stopReason: "cancelled"`, so consume silently.
-					if (message === USER_INTERRUPT_LABEL) {
-						return;
-					}
-					// `session.handoff()` normalizes an unreasoned cancellation to this
-					// exact message; every other throw is a real failure (no model
-					// selected, nothing to hand off, already compacted, provider error)
-					// and is surfaced verbatim behind the same "<verb> failed:" prefix
-					// `/compact` uses.
-					if (message === "Handoff cancelled") {
-						await runtime.output("Handoff cancelled.");
-						return;
-					}
-					// Persist the real failure so it stays debuggable after the client
-					// message scrolls away (same rationale as the TUI path, #7993).
-					logger.error("Handoff failed", { error: message });
-					await runtime.output(`Handoff failed: ${message}`);
-					return;
-				}
-				if (!result) {
-					await runtime.output("Handoff cancelled.");
-					return;
-				}
-				// `savedPath` is deliberately not reported: `SessionHandoff` only writes
-				// the document to disk when `options.autoTriggered` is set, which the
-				// user-invoked path never passes.
-				await runtime.output("Context handed off and compacted in place.");
-			};
-			if (runtime.runCommandInBackground) {
-				runtime.runCommandInBackground(runHandoff);
-				return commandConsumed();
-			}
-			await runHandoff();
-			return commandConsumed();
-		},
-		handleTui: async (command, runtime) => {
-			const customInstructions = command.args || undefined;
-			clearSubmittedText(runtime);
-			await runtime.ctx.handleHandoffCommand(customInstructions);
-		},
+		handle: handleCompact,
+		handleTui: handleCompactTui,
 	},
-	SEANCE_SLASH_COMMAND,
 	{
 		name: "resume",
 		icon: "history",
@@ -388,18 +371,18 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showSessionSelector();
 				return;
 			}
-			const match = await resolveResumableSession(
+			const target = await resolveResumeTarget(
 				sessionArg,
 				runtime.ctx.sessionManager.getCwd(),
 				runtime.ctx.sessionManager.getSessionDir(),
 				{ allowGlobalFallback: true },
 			);
-			if (!match) {
+			if (!target) {
 				runtime.ctx.showError(`Session "${sessionArg}" not found`);
 				return;
 			}
 			try {
-				await runtime.ctx.handleResumeSession(match.session.path);
+				await runtime.ctx.handleResumeSession(target.session.path, { continuation: target.continuation });
 			} catch (error) {
 				// The picker reports a failed switch itself; `/resume <id>` has no picker.
 				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
@@ -413,27 +396,26 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[session id]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const sessionArg = command.args.trim();
-			let sessionId: string | undefined;
-			if (sessionArg) {
-				const match = await resolveResumableSession(
-					sessionArg,
-					runtime.cwd,
-					runtime.sessionManager.getSessionDir(),
-					{ allowGlobalFallback: true },
-				);
-				if (!match) {
-					return usage(`Session "${sessionArg}" not found.`, runtime);
-				}
-				sessionId = match.session.id;
-			} else {
-				sessionId = runtime.sessionManager.getSessionId();
-				if (!sessionId) {
-					return usage("No active session to pin.", runtime);
-				}
-			}
+			const sessionId = await resolvePinTarget(command, runtime, "pin");
+			if (typeof sessionId !== "string") return sessionId;
 			const pinned = await toggleSessionPin(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, pinned);
 			await runtime.output(pinned ? "Session pinned to the top of the resume list." : "Session unpinned.");
+			return commandConsumed();
+		},
+	},
+	{
+		name: "unpin",
+		icon: "pin",
+		description: "Unpin a session from the top of the resume list",
+		inlineHint: "[session id]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const sessionId = await resolvePinTarget(command, runtime, "unpin");
+			if (typeof sessionId !== "string") return sessionId;
+			const wasPinned = await unpinSession(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, false);
+			await runtime.output(wasPinned ? "Session unpinned." : "Session is not pinned.");
 			return commandConsumed();
 		},
 	},
@@ -445,8 +427,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();
-			clearSubmittedText(runtime);
-			await runtime.ctx.handleBtwCommand(question);
+			await runWithDetachedDraft(
+				command,
+				runtime,
+				() => runtime.ctx.handleBtwCommand(question, runtime.input?.images),
+				{ restoreText: true },
+			);
 		},
 	},
 	{
@@ -457,8 +443,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const work = command.text.slice(`/${command.name}`.length).trim();
-			clearSubmittedText(runtime);
-			await runtime.ctx.handleTanCommand(work);
+			await runWithDetachedDraft(command, runtime, () => runtime.ctx.handleTanCommand(work, runtime.input?.images), {
+				restoreText: true,
+			});
 		},
 	},
 	{
@@ -468,6 +455,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "<complaint>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
+			if (refuseImages(command, runtime)) return;
 			const complaint = command.text.slice(`/${command.name}`.length).trim();
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleOmfgCommand(complaint);
@@ -480,6 +468,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[request] [--all]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
+			if (refuseImages(command, runtime)) return;
 			const args = command.text.slice(`/${command.name}`.length).trim();
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleCleanseCommand(args);
@@ -840,7 +829,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "restart",
 		icon: "restart",
-		description: "Restart omp with the same launch flags, resuming this session",
+		description: "Restart omp with the same launch flags, resuming this session and its running subagents",
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.restart();
@@ -849,13 +838,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 ];
 async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
 	setProjectDir(cwd);
-	await runtime.settings.reloadForCwd(cwd);
-	await rebindMemoryBackendForCwd(runtime.session);
-	clearClaudePluginRootsCache();
-	const src = discoverTitleSystemPromptFile(cwd);
-	const p = await resolvePromptInput(src, "title system prompt");
-	runtime.session.setTitleSystemPrompt(p);
-	await runtime.session.refreshSkillsAndCommands();
+	await rescopeSessionToCwd(runtime.session, runtime.settings, cwd);
 	await runtime.refreshCommands?.();
-	await runtime.reloadPlugins();
 }

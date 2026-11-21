@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	deliveredImageSize,
 	type ImageTokenization,
 	imageTokens,
 	resolveImageMaxEdge,
@@ -22,6 +23,16 @@ const GPT_PATCH: ImageTokenization = {
 	low: { maxEdge: 512 },
 	high: { maxEdge: 2048, patchBudget: 2500 },
 	original: { maxEdge: 6000, patchBudget: 10_000 },
+};
+
+/** DeepSeek V4.1 Flash's vision config: 14px patches merged 3×3, 1,024-token cap, 544² floor. */
+const DEEPSEEK_PATCH: ImageTokenization = {
+	regime: "deepseek-patch",
+	verified: true,
+	patchSize: 14,
+	downsample: 3,
+	maxTokens: 1024,
+	minPixels: 295_936,
 };
 
 function ruleFor(provider: string, id: string): ImageTokenization {
@@ -128,12 +139,24 @@ describe("resolveImageTokenization", () => {
 		}
 	});
 
-	it("marks the Gemini, Sonnet and Grok rules measured on Antigravity and xAI as verified", () => {
+	it("marks the Gemini, Sonnet and Grok rules measured on Antigravity, xAI and Devin as verified", () => {
 		// Cloud Code Assist bills every Gemini image 1,089 tokens; Google's own API keeps the documented 1,120.
 		for (const id of ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]) {
 			expect(ruleFor("google-antigravity", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
 		}
 		expect(ruleFor("google", "gemini-3.8-flash")).toEqual({ regime: "fixed", tokens: 1120 });
+		// Devin bills the Gemini models measured across sizes 1,089 (raw effort uids included); the rest keep the
+		// unverified lineage rule.
+		for (const id of [
+			"gemini-3-7-flash",
+			"gemini-4-carbon",
+			"gemini-4-carbon-high",
+			"gemini-4-neon",
+			"gemini-4-neon-xhigh",
+		]) {
+			expect(ruleFor("devin", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
+		}
+		expect(ruleFor("devin", "gemini-3-8-flash")).toEqual({ regime: "fixed", tokens: 1120 });
 		// Sonnet's standard tier is verified on every host; Opus 4.6 is not measured.
 		expect(ruleFor("google-antigravity", "claude-sonnet-4-6")).toEqual({ ...STANDARD, verified: true });
 		expect(ruleFor("anthropic", "claude-sonnet-4-6").verified).toBe(true);
@@ -246,6 +269,30 @@ describe("resolveImageTokenization", () => {
 		expect(resolveImageTokenization(model)).toEqual(STANDARD);
 		expect(resolveImageTokenization({ ...model, identity: { ...model.identity, revision: "4.7.0" } })).toEqual(HIRES);
 	});
+
+	it("prices DeepSeek V4.1 Flash by its own vision config on every host, and V4.0 by the wire", () => {
+		for (const [provider, id] of [
+			["openrouter", "deepseek/deepseek-v4.1-flash-1017"],
+			["openrouter", "deepseek/deepseek-v4.1-flash"],
+			["deepseek", "deepseek-flash"],
+			// DeepSeek's API serves the retired V4.0 ids with the current Flash.
+			["deepseek", "deepseek-v4-flash"],
+			["deepseek", "deepseek-v4-flash-vision-exp"],
+			["fireworks", "deepseek-v4.1-flash"],
+			["together", "deepseek-ai/DeepSeek-V4.1-Flash"],
+		] as const) {
+			expect(resolveImageTokenization(getBundledModel(provider, id))).toEqual(DEEPSEEK_PATCH);
+		}
+		// Hosts still running the V4.0 vision preview keep their wire fallback.
+		expect(resolveImageTokenization(getBundledModel("openrouter", "deepseek/deepseek-v4-flash-vision-exp"))).toEqual(
+			HIRES_FALLBACK,
+		);
+		expect(resolveImageTokenization(getBundledModel("fireworks", "deepseek-v4-flash-vision-exp"))).toEqual(GPT_PATCH);
+		// An unmeasured later Flash release is not priced, let alone verified, by V4.1's rule.
+		expect(
+			resolveImageTokenization({ provider: "fireworks", api: "openai-completions", id: "deepseek-v4.2-flash" }),
+		).toEqual(GPT_PATCH);
+	});
 });
 
 describe("imageTokens", () => {
@@ -281,6 +328,88 @@ describe("imageTokens", () => {
 		expect(imageTokens(STANDARD, { width: 2999, height: 3000 })).toBe(39 * 39);
 		expect(imageTokens({ regime: "fixed", tokens: 1120 }, { width: 2048, height: 2048 })).toBe(1120);
 	});
+
+	it("matches DeepSeek V4.1 Flash billing measured through OpenRouter", () => {
+		// Input-token delta over a text-only request, identical on Fireworks and
+		// DeepInfra: upscaled to the 544² floor, then 42px cells up to the cap.
+		const measured: [width: number, height: number, tokens: number][] = [
+			[256, 256, 184],
+			[512, 512, 184],
+			[784, 784, 382],
+			[1024, 1024, 652],
+			[1280, 1280, 994],
+			[1568, 1562, 994],
+			[1568, 784, 743],
+			[784, 1568, 762],
+			[2576, 1716, 977],
+			[3000, 1000, 992],
+			[4000, 4000, 994],
+		];
+		for (const [width, height, tokens] of measured) {
+			expect(imageTokens(DEEPSEEK_PATCH, { width, height })).toBe(tokens);
+		}
+	});
+
+	it("resizes DeepSeek images like the reference processor at extreme aspect ratios", () => {
+		// Values from `plan_image_grid` in DeepSeek's `inference/image_processor.py`.
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 1, height: 8192 })).toBe(1024);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 1 })).toBe(1024);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 64, height: 8192 })).toBe(590);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 64 })).toBe(396);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 100, height: 2000 })).toBe(234);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 2000, height: 100 })).toBe(179);
+	});
+});
+
+describe("deliveredImageSize", () => {
+	it("resizes Anthropic images to the sizes the guide lists, in either orientation", () => {
+		// Guide examples on the standard tier: A4 scan 1075×1520 → 924×1307,
+		// 1920×1080 screenshot → 1456×819.
+		expect(deliveredImageSize(STANDARD, { width: 1075, height: 1520 })).toEqual({ width: 924, height: 1307 });
+		expect(deliveredImageSize(STANDARD, { width: 1920, height: 1080 })).toEqual({ width: 1456, height: 819 });
+		// The high-res tier takes the same screenshot as it is.
+		expect(deliveredImageSize(HIRES, { width: 1920, height: 1080 })).toEqual({ width: 1920, height: 1080 });
+	});
+
+	it("sizes an OpenAI image by the detail level the request carries", () => {
+		const size = { width: 2048, height: 2048 };
+		// `high` shrinks to its 2,500-patch budget (50×50 patches of 32px); `low` fits 512px.
+		expect(deliveredImageSize(GPT_PATCH, size, "high")).toEqual({ width: 1600, height: 1600 });
+		expect(deliveredImageSize(GPT_PATCH, size, "low")).toEqual({ width: 512, height: 512 });
+		// `auto` sizes like `original` here, whose 10,000-patch budget holds 64×64 patches.
+		expect(deliveredImageSize(GPT_PATCH, size)).toEqual(size);
+		expect(deliveredImageSize(GPT_PATCH, size, "original")).toEqual(size);
+	});
+
+	it("enlarges a DeepSeek image to the pixel floor and shrinks one past the token cap", () => {
+		// 256² is under the 544² floor; 4000² lands on 31×31 cells of 42px, the grid billed 994 tokens.
+		expect(deliveredImageSize(DEEPSEEK_PATCH, { width: 256, height: 256 })).toEqual({ width: 544, height: 544 });
+		expect(deliveredImageSize(DEEPSEEK_PATCH, { width: 4000, height: 4000 })).toEqual({ width: 1302, height: 1302 });
+	});
+
+	it("names no size for a rule that bills no pixel grid", () => {
+		expect(deliveredImageSize({ regime: "fixed", tokens: 1120 }, { width: 2048, height: 2048 })).toBeUndefined();
+	});
+
+	it("is a fixed point of the resize, billed like the image it came from", () => {
+		// A caller that sizes an image to the delivered size first must not see it resized, or billed, again.
+		const cases: [rule: ImageTokenization, width: number, height: number][] = [
+			[STANDARD, 1440, 900],
+			[STANDARD, 900, 1440],
+			[STANDARD, 3000, 2999],
+			[HIRES, 4000, 4000],
+			[GPT_PATCH, 1932, 1920],
+			[DEEPSEEK_PATCH, 2576, 1716],
+			[DEEPSEEK_PATCH, 8192, 64],
+		];
+		for (const [rule, width, height] of cases) {
+			const detail = rule.regime === "openai-patch" ? "high" : undefined;
+			const delivered = deliveredImageSize(rule, { width, height }, detail);
+			if (!delivered) throw new Error(`no delivered size for ${rule.regime} ${width}x${height}`);
+			expect(deliveredImageSize(rule, delivered, detail)).toEqual(delivered);
+			expect(imageTokens(rule, delivered, detail)).toBe(imageTokens(rule, { width, height }, detail));
+		}
+	});
 });
 
 function isPositiveNumber(value: unknown): boolean {
@@ -301,6 +430,9 @@ function payloadProblems(payload: unknown): string[] {
 		case "anthropic-patch":
 			requirePositive(payload, "maxEdge", "");
 			requirePositive(payload, "maxTokens", "");
+			break;
+		case "deepseek-patch":
+			for (const field of ["patchSize", "downsample", "maxTokens", "minPixels"]) requirePositive(payload, field, "");
 			break;
 		case "openai-patch":
 			requirePositive(payload, "multiplier", "");

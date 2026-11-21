@@ -108,6 +108,14 @@ describe("listClaudeResetCredits", () => {
 		});
 	});
 
+	it("maps a Fable launch grant onto the Fable weekly limit it clears", async () => {
+		const payload = cedarPayload();
+		payload.cedar_ember.grants[0].clears = ["five_hour", "seven_day_overage_included"];
+		const { fetch } = recordingFetch(() => json(200, payload));
+		const result = await listClaudeResetCredits({ accessToken: "token", orgId: "org_1", fetch });
+		expect(result?.credits[0]?.clears).toEqual(["anthropic:5h", "anthropic:7d:fable"]);
+	});
+
 	it("parses discovery quota evidence with the same normalized model windows as ordinary usage", async () => {
 		const { fetch, calls } = recordingFetch(() =>
 			json(200, {
@@ -366,7 +374,7 @@ describe("Claude usage reset integration", () => {
 		);
 
 		expect(report?.resetCredits).toMatchObject({ availableCount: 2, nextCreditId: "grant_1" });
-		expect(calls).toHaveLength(1);
+		expect(calls.filter(call => !call.url.endsWith("/profile"))).toHaveLength(1);
 		expect(report?.limits.find(limit => limit.id === "anthropic:extra")?.amount.used).toBe(12.5);
 		expect(report?.limits.find(limit => limit.id === "anthropic:7d:fable")?.amount.usedFraction).toBe(0.61);
 	});
@@ -397,7 +405,10 @@ describe("Claude usage reset integration", () => {
 			{ fetch },
 		);
 
-		expect(calls.map(call => new URL(call.url).search)).toEqual(["", "?cedar_ember=1&skip_spend=1"]);
+		expect(calls.filter(call => !call.url.endsWith("/profile")).map(call => new URL(call.url).search)).toEqual([
+			"",
+			"?cedar_ember=1&skip_spend=1",
+		]);
 		expect(report?.resetCredits).toMatchObject({ availableCount: 2, nextCreditId: "grant_1" });
 	});
 

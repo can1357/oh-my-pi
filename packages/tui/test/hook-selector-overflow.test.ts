@@ -11,6 +11,28 @@ beforeAll(async () => {
 	setThemeInstance(theme);
 });
 describe("HookSelectorComponent", () => {
+	it.each<{ keys: string[]; options: string[]; initialIndex: number }>([
+		{ keys: ["o", "k"], options: ["Yes", "No"], initialIndex: 1 },
+		{ keys: ["j"], options: ["No", "Yes"], initialIndex: 0 },
+		{ keys: ["\x1b[107;1u"], options: ["Yes", "No"], initialIndex: 1 },
+		{ keys: ["\x1b[106;1u"], options: ["No", "Yes"], initialIndex: 0 },
+	])("keeps the safe confirmation selected after printable input %#", ({ keys, options, initialIndex }) => {
+		const selected: string[] = [];
+		const component = new HookSelectorComponent(
+			"Confirm action?",
+			options,
+			option => selected.push(option),
+			() => {},
+			{ initialIndex },
+		);
+
+		for (const key of keys) component.handleInput(key);
+		component.handleInput("\n");
+		component.dispose();
+
+		expect(selected).toEqual(["No"]);
+	});
+
 	it("keeps outlined options within render width", () => {
 		const options = [
 			"aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;bbb;aaa;b",
@@ -216,7 +238,7 @@ describe("HookSelectorComponent", () => {
 			{ disabledIndices: [1] },
 		);
 
-		component.handleInput("j");
+		component.handleInput("\x1b[B");
 		component.handleInput("\n");
 
 		expect(selected).toBe("Third");

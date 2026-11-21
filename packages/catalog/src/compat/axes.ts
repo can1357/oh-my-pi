@@ -58,12 +58,13 @@ export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
 
 /**
  * How hard agent prompts push subagent delegation for a model lineage
- * (`delegation-bias` axis). `eager` is the unassigned default: the prompt
- * actively pushes fan-out. `restrained` keeps fan-out for genuinely parallel
- * slices but forbids reflexive scouts and single-agent babysitting. `gated`
- * forbids subagents unless the user or a skill asks.
+ * (`delegation-bias` axis). `eager` actively pushes fan-out. `balanced`, the
+ * unassigned default, neither pushes nor restricts fan-out beyond a light
+ * nudge to explore unfamiliar code with a scout. `restrained` keeps fan-out
+ * for genuinely parallel slices but forbids reflexive scouts and single-agent
+ * babysitting. `gated` forbids subagents unless the user or a skill asks.
  */
-export const DELEGATION_BIASES = ["eager", "restrained", "gated"] as const;
+export const DELEGATION_BIASES = ["eager", "balanced", "restrained", "gated"] as const;
 const THINKING_MODES = [
 	"effort",
 	"budget",
@@ -109,6 +110,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"preserved",
 		"interleaved",
 	]),
+	"completions-allow-missing-thinking": wire("completionsAllowMissingThinking", ["request"]),
 	"anthropic-thinking": wire("anthropicThinking", ["request"], "scalar", [
 		"adaptive",
 		"adaptive-summarized",
@@ -119,12 +121,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"openai-platform-header": wire("openaiPlatformHeader", ["request"]),
 	"responses-cache-retention": wire("responsesCacheRetention", ["request"]),
 	"responses-verbosity": wire("responsesVerbosity", ["request"], "scalar", ["low"]),
-	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority"]),
+	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority", "ultrafast"]),
 	"responses-parallel-tool-calls": wire("responsesParallelToolCalls", ["request"]),
 	"responses-safety-identifier": wire("responsesSafetyIdentifier", ["request"]),
 	"responses-tool-choice-auto": wire("responsesToolChoiceAuto", ["request"]),
 	"routing-session-lock": wire("routingSessionLock", ["request"]),
 	"google-thinking": wire("googleThinking", ["request"], "scalar", ["level", "level-medium"]),
+	"google-omit-sampling": wire("googleOmitSampling", ["request"]),
+	"google-pin-max-output-tokens": wire("googlePinMaxOutputTokens", ["request"]),
+	"google-native-replay": wire("googleNativeReplay", ["request"]),
 	// ── wire: OpenAI-compatible surfaces (chat completions + Responses) ──
 	"allows-synthetic-reasoning-content-for-tool-calls": wire("allowsSyntheticReasoningContentForToolCalls", OAI),
 	"always-send-max-tokens": wire("alwaysSendMaxTokens", OAI),
@@ -144,7 +149,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
 	"omit-reasoning-effort": wire("omitReasoningEffort", OAI),
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
-	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id"]),
+	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id", "x-session-id"]),
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
 	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
 	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
@@ -171,6 +176,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"replay-reasoning-content": wire("replayReasoningContent", ["openai"]),
 	"synthetic-reasoning-content-fallback": wire("syntheticReasoningContentFallback", ["openai"]),
 	"requires-assistant-after-tool-result": wire("requiresAssistantAfterToolResult", ["openai"]),
+	"fold-user-after-tool-result": wire("foldUserAfterToolResult", OAI),
 	"requires-assistant-content-for-tool-calls": wire("requiresAssistantContentForToolCalls", OAI),
 	"requires-mistral-tool-ids": wire("requiresMistralToolIds", ["openai"]),
 	"requires-reasoning-content-for-all-assistant-turns": wire("requiresReasoningContentForAllAssistantTurns", OAI),
@@ -184,6 +190,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
 	"supports-steering": wire("supportsSteering", ["openai-responses"]),
+	"uncached-instructions": wire("uncachedInstructions", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
@@ -206,6 +213,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
 	"store-responses": wire("storeResponses", ["openai-responses"]),
+	"tool-name-prefix": wire("toolNamePrefix", ["openai-responses"], "scalar", ["_"]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
@@ -248,6 +256,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	]),
 	"effort-beta": wire("effortBeta", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
+	"extended-cache-ttl-beta": wire("extendedCacheTtlBeta", ["anthropic"]),
 	"fast-mode": wire("fastMode", ["anthropic"]),
 	"first-party-provider": wire("firstPartyProvider", ["anthropic"]),
 	"honors-claude-code-beta-kill-switch": wire("honorsClaudeCodeBetaKillSwitch", ["anthropic"]),
@@ -257,6 +266,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
 	"replay-unsigned-thinking": wire("replayUnsignedThinking", ["anthropic"]),
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
+	"requires-thinking-presence": wire("requiresThinkingPresence", ["anthropic"]),
 	"requires-tool-result-id": wire("requiresToolResultId", ["anthropic"]),
 	"signing-endpoint": wire("signingEndpoint", ["anthropic"]),
 	"strip-thinking-history": wire("stripThinkingHistory", ["openai", "anthropic", "ollama"]),
@@ -267,7 +277,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
 	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
-	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic"]),
+	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic", "bedrock"]),
+	"supports-message-threads": wire("supportsMessageThreads", ["anthropic"]),
 	"supports-between-tools-thinking": wire("supportsBetweenToolsThinking", ["anthropic"]),
 	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic", "bedrock"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
@@ -280,6 +291,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
+	"temperature-floor": wire("temperatureFloor", ["devin"]),
 	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
@@ -294,6 +306,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-skip-thought-signature-on-first-function-call": wire("requiresSkipThoughtSignatureOnFirstFunctionCall", [
 		"google",
 	]),
+	"base64-skip-thought-signature": wire("base64SkipThoughtSignature", ["google"]),
 	"supports-function-part-id": wire("supportsFunctionPartId", ["google"]),
 
 	// ── wire: shared across surfaces ──
@@ -315,11 +328,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
 	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic", "bedrock"]),
 	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic", "bedrock", "devin", "google"]),
-	"thinking-loop-guard": wire("thinkingLoopGuard", [...OAI, "anthropic", "google"], "scalar", [
-		"gemini",
-		"deepseek",
-		"xai",
-	]),
 
 	// ── thinking control surface ──
 	"thinking-default-level": { key: "defaultLevel", set: "thinking", shape: "scalar", values: EFFORTS },
@@ -341,12 +349,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-unverified": { key: "unverified", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
+	"supports-websockets": { key: "supportsWebsockets", set: "catalog", shape: "scalar", values: [true, false] },
 	"apply-patch-tool-type": {
 		key: "applyPatchToolType",
 		set: "catalog",
 		shape: "scalar",
 		values: ["freeform", "function"],
 	},
+	/** Paraphrase model-visible prompt prose per install (`perturbContext` in pi-ai). */
+	"prompt-perturbation": { key: "promptPerturbation", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-native-tools": { key: "requiresNativeTools", set: "catalog", shape: "scalar", values: [true, false] },
 	"tool-schemas-in-context": { key: "toolSchemasInContext", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-tool-free-history-for-tool-opt-out": {
@@ -454,6 +465,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["output", "signature"],
 	},
+	/**
+	 * Stream loop guard for the model line, on every host and API (read
+	 * through `loopGuardLevel` in pi-ai `utils/thinking-loop`). `semantic`
+	 * adds near-duplicate and stalled-wording paragraph detection to the
+	 * exact repeated-cycle check; `off` disables the guard. Unassigned: exact
+	 * repeated cycles only.
+	 */
+	"thinking-loop-guard": {
+		key: "thinkingLoopGuard",
+		set: "catalog",
+		shape: "scalar",
+		values: ["off", "semantic"],
+	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
@@ -467,6 +491,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
+	/**
+	 * Revision suffix the host appends to the model's id (Vertex `@default`): a
+	 * `provider/id` selector written without it names this model exactly.
+	 * Unassigned: the id has no implied revision and must be written in full.
+	 */
+	"selector-revision-suffix": { key: "selectorRevisionSuffix", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
 	/** How the model line bills an input image; shape and formulas in `./image-tokenization`. */
 	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
@@ -477,7 +507,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-count-budget": { key: "imageCountBudget", set: "catalog", shape: "scalar" },
 	/**
 	 * Replaces `image-count-budget` while the request reaches the official
-	 * endpoint (pi-ai `reachesOfficialEndpoint`): a limit measured or documented
+	 * endpoint (pi-ai `reachesBudgetedHost`): a limit measured or documented
 	 * for the host's own endpoint, which a custom `baseUrl` or an
 	 * `ANTHROPIC_BASE_URL`/`FOUNDRY_BASE_URL` reroute (proxy, gateway) need not share.
 	 */
@@ -493,6 +523,23 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	/** Longest image edge the host passes to the model: it downscales larger images to fit first. */
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
+	/**
+	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps images within what the
+	 * request's other bytes leave of it, and keeps the newest user message's and newest tool result's images past
+	 * `inline-image-byte-budget` while they fit that room.
+	 */
+	"request-body-byte-limit": { key: "requestBodyByteLimit", set: "catalog", shape: "scalar" },
+	/**
+	 * Opt-in: the host budgets above apply whenever the request reaches the provider's own catalog endpoint
+	 * (`endpoint-hosts`, or an unset `baseUrl`), for a hosted gateway whose compat names no official endpoint.
+	 * Unassigned: they apply only on the official endpoint (pi-ai `reachesOfficialEndpoint`).
+	 */
+	"catalog-endpoint-budgets": {
+		key: "catalogEndpointBudgets",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	/**
 	 * Supported formats and size bounds for judgment-request images; `mime-types`
 	 * is comma-separated because object payloads have no array shape.
@@ -528,12 +575,17 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	/** Seeds `maxTokens` only when the row reports none; applied after `limits-patch`. */
 	"max-tokens-fallback": { key: "maxTokensFallback", set: "catalog", shape: "scalar" },
-	/** Most output tokens the host serves: a larger reported `maxTokens` is lowered to it; an unknown one stays unknown. */
+	/** Most output tokens the host serves: a larger reported `maxTokens` (and Antigravity per-SKU `maxOutputTokens`) is lowered to it; an unknown one stays unknown. */
 	"max-tokens-ceiling": { key: "maxTokensCeiling", set: "catalog", shape: "scalar" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
-	"task-sibling-prompt-cache": {
-		key: "taskSiblingPromptCache",
+	/**
+	 * The lane rewards routing related requests — Task siblings, forks, explicit
+	 * `--prompt-cache-key` callers — under one shared prompt-cache key instead of
+	 * each conversation's own identity. Unassigned: per-conversation routing.
+	 */
+	"shared-prompt-cache": {
+		key: "sharedPromptCache",
 		set: "catalog",
 		shape: "scalar",
 		values: [true, false],
@@ -544,6 +596,22 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * Unassigned: no known lookback bound.
 	 */
 	"prompt-cache-lookback": { key: "promptCacheLookback", set: "catalog", shape: "scalar" },
+	/**
+	 * The provider's own endpoint keeps prompt-cache entries indefinitely
+	 * (logged-in Codex subscriptions): an idle gap never cools the prefix, so
+	 * rewriting it while idle only discards a warm cache. Read through
+	 * `compat/prompt-cache-persistent.ts`. Unassigned: entries expire.
+	 */
+	"prompt-cache-persistent": { key: "promptCachePersistent", set: "catalog", shape: "scalar", values: [true, false] },
+	/**
+	 * The provider's own endpoint accepts a `max_tokens: 0` pre-warm request
+	 * (Anthropic Messages): it reads the prompt, writes or refreshes the cache at
+	 * its breakpoints, and returns usage with no output billed. The coding
+	 * agent's cache warmer refreshes entries with it instead of a one-token
+	 * replay. Read through `compat/prompt-cache-prewarm.ts`. Unassigned: no
+	 * pre-warm request.
+	 */
+	"prompt-cache-prewarm": { key: "promptCachePrewarm", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**
@@ -627,7 +695,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"region-limits-eu": { key: "regionLimitsEu", set: "catalog", shape: "object" },
 	/**
 	 * Subscription credit rates: `input` is the per-token credit weight shown
-	 * as the model's multiplier; `output` and `cache-read` multiply it.
+	 * as the model's multiplier; `output` and `cache-read` multiply it. An
+	 * `effective-rates` block of dated cards overwrites them from each card's
+	 * `effective-from`, as on `cost-patch`.
 	 */
 	"credit-rates": { key: "creditRates", set: "catalog", shape: "object" },
 	/**
@@ -669,3 +739,97 @@ export const API_COMPAT_RECORDS: Readonly<Record<string, readonly CompatRecordNa
 	"google-vertex": ["google"],
 	"google-gemini-cli": ["google"],
 };
+
+/** Axis assignments of one rule block, split by namespace and keyed by resolved field. */
+export interface RuleAxes {
+	wire: Record<string, unknown>;
+	thinking: Record<string, unknown>;
+	catalog: Record<string, unknown>;
+}
+
+/**
+ * Object-payload child name → resolved JSON key. Authored names are
+ * kebab-case; an axis-directive spelling maps to its resolved axis key
+ * (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else
+ * converts mechanically (`input-threshold` → `inputThreshold`).
+ */
+export function axisPayloadKey(name: string): string {
+	return AXES[name]?.key ?? name.replace(/-([a-z0-9])/g, (_, first: string) => first.toUpperCase());
+}
+
+/** Whether `value` is in the axis's closed vocabulary; axes without one accept any value. */
+export function axisAcceptsValue(axis: AxisDef, value: unknown): boolean {
+	return (
+		axis.values === undefined ||
+		((typeof value === "string" || typeof value === "boolean") && axis.values.includes(value))
+	);
+}
+
+function isPayloadScalar(value: unknown): value is string | number | boolean {
+	return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+function isPayloadObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** JSON object payload → resolved JSON, with the KDL compiler's key rules (`extra-body` subtrees stay verbatim). */
+function payloadValue(directive: string, object: Record<string, unknown>, verbatim: boolean): Record<string, unknown> {
+	const resolved: Record<string, unknown> = {};
+	for (const name in object) {
+		if (!verbatim && /[A-Z]/.test(name)) {
+			throw new Error(`\`${directive}\`: object payload key \`${name}\` must be kebab-case`);
+		}
+		const value = object[name];
+		const key = verbatim ? name : axisPayloadKey(name);
+		if (isPayloadScalar(value)) resolved[key] = value;
+		else if (isPayloadObject(value))
+			resolved[key] = payloadValue(directive, value, verbatim || name === "extra-body");
+		else throw new Error(`\`${directive}\`: payload key \`${name}\` must be a scalar or an object`);
+	}
+	return resolved;
+}
+
+function directiveValue(name: string, axis: AxisDef, value: unknown): unknown {
+	const scalar = (item: unknown): string | number | boolean => {
+		if (!isPayloadScalar(item)) throw new Error(`\`${name}\` takes a string, number, or boolean`);
+		if (!axisAcceptsValue(axis, item)) throw new Error(`axis \`${name}\` rejects value \`${item}\``);
+		return item;
+	};
+	switch (axis.shape) {
+		case "scalar": {
+			const item = scalar(value);
+			if (axis.key === "editRevision" && (typeof item !== "string" || !item.trim())) {
+				throw new Error(`\`${name}\` takes a non-empty string`);
+			}
+			return item;
+		}
+		case "array":
+			if (!Array.isArray(value)) throw new Error(`\`${name}\` takes an array`);
+			if (value.length === 0 && axis.emptyArray !== true) throw new Error(`\`${name}\` takes at least one value`);
+			return value.map(scalar);
+		case "object":
+			if (!isPayloadObject(value)) throw new Error(`\`${name}\` takes an object`);
+			return payloadValue(name, value, axis.verbatimKeys === true);
+	}
+}
+
+/**
+ * Compiles directive → value assignments, the JSON form of a KDL rule block's
+ * axis lines (`{ "prompt-perturbation": true }`), into resolved axes with the
+ * same validation as the KDL compiler. Object payloads use kebab-case keys.
+ *
+ * @throws Error naming an unknown directive, a value of the wrong shape, a
+ * value outside the axis vocabulary, or two directives assigning one axis.
+ */
+export function compileRuleDirectives(directives: Readonly<Record<string, unknown>>): RuleAxes {
+	const axes: RuleAxes = { wire: {}, thinking: {}, catalog: {} };
+	for (const name in directives) {
+		const axis = AXES[name];
+		if (!axis) throw new Error(`unknown directive \`${name}\``);
+		const map = axes[axis.set];
+		if (axis.key in map) throw new Error(`axis \`${axis.key}\` assigned twice`);
+		map[axis.key] = directiveValue(name, axis, directives[name]);
+	}
+	return axes;
+}

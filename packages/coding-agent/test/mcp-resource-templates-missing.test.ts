@@ -8,67 +8,87 @@
  *
  * Contract this test defends: a missing templates method is treated as "no
  * templates" (returns []), so resources still load; any OTHER error from
- * `resources/templates/list` still propagates.
+ * `resources/templates/list` still propagates. A handshake-era server gets
+ * that treatment inside the MCP host; a 2026-07-28 server's -32601 reaches the
+ * session, which is what the scripted host plays here.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { listResourceTemplates } from "../src/mcp/client";
-import { MCPManager } from "../src/mcp/manager";
-import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "../src/mcp/types";
+import {
+	connectToServer,
+	disconnectServer,
+	type HostedMCPConnection,
+	listResourceTemplates,
+} from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { disposeLocalMcpHost } from "@oh-my-pi/pi-coding-agent/mcp/host/local";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { RESOURCE_URIS } from "./fixtures/resources-no-templates-mcp";
+import { rejectionOf } from "./helpers/rejection";
+import { FakeHost } from "./mcp-host/link-fake-host";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "resources-no-templates-mcp.ts");
 const BUN_EXEC = process.execPath;
 
-/** Minimal mock transport where `request` is controlled by the caller. */
-function mockTransport(requestFn: (method: string) => Promise<unknown>): MCPTransport {
-	return {
-		connected: true,
-		request: ((method: string) => requestFn(method)) as MCPTransport["request"],
-		async notify() {},
-		async close() {},
-	};
-}
-
-function makeResourceConnection(transport: MCPTransport): MCPServerConnection {
-	return {
-		name: "docs",
-		config: { type: "stdio", command: "echo" },
-		transport,
-		serverInfo: { name: "docs", version: "1.0" },
-		capabilities: { resources: {} },
-	};
-}
+const TEMPLATES = "resources/templates/list";
 
 describe("listResourceTemplates -32601 handling", () => {
-	it("returns [] when the server answers resources/templates/list with -32601", async () => {
-		const connection = makeResourceConnection(
-			mockTransport(async method => {
-				if (method === "resources/templates/list") {
-					throw new Error("MCP error -32601: Method not found");
-				}
-				return { resourceTemplates: [] };
-			}),
-		);
+	let host: FakeHost;
+	let connection: HostedMCPConnection | undefined;
 
-		await expect(listResourceTemplates(connection)).resolves.toEqual([]);
-		// Cached as "no templates" so a second call does not re-request.
-		expect(connection.resourceTemplates).toEqual([]);
+	/** A modern server with resources whose templates listing answers with `code`. */
+	async function connectAnsweringTemplatesWith(code: number, message: string): Promise<HostedMCPConnection> {
+		host = new FakeHost();
+		host.answer = (request, tunnel) => {
+			if (request.method === "server/discover") {
+				queueMicrotask(() =>
+					tunnel.push({
+						id: request.id,
+						result: {
+							resultType: "complete",
+							supportedVersions: ["2026-07-28"],
+							capabilities: { resources: {} },
+						},
+					}),
+				);
+			} else if (request.method === "subscriptions/listen") {
+				queueMicrotask(() => tunnel.acknowledge(request));
+			} else if (request.method === TEMPLATES) {
+				queueMicrotask(() => tunnel.push({ id: request.id, error: { code, message } }));
+			}
+		};
+		connection = await connectToServer(
+			"docs",
+			{ type: "http", url: "https://mcp.example.test/mcp" },
+			{ access: host },
+		);
+		return connection;
+	}
+
+	afterEach(async () => {
+		if (connection) await disconnectServer(connection);
+		connection = undefined;
+	});
+
+	it("returns [] when the server answers resources/templates/list with -32601", async () => {
+		const docs = await connectAnsweringTemplatesWith(-32601, "Method not found");
+
+		expect(await listResourceTemplates(docs)).toEqual([]);
+		// Remembered as "no templates": a second call does not ask again.
+		expect(await listResourceTemplates(docs)).toEqual([]);
+		expect(host.tunnel.sent.filter(request => request.method === TEMPLATES)).toHaveLength(1);
 	});
 
 	it("rethrows non-method-not-found errors", async () => {
-		const connection = makeResourceConnection(
-			mockTransport(async () => {
-				throw new Error("MCP error -32603: Internal error");
-			}),
-		);
+		const docs = await connectAnsweringTemplatesWith(-32603, "Internal error");
 
-		await expect(listResourceTemplates(connection)).rejects.toThrow("-32603");
-		// Not cached: a transient failure must be retryable.
-		expect(connection.resourceTemplates).toBeUndefined();
+		expect(String(await rejectionOf(listResourceTemplates(docs)))).toContain("-32603");
+		// Not remembered: a transient failure must be retryable.
+		expect(String(await rejectionOf(listResourceTemplates(docs)))).toContain("-32603");
+		expect(host.tunnel.sent.filter(request => request.method === TEMPLATES)).toHaveLength(2);
 	});
 });
 
@@ -79,7 +99,8 @@ describe("MCPManager loads resources for a templates-less server", () => {
 		workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-templates-"));
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await disposeLocalMcpHost();
 		removeSyncWithRetries(workDir);
 	});
 
@@ -92,7 +113,8 @@ describe("MCPManager loads resources for a templates-less server", () => {
 		};
 
 		try {
-			await manager.connectServers({ docs: config }, {});
+			// A zero startup window waits for the fresh fixture to connect.
+			await manager.connectServers({ docs: config }, {}, undefined, 0);
 			await manager.ensureServerResources("docs");
 			const resources = manager.getServerResources("docs");
 
@@ -118,7 +140,8 @@ describe("MCPManager loads resources for a templates-less server", () => {
 		};
 
 		try {
-			await manager.connectServers({ docs: config }, {});
+			// A zero startup window waits for the fresh fixture to connect.
+			await manager.connectServers({ docs: config }, {}, undefined, 0);
 			await manager.ensureServerResources("docs");
 			const resources = manager.getServerResources("docs");
 

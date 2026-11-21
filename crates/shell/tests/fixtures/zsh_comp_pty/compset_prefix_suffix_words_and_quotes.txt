@@ -1,0 +1,41 @@
+### "a bb c key=valu,rest\u{2}\u{2}\u{2}\u{2}\u{2}\u{2}\u{2}\u{14}"
+% a bb c key=valu,rest
+@ 0,15
+### "\u{15}cat ~/cs.out\r"
+% cat ~/cs.out
+0 [|key=va|lu,rest|] 4 a,bb,c,key=valu,rest
+P [key=|va|lu,rest|]
+S [key=|va|lu|,rest]
+p [key=v|a|lu|,rest]
+s [key=v|a|l|u,rest]
+n 3 bb,c,key=valu,rest
+N 2 c,key=valu,rest
+p9 fails
+%
+@ 9,2
+### ": \"foo bar ba\u{18}q"
+% cat ~/cs.out
+0 [|key=va|lu,rest|] 4 a,bb,c,key=valu,rest
+P [key=|va|lu,rest|]
+S [key=|va|lu|,rest]
+p [key=v|a|lu|,rest]
+s [key=v|a|l|u,rest]
+n 3 bb,c,key=valu,rest
+N 2 c,key=valu,rest
+p9 fails
+% : "foo bar baz
+@ 9,16
+### "\u{15}cat ~/q.out\r"
+% cat ~/cs.out
+0 [|key=va|lu,rest|] 4 a,bb,c,key=valu,rest
+P [key=|va|lu,rest|]
+S [key=|va|lu|,rest]
+p [key=v|a|lu|,rest]
+s [key=v|a|l|u,rest]
+n 3 bb,c,key=valu,rest
+N 2 c,key=valu,rest
+p9 fails
+% cat ~/q.out
+q 3 foo,bar,ba [|ba||]
+%
+@ 11,2

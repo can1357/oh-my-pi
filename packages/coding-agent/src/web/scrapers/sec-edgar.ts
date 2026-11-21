@@ -85,8 +85,9 @@ function extractCik(url: URL): string | null {
 		return null;
 	}
 
-	// Pattern: Filing URLs like /Archives/edgar/data/XXXXXXXXXX/...
-	const archivesMatch = pathname.match(/\/Archives\/edgar\/data\/(\d+)/);
+	// Pattern: the company's filing directory /Archives/edgar/data/XXXXXXXXXX/. Deeper paths name a
+	// filing or one of its documents, which the generic reader fetches as requested.
+	const archivesMatch = pathname.match(/^\/Archives\/edgar\/data\/(\d+)\/?$/);
 	if (archivesMatch) {
 		return normalizeCik(archivesMatch[1]);
 	}

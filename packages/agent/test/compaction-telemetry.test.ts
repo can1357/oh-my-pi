@@ -11,12 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	type CompactionPreparation,
 	compact,
-	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	generateBranchSummary,
 	generateHandoff,
 	generateSummary,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
 	type AgentTelemetryConfig,
 	GenAIAttr,
@@ -113,7 +113,7 @@ function makePreparation(overrides: Partial<CompactionPreparation> = {}): Compac
 		recentMessages,
 		isSplitTurn: false,
 		tokensBefore: 12345,
-		fileOps: createFileOps(),
+		fileOps: snapcompact.createFileOps(),
 		settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false },
 		...overrides,
 	};

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 
 describe("IRC roster activity", () => {
-	let registry: AgentRegistry;
+	let registry: AgentRegistryApi;
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
@@ -43,6 +43,14 @@ describe("IRC roster activity", () => {
 		registry.register({ id: "Stopped", displayName: "task", kind: "sub", session: null, status: "idle" });
 		registry.setActivity("Stopped", "running bash");
 		expect(registry.get("Stopped")?.activity).toBeUndefined();
+	});
+
+	it("ignores a late heartbeat from a previous run whose id was reused", () => {
+		const old = registry.register({ id: "Reused", displayName: "task", kind: "sub", session: null });
+		const current = registry.register({ id: "Reused", displayName: "task", kind: "sub", session: null });
+		registry.setActivity("Reused", "compiling", current);
+		registry.setActivity("Reused", "reading", old);
+		expect(registry.get("Reused")?.activity).toBe("compiling");
 	});
 
 	it("normalizes a multi-line activity gist to one bounded line", () => {

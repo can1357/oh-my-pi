@@ -20,30 +20,35 @@ import {
 	type ClaudeResetAction,
 	type ClaudeResetSkip,
 	claudeCoveredLimits,
+	claudeResetWindow,
 	fullestClaudeLimit,
 	planClaudeResetRedemptions,
 } from "./claude-auto-reset";
 import {
 	type CodexResetAction,
 	type CodexResetSkip,
+	DEBOUNCE_BUCKET_MS,
 	fullestCodexChatWindow,
 	IMMINENT_RESET_EXPIRY_MS,
 	planCodexResetRedemptions,
+	resetAccountLockKey,
 	resetPlanSettings,
+	resetWindowMode,
 	SALVAGE_MIN_USED_FRACTION,
-	shouldEvaluateCodexAutoRedeem,
-	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import {
 	cfgClaudeResets,
-	cfgClaudeResetsAutoRedeem,
 	cfgCodexResets,
-	cfgCodexResetsAutoRedeem,
 	type ResetAutoRedeemMode,
+	type ResetWindow,
+	resetWindowModes,
+	resetWindowSettings,
 } from "./settings";
 
 const SOON_MS = 7 * 24 * 3_600_000;
 const IMMINENT_MS = 24 * 3_600_000;
+/** The TUI warns about a saved reset only in its final hours; the status line and `omp usage` flag it from 24h out. */
+const NOTICE_LEAD_MS = 6 * 3_600_000;
 const NOTICE_LABEL_MAX = 80;
 
 /** Saved resets close to expiry on an account whose fullest chat window is worth restoring. */
@@ -60,6 +65,8 @@ export interface ResetExpiryWarning {
 	/** The chat window the salvage planner measures for this account. */
 	limit: UsageLimit;
 	usedFraction: number;
+	/** Window whose consent governs spending the warned reset; absent when either chat window could. */
+	window: ResetWindow | undefined;
 }
 
 /**
@@ -108,9 +115,15 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 
 	const tier = remainingMs <= IMMINENT_MS ? "imminent" : "soon";
 	const horizonMs = tier === "imminent" ? IMMINENT_MS : SOON_MS;
+	const windowOf = (credit: UsageResetCreditDetail, limit: UsageLimit): ResetWindow | undefined =>
+		provider === "openai-codex" ? codexWindow?.window : claudeResetWindow(credit, [limit.id]);
+	const window = windowOf(warned.credit, fullest.limit);
+	// Count only resets the warned one's setting decides, so the count and the verdict agree.
 	let count = 0;
 	for (const { credit, expiresAtMs } of credits) {
-		if (expiresAtMs - nowMs <= horizonMs && worth(credit)) count += credit.remainingCount ?? 1;
+		if (expiresAtMs - nowMs > horizonMs) continue;
+		const worthy = worth(credit);
+		if (worthy && windowOf(credit, worthy.limit) === window) count += credit.remainingCount ?? 1;
 	}
 	return {
 		provider,
@@ -119,6 +132,7 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 		expiresAtMs: warned.expiresAtMs,
 		usableNow: spendableNow(provider, report.resetCredits, warned.credit),
 		...fullest,
+		window,
 	};
 }
 
@@ -140,14 +154,15 @@ function spendableNow(
 
 /**
  * What an open interactive omp session does with an account's soonest expiring saved
- * reset. `kind` comes from the provider's `autoRedeem` setting alone: `auto`
- * spends it by its last five minutes if the provider still allows it then,
- * `ask` prompts first, `off` leaves it. `eligibleNow` is the salvage planner's
- * answer for this report today; usage can change it before the reset expires.
+ * reset, from the consent of the window that governs it: `auto` spends it by its
+ * last five minutes if the provider still allows it then, `ask` prompts first,
+ * `off` leaves it. `eligibleNow` is the salvage planner's answer for this report
+ * today; usage can change it before the reset expires.
  */
 export interface ResetSpendVerdict {
 	kind: "auto" | "ask" | "off";
-	setting: "codexResets.autoRedeem" | "claudeResets.autoRedeem";
+	/** The setting key or keys that decide it. */
+	setting: string;
 	mode: ResetAutoRedeemMode;
 	eligibleNow: boolean;
 }
@@ -158,14 +173,15 @@ export function resetSpendVerdict(
 	settings: Settings,
 	nowMs: number,
 ): ResetSpendVerdict {
-	const autoRedeem = warning.provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
-	const mode = autoRedeem.get(settings);
-	const kind = !shouldEvaluateCodexAutoRedeem(mode) ? "off" : shouldPromptCodexAutoRedeem(mode) ? "ask" : "auto";
+	const mode = resetWindowMode(resetWindowModes(warning.provider, settings), warning.window);
+	const kind = mode === "no" ? "off" : mode === "unset" ? "ask" : "auto";
+	const windows: readonly ResetWindow[] = warning.window ? [warning.window] : ["5h", "weekly"];
+	const setting = windows.map(window => resetWindowSettings[warning.provider][window]?.id).join(" + ");
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
 	const eligibleNow =
 		plan.actions[0]?.expiresInMs === IMMINENT_RESET_EXPIRY_MS || plan.skipped[0]?.reason === "stale-report";
-	return { kind, setting: autoRedeem.id, mode, eligibleNow };
+	return { kind, setting, mode, eligibleNow };
 }
 
 /**
@@ -205,7 +221,7 @@ function planAsLastChance(
 			trigger: "sweep",
 			provider: "",
 			modelId: "",
-			settings: resetPlanSettings({ ...cfgCodexResets.get(settings), autoRedeem: "yes" }),
+			settings: resetPlanSettings({ "5h": "yes", weekly: "yes" }, cfgCodexResets.get(settings)),
 			identity: undefined,
 			reports: [{ ...lastChance, metadata: { ...report.metadata, resetCreditCredentialId: credentialId } }],
 			...episodes,
@@ -217,7 +233,7 @@ function planAsLastChance(
 		trigger: "sweep",
 		provider: "",
 		modelId: "",
-		settings: resetPlanSettings({ ...cfgClaudeResets.get(settings), autoRedeem: "yes" }),
+		settings: resetPlanSettings({ "5h": "yes", weekly: "yes", fable: "yes" }, cfgClaudeResets.get(settings)),
 		reports: [lastChance],
 		statuses: [
 			{
@@ -236,13 +252,26 @@ function planAsLastChance(
 	});
 }
 
-/** One-line TUI warning for the soonest saved reset expiring within 24 hours across the pool. */
-export function formatResetExpiryNotice(reports: readonly UsageReport[], nowMs: number): string | undefined {
+/**
+ * One-line TUI warning for saved resets across the pool within {@link NOTICE_LEAD_MS}
+ * of expiry, naming only those `claim` accepts. Each account's soonest due reset is
+ * offered under a key of provider, account, and expiry minute, so a `claim` that
+ * accepts each key once warns about every saved reset once.
+ */
+export function claimResetExpiryNotice(
+	reports: readonly UsageReport[],
+	nowMs: number,
+	claim: (key: string, expiresAtMs: number) => boolean,
+): string | undefined {
 	let soonest: { report: UsageReport; warning: ResetExpiryWarning } | undefined;
 	let accounts = 0;
 	for (const report of reports) {
 		const warning = classifyResetExpiry(report, nowMs);
-		if (warning?.tier !== "imminent") continue;
+		if (!warning || warning.expiresAtMs - nowMs > NOTICE_LEAD_MS) continue;
+		const account =
+			resetAccountLockKey({ provider: warning.provider, ...usageReportIdentity(report) }) ?? warning.provider;
+		const expiryMinute = Math.round(warning.expiresAtMs / DEBOUNCE_BUCKET_MS);
+		if (!claim(`reset-expiry|${account}|${expiryMinute}`, warning.expiresAtMs)) continue;
 		accounts++;
 		if (!soonest || warning.expiresAtMs < soonest.warning.expiresAtMs) soonest = { report, warning };
 	}

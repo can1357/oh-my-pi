@@ -180,6 +180,8 @@ export const LEGACY_COMPACTION_BETA = "compact-2026-01-12";
 export type CompactionBlockParam = {
 	type: "compaction";
 	content: string;
+	/** Opaque signed tool changes from a compaction response. */
+	tool_changes?: Record<string, unknown>[];
 	signature?: string;
 	encrypted_content?: string | null;
 	cache_control?: CacheControlEphemeral | null;
@@ -203,9 +205,9 @@ export type ContentBlockParam =
 /**
  * A single conversation turn.
  *
- * `system` is the Opus 4.8+ mid-conversation system role
- * (`mid-conversation-system-2026-04-07` beta); the public API otherwise only
- * accepts `user` / `assistant`.
+ * `system` is the Opus 4.8+ mid-conversation system role (generally available;
+ * the former `mid-conversation-system-2026-04-07` beta is no longer sent); the
+ * public API otherwise only accepts `user` / `assistant`.
  */
 export type MessageParam = {
 	role: "user" | "assistant" | "system";
@@ -324,6 +326,13 @@ export type ContextManagement = {
 
 export type OnDemandCompaction = { type: "summarize"; instructions?: string };
 
+/**
+ * Message threads beta (`message-threads-2026-08-12`): `create` stores the
+ * conversation under the response id; `continue` appends to the conversation
+ * stored under `previous_message_id` and omits everything sent before.
+ */
+export type ThreadParam = { type: "create" } | { type: "continue"; previous_message_id: string };
+
 export type MessageCreateParams = {
 	model: string;
 	messages: MessageParam[];
@@ -355,6 +364,8 @@ export type MessageCreateParams = {
 	fallbacks?: FallbackParam[];
 	/** Fallback credit token redeemed from a prior refusal (`fallback-credit-2026-06-01` / `fallback-credit-2026-07-01`). */
 	fallback_credit_token?: string;
+	/** Message threads beta: start or continue a server-held conversation. */
+	thread?: ThreadParam;
 };
 
 export type MessageCreateParamsStreaming = MessageCreateParams & { stream: true };
@@ -453,7 +464,13 @@ export type ResponseContentBlock =
 	| WebSearchToolResultBlockParam
 	| ToolSearchToolResultBlockParam
 	| { type: "fallback"; from: { model: string }; to: { model: string } }
-	| { type: "compaction"; content: string; signature?: string; encrypted_content?: string | null };
+	| {
+			type: "compaction";
+			content: string;
+			signature?: string;
+			encrypted_content?: string | null;
+			tool_changes?: Record<string, unknown>[];
+	  };
 
 export type ContentBlockDelta =
 	| { type: "text_delta"; text: string }

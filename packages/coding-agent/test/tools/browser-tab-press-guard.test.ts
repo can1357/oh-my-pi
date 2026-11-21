@@ -17,9 +17,9 @@ function makeSession(): ToolSession {
 	} as unknown as ToolSession;
 }
 
-describe("tab.press argument guard", () => {
+describe("tab.press argument order", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"rejects the inverted form before input and dispatches the valid form through WorkerCore",
+		"reads press(selector, key) as press(key, {selector}) through WorkerCore",
 		async () => {
 			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 			if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
@@ -35,37 +35,18 @@ describe("tab.press argument guard", () => {
 				});
 				const result = await runInTab(name, {
 					code: `
-						let inverted;
-						try {
-							await tab.press("body", "Escape");
-						} catch (error) {
-							inverted = { name: error.name, message: error.message };
-						}
-						const before = await tab.evaluate(() => ({
+						await tab.press("#target", "Escape");
+						return await tab.evaluate(() => ({
 							active: document.activeElement?.id || "",
 							events: globalThis.__events,
 						}));
-						await tab.press("Escape", { selector: "#target" });
-						const after = await tab.evaluate(() => ({
-							active: document.activeElement?.id || "",
-							events: globalThis.__events,
-						}));
-						return { inverted, before, after };
 					`,
 					timeoutMs: 15_000,
 					session: makeSession(),
 				});
 				expect(result.returnValue).toEqual({
-					inverted: {
-						name: "ToolError",
-						message:
-							'tab.press() takes (key, options) but was called as (selector, key). Did you mean tab.press("Escape", { selector: "body" })?',
-					},
-					before: { active: "initial", events: [] },
-					after: {
-						active: "target",
-						events: [{ key: "Escape", isTrusted: true }],
-					},
+					active: "target",
+					events: [{ key: "Escape", isTrusted: true }],
 				});
 			} finally {
 				await releaseTab(name, { kill: true });
@@ -75,17 +56,14 @@ describe("tab.press argument guard", () => {
 		45_000,
 	);
 
-	it("rejects the inverted form and preserves focus-before-key order in cmux", async () => {
+	it("reads press(selector, key) and preserves focus-before-key order in cmux", async () => {
 		const calls: unknown[][] = [];
 		const tab = new CmuxTab({
 			client: { request: async (...args: unknown[]) => (calls.push(args), {}) } as never,
 			surfaceId: "press-guard",
 		});
 
-		await expect(tab.press("body", "Escape" as never)).rejects.toThrow(/takes \(key, options\)/);
-		expect(calls).toEqual([]);
-
-		await tab.press("Escape", { selector: "body" });
+		await tab.press("body", "Escape");
 		expect(calls).toEqual([
 			["browser.focus", { surface_id: "press-guard", selector: "body" }, { timeoutMs: undefined }],
 			["browser.press", { surface_id: "press-guard", key: "Escape" }, { timeoutMs: undefined }],

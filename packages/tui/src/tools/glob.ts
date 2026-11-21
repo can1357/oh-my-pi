@@ -15,12 +15,14 @@ import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
 import { toPathList } from "../render/render-utils";
 import * as path from "node:path";
-import { Ellipsis, fileHyperlink, renderFileList, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import { fileHyperlink, renderFileList, renderStatusLine, renderTreeList } from "../render";
 import {
 	createCachedComponent,
+	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
+	formatStyledPath,
 	PREVIEW_LIMITS,
 } from "../render/render-utils";
 import { formatFullOutputReference } from "./output-meta";
@@ -151,7 +153,7 @@ export const globToolRenderer = {
 			},
 			uiTheme,
 		);
-		return new Text(text, 1, 0);
+		return new Text(text, 0, 0);
 	},
 
 	renderResult(
@@ -165,7 +167,7 @@ export const globToolRenderer = {
 
 		if (result.isError || details?.error) {
 			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			return new Text(formatErrorMessage(errorText, uiTheme), 1, 0);
+			return new Text(formatErrorMessage(errorText, uiTheme), 0, 0);
 		}
 
 		const hasDetailedData = details?.fileCount !== undefined;
@@ -178,7 +180,7 @@ export const globToolRenderer = {
 				textContent.includes("No files found") ||
 				textContent.trim() === ""
 			) {
-				return new Text(formatEmptyMessage("No files found", uiTheme), 1, 0);
+				return new Text(formatEmptyMessage("No files found", uiTheme), 0, 0);
 			}
 
 			const lines = textContent.split("\n").filter(l => l.trim());
@@ -201,13 +203,12 @@ export const globToolRenderer = {
 							expanded: options.expanded,
 							maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 							itemType: "file",
-							renderItem: line => uiTheme.fg("accent", line),
+							renderItem: line => formatStyledPath(line, uiTheme),
 						},
 						uiTheme,
 					);
-					return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+					return fitHeaderedRows(header, listLines, width);
 				},
-				{ paddingX: 1 },
 			);
 		}
 
@@ -244,7 +245,7 @@ export const globToolRenderer = {
 			);
 			const lines = [header, formatEmptyMessage(emptyLabel, uiTheme)];
 			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 1, 0);
+			return new Text(lines.join("\n"), 0, 0);
 		}
 		const meta: string[] = [formatCount("file", fileCount)];
 		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
@@ -296,9 +297,8 @@ export const globToolRenderer = {
 					},
 					uiTheme,
 				);
-				return [header, ...fileLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+				return fitHeaderedRows(header, [...fileLines, ...extraLines], width);
 			},
-			{ paddingX: 1 },
 		);
 	},
 	describeCall(args: GlobRenderArgs): NativeToolView {

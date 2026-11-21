@@ -316,6 +316,8 @@ export type CollabUiRequestDraft =
 			checkedIndices?: number[];
 			markableCount?: number;
 			helpText?: string;
+			/** The select asks for a permission (a tool approval, a settings change), not an answer. */
+			approval?: boolean;
 	  }
 	| {
 			kind: "editor";
@@ -337,9 +339,14 @@ export type GuestFrame =
 			 */
 			writeToken?: string;
 	  }
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	/** `followUp`: wait for the running turn to finish instead of steering it (the TUI's Ctrl+Enter). */
+	| { t: "prompt"; text: string; images?: ImageContent[]; followUp?: true }
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
+	/** The `.`/`c` continue shortcut: resume the agent, interrupting a running turn first. */
+	| { t: "resume" }
+	/** Empty Enter: interrupt a run that has queued input and continue it with that input. */
+	| { t: "deliver-queue" }
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
 	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number };
 
@@ -381,7 +388,8 @@ export type HostFrame =
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }
-	| { t: "error"; message: string };
+	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
+	| { t: "error"; message: string; resync?: true };
 
 export type WireFrame = GuestFrame | HostFrame;
 
@@ -403,12 +411,42 @@ export const COLLAB_PROTO = 3;
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";
 
+/** Activity label before the first colon-space in a tool intent; preserves bare labels and embedded URL or file:line references. */
+export function toolIntentLabel(intent: string): string {
+	const separator = intent.search(/:(?=\s|$)/);
+	return separator > 0 ? intent.slice(0, separator).trim() || intent : intent;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Envelope & link constants
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Plaintext envelope prefix: `[4B uint32 BE peerId][sealed payload]`. */
 export const ENVELOPE_HEADER_LENGTH = 4;
+
+/**
+ * Prefix `sealed` with its envelope header. Host→relay: peerId 0 broadcasts to
+ * all guests, peerId N targets guest N. Guest→relay: always 0; the relay
+ * rewrites it to the sender's id.
+ */
+export function packEnvelope(peerId: number, sealed: Uint8Array): Uint8Array<ArrayBuffer> {
+	const out = new Uint8Array(ENVELOPE_HEADER_LENGTH + sealed.byteLength);
+	new DataView(out.buffer).setUint32(0, peerId, false);
+	out.set(sealed, ENVELOPE_HEADER_LENGTH);
+	return out;
+}
+
+/** Split an envelope into its peerId and sealed payload; `null` when shorter than the header. */
+export function unpackEnvelope(data: Uint8Array): { peerId: number; payload: Uint8Array } | null {
+	if (data.byteLength < ENVELOPE_HEADER_LENGTH) return null;
+	const peerId = new DataView(data.buffer, data.byteOffset, ENVELOPE_HEADER_LENGTH).getUint32(0, false);
+	return { peerId, payload: data.subarray(ENVELOPE_HEADER_LENGTH) };
+}
+
+/** Rewrite the peerId in place without copying the payload. */
+export function rewriteEnvelopePeer(data: Uint8Array, peerId: number): void {
+	new DataView(data.buffer, data.byteOffset, ENVELOPE_HEADER_LENGTH).setUint32(0, peerId, false);
+}
 
 export const ROOM_ID_BYTES = 16;
 
@@ -421,6 +459,22 @@ export const ROOM_KEY_BYTES = 32;
  * proves prompt/abort/agent-cmd capability to the host.
  */
 export const WRITE_TOKEN_BYTES = 16;
+
+/**
+ * Each automatic rejoin costs the host a full snapshot, and a guest on a link
+ * too slow for the session is shed again after every one. Past the cap the
+ * guest stops rejoining on its own and leaves the decision to the user.
+ */
+export const MAX_AUTO_REJOINS = 3;
+export const AUTO_REJOIN_WINDOW_MS = 5 * 60_000;
+
+/** Records an automatic rejoin in {@link history} if the window has room for one. */
+export function takeAutoRejoin(history: number[], now = Date.now()): boolean {
+	while (history.length > 0 && now - history[0]! >= AUTO_REJOIN_WINDOW_MS) history.shift();
+	if (history.length >= MAX_AUTO_REJOINS) return false;
+	history.push(now);
+	return true;
+}
 
 /** Default public relay; bare `<roomId>.<key>` links resolve against it. */
 export const DEFAULT_RELAY_URL = "wss://my.omp.sh";
@@ -447,5 +501,7 @@ export type RelayControlToHost = { t: "peer-joined" | "peer-left"; peer: number 
 export type RelayControlToGuest = { t: "room-closed" };
 export type RelayControlMessage = RelayControlToHost | RelayControlToGuest;
 
+export * from "./shell-trace";
+export * from "./shell-viz";
 export * from "./stream";
 export * from "./tsp";

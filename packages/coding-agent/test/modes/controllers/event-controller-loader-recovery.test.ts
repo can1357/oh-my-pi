@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -23,24 +23,14 @@ import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/setting
  * the next `agent_start` recreates and re-attaches it.
  */
 function createContext(options: { terminalProgress?: boolean } = {}) {
-	// `continuation`: a scheduled retry/continuation the session still owes.
-	const streamState: { isStreaming: boolean; continuation?: PromiseWithResolvers<void> } = { isStreaming: false };
+	const streamState = { isStreaming: false };
 	if (options.terminalProgress) cfgTerminalShowProgress.set(settings, true);
-	const progressCleared = Promise.withResolvers<void>();
-	const setProgress = vi.fn((active: boolean) => {
-		if (!active) progressCleared.resolve();
-	});
+	const setProgress = vi.fn((_active: boolean) => {});
 	const ctx = createInteractiveModeContext({
 		ui: { terminal: { setProgress } },
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
-			},
-			get hasPostPromptWork() {
-				return streamState.continuation !== undefined;
-			},
-			waitForIdle: async () => {
-				await streamState.continuation?.promise;
 			},
 		},
 	});
@@ -60,12 +50,17 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 		ctx.loadingAnimation = working;
 		statusContainer.addChild(working);
 	});
-	return { ctx, streamState, statusContainer, workingLoaders, setProgress, progressCleared: progressCleared.promise };
+	return { ctx, streamState, statusContainer, workingLoaders, setProgress };
 }
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
 const AGENT_END = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
-const NON_TERMINAL_AGENT_END = { type: "agent_end", messages: [], isTerminal: false } as unknown as AgentSessionEvent;
+const AGENT_PAUSE = {
+	type: "agent_pause",
+	messages: [],
+	yielded: false,
+	awaiting: false,
+} as unknown as AgentSessionEvent;
 const COMPACTION_START = {
 	type: "auto_compaction_start",
 	reason: "overflow",
@@ -77,13 +72,6 @@ const COMPACTION_END = {
 	result: { summary: "s", shortSummary: "s", tokensBefore: 10, details: {}, firstKeptEntryId: undefined },
 	willRetry: true,
 } as unknown as AgentSessionEvent;
-
-/** One macrotask hop: every microtask continuation queued so far has run. */
-async function nextMacrotask(): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	setImmediate(resolve);
-	await promise;
-}
 
 const RETRY_START = {
 	type: "auto_retry_start",
@@ -113,6 +101,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 	});
 
 	afterEach(() => {
+		setSystemTime();
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		resetSettingsForTest();
@@ -174,6 +163,9 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		const { ctx, streamState } = createContext();
 		const controller = new EventController(ctx);
 		const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+		// Spinner ticks land on the shared wall-clock grid (multiples of the 80ms
+		// period); starting on a boundary puts a tick exactly at the 400ms mark.
+		setSystemTime(1_000_000);
 
 		streamState.isStreaming = true;
 		await controller.handleEvent(RETRY_START);
@@ -279,41 +271,29 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
 	});
 
-	it("ends OSC 9;4 progress when an abort cancels the overflow retry before it starts", async () => {
-		const { ctx, streamState, setProgress, progressCleared } = createContext({ terminalProgress: true });
+	it("keeps OSC 9;4 progress through a pause and ends it when an abort ends the run before the retry starts", async () => {
+		const { ctx, setProgress } = createContext({ terminalProgress: true });
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent(COMPACTION_START);
 		await controller.handleEvent(COMPACTION_END);
-		// Recovery scheduled the retry, so the overflowed turn settles non-terminally.
-		const retry = Promise.withResolvers<void>();
-		streamState.continuation = retry;
-		await controller.handleEvent(NON_TERMINAL_AGENT_END);
-		await nextMacrotask();
+		// Recovery scheduled the retry, so the overflowed loop pauses.
+		await controller.handleEvent(AGENT_PAUSE);
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
 
-		// Esc cancels the scheduled retry: no agent_start or terminal agent_end follows.
-		streamState.continuation = undefined;
-		retry.resolve();
-		await progressCleared;
+		// Esc cancels the scheduled retry: the session ends the run.
+		await controller.handleEvent(AGENT_END);
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
 	});
 
 	it("leaves OSC 9;4 progress to a scheduled continuation that does start", async () => {
-		const { ctx, streamState, setProgress } = createContext({ terminalProgress: true });
+		const { ctx, setProgress } = createContext({ terminalProgress: true });
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent(AGENT_START);
-		const retry = Promise.withResolvers<void>();
-		streamState.continuation = retry;
-		await controller.handleEvent(NON_TERMINAL_AGENT_END);
-
-		// The retry runs: its agent_start supersedes the settle watch.
+		await controller.handleEvent(AGENT_PAUSE);
 		await controller.handleEvent(AGENT_START);
-		streamState.continuation = undefined;
-		retry.resolve();
-		await nextMacrotask();
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
 
 		await controller.handleEvent(AGENT_END);

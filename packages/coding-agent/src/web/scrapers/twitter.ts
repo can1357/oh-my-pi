@@ -7,14 +7,12 @@ import {
 	parseXAIAnswer,
 	requestXAIResponses,
 	XAI_SEARCH_REASONING_EFFORT,
+	XAI_SEARCH_MAX_TURNS,
 	xaiModelChain,
 } from "../search/providers/xai";
 import { parseXUrl, type XProfileTab, type XTarget } from "../x";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult } from "./types";
-
-/** Agent turns per X read: one round of X tool calls, plus one follow-up when a call misfires. */
-const X_READ_MAX_TURNS = 2;
 
 /** Search operators narrowing `from:<handle>` to what each profile tab shows. */
 const PROFILE_TAB_FILTERS: Record<XProfileTab, string> = {
@@ -101,7 +99,7 @@ export const handleTwitter: SpecialHandler = async (url, timeout, signal, _stora
 						{ role: "user", content: url },
 					],
 					tools: [xSearch],
-					max_turns: X_READ_MAX_TURNS,
+					max_turns: XAI_SEARCH_MAX_TURNS,
 					reasoning: { effort: XAI_SEARCH_REASONING_EFFORT },
 				},
 			);

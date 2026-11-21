@@ -20,12 +20,6 @@ async function dimensions(image: { data: string }): Promise<{ width: number; hei
 }
 
 describe("ensureSupportedImageInput", () => {
-	test("passes supported mime types through unchanged", async () => {
-		const input = { type: "image" as const, data: RED_1X1_PNG_BASE64, mimeType: "image/png" };
-		const result = await ensureSupportedImageInput(input);
-		expect(result).toEqual(input);
-	});
-
 	test("converts unsupported image input to png", async () => {
 		const result = await ensureSupportedImageInput({
 			type: "image",

@@ -76,6 +76,21 @@ describe("file-editing tools refuse handler-owned URL writes", () => {
 		expect(resultText(result)).toContain("proc://web is written through `write`, not edited");
 	});
 
+	it("hashline edit refuses an untagged handler URL with the handler refusal", async () => {
+		const output = path.join(artifactsDir, "Reviewer.md");
+		await Bun.write(output, "verdict: REJECT\n");
+
+		for (const header of ["[agent://Reviewer]", "[agent://Reviewer#]"]) {
+			const result = await new EditTool(createSession(), "hashline").execute("untagged", {
+				input: `${header}\nPUT 1.=1:\n+verdict: APPROVE\n`,
+			});
+
+			expect(result.isError).toBe(true);
+			expect(resultText(result)).toContain("agent://Reviewer is written through `write`, not edited");
+		}
+		expect(await Bun.file(output).text()).toBe("verdict: REJECT\n");
+	});
+
 	it("edit and ast_edit approvals deny read-only URL targets at the gate", () => {
 		const session = createSession();
 		const ops = [{ pat: "a($A)", out: "b($A)" }];

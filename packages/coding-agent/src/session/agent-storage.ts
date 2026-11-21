@@ -171,11 +171,37 @@ const instances = new Map<string, AgentStorage>();
 let cancelExitCleanup: (() => void) | undefined;
 
 /**
+ * The agent.db surface sessions and tools reach through `Settings.getStorage()`.
+ * {@link AgentStorage} implements it over SQLite; a subagent worker's settings
+ * mirrors return a remote implementation that runs every call on the main
+ * thread's open storage (`thread/services/runtime-remote.ts`), so workers never
+ * open a second connection.
+ */
+export interface AgentStorageApi {
+	/** Cached value by key; null when missing or expired. */
+	getCache(key: string): string | null;
+	/** Set a cached value with expiry time (unix seconds). */
+	setCache(key: string, value: string, expiresAtSec: number): void;
+	/** Stored auth credentials, optionally filtered by provider. */
+	listAuthCredentials(provider?: string, includeDisabled?: boolean): StoredAuthCredential[];
+	/** Record a model use ("provider/modelId"), bumping it in the MRU order. */
+	recordModelUsage(modelKey: string): void;
+	/** Model keys, most recently used first. */
+	getModelUsageOrder(): string[];
+	/** Fold one completed request's timing into the model's perf aggregates. */
+	recordModelPerf(modelKey: string, sample: ModelPerfSample, serviceTier?: ServiceTier | null): Promise<void>;
+	/** Recency-weighted perf averages keyed by "provider/modelId". */
+	getModelPerf(): Map<string, ModelPerfStats>;
+	/** Claim a one-time notice across every process sharing the database. */
+	claimNotice(key: string, expiresAtMs: number): boolean;
+}
+
+/**
  * Unified SQLite storage for agent settings, model usage, and auth credentials.
  * Delegates auth credential operations to AuthCredentialStore from @oh-my-pi/pi-ai.
  * Uses singleton pattern per database path; access via AgentStorage.open().
  */
-export class AgentStorage {
+export class AgentStorage implements AgentStorageApi {
 	#db: Database;
 	#authStore: AuthCredentialStore;
 
@@ -283,6 +309,11 @@ CREATE TABLE IF NOT EXISTS hint_usage (
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notice_claims (
+	key TEXT PRIMARY KEY,
+	expires_at_ms INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
@@ -553,6 +584,25 @@ FROM model_usage_legacy
 			this.#usageStmts[kind].upsert.run(name);
 		} catch (error) {
 			logger.warn("AgentStorage failed to record usage", { kind, name, error: String(error) });
+		}
+	}
+
+	/**
+	 * Claims a one-time notice: true only for the first claim of `key` among every
+	 * process sharing this database, so concurrent omp windows show it once. The
+	 * claim lasts until `expiresAtMs`, when the notice no longer applies.
+	 * Failures are logged and return false: a notice that cannot be recorded
+	 * stays unshown rather than repeating on every check.
+	 */
+	claimNotice(key: string, expiresAtMs: number): boolean {
+		try {
+			using prune = this.#db.prepare("DELETE FROM notice_claims WHERE expires_at_ms <= ?");
+			prune.run(Date.now());
+			using claim = this.#db.prepare("INSERT OR IGNORE INTO notice_claims (key, expires_at_ms) VALUES (?, ?)");
+			return claim.run(key, expiresAtMs).changes > 0;
+		} catch (error) {
+			logger.warn("AgentStorage failed to claim notice", { key, error: String(error) });
+			return false;
 		}
 	}
 

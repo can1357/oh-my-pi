@@ -1,9 +1,11 @@
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { postmortem } from "@oh-my-pi/pi-utils";
 
 const db = process.argv[2];
 const release = process.argv[3];
 if (!db || !release) throw new Error("Expected database and response-release paths");
+postmortem.installProcessHandlers();
 await AgentStorage.open(db);
 const auth = new AuthStorage(await SqliteAuthCredentialStore.open(db));
 await auth.credentials.set("anthropic", [{ type: "oauth", access: "old", refresh: "old-refresh", expires: 0 }]);

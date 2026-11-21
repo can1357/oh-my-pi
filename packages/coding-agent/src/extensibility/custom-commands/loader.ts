@@ -12,9 +12,9 @@ import { getAgentDir, getProjectDir, isEnoent, logger } from "@oh-my-pi/pi-utils
 import { getConfigDirs } from "../../config";
 
 import { execCommand } from "../../exec/exec";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+import { getCodingAgentApi } from "../host-api";
 import * as typebox from "../legacy-typebox";
+import { assertBunCanImport } from "../module-path";
 import { GreenCommand } from "./bundled/ci-green";
 import { AnnotateCommand } from "./bundled/annotate";
 import { ReviewCommand } from "./bundled/review";
@@ -38,6 +38,7 @@ async function loadCommandModule(
 	sharedApi: CustomCommandAPI,
 ): Promise<{ commands: CustomCommand[] | null; error: string | null }> {
 	try {
+		await assertBunCanImport(commandPath);
 		const module = await import(commandPath);
 		const factory = (module.default ?? module) as CustomCommandFactory;
 
@@ -126,7 +127,12 @@ export async function discoverCustomCommands(
 			continue;
 		}
 		for (const entry of entries) {
-			if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+			if (entry.name.startsWith(".")) continue;
+			// A plain `readdir(withFileTypes)` reports a symlink as a link rather than the
+			// type it points at, so linking a shared command package into the commands dir
+			// would drop it silently. Match the skill loader and the hook loader and accept
+			// links here; the index.* probe below narrows it back to a real directory.
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 			const commandDir = path.join(commandsDir, entry.name);
 
 			for (const filename of indexCandidates) {
@@ -199,7 +205,9 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 		typebox,
 		arktype,
 		zod,
-		pi: PiCodingAgent,
+		get pi() {
+			return getCodingAgentApi();
+		},
 	};
 
 	// 1. Load bundled commands first (lowest priority - can be overridden)

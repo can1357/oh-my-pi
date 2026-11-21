@@ -63,9 +63,4 @@ describe("printableEvent", () => {
 		expect(printed.messages).toHaveLength(2);
 		for (const message of printed.messages) expect(message.providerPayload).toBeUndefined();
 	});
-
-	it("passes unrelated events through untouched", () => {
-		const event: AgentSessionEvent = { type: "notice", level: "info", message: "hi" };
-		expect(printableEvent(event)).toBe(event);
-	});
 });

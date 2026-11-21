@@ -41,6 +41,11 @@ const RGI_EMOJI = /^\p{RGI_Emoji}$/v;
 const CODE = /^[A-Z0-9]{1,6}$/;
 /** The card form, `<icon> <CODE>: <title>`. */
 const CARD_LINE = /^(\S+) ([A-Z0-9]{1,6}): (\S.*)$/u;
+/**
+ * A code heading the title text instead of filling `code` (`WAIT Observe agent
+ * waits`); two characters at least, so a leading `A` or `I` stays a word.
+ */
+const LEADING_CODE = /^([A-Z0-9]{2,6}):? (\S.*)$/;
 /** Tern reads at most 8 characters as the icon. */
 const MAX_ICON_CODEPOINTS = 8;
 
@@ -109,7 +114,9 @@ export function formatCardTitle(card: TitleCard, title: string): string {
  * no tag at all, or a title {@link normalizeGeneratedTitle} rejects. Card pieces
  * degrade one by one: an `nf` name matching no catalog glyph leaves the emoji,
  * and a missing or invalid code or icon leaves a plain title. A plain `<title>`
- * holding the line form (`🧪 FLAKY: Fix flaky park tests`) keeps its card as well.
+ * holding the line form (`🧪 FLAKY: Fix flaky park tests`) keeps its card as well,
+ * as does a tag whose icons are attributes but whose code heads the text
+ * (`<title emoji="⏳">WAIT Observe agent waits</title>`).
  *
  * @param sourceText The user's message, to reconcile the title's casing against.
  */
@@ -125,9 +132,14 @@ export function parseCardTitleReply(reply: string, icons: TitleIcons, sourceText
 	if (!card && attrs.code === undefined) {
 		const line = CARD_LINE.exec(text);
 		const lineCard = line ? buildCard(line[2], line[1], attrs.nf) : undefined;
+		const lead = lineCard ? undefined : LEADING_CODE.exec(text);
+		const leadCard = lead ? buildCard(lead[1], attrs.emoji, attrs.nf) : undefined;
 		if (lineCard) {
 			card = lineCard;
 			text = line![3]!;
+		} else if (leadCard) {
+			card = leadCard;
+			text = lead![2]!;
 		}
 	}
 	const title = normalizeGeneratedTitle(text, sourceText);

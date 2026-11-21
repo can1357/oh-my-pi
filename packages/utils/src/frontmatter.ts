@@ -2,8 +2,13 @@ import { YAML } from "bun";
 import { truncate } from "./format";
 import * as logger from "./logger";
 
-function stripHtmlComments(content: string): string {
-	return content.replace(/<!--[\s\S]*?-->/g, "");
+function stripLeadingHtmlComments(content: string): string {
+	const leading = /^(?:(?:\s*<!--[\s\S]*?-->)+)/.exec(content);
+	if (!leading) return content;
+	const rest = content.slice(leading[0].length);
+	// Only repair a comment that precedes frontmatter; leave a plain document
+	// (and every body) byte-identical so HTML comments inside it survive.
+	return /^\s*---/.test(rest) ? rest.replace(/^\s+/, "") : content;
 }
 
 /** Convert kebab-case to camelCase (e.g. "thinking-level" -> "thinkingLevel") */
@@ -142,7 +147,8 @@ export function parseFrontmatter(
 	const frontmatter: Record<string, unknown> = { ...fallback };
 
 	const newlineNormalized = normalize ? content.replace(/\r\n?/g, "\n") : content;
-	const normalized = normalize && repair ? stripHtmlComments(newlineNormalized) : newlineNormalized;
+	const repairHtmlComments = normalize && repair;
+	const normalized = repairHtmlComments ? stripLeadingHtmlComments(newlineNormalized) : newlineNormalized;
 	if (!normalized.startsWith("---")) {
 		return { frontmatter, body: normalized };
 	}
@@ -152,7 +158,8 @@ export function parseFrontmatter(
 		return { frontmatter, body: normalized };
 	}
 
-	const metadata = normalized.slice(4, endIndex);
+	const rawMetadata = normalized.slice(4, endIndex);
+	const metadata = repairHtmlComments ? rawMetadata.replace(/<!--[\s\S]*?-->/g, "") : rawMetadata;
 	const body = normalized.slice(endIndex + 4).trim();
 
 	try {

@@ -3,14 +3,16 @@ import type {
 	CustomCommandAPI,
 	CustomCommandContext,
 } from "../../../../extensibility/custom-commands/types";
+import { parseCommandArgs } from "../../../../utils/command-args";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import type { CodeReviewOverlayResult, TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 import {
-	extractReviewPrRefFromArgs,
 	liveCommandCwd,
 	resolvePrReviewTarget,
 	ReviewCommand,
+	type ReviewRequest,
+	resolveReviewRequest,
 	selectReviewChoice,
 	type ReviewPrRef,
 } from "../review";
@@ -21,8 +23,10 @@ import {
 	type ResolvedReviewTarget,
 	resolveLocalReviewTarget,
 	type ReviewTargetUI,
+	reviewRepository,
 } from "../review/target";
 import { acquireFileTextReviewSource, createPromptTextReviewSource } from "./direct-source";
+import { type AnnotationDraft, loadAnnotationDrafts } from "./draft-store";
 import { showCodeReviewOverlay, showTextReviewOverlay } from "./fullscreen";
 import { selectAnnotationSourceKind, selectSessionTextReviewSource, type AnnotationSourceKind } from "./text-source";
 import {
@@ -46,6 +50,8 @@ interface CodeReviewDependencies {
 	showCodeReviewOverlay(
 		ctx: CustomCommandContext,
 		target: ResolvedReviewTarget,
+		focus?: string,
+		resumed?: AnnotationDraft,
 	): Promise<CodeReviewOverlayResult | undefined>;
 }
 
@@ -84,10 +90,6 @@ function parseAnnotationSourceKind(args: string): AnnotationSourceKind | undefin
 	return undefined;
 }
 
-function splitReviewArgs(args: string): string[] {
-	return args.trim() ? args.trim().split(/\s+/) : [];
-}
-
 const ANNOTATE_MODE_COMPLETIONS: readonly AutocompleteItem[] = [
 	{
 		value: "last ",
@@ -102,7 +104,7 @@ const ANNOTATE_MODE_COMPLETIONS: readonly AutocompleteItem[] = [
 	{
 		value: "code-review ",
 		label: "code-review",
-		description: "Annotate local changes or a GitHub pull request",
+		description: "Annotate local changes, a GitHub pull request, or a GitLab merge request",
 	},
 ];
 
@@ -182,13 +184,14 @@ async function finishCodeReview(
 	target: ResolvedReviewTarget,
 	focus: string | undefined,
 	showOverlay: CodeReviewDependencies["showCodeReviewOverlay"],
+	resumed?: AnnotationDraft,
 ): Promise<string | undefined> {
 	const issue = getReviewTargetIssue(target);
 	if (issue) {
 		ctx.ui.notify(issue, "warning");
 		return undefined;
 	}
-	const result = await showOverlay(ctx, target);
+	const result = await showOverlay(ctx, target, focus, resumed);
 	if (!result) return undefined;
 	const review = result.action === "review";
 	const feedback = buildCodeReviewFeedback(target, result.annotations, review, focus);
@@ -205,19 +208,30 @@ export async function runCodeReviewCommand(
 	dependencies: Partial<CodeReviewDependencies> = {},
 ): Promise<string | undefined> {
 	if (!ctx.hasUI) {
-		return new ReviewCommand(api).execute(splitReviewArgs(args), ctx);
+		return new ReviewCommand(api).execute(parseCommandArgs(args), ctx);
 	}
 	const resolved = { ...defaultCodeReviewDependencies, ...dependencies };
-	const cwd = liveCommandCwd(api, ctx);
-	const parsed = extractReviewPrRefFromArgs(splitReviewArgs(args));
-	const focus = parsed.extraInstructions || undefined;
-	const choice = parsed.prRef ? { kind: "pr" as const, ref: parsed.prRef } : await selectReviewChoice(ctx, cwd);
-	if (!choice) return undefined;
-	const target =
-		choice.kind === "pr"
-			? await resolved.resolvePrReviewTarget(cwd, ctx, choice.ref)
-			: await resolved.resolveLocalReviewTarget(choice.kind, cwd, ctx.ui);
-	return target ? finishCodeReview(ctx, target, focus, resolved.showCodeReviewOverlay) : undefined;
+	const sessionCwd = liveCommandCwd(api, ctx);
+	let request: ReviewRequest;
+	try {
+		request = await resolveReviewRequest(parseCommandArgs(args), sessionCwd);
+	} catch (error) {
+		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		return undefined;
+	}
+	const focus = request.extraInstructions || undefined;
+	const selection = request.prRef
+		? { choice: { kind: "pr" as const, ref: request.prRef }, cwd: request.cwd }
+		: await selectReviewChoice(ctx, request.cwd);
+	if (!selection) return undefined;
+	const { choice, cwd } = selection;
+	if (choice.kind === "pr") {
+		const target = await resolved.resolvePrReviewTarget(cwd, ctx, choice.ref);
+		return target ? finishCodeReview(ctx, target, focus, resolved.showCodeReviewOverlay) : undefined;
+	}
+	const target = await resolved.resolveLocalReviewTarget(choice.kind, cwd, ctx.ui);
+	const repository = reviewRepository(cwd, sessionCwd);
+	return target ? finishCodeReview(ctx, { ...target, repository }, focus, resolved.showCodeReviewOverlay) : undefined;
 }
 
 /** Run `/annotate` text sources; all resulting feedback is pasted, never submitted. */
@@ -242,6 +256,7 @@ export async function runAnnotateCommand(
 	const trimmed = args.trim();
 	let kind: AnnotationSourceKind | undefined;
 	let source: TextReviewSource | undefined;
+	let resumed: AnnotationDraft | undefined;
 	if (trimmed.length === 0) {
 		kind = await textDependencies.selectAnnotationSourceKind(ctx.ui);
 	} else {
@@ -274,10 +289,30 @@ export async function runAnnotateCommand(
 				if (text !== undefined) source = textDependencies.createPromptTextReviewSource(ctx, text);
 				break;
 			}
+			case "draft": {
+				const drafts = await loadAnnotationDrafts(ctx.sessionManager);
+				if (drafts.length === 0) {
+					ctx.ui.notify("No saved annotation drafts in this session.", "info");
+					return undefined;
+				}
+				const labels = drafts.map(
+					({ source, state }, index) =>
+						`${index + 1}. ${source.kind === "diff" ? source.target.mode : source.source.label} — ${state.annotations.length} note(s)${state.editor?.text ? " + unfinished note" : ""}`,
+				);
+				resumed = drafts[labels.indexOf((await ctx.ui.select("Resume an annotation draft", labels)) ?? "")];
+				if (!resumed) return undefined;
+				if (resumed.source.kind === "diff") {
+					const { target, focus } = resumed.source;
+					const { showCodeReviewOverlay: show } = { ...defaultCodeReviewDependencies, ...dependencies };
+					return finishCodeReview(ctx, target, focus, show, resumed);
+				}
+				source = resumed.source.source;
+				break;
+			}
 		}
 	}
 	if (!source) return undefined;
-	const result = await textDependencies.showTextReviewOverlay(ctx, source);
+	const result = await textDependencies.showTextReviewOverlay(ctx, source, resumed);
 	if (!result || result.annotations.length === 0) return undefined;
 	if (result.editedText !== undefined) source = { ...source, text: result.editedText };
 	let contextSummary: string | undefined;

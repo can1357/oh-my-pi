@@ -14,9 +14,11 @@ import { cfgCompactionExperimentalContextManagement } from "../session/context-s
  * The session's `local://` mapping: its pinned {@link LocalProtocolOptions}
  * (subagents and multi-session hosts pin a parent/foreign root) or else its own
  * artifacts dir and session id, so `local://` never falls through to another
- * session's root.
+ * session's root. Takes a tool session or a `SessionManager`.
  */
-export function sessionLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
+export function sessionLocalProtocolOptions(
+	session: Pick<ToolSession, "localProtocolOptions" | "getArtifactsDir" | "getSessionId">,
+): LocalProtocolOptions {
 	return (
 		session.localProtocolOptions ?? {
 			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
@@ -38,7 +40,7 @@ export function contextLocalProtocolOptions(session: ToolSession): LocalProtocol
 /** The single ResolveContext builder for a tool session; replaces per-tool literal assembly. */
 export function sessionResolveContext(
 	session: ToolSession,
-	options: { signal?: AbortSignal; skipDirectoryListing?: boolean } = {},
+	options: { signal?: AbortSignal; skipDirectoryListing?: boolean; containSkillPaths?: boolean } = {},
 ): ResolveContext {
 	return {
 		cwd: session.cwd,
@@ -51,6 +53,7 @@ export function sessionResolveContext(
 		agentRegistry: session.agentRegistry,
 		localProtocolOptions: contextLocalProtocolOptions(session),
 		skills: session.skills,
+		containSkillPaths: options.containSkillPaths,
 		rules: session.activeRules,
 		session,
 		skipDirectoryListing: options.skipDirectoryListing,

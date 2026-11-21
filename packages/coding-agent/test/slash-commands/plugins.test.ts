@@ -11,6 +11,8 @@ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-comm
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+// A session refreshes skills with its own effective roots, never the process-wide CLI injection
+// (`--no-extensions` in an earlier in-process `runRootCommand` leaves it at explicit-only).
 const ROOTS: EffectiveExtensionRoots = { explicit: [], mode: "merge", configured: [], configuredLevel: "user" };
 
 function makeContext(cwd: string, refreshSkills: () => Promise<void>) {
@@ -80,7 +82,7 @@ describe("/plugins live enable and disable", () => {
 
 		let visibleSkills = 0;
 		const ctx = makeContext(root, async () => {
-			const { skills } = await loadSkills({ cwd: root });
+			const { skills } = await loadSkills({ cwd: root, extensionRoots: ROOTS });
 			visibleSkills = skills.filter(skill => skill.name === "market-skill").length;
 		});
 		await executeBuiltinSlashCommand(`/plugins enable ${id}`, { ctx });
@@ -109,7 +111,7 @@ describe("/plugins live enable and disable", () => {
 		);
 		let visibleSkills = 0;
 		const ctx = makeContext(root, async () => {
-			const { skills } = await loadSkills({ cwd: root });
+			const { skills } = await loadSkills({ cwd: root, extensionRoots: ROOTS });
 			visibleSkills = skills.filter(skill => skill.name === "npm-skill").length;
 		});
 		await executeBuiltinSlashCommand(`/plugins enable ${name}`, { ctx });

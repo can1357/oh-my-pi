@@ -14,9 +14,14 @@
  * so diagnostics stay greppable and Bun native-crash reports (which abort
  * before any JS cleanup can restore fd 2) are preserved.
  *
- * Only dup/dup2 go through bun:ffi. fcntl is deliberately avoided: it is
- * variadic, and the arm64-darwin ABI passes variadic arguments on the stack,
- * so a fixed-arity FFI signature would read garbage for the third argument.
+ * Only dup2 goes through bun:ffi. The saved copy of fd 2 comes from opening
+ * `/dev/fd/2` instead of `dup(2)`, because Bun opens files close-on-exec: a
+ * plain dup would leak the terminal into every child spawned without explicit
+ * fd handling (Rust `Command`, gitoxide filter drivers), which could then read
+ * the user's keystrokes and terminal replies. fcntl is deliberately avoided:
+ * it is variadic, and the arm64-darwin ABI passes variadic arguments on the
+ * stack, so a fixed-arity FFI signature would read garbage for the third
+ * argument.
  */
 import { dlopen, FFIType } from "bun:ffi";
 import * as fs from "node:fs";
@@ -27,7 +32,6 @@ const STDOUT_FILENO = 1;
 const STDERR_FILENO = 2;
 
 interface LibcFdOps {
-	dup(fd: number): number;
 	dup2(oldFd: number, newFd: number): number;
 }
 
@@ -44,7 +48,6 @@ function libcFdOps(): LibcFdOps | null {
 	for (const candidate of candidates) {
 		try {
 			const libc = dlopen(candidate, {
-				dup: { args: [FFIType.i32], returns: FFIType.i32 },
 				dup2: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
 			});
 			libcFdOpsCache = libc.symbols;
@@ -102,6 +105,15 @@ export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions):
 	const libc = libcFdOps();
 	if (!libc) return false;
 
+	// First, so a fd 2 that cannot be reopened (a socket: Linux refuses
+	// `/dev/fd/N` for those) leaves the guard inert with no redirect file made.
+	let saved: number;
+	try {
+		saved = fs.openSync(`/dev/fd/${STDERR_FILENO}`, fs.constants.O_WRONLY);
+	} catch {
+		return false;
+	}
+
 	let redirectFd: number;
 	try {
 		const redirectPath = options?.redirectPath ?? redirectTarget ?? getLogPath();
@@ -115,15 +127,11 @@ export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions):
 		try {
 			redirectFd = fs.openSync("/dev/null", "w");
 		} catch {
+			fs.closeSync(saved);
 			return false;
 		}
 	}
 
-	const saved = libc.dup(STDERR_FILENO);
-	if (saved === -1) {
-		fs.closeSync(redirectFd);
-		return false;
-	}
 	if (libc.dup2(redirectFd, STDERR_FILENO) === -1) {
 		fs.closeSync(redirectFd);
 		fs.closeSync(saved);

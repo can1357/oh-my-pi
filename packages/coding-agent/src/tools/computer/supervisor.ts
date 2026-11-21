@@ -6,16 +6,23 @@ import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import {
+	type ApprovalContextSource,
+	type ApprovalPolicy,
+	resolveApproval,
+	resolveApprovalFromContext,
+} from "../approval";
 import type { ToolSession } from "../index";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	COMPUTER_WORKER_ARG,
 	type ComputerEscapeScope,
-	type ComputerRunOk,
+	type ComputerRunResult,
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
+	type ControlVerdict,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
@@ -31,6 +38,15 @@ const SMOKE_TIMEOUT_MS = 5_000;
 const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
 
+/**
+ * The user's `tools.approval["computer.control"]` policy. The approval mode never decides it: the default `yolo`
+ * would hand the user's foreground to every headless run, so without an explicit entry the user is asked.
+ */
+function controlPolicy(context: ApprovalContextSource): ApprovalPolicy {
+	const { userPolicies } = resolveApprovalFromContext(context);
+	return resolveApproval({ name: "computer.control", approval: "exec" }, undefined, "always-ask", userPolicies).policy;
+}
+
 /** Runs desktop scripts and owns their persistent worker session. */
 export interface ComputerController {
 	run(
@@ -39,7 +55,7 @@ export interface ComputerController {
 		snapshot: ComputerSessionSnapshot,
 		signal?: AbortSignal,
 		context?: AgentToolContext,
-	): Promise<ComputerRunOk>;
+	): Promise<ComputerRunResult>;
 	revokeControl?(): Promise<void>;
 	/** The owner's agent turn `turn` ended: let the display sleep now, keeping control, refs and the worker. */
 	releaseDisplay?(turn: number): void;
@@ -51,6 +67,12 @@ export interface ComputerController {
 	/** The user's message acknowledges every Escape stop so far, lifting the refusal they set. */
 	resumeAfterEscape?(): void;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
+	/**
+	 * Ends the desktop session the model sees (`computer.close()`): its handles, frames, refs and control go, the
+	 * user's Escape stops stay, and the next call opens a new session.
+	 */
+	reset(): Promise<void>;
+	/** Ends the controller for good when its agent session is disposed; later calls fail. */
 	close(): Promise<void>;
 }
 
@@ -92,7 +114,7 @@ const NATIVE_ESCAPE_STOPS: ComputerEscapeStops = { read: desktopEscapeStops, for
 export type ComputerWorkerFactory = () => ComputerWorkerHandle;
 
 interface PendingRun {
-	resolve(value: ComputerRunOk): void;
+	resolve(value: ComputerRunResult): void;
 	reject(error: unknown): void;
 	signal?: AbortSignal;
 	toolCalls: Map<string, AbortController>;
@@ -258,7 +280,7 @@ export class ComputerSupervisor implements ComputerController {
 		snapshot: ComputerSessionSnapshot,
 		signal?: AbortSignal,
 		context?: AgentToolContext,
-	): Promise<ComputerRunOk> {
+	): Promise<ComputerRunResult> {
 		if (this.#closed) throw new ToolError("Computer session is closed");
 		if (this.#escapeStopped()) throw new ToolError(ESCAPE_REFUSED_MESSAGE);
 		if (signal?.aborted) throw new ToolAbortError();
@@ -273,7 +295,7 @@ export class ComputerSupervisor implements ComputerController {
 		if (signal?.aborted || epoch !== this.#controlEpoch) throw new ToolAbortError();
 
 		const id = `computer-${++this.#nextId}`;
-		const { promise, resolve, reject } = Promise.withResolvers<ComputerRunOk>();
+		const { promise, resolve, reject } = Promise.withResolvers<ComputerRunResult>();
 		const pending: PendingRun = { resolve, reject, signal, context, toolCalls: new Map() };
 		this.#pending.set(id, pending);
 		const abort = (): void => {
@@ -285,7 +307,7 @@ export class ComputerSupervisor implements ComputerController {
 
 		try {
 			this.#worker?.send({ type: "run", id, code, timeoutMs, session, escape: this.#escapeScope() });
-			let result: ComputerRunOk;
+			let result: ComputerRunResult;
 			try {
 				result = await this.#raceWithGrace(promise, timeoutMs);
 			} catch (error) {
@@ -300,6 +322,23 @@ export class ComputerSupervisor implements ComputerController {
 			}
 			// The stop landed after the script finished, its input out: keep what it did, led by the user's stop.
 			if (this.#escapeStopped()) {
+				if (result.error) {
+					const reported =
+						result.error.message.includes(ESCAPE_STOPPED_MESSAGE) ||
+						result.error.message.includes(ESCAPE_AFTER_CALL_MESSAGE);
+					if (!reported && result.error.isAbort) {
+						return {
+							...result,
+							error: { name: "ToolError", message: ESCAPE_STOPPED_MESSAGE, isToolError: true, isAbort: false },
+						};
+					}
+					return reported
+						? result
+						: {
+								...result,
+								error: { ...result.error, message: `${result.error.message}\n\n${ESCAPE_STOPPED_MESSAGE}` },
+							};
+				}
 				return { ...result, displays: [{ type: "text", text: ESCAPE_AFTER_CALL_MESSAGE }, ...result.displays] };
 			}
 			return result;
@@ -356,7 +395,9 @@ export class ComputerSupervisor implements ComputerController {
 				controller.abort(new ToolAbortError("Computer run ended"));
 			this.#pending.delete(message.id);
 			if (message.ok) pending.resolve(message.payload);
-			else pending.reject(errorFromPayload(message.error));
+			else if (message.output && (message.output.displays.length > 0 || message.output.screenshots.length > 0)) {
+				pending.resolve({ ...message.output, error: message.error });
+			} else pending.reject(errorFromPayload(message.error));
 			return;
 		}
 		if (message.type === "capabilities") {
@@ -386,19 +427,41 @@ export class ComputerSupervisor implements ComputerController {
 		else pending.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			const context = pending.context ?? this.#session.getToolContext?.();
-			let approved = false;
-			if (context?.ui && context.hasUI !== false && !controller.signal.aborted) {
-				approved =
-					(await untilAborted(controller.signal, () =>
-						context.ui!.confirm(
-							"Allow foreground computer control?",
-							`${message.reason}\n\nFor this task only. Use the host interrupt to stop and revoke control. This does not authorize external side effects.`,
-							{ signal: controller.signal },
-						),
-					)) === true;
+			const policy = controlPolicy(context ?? { settings: this.#session.settings });
+			let verdict: ControlVerdict;
+			if (policy === "allow") {
+				verdict = "approved";
+			} else if (policy === "deny") {
+				verdict = "denied";
+			} else if (!context?.ui || context.hasUI === false) {
+				verdict = "no-ui";
+			} else if (message.timeoutMs <= 0) {
+				// The run has no time left to wait in; a prompt would close before anyone could answer it.
+				verdict = "unanswered";
+			} else {
+				// The prompt closes before the run's deadline, so the script hears that nobody answered. The deadline
+				// aborts the dialog rather than riding its `timeout` option: a timed-out TUI confirm picks its
+				// highlighted option, which is Yes.
+				const deadline = AbortSignal.timeout(message.timeoutMs);
+				const signal = AbortSignal.any([controller.signal, deadline]);
+				let approved = false;
+				try {
+					approved =
+						!signal.aborted &&
+						(await untilAborted(signal, () =>
+							context.ui!.confirm(
+								"Allow foreground computer control?",
+								`${message.reason}\n\nFor this task only. Use the host interrupt to stop and revoke control. This does not authorize external side effects.`,
+								{ signal },
+							),
+						)) === true;
+				} catch (error) {
+					if (!deadline.aborted || controller.signal.aborted) throw error;
+				}
+				verdict = approved ? "approved" : deadline.aborted ? "unanswered" : "denied";
 			}
-			if (controller.signal.aborted || this.#pending.get(message.runId) !== pending) approved = false;
-			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value: approved } });
+			if (controller.signal.aborted || this.#pending.get(message.runId) !== pending) verdict = "denied";
+			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value: verdict } });
 		} catch (error) {
 			this.#safeSend({
 				type: "tool-reply",
@@ -496,7 +559,7 @@ export class ComputerSupervisor implements ComputerController {
 		}
 	}
 
-	async #raceWithGrace(promise: Promise<ComputerRunOk>, timeoutMs: number): Promise<ComputerRunOk> {
+	async #raceWithGrace(promise: Promise<ComputerRunResult>, timeoutMs: number): Promise<ComputerRunResult> {
 		const timeoutSignal = AbortSignal.timeout(timeoutMs + GRACE_MS);
 		const timeout = Promise.withResolvers<never>();
 		const onTimeout = (): void => timeout.reject(new ToolError(RESTART_MESSAGE));
@@ -539,6 +602,11 @@ export class ComputerSupervisor implements ComputerController {
 		await worker?.terminate().catch(() => undefined);
 	}
 
+	async reset(): Promise<void> {
+		if (this.#closed) return;
+		await this.#shutdown();
+	}
+
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
@@ -549,6 +617,11 @@ export class ComputerSupervisor implements ComputerController {
 				// An addon without the Escape exports kept no count to drop; the worker must still close.
 			}
 		}
+		await this.#shutdown();
+	}
+
+	/** Asks the worker to close its native session, then terminates it; a later `#start()` spawns a new one. */
+	async #shutdown(): Promise<void> {
 		const worker = this.#worker;
 		if (!worker) return;
 		const closed = Promise.withResolvers<void>();
@@ -562,7 +635,8 @@ export class ComputerSupervisor implements ComputerController {
 			// Forced termination below is the bounded close fallback.
 		} finally {
 			unsubscribe();
-			await this.#terminate(new ToolError("Computer session closed"));
+			// A crash while closing already terminated this worker; a call since may have started its successor.
+			if (this.#worker === worker) await this.#terminate(new ToolError("Computer session closed"));
 		}
 	}
 }

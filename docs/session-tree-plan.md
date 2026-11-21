@@ -38,9 +38,9 @@ Tree APIs:
 
 - `getBranch(fromId?)` walks parent links to root and returns root→node path
 - `getTree()` returns `SessionTreeNode[]` (`entry`, `children`, `label`)
-  - parent links become children arrays
-  - entries with missing, null, or self parents are treated as roots
-  - children are sorted oldest→newest by timestamp
+   - parent links become children arrays
+   - entries with missing, null, or self parents are treated as roots
+   - children are sorted oldest→newest by timestamp
 - `getChildren(parentId)` returns direct children
 - `getLabel(id)` resolves current label from the index's `#labels` map
 
@@ -72,7 +72,7 @@ There are three leaf movement primitives:
 Flow:
 
 1. Validate the target and compute the abandoned path (`collectEntriesForBranchSummary`).
-2. For an interactive selection of an `ask` tool result whose original questions can be recovered, return a `reopenAsk` request without mutating the tree. The selector re-opens the question UI, then calls `navigateTree` again with the replacement result; that second call appends a new sibling `toolResult` at the original answer's parent.
+2. For an interactive selection of an `ask` tool result whose original form `html` can be recovered, return a `reopenAsk` request without mutating the tree. The selector re-opens the form, then calls `navigateTree` again with the replacement result; that second call appends a new sibling `toolResult` at the original answer's parent.
 3. Emit `session_before_tree` with `TreePreparation`.
 4. Optionally summarize abandoned entries (hook-provided summary or built-in summarizer).
 5. Compute the new leaf target:
@@ -116,10 +116,10 @@ The separate `AgentSession.branch(entryId)` API, used by extension/hook command 
 `buildSessionContext()` (in `session-context.ts`, exposed via `SessionManager.buildSessionContext()`) resolves the active root→leaf path and builds effective LLM context state:
 
 - Tracks latest configured/effective thinking, role-model, per-family service-tier, mode/data, and injected-TTSR state on the path.
-- Handles latest compaction on the path:
-  - emits compaction summary first
-  - replays kept messages from `firstKeptEntryId` to compaction point
-  - then replays post-compaction messages
+- Handles the latest compaction on the path that the reading model (`options.model`) can replay:
+   - emits compaction summary first
+   - replays kept messages from `firstKeptEntryId` to compaction point
+   - then replays post-compaction messages
 - Includes `branch_summary` and `custom_message` entries as `AgentMessage` objects.
 
 `session/messages.ts` then maps these message types for model input:
@@ -141,8 +141,8 @@ Tree selector behavior (`tree-selector.ts`):
 
 - Flattens tree for navigation, keeps active-path highlighting, and prioritizes displaying the active branch first.
 - Supports filter modes: `default`, `no-tools`, `user-only`, `labeled-only`, `all`.
-  - `default` suppresses settings/bookkeeping entries: `label`, `custom`, model/thinking/service-tier/title changes, `model_usage`, credential pins, session initialization, TTSR injections, mode changes, and reset boundaries.
-  - `user-only` includes ordinary user messages and user-invoked skill/collaboration custom prompts.
+   - `default` suppresses settings/bookkeeping entries: `label`, `custom`, model/thinking/service-tier/title changes, `model_usage`, credential pins, session initialization, TTSR injections, mode changes, and reset boundaries.
+   - `user-only` includes ordinary user messages and user-invoked skill/collaboration custom prompts.
 - Supports free-text search over rendered semantic content.
 - `Shift+L` opens inline label editing and writes via `appendLabelChange`.
 
@@ -162,19 +162,19 @@ Command-time extension API (`ExtensionCommandContext`):
 Events around tree navigation:
 
 - `session_before_tree`
-  - receives `TreePreparation`:
-    - `targetId`
-    - `oldLeafId`
-    - `commonAncestorId`
-    - `entriesToSummarize`
-    - `userWantsSummary`
-  - may cancel navigation
-  - may provide summary payload used instead of built-in summarizer
-  - receives abort `signal` (Escape cancellation path)
+   - receives `TreePreparation`:
+      - `targetId`
+      - `oldLeafId`
+      - `commonAncestorId`
+      - `entriesToSummarize`
+      - `userWantsSummary`
+   - may cancel navigation
+   - may provide summary payload used instead of built-in summarizer
+   - receives abort `signal` (Escape cancellation path)
 - `session_tree`
-  - emits `newLeafId`, `oldLeafId`
-  - includes `summaryEntry` when a summary was created
-  - `fromExtension` indicates summary origin
+   - emits `newLeafId`, `oldLeafId`
+   - includes `summaryEntry` when a summary was created
+   - `fromExtension` indicates summary origin
 
 Adjacent but related lifecycle hooks:
 
@@ -203,10 +203,10 @@ Trigger:
 Naming source:
 
 - The normalized plan title is humanized via `humanizePlanTitle(title)` (`packages/coding-agent/src/plan-mode/approved-plan.ts`):
-  - replaces runs of `-`/`_` with a single space
-  - trims whitespace
-  - capitalizes the first character
-  - returns `""` for whitespace-only / separator-only input
+   - replaces runs of `-`/`_` with a single space
+   - trims whitespace
+   - capitalizes the first character
+   - returns `""` for whitespace-only / separator-only input
 - The humanized name is applied only when the current session has no name (`!sessionManager.getSessionName()`). It then calls `sessionManager.setSessionName(name, "auto")`, which also refuses to overwrite user-named sessions.
 - The naming write is awaited before the execution prompt is queued.
 

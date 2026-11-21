@@ -2,8 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
-import { register, type ScopeLike } from "../config/registry";
-import { cfgMemoryBackend } from "../memory-backend/settings";
+import { register } from "../config/registry";
 
 // Mnemopi local SQLite memory backend.
 export const cfgMnemopiDbPath = register({
@@ -14,7 +13,8 @@ export const cfgMnemopiDbPath = register({
 		tab: "memory",
 		group: "Mnemopi",
 		label: "Mnemopi DB Path",
-		description: "Optional SQLite DB path. Defaults to the agent memories directory.",
+		description:
+			"Optional SQLite DB path; a leading ~ is the home directory. Defaults to the agent memories directory.",
 		condition: "mnemopiActive",
 	},
 });
@@ -64,14 +64,6 @@ export const cfgMnemopiScoping = register({
 	},
 });
 
-/**
- * Whether `retain`/`learn` can take `scope: "global"`: only Mnemopi with a bank every project
- * recalls (`global` or `per-project-tagged` scoping). Tools hide the option everywhere else.
- */
-export function isGlobalMemoryScopeAvailable(scope: ScopeLike): boolean {
-	return cfgMemoryBackend.get(scope) === "mnemopi" && cfgMnemopiScoping.get(scope) !== "per-project";
-}
-
 export const cfgMnemopiEmbeddingVariant = register({
 	id: "mnemopi.embeddingVariant",
 	type: "enum",
@@ -108,6 +100,35 @@ export const cfgMnemopiAutoRecall = register({
 		group: "Mnemopi",
 		label: "Mnemopi Auto Recall",
 		description: "Recall local memories into the first turn of each session",
+		condition: "mnemopiActive",
+	},
+});
+
+export const cfgMnemopiRecallRelevance = register({
+	id: "mnemopi.recallRelevance",
+	type: "enum",
+	values: ["auto", "on", "off"] as const,
+	default: "off",
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Recall Relevance",
+		description:
+			"Ask the judge model role whether each automatically recalled memory is relevant to the task before injecting it",
+		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Filter only with a native judge backend; otherwise inject every recalled memory",
+			},
+			{
+				value: "on",
+				label: "On",
+				description:
+					"Filter with whichever model the judge role resolves to; an on-device judge may answer only some memories in time",
+			},
+			{ value: "off", label: "Off", description: "Never filter; inject every recalled memory" },
+		],
 		condition: "mnemopiActive",
 	},
 });
@@ -219,6 +240,36 @@ export const cfgMnemopiEmbeddingApiKey = register({
 		group: "Mnemopi",
 		label: "Mnemopi Embedding API Key",
 		description: "Optional embedding API key passed to Mnemopi",
+		condition: "mnemopiActive",
+	},
+});
+
+export const cfgMnemopiEmbeddingQueryPrefix = register({
+	id: "mnemopi.embeddingQueryPrefix",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Embedding Query Prefix",
+		description:
+			"Text prepended to recall queries before embedding, for instruction-tuned embedders (Qwen3-Embedding, E5); stored memories are embedded unchanged",
+		condition: "mnemopiActive",
+	},
+});
+
+export const cfgMnemopiEmbeddingInputType = register({
+	id: "mnemopi.embeddingInputType",
+	type: "boolean",
+	default: false,
+	// Without the env term the `false` default would mask Mnemopi's own `MNEMOPI_EMBEDDING_INPUT_TYPE` fallback.
+	env: { name: "MNEMOPI_EMBEDDING_INPUT_TYPE", fallback: true },
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Embedding Input Type",
+		description:
+			"Send input_type (query for recall, passage for stored memories) with embedding API requests; NVIDIA NIM asymmetric embedders require it",
 		condition: "mnemopiActive",
 	},
 });

@@ -48,6 +48,16 @@ class "minimax" {
 			}
 		}
 	}
+	// MiniMax's standard API doubles every rate above 512K input tokens;
+	// subscription hosts retain the same rates only as usage estimates.
+	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+		models "MiniMax-M3" {
+			long-context-cost {
+				input-threshold 512000
+				multiplier 2.0
+			}
+		}
+	}
 	on "alibaba-coding-plan" "minimax-code" "minimax-code-cn" "wafer-serverless" {
 		supports-developer-role #false
 	}
@@ -81,15 +91,17 @@ class "minimax" {
 			thinking-efforts "low" "medium" "high"
 		}
 	}
-	// MiniMax-M3.1-Flash-Preview always thinks (`thinking.type: "disabled"` and
-	// effort `none` 400 with error 2013) and tunes depth through
-	// `output_config.effort` from `low` to `max` (the default when omitted).
-	// The identity map replaces the M3 family's adaptive-tag-only map so each
-	// level reaches the wire. Like the M2 family, thinking cannot be turned off:
-	// `thinking-requires-effort` hides the off level and clamps forced-off
-	// requests to the lowest effort instead of sending `disabled`.
+	// MiniMax-M3.1-Flash (and its bundled `-Preview` id) always thinks
+	// (`thinking.type: "disabled"` and effort `none` 400 with error 2013) and
+	// tunes depth through `output_config.effort` from `low` to `max` (the
+	// default when omitted). The identity map replaces the M3 family's
+	// adaptive-tag-only map so each level reaches the wire. Like the M2 family,
+	// thinking cannot be turned off: `thinking-requires-effort` hides the off
+	// level and clamps forced-off requests to the lowest effort instead of
+	// sending `disabled`. The launch id also rejects sampling params
+	// (`temperature`, `top_p`, `top_k`).
 	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
-		models "MiniMax-M3.1-Flash-Preview" {
+		models "MiniMax-M3.1-Flash" "MiniMax-M3.1-Flash-Preview" {
 			thinking-requires-effort #true
 			thinking-efforts "low" "medium" "high" "xhigh" "max"
 			thinking-effort-map {
@@ -97,6 +109,9 @@ class "minimax" {
 				medium "medium"
 				high "high"
 			}
+		}
+		models "MiniMax-M3.1-Flash" {
+			supports-sampling-params #false
 		}
 	}
 	// Token Plan rows ride the Anthropic route; these OpenAI-only wire axes

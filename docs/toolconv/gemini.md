@@ -1,19 +1,19 @@
 # Gemini Pythonic tool-calling format (`tool_code` / `default_api`)
 
-Pythonic text convention handled by OMP's **`gemini` owned dialect**, used for prompt-driven **Gemma 3** tool calling and seen in malformed hosted **Gemini** output. Calls are Python-like expressions such as `default_api.<function_name>(<kwargs>)`, optionally wrapped in `print(...)`, inside a fenced ```` ```tool_code ```` block; results return in ```` ```tool_outputs ```` blocks. This is not the hosted Gemini native API protocol, which uses structured `functionCall` / `functionResponse` parts.
+Pythonic text convention handled by OMP's **`gemini` owned dialect**, used for prompt-driven **Gemma 3** tool calling and seen in malformed hosted **Gemini** output. Calls are Python-like expressions such as `default_api.<function_name>(<kwargs>)`, optionally wrapped in `print(...)`, inside a fenced ` ```tool_code ` block; results return in ` ```tool_outputs ` blocks. This is not the hosted Gemini native API protocol, which uses structured `functionCall` / `functionResponse` parts.
 
-The OMP behavior below follows `packages/ai/src/dialect/gemini.ts`, the shared rendering helpers, and the owned history/stream converters. The external guides and malformed-call reports listed under *Sources* provide background on the text convention.
+The OMP behavior below follows `packages/ai/src/dialect/gemini.ts`, the shared rendering helpers, and the owned history/stream converters. The external guides and malformed-call reports listed under _Sources_ provide background on the text convention.
 
 ## "Special" tokens
 
 OMP matches these markers as literal decoded text; its scanner does not inspect tokenizer IDs. The surrounding model chat template may have its own control tokens. The payload markers are:
 
-| Marker (verbatim) | Role |
-|---|---|
-| ` ```tool_code ` | Opens a fenced block of Python-like calls for the app to parse, not execute as Python. Closed by ` ``` `. |
-| ` ```tool_outputs ` | Opens a fenced block carrying the executed results back to the model. Closed by a bare ` ``` `. |
-| `default_api` | Synthetic module namespace the hosted stack bundles un-namespaced tools into. Calls read `default_api.<name>(...)`. |
-| `print(...)` | Conventional wrapper around the call in the hosted-Gemini form (the model is trained to "print" the call). Semantically irrelevant — the runtime parses the call, it does not execute Python. |
+| Marker (verbatim)   | Role                                                                                                                                                                                          |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ` ```tool_code `    | Opens a fenced block of Python-like calls for the app to parse, not execute as Python. Closed by ` ``` `.                                                                                     |
+| ` ```tool_outputs ` | Opens a fenced block carrying the executed results back to the model. Closed by a bare ` ``` `.                                                                                               |
+| `default_api`       | Synthetic module namespace the hosted stack bundles un-namespaced tools into. Calls read `default_api.<name>(...)`.                                                                           |
+| `print(...)`        | Conventional wrapper around the call in the hosted-Gemini form (the model is trained to "print" the call). Semantically irrelevant — the runtime parses the call, it does not execute Python. |
 
 There is **no** per-call id in this text convention. Native Gemini thought summaries use parts marked `thought: true`; a `thoughtSignature` is opaque replay metadata and does not itself identify a thinking part.
 
@@ -33,6 +33,7 @@ This document specifies the **payload** (the two fenced blocks + the Python call
 Tools are advertised in the prompt as a JSON-Schema catalog. Gemma 3's official guide ships **two** interchangeable system-prompt templates that differ only in how the model is told to answer:
 
 1. **Pythonic** (the one this spec targets):
+
    > You have access to functions. If you decide to invoke any of the function(s), you MUST put it in the format of `[func_name1(params_name1=params_value1, params_name2=params_value2...), func_name2(params)]`
    > You SHOULD NOT include any other text in the response if you call a function
 
@@ -60,14 +61,14 @@ All of the following are accepted equivalents seen in the wild and across Gemma/
 
 Argument values are **Python literals**, not JSON:
 
-| Python literal | Example | Decoded |
-|---|---|---|
-| string | `'London'` or `"London"` | `"London"` |
-| int / float | `42`, `3.14` | `42`, `3.14` |
-| bool | `True` / `False` | `true` / `false` |
-| null | `None` | `null` |
-| list | `["a", "b"]` | `["a","b"]` |
-| dict | `{"k": 1}` | `{"k":1}` |
+| Python literal | Example                  | Decoded          |
+| -------------- | ------------------------ | ---------------- |
+| string         | `'London'` or `"London"` | `"London"`       |
+| int / float    | `42`, `3.14`             | `42`, `3.14`     |
+| bool           | `True` / `False`         | `true` / `false` |
+| null           | `None`                   | `null`           |
+| list           | `["a", "b"]`             | `["a","b"]`      |
+| dict           | `{"k": 1}`               | `{"k":1}`        |
 
 Strings use Python escaping (`\n`, `\t`, `\\`, `\'`, `\"`); hosted Gemini emits single quotes (`location='London'`), Gemma examples use double quotes — both are valid. Arguments are keyword form (`name=value`); positional arguments are not used because the runtime maps to a named schema.
 
@@ -76,24 +77,24 @@ Strings use Python escaping (`\n`, `\t`, `\\`, `\'`, `\"`); hosted Gemini emits 
 Two encodings occur inside a single `tool_code` block:
 
 - **OMP / Gemma 3 Pythonic form** — a Python **list** of call expressions. OMP renders this form for two or more calls:
-  ````text
-  ```tool_code
-  [default_api.get_current_temperature(location="London"), default_api.get_temperature_date(location="London", date="2024-10-01")]
-  ```
-  ````
+   ````text
+   ```tool_code
+   [default_api.get_current_temperature(location="London"), default_api.get_temperature_date(location="London", date="2024-10-01")]
+   ```
+   ````
 - **Hosted Gemini variant** — one `print(default_api...)` **statement per line**:
-  ````text
-  ```tool_code
-  print(default_api.get_current_temperature(location="London"))
-  print(default_api.get_temperature_date(location="London", date="2024-10-01"))
-  ```
-  ````
+   ````text
+   ```tool_code
+   print(default_api.get_current_temperature(location="London"))
+   print(default_api.get_temperature_date(location="London", date="2024-10-01"))
+   ```
+   ````
 
 The OMP scanner extracts calls in source order from either form, skipping strings and Python comments. It records the final identifier before each matching call parenthesis, ignores the `print` wrapper, and skips over a recovered call's argument body. It does not evaluate Python expressions. Each parsed call gets a synthesized `ptc_…` id; the text convention itself has no id.
 
 ## Tool-result format
 
-Executed results are returned to the model in ```` ```tool_outputs ```` blocks. OMP renders one complete block per result, in call order; it does not encode `isError` separately. Gemma 3 docs also show assignment-style values (`result = 92.3`), while opaque output can be returned as text/JSON:
+Executed results are returned to the model in ` ```tool_outputs ` blocks. OMP renders one complete block per result, in call order; it does not encode `isError` separately. Gemma 3 docs also show assignment-style values (`result = 92.3`), while opaque output can be returned as text/JSON:
 
 ````text
 ```tool_outputs

@@ -14,7 +14,7 @@
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { type Component, matchesKey, type OverlayFocusOwner, type OverlayHandle, type OverlayOptions } from "../index";
 import { formatCoarseDuration } from "../chrome/format";
-import { centerLine } from "../utils";
+import { centerLine, visibleWidth } from "../utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../keybinding-matchers";
 import { formatKeyHint, formatTooltipKey } from "../app-keybindings";
@@ -23,6 +23,17 @@ import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, keyed, node, row, span, text } from "../native/describe";
 import { actionBar, actionButton } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
+
+/** Outstanding turn and job counts supplied by the pause-screen host. */
+export interface PauseWorkStatus {
+	unsettledTurns: number;
+	unfinishedJobs: number;
+}
+
+/** Optional live work source for the pause overlay. */
+export interface PauseScreenOptions {
+	getWorkStatus?: () => PauseWorkStatus;
+}
 
 /**
  * Slice of `InteractiveModeContext` the pause screen drives. Narrow so tests
@@ -39,9 +50,10 @@ export interface PauseScreenHost {
 	readonly sessionName?: string;
 }
 
-/** Refresh cadence for the live "paused for" clock. */
-const TICK_MS = 1_000;
+const EMPTY_WORK_STATUS: PauseWorkStatus = { unsettledTurns: 0, unfinishedJobs: 0 };
 
+/** Refresh cadence for the live hold clock and work-status snapshot. */
+const TICK_MS = 1_000;
 /** Pause-bar glyph geometry (rows × columns of full blocks per bar). */
 const BAR_ROWS = 7;
 const BAR_WIDTH = 5;
@@ -49,7 +61,7 @@ const BAR_GAP = 4;
 
 /** Below either bound the full scene cannot breathe; drop to the compact card. */
 const MIN_FULL_WIDTH = 64;
-const MIN_FULL_HEIGHT = 18;
+const MIN_FULL_HEIGHT = 23;
 
 const TITLE = "P A U S E D";
 const BODY_LINES = [
@@ -79,51 +91,110 @@ function formatClock(ms: number): string {
  * Paint the pause scene as exactly `height` rows, vertically centered.
  * Exported for tests.
  */
-export function renderPauseScreen(width: number, height: number, elapsedMs: number, sessionName?: string): string[] {
-	const compact = width < MIN_FULL_WIDTH || height < MIN_FULL_HEIGHT;
+export function renderPauseScreen(
+	width: number,
+	height: number,
+	elapsedMs: number,
+	sessionName?: string,
+	workStatus: PauseWorkStatus = EMPTY_WORK_STATUS,
+): string[] {
+	const screenWidth = Math.max(1, Math.floor(width));
+	const screenHeight = Math.max(1, Math.floor(height));
+	const compact = screenWidth < MIN_FULL_WIDTH || screenHeight < MIN_FULL_HEIGHT;
+	const outstanding = workStatus.unsettledTurns > 0 || workStatus.unfinishedJobs > 0;
+	const status = outstanding ? "Pausing — waiting for work to settle" : "Paused — ready to suspend";
+	const workCounts = [
+		`Unsettled turns: ${workStatus.unsettledTurns}`,
+		`Unfinished jobs: ${workStatus.unfinishedJobs}`,
+	];
 	const content: string[] = [];
 	// Resume keys mirror PauseScreenComponent#handleInput: `app.interrupt` (raw Escape when unbound), Enter, Space.
 	const esc = interruptKey();
 
 	if (compact) {
-		if (sessionName) {
-			content.push(centerLine(theme.bold(sessionName), width).trimEnd());
-			content.push("");
+		const sessionLine = sessionName
+			? centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd()
+			: undefined;
+		const titleLine = centerLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), screenWidth).trimEnd();
+		const clockLine = centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth).trimEnd();
+		const statusLine = centerLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth).trimEnd();
+		const resumeLine = centerLine(theme.fg("dim", `${esc} to resume`), screenWidth).trimEnd();
+		const fullContent: string[] = [];
+		if (sessionLine) fullContent.push(sessionLine);
+		fullContent.push(titleLine, "", clockLine, statusLine);
+		if (outstanding)
+			fullContent.push(...workCounts.map(line => centerLine(theme.fg("muted", line), screenWidth).trimEnd()));
+		fullContent.push(resumeLine);
+
+		if (screenHeight >= fullContent.length) {
+			content.push(...fullContent);
+		} else {
+			// Keep the live state and a way out on screen before the decorative card details.
+			if (screenHeight === 1) {
+				const counts = `T:${workStatus.unsettledTurns} J:${workStatus.unfinishedJobs}`;
+				const summary = outstanding ? `${counts} · ${esc} to resume` : `Paused · ${esc} to resume`;
+				const abbreviatedSummary = outstanding
+					? `T${workStatus.unsettledTurns} J${workStatus.unfinishedJobs} ${esc} resume`
+					: `${esc} resume`;
+				const visibleSummary = visibleWidth(summary) > screenWidth ? abbreviatedSummary : summary;
+				content.push(
+					centerLine(theme.fg(outstanding ? "warning" : "success", visibleSummary), screenWidth).trimEnd(),
+				);
+			} else if (screenHeight === 2 && outstanding) {
+				const counts = `Pausing · T:${workStatus.unsettledTurns} J:${workStatus.unfinishedJobs}`;
+				content.push(centerLine(theme.fg("warning", counts), screenWidth).trimEnd(), resumeLine);
+			} else {
+				content.push(statusLine);
+				if (outstanding && screenHeight === 3) {
+					content.push(
+						centerLine(
+							theme.fg("muted", `Turns: ${workStatus.unsettledTurns} · Jobs: ${workStatus.unfinishedJobs}`),
+							screenWidth,
+						).trimEnd(),
+					);
+				} else if (outstanding) {
+					content.push(...workCounts.map(line => centerLine(theme.fg("muted", line), screenWidth).trimEnd()));
+				}
+				content.push(resumeLine);
+			}
+
+			if (content.length < screenHeight && sessionLine) content.push(sessionLine);
+			if (content.length < screenHeight) content.push(titleLine);
+			if (content.length < screenHeight) content.push(clockLine);
 		}
-		content.push(centerLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), width).trimEnd());
-		content.push("");
-		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), width).trimEnd());
-		content.push(centerLine(theme.fg("dim", `${esc} to resume`), width).trimEnd());
 	} else {
 		if (sessionName) {
-			content.push(centerLine(theme.bold(sessionName), width).trimEnd());
-			content.push("");
+			content.push(centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd());
 			content.push("");
 		}
 		const bar = "█".repeat(BAR_WIDTH);
 		const glyphRow = `${bar}${" ".repeat(BAR_GAP)}${bar}`;
 		for (let i = 0; i < BAR_ROWS; i++) {
-			content.push(centerLine(theme.fg("accent", glyphRow), width).trimEnd());
+			content.push(centerLine(theme.fg("accent", glyphRow), screenWidth).trimEnd());
 		}
 		content.push("");
-		content.push(centerLine(theme.bold(theme.fg("accent", TITLE)), width).trimEnd());
+		content.push(centerLine(theme.bold(theme.fg("accent", TITLE)), screenWidth).trimEnd());
 		content.push("");
 		for (const line of BODY_LINES) {
-			content.push(centerLine(theme.fg("muted", line), width).trimEnd());
+			content.push(centerLine(theme.fg("muted", line), screenWidth).trimEnd());
 		}
-		content.push("");
-		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), width).trimEnd());
+		content.push(centerLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth).trimEnd());
+		if (outstanding) {
+			content.push(centerLine(theme.fg("muted", workCounts[0]!), screenWidth).trimEnd());
+			content.push(centerLine(theme.fg("muted", workCounts[1]!), screenWidth).trimEnd());
+		}
+		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth).trimEnd());
 		content.push("");
 		const resumeHint = `${esc} · ${formatKeyHint("enter")} · ${formatKeyHint("space")} — resume`;
-		content.push(centerLine(theme.fg("dim", resumeHint), width).trimEnd());
+		content.push(centerLine(theme.fg("dim", resumeHint), screenWidth).trimEnd());
 	}
 
-	const topPad = Math.max(0, Math.floor((height - content.length) / 2));
+	const topPad = Math.max(0, Math.floor((screenHeight - content.length) / 2));
 	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const lines: string[] = new Array(topPad).fill("");
 	lines.push(...content);
-	while (lines.length < height) lines.push("");
-	return lines.slice(0, Math.max(1, height));
+	while (lines.length < screenHeight) lines.push("");
+	return lines.slice(0, screenHeight);
 }
 
 /** Fullscreen overlay component; resolves {@link run} when a resume key lands. */
@@ -133,19 +204,25 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 	#disposed = false;
 	#startedAt = Date.now();
 	#native: NativeNode | undefined;
+	#workSnapshot: PauseWorkStatus;
 
-	constructor(readonly host: PauseScreenHost) {}
+	constructor(
+		readonly host: PauseScreenHost,
+		readonly options: PauseScreenOptions = {},
+	) {
+		this.#workSnapshot = this.#readWorkSnapshot();
+	}
 
 	/** Start the clock; resolves once the user asks to resume. */
 	run(): Promise<void> {
 		this.#startedAt = agentPauseGate.pausedAt ?? Date.now();
 		this.#native = undefined;
-		// The tick only repaints the hold clock; natively the `elapsed` node counts on its own.
-		if (!isNativeRendering()) {
-			this.#timer ??= setInterval(() => {
-				if (!this.#disposed) this.host.ui.requestRender();
-			}, TICK_MS);
-		}
+		this.#refreshWorkSnapshot();
+		this.#timer ??= setInterval(() => {
+			if (this.#disposed) return;
+			const statusChanged = this.#refreshWorkSnapshot();
+			if (statusChanged || !isNativeRendering()) this.host.ui.requestRender();
+		}, TICK_MS);
 		this.host.ui.requestRender();
 		return this.#done.promise;
 	}
@@ -181,6 +258,25 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 		this.#native = undefined;
 	}
 
+	#readWorkSnapshot(): PauseWorkStatus {
+		const workStatus = this.options.getWorkStatus?.() ?? EMPTY_WORK_STATUS;
+		return {
+			unsettledTurns: workStatus.unsettledTurns,
+			unfinishedJobs: workStatus.unfinishedJobs,
+		};
+	}
+
+	#refreshWorkSnapshot(): boolean {
+		const next = this.#readWorkSnapshot();
+		const previous = this.#workSnapshot;
+		if (next.unsettledTurns === previous.unsettledTurns && next.unfinishedJobs === previous.unfinishedJobs) {
+			return false;
+		}
+		this.#workSnapshot = next;
+		this.#native = undefined;
+		return true;
+	}
+
 	/** A glass sheet titled "Paused" (not the whole pane: the transcript stays visible, frozen). */
 	readonly nativeOverlay = { role: "omp.overlay.pause", size: "md", anchor: "center", head: "Paused" } as const;
 
@@ -191,6 +287,41 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 	 */
 	describe(): NativeNode {
 		if (this.#native) return this.#native;
+		const snapshot = this.#workSnapshot;
+		const outstanding = snapshot.unsettledTurns > 0 || snapshot.unfinishedJobs > 0;
+		const status = col(
+			[
+				keyed(
+					text(
+						[
+							span(
+								outstanding ? "Pausing — waiting for work to settle" : "Paused — ready to suspend",
+								outstanding ? "warning" : "success",
+							),
+						],
+						{ role: "omp.pause.settlement" },
+					),
+					"settlement",
+				),
+				...(outstanding
+					? [
+							keyed(
+								text([span(`Unsettled turns: ${snapshot.unsettledTurns}`, "muted")], {
+									role: "omp.pause.unsettled-turn-count",
+								}),
+								"unsettled-turns",
+							),
+							keyed(
+								text([span(`Unfinished jobs: ${snapshot.unfinishedJobs}`, "muted")], {
+									role: "omp.pause.unfinished-job-count",
+								}),
+								"unfinished-jobs",
+							),
+						]
+					: []),
+			],
+			{ role: "omp.pause.settlement-status", gap: "sm" },
+		);
 		const resumeKey = boundKeys("app.interrupt", ["escape"])[0] ?? "escape";
 		const hero = row(
 			[
@@ -244,12 +375,9 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 		this.#native = col(
 			[
 				keyed(hero, "hero"),
+				keyed(status, "settlement-status"),
 				keyed(facts, "facts"),
 				actionBar([
-					keyed(
-						text([span("Each agent continues where it stopped.", "muted")], { role: "omp.pause.note" }),
-						"note",
-					),
 					null,
 					actionButton("Resume", "resume", {
 						keys: resumeKey,
@@ -276,6 +404,7 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 			Math.max(1, this.host.ui.terminal.rows),
 			elapsed,
 			this.host.sessionName,
+			this.#workSnapshot,
 		);
 	}
 }
@@ -286,9 +415,9 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
  * gate on the way out (including teardown throws) — a leaked pause would
  * freeze every agent in the process with no UI left to release it.
  */
-export async function runPauseScreen(host: PauseScreenHost): Promise<void> {
+export async function runPauseScreen(host: PauseScreenHost, options?: PauseScreenOptions): Promise<void> {
 	if (!agentPauseGate.pause()) return;
-	const component = new PauseScreenComponent(host);
+	const component = new PauseScreenComponent(host, options);
 	const overlay = host.ui.showOverlay(component, {
 		width: "100%",
 		maxHeight: "100%",

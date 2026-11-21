@@ -111,15 +111,19 @@ describe("AgentSession memory backend lifecycle", () => {
 		return session;
 	}
 
-	async function startMemoryCompletion(models: Model<Api>[]) {
+	async function startMemoryCompletion(models: Model<Api>[], thinking: readonly (string | undefined)[] = []) {
+		const selectors = models.map((model, index) => {
+			const level = thinking[index];
+			return `${model.provider}/${model.id}${level ? `:${level}` : ""}`;
+		});
 		settings = Settings.isolated({
 			"compaction.enabled": false,
 			"memory.backend": "mnemopi",
 			"mnemopi.noEmbeddings": true,
 			"mnemopi.llmMode": "smol",
 			"mnemopi.autoRetain": false,
-			modelRoles: { memory: `${models[0]!.provider}/${models[0]!.id}` },
-			"retry.fallbackChains": { memory: models.slice(1).map(model => `${model.provider}/${model.id}`) },
+			modelRoles: { memory: selectors[0]! },
+			"retry.fallbackChains": { memory: selectors.slice(1) },
 		});
 		const current = createSession(async () => []);
 		for (const model of models) authStorage.keys.setRuntime(model.provider, "test-key");
@@ -183,6 +187,7 @@ describe("AgentSession memory backend lifecycle", () => {
 			model: model.id,
 			usage: response.usage,
 			stopReason: "stop",
+			completion: { prompt: "Sam works at Globex.", reply: "Sam works at Globex." },
 		});
 		expect(manager.getLeafId()).toBe(usage[0]!.id);
 	});
@@ -201,7 +206,8 @@ describe("AgentSession memory backend lifecycle", () => {
 
 		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
 
-		const usage = current.sessionManager.getBranch().filter(entry => entry.type === "model_usage");
+		// Both attempts hang off the leaf the request started on, so the second is a sibling, off the branch.
+		const usage = current.sessionManager.getEntries().filter(entry => entry.type === "model_usage");
 		expect(usage).toHaveLength(2);
 		expect(usage).toMatchObject([
 			{
@@ -216,12 +222,71 @@ describe("AgentSession memory backend lifecycle", () => {
 		]);
 	});
 
-	it("does not journal unbilled local-inference memory completions", async () => {
+	it.each([
+		{
+			name: "an explicit level as the reasoning effort",
+			suffix: "low",
+			reasoning: "low",
+			disableReasoning: undefined,
+		},
+		{ name: ":off as disabled reasoning", suffix: "off", reasoning: undefined, disableReasoning: true },
+		{ name: "neither option without a suffix", suffix: undefined, reasoning: undefined, disableReasoning: undefined },
+	])("sends the memory role's $name", async ({ suffix, reasoning, disableReasoning }) => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6")!;
+		const sent: Array<{ reasoning: unknown; disableReasoning: unknown }> = [];
+		spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, options) => {
+			sent.push({ reasoning: options?.reasoning, disableReasoning: options?.disableReasoning });
+			return memoryReply(model);
+		});
+		const { complete } = await startMemoryCompletion([model], [suffix]);
+
+		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
+		expect(sent).toEqual([{ reasoning, disableReasoning }]);
+	});
+
+	it("sends each memory fallback candidate its own thinking suffix", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6")!;
+		const backup = { ...model, id: "memory-backup" };
+		const sent: Array<{ model: string; reasoning: unknown; disableReasoning: unknown }> = [];
+		spyOn(ai, "completeSimple").mockImplementation(async (candidate, _context, options) => {
+			sent.push({ model: candidate.id, reasoning: options?.reasoning, disableReasoning: options?.disableReasoning });
+			return memoryReply(candidate, candidate.id === model.id ? "error" : "stop");
+		});
+		const { complete } = await startMemoryCompletion([model, backup], ["off", "high"]);
+
+		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
+		expect(sent).toEqual([
+			{ model: model.id, reasoning: undefined, disableReasoning: true },
+			{ model: backup.id, reasoning: "high", disableReasoning: undefined },
+		]);
+	});
+
+	it("journals a local-inference memory completion once, with zero usage", async () => {
 		const model = getBundledModel("local", "qwen2.5-1.5b")!;
 		spyOn(tinyModelClient, "complete").mockResolvedValue("Sam works at Globex.");
 		const { current, complete } = await startMemoryCompletion([model]);
 
-		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
+		expect(await complete("Where does Sam work?")).toBe("Sam works at Globex.");
+
+		const usage = current.sessionManager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage).toHaveLength(1);
+		expect(usage[0]).toMatchObject({
+			purpose: "memory",
+			role: "memory",
+			provider: model.provider,
+			model: model.id,
+			usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } },
+			stopReason: "stop",
+			completion: { prompt: "Where does Sam work?", reply: "Sam works at Globex." },
+		});
+	});
+
+	it("journals nothing when the local memory worker produces no output", async () => {
+		const model = getBundledModel("local", "qwen2.5-1.5b")!;
+		spyOn(tinyModelClient, "complete").mockResolvedValue(null);
+		const { current, complete } = await startMemoryCompletion([model]);
+
+		expect(await complete("Where does Sam work?")).toBeNull();
 		expect(current.sessionManager.getBranch().filter(entry => entry.type === "model_usage")).toEqual([]);
 	});
 
@@ -424,12 +489,13 @@ describe("AgentSession memory backend lifecycle", () => {
 				output: text => {
 					output.push(text);
 				},
-				refreshCommands: () => {},
-				reloadPlugins: async () => {
+				// The last rescope step: a failure here exercises rollback after the memory rebind.
+				refreshCommands: () => {
 					if (current.sessionManager.getCwd() !== destinationCwd) return;
 					destinationDbPath = getMnemopiSessionState(current)!.memory.dbPath!;
 					if (rollback) throw new Error("destination plugin rescope failed");
 				},
+				reloadPlugins: async () => {},
 			});
 		} finally {
 			setProjectDir(originalProjectDir);

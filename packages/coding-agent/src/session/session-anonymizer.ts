@@ -12,6 +12,7 @@
  * line and file it processes. Path segments and placeholders share the index space:
  * `name: "Probe"` → `PLACEHOLDER_7` and `agent://Probe` → `agent://seg7`.
  */
+import { editErrorKinds } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { getBundledAgentsMap } from "../task/agents";
 import { BUILTIN_TOOL_NAMES, isMCPToolName } from "../tools/builtin-names";
@@ -40,6 +41,8 @@ export const ANONYMIZED_REVIEW_NOTE =
  * - `args`/`details`/`data`: tool-call args, tool-result details, custom-entry data — walked only
  *   for built-in tools / omp's own entries, otherwise opaque.
  * - `runtime`: the build stamp; version and commit kept, branch/diff/label tokenized.
+ * - `judgment`: a journaled judge query; probabilities and counts kept, the state hash,
+ *   question ids, and choice labels tokenized.
  * - `opaque`: replaced whole by a marker.
  */
 type Rule =
@@ -66,7 +69,8 @@ type Rule =
 	| "opaque"
 	| "transforms"
 	| "sessionPath"
-	| "runtime";
+	| "runtime"
+	| "judgment";
 
 function fields(rule: Rule, keys: readonly string[]): Record<string, Rule> {
 	return Object.fromEntries(keys.map(key => [key, rule]));
@@ -77,6 +81,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("num", [
 		"version",
 		"resolvedModelIsFallback",
+		"perCallModel",
 		"display",
 		"synthetic",
 		"steering",
@@ -112,6 +117,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"nonMessageTokens",
 		"historyRewriteTokensRemoved",
 		"elidedOutputTokens",
+		"demotedReasoningBlocks",
 		"compactionEpoch",
 		"lastMessageTimestamp",
 		"historyRewriteAt",
@@ -182,6 +188,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"chars",
 		"multi",
 		"wakeRelay",
+		"broadcast",
 		"partialLine",
 		"requestedTimeoutSeconds",
 	]),
@@ -203,6 +210,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"role",
 		"titleSource",
 		"thinkingLevel",
+		"perCallThinkingLevel",
 		"configured",
 		"serviceTier",
 		"purpose",
@@ -243,12 +251,14 @@ const FIELD_RULES: Record<string, Rule> = {
 		"server",
 		"customWireName",
 		"visibility",
+		"errorKind",
 	]),
 	...fields("identity", [
 		"api",
 		"provider",
 		"model",
 		"resolvedModel",
+		"perCallModelIdentity",
 		"upstreamProvider",
 		"upstreamModel",
 		"advisor",
@@ -260,6 +270,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("id", [
 		"id",
 		"parentId",
+		"continuationOf",
 		"toolCallId",
 		"call_id",
 		"responseId",
@@ -326,19 +337,24 @@ const FIELD_RULES: Record<string, Rule> = {
 		"log",
 		"messages",
 		"body",
+		"prompt",
+		"reply",
 	]),
 	...fields("label", ["title", "previousTitle", "label", "injectedRules", "intent", "emoji", "nf"]),
 	...fields("error", ["errorMessage", "explanation", "errorClassificationMessage", "upstreamError"]),
-	...fields("tool", ["toolName", "tools", "declared", "deferred", "active"]),
+	...fields("tool", ["toolName", "tools", "mountedTools", "declared", "deferred", "active"]),
 	name: "name",
 	customType: "customType",
 	inputTransformations: "transforms",
 	parentSession: "sessionPath",
 	previousSessionFiles: "sessionPath",
 	runtime: "runtime",
+	judgment: "judgment",
 	content: "content",
 	...fields("struct", [
 		"message",
+		"completion",
+		"parentIrc",
 		"usage",
 		"cost",
 		"cttl",
@@ -406,7 +422,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		// Eval cell pretty views: printed tables/JSON/Markdown of user data.
 		"views",
 		"structured",
-		"xdev",
+		"toolCommands",
 		"response",
 		"results",
 		"projectAgentsDir",
@@ -415,6 +431,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"statusEvents",
 		"options",
 		"selectedOptions",
+		"answers",
 		"phases",
 		"tasks",
 		"completedTasks",
@@ -440,6 +457,7 @@ const TEXT_ARG_KEYS: Record<string, true> = {
 	description: true,
 	old_text: true,
 	new_text: true,
+	html: true,
 };
 
 /** Path/URI keys not covered by {@link PATH_KEY}. */
@@ -559,6 +577,7 @@ const TOOL_ENUM_VALUES: Record<string, ReadonlySet<string>> = {
 	contentType: MIME_TYPES,
 	mimeType: MIME_TYPES,
 	detail: new Set(["auto", "low", "high", "original"]),
+	errorKind: new Set(editErrorKinds()),
 };
 
 /** Built-in tool argument keys holding free-form structures (env maps, schemas, structured output). */
@@ -612,7 +631,7 @@ const ARG_SCHEMAS: Record<string, ArgSchema> = {
 	todo: argSchema("op items task phase list reason tasks content status phase_note"),
 	wait: argSchema("ids timeout#"),
 	web_search: argSchema("query limit# recency num_search_results# max_tokens# temperature#"),
-	ask: argSchema("questions id question options label description recommended# header preview multi"),
+	ask: argSchema("html"),
 	ast_grep: argSchema("pat path lang skip# limit#"),
 	ast_edit: argSchema("pat out ops paths path lang"),
 	github: argSchema(
@@ -1103,7 +1122,6 @@ const KNOWN_SCHEMES = new Set([
 	"ws",
 	"wss",
 	"agent",
-	"artifact",
 	"attachment",
 	"cfg",
 	"conflict",
@@ -1112,6 +1130,7 @@ const KNOWN_SCHEMES = new Set([
 	"local",
 	"mcp",
 	"memory",
+	"mr",
 	"omp",
 	"pr",
 	"proc",
@@ -1119,7 +1138,6 @@ const KNOWN_SCHEMES = new Set([
 	"security",
 	"skill",
 	"vault",
-	"xd",
 ]);
 
 /** File extensions kept on mock names; `.test`/`.spec`/`.d` qualify a known final extension. */
@@ -1400,6 +1418,8 @@ export class SessionAnonymizer {
 		for (const [key, value] of Object.entries(block)) {
 			const rule = allowed.has(key) && Object.hasOwn(FIELD_RULES, key) ? FIELD_RULES[key] : undefined;
 			if (rule === undefined) out[this.placeholder(key)] = this.#opaque(value);
+			// The block type is already allowlisted; replay consumers use it to distinguish text from images.
+			else if (key === "type") out[key] = value;
 			// A tool call is the model's own request (its id must stay joinable with the result).
 			else out[key] = this.#field(rule, value, block, key, fromTool && block.type !== "toolCall");
 		}
@@ -1458,6 +1478,39 @@ export class SessionAnonymizer {
 		return out;
 	}
 
+	/**
+	 * A journaled judge query. Probabilities, scores, and counts are measurements; the state hash,
+	 * question ids, and choice labels derive from user content, so only their equality survives.
+	 */
+	#judgmentRecord(record: JsonObject): JsonObject {
+		const out: JsonObject = {};
+		for (const key in record) {
+			const value = record[key];
+			if (key === "state" && typeof value === "string") out[key] = this.placeholder(value);
+			else if (key === "cached" && typeof value === "number") out[key] = value;
+			else if (key === "answers" && isObject(value)) {
+				const answers: JsonObject = {};
+				for (const id in value) {
+					const answer = value[id];
+					answers[this.placeholder(id)] =
+						typeof answer === "number"
+							? answer
+							: Array.isArray(answer)
+								? answer.map(part =>
+										typeof part === "number"
+											? part
+											: typeof part === "string"
+												? this.#literal(part, false)
+												: this.#opaque(part),
+									)
+								: this.#opaque(answer);
+				}
+				out[key] = answers;
+			} else out[this.placeholder(key)] = this.#opaque(value);
+		}
+		return out;
+	}
+
 	#field(rule: Rule, value: unknown, parent: JsonObject, key: string, fromTool: boolean): unknown {
 		// Payload scopes come first: a primitive inside an untrusted payload is still untrusted.
 		switch (rule) {
@@ -1481,6 +1534,8 @@ export class SessionAnonymizer {
 					: this.#opaque(value);
 			case "runtime":
 				return isObject(value) ? this.#runtimeStamp(value) : this.#opaque(value);
+			case "judgment":
+				return isObject(value) ? this.#judgmentRecord(value) : this.#opaque(value);
 			case "name":
 				return this.#field(
 					TOOL_CALL_TYPES[String(parent.type)] === true ? "tool" : "label",
@@ -1787,7 +1842,9 @@ export async function anonymizeSessionTranscripts(session: AnonymizeSessionInput
 	let subagentError: string | undefined;
 	try {
 		if (session.sessionFile) {
-			subSessions = await collectSubSessions(session.sessionFile, key => unreadable.push(memberFor(key)));
+			subSessions = await collectSubSessions(session.sessionFile, {
+				onUnreadable: key => unreadable.push(memberFor(key)),
+			});
 		}
 	} catch (error) {
 		subagentError = error instanceof Error ? error.message : String(error);

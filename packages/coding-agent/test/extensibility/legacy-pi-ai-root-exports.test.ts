@@ -5,6 +5,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	anthropicMessagesApi,
 	collapseSystemMessages,
+	contentText,
 	createInitialSystemMessage,
 	declarationsEqual,
 	getCurrentSystemMessage,
@@ -12,6 +13,7 @@ import {
 	getCurrentTools,
 	getDeclaredTools,
 	getInitialSystemMessage,
+	getSystemMessageText,
 	getToolStateChanges,
 	hasNonAdditiveToolChanges,
 	hasToolRedefinitions,
@@ -58,7 +60,6 @@ function createErrorMessage(errorMessage: string): AssistantMessage {
 
 describe("legacy pi-ai shim root exports", () => {
 	it("re-exports isContextOverflow with its classification behavior", () => {
-		expect(typeof isContextOverflow).toBe("function");
 		expect(isContextOverflow(createErrorMessage("prompt is too long: 300000 tokens > 200000 maximum"))).toBe(true);
 		expect(isContextOverflow(createErrorMessage("400 Bad Request: invalid API key"))).toBe(false);
 	});
@@ -74,7 +75,7 @@ describe("legacy pi-ai shim root exports", () => {
 		expect(parseStreamingJson<{ a: number }>('{"a": 1')).toEqual({ a: 1 });
 	});
 
-	it("exposes the host Anthropic transport through the legacy compat adapter", async () => {
+	it.each(["stream", "streamSimple"])("runs the host Anthropic transport through legacy %s", async method => {
 		const urls: string[] = [];
 		const fetchMock: FetchImpl = Object.assign(
 			async (input: string | URL | Request) => {
@@ -102,18 +103,19 @@ describe("legacy pi-ai shim root exports", () => {
 			maxTokens: 8_192,
 		});
 
-		const result = await anthropicMessagesApi()
-			.streamSimple(
-				model,
-				{ messages: [{ role: "user", content: "hello", timestamp: 0 }] },
-				{
-					apiKey: "test-key",
-					fetch: fetchMock,
-				},
-			)
-			.result();
+		const api = anthropicMessagesApi();
+		const stream = method === "stream" ? api.stream : api.streamSimple;
+		const result = await stream(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+			},
+		).result();
 
 		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("intentional test response");
 		expect(urls).toEqual(["https://anthropic.example.test/v1/messages"]);
 	});
 
@@ -180,6 +182,20 @@ describe("legacy pi-ai shim root exports", () => {
 // section patching, tool-state deltas, and addition anchoring must match
 // upstream exactly.
 describe("legacy pi-ai shim transcript replay exports", () => {
+	it("contentText and getSystemMessageText match upstream pi-ai's text helpers", () => {
+		const blocks = [
+			{ type: "text", text: "a" },
+			{ type: "image", data: "x", mimeType: "image/png" },
+			{ type: "text", text: "b" },
+		];
+		expect(contentText("plain")).toBe("plain");
+		expect(contentText(blocks)).toBe("a\nb");
+		expect(contentText(blocks, " | ")).toBe("a | b");
+		expect(getSystemMessageText({ role: "system", content: "Base.", sections: { x: "Sec.", y: null } })).toBe(
+			"Base.\n\nSec.",
+		);
+	});
+
 	it("normalizeContext folds systemPrompt and tools into a leading system message", () => {
 		const tool = { name: "read", description: "Read a file", parameters: { type: "object" } };
 		expect(normalizeContext({ systemPrompt: undefined, tools: undefined, messages: [] })).toEqual({ messages: [] });

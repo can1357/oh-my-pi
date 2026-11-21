@@ -378,7 +378,7 @@ export interface EasyInputMessage {
 	 * sending follow-up requests, preserve and resend phase on all assistant messages
 	 * — dropping it can degrade performance. Not used for user messages.
 	 */
-	phase?: "commentary" | "final_answer" | null;
+	phase?: "commentary" | "final_answer" | "partial_answer" | null;
 	/**
 	 * The type of the message input. Always `message`.
 	 */
@@ -4201,7 +4201,7 @@ export interface ResponseOutputMessage {
 	 * sending follow-up requests, preserve and resend phase on all assistant messages
 	 * — dropping it can degrade performance. Not used for user messages.
 	 */
-	phase?: "commentary" | "final_answer" | null;
+	phase?: "commentary" | "final_answer" | "partial_answer" | null;
 }
 /**
  * A refusal from the model.
@@ -5897,8 +5897,8 @@ export interface ResponseCreateParamsBase {
 	 *   `prompt_cache_retention` is not specified.
 	 */
 	prompt_cache_retention?: "in_memory" | "24h" | null;
-	/** Explicit prompt-cache mode and minimum lifetime for GPT-5.6+ models. */
-	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" } | null;
+	/** Explicit prompt-cache mode and minimum lifetime (`12h` is Responses-only) for GPT-5.6+ models. */
+	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" | "12h" } | null;
 	/**
 	 * **gpt-5 and o-series models only**
 	 *

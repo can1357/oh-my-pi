@@ -1,9 +1,11 @@
+import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
 	CombinedAutocompleteProvider,
 	findLeadingSlashCommandStart,
 	getKeybindings,
+	type ModelMentionCompletion,
 	type SlashCommand,
 } from "../index";
 import { formatKeyHints, type KeybindingsManager } from "../app-keybindings";
@@ -138,36 +140,28 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		onPartial?: (suggestions: { items: AutocompleteItem[]; prefix: string }) => void,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 		if (signal?.aborted) return null;
-		const currentLine = lines[cursorLine] || "";
-		const textBeforeCursor = currentLine.slice(0, cursorCol);
-		const leadingSlashStart = findLeadingSlashCommandStart(textBeforeCursor);
-		const hasPromptTextBeforeCursorLine = lines.slice(0, cursorLine).some(line => (line || "").trim() !== "");
-		const commandText =
-			leadingSlashStart !== null && !hasPromptTextBeforeCursorLine
-				? textBeforeCursor.slice(leadingSlashStart)
-				: null;
-		const spaceIndex = commandText?.indexOf(" ") ?? -1;
-		if (commandText !== null && spaceIndex !== -1) {
-			const commandName = commandText.slice(1, spaceIndex);
-			const command = this.#commands.find(cmd => cmd.name === commandName || cmd.aliases?.includes(commandName));
-			if (command && (!("allowArgs" in command) || command.allowArgs !== false)) {
-				const argumentSuggestions = await this.#baseProvider.getSuggestions(
-					lines,
-					cursorLine,
-					cursorCol,
-					signal,
-					onPartial,
-				);
-				if (argumentSuggestions) return argumentSuggestions;
-				const modelMentionSuggestions = getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
-				if (modelMentionSuggestions) return modelMentionSuggestions;
-				// No slash-argument completion for this input: preserve numeric
-				// GitHub references and internal URLs while keeping prompt-action
-				// tokens such as `#copy` literal.
-				const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
-				if (githubRefSuggestions) return githubRefSuggestions;
-				return getInternalUrlSuggestions(textBeforeCursor, undefined, signal, this.#internalUrlCaller);
-			}
+		const textBeforeCursor = (lines[cursorLine] || "").slice(0, cursorCol);
+		if (!this.#outranksModelMention(lines, cursorLine, textBeforeCursor)) {
+			const modelMention = await this.#modelMentionSuggestions(textBeforeCursor, signal, onPartial);
+			if (modelMention) return modelMention;
+		}
+		if (this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) {
+			const argumentSuggestions = await this.#baseProvider.getSuggestions(
+				lines,
+				cursorLine,
+				cursorCol,
+				signal,
+				onPartial,
+			);
+			if (argumentSuggestions) return argumentSuggestions;
+			const modelMention = await this.#modelMentionSuggestions(textBeforeCursor, signal, onPartial);
+			if (modelMention) return modelMention;
+			// No slash-argument completion for this input: preserve numeric
+			// GitHub references and internal URLs while keeping prompt-action
+			// tokens such as `#copy` literal.
+			const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
+			if (githubRefSuggestions) return githubRefSuggestions;
+			return getInternalUrlSuggestions(textBeforeCursor, undefined, signal, this.#internalUrlCaller);
 		}
 
 		const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
@@ -196,9 +190,6 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			}
 		}
 
-		const modelMentionSuggestions = getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
-		if (modelMentionSuggestions) return modelMentionSuggestions;
-
 		const urlSuggestions = await getInternalUrlSuggestions(
 			textBeforeCursor,
 			undefined,
@@ -213,6 +204,27 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		}
 
 		return this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol, signal, onPartial);
+	}
+
+	#isInSlashCommandArguments(lines: string[], cursorLine: number, textBeforeCursor: string): boolean {
+		const leadingSlashStart = findLeadingSlashCommandStart(textBeforeCursor);
+		if (leadingSlashStart === null || lines.slice(0, cursorLine).some(line => (line || "").trim() !== "")) {
+			return false;
+		}
+		const commandText = textBeforeCursor.slice(leadingSlashStart);
+		const spaceIndex = commandText.indexOf(" ");
+		if (spaceIndex === -1) return false;
+		const commandName = commandText.slice(1, spaceIndex);
+		const command = this.#commands.find(cmd => cmd.name === commandName || cmd.aliases?.includes(commandName));
+		return command !== undefined && (!("allowArgs" in command) || command.allowArgs !== false);
+	}
+
+	#outranksModelMention(lines: string[], cursorLine: number, textBeforeCursor: string): boolean {
+		return (
+			this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor) ||
+			getGithubRefContext(textBeforeCursor) !== null ||
+			getPromptActionPrefix(textBeforeCursor) !== null
+		);
 	}
 
 	applyCompletion(
@@ -270,6 +282,30 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	}
 	trySyncSlashCompletion(textBeforeCursor: string): { items: AutocompleteItem[]; prefix: string } | null {
 		return this.#baseProvider.trySyncSlashCompletion?.(textBeforeCursor) ?? null;
+	}
+	/**
+	 * `^` mention rows for the token at the cursor. While a discovery retry runs, the current
+	 * rows go out as a partial and the result is recomputed once it settles; aborts when the
+	 * editor queues a newer request.
+	 */
+	async #modelMentionSuggestions(
+		textBeforeCursor: string,
+		signal: AbortSignal | undefined,
+		onPartial: ((suggestions: { items: AutocompleteItem[]; prefix: string }) => void) | undefined,
+	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		const mention = getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
+		if (mention.kind !== "matched") return null;
+		if (!mention.pending) return mention.suggestions;
+		onPartial?.(mention.suggestions);
+		await untilAborted(signal, mention.pending);
+		const settled = getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
+		return settled.kind === "matched" ? settled.suggestions : mention.suggestions;
+	}
+
+	trySyncModelMentionCompletion(lines: string[], cursorLine: number, cursorCol: number): ModelMentionCompletion {
+		const textBeforeCursor = (lines[cursorLine] || "").slice(0, cursorCol);
+		if (this.#outranksModelMention(lines, cursorLine, textBeforeCursor)) return { kind: "unhandled" };
+		return getModelMentionSuggestions(textBeforeCursor, this.#modelMentions);
 	}
 	trySyncInlineReplace(textBeforeCursor: string): { replaceLen: number; insert: string } | null {
 		if (!emojiAutocompleteEnabled) return null;

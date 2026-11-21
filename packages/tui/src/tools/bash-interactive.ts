@@ -25,7 +25,12 @@ const NATIVE_SHEET_INSET_COLS = 8;
 // Action id of the native Force kill button (mirrors Esc).
 const KILL_ACTION = "kill";
 
-function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean): string {
+/**
+ * Translates a TUI key event into the bytes a terminal would send to a PTY
+ * child; key releases encode to "". Shared by the agent `pty` console and
+ * `!` commands (`BashExecutionComponent.encodePtyInput`).
+ */
+export function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean): string {
 	const kitty = parseKittySequence(data);
 	if (kitty?.eventType === 3) {
 		return "";
@@ -203,6 +208,11 @@ export class BashInteractiveOverlayComponent implements Component {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#flushResolvers.push(resolve);
 		return promise;
+	}
+
+	/** Whether the cursor sits after text on its row, where a line prompt leaves it. */
+	cursorAfterText(): boolean {
+		return this.#terminal.buffer.active.cursorX > 0;
 	}
 
 	/** Records process completion and stops forwarding keyboard input. */

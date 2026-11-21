@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ptree, Snowflake } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
-import type { AgentStorage } from "../../session/agent-storage";
+import type { AgentStorageApi } from "../../session/agent-storage";
 import { throwIfAborted } from "../../tools/tool-errors";
 import { ensureTool } from "../../utils/tools-manager";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../parallel";
@@ -104,7 +104,7 @@ export const handleYouTube: SpecialHandler = async (
 	url: string,
 	timeout: number,
 	userSignal?: AbortSignal,
-	storage?: AgentStorage | null,
+	storage?: AgentStorageApi | null,
 ): Promise<RenderResult | null> => {
 	throwIfAborted(userSignal);
 	const yt = parseYouTubeUrl(url);

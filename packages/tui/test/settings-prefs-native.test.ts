@@ -46,6 +46,13 @@ const ENTRIES: SettingsDisplayEntry[] = [
 	},
 	{ path: "shell.path", type: "string", defaultValue: "", ui: { tab: "shell", label: "Shell path", description: "" } },
 	{
+		path: "edit.mode",
+		type: "enum",
+		enumValues: ["apply_patch", "hashline", "patch", "replace", "sloppy", "none"],
+		defaultValue: "hashline",
+		ui: { tab: "files", group: "Editing", label: "Edit Mode", description: "" },
+	},
+	{
 		path: "providers.order",
 		type: "array",
 		defaultValue: ["a", "b"],
@@ -241,6 +248,21 @@ describe("settings as a native prefs page", () => {
 		expect(prefs(selector).props.editing).toBeNull();
 		expect(previews.length).toBe(2);
 		expect(values.get("theme.dark")).toBe("dark");
+	});
+
+	it("opens an enum's menu on activate and closes it on a pick", () => {
+		const { selector, values, changes } = harness();
+		send(selector, { type: "action", key: "", act: "page", value: "files", mods: [] });
+		send(selector, { type: "activate", key: "", item: "edit.mode" });
+		expect(prefs(selector).props.editing).toEqual({ row: "edit.mode", option: "hashline" });
+
+		send(selector, { type: "select", key: "", item: "edit.mode=sloppy" });
+		expect(prefs(selector).props.editing).toEqual({ row: "edit.mode", option: "sloppy" });
+
+		send(selector, { type: "change", key: "", item: "edit.mode", value: "sloppy" });
+		expect(values.get("edit.mode")).toBe("sloppy");
+		expect(changes).toEqual([["edit.mode", "sloppy"]]);
+		expect(prefs(selector).props.editing).toBeNull();
 	});
 
 	it("picks a menu option like Enter in the submenu", () => {

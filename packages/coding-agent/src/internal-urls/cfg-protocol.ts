@@ -250,6 +250,7 @@ function shadowingLayer(
 	const owner = setting.provenance(settings);
 	if (!above.includes(owner)) return undefined;
 	const effective = setting.get(settings);
+	if (keepsGlobalListEntries(setting, owner, effective, value)) return undefined;
 	if (!isRecord(value) || !isRecord(effective)) {
 		return Bun.deepEquals(effective, value) ? undefined : owner;
 	}
@@ -272,11 +273,14 @@ function saveShadowingLayer(
 ): SettingProvenance | undefined {
 	const owner = setting.provenance(persistent);
 	const effective = setting.get(persistent);
+	let global: unknown = persistent.getGlobalSettings();
+	for (const segment of setting.segments) global = isRecord(global) ? global[segment] : undefined;
+	if (above.includes(owner) && keepsGlobalListEntries(setting, owner, effective, global ?? setting.default)) {
+		return undefined;
+	}
 	if (owner === "env" || !above.includes(owner) || !isRecord(value) || !isRecord(effective)) {
 		return shadowingLayer(setting, persistent, value, above);
 	}
-	let global: unknown = persistent.getGlobalSettings();
-	for (const segment of setting.segments) global = isRecord(global) ? global[segment] : undefined;
 	for (const key in value) {
 		const current = effective[key];
 		if (current === undefined || Bun.deepEquals(current, value[key])) continue;
@@ -284,6 +288,24 @@ function saveShadowingLayer(
 		return owner;
 	}
 	return undefined;
+}
+
+/**
+ * Whether the project or `--config` overlay list that owns `setting` keeps `globalList` in effect:
+ * a `merge: "prepend" | "append"` list adds its own entries around the global ones instead of
+ * replacing them, unless it configures an empty list.
+ */
+function keepsGlobalListEntries(
+	setting: AnySetting,
+	owner: SettingProvenance,
+	effective: unknown,
+	globalList: unknown,
+): boolean {
+	const merge = setting.definition.type === "array" ? setting.definition.merge : undefined;
+	if ((owner !== "project" && owner !== "overlay") || (merge !== "prepend" && merge !== "append")) return false;
+	if (!Array.isArray(effective) || !Array.isArray(globalList) || effective.length <= globalList.length) return false;
+	const offset = merge === "prepend" ? effective.length - globalList.length : 0;
+	return globalList.every((entry, index) => Bun.deepEquals(effective[offset + index], entry));
 }
 
 /** Only an environment variable outranks a session override. */

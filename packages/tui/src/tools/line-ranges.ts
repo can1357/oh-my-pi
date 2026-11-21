@@ -13,13 +13,11 @@ export interface LineRange {
 export const LINE_RANGE_CHUNK_SOURCE = String.raw`L?(\d+)(?:(\.\.|[-+])L?(\d+)?)?`;
 const LINE_RANGE_CHUNK_RE = new RegExp(`^${LINE_RANGE_CHUNK_SOURCE}$`, "i");
 
-/** Parse a single `N`, `N-M`, `N-`, `N+K`, or `..`-aliased (`N..M`, `N..`) chunk. Throws via {@link ToolError} on invalid bounds. */
+/**
+ * Parse a single `N` (that one line), `N-` (from `N` onward), `N-M`, `N+K`, or `..`-aliased (`N..M`, `N..`)
+ * chunk. Throws via {@link ToolError} on invalid bounds.
+ */
 export function parseLineRangeChunk(sel: string): LineRange | null {
-	return parseChunk(sel, false);
-}
-
-/** `pinBare` makes a separator-less `N` the single line `N` instead of "from `N` onward". */
-function parseChunk(sel: string, pinBare: boolean): LineRange | null {
 	const lineMatch = LINE_RANGE_CHUNK_RE.exec(sel);
 	if (!lineMatch) return null;
 	const rawStart = Number.parseInt(lineMatch[1]!, 10);
@@ -36,14 +34,14 @@ function parseChunk(sel: string, pinBare: boolean): LineRange | null {
 		}
 		rawEnd = rawStart + rhs - 1;
 	} else if (sep === "-") {
-		// `301-` is shorthand for "from 301 onward" — equivalent to a lone bare `301`.
+		// `301-` is shorthand for "from 301 onward".
 		if (rhs !== undefined) {
 			if (rhs < rawStart) {
 				throw new ToolError(`Invalid range ${rawStart}-${rhs}: end must be >= start.`);
 			}
 			rawEnd = rhs;
 		}
-	} else if (pinBare) {
+	} else {
 		rawEnd = rawStart;
 	}
 	return { startLine: rawStart, endLine: rawEnd };
@@ -55,25 +53,26 @@ function parseChunk(sel: string, pinBare: boolean): LineRange | null {
  * downstream consumers can stream the file in a single forward pass per range.
  */
 export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null {
-	const chunks = sel.split(",");
-	// A lone `:50` means "from line 50". Inside a comma list, a bare number is
-	// that one line; otherwise `:19,59` collapses to "from 19 through EOF".
-	const pinBare = chunks.length > 1;
 	const parsed: LineRange[] = [];
-	for (const chunk of chunks) {
-		const range = parseChunk(chunk, pinBare);
+	for (const chunk of sel.split(",")) {
+		const range = parseLineRangeChunk(chunk);
 		if (!range) return null;
 		parsed.push(range);
 	}
 	if (parsed.length === 0) return null;
-	parsed.sort((a, b) => a.startLine - b.startLine);
+	return mergeLineRanges(parsed);
+}
 
-	const merged: LineRange[] = [parsed[0]];
-	for (let i = 1; i < parsed.length; i++) {
-		const current = parsed[i];
+/**
+ * Sort non-empty `ranges` by start line and merge the ones that overlap or touch;
+ * an open-ended range (`endLine` undefined) reaches EOF and absorbs every later one.
+ */
+export function mergeLineRanges(ranges: readonly LineRange[]): [LineRange, ...LineRange[]] {
+	const [first, ...rest] = [...ranges].sort((a, b) => a.startLine - b.startLine);
+	const merged: [LineRange, ...LineRange[]] = [first];
+	for (const current of rest) {
 		const last = merged[merged.length - 1];
-		// Open-ended (endLine undefined) means "to EOF" — any later range is absorbed.
-		if (last.endLine === undefined) continue;
+		if (last.endLine === undefined) break;
 		// Merge when current starts within (or immediately after) the last range.
 		if (current.startLine <= last.endLine + 1) {
 			if (current.endLine === undefined || current.endLine > last.endLine) {
@@ -83,7 +82,7 @@ export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null
 		}
 		merged.push(current);
 	}
-	return merged as [LineRange, ...LineRange[]];
+	return merged;
 }
 
 /**

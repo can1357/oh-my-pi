@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import {
 	$envExact,
 	getAgentDbPath,
@@ -13,6 +14,7 @@ import {
 	getAuthBrokerSnapshotCachePath,
 	getConfigRootDir,
 	isEnoent,
+	isRetryableStatus,
 	logger,
 	MAIN_CONFIG_FILENAMES,
 } from "@oh-my-pi/pi-utils";
@@ -26,8 +28,9 @@ import {
 	SqliteAuthCredentialStore,
 } from "../auth-storage";
 import * as AIError from "../error";
-import { AuthBrokerClient, AuthBrokerError } from "./client";
-import { type AuthBrokerAccountPool, RemoteAuthCredentialStore } from "./remote-store";
+import { AuthBrokerClient, AuthBrokerError, type FetchSnapshotResult } from "./client";
+import { HybridAuthCredentialStore } from "./hybrid-store";
+import { type AuthBrokerAccountPool, type AuthBrokerProviderPool, RemoteAuthCredentialStore } from "./remote-store";
 import { readAuthBrokerSnapshotCache, scheduleAuthBrokerSnapshotCacheWrite } from "./snapshot-cache";
 import { DEFAULT_SNAPSHOT_CACHE_TTL_MS, type SnapshotResponse } from "./types";
 
@@ -50,6 +53,27 @@ export interface DiscoverAuthStorageOptions {
 	accountPool?: AuthBrokerAccountPool;
 	accountPolicies?: AuthAccountPolicies;
 	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
+	/**
+	 * Without a usable snapshot cache, retry a broker that is restarting or
+	 * briefly unreachable for up to 30 s (default `true`). A host with a user
+	 * waiting on it passes `false` to fail at once.
+	 */
+	retryUnreachableBroker?: boolean;
+	/**
+	 * Called after each failed attempt at the initial snapshot that startup will
+	 * retry, so a CLI can tell its user it is waiting on the broker.
+	 */
+	onBrokerRetry?: (retry: AuthBrokerStartupRetry) => void;
+}
+
+/** A failed attempt at the initial snapshot that startup retries. */
+export interface AuthBrokerStartupRetry {
+	url: string;
+	error: AuthBrokerError;
+	/** Wait before the next attempt. */
+	delayMs: number;
+	/** How long startup retries in total before failing. */
+	budgetMs: number;
 }
 
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
@@ -122,7 +146,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		}
 		const policy = entry as Record<string, unknown>;
 		const unknownPolicyFields = Object.keys(policy).filter(
-			key => key !== "provider" && key !== "account" && key !== "priority" && key !== "reservePct",
+			key =>
+				key !== "provider" &&
+				key !== "account" &&
+				key !== "priority" &&
+				key !== "reservePct" &&
+				key !== "reclaimAbovePct",
 		);
 		if (unknownPolicyFields.length > 0) {
 			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
@@ -171,6 +200,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		) {
 			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
 		}
+		if (
+			policy.reclaimAbovePct !== undefined &&
+			(typeof policy.reclaimAbovePct !== "number" || !Number.isFinite(policy.reclaimAbovePct))
+		) {
+			throw new AIError.ConfigurationError(`${path}.reclaimAbovePct must be a finite number`);
+		}
 
 		return {
 			provider,
@@ -182,6 +217,7 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			},
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
+			...(typeof policy.reclaimAbovePct === "number" ? { reclaimAbovePct: policy.reclaimAbovePct } : {}),
 		};
 	});
 }
@@ -272,7 +308,7 @@ export async function loadAuthBrokerAccountPool(): Promise<AuthBrokerAccountPool
 		throw new AIError.ConfigurationError("OMP_AUTH_BROKER_ACCOUNT_POOL_FILE must contain a JSON object");
 	}
 
-	const accountPool = new Map<string, ReadonlySet<string>>();
+	const accountPool = new Map<string, ReadonlySet<string> | AuthBrokerProviderPool>();
 	for (const [provider, value] of Object.entries(parsed)) {
 		const normalizedProvider = provider.trim();
 		if (normalizedProvider.length === 0) {
@@ -283,28 +319,66 @@ export async function loadAuthBrokerAccountPool(): Promise<AuthBrokerAccountPool
 				"OMP_AUTH_BROKER_ACCOUNT_POOL_FILE contains a provider id with surrounding whitespace",
 			);
 		}
-		if (!Array.isArray(value)) {
-			throw new AIError.ConfigurationError(
-				`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} must be an array of identity keys`,
-			);
-		}
-		const identities = new Set<string>();
-		for (const identity of value) {
-			if (typeof identity !== "string" || identity.length === 0) {
-				throw new AIError.ConfigurationError(
-					`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} contains an invalid identity key`,
-				);
-			}
-			if (identity !== identity.trim()) {
-				throw new AIError.ConfigurationError(
-					`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} contains an identity key with surrounding whitespace`,
-				);
-			}
-			identities.add(identity);
-		}
-		accountPool.set(provider, identities);
+		accountPool.set(provider, parseAccountPoolEntry(provider, value));
 	}
 	return accountPool;
+}
+
+/**
+ * One pool-file entry: an identity array (visible OAuth accounts, API keys
+ * kept), `true` (everything visible), `false` (nothing visible), or a rule
+ * object `{ "accounts"?: [...], "apiKeys"?: boolean }`.
+ */
+function parseAccountPoolEntry(provider: string, value: unknown): ReadonlySet<string> | AuthBrokerProviderPool {
+	if (Array.isArray(value)) return parseAccountPoolIdentities(provider, value);
+	if (value === true) return {};
+	if (value === false) return { accounts: new Set(), apiKeys: false };
+	if (value === null || typeof value !== "object") {
+		throw new AIError.ConfigurationError(
+			`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} must be an array of identity keys, a boolean, or an object with "accounts"/"apiKeys"`,
+		);
+	}
+	const rule: { accounts?: ReadonlySet<string>; apiKeys?: boolean } = {};
+	for (const [key, field] of Object.entries(value)) {
+		if (key === "accounts") {
+			if (!Array.isArray(field)) {
+				throw new AIError.ConfigurationError(
+					`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} has "accounts" that is not an array of identity keys`,
+				);
+			}
+			rule.accounts = parseAccountPoolIdentities(provider, field);
+		} else if (key === "apiKeys") {
+			if (typeof field !== "boolean") {
+				throw new AIError.ConfigurationError(
+					`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} has "apiKeys" that is not a boolean`,
+				);
+			}
+			rule.apiKeys = field;
+		} else {
+			throw new AIError.ConfigurationError(
+				`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} has unknown field ${JSON.stringify(key)}`,
+			);
+		}
+	}
+	return rule;
+}
+
+function parseAccountPoolIdentities(provider: string, value: unknown[]): Set<string> {
+	const identities = new Set<string>();
+	for (const identity of value) {
+		if (typeof identity !== "string" || identity.length === 0) {
+			throw new AIError.ConfigurationError(
+				`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} contains an invalid identity key`,
+			);
+		}
+		if (identity !== identity.trim()) {
+			throw new AIError.ConfigurationError(
+				`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} contains an identity key with surrounding whitespace`,
+			);
+		}
+		identities.add(identity);
+	}
+	return identities;
 }
 
 function resolveSnapshotTtlMs(): number {
@@ -316,6 +390,72 @@ function resolveSnapshotTtlMs(): number {
 	if (Number.isFinite(ttlMs) && ttlMs >= 0) return ttlMs;
 	logger.warn("Invalid OMP_AUTH_BROKER_SNAPSHOT_TTL_MS; using default", { value: raw });
 	return DEFAULT_SNAPSHOT_CACHE_TTL_MS;
+}
+
+/**
+ * How long startup keeps retrying the initial snapshot when no cache can stand
+ * in, so a broker restart or a short network outage does not fail startup.
+ */
+const INITIAL_SNAPSHOT_RETRY_BUDGET_MS = 30_000;
+const INITIAL_SNAPSHOT_RETRY_INITIAL_DELAY_MS = 500;
+const INITIAL_SNAPSHOT_RETRY_MAX_DELAY_MS = 8_000;
+
+/** No HTTP answer, or one a restarting broker or its proxy gives (5xx, 408, 429). */
+function isTransientAuthBrokerError(error: unknown): error is AuthBrokerError {
+	return error instanceof AuthBrokerError && (error.status === undefined || isRetryableStatus(error.status));
+}
+
+interface InitialSnapshotOptions {
+	url: string;
+	/** Retry transient failures; without it the first failure throws. */
+	retry: boolean;
+	onRetry?: (retry: AuthBrokerStartupRetry) => void;
+}
+
+/**
+ * Fetch the snapshot a broker store opens with. With `retry`, transient
+ * failures are retried with exponential backoff under one
+ * {@link INITIAL_SNAPSHOT_RETRY_BUDGET_MS} deadline that also cancels a request
+ * in flight; a rejected token or any other definite answer fails at once.
+ */
+async function fetchInitialSnapshot(
+	client: AuthBrokerClient,
+	{ url, retry, onRetry }: InitialSnapshotOptions,
+): Promise<SnapshotResponse> {
+	const budget = retry ? AbortSignal.timeout(INITIAL_SNAPSHOT_RETRY_BUDGET_MS) : undefined;
+	let delayMs = INITIAL_SNAPSHOT_RETRY_INITIAL_DELAY_MS;
+	let lastError: AuthBrokerError | undefined;
+	for (;;) {
+		let result: FetchSnapshotResult;
+		try {
+			result = await client.fetchSnapshot({ signal: budget });
+		} catch (error) {
+			// The deadline cancelled this request: give up without reporting another retry.
+			const cause = budget?.aborted ? (lastError ?? error) : undefined;
+			if (cause instanceof AuthBrokerError) throw initialSnapshotRetriesSpent(cause);
+			if (!budget || !isTransientAuthBrokerError(error)) throw error;
+			lastError = error;
+			logger.warn("auth-broker initial snapshot failed; retrying", { error: error.message, delayMs });
+			onRetry?.({ url, error, delayMs, budgetMs: INITIAL_SNAPSHOT_RETRY_BUDGET_MS });
+			try {
+				await scheduler.wait(delayMs, { signal: budget });
+			} catch {
+				throw initialSnapshotRetriesSpent(lastError);
+			}
+			delayMs = Math.min(delayMs * 2, INITIAL_SNAPSHOT_RETRY_MAX_DELAY_MS);
+			continue;
+		}
+		if (result.status !== 200)
+			throw new AuthBrokerError("Auth broker returned no initial snapshot", { status: result.status });
+		return result.snapshot;
+	}
+}
+
+function initialSnapshotRetriesSpent(lastError: AuthBrokerError): AuthBrokerError {
+	return new AuthBrokerError(
+		`Auth broker gave no initial snapshot after retrying for ${INITIAL_SNAPSHOT_RETRY_BUDGET_MS / 1000}s: ${lastError.message}`,
+		{ status: lastError.status, body: lastError.body, cause: lastError },
+	);
 }
 
 /**
@@ -373,6 +513,14 @@ export interface OpenAuthCredentialStoreOptions {
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
 	accountPool?: AuthBrokerAccountPool;
+	/**
+	 * Without a usable cache, retry a broker that is restarting or briefly
+	 * unreachable for up to 30 s instead of failing on the first try. Startup
+	 * sets this; a runtime settings switch fails fast and keeps its current store.
+	 */
+	retryUnreachableBroker?: boolean;
+	/** Called after each failed attempt that {@link retryUnreachableBroker} retries. */
+	onBrokerRetry?: (retry: AuthBrokerStartupRetry) => void;
 }
 
 /** Credential store opened by {@link openAuthCredentialStore} plus its diagnostics label. */
@@ -383,8 +531,10 @@ export interface OpenedAuthCredentialStore {
 
 /**
  * Open the credential store {@link discoverAuthStorage} would use for
- * `brokerConfig`: the remote broker store (fails fast when the broker has no
- * usable snapshot) or the local SQLite store. Also feeds
+ * `brokerConfig`: the remote broker store (fails when the broker has no
+ * usable snapshot) wrapped in {@link HybridAuthCredentialStore}, which keeps
+ * logins the broker will not serve in the local `agent.db`; or the local SQLite
+ * store. Also feeds
  * {@link AuthStorage.replaceStore} when broker settings change at runtime.
  */
 export async function openAuthCredentialStore(
@@ -430,12 +580,11 @@ export async function openAuthCredentialStore(
 			// No usable cache: block on the broker so a misconfigured/unreachable
 			// broker or revoked token fails startup with an actionable error
 			// (issue #8096) instead of yielding an empty credential store.
-			const initialResult = await client.fetchSnapshot();
-			if (initialResult.status !== 200)
-				throw new AuthBrokerError("Auth broker returned no initial snapshot", {
-					status: initialResult.status,
-				});
-			initialSnapshot = initialResult.snapshot;
+			initialSnapshot = await fetchInitialSnapshot(client, {
+				url: brokerConfig.url,
+				retry: options.retryUnreachableBroker === true,
+				onRetry: options.onBrokerRetry,
+			});
 			persist?.(initialSnapshot);
 		}
 		// Fresh cache: stale-while-revalidate. The store's constructor starts its
@@ -443,13 +592,18 @@ export async function openAuthCredentialStore(
 		// the current generation within one RTT without blocking startup on a
 		// broker round trip. A token revoked since the cache was written surfaces
 		// through that background path exactly like a mid-session revocation.
-		const store = new RemoteAuthCredentialStore({
+		// Opened before the broker store, whose constructor starts background sync that a failed open would leak.
+		const local = await SqliteAuthCredentialStore.open(getAgentDbPath(options.agentDir ?? getAgentDir()));
+		const broker = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,
 			onSnapshot: persist,
 			accountPool,
 		});
-		return { store, sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}` };
+		return {
+			store: new HybridAuthCredentialStore({ broker, local }),
+			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
+		};
 	}
 
 	const dbPath = getAgentDbPath(options.agentDir ?? getAgentDir());
@@ -479,6 +633,8 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		cachePath: options.cachePath,
 		sourceLabel: options.sourceLabel,
 		accountPool: options.accountPool,
+		retryUnreachableBroker: options.retryUnreachableBroker ?? true,
+		onBrokerRetry: options.onBrokerRetry,
 	});
 	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,

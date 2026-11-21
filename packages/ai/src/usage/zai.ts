@@ -240,6 +240,12 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 
 	if (!payload) return null;
 	if (payload.success !== true) {
+		// An account without a GLM Coding Plan (pay-as-you-go models only) answers
+		// `{code: 500, msg: "当前用户不存在coding plan"}`: nothing to meter, not a failure.
+		if (typeof payload.msg === "string" && /不存在\s*coding\s*plan|no\s+coding\s+plan/i.test(payload.msg)) {
+			ctx.logger?.debug("ZAI account has no Coding Plan to meter", { code: payload.code });
+			return null;
+		}
 		ctx.logger?.warn("ZAI usage response invalid", { code: payload.code, message: payload.msg });
 		return null;
 	}

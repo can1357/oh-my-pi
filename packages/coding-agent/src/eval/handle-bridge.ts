@@ -1,10 +1,11 @@
-import type { AsyncJob, AsyncJobManager } from "../async";
-import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { isRecord, truncate } from "@oh-my-pi/pi-utils";
+import { type AsyncJob, type AsyncJobManagerApi, agentProgress } from "../async";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
-import { getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
+import { type CompletionAttempt, getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for waiting on eval handles. */
@@ -29,6 +30,8 @@ export interface EvalHandleSnapshot extends EvalHandleRef {
 	text?: string;
 	data?: unknown;
 	error?: string;
+	/** Completion fallback attempts; only on `__status__` snapshots. */
+	attempts?: CompletionAttempt[];
 }
 
 interface EvalHandleBridgeOptions {
@@ -38,15 +41,11 @@ interface EvalHandleBridgeOptions {
 }
 
 type ResolvedHandle =
-	| { ref: EvalHandleRef; job: AsyncJob; manager: AsyncJobManager }
+	| { ref: EvalHandleRef; job: AsyncJob; manager: AsyncJobManagerApi }
 	| { ref: EvalHandleRef; completion: CompletionHandleEntry };
 
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function parseRef(value: unknown): EvalHandleRef {
-	if (!isUnknownRecord(value)) throw new ToolError("handle must be an object with kind and id");
+	if (!isRecord(value)) throw new ToolError("handle must be an object with kind and id");
 	const { kind, id } = value;
 	if ((kind !== "agent" && kind !== "completion") || typeof id !== "string" || id.length === 0) {
 		throw new ToolError("handle must contain kind agent|completion and a non-empty id");
@@ -55,7 +54,7 @@ function parseRef(value: unknown): EvalHandleRef {
 }
 
 function parseRefs(args: unknown): { items: EvalHandleRef[]; timeoutMs?: number } {
-	if (!isUnknownRecord(args) || !Array.isArray(args.items)) {
+	if (!isRecord(args) || !Array.isArray(args.items)) {
 		throw new ToolError("wait() requires an items array");
 	}
 	const items = args.items.map(parseRef);
@@ -67,7 +66,7 @@ function parseRefs(args: unknown): { items: EvalHandleRef[]; timeoutMs?: number 
 }
 
 function parseSingleRef(args: unknown): EvalHandleRef {
-	if (!isUnknownRecord(args)) throw new ToolError("handle request requires an item");
+	if (!isRecord(args)) throw new ToolError("handle request requires an item");
 	return parseRef(args.item);
 }
 
@@ -99,7 +98,7 @@ function agentSnapshot(ref: EvalHandleRef, job: AsyncJob): EvalHandleSnapshot {
 
 	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: job.resultText ?? "" };
 	const evalResult = job.latestDetails?.evalResult;
-	if (isUnknownRecord(evalResult)) {
+	if (isRecord(evalResult)) {
 		if (typeof evalResult.text === "string") snapshot.text = evalResult.text;
 		if (Object.hasOwn(evalResult, "data")) snapshot.data = evalResult.data;
 	}
@@ -135,24 +134,47 @@ function cancelResolved(resolved: ResolvedHandle, reason?: unknown): boolean {
 	return true;
 }
 
+/**
+ * Longest string an `agent` status event keeps. Eval renderers show these fields on one line
+ * (a native status row stops at 200 cells, an agent tree row at 48), while the eval result
+ * persists every kept event in its details.
+ */
+const AGENT_STATUS_STRING_MAX = 256;
+
+/**
+ * The scalar fields of a subagent progress snapshot, long strings cut. Its nested data (tool
+ * data, recent tools and output) stays with the job: no eval renderer reads it, and copying it
+ * into each snapshot stored the full assignment and every extracted record with the eval result.
+ * `assignment` and `task` are dropped too: the row shows `taskPreview` instead.
+ */
+function agentStatusFields(progress: Record<string, unknown>): Record<string, unknown> {
+	const fields: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(progress)) {
+		if (key === "assignment" || key === "task") continue;
+		if (typeof value === "string") fields[key] = truncate(value, AGENT_STATUS_STRING_MAX);
+		else if (typeof value === "number" || typeof value === "boolean") fields[key] = value;
+	}
+	return fields;
+}
+
 function emitProgress(
 	resolved: ResolvedHandle,
 	emitStatus: ((event: JsStatusEvent) => void) | undefined,
 	previousProgress: unknown,
 ): unknown {
 	if (!emitStatus || !("job" in resolved)) return previousProgress;
-	const progress = resolved.job.latestDetails?.progress;
-	const first = Array.isArray(progress) ? progress[0] : undefined;
-	if (!isUnknownRecord(first) || first === previousProgress) return previousProgress;
-	const task = typeof first.assignment === "string" ? first.assignment : first.task;
+	const id = resolved.job.agentId ?? resolved.job.id;
+	const progress = agentProgress(resolved.job.latestDetails, id);
+	if (!progress || progress === previousProgress) return previousProgress;
+	const task = typeof progress.assignment === "string" ? progress.assignment : progress.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
 	emitStatus({
-		...first,
+		...agentStatusFields(progress),
 		op: "agent",
-		id: resolved.job.agentId ?? resolved.job.id,
+		id,
 		taskPreview: taskPreview || undefined,
 	});
-	return first;
+	return progress;
 }
 
 /** Largest setTimeout delay before 32-bit overflow (Node/Bun warn and fire in ~1ms past this). */
@@ -210,9 +232,18 @@ export async function runEvalWait(
 ): Promise<{ items: EvalHandleSnapshot[] }> {
 	const { items, timeoutMs } = parseRefs(args);
 	const resolved = items.map(item => resolveHandle(item, options));
+	// Worker job rows are snapshots: re-read each row when it settles, before
+	// another handle can hold this wait open past the row's retention.
+	const refresh = (handle: ResolvedHandle): void => {
+		if ("job" in handle) handle.job = handle.manager.getJob(handle.ref.id) ?? handle.job;
+	};
+	for (const handle of resolved) {
+		if ("job" in handle) void handle.job.promise.then(() => refresh(handle));
+	}
 	const emittedProgress = new Map<string, unknown>();
 	const emitLatestProgress = (handle: ResolvedHandle): void => {
-		if (!("job" in handle)) return;
+		if (!options.emitStatus || !("job" in handle)) return;
+		refresh(handle);
 		const progress = emitProgress(handle, options.emitStatus, emittedProgress.get(handle.ref.id));
 		if (progress) emittedProgress.set(handle.ref.id, progress);
 	};
@@ -225,12 +256,28 @@ export async function runEvalWait(
 			}, 1_000);
 			interval.unref?.();
 			let outcome: "settled" | "timeout" | "aborted";
+			// An untimed wait keeps the eval call open until every awaited agent
+			// finishes: no message to the caller lands before then.
+			const waiter = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
+			const awaits = (options.session.agentRegistry ?? AgentRegistry.global()).awaits;
+			const releaseHolds =
+				timeoutMs === undefined
+					? resolved.flatMap(handle =>
+							"job" in handle && handle.job.agentId
+								? [awaits.hold(waiter, [handle.job.agentId], { interruptible: false })]
+								: [],
+						)
+					: [];
 			try {
 				outcome = await waitForSettlement(resolved, timeoutMs, options.signal);
 			} finally {
 				clearInterval(interval);
+				for (const release of releaseHolds) release();
 			}
-			for (const handle of resolved) emitLatestProgress(handle);
+			for (const handle of resolved) {
+				refresh(handle);
+				emitLatestProgress(handle);
+			}
 			if (outcome === "aborted") {
 				for (const handle of resolved) cancelResolved(handle, options.signal?.reason);
 				await Promise.allSettled(
@@ -252,7 +299,10 @@ export async function runEvalWait(
 
 /** Return one handle's current state without waiting or consuming it. */
 export function runEvalStatus(args: unknown, options: EvalHandleBridgeOptions): EvalHandleSnapshot {
-	return snapshot(resolveHandle(parseSingleRef(args), options));
+	const resolved = resolveHandle(parseSingleRef(args), options);
+	const result = snapshot(resolved);
+	if ("completion" in resolved) result.attempts = resolved.completion.attempts.map(attempt => ({ ...attempt }));
+	return result;
 }
 
 /** Cancel one running eval handle owned by this session. */

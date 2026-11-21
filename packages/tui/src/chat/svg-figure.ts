@@ -5,30 +5,29 @@
  * previous raster, which stays on screen until the next one lands.
  *
  * Sizing is natural rather than preview-capped: one terminal row spans
- * {@link UNITS_PER_ROW} SVG user units, so `font-size="14"` text lands near
+ * {@link PX_PER_ROW} SVG user units, so `font-size="14"` text lands near
  * the terminal's own glyph size and the figure takes as many columns as its
- * drawing needs — up to the full width, and a viewport-relative height. The
+ * drawing needs — up to the full width, and a viewport-relative height. A
+ * figure given a {@link SvgFigureOptions.size} is fitted to that box instead. The
  * raster is drawn at the terminal's device pixels per unit, padded to whole
  * cells, and redrawn when the room it is shown in changes, so the terminal
  * places it 1:1: any resampling, even 0.99×, blurs every glyph edge.
  */
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
-import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
+import { Image, type ImageBudget } from "../components/image";
 import { fencedCode, type Markdown } from "../components/markdown";
 import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
 import { ensureThemeSync, getThemeEpoch, type ThemeColor, theme } from "../theme";
 import type { Component } from "../tui";
+import { type FigureBox, type FigureSize, figureBox, figureRoom, isSized, PX_PER_ROW } from "./figure-size";
 import { closePartialSvg, prepareSvg } from "./svg-source";
-
-/** SVG user units per terminal row; a 1000-unit-wide drawing spans ~125 columns of 1:2 cells. */
-const UNITS_PER_ROW = 16;
 /** Least time between rasters of a fence that is still streaming. */
 const STREAM_INTERVAL_MS = 200;
 /** Longest raster edge; the native rasterizer caps the surface at 4096² pixels. */
 const MAX_EDGE_PX = 4096;
-/** Share of the terminal's rows one figure may fill, so it fits on screen whole. */
-const MAX_VIEWPORT_SHARE = 0.8;
+/** Draw scale no box reaches: a sized figure is fitted to its box alone. */
+const FIT_SCALE = MAX_EDGE_PX;
 
 /**
  * Foreground theme colors behind the figure tokens (`var(--name)`); `surface`
@@ -113,14 +112,20 @@ export interface SvgFigureOptions {
 	markdown?: (text: string) => Markdown;
 	/** Shared inline-image budget; superseded rasters are released from it. */
 	budget?: ImageBudget;
+	/**
+	 * Also release a re-raster's previous image (a cell size, theme or room change), for an
+	 * owner with no scrollback copy that could still show it, such as a form.
+	 */
+	releaseSuperseded?: boolean;
+	/**
+	 * Rows the figure may fill, fallback code included, read on every render;
+	 * zero hides it. Unset or `undefined` takes a share of the terminal viewport.
+	 */
+	maxRows?: () => number | undefined;
+	/** A stated size (an `<img width>`): the drawing is fitted to it, aspect ratio kept, instead of drawn at its natural scale. */
+	size?: FigureSize;
 	/** The figure's rows changed outside a text update: a raster landed or rendering fell back to code. */
 	onChange: () => void;
-}
-
-/** Cells a figure may fill. */
-interface Limits {
-	columns: number;
-	rows: number;
 }
 
 /** One rasterized revision and the inputs that produced it. */
@@ -128,7 +133,7 @@ interface Raster {
 	source: string;
 	/** Cell size the raster was padded to; its pixels are whole cells of it. */
 	cell: CellDimensions;
-	limits: Limits;
+	limits: FigureBox;
 	themeEpoch: number;
 	/** Base64 PNG. */
 	data: string;
@@ -142,19 +147,19 @@ interface Raster {
 interface Attempt {
 	source: string;
 	cell: CellDimensions;
-	limits: Limits;
+	limits: FigureBox;
 	themeEpoch: number;
 	final: boolean;
 }
 
 let nextFigureId = 0;
 
-/** Cells a figure rendered at `width` may fill: the image's width, a share of the viewport, and the raster edge cap. */
-function limitsFor(width: number, cell: CellDimensions): Limits {
-	const viewportRows = Math.floor((process.stdout.rows || 24) * MAX_VIEWPORT_SHARE);
+/** Cells a figure rendered at `width` may fill: its stated size, else the room (see {@link figureRoom}), within the raster edge cap. */
+function limitsFor(width: number, cell: CellDimensions, maxRows: number | undefined, size: FigureSize = {}): FigureBox {
+	const box = figureBox(size, { room: figureRoom(width, maxRows), cell });
 	return {
-		columns: Math.min(imageMaxColumns(width), Math.floor(MAX_EDGE_PX / cell.widthPx)),
-		rows: Math.max(1, Math.min(viewportRows, Math.floor(MAX_EDGE_PX / cell.heightPx))),
+		columns: Math.min(box.columns, Math.floor(MAX_EDGE_PX / cell.widthPx)),
+		rows: Math.min(box.rows, Math.floor(MAX_EDGE_PX / cell.heightPx)),
 	};
 }
 
@@ -178,7 +183,14 @@ export class SvgFigure implements Component {
 	/** Last render width; rasters wait for the first render to know their room. */
 	#width: number | undefined;
 	#image: { raster: Raster; component: Image } | undefined;
-	#fallback: { source: string; md: Markdown } | undefined;
+	#fallback:
+		| {
+				source: string;
+				md: Markdown;
+				/** `rows` cut to a ceiling, kept so unchanged frames return the same array. */
+				clip?: { of: readonly string[]; rows: readonly string[] };
+		  }
+		| undefined;
 	#placeholder: readonly string[] | undefined;
 
 	constructor(options: SvgFigureOptions) {
@@ -203,21 +215,34 @@ export class SvgFigure implements Component {
 
 	/** Whether the final source still waits for its raster (or for failing to render). */
 	get pending(): boolean {
-		return this.#final && this.#raster?.source !== this.#source && this.#failed !== this.#source;
+		return (
+			this.#maxRows() !== 0 && this.#final && this.#raster?.source !== this.#source && this.#failed !== this.#source
+		);
+	}
+
+	/** The caller's row ceiling, if any; a surface shorter than its chrome leaves none. */
+	#maxRows(): number | undefined {
+		const rows = this.#options.maxRows?.();
+		return rows === undefined ? undefined : Math.max(0, Math.floor(rows));
 	}
 
 	render(width: number): readonly string[] {
 		// Width, cell size and theme are render-time inputs; a change re-rasterizes.
 		this.#width = width;
 		this.#schedule();
-		if (this.#failed === this.#source) return this.#fallbackRows(width);
+		const maxRows = this.#maxRows();
+		if (maxRows === 0) return [];
+		if (this.#failed === this.#source) return this.#fallbackRows(width, maxRows);
 		const raster = this.#raster;
 		if (!raster) {
 			if (!this.#options.markdown) return [];
 			this.#placeholder ??= [` ${theme.fg("dim", "Drawing SVG…")}`];
 			return this.#placeholder;
 		}
-		return this.#imageFor(raster).render(width);
+		const rows = this.#imageFor(raster, maxRows).render(width);
+		// A SIXEL band is six pixels whole: cells shorter than that reserve more
+		// rows than the ceiling, and a cut band would draw nothing anyway.
+		return maxRows !== undefined && rows.length > maxRows ? [] : rows;
 	}
 
 	invalidate(): void {
@@ -227,10 +252,22 @@ export class SvgFigure implements Component {
 		this.#fallback = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#placeholder = undefined;
+		this.#image?.component.releaseRenderCaches();
+		this.#fallback?.md.releaseRenderCaches();
+		if (this.#fallback) this.#fallback.clip = undefined;
+	}
+
 	dispose(): void {
 		this.#disposed = true;
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
+	}
+
+	/** Retire the drawn raster as soon as no frame shows it: for an owner that is closing for good. */
+	release(): void {
+		this.#image?.component.release();
 	}
 
 	debugState(): Record<string, unknown> {
@@ -247,7 +284,7 @@ export class SvgFigure implements Component {
 		const attempt = this.#attempt;
 		if (this.#failed === this.#source) return false;
 		const cell = getCellDimensions();
-		const limits = limitsFor(width, cell);
+		const limits = limitsFor(width, cell, this.#maxRows(), this.#options.size);
 		return (
 			attempt === undefined ||
 			attempt.source !== this.#source ||
@@ -265,7 +302,7 @@ export class SvgFigure implements Component {
 	 * below both of its limits drew at its natural size and redraws only once
 	 * it no longer fits; one that filled a limit redraws whenever they change.
 	 */
-	#outgrown(limits: Limits): boolean {
+	#outgrown(limits: FigureBox): boolean {
 		const raster = this.#raster;
 		if (raster?.source !== this.#source) return false;
 		const columns = raster.widthPx / raster.cell.widthPx;
@@ -280,6 +317,7 @@ export class SvgFigure implements Component {
 	#schedule(): void {
 		const width = this.#width;
 		if (this.#disposed || this.#rasterizing || width === undefined) return;
+		if (this.#maxRows() === 0) return;
 		if (this.#final && this.#timer) {
 			clearTimeout(this.#timer);
 			this.#timer = undefined;
@@ -302,7 +340,7 @@ export class SvgFigure implements Component {
 		const attempt: Attempt = {
 			source: this.#source,
 			cell,
-			limits: limitsFor(width, cell),
+			limits: limitsFor(width, cell, this.#maxRows(), this.#options.size),
 			themeEpoch: getThemeEpoch(),
 			final: this.#final,
 		};
@@ -318,7 +356,7 @@ export class SvgFigure implements Component {
 					new TextEncoder().encode(prepared),
 					attempt.limits.columns * cell.widthPx,
 					attempt.limits.rows * cell.heightPx,
-					cell.heightPx / UNITS_PER_ROW,
+					isSized(this.#options.size) ? FIT_SCALE : cell.heightPx / PX_PER_ROW,
 					cell,
 				);
 			} catch (error) {
@@ -358,19 +396,25 @@ export class SvgFigure implements Component {
 		// re-raster of the same source (cell size, theme or room change) may still be
 		// standing in scrollback, so the residency sweep keeps deciding for it.
 		if (previous && previous.source !== attempt.source) this.#options.budget?.release(previous.key);
+		else if (previous && this.#options.releaseSuperseded && this.#image?.raster === previous)
+			this.#image.component.release();
 		this.#options.onChange();
 	}
 
 	/**
 	 * The image for `raster` over the whole cells it was padded to. At the
 	 * cell size and room it was drawn for that box is its pixels exactly; a
-	 * raster outdated by a resize is scaled by {@link Image} until its redraw lands.
+	 * raster outdated by a resize is scaled by {@link Image} until its redraw
+	 * lands. A caller's ceiling (`maxRows`) refits the shown image at once.
 	 */
-	#imageFor(raster: Raster): Image {
+	#imageFor(raster: Raster, maxRows = Number.POSITIVE_INFINITY): Image {
 		const current = this.#image;
-		if (current?.raster === raster) return current.component;
 		const columns = raster.widthPx / raster.cell.widthPx;
-		const rows = raster.heightPx / raster.cell.heightPx;
+		const rows = Math.min(raster.heightPx / raster.cell.heightPx, maxRows);
+		if (current?.raster === raster) {
+			current.component.setMaxHeightCells(rows);
+			return current.component;
+		}
 		const component = new Image(
 			raster.data,
 			"image/png",
@@ -390,12 +434,18 @@ export class SvgFigure implements Component {
 	}
 
 	/** The source as the fenced code block it was written as, fenced longer than any backtick run inside. */
-	#fallbackRows(width: number): readonly string[] {
+	#fallbackRows(width: number, maxRows?: number): readonly string[] {
 		const source = this.#source;
 		if (!this.#options.markdown) return [];
 		if (this.#fallback?.source !== source) {
 			this.#fallback = { source, md: this.#options.markdown(fencedCode("svg", source)) };
 		}
-		return this.#fallback.md.render(width);
+		const fallback = this.#fallback;
+		const rows = fallback.md.render(width);
+		if (maxRows === undefined || rows.length <= maxRows) return rows;
+		if (fallback.clip?.of !== rows || fallback.clip.rows.length !== maxRows) {
+			fallback.clip = { of: rows, rows: rows.slice(0, maxRows) };
+		}
+		return fallback.clip.rows;
 	}
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
-import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentOutputManager, PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // Contract: subagent output ids are the requested name, used verbatim the first
@@ -18,6 +18,18 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Anna")).toBe("Anna-3");
 		// A distinct name is untouched — no prefix, no suffix.
 		expect(await mgr.allocate("Bob")).toBe("Bob");
+	});
+
+	it("reserves numeric names for PIDs only when cross-instance messaging is enabled", async () => {
+		using tmp = TempDir.createSync("@omp-output-manager-");
+		await Bun.write(path.join(tmp.path(), "Agent123.md"), "prior output");
+		const local = new AgentOutputManager(() => tmp.path(), { settings: Settings.isolated() });
+		const sharing = new AgentOutputManager(() => tmp.path(), {
+			settings: Settings.isolated({ "task.crossInstance": true }),
+		});
+
+		expect(await local.allocate("123")).toBe("123");
+		expect(await sharing.allocate("123")).toBe("Agent123-2");
 	});
 
 	it("nests ids under a parent prefix and still suffixes repeats", async () => {
