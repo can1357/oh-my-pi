@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The `omp compress` prompt no longer cites RFC 2119 by number, as a precaution: Google Antigravity rejects that citation followed by the six standard requirement words with a bare `429 RESOURCE_EXHAUSTED` ([#19270](https://github.com/can1357/oh-my-pi/pull/19270) by [@Xytronix](https://github.com/Xytronix))
+- The `omp compress` prompt no longer cites RFC 2119 by number, as a precaution: Google Antigravity rejects that citation followed by the six standard requirement words with a bare `429 RESOURCE_EXHAUSTED` ([#19910](https://github.com/can1357/oh-my-pi/pull/19910) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
