@@ -48,6 +48,7 @@
 - Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - TTSR rules that cannot interrupt what is streaming (`interruptMode: never`, which includes the built-in style rules; `prose-only` rules on tool calls; `tool-only` rules on replies and reasoning) are checked once when the reply, reasoning or tool call ends instead of on every streamed chunk, and a tool call no interrupting rule applies to is not inspected while it streams. They still report the same matches and send the same reminders.
 - Eval `completion()` accepts a user-tagged model agent as its `model` (for example `completion(prompt, { model: "m1" })`); it runs the model the user pinned with `^model`, at the effort they tagged, instead of refusing anything but a tier
+- `sharpshooter.enabled` runs Sharpshooter next to the selected memory backend, so one session has searchable recall and always-on project decisions ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
 
 ### Fixed
 
@@ -93,6 +94,9 @@
 - Fixed `computer` on Windows passing off a fully covered window's screenshot and `ax()` tree as current: for Chrome, Edge and Electron apps, which can stop drawing while covered, both now say the window appeared covered and may be stale ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 - Entering `/goal` on Anthropic no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
 - Fixed isolated `task` subagents starting with no git work tree when the session cwd is a bare-repository container (`.git` with `core.bare=true`); isolation now refuses before spawning and names the repository's work trees to start from ([#19791](https://github.com/can1357/oh-my-pi/issues/19791))
+- Sharpshooter consolidation keeps its queued decisions for the next cycle when the model returns only some of the memory files ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
+- Memory search after `/move` answers for the project the session moved to ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
+- `/move` no longer drops the first destination prompt or re-files the departed project's last prompt as a decision ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
 
 ## [19.0.1] - 2026-11-19
 

@@ -4,7 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
+import { isEnoent, prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -67,6 +67,8 @@ export interface SharpshooterConsolidationResult {
 	sessions?: number;
 	deltas?: number;
 	error?: string;
+	/** The failure is already in the bank state (`lastError`), where status and diagnose report it. */
+	recorded?: boolean;
 }
 
 interface ReplacementFile {
@@ -288,10 +290,18 @@ async function consolidateLocked(
 	} catch (error) {
 		const message = errorMessage(error);
 		await recordConsolidationError(options.agentDir, options.cwd, state, message);
-		return { ran: false, reason: "error", error: message };
+		return { ran: false, reason: "error", error: message, recorded: true };
 	}
 }
 
+/**
+ * Read the three memory files.
+ *
+ * A file that is not there reads as empty, which is the normal case on a new
+ * project. Any other failure throws, because what is read here decides the
+ * all-empty guard: an unreadable file taken as empty would let a reply that
+ * wipes the set past a check whose whole job is to catch that.
+ */
 async function readCurrentMemoryFiles(agentDir: string, cwd: string): Promise<Record<SharpshooterMemoryFile, string>> {
 	const files: Record<SharpshooterMemoryFile, string> = {
 		"architecture.md": "",
@@ -300,9 +310,12 @@ async function readCurrentMemoryFiles(agentDir: string, cwd: string): Promise<Re
 	};
 	await Promise.all(
 		SHARPSHOOTER_MEMORY_FILES.map(async name => {
-			files[name] = await Bun.file(sharpshooterMemoryFilePath(agentDir, cwd, name))
-				.text()
-				.catch(() => "");
+			try {
+				files[name] = await Bun.file(sharpshooterMemoryFilePath(agentDir, cwd, name)).text();
+			} catch (err) {
+				if (isEnoent(err)) return;
+				throw new Error(`cannot read ${name}: ${err instanceof Error ? err.message : String(err)}`);
+			}
 		}),
 	);
 	return files;
@@ -362,6 +375,19 @@ function parseReplacementFiles(
 	const totalChars = files.reduce((sum, file) => sum + file.content.trim().length, 0);
 	if (totalChars === 0 && SHARPSHOOTER_MEMORY_FILES.some(name => currentFiles[name].trim().length > 0)) {
 		throw new Error("replace_memory_files returned all-empty content; refusing to wipe memory files");
+	}
+	// The prompt asks for the complete content of all three files, and the tool
+	// schema accepts a shorter array. A short reply is malformed, not a judgement
+	// about the files it left out: only the returned files are written, so the rest
+	// keep their old bytes while every queued delta is consumed and the run records
+	// success. A decision meant for an omitted file is then gone with nothing
+	// recording that it existed. Rejecting the reply keeps the deltas for the next
+	// pass, which is the only outcome that does not lose one.
+	if (seen.size < SHARPSHOOTER_MEMORY_FILES.length) {
+		const missing = SHARPSHOOTER_MEMORY_FILES.filter(name => !seen.has(name));
+		throw new Error(
+			`replace_memory_files omitted ${missing.join(", ")}; refusing an incomplete reply because its queued deltas would be consumed unapplied`,
+		);
 	}
 	return files;
 }

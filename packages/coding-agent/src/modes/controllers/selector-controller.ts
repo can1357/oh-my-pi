@@ -710,7 +710,9 @@ export class SelectorController {
 	 * (settings selector, approved `cfg://` writes); the value is already stored.
 	 * Only `defaultThinkingLevel` needs this: it also switches the live session,
 	 * which config reloads and parent-session writes must not do. Every other
-	 * setting applies through handle listeners owned by the session and InteractiveMode.
+	 * setting applies through handle listeners owned by the session and
+	 * InteractiveMode, including the Sharpshooter pairing toggle, which the
+	 * session's memory lifecycle orders behind the next prompt.
 	 */
 	handleSettingChange(id: string, value: unknown): void {
 		if (id !== cfgDefaultThinkingLevel.id || typeof value !== "string") return;
