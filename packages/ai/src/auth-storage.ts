@@ -34,6 +34,7 @@ import { OAuthAccounts } from "./auth/oauth";
 import { AccountPolicies } from "./auth/policy";
 import { CredentialPool } from "./auth/pool";
 import { OAuthRefresher } from "./auth/refresh";
+import { ProviderCooldowns } from "./auth/provider-cooldown";
 import { ResetCredits } from "./auth/resets";
 import { RateLimits } from "./auth/rotation";
 import { CredentialSelector } from "./auth/select";
@@ -333,11 +334,13 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
 		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
+		const cooldowns = new ProviderCooldowns(store);
 		const usage = new UsageService({
 			store,
 			pool,
 			overrides,
 			refresher,
+			cooldowns,
 			cache: usageCache,
 			blocks,
 			affinity,
@@ -363,16 +366,17 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			refresher,
 			strategies,
 		});
-		const limits = new RateLimits({ store, pool, overrides, blocks, affinity, usage, strategies });
+		const limits = new RateLimits({ store, pool, overrides, blocks, affinity, usage, strategies, cooldowns });
 		const keys = new KeyCascade({
 			pool,
 			overrides,
 			selector,
+			cooldowns,
 			affinity,
 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
 			sourceLabel,
 		});
-		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });
+		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, cooldowns, affinity, refresher });
 
 		return {
 			pool,

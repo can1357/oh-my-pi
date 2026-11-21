@@ -1,7 +1,14 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import {
+	AuthStorage,
+	type FetchImpl,
+	isUnattributedRejection,
+	type Model,
+	SqliteAuthCredentialStore,
+} from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
@@ -51,6 +58,23 @@ function geminiOAuthModel(id: string): Model<"google-gemini-cli"> {
 const developerModel = geminiDeveloperModel("gemini-2.5-flash");
 const oauthModel = geminiOAuthModel("gemini-2.5-flash");
 
+const BARE_429_BODY = JSON.stringify({
+	error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" },
+});
+const QUOTA_FAILURE_429_BODY = JSON.stringify({
+	error: {
+		code: 429,
+		message: "Resource has been exhausted (e.g. check quota).",
+		status: "RESOURCE_EXHAUSTED",
+		details: [
+			{
+				"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+				violations: [{ quotaMetric: "generate_content_requests", quotaId: "GenerateRequestsPerDayPerProject" }],
+			},
+		],
+	},
+});
+
 type CapturedRequest = {
 	url: string;
 	headers: Record<string, string>;
@@ -59,6 +83,7 @@ type CapturedRequest = {
 
 describe("searchGemini tools serialization", () => {
 	let capturedRequest: CapturedRequest | null = null;
+	let capturedRequests: CapturedRequest[] = [];
 
 	let oauthAuthStorage: AuthStorage;
 	let apiKeyAuthStorage: AuthStorage;
@@ -78,8 +103,9 @@ describe("searchGemini tools serialization", () => {
 		apiKeyRegistry = new ModelRegistry(apiKeyAuthStorage);
 	});
 
-	function mockGeminiFetch(responseText = SSE_RESPONSE): FetchImpl {
+	function mockGeminiFetch(responseText = SSE_RESPONSE, status = 200): FetchImpl {
 		capturedRequest = null;
+		capturedRequests = [];
 		return (url, init) => {
 			const headers = new Headers(init?.headers);
 			capturedRequest = {
@@ -87,17 +113,33 @@ describe("searchGemini tools serialization", () => {
 				headers: Object.fromEntries(headers.entries()),
 				body: init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : null,
 			};
+			capturedRequests.push(capturedRequest);
 			return Promise.resolve(
 				new Response(responseText, {
-					status: 200,
-					headers: { "Content-Type": "text/event-stream" },
+					status,
+					headers: { "Content-Type": status === 200 ? "text/event-stream" : "application/json" },
 				}),
 			);
 		};
 	}
 
+	/** Serves one of `bearers` per pooled account; `limits.rotate` switches to the next until the pool is spent. */
+	function poolAntigravityAccounts(bearers: readonly string[]) {
+		let current = 0;
+		vi.spyOn(oauthAuthStorage.oauth, "access").mockImplementation(async () => ({
+			accessToken: bearers[current],
+			projectId: "test-project",
+		}));
+		return vi.spyOn(oauthAuthStorage.limits, "rotate").mockImplementation(async () => {
+			if (current >= bearers.length - 1) return { switched: false };
+			current += 1;
+			return { switched: true };
+		});
+	}
+
 	afterEach(() => {
 		capturedRequest = null;
+		capturedRequests = [];
 		vi.restoreAllMocks();
 		oauthAuthStorage.close();
 		apiKeyAuthStorage.close();
@@ -423,5 +465,54 @@ describe("searchGemini tools serialization", () => {
 
 		expect(capturedRequest?.body?.userAgent).toBe("antigravity");
 		expect(capturedRequest?.body?.requestType).toBeUndefined();
+	});
+
+	it("refuses a bare Antigravity 429 on the account that received it", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const rotateSpy = poolAntigravityAccounts(["antigravity-a", "antigravity-b", "antigravity-c"]);
+		const fetchMock = mockGeminiFetch(BARE_429_BODY, 429);
+
+		let thrown: unknown;
+		try {
+			await searchGemini({
+				...makeParams("bare 429", getBundledModel("google-antigravity", "gemini-3.8-flash")),
+				fetch: fetchMock,
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(isUnattributedRejection(thrown)).toBe(true);
+		expect(thrown).toMatchObject({ status: 429 });
+		// One request on one account: no fetch retry, no refresh replay, no sibling rotation.
+		expect(capturedRequests.map(request => request.headers.authorization)).toEqual(["Bearer antigravity-a"]);
+		// Reported once so the rotation layer pauses the provider; never answered with another account.
+		expect(rotateSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps retrying and rotating an Antigravity 429 that names its quota", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		poolAntigravityAccounts(["antigravity-a", "antigravity-b", "antigravity-c"]);
+		const fetchMock = mockGeminiFetch(QUOTA_FAILURE_429_BODY, 429);
+
+		let thrown: unknown;
+		try {
+			await searchGemini({
+				...makeParams("quota 429", getBundledModel("google-antigravity", "gemini-3.8-flash")),
+				fetch: fetchMock,
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(Error);
+		expect(isUnattributedRejection(thrown)).toBe(false);
+		const bearers = capturedRequests.map(request => request.headers.authorization);
+		// Every account gets the full fetch retry budget (1 + MAX_RETRIES) before the pool rotates.
+		expect(bearers).toEqual([
+			...Array(4).fill("Bearer antigravity-a"),
+			...Array(4).fill("Bearer antigravity-b"),
+			...Array(4).fill("Bearer antigravity-c"),
+		]);
 	});
 });

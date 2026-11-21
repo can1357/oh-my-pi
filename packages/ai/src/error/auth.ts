@@ -50,6 +50,24 @@ export class OAuthRefreshUnavailableError extends Error {
 	}
 }
 
+/**
+ * Every account of a provider is held back after the provider refused a
+ * request in a way that implicates the client rather than one account (see
+ * `ProviderCooldowns`). The message carries the original refusal text, so the
+ * classifiers keep it out of both the rotation and the transient-retry lanes.
+ */
+export class ProviderCooldownError extends Error {
+	readonly provider: string;
+	readonly untilMs: number;
+
+	constructor(provider: string, untilMs: number, reason: string) {
+		super(`${provider} requests are paused on every account until ${new Date(untilMs).toISOString()}: ${reason}`);
+		this.name = "ProviderCooldownError";
+		this.provider = provider;
+		this.untilMs = untilMs;
+	}
+}
+
 /** A user-facing login flow required an `onPrompt` callback that was not supplied. */
 export class OnPromptRequiredError extends Error {
 	constructor(providerLabel: string) {

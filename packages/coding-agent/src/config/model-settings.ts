@@ -4,6 +4,7 @@
  */
 import { register, effect, operatorValue, type SettingValueOf } from "./registry";
 import type { AuthAccountPolicies } from "@oh-my-pi/pi-ai/auth-storage";
+import { setProviderCooldownMs } from "@oh-my-pi/pi-ai/auth/provider-cooldown";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
 import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { cfgDefaultThinkingLevel } from "../session/settings";
@@ -90,6 +91,44 @@ export const cfgAuthUnpausedProviders = register({
 /** `auth.unpausedProviders` from operator layers only; the value the process applies. */
 export const cfgOperatorUnpausedProviders = operatorValue(cfgAuthUnpausedProviders);
 effect(cfgOperatorUnpausedProviders, setUnpausedProviders);
+
+/**
+ * Minutes every account of a provider is held back after a refusal that names no quota (a bare
+ * Google Antigravity 429); `0` turns the pause off. Either way the refusal is never retried on
+ * another account. Read through {@link cfgOperatorUnattributedRefusalCooldownMinutes}.
+ */
+export const cfgAuthUnattributedRefusalCooldownMinutes = register({
+	id: "auth.unattributedRefusalCooldownMinutes",
+	type: "number",
+	default: 30,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) {
+			throw new Error("auth.unattributedRefusalCooldownMinutes must be a non-negative number of minutes");
+		}
+	},
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Unattributed Refusal Pause",
+		description:
+			"Minutes to pause every account of a provider after it refuses a request without naming a quota (a bare Google Antigravity 429). The refusal never moves to another account either way. Project settings cannot set this",
+		options: [
+			{ value: "0", label: "Off", description: "Do not pause the provider; the refusal still ends the request" },
+			{ value: "5", label: "5 minutes" },
+			{ value: "15", label: "15 minutes" },
+			{ value: "30", label: "30 minutes", description: "Default" },
+			{ value: "60", label: "1 hour" },
+			{ value: "120", label: "2 hours" },
+		],
+		// The editor writes the global layer; hide it while a project layer supplies a (disregarded) value.
+		condition: "unattributedRefusalCooldownNotProject",
+	},
+});
+
+/** `auth.unattributedRefusalCooldownMinutes` from operator layers only; the value the process applies. */
+export const cfgOperatorUnattributedRefusalCooldownMinutes = operatorValue(cfgAuthUnattributedRefusalCooldownMinutes);
+effect(cfgOperatorUnattributedRefusalCooldownMinutes, minutes => setProviderCooldownMs(minutes * 60_000));
 
 export const cfgEnabledModels = register({
 	id: "enabledModels",

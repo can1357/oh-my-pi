@@ -14,6 +14,7 @@ import {
 	providerTypeKey,
 } from "./blocks";
 import type { CredentialBlocks } from "./blocks";
+import type { ProviderCooldowns } from "./provider-cooldown";
 import type { KeyOverrides } from "./cascade";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
@@ -64,6 +65,7 @@ export interface RateLimitsDeps {
 	affinity: SessionAffinity;
 	usage: UsageService;
 	strategies: RankingStrategyResolver;
+	cooldowns: ProviderCooldowns;
 }
 
 /** Usage-limit marking, credential rotation after failures, and bearer-matched invalidation. */
@@ -468,6 +470,13 @@ export class RateLimits implements LimitsApi {
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 		// A provider-controlled model id must match the provider and request before any mutation.
 		if (AIError.isMismatchedModelEntitlementDenial(error, provider, options?.modelId)) return { switched: false };
+		// An unattributed Antigravity refusal is not a quota on this account; blocking
+		// it or rotating to a sibling would only expose the next account to the
+		// refusal. Pause the whole provider instead, so no account sends more.
+		if (AIError.isUnattributedRejection(error)) {
+			this.#deps.cooldowns.trip(provider, message ?? AIError.UNATTRIBUTED_REJECTION_PREFIX);
+			return { switched: false };
+		}
 		const modelPolicy = AIError.isModelEntitlementDenial(error, provider, options?.modelId);
 		const accountPolicy = modelPolicy || AIError.isAccountPolicyError(error);
 		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
