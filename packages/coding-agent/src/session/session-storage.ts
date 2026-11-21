@@ -533,7 +533,6 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 }
 
 /**
-/**
  * Bound on the sweep-unlink-sweep passes in
  * {@link FileSessionStorage.deleteSessionWithArtifacts}. A pass repeats only when a
  * concurrent scan promoted a backup back onto the freed primary; past this the
