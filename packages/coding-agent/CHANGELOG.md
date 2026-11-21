@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
+
 ### Fixed
 
 - Fixed Cursor turns growing past `compaction.thresholdTokens`: Cursor runs its tool loop server-side, so a single turn could replay millions of tokens before omp could compact. A turn that crosses the threshold is now asked to wrap up, and omp compacts and continues the task ([#16181](https://github.com/can1357/oh-my-pi/pull/16181) by [@joseotaviorf](https://github.com/joseotaviorf))
