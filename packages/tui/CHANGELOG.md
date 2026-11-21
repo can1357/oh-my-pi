@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added handling of `features` terminal events to update UI without waiting for a new hello
+- Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 - Added Vim `W`, `B`, and `E` motions for navigating whitespace-delimited WORDs ([#13099](https://github.com/can1357/oh-my-pi/pull/13099) by [@Scott-Simmons](https://github.com/Scott-Simmons)).
 - Added Vim `s`/`S` (substitute characters / lines, Visual `S` changes whole lines) and the linewise line motions `-`, `+`, and `_` ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim redo (`Ctrl+R`) and counted undo (`3u`); undo and redo return the cursor to where the change began, as in Vim ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
@@ -14,33 +14,21 @@
 - Added Vim `gj`/`gk` to move by screen row through wrapped lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim `/`, `?`, `n`, and `N` to search prompt history, like a shell's vi mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim `"+p`/`"*p` to put the system clipboard; `Editor.onYank` now also gets the register name ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Added `configureEditor` and `vimMode` options to `HtmlFormDialog` (`configureEditor` also on `HookEditorComponent`); with Vim mode, a form's one-line text fields and "Other" answers become Vim-mode editors too (passwords stay plain), `j`/`k` step between option rows, and `Escape` in these editors leaves Insert mode before it closes or cancels anything ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- `Editor` re-announces its Vim mode through `onVimModeChange` when it gains focus, so a host's cursor shape follows the editor holding the keys ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added `vimMode` and `configureEditor` options to `HtmlFormDialog` and `HookEditorComponent`: with `vimMode` their text boxes are Vim-mode editors (a form's one-line fields and "Other" answers too; passwords stay plain), `j`/`k` step between a form's option rows, and `Escape` leaves Insert mode before it closes or cancels anything ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 
 ### Changed
 
-- Native chats no longer show a crossed-out Spotlight star or leave an empty row under unchanged tool results.
-- Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`
-- The background jobs sheet reads a job's output from where its command sends it: a command that pipes (`| tail`) or redirects (`> log`) gets a tab per stream beside Output and opens on the one being written, instead of "No output yet" until it ends
-- The background jobs sheet draws a job's command as its live shell visualization with the running step in view, and fits what the job is for, its caption and its facts in fewer lines
-- Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- `Editor` re-announces its Vim mode through `onVimModeChange` when it gains focus, so a host's cursor shape follows the editor holding the keys ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 
 ### Fixed
 
+- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - Fixed Vim `.` not retyping the inserted text when the keys arrived in one burst (e.g. `ccfoo` typed quickly) ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `w`, `b`, and `e` stopping at the end of the line; they now cross lines like Vim's, and `dw`, `d}`, and `2D` follow Vim's rules for multi-line and end-of-line spans ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `gg`, `G`, `dd`, and linewise puts landing in column 0 instead of the first non-blank; `dk` on the first line no longer deletes it; `D`/`C` no longer leave `j`/`k` stuck at line end ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `v$` not selecting through the line break and `g`-commands (`gg`, `gU`) doing nothing in Visual mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `cc`, `cj`, and other linewise changes keeping the start of the line when the cursor was mid-line, and storing the old text so `p` spliced it into a line instead of putting it back as whole lines ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Fixed Vim `di(`, `ci{`, and other bracket objects doing nothing when the cursor is before the brackets; like Vim 9.2 they now use the next pair ahead ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
-- Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
-- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
-- Large repaints are again written in pieces that end between rows, so output from another process sharing the terminal cannot land inside a row or an escape sequence
-- Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there
-- `ask` HTML forms keep a prefilled or hidden control named `__proto__` in their default data, so a timed-out form no longer drops it ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
-- An ask form with one question submits on one Enter instead of stopping on Submit first
-- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.0] - 2026-11-21
 

@@ -1712,6 +1712,40 @@ describe("Editor vim mode", () => {
 			await rendered.promise;
 			expect(editor.getText()).toBe("beta\nfrom clipboard");
 		});
+
+		it('keeps the last "+y when the clipboard reads empty, and . repeats a put that waited on the clipboard', async () => {
+			// No clipboard tool (SSH, headless): the read comes back empty and the yanked text stays.
+			const editor = vimEditor("alpha beta");
+			editor.handleInput('"+yw');
+			editor.readClipboard = async () => "";
+			const rendered = Promise.withResolvers<void>();
+			editor.requestRender = () => rendered.resolve();
+			editor.handleInput('$"+p');
+			await rendered.promise;
+			expect(editor.getText()).toBe("alpha betaalpha ");
+
+			const repeat = vimEditor("ab");
+			repeat.readClipboard = async () => "Z";
+			const landed = Promise.withResolvers<void>();
+			repeat.requestRender = () => landed.resolve();
+			repeat.handleInput('x"+p');
+			await landed.promise;
+			expect(repeat.getText()).toBe("bZ");
+			// `.` is the put, not the `x` before it.
+			repeat.handleInput(".");
+			expect(repeat.getText()).toBe("bZZ");
+		});
+
+		it("a counted redo keeps each step undoable on its own", () => {
+			const editor = vimEditor("one two three four");
+			editor.handleInput("dwdwdw");
+			editor.handleInput("3u");
+			editor.handleInput("3");
+			editor.handleInput("\x12");
+			expect(editor.getText()).toBe("four");
+			editor.handleInput("u");
+			expect(editor.getText()).toBe("three four");
+		});
 	});
 
 	describe("Vim screen rows, text objects ahead, history search", () => {

@@ -6803,20 +6803,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** Apply the `tui.vimMode` setting to an editor and route its clipboard registers. */
+	/** Apply the `tui.vimMode` setting to the composer and route its clipboard registers. */
 	#applyVimMode(editor: CustomEditor): void {
-		this.#wireVimEditor(editor);
+		editor.setVimMode(cfgTuiVimMode.get(settings));
+		this.#wireVimClipboard(editor);
 		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
 		// visible at a glance, and the border is where bash/python mode already signal themselves.
 		editor.onVimModeChange = () => this.#syncVimStatus(editor);
 	}
 
 	/**
-	 * Vim mode plus clipboard routing: a yank reaches the system clipboard when it names `"+`/`"*`,
-	 * or always under `tui.vimYankToClipboard`; `"+p`/`"*p` read it back.
+	 * Clipboard routing: a yank reaches the system clipboard when it names `"+`/`"*`, or always under
+	 * `tui.vimYankToClipboard`; `"+p`/`"*p` read it back.
 	 */
-	#wireVimEditor(editor: Editor): void {
-		editor.setVimMode(cfgTuiVimMode.get(settings));
+	#wireVimClipboard(editor: Editor): void {
 		editor.onYank = (text, register) => {
 			if (register === "+" || register === "*" || cfgTuiVimYankToClipboard.get(settings)) {
 				void this.#copyYankToClipboard(text);
@@ -6827,7 +6827,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	configureDialogEditor(editor: Editor): void {
-		this.#wireVimEditor(editor);
+		this.#wireVimClipboard(editor);
 		// Dialogs have no status line of their own; the cursor shape is what shows the mode.
 		editor.onVimModeChange = mode => this.ui.terminal.setCursorShape?.(mode === "insert" ? "bar" : "block");
 	}
