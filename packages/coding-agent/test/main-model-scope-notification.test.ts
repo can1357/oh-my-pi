@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentState } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
@@ -55,6 +56,11 @@ function scopedModel(id: string): ScopedModel {
 	};
 }
 
+function setSessionModel(session: TestSessionContext["session"], model: Model | undefined): void {
+	const agentState: Partial<AgentState> = session.agent.state;
+	agentState.model = model;
+}
+
 describe("buildModelScopeNotification", () => {
 	it("does not emit startup model scope chrome while startup.quiet is enabled", () => {
 		expect(buildModelScopeNotification([scopedModel("claude-sonnet-4-5")], true)).toBeNull();
@@ -93,8 +99,7 @@ describe("startup model fallback notice after first-run setup", () => {
 		cfgMarketplaceAutoUpdate.override(settings, "off");
 		testSession = await createTestSession({ inMemory: true });
 		// The launch has no default model: sdk.ts starts its agent with an undefined initial model.
-		const agentState: Partial<AgentState> = testSession.session.agent.state;
-		agentState.model = undefined;
+		setSessionModel(testSession.session, undefined);
 	});
 
 	afterEach(async () => {
@@ -119,8 +124,11 @@ describe("startup model fallback notice after first-run setup", () => {
 		// directory, and closing that handle fails its checkpoint. close() has already dropped it.
 		try {
 			HistoryStorage.close();
-		} catch {
+		} catch (err) {
 			// The stale handle left by startup-composer.test.ts; see above.
+			if (err instanceof Error && err.message.includes("disk I/O error")) return;
+			if ((err as { code?: string })?.code?.startsWith("SQLITE_IOERR")) return;
+			throw err;
 		}
 		closeSessionIndex();
 		closeModelCache();
@@ -201,14 +209,12 @@ describe("startup model fallback notice after first-run setup", () => {
 	});
 
 	it("keeps a model fallback notice when setup leaves the session's model unchanged", async () => {
-		const agentState: Partial<AgentState> = testSession.session.agent.state;
-		agentState.model = scopedModel("claude-3-5-haiku").model;
+		setSessionModel(testSession.session, scopedModel("claude-3-5-haiku").model);
 		expect(await startupWarnings(FALLBACK_NOTICE)).toContain(FALLBACK_NOTICE);
 	});
 
 	it("does not show a model fallback notice once setup has selected a different model", async () => {
-		const agentState: Partial<AgentState> = testSession.session.agent.state;
-		agentState.model = scopedModel("claude-3-5-haiku").model;
+		setSessionModel(testSession.session, scopedModel("claude-3-5-haiku").model);
 		expect(await startupWarnings(FALLBACK_NOTICE, "claude-sonnet-4-5")).not.toContain(FALLBACK_NOTICE);
 	});
 });
