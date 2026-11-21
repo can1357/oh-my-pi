@@ -1085,7 +1085,10 @@ async function moveMissingCwdSessionIfNeeded(
 	}
 
 	// Filed under this folder (or a removed worktree of it): the session belongs here, no question to ask.
-	if (!(await SessionManager.isStrandedIn(session, cwd, sessionDir))) {
+	if (await SessionManager.isStrandedIn(session, cwd, sessionDir)) {
+		// It moves only when its storage refuses the move while another omp process writes it.
+		if (!SessionManager.relocatesUnasked()) return { status: "kept" };
+	} else {
 		const movePromptResult = await askToMoveSession(session);
 		if (movePromptResult === "keep") {
 			return { status: "kept" };
@@ -2508,7 +2511,8 @@ export async function runRootCommand(
 			const chosen = continuation?.session ?? selected;
 			try {
 				sessionManager = await forkIfMovedAway(
-					(await SessionManager.isStrandedIn(chosen, cwd, parsedArgs.sessionDir))
+					SessionManager.relocatesUnasked() &&
+						(await SessionManager.isStrandedIn(chosen, cwd, parsedArgs.sessionDir))
 						? await openRelocatedSession(chosen, cwd, parsedArgs.sessionDir)
 						: await SessionManager.open(chosen.path),
 					parsedArgs.sessionDir,

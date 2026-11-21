@@ -542,12 +542,17 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 
 		// Through the configured storage: under `session.storage: sql` the
 		// target is a row, and a filesystem check would drop every breadcrumb.
-		// A regular file, as the `statSync(...).isFile()` this replaced required:
-		// `existsSync` also accepts a directory named `*.jsonl`, and continuing
-		// one fails the launch with EISDIR instead of ignoring the breadcrumb.
+		// A shared store may hold a row another client committed since this one
+		// loaded its view: another omp process wrote the session this terminal
+		// last ran. A regular file, as the `statSync(...).isFile()` this replaced
+		// required: `existsSync` also accepts a directory named `*.jsonl`, and
+		// continuing one fails the launch with EISDIR instead of ignoring the
+		// breadcrumb.
+		const storage = defaultSessionStorage();
+		await storage.refresh?.();
 		const exists = ((): boolean => {
 			try {
-				return defaultSessionStorage().statSync(sessionFile).isFile;
+				return storage.statSync(sessionFile).isFile;
 			} catch {
 				return false;
 			}

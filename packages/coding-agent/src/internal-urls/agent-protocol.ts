@@ -36,7 +36,7 @@ import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with 
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import { defaultSessionStorage, type SessionStorage, sessionTreeStorage } from "../session/session-storage";
-import { artifactsDirsFromRegistry } from "./registry-helpers";
+import { artifactsDirsFromRegistry, isStoredFile } from "./registry-helpers";
 import type {
 	InternalResource,
 	InternalWriteResult,
@@ -360,20 +360,26 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	/** An agent of another omp instance, read from that instance's session files. */
+	/** An agent of another omp instance, read from that instance's transcripts in this process's session storage. */
 	async #resolvePeer(url: InternalUrl, target: PidTarget): Promise<InternalResource> {
 		const { pid, id } = target.address;
 		const peer = agentMesh()?.peer(pid);
 		if (!peer) throw new Error(`No omp instance with pid ${pid} in this project. List them with agent://peers`);
 		const sessionFile = peer.sessionFile;
 		if (!sessionFile) throw new Error(`Instance ${pid} has no session file; its agents cannot be read.`);
+		// The instances of one project share a configuration, so the peer keeps
+		// its transcripts where this process does: files, or `session.storage: sql` rows.
+		const storage = defaultSessionStorage();
+		// The peer writes through its own client: a shared store holds rows it
+		// committed after this process last loaded its view.
+		await storage.refresh?.();
 		if (!id) {
 			if (target.segments.length > 0) throw new Error(`agent://${pid} is a main agent; it has no JSON output.`);
 			return this.#resolveProgress(
 				url,
 				{ id: String(pid), status: peer.status, session: null, sessionFile },
 				false,
-				defaultSessionStorage(),
+				storage,
 			);
 		}
 		const dir = sessionFile.slice(0, -".jsonl".length);
@@ -387,8 +393,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			segments: target.segments,
 			dirs: [dir],
 			remoteStatus: agent?.status,
+			storage,
 			remoteProgress: async () => {
-				const exists = await Bun.file(transcript).exists();
+				const exists = isStoredFile(transcript, storage);
 				if (!exists && !agent) return undefined;
 				return {
 					id: formatPeerAddress(target.address),

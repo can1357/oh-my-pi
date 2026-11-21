@@ -452,7 +452,7 @@ Id/filename-prefix match behavior (local or global):
    - On yes (default), `SessionManager.open()` is anchored at the missing source cwd with `initialCwd`, then `manager.moveTo(cwd, sessionDir)` re-roots the existing session without duplicating it.
    - On no, startup is cancelled. In non-TTY mode, startup fails with an error directing the user to run interactively.
    - Under `--mode rpc`, `--mode rpc-ui` and `--mode acp` no question is asked, because the protocol owns standard input and standard output: the session opens where it is stored, with the launch directory as its working directory, as a path-valued resume does.
-   - A session recorded in a since-removed worktree of the launch checkout's repository is moved into the launch directory without a question, in every mode.
+   - Under file storage, a session recorded in a since-removed worktree of the launch checkout's repository is moved into the launch directory without a question, in every mode. Under `session.storage: sql` it resumes where it is stored (see `session.md`).
 - If the recorded directory still exists, the matched session is opened directly. Startup later changes the process/project scope to the resumed session's cwd and reloads cwd-scoped settings and plugin caches. It is not implicitly forked.
 
 Path-valued resume opens directly rather than using the missing-directory move

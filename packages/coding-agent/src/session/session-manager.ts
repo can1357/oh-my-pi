@@ -4668,6 +4668,20 @@ export class SessionManager {
 	}
 
 	/**
+	 * Whether resuming a session from `storage` may move it into the current
+	 * folder without asking: a stranded session ({@link isStrandedIn}), or one
+	 * whose project folder was renamed ({@link continueRecent}). Only a storage
+	 * with ownership leases can, because the move then refuses while another
+	 * live omp process writes the session. A storage without them
+	 * (`session.storage: sql`) cannot tell whether a process, on this machine or
+	 * another, still has the session open, and a move would send that process's
+	 * later entries to the old key; such a session resumes where it is stored.
+	 */
+	static relocatesUnasked(storage: SessionStorage = defaultSessionStorage()): boolean {
+		return storage.claimSession !== undefined;
+	}
+
+	/**
 	 * Open a session whose recorded directory `recordedCwd` is gone and move it,
 	 * artifacts included, into `cwd` so it resumes from there.
 	 * @param sessionDir Target session directory; defaults to `cwd`'s.
@@ -4818,7 +4832,20 @@ export class SessionManager {
 				// Cross-filesystem `mv` (new inode) is intentionally not a re-root.
 				const looksLikeMovedProject =
 					candidateForMove && hasPositiveMovedProjectEvidence(breadcrumb.cwdIdentity, resolvedCwd);
-				if (looksLikeMovedProject) {
+				if (looksLikeMovedProject && !SessionManager.relocatesUnasked(storage)) {
+					// A storage without ownership leases (`session.storage: sql`) cannot
+					// tell whether another omp process, on this machine or another, still
+					// writes the session, and a move would send that process's later
+					// entries to the old key: continue the session where it is stored.
+					logger.warn(
+						"Not re-rooting moved session: its storage cannot tell whether another omp process has it open",
+						{
+							from: breadcrumbCwd,
+							to: resolvedCwd,
+						},
+					);
+					newestInTargetDir = breadcrumb.sessionFile;
+				} else if (looksLikeMovedProject) {
 					logger.warn("Re-rooting moved session", { from: breadcrumbCwd, to: resolvedCwd });
 					// Anchor at the gone breadcrumb cwd so the moveTo below relocates the
 					// session: open() now falls back to the launch cwd for a missing

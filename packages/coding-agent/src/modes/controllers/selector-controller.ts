@@ -2123,7 +2123,9 @@ export class SelectorController {
 	/**
 	 * Move a session stranded under the current folder (see
 	 * {@link SessionManager.isStrandedIn}) into it before resuming: its recorded
-	 * directory is gone and cannot be entered.
+	 * directory is gone and cannot be entered. A storage that cannot refuse the
+	 * move while another omp process writes the session
+	 * ({@link SessionManager.relocatesUnasked}) resumes it where it is stored.
 	 * Returns the session file to switch to.
 	 * @throws when the move fails, e.g. another omp process writes the session.
 	 */
@@ -2136,6 +2138,7 @@ export class SelectorController {
 		const info = await readSessionInfo(sessionPath);
 		if (!info || !(await SessionManager.isStrandedIn(info, cwd, sessionDir, this.ctx.settings)))
 			return { sessionPath };
+		if (!SessionManager.relocatesUnasked(sessionManager.getStorage())) return { sessionPath };
 		try {
 			const relocated = await SessionManager.openRelocated(sessionPath, info.cwd, cwd, sessionDir);
 			const movedPath = relocated.getSessionFile() ?? sessionPath;

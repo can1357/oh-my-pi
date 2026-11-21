@@ -1622,9 +1622,21 @@ export async function listRecentSessions(query: RecentSessionsQuery): Promise<Se
  * Every top-level session file under `sessionsRoot` (subagent transcripts
  * nested below a session are not), newest mtime first. Stat-only; unlike the
  * session listings it skips the realpath dedupe, so a transcript linked into
- * the root under two names is listed under each.
+ * the root under two names is listed under each. With a key-indexed
+ * `storage` (`session.storage: sql`) the sessions are that store's keys one
+ * directory below the root, and a store that cannot be listed (its database
+ * is unreachable) rejects; otherwise, the session files on disk, none when the
+ * root cannot be read.
  */
-export async function listSessionFiles(sessionsRoot: string = getSessionsDir()): Promise<StatedSessionFile[]> {
+export async function listSessionFiles(
+	sessionsRoot: string = getSessionsDir(),
+	storage?: SessionStorage,
+): Promise<StatedSessionFile[]> {
+	if (storage && !(storage instanceof FileSessionStorage)) {
+		// A shared store may hold sessions another client committed since this one loaded its view.
+		await storage.refresh?.();
+		return statStoredNewestFirst(storage.listFilesSync(sessionsRoot, "*/*.jsonl"), storage);
+	}
 	try {
 		return await statNewestFirst(await scanBucketFiles(sessionsRoot, "*.jsonl"));
 	} catch {

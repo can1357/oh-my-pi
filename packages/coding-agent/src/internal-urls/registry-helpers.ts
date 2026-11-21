@@ -148,7 +148,7 @@ export async function sessionFilesFromDisk(
  * check replaced did: a retained transcript reached through a symlink is
  * readable and must still be advertised.
  */
-function isStoredFile(file: string, storage: SessionStorage): boolean {
+export function isStoredFile(file: string, storage: SessionStorage): boolean {
 	try {
 		return storage.statSync(file).isFile;
 	} catch {

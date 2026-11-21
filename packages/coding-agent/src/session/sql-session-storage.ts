@@ -4,7 +4,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
-import { SessionWriteConflictError } from "./session-storage";
+import { processLocalStoreKey, SessionWriteConflictError, type SessionStoreIdentity } from "./session-storage";
 import { noteSqlWriteCommitted } from "./session-storage-fallback";
 import { eexist, enoent } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
@@ -275,6 +275,32 @@ function sqliteQueue(client: SqlSessionStorageClient): SqliteQueue {
 		sqliteFileQueues.set(file, queue);
 	}
 	return queue;
+}
+
+/** PostgreSQL: the schema the unqualified table `$1` resolves to through the search path. */
+const TABLE_SCHEMA_QUERY =
+	"SELECT n.nspname AS schema FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass($1)";
+
+/**
+ * The store identity of `table` through `client`, before PostgreSQL's schema
+ * is known; see {@link SqlSessionStorageBackend.identity}. Keys a client that
+ * names no file or server by the client object, as {@link sqliteQueue} does,
+ * so stores on one in-memory database share it and no other store does.
+ */
+function clientStoreIdentity(
+	client: SqlSessionStorageClient,
+	adapter: SqlSessionStorageAdapter,
+	table: string,
+): SessionStoreIdentity {
+	const { filename, hostname, port, database } = client.options;
+	if (adapter === "sqlite") {
+		if (typeof filename === "string" && filename !== "" && filename !== ":memory:") {
+			return { key: `sql:sqlite:${path.resolve(filename)}:${table}`, shared: true };
+		}
+	} else if (typeof hostname === "string" && hostname !== "" && typeof database === "string" && database !== "") {
+		return { key: `sql:${adapter}:${hostname}:${String(port ?? "")}/${database}:${table}`, shared: true };
+	}
+	return { key: `sql:${adapter}:${processLocalStoreKey(client)}:${table}`, shared: false };
 }
 
 function detectAdapter(client: SqlSessionStorageClient): SqlSessionStorageAdapter {
@@ -622,6 +648,10 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	readonly #createTable: boolean;
 	/** The shared call queue for this client's SQLite database; unset on other dialects. */
 	readonly #sqliteQueue: SqliteQueue | undefined;
+	/** The store named from the client's options; see {@link identity}. */
+	readonly #clientIdentity: SessionStoreIdentity;
+	/** On PostgreSQL, the schema the table is in, once {@link init} has read it. */
+	#tableSchema: string | undefined;
 
 	constructor(options: SqlSessionStorageOptions) {
 		this.#client = options.client;
@@ -637,6 +667,21 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		this.#q = buildQueries(this.#adapter, table);
 		this.#createTable = options.createTable !== false;
 		this.#sqliteQueue = this.#adapter === "sqlite" ? sqliteQueue(options.client) : undefined;
+		this.#clientIdentity = clientStoreIdentity(options.client, this.#adapter, table);
+	}
+
+	/**
+	 * The table, named by the database file it is in (SQLite), or by the
+	 * server's host and port, the database and, on PostgreSQL, the schema the
+	 * table is in (read once {@link init} has found the table), all from the
+	 * client's parsed options and the server: never the user, the password or
+	 * the connection string. A client that names no file or server (an
+	 * in-memory database, a wrapper that hides its options) gets a key of its
+	 * own in this process.
+	 */
+	get identity(): SessionStoreIdentity {
+		if (this.#tableSchema === undefined) return this.#clientIdentity;
+		return { key: `${this.#clientIdentity.key}:schema=${this.#tableSchema}`, shared: true };
 	}
 
 	get adapter(): SqlSessionStorageAdapter {
@@ -647,8 +692,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		return this.#table;
 	}
 
-	init(): Promise<void> {
-		return this.#exclusive(async () => {
+	async init(): Promise<void> {
+		await this.#exclusive(async () => {
 			if (this.#adapter === "sqlite") {
 				// Another process's write lock then makes this one wait instead of failing at once.
 				const [setting] = (await this.#client.unsafe("PRAGMA busy_timeout")) as BusyTimeoutRow[];
@@ -680,6 +725,13 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			}
 			await this.#setup(this.#q.createPartsTable);
 		});
+		if (this.#adapter === "postgres" && this.#clientIdentity.shared) {
+			// The unqualified table resolves through the search path, to the first schema on it that holds the
+			// table: two schemas of one database hold two stores. The name is a checked unquoted identifier, so
+			// to_regclass folds it as the store's queries do.
+			const [row] = (await this.#client.unsafe(TABLE_SCHEMA_QUERY, [this.#table])) as Array<{ schema: unknown }>;
+			this.#tableSchema = String(row?.schema ?? "");
+		}
 	}
 
 	/**

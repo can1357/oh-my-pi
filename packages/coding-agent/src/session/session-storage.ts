@@ -202,6 +202,13 @@ export interface SessionStorage {
 	 */
 	readonly defersSyncPublish?: boolean;
 	/**
+	 * Names the store a key-indexed storage reads, so data derived per store
+	 * (the transcript index) never mixes two stores. The JSONL tree under the
+	 * agent directory omits it, and so may a storage that cannot name its
+	 * store; data derived from such a store is this process's own.
+	 */
+	readonly storeIdentity?: SessionStoreIdentity;
+	/**
 	 * Resolve once every write this storage queued for `path` has been confirmed
 	 * by, or rejected by, the backing store. In-body backends never queue, so
 	 * they omit this; {@link defersSyncPublish} marks the backends that provide
@@ -1724,6 +1731,44 @@ export function sessionTreeStorage(session: {
 }
 
 /**
+ * The name data derived from a key-indexed store (the transcript index) is
+ * kept under. `key` names the store and holds no credential. `shared` says
+ * every process that opens the store computes the same key, as for a table on
+ * a database server or in a database file; otherwise the key holds only in
+ * this process (an in-memory database, a client that hides its connection),
+ * and so does the data derived under it.
+ */
+export interface SessionStoreIdentity {
+	readonly key: string;
+	readonly shared: boolean;
+}
+
+const processLocalStoreSerials = new WeakMap<object, number>();
+let lastProcessLocalStoreSerial = 0;
+
+/**
+ * A store key that `owner` (a client or a storage object) keeps for its life
+ * and no other object in this process gets: the key of a store that cannot
+ * name itself across processes.
+ */
+export function processLocalStoreKey(owner: object): string {
+	let serial = processLocalStoreSerials.get(owner);
+	if (serial === undefined) {
+		serial = ++lastProcessLocalStoreSerial;
+		processLocalStoreSerials.set(owner, serial);
+	}
+	return `local#${serial}`;
+}
+
+/**
+ * Bytes of a key-indexed transcript read at a time by passes over a whole
+ * transcript (the transcript index, message counts, the listing's line scan),
+ * so memory follows the window, not the transcript; a window widens when one
+ * record is longer.
+ */
+export const SESSION_READ_WINDOW_BYTES = 1024 * 1024;
+
+/**
  * The UTF-8 text of `filePath` in `storage` from byte `offset` to the end, or
  * at most `maxBytes` of it, with the full size the read observed:
  * {@link SessionStorage.readTextFrom} where the backend has it, else a whole
@@ -1744,6 +1789,39 @@ export async function readSessionTextFrom(
 	if (offset >= bytes.length) return { text: "", size: bytes.length };
 	const end = maxBytes === undefined ? undefined : offset + Math.max(0, maxBytes);
 	return { text: bytes.subarray(offset, end).toString("utf8"), size: bytes.length };
+}
+
+/**
+ * The bytes of `filePath` in `storage`, in windows of
+ * {@link SESSION_READ_WINDOW_BYTES} read one after another, each kept through
+ * its last newline, where its bytes are exactly the stored ones (a window
+ * holding no newline widens), and the rest of the transcript last. A storage
+ * that cannot read from an offset gives the whole transcript at once. A
+ * missing transcript raises ENOENT.
+ */
+export async function* readSessionLineWindows(storage: SessionStorage, filePath: string): AsyncGenerator<Uint8Array> {
+	const encoder = new TextEncoder();
+	if (!storage.readTextFrom) {
+		yield encoder.encode(await storage.readText(filePath));
+		return;
+	}
+	let offset = 0;
+	let span = SESSION_READ_WINDOW_BYTES;
+	for (;;) {
+		const { text, size } = await storage.readTextFrom(filePath, offset, span);
+		const bytes = encoder.encode(text);
+		// A window that reaches the end holds whole characters only.
+		const last = offset + span >= size;
+		const end = last ? bytes.length : bytes.lastIndexOf(0x0a) + 1;
+		if (end > 0) yield bytes.subarray(0, end);
+		if (last) return;
+		if (end === 0) {
+			span *= 2;
+		} else {
+			offset += end;
+			span = SESSION_READ_WINDOW_BYTES;
+		}
+	}
 }
 
 function matchesPatternSegment(name: string, pattern: string): boolean {

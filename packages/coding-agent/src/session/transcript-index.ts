@@ -8,9 +8,15 @@
  * {@link syncTranscriptIndex} tails each session file from the byte offset it
  * last indexed, newest files first, so once the first pass is done a sync
  * reads only appended lines; a file that shrank is indexed afresh and a
- * vanished one dropped. The first pass reads every transcript, so syncs run on
- * a worker thread (`transcript-index-client.ts`), hosted by the daemon's
- * `transcripts` module. Queries answer from whatever is indexed.
+ * vanished one dropped. The first pass reads every transcript, so syncs of the
+ * JSONL tree run on a worker thread (`transcript-index-client.ts`), hosted by
+ * the daemon's `transcripts` module. A key-indexed store (`session.storage:
+ * sql`) is open only in the process that installed it, so that process syncs
+ * it through the storage itself, into an index of its own
+ * ({@link transcriptIndexDbPath}): a sync drops every session its listing
+ * lacks, so two stores sharing one index would drop each other's. A store
+ * only this process can name keeps its index in a directory of this process
+ * ({@link transcriptIndexDbPath}). Queries answer from whatever is indexed.
  */
 import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
@@ -20,15 +26,28 @@ import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import {
 	getSessionsDir,
 	getTranscriptIndexDbPath,
+	hasFsCode,
+	isEacces,
+	isEnoent,
 	logger,
 	openSqliteDatabaseSync,
+	postmortem,
 	type SqliteFileIdentity,
 	sqliteFileIdentity,
+	TempDir,
 	tryAcquireFileLock,
 } from "@oh-my-pi/pi-utils";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import type { WordQuery } from "./search-query";
-import { listSessionFiles } from "./session-listing";
+import { listSessionFiles, type StatedSessionFile } from "./session-listing";
+import {
+	defaultSessionStorage,
+	FileSessionStorage,
+	processLocalStoreKey,
+	readSessionTextFrom,
+	SESSION_READ_WINDOW_BYTES,
+	type SessionStorage,
+} from "./session-storage";
 
 const TRANSCRIPT_INDEX_DDL = `
 PRAGMA journal_mode=WAL;
@@ -94,10 +113,13 @@ export type TranscriptRole = "user" | "assistant";
 
 /**
  * How a {@link syncTranscriptIndex} pass ended: `synced` (the index holds every
- * complete line on disk), `busy` (another process holds the sync), or
- * `unavailable` (the index cannot be opened). Only `synced` indexed anything.
+ * complete line its storage holds), `partial` (the store could not be listed,
+ * or a session could not be read through; the index holds what was, and the
+ * pass leaves the index stale so the next search syncs again), `busy` (another process holds the sync), or
+ * `unavailable` (the index cannot be opened). Only `synced` and `partial`
+ * indexed anything.
  */
-export type TranscriptSyncOutcome = "synced" | "busy" | "unavailable";
+export type TranscriptSyncOutcome = "synced" | "partial" | "busy" | "unavailable";
 
 /** What one {@link syncTranscriptIndex} pass did. */
 export interface TranscriptSyncResult {
@@ -110,10 +132,15 @@ export interface TranscriptSyncResult {
 
 /** The store one {@link syncTranscriptIndex} pass brings up to date, and the sessions it reads. */
 export interface TranscriptSyncOptions {
-	/** Index store. Default: {@link getTranscriptIndexDbPath}. */
+	/** Index store. Default: {@link transcriptIndexDbPath} of `storage`, else of the files on disk. */
 	dbPath?: string;
 	/** Root holding one directory per project. Default: {@link getSessionsDir}. */
 	sessionsRoot?: string;
+	/**
+	 * A key-indexed store (`session.storage: sql`) whose sessions are indexed
+	 * instead of the session files on disk. Omitted, the files on disk.
+	 */
+	storage?: SessionStorage;
 }
 
 /** A message that answered a transcript search. */
@@ -157,14 +184,53 @@ const handles = new Map<string, IndexHandle>();
 const failedPaths = new Set<string>();
 
 /**
- * The connection to the store at `dbPath`, by default the current agent dir's,
- * reopened when the file behind the path changed. `undefined` when the store
- * cannot be opened.
+ * The index store of `storage`'s sessions: the agent dir's `transcripts.db`
+ * for the JSONL tree, else a store named after the key-indexed store
+ * ({@link SessionStorage.storeIdentity}), so a profile whose processes use
+ * different stores keeps one index per store. The index of a store every
+ * process names alike sits beside `transcripts.db`; that of a store only this
+ * process can name (or a storage that names none, keyed by the storage
+ * object) sits in a directory of this process.
+ */
+export function transcriptIndexDbPath(storage: SessionStorage = defaultSessionStorage()): string {
+	const shared = getTranscriptIndexDbPath();
+	if (storage instanceof FileSessionStorage) return shared;
+	const identity = storage.storeIdentity ?? { key: processLocalStoreKey(storage), shared: false };
+	const name = Bun.hash.wyhash(identity.key).toString(16).padStart(16, "0");
+	return path.join(identity.shared ? path.dirname(shared) : processIndexDir(), `transcripts-${name}.db`);
+}
+
+let processIndexes: TempDir | undefined;
+
+/**
+ * This process's directory (mode 0700, under the temp dir) for the indexes of
+ * stores only it can name. It is removed when the process exits normally or
+ * through `process.exit`, on an uncaught error, and on a signal whose handler
+ * runs the exit cleanups (the CLI installs them); after SIGKILL, or a signal
+ * an embedding host does not handle, it stays behind.
+ */
+function processIndexDir(): string {
+	if (!processIndexes) {
+		const dir = TempDir.createSync("@omp-transcripts-");
+		processIndexes = dir;
+		postmortem.register("transcript-index-process-stores", () => dir.removeSync(), { exitOnly: true });
+	}
+	return processIndexes.path();
+}
+
+/** Under the test runner, a test that chose no agent dir must never open or sync the user's index. */
+export function guardsUserIndex(): boolean {
+	return isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR;
+}
+
+/**
+ * The connection to the store at `dbPath`, by default the index of the
+ * process default storage, reopened when the file behind the path changed.
+ * `undefined` when the store cannot be opened.
  */
 function openTranscriptIndex(dbPath?: string): Database | undefined {
-	// Tests never touch the user's index: the default store needs an agent dir the test chose.
-	if (dbPath === undefined && isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR) return undefined;
-	const store = dbPath ?? getTranscriptIndexDbPath();
+	if (dbPath === undefined && guardsUserIndex()) return undefined;
+	const store = dbPath ?? transcriptIndexDbPath();
 	const open = handles.get(store);
 	if (open) {
 		const identity = sqliteFileIdentity(store);
@@ -199,7 +265,7 @@ export function closeTranscriptIndex(): void {
 	failedPaths.clear();
 }
 
-/** Whether a sync of the current agent dir's index, in any process, completed within `maxAgeMs`. */
+/** Whether a sync of the process default storage's index, in any process, completed within `maxAgeMs`. */
 export function isTranscriptIndexFresh(maxAgeMs: number): boolean {
 	const db = openTranscriptIndex();
 	if (!db) return false;
@@ -216,13 +282,22 @@ export function isTranscriptIndexFresh(maxAgeMs: number): boolean {
  * Brings the index up to date with the top-level session files, newest first.
  * One process syncs a store at a time; a call that finds another sync running
  * returns `busy` at once. Reads every new transcript line, so the first pass
- * over a large history takes a minute or more: never run it on the UI thread.
+ * over a large history takes a minute or more: never run a sync of the JSONL
+ * tree on the UI thread. A sync of a key-indexed `storage` reads windows of
+ * {@link SESSION_READ_WINDOW_BYTES}, widened when one record is longer, each
+ * awaiting the database. A session gone since the listing is dropped by the
+ * next sync, and one this user may not read is skipped; a store that cannot
+ * be listed, or any other read that fails, leaves the pass `partial` and the
+ * index stale. Under the test runner, a call that names no `dbPath` needs an
+ * agent dir the test chose.
  */
 export async function syncTranscriptIndex(options: TranscriptSyncOptions = {}): Promise<TranscriptSyncResult> {
 	const result: TranscriptSyncResult = { outcome: "unavailable", files: 0, messages: 0 };
-	const db = openTranscriptIndex(options.dbPath);
+	if (options.dbPath === undefined && guardsUserIndex()) return result;
+	const dbPath = options.dbPath ?? transcriptIndexDbPath(options.storage ?? new FileSessionStorage());
+	const db = openTranscriptIndex(dbPath);
 	if (!db) return result;
-	const lock = tryAcquireFileLock(`${options.dbPath ?? getTranscriptIndexDbPath()}.sync`);
+	const lock = tryAcquireFileLock(`${dbPath}.sync`);
 	if (!lock) {
 		result.outcome = "busy";
 		return result;
@@ -232,48 +307,82 @@ export async function syncTranscriptIndex(options: TranscriptSyncOptions = {}): 
 		for (const row of db.query<IndexedFile, []>("SELECT id, path, indexed FROM files").all()) {
 			known.set(row.path, row);
 		}
-		const files = await listSessionFiles(options.sessionsRoot ?? getSessionsDir());
+		let files: StatedSessionFile[];
+		try {
+			files = await listSessionFiles(options.sessionsRoot ?? getSessionsDir(), options.storage);
+		} catch (error) {
+			// The store could not be listed (its database is unreachable): nothing is read or dropped, and the index stays stale.
+			logger.debug("Transcript index could not list the sessions", { error: String(error) });
+			result.outcome = "partial";
+			return result;
+		}
 		result.outcome = "synced";
-		const writer = new IndexWriter(db);
+		const writer = new IndexWriter(db, transcriptSource(options.storage), result);
 		for (const { file, stat } of files) {
 			const indexed = known.get(file);
 			known.delete(file);
 			if (indexed?.indexed === stat.size) continue;
-			let added: number;
 			try {
-				added = await writer.index(file, stat.size, indexed);
+				await writer.index(file, stat.size, indexed);
 			} catch (error) {
-				// Removed or unreadable since the listing; the next sync settles it.
+				// Steps committed before the failure stay indexed, and the next sync reads on from there.
+				// A file this user may not read stays unreadable: skip it as a vanished one, so it cannot keep the index stale.
+				if (!isEnoent(error) && !isEacces(error) && !hasFsCode(error, "EPERM")) result.outcome = "partial";
 				logger.debug("Transcript index skipped a session file", { file, error: String(error) });
-				continue;
 			}
-			if (added === 0) continue;
-			result.files++;
-			result.messages += added;
 		}
 		// An empty listing is an unreadable sessions root, not a deleted history.
 		if (files.length > 0) writer.drop([...known.values()]);
-		db.run(
-			"INSERT INTO meta (key, value) VALUES ('synced_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-			[Date.now()],
-		);
+		if (result.outcome === "synced") {
+			db.run(
+				"INSERT INTO meta (key, value) VALUES ('synced_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+				[Date.now()],
+			);
+		}
 	} finally {
 		lock.release();
 	}
 	return result;
 }
 
-/** Prepared writes of one sync pass. */
+/** Reads bytes `[start, end)` of a transcript, `step` bytes at a time. */
+interface TranscriptSource {
+	read(file: string, start: number, end: number): Promise<Uint8Array>;
+	step: number;
+}
+
+/**
+ * Transcripts on disk, or in a key-indexed `storage`. A storage read returns
+ * text, which re-encodes to the stored bytes through every complete
+ * character; a range that ends inside a character differs only after the
+ * range's last newline, which {@link IndexWriter.index} never keeps.
+ */
+function transcriptSource(storage: SessionStorage | undefined): TranscriptSource {
+	if (!storage || storage instanceof FileSessionStorage) {
+		return { read: (file, start, end) => Bun.file(file).slice(start, end).bytes(), step: SYNC_CHUNK_BYTES };
+	}
+	return {
+		read: async (file, start, end) =>
+			Buffer.from((await readSessionTextFrom(storage, file, start, end - start)).text, "utf8"),
+		step: SESSION_READ_WINDOW_BYTES,
+	};
+}
+
+/** Prepared writes of one sync pass, counted into its result as each step commits. */
 class IndexWriter {
 	readonly #db: Database;
+	readonly #source: TranscriptSource;
+	readonly #result: TranscriptSyncResult;
 	readonly #upsertFile: Statement;
 	readonly #advanceFile: Statement;
 	readonly #insertMessage: Statement;
 	readonly #clearFile: Statement;
 	readonly #deleteFile: Statement;
 
-	constructor(db: Database) {
+	constructor(db: Database, source: TranscriptSource, result: TranscriptSyncResult) {
 		this.#db = db;
+		this.#source = source;
+		this.#result = result;
 		this.#upsertFile = db.prepare(`
 INSERT INTO files (path, session_id, cwd, indexed, messages) VALUES (?1, ?2, ?3, ?4, ?5)
 ON CONFLICT(path) DO UPDATE SET session_id = ?2, cwd = ?3, indexed = ?4, messages = ?5
@@ -287,31 +396,30 @@ RETURNING id`);
 	/**
 	 * Indexes `file` from where the last sync stopped (from the start when it
 	 * shrank since) through its last complete line, one transaction per read
-	 * step. Returns the messages added; a file without a session header adds
-	 * none and stays unrecorded.
+	 * step, counting each committed step's messages into the pass's result. A
+	 * file without a session header adds none and stays unrecorded.
 	 */
-	async index(file: string, size: number, indexed: IndexedFile | undefined): Promise<number> {
+	async index(file: string, size: number, indexed: IndexedFile | undefined): Promise<void> {
 		let id = indexed && size >= indexed.indexed ? indexed.id : undefined;
 		let offset = id === undefined ? 0 : (indexed?.indexed ?? 0);
-		let added = 0;
-		let span = SYNC_CHUNK_BYTES;
+		let counted = false;
+		let span = this.#source.step;
 		while (offset < size) {
-			const bytes = await Bun.file(file)
-				.slice(offset, Math.min(size, offset + span))
-				.bytes();
+			const stepEnd = Math.min(size, offset + span);
+			const bytes = await this.#source.read(file, offset, stepEnd);
 			const end = bytes.lastIndexOf(NEWLINE) + 1;
 			if (end === 0) {
 				// An unterminated last line waits for its newline; a longer line widens the step.
-				if (offset + bytes.length >= size) break;
+				if (stepEnd >= size) break;
 				span *= 2;
 				continue;
 			}
-			span = SYNC_CHUNK_BYTES;
+			span = this.#source.step;
 			const chunk = readChunk(bytes.subarray(0, end));
 			const next = offset + end;
 			if (id === undefined) {
 				const header = chunk.header;
-				if (!header) return 0;
+				if (!header) return;
 				id = this.#db.transaction(() => {
 					const row = this.#upsertFile.get(file, header.id, header.cwd, next, chunk.records) as { id: number };
 					// A rewritten file replaces everything indexed from its old content.
@@ -326,10 +434,13 @@ RETURNING id`);
 					this.#advanceFile.run(next, chunk.records, fileId);
 				})();
 			}
-			added += chunk.rows.length;
+			if (chunk.rows.length > 0) {
+				this.#result.messages += chunk.rows.length;
+				if (!counted) this.#result.files++;
+				counted = true;
+			}
 			offset = next;
 		}
-		return added;
 	}
 
 	/** Removes files gone from disk with their messages. */

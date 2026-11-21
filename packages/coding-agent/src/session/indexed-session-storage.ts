@@ -5,12 +5,14 @@ import {
 	childDirNames,
 	childEntryNames,
 	childKeyName,
+	readSessionLineWindows,
 	SessionWriteConflictError,
 	type SessionStorage,
 	type SessionStorageEntry,
 	type SessionStorageStat,
 	type SessionStorageWriter,
 	type SessionStorageWriteOptions,
+	type SessionStoreIdentity,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
@@ -36,6 +38,8 @@ export interface SessionStorageIndexEntry {
 export interface SessionStorageBackend {
 	init(): Promise<void>;
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
+	/** The store this backend reads, without credentials; see {@link SessionStorage.storeIdentity}. */
+	readonly identity?: SessionStoreIdentity;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	/**
@@ -43,7 +47,9 @@ export interface SessionStorageBackend {
 	 * it, and the session's size in bytes, both from one read of the backing
 	 * store; `null` when `path` holds no session. A capped read may end inside
 	 * a character. Optional: without it the storage reads the whole session
-	 * and cuts it.
+	 * and cuts it, so a pass over a transcript in read windows (the
+	 * transcript index, message counts) reads it whole once per window; the
+	 * listing's line scan then reads it whole once instead.
 	 */
 	readFrom?(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number } | null>;
 	/**
@@ -190,6 +196,10 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	constructor(backend: SessionStorageBackend) {
 		this.#backend = backend;
+	}
+
+	get storeIdentity(): SessionStoreIdentity | undefined {
+		return this.#backend.identity;
 	}
 
 	async initialize(): Promise<void> {
@@ -421,9 +431,24 @@ export class IndexedSessionStorage implements SessionStorage {
 		return { text: bytes.subarray(offset, end).toString("utf-8"), size: bytes.length };
 	}
 
+	/**
+	 * Visits the transcript's lines in read windows (see
+	 * {@link readSessionLineWindows}), so a scan holds one window, not the whole
+	 * transcript, and stops reading at the first window that answers it. A
+	 * backend that cannot read a range is read whole, once.
+	 */
 	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
-		for (const line of (await this.readText(path)).split("\n")) {
-			if (visit(line)) return;
+		if (!this.#backend.readFrom) {
+			for (const line of (await this.readText(path)).split("\n")) {
+				if (visit(line)) return;
+			}
+			return;
+		}
+		const decoder = new TextDecoder();
+		for await (const window of readSessionLineWindows(this, path)) {
+			for (const line of decoder.decode(window).split("\n")) {
+				if (visit(line)) return;
+			}
 		}
 	}
 

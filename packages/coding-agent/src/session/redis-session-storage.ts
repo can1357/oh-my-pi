@@ -3,7 +3,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
-import { SessionWriteConflictError } from "./session-storage";
+import { processLocalStoreKey, SessionWriteConflictError, type SessionStoreIdentity } from "./session-storage";
 import { eexist } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
@@ -38,6 +38,14 @@ export interface RedisSessionStorageOptions {
 	 * Default 500.
 	 */
 	scanCount?: number;
+	/**
+	 * The server and database the client is connected to, for naming the store
+	 * (with the prefix) to data derived from it, such as the transcript index:
+	 * every process that names the same server, database and prefix shares that
+	 * data. Never put a credential here. Omitted, the store is named by the
+	 * client object, so its derived data is this process's own.
+	 */
+	server?: { host: string; port?: number; db?: number };
 }
 
 const DEFAULT_PREFIX = "omp:sessions:";
@@ -120,6 +128,24 @@ for _, path in ipairs(paths) do
 end
 return #paths`;
 
+// Size and bytes from one read, so an append between them cannot pair a size
+// with other content. ARGV[1] is the byte offset, ARGV[2] the most bytes to
+// return ("" for the rest); a missing key returns nil.
+const READ_FROM_SCRIPT = `-- OMP_READ_FROM
+if redis.call("EXISTS", KEYS[1]) == 0 then
+	return false
+end
+local size = redis.call("STRLEN", KEYS[1])
+local from = tonumber(ARGV[1])
+local take = size - from
+if ARGV[2] ~= "" then
+	take = math.min(take, tonumber(ARGV[2]))
+end
+if take <= 0 then
+	return {size, ""}
+end
+return {size, redis.call("GETRANGE", KEYS[1], from, from + take - 1)}`;
+
 /** A `SCAN MATCH` glob for the keys starting with `prefix`, its glob characters escaped. */
 function keysStartingWith(prefix: string): string {
 	return `${prefix.replace(/[*?[\]\\]/g, "\\$&")}*`;
@@ -172,11 +198,17 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 	readonly #client: RedisSessionStorageClient;
 	readonly #prefix: string;
 	readonly #scanCount: number;
+	/** The keyspace: the named server and database, else the client object, with the prefix. */
+	readonly identity: SessionStoreIdentity;
 
 	constructor(options: RedisSessionStorageOptions) {
 		this.#client = options.client;
 		this.#prefix = options.prefix ?? DEFAULT_PREFIX;
 		this.#scanCount = options.scanCount ?? DEFAULT_SCAN_COUNT;
+		const server = options.server;
+		this.identity = server
+			? { key: `redis:${server.host}:${server.port ?? 6379}/${server.db ?? 0}:${this.#prefix}`, shared: true }
+			: { key: `redis:${processLocalStoreKey(options.client)}:${this.#prefix}`, shared: false };
 	}
 
 	init(): Promise<void> {
@@ -220,6 +252,18 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		const head = prefixBytes > 0 ? this.#client.getrange(key, 0, prefixBytes - 1) : Promise.resolve("");
 		const tail = suffixBytes > 0 ? this.#client.getrange(key, -suffixBytes, -1) : Promise.resolve("");
 		return Promise.all([head, tail]);
+	}
+
+	async readFrom(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number } | null> {
+		const result = await this.#client.send("EVAL", [
+			READ_FROM_SCRIPT,
+			"1",
+			this.#fileKey(path),
+			String(Math.max(0, Math.trunc(offset))),
+			maxBytes === undefined ? "" : String(Math.max(0, Math.trunc(maxBytes))),
+		]);
+		if (!Array.isArray(result)) return null;
+		return { size: Number(result[0]), text: String(result[1] ?? "") };
 	}
 
 	async writeFull(

@@ -11,12 +11,20 @@
  *
  * The client half ({@link syncTranscripts}) lives here too so both ends of the
  * contract stay in one file. It falls back to a worker thread of the calling
- * process when the daemon cannot serve it.
+ * process when the daemon cannot serve it, and syncs a key-indexed session
+ * store (`session.storage: sql`) in the calling process, the only one that
+ * holds it.
  */
 import { type } from "@oh-my-pi/omptype";
 import { getSessionsDir, getTranscriptIndexDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
-import type { TranscriptSyncResult } from "../../session/transcript-index";
+import { defaultSessionStorage, FileSessionStorage } from "../../session/session-storage";
+import {
+	guardsUserIndex,
+	syncTranscriptIndex,
+	type TranscriptSyncResult,
+	transcriptIndexDbPath,
+} from "../../session/transcript-index";
 import { TranscriptIndexer } from "../../session/transcript-index-client";
 import { daemonClient } from "../client";
 import type { DaemonModule } from "../module";
@@ -62,15 +70,39 @@ export const transcriptsModule: DaemonModule = {
 
 /** This process's indexer, used only when the daemon cannot serve it; its worker exits with each sync. */
 let localIndexer: TranscriptIndexer | undefined;
+/** Running in-process syncs of a key-indexed store, by index path; a sync asked for meanwhile joins one. */
+const storedSyncs = new Map<string, Promise<TranscriptSyncResult>>();
 
 /**
- * Brings the current agent dir's transcript index up to date through the
- * daemon, or on a worker thread of this process when the daemon is
- * unreachable, predates the module, or would be the user's own under the test
- * runner. Rejects when the sync fails, or when `signal` aborts first; the sync
- * itself runs on.
+ * Brings the transcript index of this process's default storage up to date:
+ * the agent dir's index of the JSONL tree through the daemon, or on a worker
+ * thread of this process when the daemon is unreachable, predates the module,
+ * or would be the user's own under the test runner. Rejects when the sync
+ * fails, or when `signal` aborts first; the sync itself runs on.
+ *
+ * A key-indexed default storage (`session.storage: sql`) is synced in this
+ * process instead, into that store's own index: the daemon serves every
+ * profile, and neither it nor a worker holds the store this process installed
+ * (its client, table and credentials, or an SDK host's own store), so only
+ * this process can read it.
+ *
+ * Under the test runner, a test that chose no agent dir syncs no index (`unavailable`).
  */
 export async function syncTranscripts(signal?: AbortSignal): Promise<TranscriptSyncResult> {
+	// Not through the daemon, a worker, or here: the agent dir would be the user's own.
+	if (guardsUserIndex()) return { outcome: "unavailable", files: 0, messages: 0 };
+	const storage = defaultSessionStorage();
+	if (!(storage instanceof FileSessionStorage)) {
+		const dbPath = transcriptIndexDbPath(storage);
+		let running = storedSyncs.get(dbPath);
+		if (!running) {
+			running = syncTranscriptIndex({ dbPath, sessionsRoot: getSessionsDir(), storage }).finally(() =>
+				storedSyncs.delete(dbPath),
+			);
+			storedSyncs.set(dbPath, running);
+		}
+		return untilAborted(signal, running);
+	}
 	const target = { dbPath: getTranscriptIndexDbPath(), sessionsRoot: getSessionsDir() };
 	const daemon = await untilAborted(signal, transcriptsDaemon());
 	if (daemon) return daemon.call<TranscriptSyncResult>(TRANSCRIPTS_KIND, TRANSCRIPTS_SYNC_METHOD, target, { signal });

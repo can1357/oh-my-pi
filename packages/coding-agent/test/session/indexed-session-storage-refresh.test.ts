@@ -1,7 +1,8 @@
 /**
  * `IndexedSessionStorage.refresh` brings a long-running process's index up to
  * date with sessions other processes wrote to the shared backend, without
- * losing a write of its own the backend read could not yet describe.
+ * losing a write of its own the backend read could not yet describe. And a
+ * backend that cannot read a byte range is read whole once per line scan.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -13,6 +14,8 @@ import {
 /** A shared backend whose index read can be held open, as a slow database query would be. */
 class SharedBackend implements SessionStorageBackend {
 	readonly files = new Map<string, { content: string; mtimeMs: number }>();
+	/** Whole-session reads; this backend has no `readFrom`, so every read is one. */
+	readFullCalls = 0;
 	#heldIndex: { snapshot: SessionStorageIndexEntry[]; release: PromiseWithResolvers<void> } | undefined;
 
 	/** The next index read snapshots now and returns only once released. */
@@ -40,6 +43,7 @@ class SharedBackend implements SessionStorageBackend {
 		return snapshot;
 	}
 	async readFull(path: string): Promise<string | null> {
+		this.readFullCalls++;
 		return this.files.get(path)?.content ?? null;
 	}
 	async readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
@@ -116,5 +120,24 @@ describe("IndexedSessionStorage.refresh", () => {
 		await refreshing;
 
 		expect(storage.existsSync("/s/old.jsonl")).toBe(false);
+	});
+});
+
+describe("IndexedSessionStorage.scanLines on a backend that cannot read a range", () => {
+	test("reads a transcript several read windows long whole, once, and visits every line", async () => {
+		const backend = new SharedBackend();
+		const lines = Array.from({ length: 40 }, (_, i) => `line ${i} ${"é".repeat(60_000)}`);
+		backend.files.set("/s/long.jsonl", { content: `${lines.join("\n")}\n`, mtimeMs: 1 });
+		const storage = await storageOn(backend);
+		backend.readFullCalls = 0;
+		const seen: string[] = [];
+
+		await storage.scanLines("/s/long.jsonl", line => {
+			if (line) seen.push(line.slice(0, line.indexOf(" ", 5)));
+			return false;
+		});
+
+		expect(seen).toEqual(lines.map(line => line.slice(0, line.indexOf(" ", 5))));
+		expect(backend.readFullCalls).toBe(1);
 	});
 });
