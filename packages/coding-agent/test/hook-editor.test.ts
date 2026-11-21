@@ -6,6 +6,7 @@ import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CURSOR_MARKER, isFocusable, setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
@@ -79,6 +80,7 @@ function createControllerContext() {
 		hookEditor: undefined,
 		closeLinkBrowser: () => {},
 		configureDialogEditor: () => {},
+		settings: Settings.isolated(),
 		rerenderInLinkBrowser: () => {},
 		rebuildTranscriptScrollback: () => {},
 	} as unknown as TestContext;

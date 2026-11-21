@@ -651,6 +651,17 @@ export class HtmlFormDialog implements Component, Focusable {
 		};
 	}
 
+	/** The editor holding the keys: an open note, else the focused textarea or Vim-mode one-line box; none on other rows. */
+	activeEditor(): Editor | undefined {
+		if (this.#hidden) return undefined;
+		if (this.#noteEditor) return this.#noteEditor.editor;
+		const stop = this.#stops[this.#focus];
+		if (stop?.kind === "text") return this.#editors.get(stop.field);
+		if (stop?.kind !== "other") return undefined;
+		const box = this.#others.get(stop.field);
+		return box instanceof Editor ? box : undefined;
+	}
+
 	handleInput(data: string): void {
 		this.#resetCountdown();
 		this.#changed();
@@ -669,15 +680,9 @@ export class HtmlFormDialog implements Component, Focusable {
 		}
 		const stop = this.#stops[this.#focus]!;
 		// A text box in Vim mode takes Esc first: it leaves Insert mode or cancels a half-typed command.
-		const box = this.#hidden
-			? undefined
-			: stop.kind === "text"
-				? this.#editors.get(stop.field)
-				: stop.kind === "other"
-					? this.#others.get(stop.field)
-					: undefined;
-		if (box instanceof Editor && box.vimConsumesEscape() && matchesKey(data, "escape")) {
-			box.handleInput(data);
+		const editor = this.activeEditor();
+		if (editor?.vimConsumesEscape() && matchesKey(data, "escape")) {
+			editor.handleInput(data);
 			return;
 		}
 		// Esc hands the keys to the composer, where Esc interrupts the turn and so cancels the ask.
@@ -968,8 +973,7 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	#initText(field: TextField): void {
 		if (field.multiline) {
-			const editor = new Editor(getEditorTheme());
-			this.#configureEditor(editor);
+			const editor = this.#newEditor();
 			editor.setBorderVisible(false);
 			editor.setMaxHeight(this.#textareaRows(field));
 			// Enter leaves the field (handled before the editor); Shift+Enter inserts newlines.
@@ -1004,8 +1008,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	 */
 	#vimLineEditor(placeholder: string | undefined): Editor | undefined {
 		if (!this.#options.vimMode) return undefined;
-		const editor = new Editor(getEditorTheme());
-		this.#configureEditor(editor);
+		const editor = this.#newEditor();
 		editor.setBorderVisible(false);
 		editor.setMaxHeight(LINE_MAX_ROWS);
 		// Enter moves on to the next field (handled before the editor).
@@ -1015,11 +1018,12 @@ export class HtmlFormDialog implements Component, Focusable {
 		return editor;
 	}
 
-	/** The host's wiring, then the form's Vim mode, always starting in Insert mode (a reopened note too). */
-	#configureEditor(editor: Editor): void {
+	/** A new editor for the form: the host's wiring, then the form's Vim mode. */
+	#newEditor(): Editor {
+		const editor = new Editor(getEditorTheme());
 		this.#options.configureEditor?.(editor);
-		editor.setVimMode(false);
-		if (this.#options.vimMode) editor.setVimMode(true);
+		editor.setVimMode(this.#options.vimMode === true);
+		return editor;
 	}
 
 	/** Fixed textarea height: the `rows` asked for, grown to fit a prefilled draft, capped. */
@@ -1172,9 +1176,9 @@ export class HtmlFormDialog implements Component, Focusable {
 		const option =
 			target ?? (stop.kind === "option" ? stop.option : (this.#open?.highlight ?? this.#current(stop.field)));
 		if (option === undefined || stop.field.options[option]?.disabled !== false) return;
-		const editor = (this.#savedNoteEditor ??= new Editor(getEditorTheme()));
+		const editor = (this.#savedNoteEditor ??= this.#newEditor());
 		// Each note opens in Insert mode, wherever Vim mode was left when the last one closed.
-		this.#configureEditor(editor);
+		editor.resetVimMode();
 		editor.setBorderVisible(false);
 		editor.setMaxHeight(4);
 		editor.disableSubmit = true;

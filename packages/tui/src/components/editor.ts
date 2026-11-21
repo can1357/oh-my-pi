@@ -978,6 +978,12 @@ export class Editor implements Component, Focusable {
 	#vimHistory: { query: string; matches: string[]; at: number; draft: string } | null = null;
 	/** Set by `gj`/`gk` within a key, so the screen column they keep survives it. */
 	#vimScreenMoved = false;
+	/** Bumped by every store into `"+`/`"*`, so a clipboard read started before it cannot overwrite it. */
+	#vimClipboardGeneration = 0;
+	/** Bumped by every Vim key, so a put still waiting on the clipboard is dropped once another key arrives. */
+	#vimKeySerial = 0;
+	/** The current key's put is waiting on the clipboard; it settles the `.` record itself. */
+	#vimPutDeferred = false;
 	/** States `u` stepped back from, newest last; Vim's `Ctrl-R` replays them until the next edit. */
 	#redoStack: EditorState[] = [];
 	#suspendUndo = false;
@@ -1171,12 +1177,24 @@ export class Editor implements Component, Focusable {
 	 *  never left in a state where ordinary typing does nothing. */
 	setVimMode(enabled: boolean): void {
 		if (enabled === (this.#vim !== null)) return;
+		this.#startVim(enabled ? new VimState() : null);
+	}
+
+	/** Start Vim mode over in Insert mode with nothing pending, as a freshly enabled editor (a reopened note). No-op when off. */
+	resetVimMode(): void {
+		const previous = this.#vim;
+		if (previous === null) return;
+		this.#startVim(new VimState());
+		if (previous.mode !== "insert") this.onVimModeChange?.("insert");
+	}
+
+	#startVim(vim: VimState | null): void {
 		this.#vimSession = null;
 		this.#pinnedUndo = null;
-		this.#vim = enabled ? new VimState() : null;
-		if (this.#vim) {
-			this.#vim.screenMove = count => this.#vimScreenMove(count);
-			this.#vim.mode = "insert";
+		this.#vim = vim;
+		if (vim) {
+			vim.screenMove = count => this.#vimScreenMove(count);
+			vim.mode = "insert";
 			const mark = this.#undoMark();
 			this.#pinnedUndo = mark;
 			this.#startVimSession(mark, false);
@@ -2739,12 +2757,15 @@ export class Editor implements Component, Focusable {
 	#runVimKey(key: string, vim: VimState): boolean {
 		const before = vim.mode;
 		const pendingBefore = vim.pendingText;
+		const registerBefore = vim.register;
 		const selectedLinesBefore = this.vimSelectedLines;
 		const mark = this.#undoMark();
 		const pinHere = this.#vimSession === null;
 		if (pinHere) this.#pinnedUndo = mark;
 		const revisionBefore = this.#textRevision;
 		this.#vimScreenMoved = false;
+		this.#vimPutDeferred = false;
+		this.#vimKeySerial++;
 		const commands = vim.handleKey(key, this.#state);
 		if (commands === null) {
 			if (pinHere) this.#pinnedUndo = null;
@@ -2757,16 +2778,19 @@ export class Editor implements Component, Focusable {
 		// Before applying: Escape's commands would otherwise clear the replace log this reads.
 		if (leaving) this.#endVimSession();
 		this.#applyVimCommands(commands);
-		if (this.#textRevision !== revisionBefore) {
-			vim.commitChange();
-		} else {
-			vim.discardChange();
+		// A put waiting on the clipboard settles its `.` record itself once it lands.
+		if (!this.#vimPutDeferred) {
+			if (this.#textRevision !== revisionBefore) vim.commitChange();
+			else vim.discardChange();
 		}
 		// The session baseline follows `cw`'s delete or `o`'s new line, but its undo mark precedes them,
 		// so one `u` restores the whole change. Every other key (`.` too) is a single undo step.
 		if (!editing(before) && editing(vim.mode)) this.#startVimSession(mark, vim.mode === "replace");
 		else if (this.#vimSession === null) {
-			this.#collapseUndoSince(sessionMark ?? mark);
+			// `3u` and `3<C-r>` walk the stack themselves; folding would merge the steps they restore.
+			if (!commands.some(command => command.kind === "undo" || command.kind === "redo")) {
+				this.#collapseUndoSince(sessionMark ?? mark);
+			}
 			this.#pinnedUndo = null;
 		}
 		// Pending and selection size are mode chrome too: hosts echo `2d` and the Visual line count
@@ -2777,10 +2801,8 @@ export class Editor implements Component, Focusable {
 		}
 		// `gj`/`gk` keep their screen column across consecutive moves; any finished command but them resets it.
 		if (!this.#vimScreenMoved && vim.pendingText === "") this.#preferredVisualCol = null;
-		const clipboard = vim.pendingText.slice(0, 2);
-		if ((clipboard === '"+' || clipboard === '"*') && !pendingBefore.startsWith(clipboard)) {
-			this.#prefetchVimClipboard(clipboard.charAt(1));
-		}
+		const register = vim.register;
+		if ((register === "+" || register === "*") && register !== registerBefore) this.#prefetchVimClipboard(register);
 		if (before === "replace" && vim.mode !== "replace") this.#replaceLog.length = 0;
 		if (vim.mode === "replace" && before !== "replace") this.#replaceLog.length = 0;
 		return true;
@@ -2959,16 +2981,18 @@ export class Editor implements Component, Focusable {
 	#prefetchVimClipboard(name: string): void {
 		const read = this.readClipboard;
 		if (read === undefined) return;
+		const generation = this.#vimClipboardGeneration;
 		const pending = read()
 			.then(
 				text => {
+					// A store into the register since the read began wins, and an empty read (no clipboard
+					// tool, as over SSH) leaves the last `"+y` in place.
+					if (generation !== this.#vimClipboardGeneration || text === "") return;
 					// Clipboard text carries no type; like Vim, a trailing newline makes it linewise.
-					if (text === "") this.#vimRegisters.delete(name);
-					else
-						this.#vimRegisters.set(
-							name,
-							text.endsWith("\n") ? { text: text.slice(0, -1), linewise: true } : { text, linewise: false },
-						);
+					this.#vimRegisters.set(
+						name,
+						text.endsWith("\n") ? { text: text.slice(0, -1), linewise: true } : { text, linewise: false },
+					);
 				},
 				() => {},
 			)
@@ -2978,12 +3002,22 @@ export class Editor implements Component, Focusable {
 		this.#vimClipboardRead = pending;
 	}
 
-	/** A `"+p` that beat its clipboard read runs once the read lands. */
+	/**
+	 * A `"+p` that beat its clipboard read runs once the read lands, and settles `.` then. It is
+	 * dropped if another key or an edit came first: its positions were taken from the older buffer.
+	 */
 	#deferVimClipboard(command: Extract<VimCommand, { kind: "paste" | "visualPut" }>): boolean {
 		const read = this.#vimClipboardRead;
 		if (read === null || (command.register !== "+" && command.register !== "*")) return false;
+		const serial = this.#vimKeySerial;
+		const revision = this.#textRevision;
+		this.#vimPutDeferred = true;
 		void read.then(() => {
+			const vim = this.#vim;
+			if (vim === null || serial !== this.#vimKeySerial || revision !== this.#textRevision) return;
 			this.#applyVimCommands([command]);
+			if (this.#textRevision !== revision) vim.commitChange();
+			else vim.discardChange();
 			this.requestRender?.();
 		});
 		return true;
@@ -3041,13 +3075,9 @@ export class Editor implements Component, Focusable {
 		const current = this.#findCurrentVisualLine(visualLines);
 		const target = Math.max(0, Math.min(visualLines.length - 1, current + count));
 		if (target === current) return null;
-		const { cursorLine, cursorCol } = this.#state;
-		// Reuses Up/Down's column rules (and their sticky column), then hands the position back as a motion.
-		this.#moveToVisualLine(visualLines, current, target);
-		const to = { line: this.#state.cursorLine, col: this.#state.cursorCol };
-		this.#state.cursorLine = cursorLine;
-		this.#state.cursorCol = cursorCol;
-		this.#vimScreenMoved = true;
+		// Up/Down's column rules, sticky column included.
+		const to = this.#visualLineTarget(visualLines, current, target);
+		if (to !== null) this.#vimScreenMoved = true;
 		return to;
 	}
 
@@ -3252,6 +3282,7 @@ export class Editor implements Component, Focusable {
 			}
 			this.#vimRegisters.set(named, entry);
 		} else if (name !== undefined && /^[0-9+*-]$/.test(name)) {
+			if (name === "+" || name === "*") this.#vimClipboardGeneration++;
 			this.#vimRegisters.set(name, entry);
 		} else if (yank) {
 			this.#vimRegisters.set("0", entry);
@@ -4614,40 +4645,45 @@ export class Editor implements Component, Focusable {
 		currentVisualLine: number,
 		targetVisualLine: number,
 	): void {
+		const to = this.#visualLineTarget(visualLines, currentVisualLine, targetVisualLine);
+		if (to === null) return;
+		this.#state.cursorLine = to.line;
+		this.#state.cursorCol = to.col;
+	}
+
+	/** Where a move to `targetVisualLine` lands under the sticky column rules (which it updates); the cursor stays. */
+	#visualLineTarget(
+		visualLines: Array<{ logicalLine: number; startCol: number; length: number }>,
+		currentVisualLine: number,
+		targetVisualLine: number,
+	): VimPosition | null {
 		const currentVL = visualLines[currentVisualLine];
 		const targetVL = visualLines[targetVisualLine];
+		if (!currentVL || !targetVL) return null;
+		// Work in visual cells (grapheme-walked), not UTF-16 code units: code-unit
+		// columns land mid-surrogate on emoji and drift on wide CJK glyphs.
+		const sourceLine = this.#state.lines[currentVL.logicalLine] || "";
+		const sourceText = sourceLine.slice(currentVL.startCol, currentVL.startCol + currentVL.length);
+		const currentVisualCol = visualColAtOffset(sourceText, this.#state.cursorCol - currentVL.startCol);
 
-		if (currentVL && targetVL) {
-			// Work in visual cells (grapheme-walked), not UTF-16 code units: code-unit
-			// columns land mid-surrogate on emoji and drift on wide CJK glyphs.
-			const sourceLine = this.#state.lines[currentVL.logicalLine] || "";
-			const sourceText = sourceLine.slice(currentVL.startCol, currentVL.startCol + currentVL.length);
-			const currentVisualCol = visualColAtOffset(sourceText, this.#state.cursorCol - currentVL.startCol);
+		// For non-last segments, clamp before the segment end to stay within the segment
+		const isLastSourceSegment =
+			currentVisualLine === visualLines.length - 1 ||
+			visualLines[currentVisualLine + 1]?.logicalLine !== currentVL.logicalLine;
+		const sourceMaxVisualCol = maxSegmentVisualCol(sourceText, isLastSourceSegment);
 
-			// For non-last segments, clamp before the segment end to stay within the segment
-			const isLastSourceSegment =
-				currentVisualLine === visualLines.length - 1 ||
-				visualLines[currentVisualLine + 1]?.logicalLine !== currentVL.logicalLine;
-			const sourceMaxVisualCol = maxSegmentVisualCol(sourceText, isLastSourceSegment);
+		const isLastTargetSegment =
+			targetVisualLine === visualLines.length - 1 ||
+			visualLines[targetVisualLine + 1]?.logicalLine !== targetVL.logicalLine;
+		const targetLine = this.#state.lines[targetVL.logicalLine] || "";
+		const targetText = targetLine.slice(targetVL.startCol, targetVL.startCol + targetVL.length);
+		const targetMaxVisualCol = maxSegmentVisualCol(targetText, isLastTargetSegment);
 
-			const isLastTargetSegment =
-				targetVisualLine === visualLines.length - 1 ||
-				visualLines[targetVisualLine + 1]?.logicalLine !== targetVL.logicalLine;
-			const targetLine = this.#state.lines[targetVL.logicalLine] || "";
-			const targetText = targetLine.slice(targetVL.startCol, targetVL.startCol + targetVL.length);
-			const targetMaxVisualCol = maxSegmentVisualCol(targetText, isLastTargetSegment);
+		const moveToVisualCol = this.#computeVerticalMoveColumn(currentVisualCol, sourceMaxVisualCol, targetMaxVisualCol);
 
-			const moveToVisualCol = this.#computeVerticalMoveColumn(
-				currentVisualCol,
-				sourceMaxVisualCol,
-				targetMaxVisualCol,
-			);
-
-			// Set cursor position, snapping to a grapheme boundary in the target text
-			this.#state.cursorLine = targetVL.logicalLine;
-			const targetCol = targetVL.startCol + offsetAtVisualCol(targetText, moveToVisualCol);
-			this.#state.cursorCol = Math.min(targetCol, targetLine.length);
-		}
+		// Snap to a grapheme boundary in the target text
+		const targetCol = targetVL.startCol + offsetAtVisualCol(targetText, moveToVisualCol);
+		return { line: targetVL.logicalLine, col: Math.min(targetCol, targetLine.length) };
 	}
 
 	/**
@@ -4730,11 +4766,16 @@ export class Editor implements Component, Focusable {
 		// EditorState holds only primitives plus an array of immutable strings:
 		// a shallow array copy is a complete snapshot. structuredClone pays for
 		// general-case dispatch per element on every edit keystroke.
-		this.#undoStack.push({
+		this.#pushUndoSnapshot({
 			lines: this.#state.lines.slice(),
 			cursorLine: this.#state.cursorLine,
 			cursorCol: this.#state.cursorCol,
 		});
+	}
+
+	/** Push onto the undo stack, evicting the oldest snapshot past the cap unless it is the open change's restore point. */
+	#pushUndoSnapshot(snapshot: EditorState): void {
+		this.#undoStack.push(snapshot);
 		if (this.#undoStack.length <= MAX_UNDO_STACK) return;
 		const pin = this.#pinnedUndo;
 		const anchorIndex = pin === null ? -1 : pin.depth - (this.#undoShifts - pin.shifts);
@@ -4764,15 +4805,11 @@ export class Editor implements Component, Focusable {
 	#applyRedo(): void {
 		const snapshot = this.#redoStack.pop();
 		if (!snapshot) return;
-		this.#undoStack.push({
+		this.#pushUndoSnapshot({
 			lines: this.#state.lines,
 			cursorLine: snapshot.cursorLine,
 			cursorCol: snapshot.cursorCol,
 		});
-		if (this.#undoStack.length > MAX_UNDO_STACK) {
-			this.#undoStack.shift();
-			this.#undoShifts++;
-		}
 		this.#restoreUndoSnapshot(snapshot);
 	}
 

@@ -100,8 +100,10 @@ export interface HookEditorOptions {
 	 * hint out of view.
 	 */
 	maxHeight?: number;
-	/** Called on the inner editor once it is built, e.g. to turn on Vim mode. */
+	/** Called on the inner editor once it is built, e.g. to wire Vim mode's clipboard and cursor shape. */
 	configureEditor?: (editor: Editor) => void;
+	/** Vim-style modal editing in the inner editor; Escape then leaves Insert mode before it cancels. */
+	vimMode?: boolean;
 }
 
 /** Interactive multiline dialog used by hooks and the ask tool's Other response. */
@@ -159,6 +161,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
 		options?.configureEditor?.(this.#editor);
+		this.#editor.setVimMode(options?.vimMode === true);
 		if (this.#promptStyle) {
 			this.#editor.setBorderVisible(false);
 			this.#editor.setPromptGutter("> ");
@@ -374,6 +377,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		this.dispose();
 		if (images?.length) this.#onCancelCallback(text, images);
 		else this.#onCancelCallback(text);
+	}
+
+	/** The inner editor, which holds the keys while the prompt is focused. */
+	activeEditor(): Editor {
+		return this.#editor;
 	}
 
 	/** Route non-bracketed paste transports (e.g. kitty's OSC 5522 enhanced clipboard)

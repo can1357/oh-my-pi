@@ -789,17 +789,24 @@ export class VimState {
 
 	/** True while a count, operator, `g`, text-object, find, `r`, `"x` prefix, or search is half-typed — Escape cancels it. */
 	get pending(): boolean {
+		return this.#commandPending() || this.#registerPending || this.#register !== null || this.#search !== null;
+	}
+
+	/** A count, operator, `g`, text object, find, or `r` is waiting for the key that finishes the command. */
+	#commandPending(): boolean {
 		return (
 			this.#count.length > 0 ||
 			this.#operator !== null ||
 			this.#pendingG ||
 			this.#textObject !== null ||
 			this.#findPending !== null ||
-			this.#replaceChar ||
-			this.#registerPending ||
-			this.#register !== null ||
-			this.#search !== null
+			this.#replaceChar
 		);
+	}
+
+	/** The register a `"x` prefix named for the command being typed, or null. */
+	get register(): string | null {
+		return this.#register;
 	}
 
 	/** True while `/` or `?` is reading search text: Enter, Backspace, and Space go to the search line. */
@@ -1036,14 +1043,7 @@ export class VimState {
 		const commands = this.#dispatchKey(key, buf);
 		// The key that names the register (`"a`) is not the command it is for.
 		if (register === null) return commands;
-		const waiting =
-			this.#count.length > 0 ||
-			this.#operator !== null ||
-			this.#pendingG ||
-			this.#textObject !== null ||
-			this.#findPending !== null ||
-			this.#replaceChar;
-		if (waiting && this.#register !== null) return commands;
+		if (this.#commandPending() && this.#register !== null) return commands;
 		this.#register = null;
 		if (commands === null) return null;
 		return commands.map(command =>

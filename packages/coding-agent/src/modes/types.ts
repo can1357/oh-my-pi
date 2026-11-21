@@ -589,7 +589,7 @@ export interface InteractiveModeContext {
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(): void;
 	updateEditorBorderColor(): void;
-	/** Give an editor a dialog owns the composer's Vim setting, clipboard routing, and cursor shape. */
+	/** Give an editor a dialog owns the composer's clipboard routing and a cursor shape that shows its Vim mode. */
 	configureDialogEditor(editor: Editor): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;

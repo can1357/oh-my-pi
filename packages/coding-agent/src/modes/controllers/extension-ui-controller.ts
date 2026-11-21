@@ -1202,6 +1202,7 @@ export class ExtensionUiController {
 						externalEditor: editDialogExternally,
 						question: prompt.question,
 						configureEditor: editor => this.ctx.configureDialogEditor(editor),
+						vimMode: cfgTuiVimMode.get(this.ctx.settings),
 						...options,
 					},
 				);
@@ -1603,6 +1604,7 @@ export class ExtensionUiController {
 					...editorOptions,
 					externalEditor: editDialogExternally,
 					configureEditor: editor => this.ctx.configureDialogEditor(editor),
+					vimMode: cfgTuiVimMode.get(this.ctx.settings),
 				},
 			);
 			this.ctx.closeLinkBrowser();
