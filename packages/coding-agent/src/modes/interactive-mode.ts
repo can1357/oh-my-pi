@@ -1856,7 +1856,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		const scope = { agentRegistry: AgentRegistry.global(), agentLifecycle: () => AgentLifecycleManager.global() };
-		stopAgentRun(scope, this.session.asyncJobManager, id).then(
+		stopAgentRun(scope, this.session.asyncJobManager, id, USER_INTERRUPT_LABEL).then(
 			outcome => {
 				if (outcome.status !== "cancelled") this.showWarning(outcome.message);
 				this.ui.requestRender();
