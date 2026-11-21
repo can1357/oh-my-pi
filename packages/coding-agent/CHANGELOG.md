@@ -131,7 +131,7 @@
 
 ### Fixed
 
-- Fixed edits anchored on lines shown by numbered bash output (`grep -n`, `rg -n`, `nl -ba`, `cat -n`) being rejected as never displayed: the bash result now credits rows that match the file and lists the file's edit tag with the credited lines (e.g. `[src/foo.ts#AB12] lines 10-12, 35`)
+- Fixed edits anchored on lines shown by numbered bash output (`grep -n`, `rg -n`, `nl -ba`, `cat -n`) being rejected as never displayed: the bash result now credits rows that match the file and lists the file's edit tag with the credited lines (e.g. `[src/foo.ts#AB12] lines 10-12, 35`) ([#20054](https://github.com/can1357/oh-my-pi/pull/20054) by [@apoc](https://github.com/apoc))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
