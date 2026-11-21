@@ -39,7 +39,7 @@ describe("write streaming preview incremental line tracking", () => {
 	function renderCollapsed(content: string, options: { expanded: boolean; isPartial: boolean; spinnerFrame: number }) {
 		return getUiTheme().then(uiTheme => {
 			const component = writeToolRenderer.renderCall({ path: "/tmp/inc.ts", content }, options, uiTheme);
-			if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+			if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 			return component.render(120);
 		});
 	}
@@ -118,7 +118,7 @@ describe("write streaming preview incremental line tracking", () => {
 				options,
 				uiTheme,
 			);
-			if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+			if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 			rendered = component.render(120);
 		}
 
@@ -134,7 +134,7 @@ describe("write streaming preview incremental line tracking", () => {
 		const options = { expanded: true, isPartial: true, spinnerFrame: 0 };
 		const render = (content: string) => {
 			const component = writeToolRenderer.renderCall({ path: "/tmp/restart.ts", content }, options, uiTheme);
-			if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+			if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 			return component.render(120);
 		};
 		const tail = `${"x".repeat(80)}\n`;
@@ -163,12 +163,12 @@ describe("write streaming preview incremental line tracking", () => {
 		for (const piece of ["const a = ", "1;\nconst b = ", "2;\nconst c = 3"]) {
 			acc += piece;
 			const component = writeToolRenderer.renderCall({ path: "/tmp/chunks.ts", content: acc }, options, uiTheme);
-			if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+			if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 			component.render(120);
 		}
 		expect(pushes).toEqual(["const a = 1;\n", "const b = 2;\n"]);
 		const component = writeToolRenderer.renderCall({ path: "/tmp/chunks.ts", content: acc }, options, uiTheme);
-		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+		if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 		expect(stripAnsi(component.render(120).join("\n"))).toContain("const c = 3");
 	});
 
@@ -187,7 +187,7 @@ describe("write streaming preview incremental line tracking", () => {
 		const content = "const solo = 1;";
 		const streamingOptions = { expanded: true, isPartial: true, spinnerFrame: 0 };
 		const streaming = writeToolRenderer.renderCall({ path: "/tmp/solo.ts", content }, streamingOptions, uiTheme);
-		if (!streaming) throw new Error("expected a rendered component for a non-xdev write path");
+		if (!streaming) throw new Error("expected a rendered component for a non-tool-command write path");
 		const streamingText = stripAnsi(streaming.render(120).join("\n"));
 		expect(streamingText).toContain("const solo = 1;");
 		expect(streamingText).not.toContain("H(");
@@ -195,7 +195,7 @@ describe("write streaming preview incremental line tracking", () => {
 
 		const settledOptions = { expanded: true, isPartial: true, spinnerFrame: 0, argsComplete: true };
 		const settled = writeToolRenderer.renderCall({ path: "/tmp/solo.ts", content }, settledOptions, uiTheme);
-		if (!settled) throw new Error("expected a rendered component for a non-xdev write path");
+		if (!settled) throw new Error("expected a rendered component for a non-tool-command write path");
 		expect(stripAnsi(settled.render(120).join("\n"))).toContain("H(const solo = 1;)");
 		expect(pushes).toEqual(["const solo = 1;"]);
 		settled.render(120);

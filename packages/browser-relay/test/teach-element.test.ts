@@ -30,10 +30,11 @@ it("prefers referenced ARIA names (including hidden labels) over local text and 
 		<input type="password" value="must-not-record">
 		<a href="/back"> Back    to cart </a>`);
 	const [button, select, password, link] = document.querySelectorAll("button, select, input, a");
-	const describe = (element: typeof button) => nameFor(element, document, (target, includeHidden) => {
-		if (!includeHidden && target.getAttribute("hidden") !== null) return "";
-		return target.textContent ?? "";
-	});
+	const describe = (element: typeof button) =>
+		nameFor(element, document, (target, includeHidden) => {
+			if (!includeHidden && target.getAttribute("hidden") !== null) return "";
+			return target.textContent ?? "";
+		});
 	expect([roleFor(button), describe(button)]).toEqual(["button", "Billing History"]);
 	expect(roleFor(select)).toBe("listbox");
 	expect([roleFor(password), describe(password)]).toEqual([undefined, undefined]);

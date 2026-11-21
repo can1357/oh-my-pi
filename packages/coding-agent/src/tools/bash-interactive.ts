@@ -11,6 +11,7 @@ import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-p
 import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { holdBlockedStatus } from "../utils/run-status";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
+import { appendImageLinks } from "../utils/image-temp";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 
 export interface BashInteractiveResult extends OutputSummary {
@@ -181,11 +182,13 @@ export async function runInteractiveBashPty(
 						const tail = graphics.finish();
 						if (tail) sink.push(tail);
 						const [summary, images] = await Promise.all([sink.dump(), graphics.images()]);
+						const output = await appendImageLinks(summary.output, images);
 						done({
 							exitCode: run.exitCode,
 							cancelled: run.cancelled,
 							timedOut: run.timedOut,
 							...summary,
+							output,
 							...(images.length > 0 ? { images } : {}),
 						});
 					})();
