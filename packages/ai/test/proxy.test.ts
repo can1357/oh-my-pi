@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { clearAwsCredentialCache, resolveAwsCredentials } from "@oh-my-pi/pi-ai/providers/aws-credentials";
+import type { FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import {
 	__resetGlobalProxyFetch,
 	__resetProxyCache,
@@ -11,10 +14,14 @@ import {
 	getProxyForProvider,
 	getProxyForUrl,
 	installGlobalProxyFetch,
+	isLanHostname,
 	isLocalOrMetadataHost,
 	shouldBypassProxy,
+	withProxyInit,
 	wrapFetchForProxy,
 } from "@oh-my-pi/pi-ai/utils/proxy";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const PROXY = "http://127.0.0.1:24560";
 
@@ -67,6 +74,75 @@ async function waitForSocketClose(socket: net.Socket): Promise<void> {
 	const closed = Promise.withResolvers<void>();
 	socket.once("close", () => closed.resolve());
 	await closed.promise;
+}
+
+interface RecordingProxyServer {
+	url: string;
+	/** Number of requests that reached the proxy. */
+	readonly hits: number;
+	close(): Promise<void>;
+}
+
+/**
+ * Minimal HTTP proxy that counts every request it receives and answers `200`,
+ * so a request that wrongly takes the proxy path is directly observable.
+ */
+async function createRecordingProxyServer(): Promise<RecordingProxyServer> {
+	const sockets = new Set<net.Socket>();
+	const state = { hits: 0 };
+	const server = net.createServer(socket => {
+		state.hits++;
+		sockets.add(socket);
+		socket.once("close", () => sockets.delete(socket));
+		socket.on("data", () => {
+			socket.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+			socket.end();
+		});
+	});
+
+	const listening = Promise.withResolvers<void>();
+	const onError = (error: Error): void => listening.reject(error);
+	server.once("error", onError);
+	server.listen(0, "127.0.0.1", () => {
+		server.off("error", onError);
+		listening.resolve();
+	});
+	await listening.promise;
+
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("expected TCP listener address");
+
+	return {
+		url: `http://127.0.0.1:${address.port}`,
+		get hits() {
+			return state.hits;
+		},
+		async close() {
+			for (const socket of sockets) socket.destroy();
+			const closed = Promise.withResolvers<void>();
+			server.close(error => {
+				if (error) closed.reject(error);
+				else closed.resolve();
+			});
+			await closed.promise;
+		},
+	};
+}
+
+/** Model whose endpoint is a LAN inference box reached over mDNS. */
+function lanModel(): Model {
+	return buildModel({
+		id: "lan-model",
+		name: "LAN Model",
+		api: "openai-completions",
+		provider: "openai",
+		baseUrl: "http://gpu-box.local:8080/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 4096,
+		maxTokens: 1024,
+	} as ModelSpec);
 }
 const isProxyEnvKey = (k: string): boolean =>
 	k.startsWith("PI_PROXY") ||
@@ -223,6 +299,165 @@ describe("isLocalOrMetadataHost / shouldBypassProxy hard-coded ranges", () => {
 	}
 });
 
+describe("LAN .local names", () => {
+	it("bypasses the proxy for a LAN inference box on a .local name", () => {
+		// A home-LAN inference endpoint (gpu-box.local:8080) is only reachable
+		// directly; sending it through the remote egress proxy fails the request.
+		expect(isLanHostname("gpu-box.local")).toBe(true);
+		expect(shouldBypassProxy(new URL("http://gpu-box.local:8080/v1"))).toBe(true);
+	});
+
+	it("keeps .local names out of the shared local/metadata predicate", () => {
+		// The shared predicate also gates the plain-HTTP credential endpoint guard:
+		// a `.local` name is not a trusted local address (any LAN peer can answer
+		// one), so widening the predicate would leak the container credential
+		// token in plaintext to whoever answers that name.
+		expect(isLocalOrMetadataHost("gpu-box.local")).toBe(false);
+	});
+
+	it("does not bypass a host that merely ends in 'local'", () => {
+		expect(isLanHostname("notlocal")).toBe(false);
+		expect(isLocalOrMetadataHost("notlocal")).toBe(false);
+		expect(shouldBypassProxy(new URL("http://notlocal/v1"))).toBe(false);
+	});
+
+	it("bypasses the proxy for the absolute DNS spelling of a .local host", () => {
+		// `new URL(...).hostname` keeps the DNS root label, so the suffix check
+		// has to see through it — the catalog's local-endpoint check does.
+		expect(new URL("http://gpu-box.local.:8080/v1").hostname).toBe("gpu-box.local.");
+		expect(isLanHostname("gpu-box.local.")).toBe(true);
+		expect(shouldBypassProxy(new URL("http://gpu-box.local.:8080/v1"))).toBe(true);
+	});
+
+	it("pins a bypassed host to a direct connection", () => {
+		const init = withProxyInit("http://gpu-box.local:8080/v1", undefined, undefined) as
+			| { proxy?: unknown }
+			| undefined;
+		expect(init?.proxy).toBe(false);
+	});
+});
+
+describe("AWS container credential endpoint guard", () => {
+	const AWS_ENV_KEYS = [
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"AWS_PROFILE",
+		"AWS_SDK_LOAD_CONFIG",
+		"AWS_REGION",
+		"AWS_DEFAULT_REGION",
+		"AWS_CONFIG_FILE",
+		"AWS_SHARED_CREDENTIALS_FILE",
+		"AWS_EC2_METADATA_DISABLED",
+		"AWS_WEB_IDENTITY_TOKEN_FILE",
+		"AWS_ROLE_ARN",
+		"AWS_ROLE_SESSION_NAME",
+		"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN",
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+	] as const;
+
+	let savedAws: Record<string, string | undefined>;
+	let awsTmp: string;
+
+	beforeEach(async () => {
+		savedAws = {};
+		for (const key of AWS_ENV_KEYS) {
+			savedAws[key] = Bun.env[key];
+			delete Bun.env[key];
+		}
+		awsTmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-aws-guard-"));
+		// Empty profile files so static/profile resolution definitely misses and
+		// the container endpoint is the only credential source under test.
+		await Bun.write(path.join(awsTmp, "credentials"), "");
+		await Bun.write(path.join(awsTmp, "config"), "");
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = path.join(awsTmp, "credentials");
+		Bun.env.AWS_CONFIG_FILE = path.join(awsTmp, "config");
+		Bun.env.AWS_EC2_METADATA_DISABLED = "true";
+		clearAwsCredentialCache();
+	});
+
+	afterEach(async () => {
+		for (const key of AWS_ENV_KEYS) {
+			const value = savedAws[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		clearAwsCredentialCache();
+		await removeWithRetries(awsTmp);
+	});
+
+	it("rejects a plain-http .local credential endpoint and never sends the token", async () => {
+		Bun.env.AWS_CONTAINER_CREDENTIALS_FULL_URI = "http://gpu-box.local/creds";
+		Bun.env.AWS_CONTAINER_AUTHORIZATION_TOKEN = "container-secret";
+		const requests: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			requests.push(String(input));
+			return Response.json({
+				AccessKeyId: "AKIA",
+				SecretAccessKey: "secret",
+				Expiration: "2099-01-01T00:00:00Z",
+			});
+		};
+
+		await expect(resolveAwsCredentials({ fetch: fetchImpl })).rejects.toThrow(
+			/must use HTTPS or a local metadata host/,
+		);
+		expect(requests).toHaveLength(0);
+	});
+});
+
+describe("native proxy environment", () => {
+	it("keeps a .local inference request off the HTTP_PROXY egress", async () => {
+		const proxy = await createRecordingProxyServer();
+		try {
+			Bun.env.HTTP_PROXY = proxy.url;
+			__resetProxyCache();
+
+			await transportFetch(lanModel(), undefined)("http://gpu-box.local:8080/v1", {
+				signal: AbortSignal.timeout(2_000),
+			}).catch(() => undefined);
+
+			expect(proxy.hits).toBe(0);
+		} finally {
+			await proxy.close();
+		}
+	});
+
+	it("keeps the absolute DNS spelling off the HTTP_PROXY egress", async () => {
+		const proxy = await createRecordingProxyServer();
+		try {
+			Bun.env.HTTP_PROXY = proxy.url;
+			__resetProxyCache();
+
+			await transportFetch(lanModel(), undefined)("http://gpu-box.local.:8080/v1", {
+				signal: AbortSignal.timeout(2_000),
+			}).catch(() => undefined);
+
+			expect(proxy.hits).toBe(0);
+		} finally {
+			await proxy.close();
+		}
+	});
+
+	it("still routes a remote host through the native proxy", async () => {
+		const proxy = await createRecordingProxyServer();
+		try {
+			Bun.env.HTTP_PROXY = proxy.url;
+			__resetProxyCache();
+
+			await transportFetch(lanModel(), undefined)("http://api.openai.com/v1", {
+				signal: AbortSignal.timeout(2_000),
+			}).catch(() => undefined);
+
+			expect(proxy.hits).toBe(1);
+		} finally {
+			await proxy.close();
+		}
+	});
+});
+
 describe("shouldBypassProxy NO_PROXY rules", () => {
 	it("matches an exact host", () => {
 		Bun.env.NO_PROXY = "api.sakana.ai";
@@ -257,6 +492,38 @@ describe("shouldBypassProxy NO_PROXY rules", () => {
 		Bun.env.NO_PROXY = "api.sakana.ai:443";
 		expect(shouldBypassProxy(new URL("wss://api.sakana.ai/v1"))).toBe(true);
 	});
+
+	it("normalizes the DNS root label on both the rule and the target", () => {
+		// `new URL(...).hostname` keeps the DNS root label, so the rule and the
+		// target have to be normalized the same way. Otherwise an absolute
+		// spelling on either side silently fails to match and the exempted host
+		// gets tunnelled through the proxy.
+		Bun.env.NO_PROXY = "api.internal.example.";
+		expect(shouldBypassProxy(new URL("https://api.internal.example./v1"))).toBe(true);
+		expect(shouldBypassProxy(new URL("https://api.internal.example/v1"))).toBe(true);
+
+		Bun.env.NO_PROXY = "api.internal.example";
+		expect(shouldBypassProxy(new URL("https://api.internal.example./v1"))).toBe(true);
+
+		Bun.env.NO_PROXY = "api.internal.example.:443";
+		expect(shouldBypassProxy(new URL("https://api.internal.example./v1"))).toBe(true);
+	});
+
+	it("normalizes the DNS root label on a leading-dot rule", () => {
+		Bun.env.NO_PROXY = ".internal.example.";
+		expect(shouldBypassProxy(new URL("https://api.internal.example./v1"))).toBe(true);
+		expect(shouldBypassProxy(new URL("https://api.internal.example/v1"))).toBe(true);
+	});
+
+	it("does not tunnel a dotted NO_PROXY exemption through the proxy", () => {
+		Bun.env.NO_PROXY = "api.internal.example.";
+		Bun.env.PI_PROXY = PROXY;
+
+		const init = withProxyInit("https://api.internal.example./v1", undefined, PROXY) as
+			| { proxy?: unknown }
+			| undefined;
+		expect(init?.proxy).toBe(false);
+	});
 });
 
 describe("wrapFetchForProxy", () => {
@@ -278,11 +545,11 @@ describe("wrapFetchForProxy", () => {
 		expect(calls[0].proxy).toBe(PROXY);
 	});
 
-	it("does not inject a proxy for a bypassed (loopback) host", async () => {
+	it("pins a bypassed (loopback) host to a direct connection", async () => {
 		Bun.env.PI_PROXY_WRAP_BYPASS = PROXY;
 		const { fetch, calls } = makeCapture();
 		await wrapFetchForProxy(fetch, "wrap-bypass")("http://127.0.0.1:11434/api/chat");
-		expect(calls[0].proxy).toBeUndefined();
+		expect(calls[0].proxy).toBe(false);
 	});
 
 	it("does not route one provider's request through another provider's proxy", async () => {
@@ -348,7 +615,7 @@ describe("installGlobalProxyFetch", () => {
 		Bun.env.PI_PROXY = PROXY;
 		installGlobalProxyFetch();
 		await fetch("http://127.0.0.1:11434/api/chat");
-		expect(calls[0].proxy).toBeUndefined();
+		expect(calls[0].proxy).toBe(false);
 	});
 
 	it.skipIf(process.platform === "win32")(
