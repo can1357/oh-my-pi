@@ -1,8 +1,8 @@
 /**
  * Cross-process advisory lock for packages that serialize access to an
  * on-disk resource. The native handle is process-owned and automatically
- * released on exit: Linux uses abstract Unix sockets, Windows uses named
- * mutexes, and other Unix platforms use `flock(2)` on `${filePath}.lock`.
+ * released on exit: Windows uses named mutexes, Linux an open-file-description
+ * lock on `${filePath}.lock`, and other Unix platforms `flock(2)` on it.
  */
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";

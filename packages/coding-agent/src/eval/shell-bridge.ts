@@ -8,10 +8,14 @@
  * one persistent shell per agent session (separate from the `bash` tool's):
  * variables and functions carry over, but each command starts in the session
  * cwd or its own `cwd`.
+ * The session's tool commands run in it too, each reported as a status event
+ * under its tool name.
  */
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { shellChangeSnapshots } from "../commit/selective/journal";
 import { executeBash } from "../exec/bash-executor";
+import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { cfgBashGitGuard } from "../exec/settings";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
@@ -30,6 +34,8 @@ const MAX_OUTPUT_CHARS = 16 * 1024 * 1024;
 export interface EvalShellBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
+	/** Enclosing eval call, for the tool commands the command runs. */
+	parentToolCallId?: string;
 	emitStatus?: (event: JsStatusEvent) => void;
 }
 
@@ -60,6 +66,32 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 	const chunks: string[] = [];
 	let length = 0;
 	let truncated = false;
+	const names = toolCommandNames(session);
+	const toolContext = session.getToolContext?.();
+	const commands =
+		names.length === 0
+			? undefined
+			: {
+					names,
+					handler: createToolCommandHandler({
+						session,
+						toolCallId: `sh-${crypto.randomUUID()}`,
+						signal,
+						context: toolContext && {
+							...toolContext,
+							programmatic: true,
+							parentToolCallId: options.parentToolCallId,
+						},
+						onDispatch: dispatch => {
+							options.emitStatus?.({
+								op: dispatch.tool,
+								mode: dispatch.mode,
+								code: dispatch.exitCode,
+								...(dispatch.exitCode === 0 ? {} : { hasError: true }),
+							});
+						},
+					}),
+				};
 	const result = await executeBash(command, {
 		cwd: cwd ? resolveToCwd(cwd, session.cwd) : session.cwd,
 		// 0 disables the executor deadline: the cell's own deadline governs.
@@ -75,8 +107,12 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 		filesystem: new InternalUrlFilesystem({
 			context: sessionResolveContext(session, { signal }),
 			tier: "read",
+			onFileChange:
+				session.recordFileChange &&
+				(change => session.recordFileChange?.({ tool: "eval", ...shellChangeSnapshots(change) })),
 		}).shellFilesystem(),
 		speech: sessionShellSpeech(session),
+		commands,
 		// The sink's inline window is a bounded preview; collect the whole stream instead.
 		chunkThrottleMs: 0,
 		onChunk: chunk => {

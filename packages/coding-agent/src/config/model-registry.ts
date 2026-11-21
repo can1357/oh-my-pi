@@ -2,6 +2,7 @@ import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { getProviderHooks, type ProviderHooks, setProviderHooks } from "@oh-my-pi/pi-ai/provider-hooks";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
@@ -15,11 +16,18 @@ import type {
 	ModelSpec,
 	RemoteCompactionConfig,
 	SimpleStreamOptions,
+	StreamOptions,
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
+import type {
+	ImageGenerationOptions,
+	ImageGenerationRequest,
+	ImageGenerationResult,
+} from "@oh-my-pi/pi-ai/images/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
+import { setRuntimeProviderRule } from "@oh-my-pi/pi-catalog/compat/cascade";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	clampCodexContextWindow,
@@ -37,7 +45,6 @@ import {
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
 	googleAntigravityModelManagerOptions,
-	googleGeminiCliModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
 	kiroModelManagerOptions,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
@@ -54,8 +61,10 @@ import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
-import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
+import { redactUrlForLog } from "../utils/redact-url";
+import type { SearchParams } from "../web/search/providers/base";
+import type { SearchResponse } from "../web/search/types";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
@@ -111,12 +120,12 @@ import {
 	BUILT_IN_DISCOVERY_CACHE_TTL_MS,
 	BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS,
 	type BuiltInDiscoveryResult,
-	extractGoogleOAuthProjectId,
 	extractGoogleOAuthToken,
 	getOAuthCredentialsForProvider,
 	isAuthenticated,
 	isDiscoveryBearerApiKey,
 	kNoAuth,
+	type OAuthDiscoveryAccount,
 	type ProviderDiscoveryState,
 	RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS,
 	resolveOAuthDiscoveryAccounts,
@@ -129,6 +138,7 @@ export { mergeDiscoveredModel } from "./model-patch";
 export {
 	isAuthenticated,
 	kNoAuth,
+	type OAuthDiscoveryAccount,
 	type ProviderDiscoveryState,
 	type ProviderDiscoveryStatus,
 } from "./model-provider-discovery";
@@ -546,6 +556,10 @@ export class ModelRegistry {
 	// would silently revert the provider to its unprojected catalog.
 	#runtimeModelModifiers: Map<string, ModifyModelsHook> = new Map();
 	#lastModelModifierWarnings: Map<string, string> = new Map();
+	/** Extension web searches by provider ({@link ProviderConfigInput.webSearch}). */
+	#runtimeWebSearches = new Map<string, NonNullable<ProviderConfigInput["webSearch"]>>();
+	/** Extension discovery by built-in provider ({@link ProviderConfigInput.discoverModels}). */
+	#runtimeDiscoveries = new Map<string, NonNullable<ProviderConfigInput["discoverModels"]>>();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
@@ -3092,20 +3106,6 @@ export class ModelRegistry {
 		}
 	}
 
-	/**
-	 * Resolve the GCP project id for Gemini CLI quota discovery from the stored
-	 * OAuth credential matched to the token in use. Used only as a fallback for
-	 * the discovery fast path, where `peekApiKey` returns the bare access token
-	 * (stripping the structured identity); matching strictly by `access` avoids
-	 * attaching an unrelated account's project. Workspace/Standard accounts
-	 * require the id because project-less `loadCodeAssist` cannot resolve one.
-	 */
-	#resolveGeminiCliDiscoveryProjectId(oauthToken: string): string | undefined {
-		const credentials = getOAuthCredentialsForProvider(this.authStorage, "google-gemini-cli");
-		const projectId = credentials.find(credential => credential.access === oauthToken)?.projectId?.trim();
-		return projectId ? projectId : undefined;
-	}
-
 	async #collectBuiltInModelManagerOptions(
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
@@ -3136,17 +3136,6 @@ export class ModelRegistry {
 							);
 						},
 						endpoint: this.#descriptorBaseUrl("google-antigravity"),
-						fetch: this.#fetch,
-					}),
-			},
-			{
-				providerId: "google-gemini-cli",
-				resolveKey: extractGoogleOAuthToken,
-				createOptions: (oauthToken, raw) =>
-					googleGeminiCliModelManagerOptions({
-						oauthToken,
-						projectId: extractGoogleOAuthProjectId(raw) ?? this.#resolveGeminiCliDiscoveryProjectId(oauthToken),
-						endpoint: this.#descriptorBaseUrl("google-gemini-cli"),
 						fetch: this.#fetch,
 					}),
 			},
@@ -3201,17 +3190,21 @@ export class ModelRegistry {
 			},
 		];
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
-		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(descriptor => {
-			if (disabledProviders.has(descriptor.providerId)) return false;
-			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
-			if (this.#runtimeModelManagers.has(descriptor.providerId)) return false;
-			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
-		});
-		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor => {
-			if (disabledProviders.has(descriptor.providerId)) return false;
-			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
-			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
-		});
+		// A pi-native override routes the provider through a gateway, which is not
+		// the provider's listing API. Descriptors that ignore the override's base
+		// URL would also send the gateway key to the provider itself.
+		const discoverable = (providerId: string): boolean =>
+			!disabledProviders.has(providerId) &&
+			(this.#runtimeProviderOverrides.get(providerId)?.transport ??
+				this.#providerOverrides.get(providerId)?.transport) !== "pi-native" &&
+			!configuredDiscoveryProviders.has(providerId) &&
+			(providerFilter?.has(providerId) ?? true);
+		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
+			descriptor => discoverable(descriptor.providerId) && !this.#runtimeModelManagers.has(descriptor.providerId),
+		);
+		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor =>
+			discoverable(descriptor.providerId),
+		);
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
@@ -3268,7 +3261,10 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+				const managerOptions = this.#withRuntimeDiscovery(
+					descriptor.createModelManagerOptions(preparedConfig),
+					apiKey,
+				);
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
@@ -3282,7 +3278,7 @@ export class ModelRegistry {
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(descriptor.createOptions(key, specialKeys[i]));
+			options.push(this.#withRuntimeDiscovery(descriptor.createOptions(key, specialKeys[i]), key));
 		}
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
@@ -3316,6 +3312,31 @@ export class ModelRegistry {
 			}
 		}
 		return options;
+	}
+
+	/**
+	 * A built-in provider's discovery with an extension's `discoverModels` in place of its
+	 * roster fetch; caching, merging, and authority stay the built-in manager's.
+	 */
+	#withRuntimeDiscovery(options: ModelManagerOptions<Api>, apiKey: string | undefined): ModelManagerOptions<Api> {
+		const discover = this.#runtimeDiscoveries.get(options.providerId);
+		if (!discover) return options;
+		const providerId = options.providerId;
+		return {
+			...options,
+			fetchDynamicModels: async () => {
+				const accounts = isAuthenticated(apiKey)
+					? await resolveOAuthDiscoveryAccounts(this.authStorage, providerId, apiKey)
+					: [];
+				if (!accounts) return null;
+				const models = await discover({
+					accounts,
+					baseUrl: this.#descriptorBaseUrl(providerId),
+					fetch: this.#fetch,
+				});
+				return models && [...models];
+			},
+		};
 	}
 
 	async #discoverWithModelManager(
@@ -4259,6 +4280,11 @@ export class ModelRegistry {
 		return this.authStorage.keys.peek(provider, options);
 	}
 
+	/** The extension web search registered for `provider`'s models, which the web search tool runs in place of their grounding backend. */
+	getProviderWebSearch(provider: string): ProviderConfigInput["webSearch"] {
+		return this.#runtimeWebSearches.get(provider);
+	}
+
 	/** Whether a model uses OAuth credentials. Kept separate from subscription billing for cache-tier decisions. */
 	isUsingOAuth(model: Model<Api>): boolean {
 		return this.authStorage.credentials.hasOAuth(model.provider);
@@ -4293,6 +4319,11 @@ export class ModelRegistry {
 		}
 		this.#invalidateProviderModelCache(providerName);
 		this.#runtimeRegistrations = this.#runtimeRegistrations.filter(change => change.name !== providerName);
+		// Hooks and rules are per-thread module state: a mirror drops its own copies too.
+		setProviderHooks(providerName, undefined);
+		this.#runtimeWebSearches.delete(providerName);
+		this.#runtimeDiscoveries.delete(providerName);
+		setRuntimeProviderRule(providerName, undefined);
 		if (this.#owner) return;
 		this.authStorage.keys.removeConfig(providerName);
 		this.authStorage.usage.removeProvider(providerName);
@@ -4489,6 +4520,17 @@ export class ModelRegistry {
 			});
 		}
 
+		if (config.stream || config.generateImage) {
+			const hooks: ProviderHooks = { ...getProviderHooks(providerName) };
+			if (config.stream) hooks.stream = config.stream;
+			if (config.generateImage) hooks.generateImage = config.generateImage;
+			setProviderHooks(providerName, hooks);
+		}
+		if (config.webSearch) this.#runtimeWebSearches.set(providerName, config.webSearch);
+		if (config.discoverModels) this.#runtimeDiscoveries.set(providerName, config.discoverModels);
+		// Rules change how every model of the provider builds; the rebuild below re-resolves them.
+		if (config.rules) setRuntimeProviderRule(providerName, config.rules);
+
 		let sourceHandoff = false;
 		if (sourceId) {
 			this.#registeredProviderSources.add(sourceId);
@@ -4507,7 +4549,7 @@ export class ModelRegistry {
 			this.#runtimeProvidersBySource.set(sourceId, sourceProviders);
 			this.#runtimeProviderSourceByName.set(providerName, sourceId);
 		}
-		if (sourceHandoff) {
+		if (sourceHandoff || config.rules) {
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 		}
 
@@ -4888,6 +4930,15 @@ function sameDiscoveredRows(a: readonly Model<Api>[], b: readonly Model<Api>[]):
 	);
 }
 
+/** What an extension's {@link ProviderConfigInput.discoverModels} receives. */
+export interface ProviderDiscoveryContext {
+	/** Signed-in accounts for the provider; a configured key appears as one account. */
+	accounts: OAuthDiscoveryAccount[];
+	/** Base URL configured for the provider, if any. */
+	baseUrl?: string;
+	fetch: FetchImpl;
+}
+
 /**
  * Input type for registerProvider API (from extensions).
  */
@@ -4904,6 +4955,24 @@ export interface ProviderConfigInput {
 	transport?: Model<Api>["transport"];
 	/** Optional normalized usage fetcher; takes precedence over built-in usage providers. */
 	usage?: UsageProvider;
+	/** Streams every request to this provider's models in place of their api's adapter ({@link ProviderHooks.stream}). */
+	stream?(model: Model<Api>, context: Context, options: StreamOptions): AssistantMessageEventStream;
+	/** Generates images with this provider's image models ({@link ProviderHooks.generateImage}). */
+	generateImage?(
+		model: Model<Api>,
+		request: ImageGenerationRequest,
+		options: ImageGenerationOptions,
+	): Promise<ImageGenerationResult>;
+	/**
+	 * Fetches a built-in provider's model roster in place of its own discovery request, for every
+	 * signed-in account (or the configured key as one account). Resolves `null` to keep the cached
+	 * catalog. The built-in manager still caches, merges, and applies policy to the rows.
+	 */
+	discoverModels?(context: ProviderDiscoveryContext): Promise<readonly ModelSpec<Api>[] | null>;
+	/** Runs grounded web searches for this provider's models in place of their grounding backend's request. */
+	webSearch?(params: SearchParams): Promise<SearchResponse>;
+	/** Rule directives for every model of this provider, as a KDL `provider` block sets them (`{ "prompt-perturbation": true }`). */
+	rules?: Readonly<Record<string, unknown>>;
 	oauth?: {
 		name: string;
 		login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials | string>;
@@ -4931,6 +5000,8 @@ export interface ProviderConfigInput {
 		thinking?: ThinkingConfig;
 		input: ("text" | "image")[];
 		supportsTools?: boolean;
+		/** Snapcompact frame shape, replacing the model line's default (see `Model.snapcompactShape`). */
+		snapcompactShape?: Model<Api>["snapcompactShape"];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
 		maxTokens: number;

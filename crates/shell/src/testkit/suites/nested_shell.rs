@@ -58,6 +58,20 @@ fn takes_its_name_and_arguments() {
 	assert_eq!(out, "own pid\n");
 }
 
+/// A nested script must resolve files beside itself through `BASH_SOURCE`, not
+/// the caller's directory.
+#[test]
+fn nested_script_resolves_its_own_directory() {
+	let fs = MemFs::new();
+	fs.add_file("/sub/probe.sh", b"source \"${BASH_SOURCE[0]%/*}/helper.sh\"\n", 0o644);
+	fs.add_file("/sub/helper.sh", b"echo loaded\n", 0o644);
+	let out = run_script(FakeHost::new().with_fs(fs), b"bash sub/probe.sh", &[], Fault::None);
+	assert_eq!(
+		(String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr), out.status),
+		("loaded\n".into(), "".into(), 0)
+	);
+}
+
 /// The nested shell's exit status (after its EXIT trap) is the command's.
 #[test]
 fn exit_status_and_exit_trap() {

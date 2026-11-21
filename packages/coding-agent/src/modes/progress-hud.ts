@@ -1,18 +1,18 @@
 /**
  * Editor-anchored, right-aligned progress rows above the working line: judge
- * batches (`judge_batch`) and automatic background work (downloads and
- * installs, skill optimization). Both render through
- * {@link renderHudProgressRow} so they read as one HUD.
+ * batches (`judge_batch`), automatic background work (downloads and
+ * installs, skill optimization) and a background compaction beside a turn.
+ * All render through {@link renderHudProgressRow} so they read as one HUD.
  */
-import { type Component, renderProgressBar, visibleWidth } from "@oh-my-pi/pi-tui";
-import { col, node, span, text } from "@oh-my-pi/pi-tui/native/describe";
+import { type Component, type Loader, renderProgressBar, visibleWidth } from "@oh-my-pi/pi-tui";
+import { col, elapsed, node, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { theme } from "@oh-my-pi/pi-tui/theme";
-import { formatBytes } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
 import type { DownloadActivity } from "../downloads/activity";
 import type { JudgmentBatchProgress } from "../eval/judgment-batch-events";
 
@@ -60,15 +60,106 @@ function rowWidth(width: number): number {
 
 /**
  * Native HUD row, right-docked like the ANSI row: dim label, an optional
- * terminal-drawn bar, then the tail. The terminal drops and truncates.
+ * terminal-drawn bar (`null`: indeterminate), then the tail, spans or a node
+ * the terminal clocks. The terminal drops and truncates.
  */
-function describeHudRow(key: string, label: string, tail: readonly TspSpan[], bar?: number): NativeNode {
+function describeHudRow(
+	key: string,
+	label: string,
+	tail: readonly TspSpan[] | NativeNode,
+	bar?: number | null,
+): NativeNode {
 	const children: NativeNode[] = [
 		text([span(sanitizeStatusText(label), "dim")], { wrap: "none", truncate: "end", shrink: 1 }),
 	];
-	if (bar !== undefined) children.push(node("progress", { value: Math.min(1, Math.max(0, bar)), max: { w: "18ch" } }));
-	children.push(text(tail, { wrap: "none" }));
+	if (bar !== undefined) {
+		const value = bar === null ? null : Math.min(1, Math.max(0, bar));
+		children.push(node("progress", { value, max: { w: "18ch" } }));
+	}
+	children.push("k" in tail ? tail : text(tail, { wrap: "none" }));
 	return node("row", { justify: "end", gap: "sm", align: "center", role: "omp.hud.progress" }, children, key);
+}
+
+/** A background compaction as {@link BackgroundCompactionHud} shows it. */
+export interface BackgroundCompactionRun {
+	/** Its working row, which the status row shows while nothing else fills it; stopped when the run ends. */
+	readonly loader: Loader;
+	/** The HUD row's label: `Compacting context in the background (Esc to cancel)`. */
+	readonly label: string;
+	/** Epoch ms it started: the HUD row's clock. */
+	readonly startedAt: number;
+	/** Whether its session is the one in view; out of view it shows nowhere. */
+	readonly inView: () => boolean;
+}
+
+/** The compaction HUD with no run beside a turn. */
+const EMPTY_COMPACTION_HUD: NativeNode = col([], { role: "omp.hud.compaction" });
+
+/**
+ * A background compaction (`/handoff`), which leaves the composer free and
+ * so shares the dock with turns: while the status row is empty it shows its
+ * working row there ({@link idleRow}); while a turn (or any other status)
+ * holds the row, a HUD row with an indeterminate bar and its clock instead,
+ * so neither replaces the other.
+ */
+export class BackgroundCompactionHud implements Component {
+	readonly #statusBusy: () => boolean;
+	#run: BackgroundCompactionRun | undefined;
+	/** The HUD row while it stays shown, so the terminal's clock runs on uninterrupted. */
+	#native: NativeNode | undefined;
+
+	/** `statusBusy`: whether something other than the run holds the status row. */
+	constructor(statusBusy: () => boolean) {
+		this.#statusBusy = statusBusy;
+	}
+
+	start(run: BackgroundCompactionRun): void {
+		this.#run?.loader.stop();
+		this.#run = run;
+		this.#native = undefined;
+	}
+
+	stop(): void {
+		this.#run?.loader.stop();
+		this.#run = undefined;
+		this.#native = undefined;
+	}
+
+	/** The run's working row while its session is in view, for the status row to show when empty. */
+	idleRow(): Loader | undefined {
+		const run = this.#run;
+		return run?.inView() ? run.loader : undefined;
+	}
+
+	/** The run while it shows here: in view, beside a busy status row. */
+	#beside(): BackgroundCompactionRun | undefined {
+		const run = this.#run;
+		return run?.inView() && this.#statusBusy() ? run : undefined;
+	}
+
+	describe(): NativeNode {
+		const run = this.#beside();
+		if (!run) {
+			this.#native = undefined;
+			return EMPTY_COMPACTION_HUD;
+		}
+		this.#native ??= col([describeHudRow("run", run.label, elapsed(Date.now() - run.startedAt), null)], {
+			role: "omp.hud.compaction",
+		});
+		return this.#native;
+	}
+
+	render(width: number): readonly string[] {
+		const run = this.#beside();
+		const available = rowWidth(width);
+		if (!run || available === 0) return [];
+		const took = theme.fg("text", formatDuration(Date.now() - run.startedAt));
+		return [renderHudProgressRow(available, { label: run.label, tail: took, fallback: took })];
+	}
+
+	dispose(): void {
+		this.stop();
+	}
 }
 
 /** Progress rows for concurrent judge batches. */

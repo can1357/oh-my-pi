@@ -38,7 +38,7 @@ export const cfgBrowserRelay = register({
 		group: "Grep & Browser",
 		label: "Browser Relay",
 		description:
-			'Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser prelude needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override. Subagents skip it unless an open passes app: "relay".',
+			'Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); its native host serves the relay while Chrome runs. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override, or PI_BROWSER_RELAY=only to make it the only browser (sessions started from the extension\'s side panel). Subagents skip it unless an open passes app: "relay" or the relay is the only browser.',
 	},
 });
 
@@ -50,7 +50,8 @@ export const cfgBrowserRelayUrl = register({
 		tab: "tools",
 		group: "Grep & Browser",
 		label: "Browser Relay URL",
-		description: "omp browser relay endpoint (default http://127.0.0.1:9224).",
+		description:
+			"Override local browser relay discovery, for example to reach a relay forwarded from another machine.",
 	},
 });
 

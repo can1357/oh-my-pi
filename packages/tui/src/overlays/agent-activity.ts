@@ -1,3 +1,4 @@
+import { toolIntentLabel } from "@oh-my-pi/pi-wire";
 import type { AgentProgress } from "../tools/task";
 
 export type AgentActivityKind = "response" | "tool" | "irc" | "lifecycle";
@@ -10,6 +11,8 @@ export interface AgentActivityRow {
 	kind: AgentActivityKind;
 	title: string;
 	summary: string;
+	/** The searchable summary is a tool-call intent, not an argument or response. */
+	summaryIsToolIntent?: boolean;
 	status?: AgentActivityStatus;
 	entryId?: string;
 	toolCallId?: string;
@@ -44,6 +47,11 @@ export function activityOneLine(value: string): string {
 		.trim();
 }
 
+/** Keep full intent searchable while showing only its headline in the activity list. */
+export function activitySummaryLabel(row: AgentActivityRow): string {
+	return row.summaryIsToolIntent ? toolIntentLabel(row.summary) : row.summary;
+}
+
 /** Stable timestamp ordering for merged activity rows. */
 export function compareActivityRows(a: AgentActivityRow, b: AgentActivityRow): number {
 	return a.timestamp - b.timestamp || a.id.localeCompare(b.id);
@@ -74,6 +82,7 @@ export function activityRowsFromProgress(progress: AgentProgress, lastUpdate = D
 			kind: "tool",
 			title: progress.currentTool,
 			summary: progress.lastIntent ?? progress.currentToolArgs ?? progress.currentTool,
+			summaryIsToolIntent: progress.lastIntent !== undefined,
 			status: "pending",
 			toolName: progress.currentTool,
 			source: "live",
