@@ -152,6 +152,19 @@ export const cfgJudgmentAttemptTimeoutMs = register({
 	},
 });
 
+/** Delay before a still-pending judge candidate is raced against the next configured native fallback; 0 disables. */
+export const cfgJudgmentHedgeAfterMs = register({
+	id: "judgment.hedgeAfterMs",
+	type: "number",
+	default: 0,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) {
+			throw new Error("judgment.hedgeAfterMs must be a non-negative safe integer");
+		}
+	},
+});
+
 /** Named model presets; no settings-panel UI — managed by `/modelpreset` and the model hub. */
 export const cfgModelPresets = register({
 	id: "modelPresets",

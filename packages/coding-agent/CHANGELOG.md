@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `judgment.hedgeAfterMs` setting (default `0`, off): a judge candidate that has not answered after that many milliseconds keeps running while the next candidate starts beside it, when that one is a native judge you configured; the first answer wins and the other request is cancelled, its usage still recorded. A delay at or above `judgment.attemptTimeoutMs` logs a warning, since that deadline cancels a native candidate before it can be hedged ([#19051](https://github.com/can1357/oh-my-pi/pull/19051) by [@Xytronix](https://github.com/Xytronix))
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
