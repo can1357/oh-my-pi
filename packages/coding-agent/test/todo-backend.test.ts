@@ -16,7 +16,11 @@ import {
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ExtensionFactory, TodoBackendChange } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionFactory,
+	TodoBackendChange,
+	TodoBackendDefinition,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -479,6 +483,22 @@ describe("todo backend", () => {
 		expect(tasksOf(first)).toEqual([["a"]]);
 		expect(tasksOf(second)).toEqual([["a"]]);
 		expect(errors).toEqual([expect.stringContaining('"tracker"')]);
+	});
+
+	it("two extensions that register one shared backend object are still two holders: on takeover the next one gets the list", async () => {
+		const taken: TodoPhase[][] = [];
+		const shared: TodoBackendDefinition = { id: "tracker", replace: phases => void taken.push(phases) };
+		const register: ExtensionFactory = pi => pi.registerTodoBackend(shared);
+		const { session } = await open([register, register], "tracker");
+
+		session.commitTodoPhases(list("a"));
+		await settled(session);
+		const holder = session.extensionRunner?.getTodoBackends().get("tracker")?.extension;
+		session.extensionRunner?.setSuspendedExtensions(extension => extension === holder);
+		session.commitTodoPhases(list("a"));
+		await settled(session);
+
+		expect(taken).toEqual([list("a"), list("a")]);
 	});
 
 	it("native, a malformed id and a missing replace are refused; a second registration replaces the extension's first", async () => {

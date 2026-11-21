@@ -677,13 +677,15 @@ export class ExtensionRunner {
 	#todoQueued = false;
 	/**
 	 * The list the backend last took, which is not sent again, and the registration that took it:
-	 * an id can pass to another extension, which has not seen that list. `undefined` when omp does
-	 * not know what the backend holds, so the next list is sent whatever it holds: while a call
-	 * runs, after one failed, after an `apply` accepted a change to a list the backend did not hold,
-	 * and after one refused a change to a list that is not empty and that no backend was sent.
-	 * `"none"` otherwise while no backend has taken a list: an empty one has nothing to tell it.
+	 * an id can pass to another extension, which has not seen that list, also when both registered
+	 * one shared object. `undefined` when omp does not know what the backend holds, so the next list
+	 * is sent whatever it holds: while a call runs, after one failed, after an `apply` accepted a
+	 * change to a list the backend did not hold, and after one refused a change to a list that is not
+	 * empty and that no backend was sent. `"none"` otherwise while no backend has taken a list: an
+	 * empty one has nothing to tell it.
 	 */
-	#todoSent: { list: TodoBackendList; definition: TodoBackendDefinition } | "none" | undefined = "none";
+	#todoSent: { list: TodoBackendList; extension: Extension; definition: TodoBackendDefinition } | "none" | undefined =
+		"none";
 	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
 	#todoClosed = false;
 	/** Set when a backend accepted a change omp did not commit: the next list goes out even if it equals {@link #todoSent}. */
@@ -1888,9 +1890,10 @@ export class ExtensionRunner {
 				const held =
 					sent === "none"
 						? change.previous.length === 0
-						: sent?.definition === definition &&
+						: sent?.extension === extension &&
+							sent.definition === definition &&
 							Bun.deepEquals(sent.list, { backend, sessionId, phases: change.previous });
-				if (held) this.#todoSent = { list: { backend, sessionId, phases: change.next }, definition };
+				if (held) this.#todoSent = { list: { backend, sessionId, phases: change.next }, extension, definition };
 				return undefined;
 			}
 			// Accepted in the moment omp stopped waiting.
@@ -1941,7 +1944,7 @@ export class ExtensionRunner {
 			!stale &&
 			(sent === "none"
 				? pending.phases.length === 0
-				: sent?.definition === definition && Bun.deepEquals(sent.list, pending))
+				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending))
 		)
 			return;
 		this.#todoSent = undefined;
@@ -1957,7 +1960,7 @@ export class ExtensionRunner {
 			undefined,
 			this.#todoGivenUp.signal,
 		);
-		if (taken) this.#todoSent = { list: pending, definition };
+		if (taken) this.#todoSent = { list: pending, extension, definition };
 	}
 
 	/**
