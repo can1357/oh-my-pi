@@ -116,11 +116,11 @@ Invalid override keys are ignored and logged (`logger.debug`).
 
 #### Box-drawing borders
 
-All outlined chrome — tool-result frames, overlays, code fences, the editor, the welcome banner — draws with the `boxRound.*` tokens: rounded corners (`╭╮╰╯`) plus tee/cross junctions (`├┤┬┴┼`, which have no rounded Unicode form, so they are sourced from the `boxSharp.*` tokens). Markdown tables are the sole exception and keep the fully sharp `boxSharp.*` set (`┌┐└┘`).
+Outlined chrome — tool-result frames, overlays, the editor, the welcome banner — draws with the `boxRound.*` tokens: rounded corners (`╭╮╰╯`) plus tee/cross junctions (`├┤┬┴┼`, which have no rounded Unicode form, so they are sourced from the `boxSharp.*` tokens). Markdown tables keep the fully sharp `boxSharp.*` set (`┌┐└┘`). Fenced Markdown code blocks are not outlined: opening `` ```lang `` and closing `` ``` `` lines use `mdCodeBlockBorder`, while the code body uses syntax highlighting (or `mdCodeBlock`) and `codeBlockIndent` spaces (two by default). Mermaid fences may instead render as ASCII diagrams.
 
 Override behavior follows from that split:
 
-- `boxRound.{topLeft,topRight,bottomLeft,bottomRight,horizontal,vertical}` restyle every border's corners and edges.
+- `boxRound.{topLeft,topRight,bottomLeft,bottomRight,horizontal,vertical}` restyle outlined chrome's corners and edges, not Markdown code fences.
 - `boxSharp.{cross,teeDown,teeUp,teeRight,teeLeft}` restyle dividers/junctions everywhere (rounded frames and tables alike).
 - `boxSharp.{topLeft,topRight,bottomLeft,bottomRight}` now affect markdown table corners only.
 
