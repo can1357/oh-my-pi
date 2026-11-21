@@ -402,6 +402,8 @@ function payingRuns(lines: readonly string[], seen: Witnessed): boolean[] {
  * collapsed to one marker naming the read that brings the lines back.
  */
 async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View> {
+	// Numbered edit rows unlock lines in EditStore; replacing them breaks the preview's provenance.
+	if (run.input.tool === "edit") return view;
 	const keep = seenKeeps(run, view.lines);
 	const seen = witnessedRuns(view.lines, run.state.seen, SHORT_SEEN_RUN, keep);
 	const mask = payingRuns(view.lines, seen);
@@ -451,10 +453,11 @@ function viewOrigin(run: Run, view: View): Origin | undefined {
 }
 
 /**
- * The base layers, then the valve: already-seen runs collapse, lines over 400 characters keep 280, and a result over
- * 3.9k (the agent's own program output past 7.8k) is cut to ~3k, except outlines, source reads, sub-agent reports
- * (`task`, `wait`, `omp -p`), edit results and `pr://` / `issue://` threads up to 12k, and pictures. Output repeating
- * one line shape is cut to the lines that differ, its ends, and a line naming the shape.
+ * The base layers, then the valve: already-seen runs collapse except in edit results, whose numbered rows can prove
+ * lines seen in EditStore; lines over 400 characters keep 280, and a result over 3.9k (the agent's own program output
+ * past 7.8k) is cut to ~3k, except outlines, source reads, sub-agent reports (`task`, `wait`, `omp -p`), edit results
+ * and `pr://` / `issue://` threads up to 12k, and pictures. Output repeating one line shape is cut to the lines that
+ * differ, its ends, and a line naming the shape.
  * Re-asks (results up to 12k bringing back lines a cut hid) and reads of folded code come back whole.
  */
 async function shapeSubject(
@@ -481,7 +484,13 @@ async function shapeSubject(
 	if (again) bump(run, "reasks");
 
 	const keep = seenKeeps(run, lines);
-	const { mask: witnessed, starts } = witnessedRuns(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
+	const { mask: witnessed, starts } =
+		input.tool === "edit"
+			? {
+					mask: Array.from<boolean>({ length: lines.length }).fill(false),
+					starts: Array.from<boolean>({ length: lines.length }).fill(false),
+				}
+			: witnessedRuns(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
 	const width = lines.map(l => (!again && l.length > MAX_LINE ? LINE_KEEP + 36 : l.length));
 	let shown = 0;
 	lines.forEach((_, i) => {
