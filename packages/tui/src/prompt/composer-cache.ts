@@ -27,7 +27,7 @@ import { openSqliteDatabaseSync } from "@oh-my-pi/pi-utils/sqlite";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { ComposerPreferences, ComposerStatusCache } from "./composer";
 import { readStatusLineStartupData } from "../status-line/startup";
-import type { SymbolPreset } from "../theme/theme";
+import { isValidSymbolPreset, type SymbolPreset } from "../theme/theme";
 import { isWordCompletionMethod } from "./word-completion";
 
 /** Bump whenever any payload format changes; older stores are cleared on open. */
@@ -120,10 +120,7 @@ function parseUiState(
 	}
 	const { symbolPreset, colorBlindMode, darkTheme, lightTheme } = value.theme;
 	if (
-		(symbolPreset !== undefined &&
-			symbolPreset !== "unicode" &&
-			symbolPreset !== "nerd" &&
-			symbolPreset !== "ascii") ||
+		(symbolPreset !== undefined && (typeof symbolPreset !== "string" || !isValidSymbolPreset(symbolPreset))) ||
 		(colorBlindMode !== undefined && typeof colorBlindMode !== "boolean") ||
 		(darkTheme !== undefined && typeof darkTheme !== "string") ||
 		(lightTheme !== undefined && typeof lightTheme !== "string")

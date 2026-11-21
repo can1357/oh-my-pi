@@ -188,7 +188,8 @@ into document ops (`native/reconcile.ts`) and sent as frames, paced by the
 terminal's acknowledgements instead of the render cadence. None of this
 document's history, viewport, resize-replay or CPR machinery runs on that path;
 SIGWINCH only refreshes the width used by `rows` fallback nodes. While a surface
-is live the nerd symbol preset is forced process-locally, and icon glyphs are
+is live the nerd symbol preset is forced process-locally (except for an explicit
+`unicode-noemoji` setting, which keeps its glyphs), and icon glyphs are
 sent as `icon` spans. The first row paint waits
 up to 300 ms for the probe. Direct Tern sessions optimistically open a surface
 immediately and fall back to rows if the terminal does not confirm it. Such a

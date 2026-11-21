@@ -56,6 +56,33 @@ describe("composer startup cache", () => {
 		reader.close();
 	});
 
+	it("keeps a cached unicode-noemoji symbol preset instead of discarding it", () => {
+		const project = path.join(root, "project");
+		const theme = { symbolPreset: "unicode-noemoji" as const };
+
+		const writer = ComposerCache.open(dbPath);
+		writer.writeUi(project, COMPOSER_DEFAULTS, theme);
+		writer.close();
+
+		const reader = ComposerCache.open(dbPath);
+		expect(reader.read(project).theme).toEqual(theme);
+		reader.close();
+	});
+
+	it("discards a cached theme naming a symbol preset that does not exist", () => {
+		const project = path.join(root, "project");
+
+		const writer = ComposerCache.open(dbPath);
+		writer.writeUi(project, COMPOSER_DEFAULTS, { symbolPreset: "nope" as never });
+		writer.close();
+
+		const reader = ComposerCache.open(dbPath);
+		// The whole ui payload goes: valid preferences cannot survive alongside
+		// an unrecognized preset.
+		expect(reader.read(project)).toEqual({});
+		reader.close();
+	});
+
 	it("prefers a project's own status over the last status written elsewhere", () => {
 		const cache = ComposerCache.open(dbPath);
 		cache.writeStatus(path.join(root, "a"), statusFor(ThinkingLevel.Low));

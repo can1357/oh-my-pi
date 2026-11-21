@@ -9,17 +9,19 @@ import type { NativeNode } from "../../native/node";
 import { Memo } from "../../native/memo";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
-const GLYPH_PRESETS = ["nerd", "unicode", "ascii"] as const satisfies readonly SymbolPreset[];
+const GLYPH_PRESETS = ["nerd", "unicode", "unicode-noemoji", "ascii"] as const satisfies readonly SymbolPreset[];
 
 const GLYPH_LABELS: Readonly<Record<SymbolPreset, string>> = {
 	nerd: "Nerd Font",
 	unicode: "Unicode",
+	"unicode-noemoji": "Unicode (no emoji)",
 	ascii: "ASCII",
 };
 
 const GLYPH_SAMPLES: Readonly<Record<SymbolPreset, string>> = {
 	nerd: "      󰉋  ",
 	unicode: "✔  ✖  📁  ⬢  ╭─╮  ├─  •  ⠋  →",
+	"unicode-noemoji": "╭─╮  ├─  ━  •  ⠋  →  ✔  [D]  [F]",
 	ascii: "[+]  [-]  >  +  [D]  +-+  |-  *  ->",
 };
 
@@ -64,7 +66,7 @@ class GlyphSceneController implements SetupSceneController {
 
 	handleInput(data: string): void {
 		if (this.#committing) return;
-		const quickIndex = data >= "1" && data <= "3" ? Number(data) - 1 : -1;
+		const quickIndex = data >= "1" && data <= "4" ? Number(data) - 1 : -1;
 		if (quickIndex >= 0) {
 			const preset = GLYPH_PRESETS[quickIndex];
 			this.#selectList.setSelectedIndex(quickIndex);
