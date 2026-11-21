@@ -25,7 +25,7 @@
 
 Supported modes are `hashline`, `apply_patch`, `patch`, `replace`, and `sloppy`. `edit.mode: none` (or `PI_EDIT_VARIANT=none`) instead unregisters `edit`, wins over `edit.modelVariants`, turns off hashline anchors, and keeps `bash` registered regardless of `bash.enabled`; explicit tool lists still get `bash` only when they name it. `edit.modelVariants` uses the longest case-insensitive substring match against the active model string; equal-length matches keep config order. `PI_EDIT_VARIANT` pins the mode exactly; for settings-derived `hashline`, `PI_STRICT_EDIT_MODE` disables the model-family fallback to `replace` (Kimi, MiMo, MiniMax, DeepSeek, StepFun, Codex Spark, and GLM 5.3 Flash).
 
-This page primarily documents hashline. The schema, prompt, examples, renderer, and optional Lark format switch with the mode. Models with `editPromptVariant: "compact"` receive the compact hashline prompt. In `apply_patch` custom-tool mode the wire name is `apply_patch`; dispatch, including `xd://apply_patch`, still reaches the same internal tool. The tool is strict, essential, and uses exclusive concurrency.
+This page primarily documents hashline. The schema, prompt, examples, renderer, and optional Lark format switch with the mode. Models with `editPromptVariant: "compact"` receive the compact hashline prompt. In `apply_patch` custom-tool mode the wire name is `apply_patch`; a Codex-style shell call (`apply_patch <<'EOF' … EOF`, or the patch quoted) reaches the same internal tool when no `apply_patch` program is on `PATH`. The tool is strict, essential, and uses exclusive concurrency.
 
 ## `magic` mode
 
@@ -175,7 +175,7 @@ the first filesystem write; a later invalid section leaves all files unchanged.
 
 ## Output and side effects
 
-Hashline applies in one tool call; it does not use the staged `xd://resolve` / `xd://reject` flow used by `ast_edit`.
+Hashline applies in one tool call; it does not use the staged `resolve` / `reject` preview flow used by `ast_edit`.
 
 A successful hashline section returns a fresh `[path#TAG]` header, optional block-resolution and move lines, a compact post-edit preview when available, and a `Warnings:` block when recovery or normalization produced warnings. `EditToolDetails` can include the unified `diff`, `firstChangedLine`, diagnostics, operation (`update` or `delete` in hashline mode), path/move metadata, `oldText` / `newText`, `snapshotsPruned`, and per-file results. Multi-section input returns one aggregate result. Stored before/after snapshot text is capped at 32,768 characters per file and across a multi-file result; later entries may retain their diff but omit snapshot text.
 

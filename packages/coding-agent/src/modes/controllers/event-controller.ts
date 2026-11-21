@@ -54,8 +54,9 @@ import {
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
-import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
-import { writeDeviceDispatch } from "../../tools/resolve";
+import { PROPOSE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
+import { proposeDispatchDetails } from "../../tools/resolve";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
@@ -159,6 +160,23 @@ interface ApprovalPreviewGate {
 	resolve(): void;
 	reject(reason?: unknown): void;
 	started: boolean;
+}
+
+/** `value` as plan approval details, when it has their shape. */
+function planApprovalDetails(value: unknown): PlanApprovalDetails | undefined {
+	if (
+		value &&
+		typeof value === "object" &&
+		"planFilePath" in value &&
+		"title" in value &&
+		"planExists" in value &&
+		typeof value.planFilePath === "string" &&
+		typeof value.title === "string" &&
+		typeof value.planExists === "boolean"
+	) {
+		return { planFilePath: value.planFilePath, title: value.title, planExists: value.planExists };
+	}
+	return undefined;
 }
 
 /**
@@ -1760,7 +1778,7 @@ export class EventController {
 				if (renderToolName === "read") {
 					if (!readArgsHaveTarget(content.arguments)) {
 						// Args still streaming — defer until path is parseable so we can route to the
-						// read group (files + xd:// devices) vs ToolExecutionComponent (other internal URLs).
+						// read group (files and `help://` doc topics) vs ToolExecutionComponent (other internal URLs).
 						// Creating either component now would lock the read into the wrong shape.
 						continue;
 					}
@@ -2409,46 +2427,32 @@ export class EventController {
 				{ hideWithToolActivity: true },
 			);
 		}
-		// Plan approval rides a `write` to xd://propose: the dispatch metadata on
-		// the write details carries the approval payload as `inner`.
-		if (!event.isError) {
-			const dispatch = writeDeviceDispatch(event.toolName, event.result);
-			const details =
-				dispatch?.tool === PROPOSE_DEVICE_NAME && dispatch.mode === "execute" ? dispatch.inner : undefined;
-			if (
-				details &&
-				typeof details === "object" &&
-				"planFilePath" in details &&
-				"title" in details &&
-				"planExists" in details &&
-				typeof details.planFilePath === "string" &&
-				typeof details.title === "string" &&
-				typeof details.planExists === "boolean"
-			) {
-				// Dispatch the approval WITHOUT blocking the serialized event
-				// dispatch chain. `handlePlanApproval` -> `#approvePlan` awaits
-				// `session.prompt` for the ENTIRE approved-execution turn; awaiting
-				// it here (this handler runs inside `#runSerialized`) would hold the
-				// single dispatch link for the whole run, so the run's own
-				// agent_start / message_start / tool / coalesced message_update
-				// events queue behind it on `#dispatchTail` and the chat stays blank
-				// until execution finishes (issue #7684, follow-up to #5688 which
-				// only closed the overlay). Detaching frees the link the moment this
-				// handler returns; the approval overlay and the turn's live events
-				// then render. The approval flow surfaces its own failures via
-				// `showError`, so only an unexpected rejection is logged here.
-				void this.ctx
-					.handlePlanApproval({
-						planFilePath: details.planFilePath,
-						title: details.title,
-						planExists: details.planExists,
-					})
-					.catch(err => {
-						logger.warn("Plan approval dispatch failed", {
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-			}
+		// A submitted plan carries the approval payload as the `propose` details:
+		// on a direct `propose` result, or on its execute record in a `bash` run.
+		// A failed direct `propose` submitted nothing; a `bash` run is judged by
+		// each record's own exit status, not the outer shell status.
+		const details =
+			event.isError && event.toolName === PROPOSE_COMMAND_NAME
+				? undefined
+				: planApprovalDetails(proposeDispatchDetails(event.toolName, event.result));
+		if (details) {
+			// Dispatch the approval WITHOUT blocking the serialized event
+			// dispatch chain. `handlePlanApproval` -> `#approvePlan` awaits
+			// `session.prompt` for the ENTIRE approved-execution turn; awaiting
+			// it here (this handler runs inside `#runSerialized`) would hold the
+			// single dispatch link for the whole run, so the run's own
+			// agent_start / message_start / tool / coalesced message_update
+			// events queue behind it on `#dispatchTail` and the chat stays blank
+			// until execution finishes (issue #7684, follow-up to #5688 which
+			// only closed the overlay). Detaching frees the link the moment this
+			// handler returns; the approval overlay and the turn's live events
+			// then render. The approval flow surfaces its own failures via
+			// `showError`, so only an unexpected rejection is logged here.
+			void this.ctx.handlePlanApproval(details).catch(err => {
+				logger.warn("Plan approval dispatch failed", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
 		}
 	}
 	/**

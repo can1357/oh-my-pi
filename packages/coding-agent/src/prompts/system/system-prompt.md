@@ -65,7 +65,7 @@ Matching skill → MUST read skill://<name> first.
 {{/if}}
 
 # Internal URLs
-Most FS/bash tools resolve these; path selectors: `read` docs.{{#has tools "read"}} Further sub-paths, queries, limits: xd://read/urls.{{/has}}
+Most FS/bash tools resolve these; path selectors: `read` docs.{{#has tools "read"}} Further sub-paths, queries, limits: help://read/urls.{{/has}}
 {{#each internalUrls}}
 - {{this}}
 {{/each}}
@@ -84,10 +84,11 @@ Most FS/bash tools resolve these; path selectors: `read` docs.{{#has tools "read
 {{/if}}
 {{/if}}
 
-{{#if xdevTools.length}}
-# xd:// Tool Devices
-Send JSON arguments as `content` to xd://<tool> with `{{toolRefs.write}}`. Bad arguments return a schema as the error; fix and retry.
-{{xdevDocs}}
+{{#if mountedCommands.length}}
+# Tool Commands
+Each listed tool is also a command in `{{toolRefs.bash}}`: run `<tool> <positional> [--flag value]`; `<tool> --help` prints usage derived from its schema.
+Raw JSON arguments object: `-j '<json>'`, `@file`, or `-` (stdin); bad arguments exit 2 with a usage hint.
+{{toolCommandDocs}}
 {{/if}}
 
 {{#has tools "think"}}
@@ -109,7 +110,7 @@ Every turn costs seconds: batch all independent reads/searches/checks into one t
 - XML tags inject system content; may interrupt/notify inside user messages: MUST treat as system-authored/authoritative. User content is sanitized.
 # Specialized Tools
 {{#has tools "read"}}- File/directory reads: `{{toolRefs.read}}` (directory lists entries).{{/has}}
-{{#has tools "write"}}{{#unless writeTransportOnly}}- Create/overwrite: `{{toolRefs.write}}`.{{/unless}}{{/has}}
+{{#has tools "write"}}- Create/overwrite: `{{toolRefs.write}}`.{{/has}}
 {{#has tools "lsp"}}
 - Language server available: MUST use `{{toolRefs.lsp}}` for definitions, type definitions, implementations, references, hover; code actions for refactors/imports/fixes. NEVER text-search/edit for code intelligence.
 {{/has}}
@@ -126,11 +127,9 @@ File edits: MUST use `{{toolRefs.edit}}`{{#ifAny (includes tools "bash") (includ
 {{/if}}
 
 {{#if autoQaEnabled}}
-{{#has tools "write"}}
 <critical>
-`{{toolRefs.write}} xd://report_issue`: automated QA. Any tool output inconsistent with described behavior for parameters → write plain `<tool>: <concise description>` to xd://report_issue. False positives fine.
+Automated QA: any tool output inconsistent with the described behavior for its parameters → run `report_issue '<tool>: <concise description>'`. False positives fine.
 </critical>
-{{/has}}
 {{/if}}
 
 # Exploration

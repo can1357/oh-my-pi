@@ -47,7 +47,7 @@ import {
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
-	cfgToolsXdev,
+	cfgToolsCommands,
 	cfgTodoReminders,
 	cfgTodoRemindersMax,
 	cfgDevAutoqa,
@@ -2572,7 +2572,7 @@ describe("Settings", () => {
 			expect(cfgTodoReminders.get(reloaded)).toBe(true);
 		});
 
-		it("drops dead BM25-discovery keys and leaves tools.xdev at its default", async () => {
+		it("drops dead BM25-discovery keys and leaves tools.commands at its default", async () => {
 			await writeSettings({
 				tools: { discoveryMode: "off", essentialOverride: ["read"] },
 				mcp: { discoveryMode: "auto", discoveryDefaultServers: ["gh"] },
@@ -2580,10 +2580,10 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			// No migration mapping: legacy discovery intent is discarded, xdev
-			// keeps its own default. An explicit xdev value is untouched.
-			expect(cfgToolsXdev.get(settings)).toBe(true);
-			expect(cfgToolsXdev.isConfigured(settings)).toBe(false);
+			// No migration mapping: legacy discovery intent is discarded, toolCommands
+			// keeps its own default. An explicit toolCommands value is untouched.
+			expect(cfgToolsCommands.get(settings)).toBe(true);
+			expect(cfgToolsCommands.isConfigured(settings)).toBe(false);
 		});
 
 		it("migrates from settings.json containing comments", async () => {

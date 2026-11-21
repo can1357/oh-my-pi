@@ -9,6 +9,8 @@
 
 ### Changed
 
+
+- The Cursor provider forwards `bash` instead of `write` so staged previews can be finalized
 - Increased provider stream watchdog defaults from 5 to 15 minutes, preventing slow one-shot completions from being interrupted prematurely.
 - Extended Gemini reasoning-stream protection to allow longer planning sequences before interruption.
 

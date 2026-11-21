@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Tool commands run inside a bash call render as nested cards under the bash card
 - Tool cards in shared sessions and HTML exports show brief intent labels instead of detailed ranking instructions.
 
 ## [19.0.0] - 2026-11-18

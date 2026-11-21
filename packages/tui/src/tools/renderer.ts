@@ -24,7 +24,6 @@ export interface RenderResultOptions {
 	argsComplete?: boolean;
 	/**
 	 * True once this specific call has begun executing (`tool_execution_start`).
-	 * Streamed `xd://` previews stay queued until this is set.
 	 */
 	executionStarted?: boolean;
 	/**

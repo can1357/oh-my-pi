@@ -3702,7 +3702,7 @@ export class Settings {
 
 		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
 		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
-		// replacement (`tools.xdev` stays at its own default). Dead keys are
+		// replacement (`tools.commands` stays at its own default). Dead keys are
 		// deleted so they stop lingering in config.yml.
 		const toolsObj = raw.tools as Record<string, unknown> | undefined;
 		if (toolsObj) {

@@ -12,6 +12,10 @@
 
 ### Breaking Changes
 
+- Replaced `xd://` tool devices with tool commands: rarely-used tools now run as bash commands (`<tool> --help`, `<tool> <args>`) while `bash` is active and are ordinary tools otherwise
+- Renamed the `tools.xdev`, `tools.xdevDocs`, `tools.xdevInlineDevices` and `tools.xdevNotices` settings to `tools.commands`, `tools.commandDocs`, `tools.commandInline` and `tools.commandNotices`
+- Staged previews, plan submission and Auto-QA reports now use the `resolve`, `reject`, `propose` and `report_issue` commands, and tool doc topics moved from `xd://<tool>/<topic>` to `help://<tool>/<topic>`
+
 - Removed the `tui.completeScrollback` setting; transcript rows covered by the HUD, dialogs, or draft now always move to scrollback, and the input returns to the bottom row when overlays close.
 - Replaced the standalone MCP transport and tool-cache SDK exports and removed `DeferredMCPTool` plus MCP cache and reconnect-policy manager options. MCP servers are now accessed through the MCP host APIs.
 - Browser relay hosting now runs through the omp extension's native host while Chrome is open. Removed the on-demand `omp browser-relay` server command and its `--port`, `--token`, and `--no-group` options; `browser.relayUrl` remains available for relays forwarded from another machine. Reload the omp extension once after upgrading, or restart Chrome.
@@ -37,6 +41,8 @@
 - Clicking the usage-limit segment in native terminal hosts such as Tern now opens `/usage`. Changing Tern's Agents tray setting immediately switches between tray cards and the running-agent and job counters without restarting omp.
 
 ### Changed
+- Images a command prints as kitty or sixel graphics are saved to a temp file and linked in the bash output, in addition to being attached
+- `generate_image` returns its images as attachments
 
 - Spotlight tool calls use `Label: detail`; activity shows only the label, while output ranking uses the full intent.
 - Improved regex performance for TTSR and secret-redaction scans, including SIMD acceleration and faster candidate matching, without changing matching semantics.

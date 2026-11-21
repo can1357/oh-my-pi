@@ -121,7 +121,7 @@ describe("system prompt tool inventory", () => {
 			rules: [],
 			toolNames: opts.toolNames,
 			tools: opts.tools,
-			xdevTools: [{ name: "fetch", summary: "Fetches URLs." }],
+			mountedCommands: [{ name: "fetch", summary: "Fetches URLs." }],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		return systemPrompt.join("\n\n");
@@ -163,8 +163,8 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: opts.nativeTools,
 			inlineToolDescriptors: false,
-			xdevTools: [{ name: "web_search", summary: "Searches the web.", dynamic: opts.dynamic }],
-			xdevDocs: "Mounted web search documentation.",
+			mountedCommands: [{ name: "web_search", summary: "Searches the web.", dynamic: opts.dynamic }],
+			toolCommandDocs: "Mounted web search documentation.",
 		});
 		const text = systemPrompt.join("\n\n");
 		return { text, inventory: opts.nativeTools ? inventoryFrom(text) : text };
@@ -503,7 +503,7 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("Reads files from disk.");
 	});
 
-	it("references xd://-only tools by their xd:// URL", async () => {
+	it("references mounted-only tools by their bare command name", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -511,13 +511,12 @@ describe("system prompt tool inventory", () => {
 			rules: [],
 			toolNames: ["read", "bash"],
 			tools: TOOLS,
-			xdevTools: [{ name: "lsp", summary: "Language server." }],
+			mountedCommands: [{ name: "lsp", summary: "Language server." }],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		const text = systemPrompt.join("\n\n");
-		expect(text).toContain("MUST use `xd://lsp` for definitions");
-		expect(text).toContain("MUST run `xd://lsp` references first");
-		expect(text).not.toContain("`lsp`");
+		expect(text).toContain("MUST use `lsp` for definitions");
+		expect(text).toContain("MUST run `lsp` references first");
 	});
 
 	it("renders exactly one of the map-unknown-code, explore and inline-first delegation rules per bias", async () => {
@@ -585,19 +584,19 @@ describe("system prompt tool inventory", () => {
 	it.each([
 		["compact", true],
 		["inline", false],
-	] as const)("omits xd-only tools from the %s inventory", async (_mode, nativeTools) => {
+	] as const)("omits mounted-only tools from the %s inventory", async (_mode, nativeTools) => {
 		const { text, inventory } = await renderMountedWebSearch({ nativeTools, directDefinition: false });
 
 		expect(inventory).toContain(nativeTools ? "\nread" : "type read = (_: {");
 		expect(inventory).not.toContain(nativeTools ? "web_search" : "type web_search = (");
-		expect(text).toContain("# xd:// Tool Devices");
+		expect(text).toContain("# Tool Commands");
 		expect(text).toContain("Mounted web search documentation.");
 	});
 
 	it.each([
 		["compact", true],
 		["inline", false],
-	] as const)("keeps direct tools that share an xd device name in the %s inventory", async (_mode, nativeTools) => {
+	] as const)("keeps direct tools that share a mounted command name in the %s inventory", async (_mode, nativeTools) => {
 		const { inventory } = await renderMountedWebSearch({ nativeTools, directDefinition: true });
 
 		expect(inventory).toContain(nativeTools ? "\nread, web_search" : "type web_search = (");
@@ -1017,7 +1016,7 @@ describe("system prompt tool inventory", () => {
 		expect(withTodo).toContain("Update todos");
 	});
 
-	// A session without `read` cannot open `xd://read/urls`, so the grammar that link stands for must ship inline.
+	// A session without `read` cannot open `help://read/urls`, so the grammar that link stands for must ship inline.
 	it("links the internal URL reference only while read can fetch it", async () => {
 		const opts = {
 			cwd: tempDir,
@@ -1030,11 +1029,11 @@ describe("system prompt tool inventory", () => {
 			inlineToolDescriptors: false,
 		};
 		const withRead = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
-		expect(withRead).toContain("xd://read/urls");
+		expect(withRead).toContain("help://read/urls");
 		expect(withRead).not.toContain("named service");
 
 		const withoutRead = (await buildSystemPrompt({ ...opts, toolNames: ["bash"] })).systemPrompt.join("\n\n");
-		expect(withoutRead).not.toContain("xd://read/urls");
+		expect(withoutRead).not.toContain("help://read/urls");
 		expect(withoutRead).toContain("named service");
 	});
 });

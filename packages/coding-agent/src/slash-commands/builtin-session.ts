@@ -548,8 +548,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			const lines = all.map(name => `${active.includes(name) ? "*" : "-"} ${name}`);
-			for (const mounted of runtime.session.getXdevToolEntries()) {
-				lines.push(`~ xd://${mounted.name}`);
+			for (const mounted of runtime.session.getToolCommandEntries()) {
+				lines.push(`~ ${mounted.name}`);
 			}
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();

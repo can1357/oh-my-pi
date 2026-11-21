@@ -11,6 +11,7 @@ import {
 	PtySession,
 	RunTrace,
 	Shell,
+	type ShellCommands,
 	type ShellFilesystem,
 	type ShellRunResult,
 	type ShellSpeech,
@@ -33,6 +34,7 @@ import { quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
+import { appendImageLinks } from "../utils/image-temp";
 import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
 
@@ -84,6 +86,8 @@ export interface BashExecutorOptions {
 	filesystem?: ShellFilesystem;
 	/** Speech synthesizer the embedded shell's `say` speaks through when the session has one set up. */
 	speech?: ShellSpeech;
+	/** Session tool commands the embedded shell resolves during this run. Other shells never see them. */
+	commands?: ShellCommands;
 	/**
 	 * Receives a copy of every byte crossing the command's pipes in the
 	 * embedded shell (`proc://<id>/streams`). The user-shell paths ignore it.
@@ -820,8 +824,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (tail) sink.push(tail);
 			decodedImages = await graphics.images();
 		}
+		const summary = await sink.dump(notice);
+		const output = await appendImageLinks(summary.output, decodedImages);
 		return {
-			...(await sink.dump(notice)),
+			...summary,
+			output,
 			...(decodedImages.length > 0 ? { images: decodedImages } : {}),
 		};
 	};
@@ -978,6 +985,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
 				speech: options?.speech,
+				commands: options?.commands,
 				streams: options?.streams,
 				trace: runTrace,
 			},

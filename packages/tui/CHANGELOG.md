@@ -15,6 +15,7 @@
 - The UI now responds to terminal `features` events without waiting for a new hello message.
 
 ### Changed
+- Tool commands run inside a bash call render as nested tool cards in the bash card
 
 - Tool activity and job titles show the brief label of a structured intent; the Spotlight inspector still exposes the full request.
 - Improved transcript layout around docked reports, waiting asks, completion lists, dialogs, todo lists, subagent panels, queued messages, and other lower-screen chrome so visible content and reclaimed rows behave more predictably.
