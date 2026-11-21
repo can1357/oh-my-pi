@@ -18,11 +18,11 @@ export async function embeddedRelayExtensionFiles(): Promise<Record<string, stri
 	const compressed = await Bun.zstdCompress(Buffer.from(await generated, "utf8"), { level: 19 });
 	return {
 		[EMBEDDED_ZST]: compressed,
-		// A compiled binary gets an absolute `$bunfs` path; the npm bundle gets one relative to `dist/cli.js`.
+		// A compiled binary gets an absolute `$bunfs` path, which `path.resolve` keeps; the npm bundle gets one relative
+		// to `dist/cli.js`.
 		[PLACEHOLDER]:
 			'import * as path from "node:path";\n' +
 			'import zstPath from "./extension.generated.json.zst" with { type: "file" };\n' +
-			"export const embeddedRelayExtensionZstPath: string | null =\n" +
-			"\tpath.isAbsolute(zstPath) || path.win32.isAbsolute(zstPath) ? zstPath : Bun.fileURLToPath(new URL(zstPath, import.meta.url));\n",
+			"export const embeddedRelayExtensionZstPath: string | null = path.resolve(import.meta.dir, zstPath);\n",
 	};
 }
