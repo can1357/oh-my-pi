@@ -118,6 +118,21 @@ describe("formatTitleConversationContext", () => {
 			"<chat>\n<user>\nfix this\n</user>\n\n<assistant>\nChecking\n\n<think>\ninspect the logs\n</think>\n</assistant>\n</chat>",
 		);
 	});
+
+	it("keeps the plan whole when a long conversation is truncated", () => {
+		// The plan closes the envelope; middle truncation must not cut the newest statement of the work.
+		const plan = ["Eta: Prove the eta rule for primitive ops", "Eta: Port the proof to upstream"];
+		const formatted = formatTitleConversationContext(
+			[
+				{ role: "user", text: "resume your lane" },
+				{ role: "assistant", text: "checking the pane title", thinking: "tmux pane title ".repeat(300) },
+			],
+			plan,
+		);
+		expect(formatted.length).toBeLessThanOrEqual(MAX_TINY_MESSAGE_CHARS);
+		expect(formatted).toContain("omitted");
+		expect(formatted.endsWith(`<plan>\n${plan.join("\n")}\n</plan>\n</chat>`)).toBe(true);
+	});
 });
 
 describe("normalizeGeneratedTitle", () => {
