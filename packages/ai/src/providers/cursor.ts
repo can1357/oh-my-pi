@@ -1917,8 +1917,10 @@ function streamCursorWithWireMode(
 						log("relay", "closed", { transportSettled: h2Settled });
 						return false;
 					}
+					const latestContextTokens = output.usage.contextTokens;
 					({ context, options, stream } = resumption);
 					output = createCursorOutput(model, Date.now());
+					if (latestContextTokens !== undefined) output.usage.contextTokens = latestContextTokens;
 					startTime = performance.now();
 					firstTokenTime = undefined;
 					stream.push({ type: "start", partial: output });

@@ -20,6 +20,8 @@ import {
 	type AgentServerMessage,
 	AgentServerMessageSchema,
 	ConversationStateStructureSchema,
+	ConversationTokenDetailsSchema,
+	type ExecClientMessage,
 	type ExecServerMessage,
 	ExecServerMessageSchema,
 	type InteractionUpdate,
@@ -54,10 +56,10 @@ function frame(message: AgentServerMessage["message"]): Buffer {
 	return framed;
 }
 
-function execFrame(id: number, message: ExecServerMessage["message"]): Buffer {
+function execFrame(id: number, message: ExecServerMessage["message"], acceptHookAdditionalContexts = false): Buffer {
 	return frame({
 		case: "execServerMessage",
-		value: create(ExecServerMessageSchema, { id, execId: `exec-${id}`, message }),
+		value: create(ExecServerMessageSchema, { id, execId: `exec-${id}`, acceptHookAdditionalContexts, message }),
 	});
 }
 
@@ -81,11 +83,12 @@ function setBlobFrame(id: number, record: string): Buffer {
 	});
 }
 
-function checkpointFrame(records: string[]): Buffer {
+function checkpointFrame(records: string[], usedTokens?: number): Buffer {
 	return frame({
 		case: "conversationCheckpointUpdate",
 		value: create(ConversationStateStructureSchema, {
 			rootPromptMessagesJson: records.map(record => Buffer.from(blobId(record), "hex")),
+			...(usedTokens !== undefined ? { tokenDetails: create(ConversationTokenDetailsSchema, { usedTokens }) } : {}),
 		}),
 	});
 }
@@ -654,6 +657,7 @@ const fileResult = (n: number): ToolResultMessage => ({
 
 /** A Run stream whose Cursor side the test writes. */
 interface DrivenRun extends ServedRun {
+	execMessages: ExecClientMessage[];
 	/** Writes `frames`, resolving once the client has read them. */
 	send(frames: Buffer): Promise<void>;
 	/** Resolves once the client has answered `n` MCP calls on the stream. */
@@ -696,6 +700,7 @@ function drivenCursor(): { serve: FixtureStream; runs: DrivenRun[]; run(index: n
 		const run: DrivenRun = {
 			action: request.message.value.action?.action.case,
 			answers: [],
+			execMessages: [],
 			cancelled: false,
 			closed: closed.promise,
 			send: frames => {
@@ -714,9 +719,11 @@ function drivenCursor(): { serve: FixtureStream; runs: DrivenRun[]; run(index: n
 			closed.resolve();
 		});
 		receivers.set(stream, received => {
-			const replies = received.flatMap(message =>
-				message.message.case === "execClientMessage" ? [message.message.value.message] : [],
+			const execMessages = received.flatMap(message =>
+				message.message.case === "execClientMessage" ? [message.message.value] : [],
 			);
+			const replies = execMessages.map(message => message.message);
+			run.execMessages = execMessages;
 			run.answers = replies.flatMap(reply => (reply.case === "mcpResult" ? [reply.value] : []));
 			acknowledged = new Set(
 				received.flatMap(message => (message.message.case === "kvClientMessage" ? [message.message.value.id] : [])),
@@ -1090,6 +1097,37 @@ describe("Cursor runs relayed across an external executor's requests", () => {
 			expect(cursor.runs.map(served => served.action)).toEqual(["userMessageAction", "resumeAction"]);
 			expect(text(second)).toBe("Fixed.");
 			expect(first.usage.output + second.usage.output).toBe(12);
+		});
+	});
+
+	it("carries checkpoint context occupancy across relayed responses to emit the budget wrap-up notice", async () => {
+		const cursor = drivenCursor();
+		const states = new Map<string, ProviderSessionState>();
+		const options = relayOptions(states, { contextBudgetTokens: 60_000 });
+		await withCursorServer(cursor.serve, async baseUrl => {
+			const firstReply = respond(baseUrl, [user], options);
+			const run = await cursor.run(0);
+			await run.send(
+				Buffer.concat([
+					checkpointFrame([], 65_000),
+					readStarted(1),
+					execFrame(2, { case: "mcpArgs", value: readArgs(1) }, true),
+					listed(1),
+				]),
+			);
+			const first = await firstReply;
+			expect(first.usage.contextTokens).toBe(65_000);
+
+			const secondReply = respond(baseUrl, [user, first, fileResult(1)], options);
+			await run.answered(1);
+			run.end(finished("Paused for compaction."));
+			const second = await secondReply;
+
+			const mcpExec = run.execMessages.find(message => message.message.case === "mcpResult");
+			expect(mcpExec?.hookAdditionalContexts[0]?.content).toContain("65000");
+			expect(mcpExec?.hookAdditionalContexts[0]?.content).toContain("60000");
+			expect(second.contextBudgetWrapUp).toBe(true);
+			expect(second.usage.contextTokens).toBe(65_000);
 		});
 	});
 });
