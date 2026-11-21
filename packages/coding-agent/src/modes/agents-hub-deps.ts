@@ -61,6 +61,7 @@ export function createAgentsHubDeps(
 	activeModelPattern?: string,
 	defaultModelPattern?: string,
 	sessionServiceTier?: (model: Model) => ServiceTier | undefined,
+	onPersistedAgentModel?: (agentName: string) => void,
 ): AgentsHubDeps {
 	return {
 		browserSource: createModelBrowserSource(settings, sessionServiceTier),
@@ -138,6 +139,10 @@ export function createAgentsHubDeps(
 			if (sessionPicks.length > 0) {
 				cfgTaskAgentModelOverrides.override(settings, { ...persisted, ...Object.fromEntries(sessionPicks) });
 			}
+			// Persisting an agent's model is the user committing that choice; drop
+			// any session-scoped pick for it so the saved entry wins on the next
+			// session switch, not a stale Alt+P pick.
+			onPersistedAgentModel?.(name);
 		},
 		generateAgent: async (description, onText) => {
 			await modelRegistry.refresh();

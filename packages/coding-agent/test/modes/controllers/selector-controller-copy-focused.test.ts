@@ -53,6 +53,7 @@ function sessionWithReply(reply: string) {
 		sessionManager: { getBranch: () => entries, getCwd: () => "/tmp" },
 		getToolByName: () => undefined,
 		hasBuiltInTool: () => false,
+		registerSessionTaskModelResolver: () => () => {},
 		extensionRunner: undefined,
 	};
 }

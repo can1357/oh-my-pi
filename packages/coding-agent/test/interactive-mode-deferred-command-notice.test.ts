@@ -41,6 +41,8 @@ async function createHarness(): Promise<Harness> {
 		state: { model: undefined },
 		model: undefined,
 		thinkingLevel: undefined,
+		registerSessionChangeCallback: () => () => {},
+		registerSessionTaskModelResolver: () => () => {},
 		get isStreaming() {
 			return streaming;
 		},

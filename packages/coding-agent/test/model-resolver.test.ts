@@ -1287,6 +1287,20 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["openai/gpt-4o"]);
 	});
 
+	test("falls back to the active session model when @task:high is unset", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: "@task:high",
+			settings,
+			activeModelPattern: "openai/gpt-4o",
+		});
+
+		expect(result).toEqual(["openai/gpt-4o"]);
+	});
+
 	test("uses the configured task role before falling back to the session model", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
@@ -1302,6 +1316,34 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(result).toEqual(["anthropic/claude-sonnet-4-5:high"]);
+	});
+
+	test("uses the configured default for @default ahead of the active session model", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: "@default",
+			settings,
+			activeModelPattern: "openai/gpt-4o",
+		});
+
+		expect(result).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	test("uses the configured default for an unbound agent ahead of the active session model", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: undefined,
+			settings,
+			activeModelPattern: "openai/gpt-4o",
+		});
+
+		expect(result).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
 
 	test("accepts YAML list values for configured task role patterns", () => {

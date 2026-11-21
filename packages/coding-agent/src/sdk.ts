@@ -2788,6 +2788,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getModelString: () => (hasExplicitModel && model ? formatModelStringWithRouting(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
+			getSessionTaskModel: (agentName, sessionId) =>
+				session.getSessionTaskModel(agentName, sessionId ?? sessionManager.getSessionId()),
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),

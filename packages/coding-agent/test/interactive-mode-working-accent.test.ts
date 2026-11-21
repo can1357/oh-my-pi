@@ -67,6 +67,8 @@ async function createHarness(sessionName: string): Promise<Harness> {
 		isStreaming: true,
 		model: undefined,
 		thinkingLevel: undefined,
+		registerSessionChangeCallback: () => () => {},
+		registerSessionTaskModelResolver: () => () => {},
 		titleGenerationSignal: new AbortController().signal,
 		// No conversation to title: a bare /rename reports usage.
 		renameTitle: async () => null,

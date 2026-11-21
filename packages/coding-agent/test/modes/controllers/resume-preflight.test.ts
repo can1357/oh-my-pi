@@ -40,7 +40,7 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 		if (opts.flushFails) throw new Error("disk full");
 	});
 	const ctx = {
-		session: { switchSession },
+		session: { switchSession, registerSessionTaskModelResolver: () => () => {} },
 		sessionManager: {
 			getCwd: () => state.cwd,
 			getRecordedCwd: () => state.cwd,

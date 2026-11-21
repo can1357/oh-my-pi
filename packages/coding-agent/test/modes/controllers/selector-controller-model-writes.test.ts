@@ -214,4 +214,43 @@ describe("SelectorController model selector writes", () => {
 		expect(await refreshed.promise).toBe(1_050_000);
 		expect(showError).not.toHaveBeenCalled();
 	});
+
+	it("blocks a global default-role assign when the process-wide confirm is declined", async () => {
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const live = new AgentSession({
+			agent: new Agent({
+				initialState: { model: model("claude-sonnet-4-5"), systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			obfuscator: new SecretObfuscator([]),
+		});
+		session = live;
+		const confirm = vi.fn(async () => false);
+		const controller = new SelectorController(
+			createInteractiveModeContext({
+				session: live,
+				settings,
+				ui: { showOverlay: () => ({ hide: () => {}, setHidden: () => {}, isHidden: () => false }) },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
+				showError: vi.fn(),
+				showHookConfirm: confirm,
+			}),
+		);
+
+		const result = await openModelHub(controller).onAssign(
+			model("claude-opus-4-5"),
+			"default",
+			undefined,
+			"anthropic/claude-opus-4-5",
+			undefined,
+		);
+
+		expect(result).toBe(false);
+		expect(confirm).toHaveBeenCalled();
+		// Declined: the live session keeps its model and no global default is written.
+		expect(session?.model?.id).toBe("claude-sonnet-4-5");
+		expect(settings.getModelRole("default")).toBeUndefined();
+	});
 });

@@ -554,6 +554,10 @@ export async function resolveEffectiveSubagentPolicy(
 		}
 	}
 	const agentModelOverrides = cfgTaskAgentModelOverrides.get(request.session.settings);
+	// A session-scoped pick (the `Alt+P` task-model pick) lives on the requesting
+	// session, not on the shared settings override layer, so a pick recorded for
+	// one session is never read by another session sharing the same root Settings.
+	const sessionPick = request.session.getSessionTaskModel?.(agentName, request.session.getSessionId?.() ?? null);
 	const agentServiceTierOverrides = validateAgentServiceTierOverrides(
 		cfgTaskAgentServiceTierOverrides.get(request.session.settings),
 	);
@@ -582,7 +586,7 @@ export async function resolveEffectiveSubagentPolicy(
 					request,
 					perCallSelector,
 					agent,
-					Object.hasOwn(agentModelOverrides, agentName),
+					Object.hasOwn(agentModelOverrides, agentName) || sessionPick !== undefined,
 					userTaggedEffort,
 					// A multi-upstream or otherwise richer parent route cannot grant a simpler selector.
 					parentActiveModel
@@ -592,7 +596,7 @@ export async function resolveEffectiveSubagentPolicy(
 	const parentActiveModelPattern = perCallModelGrants ? undefined : request.session.getActiveModelString?.();
 	const modelResolution = {
 		requestModel: request.model,
-		settingsOverride: agentModelOverrides[agentName],
+		settingsOverride: sessionPick ?? agentModelOverrides[agentName],
 		agentModel: effectiveAgent.model,
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,

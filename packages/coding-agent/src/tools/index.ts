@@ -454,6 +454,15 @@ export interface ToolSession {
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
+	/**
+	 * A session-scoped model pick for one agent, resolved from this session's
+	 * own state (never the shared settings override layer, which every session
+	 * reads). `sessionId` is the requesting session's id, so a pick recorded for
+	 * one session is never read by another. Returns the picked selector, or
+	 * `undefined` when that session has no pick. The spawn path layers it over
+	 * the persisted `task.agentModelOverrides` entry for that agent.
+	 */
+	getSessionTaskModel?: (agentName: string, sessionId: string | null) => string | string[] | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
 	/**
