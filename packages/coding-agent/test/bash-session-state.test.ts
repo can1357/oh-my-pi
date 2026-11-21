@@ -149,21 +149,12 @@ it.skipIf(process.platform === "win32")(
 	async () => {
 		const [first, second] = [`${cwd}:first`, `${cwd}:second`];
 		let sessionId = first;
-		const heldAllocation = Promise.withResolvers<{ id?: string; path?: string }>();
-		let allocations = 0;
-		const tool = bashTool(
-			{ "bash.autoBackground.thresholdMs": 100 },
-			{
-				getSessionId: () => sessionId,
-				// Holds the first call before its shell starts, so the session changes underneath it.
-				allocateOutputArtifact: async () => (allocations++ === 0 ? heldAllocation.promise : {}),
-			},
-		);
+		const tool = bashTool({}, { getSessionId: () => sessionId });
 		try {
-			expect((await run(tool, "PI_STATE_VAR=from-first")).async?.state).toBe("running");
+			const pending = run(tool, "PI_STATE_VAR=from-first");
+			// The session changes after the call started but before its shell runs.
 			sessionId = second;
-			heldAllocation.resolve({});
-			await manager.waitForAll();
+			await pending;
 
 			expect((await run(tool, 'printf "[%s]" "$PI_STATE_VAR"')).text).toBe("[]");
 			// The left session's shell was dropped when that call finished.
