@@ -385,7 +385,7 @@ describe("todo backend", () => {
 		expect(order).toEqual(["replace", "shutdown"]);
 	});
 
-	it("a backend that never answers holds dispose no longer than the session_shutdown budget", async () => {
+	it("a backend that never answers holds dispose no longer than the session_shutdown budget, after which omp stops waiting for its call", async () => {
 		const backend = tracker();
 		const order: string[] = [];
 		const { session } = await open(
@@ -400,8 +400,16 @@ describe("todo backend", () => {
 		session.commitTodoPhases(list("a"));
 		await inFlight;
 		await session.dispose();
+		// A call omp still raced against the handler budget would keep a host's process alive for
+		// the rest of those 30 s.
+		const left = await Promise.race([
+			session.extensionRunner?.todoBackendSettled().then(() => "no call"),
+			// Not a wait: a task queued behind the microtasks of a call chain that has settled.
+			Bun.sleep(0).then(() => "a running call"),
+		]);
 
 		expect(order).toEqual(["shutdown"]);
+		expect(left).toBe("no call");
 	});
 
 	it("a label or description that is not text, or is blank once its control sequences are removed, is refused at registration", async () => {
