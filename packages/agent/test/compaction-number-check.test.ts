@@ -150,6 +150,17 @@ describe("compaction.numberCheck", () => {
 		expect(blankUnseenNumbers(summary, seen)).toBe(summary);
 	});
 
+	test("reads a long digit run in linear time and keeps its versions and lists", () => {
+		const run = "1".repeat(60_000);
+		const start = performance.now();
+		const seen = numbersSeenIn([`value ${run} then 18.20.2 and ids 120, 126`]);
+		expect(performance.now() - start).toBeLessThan(1_000);
+
+		expect(seen.has(run)).toBe(true);
+		expect(seen.has("18.20.2")).toBe(true);
+		expect(seen.has("120,126")).toBe(true);
+	});
+
 	test("skips code but still checks standalone numbers with units and versions", () => {
 		const seen = numbersSeenIn(["upgraded to 18.20.2; bundle is 4KB, 3x smaller, 12ms load"]);
 		const summary = [

@@ -28,10 +28,14 @@ export interface NumberCheckReport {
  * count too): a wider seen set can only make the check keep more.
  */
 const NUMBER = /\d{1,3}(?:,\d{3})+(?!\d)(?:\.\d+)?|\d+(?:\.\d+)?/g;
-/** A dotted version as the input shows it (`18.20.2`), so a summary's version token can match it whole. */
-const VERSION = /\d+(?:\.\d+){2,}/g;
+/**
+ * A dotted version as the input shows it (`18.20.2`), so a summary's version token can match it whole.
+ * This and `NUMBER_LIST` start only where a digit run starts: a match inside a run extends back to
+ * the run's start anyway, and retrying from every digit of a long run is quadratic.
+ */
+const VERSION = /(?<!\d)\d+(?:\.\d+){2,}/g;
 /** A list of numbers as written (`120, 126, 131`); packed into a summary it may read `120,126`. */
-const NUMBER_LIST = /\d+(?:\.\d+)?(?:,\s+\d+(?:\.\d+)?)+/g;
+const NUMBER_LIST = /(?<!\d)\d+(?:\.\d+)?(?:,\s+\d+(?:\.\d+)?)+/g;
 /**
  * A number the summary states: a standalone token, never digits inside an identifier
  * (`base64url`, `IPv6`, `claude-sonnet-4-5`, `HTTP/2`, `oauth2.ts`, a commit hash). It may carry
