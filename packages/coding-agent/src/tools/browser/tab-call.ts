@@ -1,5 +1,8 @@
-import { renderRunArg } from "../run-code";
-import { ToolError } from "../tool-errors";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { CELL_BUDGET_SLACK_MS } from "../run-scope";
+import { renderCallChain, renderRunArg } from "../run-code";
+import { TOOL_TIMEOUTS } from "../tool-timeouts";
 
 /** One allowlisted method invocation in a tab call chain. */
 export interface TabCallStep {
@@ -12,11 +15,38 @@ export const TAB_VALUE_METHODS: readonly string[] = [
 	"url",
 	"title",
 	"goto",
+	"back",
+	"forward",
+	"reload",
+	"pushState",
+	"frames",
+	"dialog",
+	"handleDialog",
+	"setDialogs",
 	"observe",
 	"ariaSnapshot",
+	"a11y",
+	"webmcpList",
+	"webmcpInvoke",
+	"webmcpEvents",
 	"screenshot",
+	"diffScreenshot",
+	"pdf",
 	"extract",
 	"click",
+	"dblclick",
+	"hover",
+	"focus",
+	"check",
+	"uncheck",
+	"keyDown",
+	"keyUp",
+	"mouseMove",
+	"mouseDown",
+	"mouseUp",
+	"clickAt",
+	"wheel",
+	"highlight",
 	"type",
 	"fill",
 	"press",
@@ -26,18 +56,79 @@ export const TAB_VALUE_METHODS: readonly string[] = [
 	"select",
 	"uploadFile",
 	"waitForUrl",
+	"text",
+	"html",
+	"value",
+	"attr",
+	"count",
+	"box",
+	"styles",
+	"isVisible",
+	"isEnabled",
+	"isChecked",
+	"waitForText",
 	"evaluate",
+	"emulate",
+	"devices",
+	"clipboardRead",
+	"clipboardWrite",
+	"clipboardCopy",
+	"clipboardPaste",
+	"cookies",
+	"setCookies",
+	"clearCookies",
+	"storage",
+	"setStorage",
+	"clearStorage",
+	"saveState",
+	"loadState",
+	"addInitScript",
+	"removeInitScript",
+	"initScripts",
+	"waitForDownload",
+	"downloads",
+	"console",
+	"errors",
+	"clearConsole",
+	"traceStart",
+	"traceStop",
+	"profileStart",
+	"profileStop",
+	"metrics",
+	"route",
+	"unroute",
+	"routes",
+	"requests",
+	"request",
+	"clearRequests",
+	"harStart",
+	"harStop",
+	"allowedDomains",
+	"vitals",
+	"reactEnable",
+	"reactTree",
+	"reactInspect",
+	"reactRenders",
+	"reactSuspense",
+	"recordStart",
+	"recordStop",
+	"recordRestart",
+	"recording",
 ];
 
 /** Tab helpers whose handle-or-null result is returned as a boolean. */
 export const TAB_PRESENCE_METHODS: readonly string[] = ["waitFor", "waitForSelector"];
 
-/** Tab helpers that return an element handle for one subsequent method call. */
-export const TAB_HANDLE_METHODS: readonly string[] = ["id", "ref"];
+/** Tab helpers that return an element or frame handle for one subsequent method call. */
+export const TAB_HANDLE_METHODS: readonly string[] = ["id", "ref", "frame"];
 
 /** Methods allowed on element handles returned by tab.id() and tab.ref(). */
 export const ELEMENT_METHODS: readonly string[] = [
 	"click",
+	"dblclick",
+	"check",
+	"uncheck",
+	"highlight",
 	"type",
 	"fill",
 	"press",
@@ -49,18 +140,51 @@ export const ELEMENT_METHODS: readonly string[] = [
 	"boundingBox",
 	"isVisible",
 	"isHidden",
+	"text",
+	"html",
+	"value",
+	"attr",
+	"styles",
+	"isEnabled",
+	"isChecked",
 	"evaluate",
+];
+
+/** Methods allowed on frame handles returned by tab.frame(). */
+export const FRAME_METHODS: readonly string[] = [
+	"click",
+	"fill",
+	"type",
+	"press",
+	"text",
+	"html",
+	"value",
+	"attr",
+	"count",
+	"isVisible",
+	"ariaSnapshot",
+	"evaluate",
+	"waitFor",
+	"waitForSelector",
+	"screenshot",
 ];
 
 const DIRECT_METHODS_DESCRIPTION = [...TAB_VALUE_METHODS, ...TAB_PRESENCE_METHODS].join(", ");
 const ELEMENT_METHODS_DESCRIPTION = ELEMENT_METHODS.join(", ");
+const FRAME_METHODS_DESCRIPTION = FRAME_METHODS.join(", ");
 
-function renderStep(step: TabCallStep): string {
-	return `${step.method}(${step.args.map(renderRunArg).join(", ")})`;
+function renderWaitStep(step: TabCallStep): string {
+	if (!step.method.startsWith("waitFor")) return renderCallChain([step]);
+	const options = step.args.at(-1);
+	if (!isRecord(options) || options.timeout !== Number.POSITIVE_INFINITY) return renderCallChain([step]);
+	// JSON.stringify turns Infinity into null; zero is the equivalent bounded disable sentinel.
+	const args = step.args.slice();
+	args[args.length - 1] = { ...options, timeout: 0 };
+	return renderCallChain([{ method: step.method, args }]);
 }
 
 function renderElementStep(step: TabCallStep): string {
-	if (step.method !== "evaluate" || typeof step.args[0] !== "string") return renderStep(step);
+	if (step.method !== "evaluate" || typeof step.args[0] !== "string") return renderCallChain([step]);
 	const [source, ...args] = step.args;
 	const renderedArgs = args.map(value => `, ${renderRunArg(value)}`).join("");
 	return `evaluate((${source})${renderedArgs})`;
@@ -78,32 +202,65 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 	const root = chain[0]!;
 	if (TAB_VALUE_METHODS.includes(root.method)) {
 		if (chain.length === 2) {
-			throw new ToolError(`Only tab.id(n)/tab.ref(id) results accept a chained call; got tab.${root.method}().`);
+			throw new ToolError(
+				`Only tab.id(n)/tab.ref(id)/tab.frame(selector) results accept a chained call; got tab.${root.method}().`,
+			);
 		}
-		return `return await tab.${renderStep(root)};`;
+		return `return await tab.${renderWaitStep(root)};`;
 	}
 	if (TAB_PRESENCE_METHODS.includes(root.method)) {
 		if (chain.length === 2) {
-			throw new ToolError(`Only tab.id(n)/tab.ref(id) results accept a chained call; got tab.${root.method}().`);
+			throw new ToolError(
+				`Only tab.id(n)/tab.ref(id)/tab.frame(selector) results accept a chained call; got tab.${root.method}().`,
+			);
 		}
-		return `return (await tab.${renderStep(root)}) !== null;`;
+		return `return (await tab.${renderWaitStep(root)}) !== null;`;
 	}
 	if (TAB_HANDLE_METHODS.includes(root.method)) {
+		const frameHandle = root.method === "frame";
 		if (chain.length === 1) {
 			throw new ToolError(
-				`tab.${root.method}() returns an element handle; call a method on it (tab.id(5).click()) or use tab.run(fn).`,
+				frameHandle
+					? 'tab.frame() returns a frame handle; call a method on it (tab.frame("#pay").click("#submit")) or use tab.run(fn).'
+					: `tab.${root.method}() returns an element handle; call a method on it (tab.id(5).click()) or use tab.run(fn).`,
 			);
 		}
-		const element = chain[1]!;
-		if (!ELEMENT_METHODS.includes(element.method)) {
+		const handleStep = chain[1]!;
+		const methods = frameHandle ? FRAME_METHODS : ELEMENT_METHODS;
+		if (!methods.includes(handleStep.method)) {
+			const description = frameHandle ? FRAME_METHODS_DESCRIPTION : ELEMENT_METHODS_DESCRIPTION;
 			throw new ToolError(
-				`Unknown element method "${element.method}". Element handles support: ${ELEMENT_METHODS_DESCRIPTION}.`,
+				`Unknown ${frameHandle ? "frame" : "element"} method "${handleStep.method}". ${frameHandle ? "Frame" : "Element"} handles support: ${description}.`,
 			);
 		}
-		return `return await (await tab.${renderStep(root)}).${renderElementStep(element)};`;
+		return `return await (await tab.${renderCallChain([root])}).${frameHandle ? renderWaitStep(handleStep) : renderElementStep(handleStep)};`;
 	}
 
 	throw new ToolError(
-		`Unknown tab helper "${root.method}". Direct helpers: ${DIRECT_METHODS_DESCRIPTION}; element handles via tab.id(n)/tab.ref(id).`,
+		`Unknown tab helper "${root.method}". Direct helpers: ${DIRECT_METHODS_DESCRIPTION}; handles via tab.id(n)/tab.ref(id)/tab.frame(selector).`,
 	);
+}
+
+/**
+ * Tool budget in seconds for a `run` or `call` that passes no `timeout` of its own, or `undefined` for the
+ * tool default. The eval cell's timeout (`cellTimeoutMs`) counts, since the cell's watchdog is suspended while
+ * the call runs; so does a call chain's trailing `{ timeout }` (ms), which wait helpers clamp to the budget
+ * less {@link CELL_BUDGET_SLACK_MS}. A cell without a timeout (`0`) and the disable sentinels take the browser
+ * tool's maximum bounded budget. The larger applies, never below the tool default.
+ */
+export function tabCallBudgetSeconds(
+	chain: readonly TabCallStep[] | undefined,
+	cellTimeoutMs?: number,
+): number | undefined {
+	let budget: number | undefined;
+	if (cellTimeoutMs === 0) budget = TOOL_TIMEOUTS.browser.max;
+	else if (cellTimeoutMs !== undefined && cellTimeoutMs > 0) budget = Math.ceil(cellTimeoutMs / 1000);
+	const options = chain?.at(-1)?.args.at(-1);
+	const timeout = isRecord(options) ? options.timeout : undefined;
+	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) {
+		budget = Math.max(budget ?? 0, TOOL_TIMEOUTS.browser.max);
+	} else if (typeof timeout === "number" && Number.isFinite(timeout) && timeout >= 0) {
+		budget = Math.max(budget ?? 0, Math.ceil((timeout + CELL_BUDGET_SLACK_MS) / 1000));
+	}
+	return budget === undefined ? undefined : Math.max(TOOL_TIMEOUTS.browser.default, budget);
 }

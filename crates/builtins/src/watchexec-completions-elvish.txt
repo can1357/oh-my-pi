@@ -1,0 +1,96 @@
+
+use builtin;
+use str;
+
+set edit:completion:arg-completer[watchexec] = {|@words|
+    fn spaces {|n|
+        builtin:repeat $n ' ' | str:join ''
+    }
+    fn cand {|text desc|
+        edit:complex-candidate $text &display=$text' '(spaces (- 14 (wcswidth $text)))$desc
+    }
+    var command = 'watchexec'
+    for word $words[1..-1] {
+        if (str:has-prefix $word '-') {
+            break
+        }
+        set command = $command';'$word
+    }
+    var completions = [
+        &'watchexec'= {
+            cand --completions 'Generate a shell completions script'
+            cand --shell 'Use a different shell'
+            cand -E 'Add env vars to the command'
+            cand --env 'Add env vars to the command'
+            cand --wrap-process 'Configure how the process is wrapped'
+            cand --stop-signal 'Signal to send to stop the command'
+            cand --stop-timeout 'Time to wait for the command to exit gracefully'
+            cand --delay-run 'Sleep before running the command'
+            cand --workdir 'Set the working directory'
+            cand --socket 'Provide a socket to the command'
+            cand -o 'What to do when receiving events while the command is running'
+            cand --on-busy-update 'What to do when receiving events while the command is running'
+            cand -s 'Send a signal to the process when it''s still running'
+            cand --signal 'Send a signal to the process when it''s still running'
+            cand --map-signal 'Translate signals from the OS to signals to send to the command'
+            cand -d 'Time to wait for new events before taking action'
+            cand --debounce 'Time to wait for new events before taking action'
+            cand --poll 'Poll for filesystem changes'
+            cand --emit-events-to 'Configure event emission'
+            cand -w 'Watch a specific file or directory'
+            cand --watch 'Watch a specific file or directory'
+            cand -W 'Watch a specific directory, non-recursively'
+            cand --watch-non-recursive 'Watch a specific directory, non-recursively'
+            cand -F 'Watch files and directories from a file'
+            cand --watch-file 'Watch files and directories from a file'
+            cand -e 'Filename extensions to filter to'
+            cand --exts 'Filename extensions to filter to'
+            cand -f 'Filename patterns to filter to'
+            cand --filter 'Filename patterns to filter to'
+            cand --filter-file 'Files to load filters from'
+            cand --project-origin 'Set the project origin'
+            cand -j 'Filter programs'
+            cand --filter-prog 'Filter programs'
+            cand -i 'Filename patterns to filter out'
+            cand --ignore 'Filename patterns to filter out'
+            cand --ignore-file 'Files to load ignores from'
+            cand --fs-events 'Filesystem events to filter to'
+            cand --log-file 'Write diagnostic logs to a file'
+            cand -c 'Clear screen before running command'
+            cand --clear 'Clear screen before running command'
+            cand --color 'When to use terminal colours'
+            cand --manual 'Show the manual page'
+            cand --only-emit-events 'Only emit events to stdout, run no commands'
+            cand -1 'Testing only: exit Watchexec after the first run and return the command''s exit code'
+            cand -n 'Shorthand for ''--shell=none'''
+            cand --no-environment 'Deprecated shorthand for ''--emit-events=none'''
+            cand --no-process-group 'Don''t use a process group'
+            cand -r 'Restart the process if it''s still running'
+            cand --restart 'Restart the process if it''s still running'
+            cand --stdin-quit 'Exit when stdin closes'
+            cand -p 'Wait until first change before running command'
+            cand --postpone 'Wait until first change before running command'
+            cand --no-vcs-ignore 'Don''t load gitignores'
+            cand --no-project-ignore 'Don''t load project-local ignores'
+            cand --no-global-ignore 'Don''t load global ignores'
+            cand --no-default-ignore 'Don''t use internal default ignores'
+            cand --no-discover-ignore 'Don''t discover ignore files at all'
+            cand --ignore-nothing 'Don''t ignore anything at all'
+            cand --no-meta 'Don''t emit fs events for metadata changes'
+            cand -v 'Set diagnostic log level'
+            cand --verbose 'Set diagnostic log level'
+            cand --print-events 'Print events that trigger actions'
+            cand -N 'Alert when commands start and end'
+            cand --notify 'Alert when commands start and end'
+            cand --timings 'Print how long the command took to run'
+            cand -q 'Don''t print starting and stopping messages'
+            cand --quiet 'Don''t print starting and stopping messages'
+            cand --bell 'Ring the terminal bell on command completion'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+            cand -V 'Print version'
+            cand --version 'Print version'
+        }
+    ]
+    $completions[$command]
+}

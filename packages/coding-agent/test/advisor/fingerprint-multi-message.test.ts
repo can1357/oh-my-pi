@@ -7,14 +7,14 @@
 //      (auto-shake mutates in place, then rewriteEntries yields a new object)
 //   C. wip heading flip (## Session update [in progress ...] vs final)
 //   E. rendered field change (custom.display) must replay
-//   F. unrendered field change (usage) must NOT replay under candidate 1
 //
 // formatSessionHistoryMarkdown folds consecutive user messages into one block,
 // so full-vs-incremental is judged by content: `seed-body-001` is never
-// mutated by scenarios A/B/F, so its presence proves the whole history was
+// mutated by scenarios A/B, so its presence proves the whole history was
 // re-rendered (full replay); absence means only the new tail shipped.
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { spillUrl } from "@oh-my-pi/pi-utils";
 
 import { type AdvisorAgent, AdvisorRuntime, type AdvisorRuntimeHost } from "../../src/advisor/runtime";
 
@@ -52,7 +52,6 @@ async function runScenario(
 	} as unknown as AdvisorAgent;
 	const host: AdvisorRuntimeHost = {
 		snapshotMessages: () => messages,
-		enqueueAdvice: () => {},
 	} as unknown as AdvisorRuntimeHost;
 	const runtime = new AdvisorRuntime(agent, host);
 	runtime.onTurnEnd();
@@ -104,7 +103,7 @@ describe("fingerprint: field-selective fingerprint (applied)", () => {
 			messages => {
 				messages[0] = {
 					...messages[0],
-					content: "[shaken ~10 tokens — recover: artifact://1 (region 1)]",
+					content: `[shaken ~10 tokens — recover: ${spillUrl(1)} (region 1)]`,
 				} as AgentMessage;
 			},
 			[mkMsg("user", "tail-body-002", 3)],
@@ -116,7 +115,7 @@ describe("fingerprint: field-selective fingerprint (applied)", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "custom",
-				customType: "xdev-mount-notice",
+				customType: "tool-command-mount-notice",
 				content: "seed-body-000",
 				display: true,
 				timestamp: 1,
@@ -134,7 +133,6 @@ describe("fingerprint: field-selective fingerprint (applied)", () => {
 		} as unknown as AdvisorAgent;
 		const host: AdvisorRuntimeHost = {
 			snapshotMessages: () => messages,
-			enqueueAdvice: () => {},
 		} as unknown as AdvisorRuntimeHost;
 		const runtime = new AdvisorRuntime(agent, host);
 		runtime.onTurnEnd();
@@ -147,19 +145,6 @@ describe("fingerprint: field-selective fingerprint (applied)", () => {
 		const last = promptTextOf(prompts[prompts.length - 1]);
 		// display is rendered (folding gate); flipping it must re-render history.
 		expect(last).toContain("seed-body-001");
-	});
-
-	it("scenario F: unrendered field change (usage) does NOT trigger replay", async () => {
-		const { prompts } = await runScenario(
-			history(["seed-body-000", "seed-body-001"]),
-			messages => {
-				messages[0] = { ...messages[0], usage: { input_tokens: 123 } } as unknown as AgentMessage;
-			},
-			[mkMsg("user", "tail-body-002", 3)],
-		);
-		const d = describeDelta(prompts);
-		expect(d.full).toBe(false);
-		expect(d.tailOnly).toBe(true);
 	});
 
 	it("scenario G: rendered field change (bashExecution.command) triggers FULL replay", async () => {

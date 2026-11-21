@@ -74,26 +74,13 @@ if ("queryLocalFonts" in window) {
   });
 }
 
-const originalGetContext = HTMLCanvasElement.prototype.getContext;
-const patchedGetContext = function getContext(type, options) {
-  const ctx = originalGetContext.call(this, type, options);
-  if (ctx && type === "2d") {
-    const originalFillText = ctx.fillText;
-    const patchedFillText = function fillText(text, x, y, maxWidth) {
-      const noiseX = (Math_random() - 0.5) * 0.02;
-      const noiseY = (Math_random() - 0.5) * 0.02;
-      return originalFillText.call(
-        this,
-        text,
-        x + noiseX,
-        y + noiseY,
-        maxWidth,
-      );
-    };
-    patchToString(patchedFillText, "fillText");
-    ctx.fillText = patchedFillText;
-  }
-  return ctx;
+// Patch the prototype once: wrapping per getContext() call would re-wrap the
+// same cached context on every acquisition and grow the call stack unbounded.
+const originalFillText = CanvasRenderingContext2D.prototype.fillText;
+const patchedFillText = function fillText(text, x, y, maxWidth) {
+  const noiseX = (Math_random() - 0.5) * 0.02;
+  const noiseY = (Math_random() - 0.5) * 0.02;
+  return originalFillText.call(this, text, x + noiseX, y + noiseY, maxWidth);
 };
-patchToString(patchedGetContext, "getContext");
-HTMLCanvasElement.prototype.getContext = patchedGetContext;
+patchToString(patchedFillText, "fillText");
+CanvasRenderingContext2D.prototype.fillText = patchedFillText;

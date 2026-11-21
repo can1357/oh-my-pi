@@ -1,6 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
+import { runBunCli } from "./bun-cli";
+import { linkPluginDirectory } from "./directory-link";
 import { extractPackageName } from "./parser";
 import type { InstalledPlugin } from "./types";
 
@@ -45,21 +47,7 @@ export async function installPlugin(packageName: string): Promise<InstalledPlugi
 	}
 
 	// Run npm install in plugins directory
-	const proc = Bun.spawn(["bun", "install", packageName], {
-		cwd: PLUGINS_DIR,
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-		windowsHide: true,
-	});
-
-	// Drain both pipes concurrently with proc.exited to avoid a pipe-buffer
-	// deadlock if bun install floods stdout/stderr.
-	const [exitCode, , stderr] = await Promise.all([
-		proc.exited,
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-	]);
+	const { exitCode, stderr } = await runBunCli(["install", packageName], PLUGINS_DIR);
 	if (exitCode !== 0) {
 		throw new Error(`Failed to install ${packageName}: ${stderr}`);
 	}
@@ -92,19 +80,7 @@ export async function uninstallPlugin(name: string): Promise<void> {
 
 	await ensurePluginsDir();
 
-	const proc = Bun.spawn(["bun", "uninstall", name], {
-		cwd: PLUGINS_DIR,
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-		windowsHide: true,
-	});
-
-	const [exitCode] = await Promise.all([
-		proc.exited,
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-	]);
+	const { exitCode } = await runBunCli(["uninstall", name], PLUGINS_DIR);
 	if (exitCode !== 0) {
 		throw new Error(`Failed to uninstall ${name}`);
 	}
@@ -186,16 +162,8 @@ export async function linkPlugin(localPath: string): Promise<void> {
 		await fs.mkdir(scopeDir, { recursive: true });
 	}
 
-	// Remove existing if present
-	try {
-		const stats = await fs.lstat(linkPath);
-		if (stats.isSymbolicLink() || stats.isDirectory()) {
-			await fs.unlink(linkPath);
-		}
-	} catch (err) {
-		if (!isEnoent(err)) throw err;
-	}
+	// Whatever is there — a stale link, or a real directory from a git install.
+	await fs.rm(linkPath, { recursive: true, force: true });
 
-	// Create symlink using fs instead of shell command
-	await fs.symlink(absolutePath, linkPath);
+	await linkPluginDirectory(absolutePath, linkPath);
 }

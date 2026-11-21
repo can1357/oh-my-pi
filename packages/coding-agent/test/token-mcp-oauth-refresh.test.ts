@@ -25,7 +25,7 @@ async function captureRefreshResource(
 	});
 	try {
 		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		await storage.reload();
+		await storage.credentials.reload();
 		const credential: MCPStoredOAuthCredential = {
 			type: "oauth",
 			access: "access-0",
@@ -33,7 +33,7 @@ async function captureRefreshResource(
 			expires: Date.now() - 60_000,
 			tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
 		};
-		await storage.set(provider, credential);
+		await storage.credentials.set(provider, credential);
 		const result = await refreshStoredManagedMcpOAuthCredential(storage, provider, {
 			forceRefresh: true,
 			recoverServerUrlFromCredentialId,
@@ -55,6 +55,69 @@ test("refresh without server-url recovery advertises no resource", async () => {
 	const { resources, access } = await captureRefreshResource(false);
 	expect(access).toBe("access-1");
 	expect(resources).toEqual([null]);
+});
+
+/**
+ * Two forced refreshes of one stored credential through the real store. The
+ * token endpoint grants `grantedOnRefresh` on the first refresh and echoes no
+ * scope on the second. Returns the `scope` each refresh request sent and the
+ * scope left on the stored credential.
+ */
+async function captureRefreshScopes(
+	resource: string | undefined,
+	grantedOnRefresh: string | undefined,
+): Promise<{ sent: (string | null)[]; stored: string | undefined }> {
+	// No server URL is recoverable from a non-profile id, so a credential with
+	// no `resource` exercises the positional-`undefined` resource path.
+	const provider = "mcp_oauth_scope_test";
+	const sent: (string | null)[] = [];
+	const tokenServer = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			sent.push(new URLSearchParams(await request.text()).get("scope"));
+			const scope = sent.length === 1 ? grantedOnRefresh : undefined;
+			return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600, scope });
+		},
+	});
+	try {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+		await storage.credentials.reload();
+		const credential: MCPStoredOAuthCredential = {
+			type: "oauth",
+			access: "access-0",
+			refresh: "refresh-0",
+			expires: Date.now() - 60_000,
+			tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
+			resource,
+			scope: "https://hub.example.test/mcp/access_as_user offline_access",
+		};
+		await storage.credentials.set(provider, credential);
+		await refreshStoredManagedMcpOAuthCredential(storage, provider, { forceRefresh: true });
+		const second = await refreshStoredManagedMcpOAuthCredential(storage, provider, { forceRefresh: true });
+		storage.close();
+		return { sent, stored: (second.credential as MCPStoredOAuthCredential | undefined)?.scope };
+	} finally {
+		tokenServer.stop(true);
+	}
+}
+
+// Entra v2 refuses a scope-less refresh when the client is also the resource
+// (AADSTS90009), so every refresh must name the grant's scope.
+for (const resource of ["https://hub.example.test/mcp", undefined]) {
+	test(`refresh repeats the stored grant scope (resource ${resource ? "stored" : "absent"})`, async () => {
+		const scope = "https://hub.example.test/mcp/access_as_user offline_access";
+		const { sent, stored } = await captureRefreshScopes(resource, undefined);
+		expect(sent).toEqual([scope, scope]);
+		expect(stored).toBe(scope);
+	});
+}
+
+test("a narrower scope granted on refresh replaces the stored one", async () => {
+	const narrowed = "https://hub.example.test/mcp/access_as_user";
+	const { sent, stored } = await captureRefreshScopes(undefined, narrowed);
+	expect(sent).toEqual(["https://hub.example.test/mcp/access_as_user offline_access", narrowed]);
+	expect(stored).toBe(narrowed);
 });
 
 const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
@@ -81,7 +144,7 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 	try {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		const authStorage = new AuthStorage(store);
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		const credential: MCPStoredOAuthCredential = {
 			type: "oauth",
 			access: "access-0",
@@ -89,7 +152,7 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 			expires: Date.now() - 60_000,
 			tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
 		};
-		await authStorage.set(provider, credential);
+		await authStorage.credentials.set(provider, credential);
 		authStorage.close();
 
 		const proc = Bun.spawn([process.execPath, cliEntry, "token", provider, "--force-refresh"], {
@@ -116,8 +179,8 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 
 		const persistedStore = await SqliteAuthCredentialStore.open(dbPath);
 		const persistedStorage = new AuthStorage(persistedStore);
-		await persistedStorage.reload();
-		const persisted = persistedStorage.get(provider);
+		await persistedStorage.credentials.reload();
+		const persisted = persistedStorage.credentials.get(provider);
 		expect(persisted?.type).toBe("oauth");
 		if (persisted?.type === "oauth") {
 			expect(persisted.access).toBe("access-1");
@@ -141,8 +204,8 @@ test("token refuses a managed MCP id scoped to another profile", async () => {
 	const dbPath = tempDir.join("agent.db");
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const authStorage = new AuthStorage(store);
-	await authStorage.reload();
-	await authStorage.set(foreignProvider, {
+	await authStorage.credentials.reload();
+	await authStorage.credentials.set(foreignProvider, {
 		type: "oauth",
 		access: "work-access",
 		refresh: "work-refresh",

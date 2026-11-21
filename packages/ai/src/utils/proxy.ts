@@ -164,15 +164,15 @@ export function getProxyForUrl(provider: string, url: URL): string | undefined {
 /**
  * Return `init` with `proxy: proxyUrl` set when the request should tunnel.
  * A caller-supplied `init.proxy` always wins (the innermost, most specific
- * decision); local/metadata hosts, NO_PROXY matches, and unparseable URLs
- * pass through unchanged.
+ * decision); Unix sockets, local/metadata hosts, NO_PROXY matches, and
+ * unparseable URLs pass through unchanged.
  */
 export function withProxyInit(
 	input: string | URL | Request,
 	init: RequestInit | undefined,
 	proxyUrl: string,
 ): RequestInit | undefined {
-	if ((init as { proxy?: unknown } | undefined)?.proxy) return init;
+	if (init && (("unix" in init && init.unix) || ("proxy" in init && init.proxy))) return init;
 	const urlStr = input instanceof Request ? input.url : input.toString();
 	let urlObj: URL;
 	try {
@@ -256,10 +256,14 @@ export function installGlobalProxyFetch(): void {
 		NO_PROXY: Bun.env.NO_PROXY || Bun.env.no_proxy,
 	};
 	if (!proxyUrl) {
-		logger.debug("global proxy fetch not installed", {
-			reason: "PI_PROXY unset",
-			env,
-		});
+		// Without any proxy variable there is nothing to diagnose; skip the
+		// per-process line. When some are set, record why none was installed.
+		if (Object.values(env).some(value => value !== undefined && value !== "")) {
+			logger.debug("global proxy fetch not installed", {
+				reason: "PI_PROXY unset",
+				env,
+			});
+		}
 		return;
 	}
 	globalProxyFetchInstalled = true;
@@ -380,14 +384,15 @@ export async function connectProxiedSocket(
 		}
 
 		const tlsOptions = options?.tls;
-		tunnelSocket = tls.connect({
+		const newTunnelSocket: tls.TLSSocket = tls.connect({
 			...tlsOptions,
 			socket: rawSocket,
 			servername: tlsOptions?.servername ?? targetHost,
 			ALPNProtocols: tlsOptions?.ALPNProtocols ?? ["h2"],
 		});
-		tunnelSocket.once("secureConnect", onTunnelReady);
-		tunnelSocket.once("error", onTunnelError);
+		tunnelSocket = newTunnelSocket;
+		newTunnelSocket.once("secureConnect", onTunnelReady);
+		newTunnelSocket.once("error", onTunnelError);
 	};
 	const onProxyReady = (): void => {
 		if (!rawSocket) return;

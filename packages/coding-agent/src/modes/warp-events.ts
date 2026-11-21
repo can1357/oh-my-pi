@@ -1,6 +1,8 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { isInsideTmux, wrapTmuxPassthrough } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
+import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { wrapTmuxPassthrough } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions/types";
 import { isSilentAbort, isUserInterruptAbort, SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
@@ -42,8 +44,9 @@ export interface WarpEventEmitter {
 /**
  * Creates the Warp event transport for a top-level interactive TUI session.
  * The caller MUST enforce that install-site invariant; the sole production
- * caller is gated by `isInteractive`, so ACP, RPC, print, headless, and
- * subagent sessions never construct an emitter.
+ * caller is the event bridge below, which the CLI installs only for interactive
+ * sessions and as a `topLevelExtensions` entry, so ACP, RPC, print, headless,
+ * and subagent sessions never construct an emitter.
  */
 export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEventEmitter | undefined {
 	if (!isWarpCliAgentProtocolActive()) {
@@ -64,8 +67,8 @@ export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEv
 				plugin_version: VERSION,
 			};
 			const osc = `\x1b]777;notify;${WARP_CLI_AGENT_SENTINEL};${JSON.stringify(body)}\x07`;
-			if (!isInsideTmux()) {
-				process.stdout.write(osc);
+			if (!hasTerminalMultiplexerSession("tmux")) {
+				writeTerminalSequence(osc);
 				return;
 			}
 			// DCS-wrap every OSC so Warp can parse it under allow-passthrough.
@@ -75,7 +78,7 @@ export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEv
 			const wrapped = wrapTmuxPassthrough(osc);
 			const eventName = event.event;
 			const ring = typeof eventName === "string" && Object.hasOwn(WARP_ATTENTION_EVENTS, eventName);
-			process.stdout.write(ring ? `${wrapped}\x07` : wrapped);
+			writeTerminalSequence(ring ? `${wrapped}\x07` : wrapped);
 		},
 	};
 }
@@ -159,7 +162,11 @@ function messageText(content: unknown): string {
 		.join("");
 }
 
-/** Internal event bridge installed only by the top-level interactive TUI runner. */
+/**
+ * Internal event bridge installed only by the top-level interactive TUI runner,
+ * through `topLevelExtensions`: a child session rebinding it would report the
+ * child to Warp as a session of its own.
+ */
 export function createWarpEventBridgeExtension(): ExtensionFactory {
 	return api => {
 		let emitter: WarpEventEmitter | undefined;

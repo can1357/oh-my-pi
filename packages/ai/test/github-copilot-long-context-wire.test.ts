@@ -119,10 +119,11 @@ describe("GitHub Copilot long-context variant wire model id", () => {
 
 /**
  * GitHub Copilot's Responses endpoint rejects the `detail: "original"` image
- * hint (an oh-my-pi extension that preserves native-resolution snapcompact
+ * hint (an omp extension that preserves native-resolution snapcompact
  * frames) with an HTTP 400. The catalog resolves `supportsImageDetailOriginal`
  * to `false` for Copilot, and the Responses request builder degrades the hint
- * to `"auto"` so the wire stays valid. Every other host preserves `"original"`.
+ * to `"auto"` so the wire stays valid. Unknown hosts use the same conservative
+ * default; known-compatible hosts and explicit opt-ins preserve `"original"`.
  */
 describe("GitHub Copilot Responses image detail clamp (#2822)", () => {
 	const imageContext: Context = {
@@ -159,7 +160,10 @@ describe("GitHub Copilot Responses image detail clamp (#2822)", () => {
 		return found;
 	}
 
-	async function detailOnWire(model: Model<"openai-responses">): Promise<string | undefined> {
+	async function detailOnWire(
+		model: Model<"openai-responses">,
+		context: Context = imageContext,
+	): Promise<string | undefined> {
 		let body: Record<string, unknown> | undefined;
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			body = await getRequestBody(input, init);
@@ -169,7 +173,7 @@ describe("GitHub Copilot Responses image detail clamp (#2822)", () => {
 			// The mocked fetch returns 401; this test only cares about what was
 			// serialized onto the wire, which `fetchMock` captures into `body`
 			// before `.result()` settles. Tolerate the result rejecting.
-			await streamOpenAIResponses(model, imageContext, {
+			await streamOpenAIResponses(model, context, {
 				apiKey: "ghu_test_copilot_token",
 				fetch: fetchMock as unknown as typeof fetch,
 			}).result();
@@ -220,5 +224,55 @@ describe("GitHub Copilot Responses image detail clamp (#2822)", () => {
 		});
 		expect(model.compat.supportsImageDetailOriginal).toBe(false);
 		expect(await detailOnWire(model)).toBe("auto");
+	});
+
+	it("clamps native snapcompact frames on custom Responses hosts unless explicitly opted in", async () => {
+		const spec = {
+			api: "openai-responses" as const,
+			provider: "custom",
+			baseUrl: "http://127.0.0.1:8080/v1",
+		};
+		expect(await detailOnWire(makeLongContextVariant(spec))).toBe("auto");
+		expect(
+			await detailOnWire(makeLongContextVariant({ ...spec, compat: { supportsImageDetailOriginal: true } })),
+		).toBe("original");
+	});
+
+	it("clamps original computer screenshots on custom Responses hosts", async () => {
+		const model = makeLongContextVariant({
+			api: "openai-responses",
+			provider: "custom",
+			baseUrl: "http://127.0.0.1:8080/v1",
+		});
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_screenshot", name: "computer", arguments: {} }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: FIXED_TIMESTAMP,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_screenshot",
+					toolName: "computer",
+					content: [{ type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "original" }],
+					isError: false,
+					timestamp: FIXED_TIMESTAMP,
+				},
+			],
+		};
+		expect(await detailOnWire(model, context)).toBe("auto");
 	});
 });

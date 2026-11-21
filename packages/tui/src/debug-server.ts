@@ -1,7 +1,6 @@
-import { existsSync, unlinkSync } from "node:fs";
-import { createServer, type Server, type Socket } from "node:net";
+import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { type Component, isFocusable, type OverlayOptions, type TUI } from "./tui";
-import { replaceTabs } from "./utils";
+import { plainText } from "./native/spans";
 
 export interface TuiDebugTreeNode {
 	kind: string;
@@ -63,10 +62,6 @@ const SPECIAL_KEYS: Readonly<Record<string, string>> = {
 	f12: "\x1b[24~",
 };
 
-function plainLine(line: string): string {
-	return replaceTabs(Bun.stripANSI(line)).replace(/[\x00-\x1f\x7f-\x9f]/g, "");
-}
-
 function errorMessage(error: unknown): string {
 	try {
 		return error instanceof Error ? error.message : String(error);
@@ -106,6 +101,9 @@ function modifiedSpecial(sequence: string, modifier: number): string {
 	if (ss3Final) return `\x1b[1;${modifier}${ss3Final[1]}`;
 	const tilde = sequence.match(/^\x1b\[(\d+)~$/);
 	if (tilde) return `\x1b[${tilde[1]};${modifier}~`;
+	// Enter/Space/Backspace/Escape have no legacy modified form: a plain byte
+	// would drop the modifier (Shift+Enter would submit), so use Kitty CSI u.
+	if (sequence.length === 1) return `\x1b[${sequence.charCodeAt(0)};${modifier}u`;
 	return sequence;
 }
 
@@ -144,7 +142,7 @@ function encodeChord(token: string): string {
 		if (alt && encoded === special) encoded = `\x1b${encoded}`;
 		return encoded;
 	}
-	if (Array.from(rest).length !== 1) throw new Error(`unknown key ${rest}`);
+	if (Array.from(rest).length !== 1) throw new Error(`unknown key ${rest} (quote literal text instead, e.g. ',')`);
 	let character = rest;
 	if (shift && /^[a-z]$/i.test(character)) character = character.toUpperCase();
 	if (ctrl) character = ctrlCharacter(character);
@@ -210,72 +208,60 @@ function mouseSequence(x: number, y: number, action: string): string {
 export class TuiDebugServer {
 	readonly #tui: TUI;
 	readonly #path: string;
-	#server: Server | undefined;
-	#sockets = new Set<Socket>();
+	#server: IpcServer | undefined;
+	#listening: Promise<boolean> | undefined;
+	#stopped = false;
+	#connections = new Set<IpcConnection>();
 
 	constructor(tui: TUI, path: string) {
 		this.#tui = tui;
 		this.#path = path;
 	}
 
+	/** Resolves true once the socket accepts connections, false if listen failed or the server stopped first. */
+	get ready(): Promise<boolean> {
+		return this.#listening ?? Promise.resolve(false);
+	}
+
 	start(): void {
-		if (this.#server !== undefined) return;
-		try {
-			if (existsSync(this.#path)) unlinkSync(this.#path);
-		} catch {
-			// The listen error below is isolated from the host application.
-		}
-		const server = createServer(socket => this.#accept(socket));
-		this.#server = server;
-		server.on("error", error => {
-			void error;
-		});
-		try {
-			server.listen(this.#path);
-		} catch {
-			this.#server = undefined;
-			server.close();
-		}
+		if (this.#listening !== undefined) return;
+		this.#stopped = false;
+		this.#listening = IpcServer.listen(this.#path, { framing: "lines" }, connection => this.#accept(connection)).then(
+			server => {
+				if (this.#stopped) {
+					void server.close().catch(() => {});
+					return false;
+				}
+				this.#server = server;
+				return true;
+			},
+			() => false, // A live peer or unusable path disables the debug socket; the host application is unaffected.
+		);
 	}
 
 	stop(): void {
+		this.#stopped = true;
 		const server = this.#server;
 		this.#server = undefined;
-		for (const socket of this.#sockets) socket.destroy();
-		this.#sockets.clear();
-		try {
-			server?.close();
-		} catch {
-			// A failed or already-closed listener still needs its stale path removed.
-		}
-		try {
-			if (existsSync(this.#path)) unlinkSync(this.#path);
-		} catch {
-			// Teardown must not affect the host application.
-		}
+		this.#listening = undefined;
+		for (const connection of this.#connections) connection.destroy();
+		this.#connections.clear();
+		void server?.close().catch(() => {});
 	}
 
-	#accept(socket: Socket): void {
-		this.#sockets.add(socket);
-		let buffer = "";
-		socket.setEncoding("utf8");
-		socket.on("data", chunk => {
-			buffer += chunk;
-			let newline = buffer.indexOf("\n");
-			while (newline !== -1) {
-				const line = buffer.slice(0, newline).replace(/\r$/, "");
-				buffer = buffer.slice(newline + 1);
-				if (line.length > 0) this.#handleLine(socket, line);
-				newline = buffer.indexOf("\n");
-			}
-		});
-		socket.on("error", error => {
-			void error;
-		});
-		socket.on("close", () => this.#sockets.delete(socket));
+	#accept(connection: IpcConnection): void {
+		if (this.#stopped) {
+			connection.destroy();
+			return;
+		}
+		this.#connections.add(connection);
+		connection.start(
+			line => void this.#handleLine(connection, line),
+			() => this.#connections.delete(connection),
+		);
 	}
 
-	#handleLine(socket: Socket, line: string): void {
+	async #handleLine(connection: IpcConnection, line: string): Promise<void> {
 		let request: DebugRequest;
 		try {
 			const parsed: unknown = JSON.parse(line);
@@ -283,36 +269,31 @@ export class TuiDebugServer {
 				throw new Error("request must be an object");
 			request = parsed as DebugRequest;
 		} catch (error) {
-			this.#write(socket, { ok: false, error: `malformed JSON: ${errorMessage(error)}` });
+			this.#write(connection, { ok: false, error: `malformed JSON: ${errorMessage(error)}` });
 			return;
 		}
+		let response: DebugResponse;
 		try {
-			const response = this.#dispatch(request);
-			if (request.op === "quit" && response.ok) {
-				this.#write(socket, response, () => {
-					this.#tui.stop();
-					process.exit(0);
-				});
-				return;
-			}
-			this.#write(socket, response);
+			response = this.#dispatch(request);
 		} catch (error) {
-			this.#write(socket, { ok: false, error: errorMessage(error) });
+			response = { ok: false, error: errorMessage(error) };
+		}
+		this.#write(connection, response);
+		if (request.op === "quit" && response.ok) {
+			await connection.drained();
+			this.#tui.stop();
+			process.exit(0);
 		}
 	}
 
-	#write(socket: Socket, response: DebugResponse, flushed?: () => void): void {
+	#write(connection: IpcConnection, response: DebugResponse): void {
 		let line: string;
 		try {
 			line = JSON.stringify(response);
 		} catch (error) {
 			line = JSON.stringify({ ok: false, error: errorMessage(error) });
 		}
-		try {
-			socket.write(`${line}\n`, flushed);
-		} catch {
-			// Broken clients cannot affect the TUI.
-		}
+		connection.send(line);
 	}
 
 	#dispatch(request: DebugRequest): DebugResponse {
@@ -323,14 +304,25 @@ export class TuiDebugServer {
 				if (paint === undefined) return { ok: false, error: "no frame painted yet" };
 				return {
 					ok: true,
-					lines: paint.lines.map(plainLine),
+					lines: paint.lines.map(plainText),
 					window_top: paint.windowTop,
 					alt_screen: paint.altScreen,
 					...(paint.cursor === undefined ? {} : { cursor: paint.cursor }),
 				};
 			}
 			case "frame":
-				return { ok: true, lines: this.#tui.getDebugDocument().map(plainLine) };
+				return { ok: true, lines: this.#tui.getDebugDocument().map(plainText) };
+			case "doc": {
+				// The document a Tern Surface Protocol terminal should hold: every sent
+				// frame applied by the reference applier.
+				const doc = this.#tui.getNativeDocument();
+				if (doc === undefined) return { ok: false, error: "no native surface" };
+				return { ok: true, doc, rows: this.#tui.nativeFallbackCount };
+			}
+			case "tsp": {
+				const count = typeof request.n === "number" && request.n > 0 ? Math.trunc(request.n) : undefined;
+				return { ok: true, native: this.#tui.nativeRendering, frames: this.#tui.getNativeFrames(count) };
+			}
 			case "tree":
 				return { ok: true, tree: this.#tree() };
 			case "values":

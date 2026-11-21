@@ -5,14 +5,11 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -92,7 +89,6 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 			settings: Settings.isolated({}),
 			steer,
 			prompt,
-			maybeStartTitleGeneration: vi.fn(),
 			queuedMessageCount: 0,
 			customCommands: [],
 			promptTemplates: [],
@@ -175,7 +171,7 @@ describe("InputController orphaned submit", () => {
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Expected built-in anthropic model to exist");
 			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-			authStorage.setRuntimeApiKey("anthropic", "test-key");
+			authStorage.keys.setRuntime("anthropic", "test-key");
 			const agent = new Agent({
 				initialState: {
 					model,
@@ -261,108 +257,5 @@ describe("InputController orphaned submit", () => {
 		expect(editor.getText()).toBe("queued with image");
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		expect(ctx.editor.pendingImageLinks).toEqual([undefined]);
-	});
-	it("skips automatic titles only for locally consumed extension commands", async () => {
-		const previousNoTitle = Bun.env.PI_NO_TITLE;
-		delete Bun.env.PI_NO_TITLE;
-		const tempDir = TempDir.createSync("@pi-extension-title-");
-		let session: AgentSession | undefined;
-		let authStorage: AuthStorage | undefined;
-		try {
-			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-			if (!model) throw new Error("Expected built-in anthropic model to exist");
-			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-			const modelRegistry = new ModelRegistry(authStorage);
-			const sessionManager = SessionManager.inMemory(tempDir.path());
-			const settings = Settings.isolated({
-				"compaction.enabled": false,
-				"providers.tinyModel": "online",
-			});
-			const localHandler = vi.fn(async () => {});
-			const runtime = new ExtensionRuntime();
-			const extension = await loadExtensionFromFactory(
-				pi => {
-					pi.registerCommand("widget-status", {
-						description: "Display local widget status",
-						handler: localHandler,
-					});
-				},
-				tempDir.path(),
-				new EventBus(),
-				runtime,
-				"widget-status-test",
-			);
-			const extensionRunner = new ExtensionRunner(
-				[extension],
-				runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-				undefined,
-				settings,
-			);
-			const agent = new Agent({
-				initialState: {
-					model,
-					systemPrompt: ["Test"],
-					tools: [],
-					messages: [],
-				},
-			});
-			session = new AgentSession({
-				agent,
-				sessionManager,
-				settings,
-				modelRegistry,
-				extensionRunner,
-			});
-			const titleSpy = vi.spyOn(session, "generateTitle").mockResolvedValue(null);
-			const { ctx, editor } = createContext(session);
-			ctx.sessionManager = sessionManager;
-			ctx.settings = settings;
-			const controller = new InputController(ctx);
-			controller.setupEditorSubmitHandler();
-
-			session.maybeStartTitleGeneration("/widget-status");
-			expect(titleSpy).not.toHaveBeenCalled();
-
-			await editor.onSubmit?.("/widget-status");
-
-			expect(localHandler).toHaveBeenCalledTimes(1);
-			expect(titleSpy).not.toHaveBeenCalled();
-			expect(sessionManager.getSessionName()).toBeUndefined();
-			expect(session.messages).toEqual([]);
-
-			const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(true);
-			for (const forwardedText of ["inspect the widgets", "/custom-prompt inspect the widgets"]) {
-				titleSpy.mockClear();
-				promptSpy.mockClear();
-
-				await editor.onSubmit?.(forwardedText);
-
-				expect(promptSpy).toHaveBeenCalledWith(forwardedText, {
-					streamingBehavior: "steer",
-					images: undefined,
-				});
-				expect(titleSpy).toHaveBeenCalledWith(forwardedText);
-				// Drain the title request's .then/.finally chain so the in-flight
-				// latch clears before the next submit; a request still in flight is
-				// deliberately deduped (see agent-session-title-generation-dispose).
-				// The chain exposes no settlement promise; sleep(0) is a macrotask
-				// boundary that deterministically drains all pending microtasks —
-				// not a wall-clock wait, so fake timers would not help here.
-				await Bun.sleep(0);
-			}
-		} finally {
-			vi.restoreAllMocks();
-			await session?.dispose();
-			authStorage?.close();
-			tempDir.removeSync();
-			if (previousNoTitle === undefined) {
-				delete Bun.env.PI_NO_TITLE;
-			} else {
-				Bun.env.PI_NO_TITLE = previousNoTitle;
-			}
-		}
 	});
 });

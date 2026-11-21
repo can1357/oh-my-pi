@@ -89,7 +89,7 @@ describe("null maxTokens fallback wire tests", () => {
 		}
 
 		expect(capturedPayload).not.toBeNull();
-		expect(capturedPayload!.max_tokens).toBe(64000); // fallback CLAUDE_CODE_MAX_OUTPUT_TOKENS
+		expect(capturedPayload!.max_tokens).toBe(64000); // fallback for unknown model ceilings
 	});
 
 	it("verifies openai completions clamps to OPENAI_MAX_OUTPUT_TOKENS when maxTokens is null", async () => {

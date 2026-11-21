@@ -13,6 +13,7 @@
  */
 
 import type { Api, FetchImpl, Model, SimpleStreamOptions, StreamOptions } from "../types";
+import type { OAuthRefreshReason } from "../auth/types";
 import type { OAuthController, OAuthCredentials } from "./oauth/types";
 
 /**
@@ -51,7 +52,7 @@ export type ProviderModelDiscoveryPreparer = (config: ProviderModelDiscoveryConf
  * - `envKeys` present ⇒ env-var fallback in `getEnvApiKey`, overriding the
  *   catalog table's `envVars` for that provider.
  * - `login` present ⇒ member of `OAuthProvider`, shown in the `/login` list
- *   (unless `showInLoginList === false`) and dispatchable via `AuthStorage.login`.
+ *   (unless `showInLoginList === false`) and dispatchable via `AuthStorage.oauth.login`.
  * - `callbackPort` present ⇒ entry in the auth-broker `CALLBACK_PORTS` map.
  * - `pasteCodeFlow` ⇒ member of `PASTE_CODE_LOGIN_PROVIDERS`.
  *
@@ -69,6 +70,8 @@ export interface ProviderDefinition {
 	readonly envKeys?: KeyResolver;
 	/** Provider transport can authenticate without a resolved API-key string. */
 	readonly allowsMissingApiKey?: boolean;
+	/** APIs whose provider transport resolves credentials without a stored account. */
+	readonly nativeAuthApis?: readonly string[];
 	/** Provider-owned model normalization that must run before API-specific option mapping. */
 	readonly prepareModel?: ProviderModelPreparer;
 	/** Provider-owned request shaping applied before generic API dispatch. */
@@ -80,8 +83,15 @@ export interface ProviderDefinition {
 	// --- interactive login (OAuthProviderInterface-compatible) ---
 	/** Interactive login; flows that need `onPrompt`/`onAuth` reject a bare controller at runtime. */
 	readonly login?: (callbacks: OAuthController) => Promise<OAuthCredentials | string>;
-	/** Refresh a stored grant; the signal bounds provider network work to refresh ownership. */
-	readonly refreshToken?: (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
+	/**
+	 * Refresh a stored grant; the signal bounds provider network work to refresh ownership.
+	 * `reason` is why the refresh was requested; undefined means the grant is near expiry.
+	 */
+	readonly refreshToken?: (
+		credentials: OAuthCredentials,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	) => Promise<OAuthCredentials>;
 	readonly getApiKey?: (credentials: OAuthCredentials) => string;
 	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
 	readonly storeCredentialsAs?: string;

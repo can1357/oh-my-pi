@@ -1,37 +1,25 @@
+import { logExperimentToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { Text } from "@oh-my-pi/pi-tui";
+
 import type { ToolDefinition } from "../../extensibility/extensions";
-import type { Theme } from "../../modes/theme/theme";
-import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
+
 import { computeRunModifiedPaths, getCurrentAutoresearchBranch, parseWorkDirDirtyPaths } from "../git";
-import {
-	ensureNumericMetricMap,
-	formatNum,
-	mergeAsi,
-	pathMatchesSpec,
-	sanitizeAsi,
-	tryGitPrefix,
-	tryGitStatus,
-} from "../helpers";
-import {
-	buildExperimentState,
-	computeConfidence,
-	currentResults,
-	findBaselineSecondary,
-	findBestKeptMetric,
-} from "../state";
+import { ensureNumericMetricMap, mergeAsi, pathMatchesSpec, sanitizeAsi, tryGitPrefix, tryGitStatus } from "../helpers";
+import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { currentResults, findBaselineSecondary } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
+import { buildExperimentState, computeConfidence, findBestKeptMetric } from "../state";
 import { openAutoresearchStorageIfExists, type SessionRow } from "../storage";
 import type {
 	ASIData,
-	AutoresearchToolFactoryOptions,
 	ExperimentResult,
 	ExperimentState,
 	LogDetails,
 	NumericMetricMap,
-} from "../types";
+} from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type { AutoresearchToolFactoryOptions } from "../types";
 
 const EXPERIMENT_TOOL_NAMES = ["init_experiment", "run_experiment", "log_experiment", "update_notes"];
 
@@ -55,6 +43,7 @@ export function createLogExperimentTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof logExperimentSchema, LogDetails> {
 	return {
+		...logExperimentToolRenderer,
 		name: "log_experiment",
 		label: "Log Experiment",
 		description:
@@ -279,22 +268,6 @@ export function createLogExperimentTool(
 				},
 			};
 		},
-		renderCall(args, _options, theme): Text {
-			const color = args.status === "keep" ? "success" : args.status === "discard" ? "warning" : "error";
-			const description = truncateToWidth(replaceTabs(args.description), 100);
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("log_experiment"))} ${theme.fg(color, args.status)} ${theme.fg("muted", description)}`,
-				0,
-				0,
-			);
-		},
-		renderResult(result, _options, theme): Text {
-			const details = result.details;
-			if (!details) {
-				return new Text(replaceTabs(result.content.find(part => part.type === "text")?.text ?? ""), 0, 0);
-			}
-			return new Text(renderSummary(details, theme), 0, 0);
-		},
 	};
 }
 
@@ -501,21 +474,4 @@ function buildLogText(
 function truncateAsiValue(value: ASIData[string]): string {
 	const text = typeof value === "string" ? value : JSON.stringify(value);
 	return text.length > 120 ? `${text.slice(0, 117)}...` : text;
-}
-
-function renderSummary(details: LogDetails, theme: Theme): string {
-	const { experiment, state } = details;
-	const color = experiment.status === "keep" ? "success" : experiment.status === "discard" ? "warning" : "error";
-	let summary = `${theme.fg(color, experiment.status.toUpperCase())} ${theme.fg("muted", truncateToWidth(replaceTabs(experiment.description), 100))}`;
-	summary += ` ${theme.fg("accent", `${state.metricName}=${formatNum(experiment.metric, state.metricUnit)}`)}`;
-	if (state.bestMetric !== null) {
-		summary += ` ${theme.fg("dim", `baseline ${formatNum(state.bestMetric, state.metricUnit)}`)}`;
-	}
-	if (state.confidence !== null) {
-		summary += ` ${theme.fg("dim", `conf ${state.confidence.toFixed(1)}x`)}`;
-	}
-	if (details.scopeDeviations.length > 0) {
-		summary += ` ${theme.fg("warning", `deviations:${details.scopeDeviations.length}`)}`;
-	}
-	return summary;
 }

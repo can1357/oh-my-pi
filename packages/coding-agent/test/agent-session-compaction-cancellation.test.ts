@@ -1,13 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { Agent, CompactionCancelledError } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	type AsyncResultEntry,
+	buildAsyncResultBatchMessage,
+} from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	ContextNotesTool,
@@ -18,7 +25,12 @@ import {
 	type ToolSession,
 } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+
+import {
+	cfgCompactionAutoContinue,
+	cfgCompactionExperimentalContextManagement,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 type HookMode = "extension-veto" | "park";
 
@@ -33,7 +45,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 			new Error("Network access is forbidden in compaction cancellation tests"),
 		);
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {
@@ -95,6 +107,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 			: [];
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
+			convertToLlm,
 		});
 
 		sessionManager.appendMessage({ role: "user", content: "first turn", timestamp: Date.now() });
@@ -199,6 +212,96 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 		await promptPromise;
 		expect(agentPrompt).toHaveBeenCalledTimes(1);
 	});
+
+	if (!experimental) {
+		it("delivers an idle async result after manual compaction on the persisted compacted context", async () => {
+			const entered = Promise.withResolvers<void>();
+			const gate = Promise.withResolvers<void>();
+			session = await createSession("park", entered.resolve, gate.promise);
+			const model = createMockModel({ responses: [{ content: ["result acknowledged"] }] });
+			const requests: string[] = [];
+			session.agent.streamFn = (activeModel, context, options) => {
+				requests.push(JSON.stringify(context));
+				return model.stream(activeModel, context, options);
+			};
+			session.agent.getApiKey = () => "test-key";
+			session.yieldQueue.register<AsyncResultEntry>("async-result-repro", {
+				build: buildAsyncResultBatchMessage,
+			});
+			const originalWait = SessionMaintenance.prototype.waitForContextReplacement;
+			const flushStarted = Promise.withResolvers<void>();
+			vi.spyOn(SessionMaintenance.prototype, "waitForContextReplacement").mockImplementation(
+				function (this: SessionMaintenance) {
+					flushStarted.resolve();
+					return originalWait.call(this);
+				},
+			);
+
+			const compaction = session.compact();
+			await entered.promise;
+			const receipt = session.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result-repro", {
+				jobId: "job-during-compact",
+				result: "JOB_DELIVERY_MARKER",
+				job: undefined,
+				durationMs: 0,
+				epoch: 0,
+			});
+			let delivered = false;
+			void receipt.then(() => {
+				delivered = true;
+			});
+			try {
+				await withTimeout(flushStarted.promise, 2_000, "Idle flush did not reach the compaction barrier");
+				await scheduler.yield();
+				expect(requests).toHaveLength(0);
+				expect(delivered).toBe(false);
+			} finally {
+				gate.resolve();
+				await compaction;
+			}
+			await withTimeout(receipt, 2_000, "Async result was not delivered after compaction");
+			await session.waitForIdle();
+			expect(session.sessionManager.getBranch()).toContainEqual(
+				expect.objectContaining({
+					type: "custom_message",
+					customType: "async-result",
+					content: expect.stringContaining("JOB_DELIVERY_MARKER"),
+				}),
+			);
+			expect(requests).toHaveLength(1);
+			expect(requests[0]).toContain("compacted");
+			expect(requests[0]).not.toContain("first turn");
+			expect(requests[0]).toContain("JOB_DELIVERY_MARKER");
+		});
+	}
+
+	it("resumes the interrupted turn when compaction rejects after the entry is appended", async () => {
+		// The entry lands, then post-append bookkeeping in #commitCompactionEntry
+		// throws. The compaction is committed from the transcript's point of view,
+		// so the turn the abort cut must still resume; otherwise a manual /compact
+		// mid-turn leaves the agent idle exactly as before the fix.
+		session = await createSession("park");
+		cfgCompactionAutoContinue.override(session.settings, true);
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		vi.spyOn(session.agent, "replaceMessages").mockImplementationOnce(() => {
+			throw new Error("post-append bookkeeping failed");
+		});
+		type Dispatched = { role: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		await expect(session.compact()).rejects.toThrow("post-append bookkeeping failed");
+		expect(session.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		await session.waitForIdle();
+
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.role === "developer" && message.synthetic === true)).toBe(true);
+	});
 	if (experimental) {
 		for (const mutation of ["branch", "disable"] as const) {
 			it(`rejects a rollover when ${mutation} changes during an awaited hook`, async () => {
@@ -212,7 +315,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 					if (!first) throw new Error("Expected seeded history");
 					session.sessionManager.branch(first.id);
 				} else {
-					session.settings.override("compaction.experimentalContextManagement", false);
+					cfgCompactionExperimentalContextManagement.override(session.settings, false);
 				}
 				gate.resolve();
 				await cancellation;
@@ -226,7 +329,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 				version: 1,
 				text: "Preserve the rollback decision.",
 			});
-			session.settings.override("compaction.experimentalContextManagement", false);
+			cfgCompactionExperimentalContextManagement.override(session.settings, false);
 			const result = await session.compact();
 			expect(result.summary).toBe("compacted");
 			expect(JSON.stringify(session.agent.state.messages)).toContain("Preserve the rollback decision.");

@@ -60,4 +60,16 @@ describe("configureRecallFeatures", () => {
 		expect(enhancedRecallEnabled({})).toBe(true);
 		expect(proactiveLinkingEnabled({})).toBe(true);
 	});
+
+	it("lets a per-instance value override the process default while the env vars still win", () => {
+		configureRecallFeatures({ polyphonicRecall: true, enhancedRecall: true });
+		expect(polyphonicRecallEnabled({}, false)).toBe(false);
+		expect(isQueryCacheEnabled(true, {}, false)).toBe(false);
+		expect(polyphonicRecallEnabled({ MNEMOPI_POLYPHONIC_RECALL: "1" }, false)).toBe(true);
+
+		configureRecallFeatures({ polyphonicRecall: false, enhancedRecall: false });
+		expect(polyphonicRecallIsEnabled({}, true)).toBe(true);
+		expect(enhancedRecallEnabled({}, true)).toBe(true);
+		expect(enhancedRecallEnabled({ MNEMOPI_ENHANCED_RECALL: "0" }, true)).toBe(false);
+	});
 });

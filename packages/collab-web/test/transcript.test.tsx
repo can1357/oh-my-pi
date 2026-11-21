@@ -2,11 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./transcript-dom-shim";
-import {
-	followTranscriptTail,
-	Transcript,
-	updateTranscriptTailLock,
-} from "../src/components/transcript/Transcript";
+import { followTranscriptTail, Transcript, updateTranscriptTailLock } from "../src/components/transcript/Transcript";
 import type { ActiveTool } from "../src/lib/client";
 
 const TOOL_CALL_ID = "call-running-tool";
@@ -170,5 +166,25 @@ describe("Transcript tail-follow scroll operations", () => {
 		followTranscriptTail(element, lock, true);
 		expect(lock.current).toBe(true);
 		expect(element.scrollTop).toBe(1_200);
+	});
+});
+
+describe("Transcript windowing", () => {
+	it("mounts only the newest 100 entries and offers the rest", () => {
+		const entries: SessionEntry[] = Array.from({ length: 250 }, (_, i) => ({
+			type: "message",
+			id: `m${i}`,
+			parentId: i === 0 ? null : `m${i - 1}`,
+			timestamp: "2026-07-15T00:00:00Z",
+			message: { role: "user", content: `message-${i}-end`, timestamp: i },
+		}));
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(countElements(html, ".tr-row--user")).toBe(100);
+		expect(html).toContain("message-249-end");
+		expect(html).toContain("message-150-end");
+		expect(html).not.toContain("message-149-end");
+		expect(html).toContain("show 150 earlier");
 	});
 });

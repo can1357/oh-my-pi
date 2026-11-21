@@ -1,8 +1,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { parseEnv } from "node:util";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import { isBunTestRuntime } from "./test-runtime";
 
+export * from "./test-runtime";
 export * from "./worker-host";
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -64,6 +67,48 @@ export function filterProcessEnv(env: Record<string, string | undefined>): Recor
 	}
 	return result;
 }
+/**
+ * Git variables that pin a repository location. They describe the checkout the
+ * agent process itself was launched from (git hooks, `git --git-dir` wrappers),
+ * so forwarding them to a child shell makes `git` ignore the command's `cwd`
+ * and mutate the wrong worktree or index. Stripped from child shell envs so git
+ * rediscovers the repository from the working directory. Mirrors the
+ * `env_remove` list in `crates/vcs/src/git/cli.rs`.
+ */
+const GIT_REPO_LOCATION_ENV_NAMES = [
+	"GIT_DIR",
+	"GIT_COMMON_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+] as const;
+
+/**
+ * Removes {@link GIT_REPO_LOCATION_ENV_NAMES} from a copied child env in place.
+ *
+ * Windows environment lookups are case-insensitive, so a block that spells a
+ * variable `git_dir` is just as binding there; match case-insensitively on
+ * win32 and exactly elsewhere (POSIX env names are case-sensitive).
+ */
+export function stripGitRepoLocationEnv(
+	env: Record<string, string>,
+	platform: NodeJS.Platform = process.platform,
+): void {
+	if (platform !== "win32") {
+		for (const name of GIT_REPO_LOCATION_ENV_NAMES) {
+			delete env[name];
+		}
+		return;
+	}
+	const folded = new Set<string>(GIT_REPO_LOCATION_ENV_NAMES.map(name => name.toLowerCase()));
+	for (const key of Object.keys(env)) {
+		if (folded.has(key.toLowerCase())) {
+			delete env[key];
+		}
+	}
+}
+
 // Bun autoloads the project's dotenv files into `process.env` before user code
 // runs — including inside `bun build --compile` binaries — so a snapshot of
 // `Bun.env` is only pre-dotenv when autoloading was explicitly disabled. Linux
@@ -107,10 +152,10 @@ function expandDotenvValues(values: Record<string, string>, env: Record<string, 
 	return expanded;
 }
 
-/** Filters process env for child shells without launch-cwd dotenv values. */
-export function filterChildShellEnv(
+function filterChildShellEnvInternal(
 	env: Record<string, string | undefined>,
-	cwd: string = process.cwd(),
+	cwd: string,
+	onDotenvValue?: (value: string) => void,
 ): Record<string, string> {
 	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);
@@ -147,6 +192,12 @@ export function filterChildShellEnv(
 		}
 	}
 	const allLaunchEnv = fallbackLaunchEnv ? { ...launchEnv, ...fallbackLaunchEnv } : launchEnv;
+	if (onDotenvValue) {
+		// Every value the project's dotenv files define is dotenv-sourced, whether
+		// or not this process loaded it (a `--cwd` launch never did).
+		for (const key in allLaunchEnv) onDotenvValue(allLaunchEnv[key]!);
+		for (const key in expandedLaunchEnv) onDotenvValue(expandedLaunchEnv[key]!);
+	}
 	for (const key in allLaunchEnv) {
 		const launchValue = runtimeLaunchEnvValues?.get(key);
 		if (launchValue !== undefined) {
@@ -168,6 +219,8 @@ export function filterChildShellEnv(
 			// Strong provenance: the launch environment is known and this name is
 			// absent from it, or OMP itself injected the value — either way it came
 			// from a project dotenv file, not the parent shell.
+			const value = result[key];
+			if (value !== undefined) onDotenvValue?.(value);
 			delete result[key];
 		} else if (
 			result[key] === launchEnv[key] ||
@@ -177,51 +230,47 @@ export function filterChildShellEnv(
 		) {
 			// No launch-env snapshot (dotenv autoloaded without procfs): best-effort
 			// value match against the Bun-parsed dotenv.
+			const value = result[key];
+			if (value !== undefined) onDotenvValue?.(value);
 			delete result[key];
 		}
 	}
+	// Last, after dotenv merging: no source (inherited, launcher, or dotenv) may
+	// pin the child shell to the agent's own repository.
+	stripGitRepoLocationEnv(result);
 	return result;
 }
 
-/**
- * Parse one dotenv line with Bun-compatible semantics: an optional `export`
- * prefix, full-line `#` comments, inline `#` comments after whitespace on
- * unquoted values, and single/double/backtick quoting (a `#` inside quotes
- * stays literal). Returns undefined for blank lines, comments, and malformed
- * names.
- */
-function parseEnvLine(line: string): { key: string; value: string } | undefined {
-	const trimmed = line.trim();
-	if (!trimmed || trimmed.startsWith("#")) return undefined;
-	const eqIndex = trimmed.indexOf("=");
-	if (eqIndex === -1) return undefined;
-	let key = trimmed.slice(0, eqIndex).trim();
-	const exported = key.match(/^export[ \t]+(.*)$/);
-	if (exported) key = exported[1].trim();
-	if (!isValidEnvName(key)) return undefined;
-	const raw = trimmed.slice(eqIndex + 1).replace(/^[ \t]+/, "");
-	const quote = raw[0];
-	if (quote === '"' || quote === "'" || quote === "`") {
-		let close = raw.indexOf(quote, 1);
-		while (close !== -1 && raw[close - 1] === "\\") close = raw.indexOf(quote, close + 1);
-		return { key, value: close === -1 ? raw.slice(1) : raw.slice(1, close) };
-	}
-	const commentIndex = raw.search(/[ \t]#/);
-	return { key, value: (commentIndex === -1 ? raw : raw.slice(0, commentIndex)).trimEnd() };
+/** Filters process env for child shells without launch-cwd dotenv values. */
+export function filterChildShellEnv(
+	env: Record<string, string | undefined>,
+	cwd: string = getProjectDir(),
+): Record<string, string> {
+	return filterChildShellEnvInternal(env, cwd);
+}
+
+/** Return every value defined by `cwd`'s dotenv files, plus environment values that came from them. */
+export function getDotenvEnvValues(
+	cwd: string = getProjectDir(),
+	env: Record<string, string | undefined> = process.env,
+): string[] {
+	const values = new Set<string>();
+	filterChildShellEnvInternal(env, cwd, value => values.add(value));
+	return [...values];
 }
 
 /**
- * Parses a .env file synchronously into key-value string pairs using
- * {@link parseEnvLine} for Bun-compatible line semantics, then mirrors valid
+ * Parses a complete .env file with the runtime's dotenv grammar, then retains
+ * only shell-identifier names and spawn-safe values before mirroring valid
  * `OMP_` variables to their `PI_` aliases.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		for (const line of content.split("\n")) {
-			const parsed = parseEnvLine(line);
-			if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
+		const parsed = parseEnv(fs.readFileSync(filePath, "utf-8"));
+		for (const key in parsed) {
+			const value = parsed[key];
+			if (value !== undefined && isValidEnvName(key) && isSafeEnvValue(value)) result[key] = value;
 		}
 	} catch {
 		// File doesn't exist or can't be read - return empty result
@@ -250,9 +299,92 @@ for (const key of Object.keys(Bun.env)) {
 	}
 }
 
+/**
+ * `OTEL_*` values from OMP's own (non-project) dotenv files: the agent dir,
+ * config root, and home `.env`. Those files configure OMP's exporter (endpoint,
+ * auth headers, GenAI content capture), so the values are kept here instead of
+ * in `Bun.env`/`process.env`: no child process or in-process extension
+ * inherits them. Read through {@link $otelEnv}; {@link withOmpOtelEnv} exposes
+ * them to the OpenTelemetry SDK for the synchronous span of its construction.
+ *
+ * Keys are folded with {@link foldOtelEnvName}.
+ */
+const ompOtelEnvFileValues = new Map<string, string>();
+
+/**
+ * Environment names compare case-insensitively on Windows, so a file that spells
+ * `otel_exporter_otlp_headers` configures the same variable as the upper-case
+ * name; match and key them folded there, exactly on POSIX (names are
+ * case-sensitive).
+ */
+function foldOtelEnvName(name: string, platform: NodeJS.Platform): string {
+	return platform === "win32" ? name.toUpperCase() : name;
+}
+
+/**
+ * @internal Loader seam, exported for tests only. Claims an `OTEL_*` entry from one of OMP's own dotenv files: the value is
+ * kept in a private map, never in the process environment. Returns `false` for
+ * any other name, which the caller handles as usual.
+ *
+ * Precedence matches the process-environment loader: a non-empty live value
+ * (shell export, project `.env`) wins, and an earlier non-empty file value wins
+ * over a later file.
+ *
+ * @param platform - Name-folding semantics; injectable for tests.
+ */
+export function claimOmpOtelEnvFileEntry(
+	name: string,
+	value: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	const key = foldOtelEnvName(name, platform);
+	if (!key.startsWith("OTEL_")) return false;
+	if (!Bun.env[name] && !ompOtelEnvFileValues.get(key)) ompOtelEnvFileValues.set(key, value);
+	return true;
+}
+
+/**
+ * `OTEL_*` lookup for OMP's own telemetry: the live environment wins (a shell
+ * export or project `.env`), then OMP's own `.env` files. Use this instead of
+ * `process.env` for any `OTEL_*` setting OMP reads itself.
+ */
+export function $otelEnv(name: string): string | undefined {
+	const live = Bun.env[name];
+	if (live) return live;
+	return ompOtelEnvFileValues.get(foldOtelEnvName(name, process.platform)) ?? live;
+}
+
+/**
+ * Runs `fn` with OMP's `.env`-sourced `OTEL_*` values temporarily present in
+ * `process.env` (only for names with no live value), then removes them again in
+ * a `finally`. For code that reads the environment itself, such as the
+ * OpenTelemetry SDK constructors.
+ *
+ * Synchronous only: awaiting inside would let other code, including child
+ * process spawns, run while the values are set.
+ */
+export function withOmpOtelEnv<T>(fn: () => T): T {
+	const previous = new Map<string, string | undefined>();
+	for (const [name, value] of ompOtelEnvFileValues) {
+		if (process.env[name]) continue;
+		previous.set(name, process.env[name]);
+		process.env[name] = value;
+	}
+	try {
+		return fn();
+	} finally {
+		for (const [name, prior] of previous) {
+			if (prior === undefined) delete process.env[name];
+			else process.env[name] = prior;
+		}
+	}
+}
+
 for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 	for (const key in file) {
-		if (!isMacosMallocStackLoggingEnvName(key) && !Bun.env[key]) {
+		if (isMacosMallocStackLoggingEnvName(key)) continue;
+		if (file !== projectEnv && claimOmpOtelEnvFileEntry(key, file[key])) continue;
+		if (!Bun.env[key]) {
 			Bun.env[key] = file[key];
 			if (file === projectEnv) projectEnvNamesLoadedByOmp.add(key);
 		}
@@ -329,15 +461,6 @@ export function $envpos(name: string, defaultValue: number): number {
 	const parsed = Number.parseInt(raw, 10);
 	if (Number.isNaN(parsed) || parsed <= 0) return defaultValue;
 	return parsed;
-}
-
-const BUN_TEST_ENTRY_PATTERN = /[._](?:test|spec)\.[cm]?[jt]sx?$/;
-
-/** True when the process is an explicitly marked test child or Bun is running a test entrypoint. */
-export function isBunTestRuntime(): boolean {
-	if (Bun.env.PI_TEST_RUNTIME === "1") return true;
-	const hasTestEnvironment = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
-	return hasTestEnvironment && BUN_TEST_ENTRY_PATTERN.test(Bun.main);
 }
 
 let terminalHeadless = isBunTestRuntime();

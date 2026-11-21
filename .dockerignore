@@ -62,7 +62,7 @@ changes/
 
 # Generated, regenerated in-image.
 packages/ai/test/.temp-images/
-python/omp-rpc/src/omp_rpc.egg-info/
+sdk/python/omp-rpc/src/omp_rpc.egg-info/
 python/robomp/data/
 python/robomp/.cache/
 python/robomp/src/robomp/static/

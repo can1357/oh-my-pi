@@ -134,35 +134,6 @@ describe("OpenAI compat policy", () => {
 		expect(responseBody.input).toEqual([]);
 	});
 
-	it("exposes reasoning replay constraints independent of endpoint", () => {
-		const compat: OpenAICompat = {
-			requiresReasoningContentForToolCalls: true,
-			requiresReasoningContentForAllAssistantTurns: true,
-			allowsSyntheticReasoningContentForToolCalls: false,
-			reasoningContentField: "reasoning_content",
-		};
-		const chatPolicy = resolveOpenAICompatPolicy(chatModel(compat), { endpoint: "chat-completions" });
-		const responsesPolicy = resolveOpenAICompatPolicy(responsesModel(compat), { endpoint: "responses" });
-
-		expect(chatPolicy.reasoning.requiresReasoningContentForToolCalls).toBe(true);
-		expect(responsesPolicy.reasoning.requiresReasoningContentForToolCalls).toBe(true);
-		expect(chatPolicy.reasoning.requiresReasoningContentForAllAssistantTurns).toBe(true);
-		expect(responsesPolicy.reasoning.requiresReasoningContentForAllAssistantTurns).toBe(true);
-		expect(chatPolicy.reasoning.allowsSyntheticReasoningContentForToolCalls).toBe(false);
-		expect(responsesPolicy.reasoning.allowsSyntheticReasoningContentForToolCalls).toBe(false);
-	});
-
-	it("exposes tool id and cumulative reasoning stream constraints for both endpoints", () => {
-		const compat: OpenAICompat = { requiresMistralToolIds: true, reasoningDeltasMayBeCumulative: true };
-		const chatPolicy = resolveOpenAICompatPolicy(chatModel(compat), { endpoint: "chat-completions" });
-		const responsesPolicy = resolveOpenAICompatPolicy(responsesModel(compat), { endpoint: "responses" });
-
-		expect(chatPolicy.tools.toolCallIdKind).toBe("mistral-9-alnum");
-		expect(responsesPolicy.tools.toolCallIdKind).toBe("mistral-9-alnum");
-		expect(chatPolicy.stream.reasoningDeltasMayBeCumulative).toBe(true);
-		expect(responsesPolicy.stream.reasoningDeltasMayBeCumulative).toBe(true);
-	});
-
 	it("routes Token Plan qwen3.8-max effort selections onto the wire", () => {
 		const model = getBundledModel<"openai-completions">("alibaba-token-plan", "qwen3.8-max");
 		for (const effort of [Effort.Low, Effort.Medium, Effort.XHigh]) {

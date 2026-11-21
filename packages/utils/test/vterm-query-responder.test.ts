@@ -22,6 +22,13 @@ describe("TerminalQueryResponder", () => {
 		expect(responder.feed("\x1b]10;?\x1b\\")).toBe("\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
 	});
 
+	test("leaves only the host's session-start cursor query unanswered", () => {
+		const responder = new TerminalQueryResponder({ hostCursorHandshake: true });
+		expect(responder.feed("\x1b[6n\x1b[c")).toBe("\x1b[?1;2c");
+		expect(responder.feed("READY\x1b[6n")).toBe("\x1b[1;1R");
+		expect(responder.feed("\x1b[6n")).toBe("\x1b[1;1R");
+	});
+
 	test("reassembles a query split across output chunks", () => {
 		const responder = new TerminalQueryResponder();
 		expect(responder.feed("prompt> \x1b[")).toBe("");

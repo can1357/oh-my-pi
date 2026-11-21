@@ -8,7 +8,7 @@
  *   echo "Run the tests" > /tmp/agent-trigger.txt
  */
 import * as fs from "node:fs";
-import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI) {
 	pi.on("session_start", async (_event, ctx) => {
@@ -24,7 +24,7 @@ export default function (pi: HookAPI) {
 							content: `External trigger: ${content}`,
 							display: true,
 						},
-						true, // triggerTurn - get LLM to respond
+						{ triggerTurn: true }, // get LLM to respond
 					);
 					await Bun.write(triggerFile, ""); // Clear after reading
 				}

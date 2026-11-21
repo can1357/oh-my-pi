@@ -23,6 +23,39 @@ afterAll(async () => {
 });
 
 describe("native file-lock ownership", () => {
+	test("a cancelled waiter never enters its critical section or releases the current owner", async () => {
+		const root = await mkRoot();
+		const target = path.join(root, "cancelled.json");
+		const lockPath = getLockPath(target);
+		const owner = tryAcquireLock(lockPath);
+		if (!owner) throw new Error("owner failed to acquire");
+		let entered = false;
+		try {
+			const controller = new AbortController();
+			const waiting = withFileLock(
+				target,
+				async () => {
+					entered = true;
+				},
+				{
+					signal: controller.signal,
+					retries: 100,
+					retryDelayMs: 1000,
+				},
+			);
+			controller.abort();
+			await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+			expect(entered).toBe(false);
+			expect(tryAcquireLock(lockPath)).toBeNull();
+		} finally {
+			owner.release();
+		}
+		await withFileLock(target, async () => {
+			entered = true;
+		});
+		expect(entered).toBe(true);
+	});
+
 	test("process death hands ownership to B while excluding C", async () => {
 		const root = await mkRoot();
 		const target = path.join(root, "abandoned.json");

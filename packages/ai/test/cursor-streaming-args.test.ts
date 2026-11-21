@@ -11,6 +11,7 @@ import {
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
 import { getStreamingPartialJson, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 
 interface Harness {
 	output: AssistantMessage;
@@ -131,22 +132,40 @@ function pushTextDelta(h: Harness, text: string): void {
 	);
 }
 
+describe("Cursor final tool-call arguments", () => {
+	it("refuses truncated arguments on completion", () => {
+		const h = newHarness();
+		const raw = '{"path":"repaired.txt","content":"hello';
+		startMcpToolCall(h, "write");
+		pushArgsTextDelta(h, raw);
+		completeMcpToolCall(h, { path: new TextEncoder().encode('"repaired.txt"') });
+		const call = h.output.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+		expect(() =>
+			validateToolArguments({ name: "write", description: "", parameters: { type: "object" } }, call),
+		).toThrow("Tool call arguments are not valid JSON");
+	});
+
+	it("uses the completion frame when a rewritten snapshot breaks the buffer without truncating it", () => {
+		const h = newHarness();
+		startMcpToolCall(h, "write");
+		pushArgsTextDelta(h, '{"path":"draft.txt"}');
+		pushArgsTextDelta(h, '{"path":"final.txt","content":"complete"}');
+		completeMcpToolCall(h, {
+			path: new TextEncoder().encode('"final.txt"'),
+			content: new TextEncoder().encode('"complete"'),
+		});
+		const call = h.output.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ path: "final.txt", content: "complete" });
+	});
+});
+
 describe("mergeCursorMcpToolCallArgs", () => {
 	it("returns streamed args unchanged when completion is undefined", () => {
 		const streamed = { tasks: [{ assignment: "do" }], context: "ctx" };
 		expect(mergeCursorMcpToolCallArgs(streamed, undefined)).toEqual(streamed);
-	});
-
-	it("preserves streamed keys the completion frame omits", () => {
-		// Issue #2615: the completion frame's McpArgs map drops oversized
-		// parameters. The task tool's `tasks` array was being lost when only
-		// the smaller `context` key survived the completion frame.
-		const streamed = { tasks: [{ assignment: "do A" }, { assignment: "do B" }], context: "ctx" };
-		const completion = { context: "ctx" };
-		expect(mergeCursorMcpToolCallArgs(streamed, completion)).toEqual({
-			tasks: [{ assignment: "do A" }, { assignment: "do B" }],
-			context: "ctx",
-		});
 	});
 
 	it("adopts scalar values from the completion frame when present", () => {
@@ -176,17 +195,6 @@ describe("mergeCursorMcpToolCallArgs", () => {
 });
 
 describe("Cursor MCP exec resolution", () => {
-	it("marks a streamed MCP call already resolved by the exec bridge", () => {
-		const h = newHarness();
-		h.state.resolvedMcpToolCallIds.add("call-resolved");
-
-		startMcpToolCall(h, "mcp__fixture_report", "call-resolved");
-
-		const block = h.output.content[0] as ToolCallState;
-		expect(block[kCursorExecResolved]).toBe(true);
-		expect(h.state.resolvedMcpToolCallIds.size).toBe(0);
-	});
-
 	it("does not duplicate an MCP call synthesized from an earlier exec frame", () => {
 		const h = newHarness();
 		synthesizeCursorExecToolCall(h.output, h.stream, h.state, "call-resolved", "web_search", {
@@ -203,6 +211,7 @@ describe("Cursor MCP exec resolution", () => {
 			name: "web_search",
 			arguments: { query: "latest chess news" },
 		});
+		expect((h.output.content[0] as ToolCallState)[kCursorExecResolved]).toBe(true);
 		expect(h.captured.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
 		expect(h.state.resolvedMcpToolCallIds.size).toBe(0);
 	});
@@ -340,11 +349,11 @@ describe("processInteractionUpdate args_text_delta handling", () => {
 		// throttle threshold. block.arguments must NOT be re-parsed; if it were,
 		// the O(N²) regression would resurface for a long stream of small deltas.
 		pushArgsTextDelta(h, `{"agent":"task","note":"initial","step":1`);
-		pushArgsTextDelta(h, `{"agent":"task","note":"initial","step":12`);
+		pushArgsTextDelta(h, `{"agent":"task","note":"initial","step":12}`);
 		expect(block.arguments).toBe(argsAfterFirst);
 
 		// The full buffer is still accumulated for the authoritative final parse.
-		expect(getStreamingPartialJson(block)).toBe(`{"agent":"task","note":"initial","step":12`);
+		expect(getStreamingPartialJson(block)).toBe(`{"agent":"task","note":"initial","step":12}`);
 
 		// toolCallCompleted re-parses the full buffer unconditionally; the merged
 		// arguments reflect every byte streamed, including the throttled tail.

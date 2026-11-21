@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { NO_AUTH_SENTINEL, resolveOpenAIRequestSetup } from "../../src/providers/openai-shared";
+import { NO_AUTH_SENTINEL } from "../../src/auth-retry";
+import { resolveOpenAIRequestSetup } from "../../src/providers/openai-shared";
 
 describe("resolveOpenAIRequestSetup keyless auth", () => {
 	test("omits Authorization for the keyless (auth: none) sentinel, keeping custom headers", () => {
@@ -7,6 +8,8 @@ describe("resolveOpenAIRequestSetup keyless auth", () => {
 			{
 				provider: "qwen",
 				id: "Qwen3.6-35B-A3B",
+				api: "openai-completions",
+				reasoning: false,
 				baseUrl: "http://localhost:8788",
 				headers: { "x-api-key": "real-key" },
 			},
@@ -18,7 +21,13 @@ describe("resolveOpenAIRequestSetup keyless auth", () => {
 
 	test("still injects Bearer for a real key", () => {
 		const setup = resolveOpenAIRequestSetup(
-			{ provider: "custom", id: "m", baseUrl: "http://localhost:8788" },
+			{
+				provider: "custom",
+				id: "m",
+				api: "openai-completions",
+				reasoning: false,
+				baseUrl: "http://localhost:8788",
+			},
 			{ apiKey: "sk-real", messages: [] },
 		);
 		expect(setup.headers.Authorization).toBe("Bearer sk-real");
@@ -29,6 +38,8 @@ describe("resolveOpenAIRequestSetup keyless auth", () => {
 			{
 				provider: "qwen",
 				id: "m",
+				api: "openai-completions",
+				reasoning: false,
 				baseUrl: "http://localhost:8788",
 				headers: { Authorization: "Bearer custom-token" },
 			},

@@ -125,22 +125,4 @@ describe("isCommonJsModulePath CJS classification (inheritedKind override fix)",
 		expect(mod.result).toBe("module.exports");
 		Reflect.deleteProperty(globalThis, "__ompLegacyPiAmbiguousValue");
 	});
-
-	it("detects CJS patterns outside comments", async () => {
-		// A file with CJS patterns in actual code should be classified as CJS
-		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "cjs-real-code", version: "1.0.0" }),
-			"dep.js": [
-				"// This is just a comment",
-				"const value = require('./value.js');",
-				"module.exports = { value };",
-			].join("\n"),
-			"value.js": ["module.exports = 99;"].join("\n"),
-			"index.mjs": ["import dep from './dep.js';", "export const result = dep.value;"].join("\n"),
-		});
-
-		const entry = path.join(dir, "index.mjs");
-		const mod = (await loadLegacyPiModule(entry)) as { result: number };
-		expect(mod.result).toBe(99);
-	});
 });

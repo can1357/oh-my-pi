@@ -21,7 +21,7 @@ export const DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS = 10_000;
  * successful fast discovery requests do not leave armed timeout signals for
  * concurrent GC to trip over later.
  */
-async function withOpenAICompatibleDiscoveryTimeout<T>(
+export async function withOpenAICompatibleDiscoveryTimeout<T>(
 	timeoutMs: number,
 	run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
@@ -104,8 +104,12 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	baseUrl: string;
 	/** Optional bearer token for Authorization header. */
 	apiKey?: string;
+	/** Retry a rejected bearer against a public catalog without credentials (only on HTTP 401). */
+	retryWithoutApiKeyOnUnauthorized?: boolean;
 	/** Additional request headers. */
 	headers?: Record<string, string>;
+	/** Query parameters appended to the `/models` probe (e.g. OpenRouter's `output_modalities` roster filter). */
+	query?: Record<string, string>;
 	/** Optional AbortSignal for request cancellation; caller owns its lifecycle. */
 	signal?: AbortSignal;
 	/**
@@ -155,14 +159,24 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	}
 
 	const fetchImpl = discoveryFetch(options.fetch);
+	const query = options.query ? `?${new URLSearchParams(options.query)}` : "";
 	const fetchPayload = async (signal?: AbortSignal): Promise<unknown | null> => {
 		let response: Response;
 		try {
-			response = await fetchImpl(`${baseUrl}${MODELS_PATH}`, {
+			response = await fetchImpl(`${baseUrl}${MODELS_PATH}${query}`, {
 				method: "GET",
 				headers: requestHeaders,
 				signal,
 			});
+			if (response.status === 401 && options.apiKey && options.retryWithoutApiKeyOnUnauthorized) {
+				const anonymousHeaders = { ...requestHeaders };
+				delete anonymousHeaders.Authorization;
+				response = await fetchImpl(`${baseUrl}${MODELS_PATH}${query}`, {
+					method: "GET",
+					headers: anonymousHeaders,
+					signal,
+				});
+			}
 		} catch {
 			return null;
 		}
@@ -201,13 +215,20 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 
 	const deduped = new Map<string, ModelSpec<TApi>>();
 	for (const entry of entries) {
+		const reasoning: unknown = Reflect.get(entry, "reasoning");
+		const supportsReasoning: unknown = Reflect.get(entry, "supports_reasoning");
 		const defaults: ModelSpec<TApi> = {
 			id: entry.id,
 			name: typeof entry.name === "string" && entry.name.length > 0 ? entry.name : entry.id,
 			api: options.api,
 			provider: options.provider,
 			baseUrl,
-			reasoning: false,
+			reasoning:
+				typeof reasoning === "boolean"
+					? reasoning
+					: typeof supportsReasoning === "boolean"
+						? supportsReasoning
+						: undefined,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: null,

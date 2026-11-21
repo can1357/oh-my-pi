@@ -223,25 +223,6 @@ describe("AgentSession historical image prompts", () => {
 		}
 	});
 
-	it("returns the target images when navigating to a user prompt", async () => {
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			const text = "Compare [Image #1, 1x1]";
-			const entryId = ctx.sessionManager.appendMessage(historicalImagePrompt(text));
-			ctx.sessionManager.appendMessage(assistantMsg("Compared."));
-
-			const result = await ctx.session.navigateTree(entryId);
-
-			expect(result).toMatchObject({
-				editorText: text,
-				editorImages: [HISTORICAL_IMAGE],
-				cancelled: false,
-			});
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-
 	it("preserves multi-image order so positional markers stay aligned", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {

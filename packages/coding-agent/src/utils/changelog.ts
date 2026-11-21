@@ -3,7 +3,9 @@ import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-util
 import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
-import type { SettingValue } from "../config/settings";
+import type { SettingValueOf } from "../config/registry";
+
+import type { cfgStartupChangelogMode } from "../modes/settings";
 
 export interface ChangelogEntry {
 	major: number;
@@ -18,6 +20,35 @@ export const RECENT_CHANGELOG_ENTRY_LIMIT = 3;
 export const STARTUP_CHANGELOG_MAX_BYTES = 64 * 1024;
 /** Hint appended when automatic startup release notes are truncated. */
 export const STARTUP_CHANGELOG_FULL_HINT = "Use `/changelog full` to view the complete changelog.";
+/** Releases shown by `/changelog last` when no count is given. */
+export const DEFAULT_LAST_CHANGELOG_COUNT = 1;
+/** Usage line printed when `/changelog` arguments are not `full` or `last [N]`. */
+export const CHANGELOG_COMMAND_USAGE = "Usage: /changelog [full|last [N]]";
+
+/**
+ * Parsed `/changelog` view. `recent` is the bare default; `last` is an explicit count.
+ */
+export type ChangelogView = { kind: "full" } | { kind: "recent"; count: number } | { kind: "last"; count: number };
+
+/**
+ * Parse `/changelog` arguments. `{ error }` is a usage string callers should print instead of entries.
+ */
+export function parseChangelogView(args: string): ChangelogView | { error: string } {
+	const trimmed = args.trim().toLowerCase();
+	if (!trimmed) return { kind: "recent", count: RECENT_CHANGELOG_ENTRY_LIMIT };
+	if (trimmed === "full") return { kind: "full" };
+	const match = trimmed.match(/^last(?:\s+(\d+))?$/);
+	if (!match) return { error: CHANGELOG_COMMAND_USAGE };
+	if (match[1] === undefined) return { kind: "last", count: DEFAULT_LAST_CHANGELOG_COUNT };
+	const count = Number.parseInt(match[1], 10);
+	if (count < 1) return { error: `${CHANGELOG_COMMAND_USAGE} (N must be a positive integer)` };
+	return { kind: "last", count };
+}
+
+/** Newest-first slice for a parsed view. `full` returns a copy of every entry. */
+export function selectChangelogEntries(entries: readonly ChangelogEntry[], view: ChangelogView): ChangelogEntry[] {
+	return view.kind === "full" ? [...entries] : entries.slice(0, view.count);
+}
 
 /** Markdown generated from selected changelog entries and whether it hit a size cap. */
 export interface RenderedChangelog {
@@ -284,9 +315,9 @@ async function parseStartupChangelogFile(
 			newlineIndex = pending.indexOf("\n");
 		}
 	}
-	if (pending && !processLine(pending + decoder.decode())) {
-		finishCurrentEntry();
-	}
+	// A seen-version stop already finished the current entry, so this is a no-op then.
+	if (pending) processLine(pending + decoder.decode());
+	finishCurrentEntry();
 	return { entries, totalUnseenEntries };
 }
 
@@ -330,14 +361,13 @@ export function getNewEntries(entries: ChangelogEntry[], lastVersion: string): C
 }
 
 /**
- * Render changelog entries oldest-first by default and optionally cap the Markdown source size.
+ * Render changelog entries in the given (newest-first) order, matching CHANGELOG.md, and optionally cap the Markdown source size.
  */
 export function renderChangelogEntries(
-	entries: ChangelogEntry[],
-	options: { maxBytes?: number; truncationHint?: string; oldestFirst?: boolean } = {},
+	entries: readonly ChangelogEntry[],
+	options: { maxBytes?: number; truncationHint?: string } = {},
 ): RenderedChangelog {
-	const orderedEntries = options.oldestFirst === false ? entries : [...entries].reverse();
-	const markdown = orderedEntries.map(entry => entry.content).join("\n\n");
+	const markdown = entries.map(entry => entry.content).join("\n\n");
 	if (options.maxBytes === undefined || Buffer.byteLength(markdown) <= options.maxBytes) {
 		return { markdown, truncated: false };
 	}
@@ -368,7 +398,6 @@ function selectStartupChangelogEntries(
 	const rendered = renderChangelogEntries(newEntries, {
 		maxBytes: STARTUP_CHANGELOG_MAX_BYTES,
 		truncationHint: STARTUP_CHANGELOG_FULL_HINT,
-		oldestFirst: false,
 	});
 	const summary = summarizeChangelogEntries(newEntries);
 	const latestEntry = newEntries[0];
@@ -407,16 +436,19 @@ export function selectStartupChangelog(
 /**
  * Resolve and persist the automatic startup changelog decision.
  *
+ * `lastVersion` is the marker as this launch read it ({@link readLastChangelogVersion});
+ * `agentDir` locates the marker this call advances.
  * Hidden mode advances the marker only for an upgrade, so downgrades do not
  * erase knowledge of a newer version the user has already seen.
  */
 export async function resolveStartupChangelogForDisplay(options: {
-	mode: SettingValue<"startup.changelogMode">;
+	mode: SettingValueOf<typeof cfgStartupChangelogMode>;
 	currentVersion: string;
+	lastVersion: string | undefined;
 	changelogPath?: string;
 	agentDir?: string;
 }): Promise<StartupChangelogSelection | undefined> {
-	const lastVersion = await readLastChangelogVersion(options.agentDir);
+	const { lastVersion } = options;
 	const parsedLastVersion = parseChangelogVersion(lastVersion);
 	if (!parsedLastVersion) {
 		await writeLastChangelogVersion(options.currentVersion, options.agentDir);

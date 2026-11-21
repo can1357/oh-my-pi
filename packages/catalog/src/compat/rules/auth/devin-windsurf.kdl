@@ -1,0 +1,6 @@
+auth "devin-windsurf" {
+	name "Devin (Windsurf Enterprise)"
+	login "custom" hook="devin-windsurf"
+	refresh "none"
+	store-as "devin"
+}

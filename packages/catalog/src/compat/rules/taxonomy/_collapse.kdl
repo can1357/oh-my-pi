@@ -46,6 +46,56 @@ collapse {
 		efforts "minimal" "low" "medium" "high"
 		requires-effort #true
 	}
+	// Gemini 4 Argon ships as `-low`/`-medium`/`-high` thinking-level SKUs,
+	// matching the three levels Google documents for the model (no minimal).
+	variant-family "google-antigravity" "gemini-4-argon" name="Gemini 4 Argon" {
+		members "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high"
+		route "low" "gemini-4-argon-low"
+		route "medium" "gemini-4-argon-medium"
+		route "high" "gemini-4-argon-high"
+		mode "google-level"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	// Gemini 4 Carbon ships the same `-low`/`-medium`/`-high` SKU split; Gemini 4
+	// models reject `minimal`.
+	variant-family "google-antigravity" "gemini-4-carbon" name="Gemini 4 Carbon" {
+		members "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high"
+		route "low" "gemini-4-carbon-low"
+		route "medium" "gemini-4-carbon-medium"
+		route "high" "gemini-4-carbon-high"
+		mode "google-level"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	// Gemini 4 Hydrogen adds an `-xhigh` SKU for the XHIGH level Google
+	// documents for it (LOW, MEDIUM, HIGH, XHIGH; no minimal).
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+	// The roster also lists `-tiered-high`/`-tiered-xhigh` SKUs under the same
+	// display names; they fold into this row unrouted, so the levels keep the
+	// plain SKUs (like the Flash `-tiered` alias).
+	variant-family "google-antigravity" "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
+		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" "gemini-4-hydrogen-xhigh" "gemini-4-hydrogen-tiered-high" "gemini-4-hydrogen-tiered-xhigh"
+		route "low" "gemini-4-hydrogen-low"
+		route "medium" "gemini-4-hydrogen-medium"
+		route "high" "gemini-4-hydrogen-high"
+		route "xhigh" "gemini-4-hydrogen-xhigh"
+		mode "google-level"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+	}
+	// Gemini 4 Neon (released 2026-11-18) is served as four thinking-level
+	// SKUs, one per level Hydrogen has: low, medium, high, xhigh (no minimal).
+	variant-family "google-antigravity" "gemini-4-neon" name="Gemini 4 Neon" {
+		members "gemini-4-neon-low" "gemini-4-neon-medium" "gemini-4-neon-high" "gemini-4-neon-xhigh"
+		route "low" "gemini-4-neon-low"
+		route "medium" "gemini-4-neon-medium"
+		route "high" "gemini-4-neon-high"
+		route "xhigh" "gemini-4-neon-xhigh"
+		mode "google-level"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+	}
 	variant-family "google-antigravity" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
 		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
 		route "off" "gemini-3.5-flash-extra-low"
@@ -88,6 +138,24 @@ collapse {
 		mode "budget"
 		efforts "minimal" "low" "medium" "high"
 	}
+	variant-family "google-antigravity" "claude-opus-5-5" name="Claude Opus 5.5" {
+		members "claude-opus-5-5-low" "claude-opus-5-5-medium" "claude-opus-5-5-high"
+		route "low" "claude-opus-5-5-low"
+		route "medium" "claude-opus-5-5-medium"
+		route "high" "claude-opus-5-5-high"
+		mode "budget"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "google-antigravity" "claude-sonnet-5-5" name="Claude Sonnet 5.5" {
+		members "claude-sonnet-5-5-low" "claude-sonnet-5-5-medium" "claude-sonnet-5-5-high"
+		route "low" "claude-sonnet-5-5-low"
+		route "medium" "claude-sonnet-5-5-medium"
+		route "high" "claude-sonnet-5-5-high"
+		mode "budget"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
 	variant-family "google-antigravity" "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
 		members "claude-sonnet-4-6" "claude-sonnet-4-6-thinking"
 		mode "budget"
@@ -123,97 +191,6 @@ collapse {
 		preserve-absent-effort-routes #true
 	}
 	variant-family "google-antigravity" "gemini-2.5-flash" name="Gemini 2.5 Flash" {
-		members "gemini-2.5-flash" "gemini-2.5-flash-thinking"
-		route "off" "gemini-2.5-flash"
-		route "minimal" "gemini-2.5-flash-thinking"
-		route "low" "gemini-2.5-flash-thinking"
-		route "medium" "gemini-2.5-flash-thinking"
-		route "high" "gemini-2.5-flash-thinking"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		preserve-absent-effort-routes #true
-	}
-	variant-family "google-gemini-cli" "gemini-{rev}-flash" name="Gemini {rev} Flash" revision=">=3.6" {
-		members "gemini-{rev}-flash-low" "gemini-{rev}-flash-medium" "gemini-{rev}-flash-high" "gemini-{rev}-flash-tiered"
-		route "minimal" "gemini-{rev}-flash-low"
-		route "low" "gemini-{rev}-flash-low"
-		route "medium" "gemini-{rev}-flash-medium"
-		route "high" "gemini-{rev}-flash-high"
-		mode "google-level"
-		efforts "minimal" "low" "medium" "high"
-		requires-effort #true
-	}
-	variant-family "google-gemini-cli" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
-		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
-		route "off" "gemini-3.5-flash-extra-low"
-		route "minimal" "gemini-3-flash-agent"
-		route "low" "gemini-3.5-flash-extra-low"
-		route "medium" "gemini-3.5-flash-extra-low"
-		route "high" "gemini-3.5-flash-low"
-		mode "google-level"
-		efforts "minimal" "low" "medium" "high"
-		aliases "gemini-3-flash"
-		suppress-when-off #true
-	}
-	variant-family "google-gemini-cli" "gemini-3.1-pro" name="Gemini 3.1 Pro" {
-		members "gemini-3.1-pro-low" "gemini-pro-agent" "gemini-3.1-pro-high"
-		route "off" "gemini-3.1-pro-low"
-		route "low" "gemini-3.1-pro-low"
-		route "high" "gemini-pro-agent"
-		mode "google-level"
-		efforts "low" "high"
-		retired "gemini-3.1-pro-high"
-		suppress-when-off #true
-	}
-	variant-family "google-gemini-cli" "gemini-3-pro" name="Gemini 3 Pro" {
-		members "gemini-3-pro-low" "gemini-3-pro-high"
-		route "off" "gemini-3-pro-low"
-		route "low" "gemini-3-pro-low"
-		route "high" "gemini-3-pro-high"
-		mode "google-level"
-		efforts "low" "high"
-		suppress-when-off #true
-	}
-	variant-family "google-gemini-cli" "gpt-oss-120b" name="GPT-OSS 120B" {
-		members "gpt-oss-120b-medium"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-	}
-	variant-family "google-gemini-cli" "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
-		members "claude-sonnet-4-6" "claude-sonnet-4-6-thinking"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		retired "claude-sonnet-4-6-thinking"
-	}
-	variant-family "google-gemini-cli" "claude-opus-4-6" name="Claude Opus 4.6" {
-		members "claude-opus-4-6-thinking" "claude-opus-4-6"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		retired "claude-opus-4-6"
-	}
-	variant-family "google-gemini-cli" "claude-sonnet-4-5" name="Claude Sonnet 4.5" {
-		members "claude-sonnet-4-5" "claude-sonnet-4-5-thinking"
-		route "off" "claude-sonnet-4-5"
-		route "minimal" "claude-sonnet-4-5-thinking"
-		route "low" "claude-sonnet-4-5-thinking"
-		route "medium" "claude-sonnet-4-5-thinking"
-		route "high" "claude-sonnet-4-5-thinking"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		preserve-absent-effort-routes #true
-	}
-	variant-family "google-gemini-cli" "claude-opus-4-5" name="Claude Opus 4.5" {
-		members "claude-opus-4-5" "claude-opus-4-5-thinking"
-		route "off" "claude-opus-4-5"
-		route "minimal" "claude-opus-4-5-thinking"
-		route "low" "claude-opus-4-5-thinking"
-		route "medium" "claude-opus-4-5-thinking"
-		route "high" "claude-opus-4-5-thinking"
-		mode "budget"
-		efforts "minimal" "low" "medium" "high"
-		preserve-absent-effort-routes #true
-	}
-	variant-family "google-gemini-cli" "gemini-2.5-flash" name="Gemini 2.5 Flash" {
 		members "gemini-2.5-flash" "gemini-2.5-flash-thinking"
 		route "off" "gemini-2.5-flash"
 		route "minimal" "gemini-2.5-flash-thinking"
@@ -636,6 +613,15 @@ collapse {
 	provider-alias "devin" "grok-4.6" "grok-4-6"
 	provider-alias "devin" "swe-1.7" "swe-1-7"
 	provider-alias "devin" "swe-1.7-lightning" "swe-1-7-lightning"
+	// Retired id: the Codex image model was relabeled to what the backend runs
+	// (gpt-image-2-codex); keep saved `openai-codex/gpt-image-1` roles resolving.
+	provider-alias "openai-codex" "gpt-image-1" "gpt-image-2"
+	// Retired rich-lane ids: AvailableModels discovery named Grok 4.5/4.6 lanes
+	// after the unprefixed model name before they adopted these family ids
+	// (#14164). Family `aliases` (not `provider-alias`) so saved selectors and
+	// models.yml `modelOverrides` keyed by the old ids both migrate. Grok 4.6
+	// is spelled out instead of riding the `cursor-grok-{rev}` template: a
+	// templated `grok-{rev}` alias would also claim the live Grok 4.7+ ids.
 	variant-family "cursor" "cursor-grok-4.5" name="Grok 4.5" {
 		members "cursor-grok-4.5-low" "cursor-grok-4.5-medium" "cursor-grok-4.5-high"
 		route "low" "cursor-grok-4.5-low"
@@ -645,6 +631,7 @@ collapse {
 		efforts "low" "medium" "high"
 		requires-effort #true
 		default-member "cursor-grok-4.5-medium"
+		aliases "grok-4.5"
 	}
 	variant-family "cursor" "cursor-grok-4.5-fast" name="Grok 4.5 Fast" {
 		members "cursor-grok-4.5-low-fast" "cursor-grok-4.5-medium-fast" "cursor-grok-4.5-high-fast"
@@ -655,6 +642,7 @@ collapse {
 		efforts "low" "medium" "high"
 		requires-effort #true
 		default-member "cursor-grok-4.5-medium-fast"
+		aliases "grok-4.5-fast"
 	}
 	variant-family "cursor" "cursor-grok-4.6" name="Grok 4.6" {
 		members "cursor-grok-4.6-low" "cursor-grok-4.6-medium" "cursor-grok-4.6-high" "cursor-grok-4.6-xhigh"
@@ -666,6 +654,7 @@ collapse {
 		efforts "low" "medium" "high" "xhigh"
 		requires-effort #true
 		default-member "cursor-grok-4.6-medium"
+		aliases "grok-4.6"
 	}
 	variant-family "cursor" "cursor-grok-4.6-fast" name="Grok 4.6 Fast" {
 		members "cursor-grok-4.6-low-fast" "cursor-grok-4.6-medium-fast" "cursor-grok-4.6-high-fast" "cursor-grok-4.6-xhigh-fast"
@@ -677,6 +666,51 @@ collapse {
 		efforts "low" "medium" "high" "xhigh"
 		requires-effort #true
 		default-member "cursor-grok-4.6-medium-fast"
+		aliases "grok-4.6-fast"
+	}
+	variant-family "cursor" "cursor-grok-{rev}" name="Grok {rev}" revision=">=4.7" {
+		members "cursor-grok-{rev}-low" "cursor-grok-{rev}-medium" "cursor-grok-{rev}-high" "cursor-grok-{rev}-xhigh"
+		route "low" "cursor-grok-{rev}-low"
+		route "medium" "cursor-grok-{rev}-medium"
+		route "high" "cursor-grok-{rev}-high"
+		route "xhigh" "cursor-grok-{rev}-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "cursor-grok-{rev}-medium"
+	}
+	variant-family "cursor" "cursor-grok-{rev}-fast" name="Grok {rev} Fast" revision=">=4.7" {
+		members "cursor-grok-{rev}-low-fast" "cursor-grok-{rev}-medium-fast" "cursor-grok-{rev}-high-fast" "cursor-grok-{rev}-xhigh-fast"
+		route "low" "cursor-grok-{rev}-low-fast"
+		route "medium" "cursor-grok-{rev}-medium-fast"
+		route "high" "cursor-grok-{rev}-high-fast"
+		route "xhigh" "cursor-grok-{rev}-xhigh-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "cursor-grok-{rev}-medium-fast"
+	}
+	variant-family "cursor" "grok-{rev}" name="Grok {rev}" revision=">=4.7" {
+		members "grok-{rev}-low" "grok-{rev}-medium" "grok-{rev}-high" "grok-{rev}-xhigh"
+		route "low" "grok-{rev}-low"
+		route "medium" "grok-{rev}-medium"
+		route "high" "grok-{rev}-high"
+		route "xhigh" "grok-{rev}-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "grok-{rev}-medium"
+	}
+	variant-family "cursor" "grok-{rev}-fast" name="Grok {rev} Fast" revision=">=4.7" {
+		members "grok-{rev}-low-fast" "grok-{rev}-medium-fast" "grok-{rev}-high-fast" "grok-{rev}-xhigh-fast"
+		route "low" "grok-{rev}-low-fast"
+		route "medium" "grok-{rev}-medium-fast"
+		route "high" "grok-{rev}-high-fast"
+		route "xhigh" "grok-{rev}-xhigh-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "grok-{rev}-medium-fast"
 	}
 	variant-family "cursor" "gpt-5.6-luna" name="GPT-5.6 Luna" {
 		members "gpt-5.6-luna-none" "gpt-5.6-luna-low" "gpt-5.6-luna-medium" "gpt-5.6-luna-high" "gpt-5.6-luna-xhigh" "gpt-5.6-luna-max"

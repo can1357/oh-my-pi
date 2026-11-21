@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { stableStringifyJson } from "@oh-my-pi/pi-utils/json";
+import { stableStringifyJson, stringifyJson } from "@oh-my-pi/pi-utils/json";
 
 describe("stableStringifyJson", () => {
 	it("canonicalizes nested object key order while preserving array order", () => {
@@ -19,5 +19,39 @@ describe("stableStringifyJson", () => {
 
 	it("rejects a top-level value JSON cannot serialize", () => {
 		expect(() => stableStringifyJson(undefined)).toThrow("Value is not JSON-serializable");
+	});
+});
+
+describe("stringifyJson", () => {
+	it("serializes bigint values as decimal strings", () => {
+		expect(stringifyJson({ n: 10n })).toBe('{"n":"10"}');
+	});
+
+	it("serializes bigints produced by toJSON", () => {
+		expect(stringifyJson({ o: { toJSON: () => 5n } })).toBe('{"o":"5"}');
+	});
+
+	it("coerces bigints that follow a stateful serializer", () => {
+		let calls = 0;
+		const value = { a: { toJSON: () => ++calls }, b: 1n };
+		expect(stringifyJson(value)).toBe('{"a":2,"b":"1"}');
+	});
+
+	it("still throws TypeError for non-serializable values", () => {
+		const circular: Record<string, unknown> = {};
+		circular.self = circular;
+		expect(() => stringifyJson(circular)).toThrow(TypeError);
+	});
+
+	it("rethrows non-TypeError serializer failures without retrying", () => {
+		let calls = 0;
+		const failing = {
+			toJSON: () => {
+				calls++;
+				throw new RangeError("boom");
+			},
+		};
+		expect(() => stringifyJson({ x: failing })).toThrow(RangeError);
+		expect(calls).toBe(1);
 	});
 });

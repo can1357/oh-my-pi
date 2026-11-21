@@ -5,15 +5,20 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTaskDisabledAgents } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 const mockTaskTool: AgentTool = {
 	name: "task",
@@ -34,11 +39,12 @@ const mockEvalTool: AgentTool = {
 async function createMagicKeywordSession(
 	modelRegistry: ModelRegistry,
 	tools: AgentTool[] = [mockTaskTool, mockEvalTool],
+	modelId = "claude-sonnet-4-5",
 ): Promise<{
 	session: AgentSession;
 	settings: Settings;
 }> {
-	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	const model = getBundledModel("anthropic", modelId);
 	if (!model) throw new Error("Expected bundled Claude Sonnet model");
 	const agent = new Agent({
 		initialState: {
@@ -68,7 +74,8 @@ describe("AgentSession magic keyword settings", () => {
 	beforeAll(async () => {
 		authRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-magic-keywords-auth-"));
 		authStorage = await AuthStorage.create(path.join(authRoot, "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openai-codex", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(authRoot, "models.yml"));
 	});
 
@@ -86,7 +93,7 @@ describe("AgentSession magic keyword settings", () => {
 	it("does not append magic keyword notices when disabled", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;
-		created.settings.set("magicKeywords.enabled", false);
+		cfgMagicKeywordsEnabled.set(created.settings, false);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please workflowz this and ultrathink through it");
@@ -98,8 +105,8 @@ describe("AgentSession magic keyword settings", () => {
 	it("honors non-ultrathink per-keyword notice toggles", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;
-		created.settings.set("magicKeywords.orchestrate", false);
-		created.settings.set("magicKeywords.workflow", false);
+		cfgMagicKeyword.orchestrate.set(created.settings, false);
+		cfgMagicKeyword.workflow.set(created.settings, false);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please orchestrate and workflowz this");
@@ -122,31 +129,10 @@ describe("AgentSession magic keyword settings", () => {
 		]);
 	});
 
-	it("renders the eval-specific workflowz notice", async () => {
-		const created = await createMagicKeywordSession(modelRegistry);
-		session = created.session;
-		created.settings.set("task.batch", false);
-		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
-
-		await session.prompt("please workflowz this");
-
-		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{
-			content?: string;
-			customType?: string;
-		}>;
-		const notice = promptMessages.find(message => message.customType === "workflow-notice");
-		expect(notice?.customType).toBe("workflow-notice");
-		expect(notice?.content).toContain("Default to `workpool()`");
-		expect(notice?.content).toContain('`hub` with `op:"wait", ids:["<pool-name>"]`');
-		expect(notice?.content).toContain("**Python:**");
-		expect(notice?.content).toContain("**JavaScript:**");
-		expect(notice?.content).not.toContain("parallel(thunks)");
-	});
-
 	it("updates the workflowz notice when scout is disabled during the session", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;
-		created.settings.set("task.disabledAgents", ["scout"]);
+		cfgTaskDisabledAgents.set(created.settings, ["scout"]);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please workflowz this");
@@ -179,6 +165,27 @@ describe("AgentSession magic keyword settings", () => {
 		expect(promptMessages.map(message => message.customType).filter(Boolean)).toEqual([]);
 	});
 
+	it("appends the jevify notice only while the eval tool is active", async () => {
+		const withEval = await createMagicKeywordSession(modelRegistry, [mockEvalTool]);
+		session = withEval.session;
+		const withEvalSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		await session.prompt("jevify this commit for unrelated changes");
+		const withEvalMessages = withEvalSpy.mock.calls[0]![0] as unknown as Array<{
+			content?: string;
+			customType?: string;
+		}>;
+		const notice = withEvalMessages.find(message => message.customType === "jevify-notice");
+		expect(notice?.content).toContain("judge(state, questions)");
+		await session.dispose();
+
+		const withoutEval = await createMagicKeywordSession(modelRegistry, [mockTaskTool]);
+		session = withoutEval.session;
+		const withoutEvalSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		await session.prompt("jevify this commit for unrelated changes");
+		const withoutEvalMessages = withoutEvalSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		expect(withoutEvalMessages.map(message => message.customType).filter(Boolean)).toEqual([]);
+	});
+
 	it("skips workflowz notice when the eval tool is inactive", async () => {
 		const created = await createMagicKeywordSession(modelRegistry, [mockTaskTool]);
 		session = created.session;
@@ -193,7 +200,7 @@ describe("AgentSession magic keyword settings", () => {
 	it("does not use a disabled ultrathink keyword to force auto thinking", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;
-		created.settings.set("magicKeywords.ultrathink", false);
+		cfgMagicKeyword.ultrathink.set(created.settings, false);
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 		const classifierSpy = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
 		session.setThinkingLevel(AUTO_THINKING);
@@ -203,6 +210,56 @@ describe("AgentSession magic keyword settings", () => {
 		expect(classifierSpy).toHaveBeenCalledTimes(1);
 		expect(session.thinkingLevel).toBe(Effort.Low);
 		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+	});
+
+	it.each([
+		["takes per-message effort", "anthropic", "claude-sonnet-5-5", Effort.Low],
+		["takes configuration updates", "openai-codex", "gpt-6-astra", Effort.Low],
+		["needs a stable effort", "anthropic", "claude-sonnet-4-5", Effort.High],
+	] as const)(
+		"a chillax steer mid-turn on a model that %s sets the next request's effort",
+		async (_label, provider, id, next) => {
+			const mock = createMockModel({ responses: [{ content: ["working"] }, { content: ["relaxed"] }] });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: getBundledModel(provider, id), systemPrompt: ["Test"], tools: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+			});
+			session.setThinkingLevel(Effort.High);
+			let steered = false;
+			const active = session;
+			active.agent.setOnBeforeYield(async () => {
+				if (steered) return;
+				steered = true;
+				await active.prompt("chillax, just wrap it up", { streamingBehavior: "steer" });
+			});
+
+			await active.prompt("refactor the parser");
+
+			expect(mock.calls.map(call => call.options?.reasoning)).toEqual([Effort.High, next]);
+			expect(active.thinkingLevel).toBe(next);
+		},
+	);
+
+	it("resolves an auto chillax turn to the model floor without classifying", async () => {
+		const created = await createMagicKeywordSession(modelRegistry, [], "claude-sonnet-5-5");
+		session = created.session;
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierSpy = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.High);
+		session.setThinkingLevel(AUTO_THINKING);
+
+		await session.prompt("chillax and rename the flag");
+
+		expect(classifierSpy).not.toHaveBeenCalled();
+		expect(session.thinkingLevel).toBe(Effort.Low);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
 	it("queues the magic-keyword notice before the user message", async () => {

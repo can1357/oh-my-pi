@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
@@ -57,5 +57,37 @@ describe("EventController todo reminder", () => {
 		// HUD updates via setTodos.
 		expect(present).toHaveBeenCalledTimes(1);
 		expect(ctx.setTodos).toHaveBeenCalledWith(phases);
+	});
+
+	it("does not reveal a dismissed HUD for a read-only todo view", async () => {
+		const { ctx } = createContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "todo-view",
+			toolName: "todo",
+			isError: false,
+			result: {
+				content: [{ type: "text", text: "Done" }],
+				details: {
+					op: "view",
+					phases: [{ name: "Done", tasks: [{ content: "ship", status: "completed" }] }],
+				},
+			},
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+		expect(ctx.setTodos).not.toHaveBeenCalled();
+		await controller.handleEvent({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolName: "todo",
+				toolCallId: "todo-view",
+				content: [],
+				isError: false,
+				timestamp: 1,
+				details: { op: "view", phases: [{ name: "Done", tasks: [{ content: "ship", status: "completed" }] }] },
+			},
+		} as Extract<AgentSessionEvent, { type: "message_end" }>);
+		expect(ctx.setTodos).not.toHaveBeenCalled();
 	});
 });

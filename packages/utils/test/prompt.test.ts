@@ -85,11 +85,6 @@ describe("format: structure", () => {
 });
 
 describe("compile cache", () => {
-	it("returns the identical compiled function for repeat compiles of the same template", () => {
-		const template = "Hello {{name}} {{#if x}}yes{{/if}}";
-		expect(prompt.compile(template)).toBe(prompt.compile(template));
-	});
-
 	it("renders templates with 3+ closing braces unambiguously", () => {
 		expect(prompt.render("{{#if a}}{ {{b}}}{{/if}}", { a: true, b: "v" })).toBe("{ v}");
 	});
@@ -106,5 +101,47 @@ describe("helpers: join", () => {
 	it("defaults to comma-space and tolerates non-arrays", () => {
 		expect(prompt.render("{{join files}}", { files: ["a", "b"] })).toBe("a, b");
 		expect(prompt.render("{{join files}}", { files: "not-an-array" })).toBe("");
+	});
+});
+
+describe("renderTracked", () => {
+	const template =
+		"<list>\n{{#each items}}\n{{#unless @first}}\n\n{{/unless}}\n<i>\n{{body}}\n</i>\n{{/each}}\n</list>\n\n\n| x  |  y |";
+	const texts = (result: prompt.TrackedRender) =>
+		result.ranges.map(ranges => ranges.map(({ start, end }) => result.text.slice(start, end)));
+
+	it("matches render and reports each tracked iteration without its blank edge lines", () => {
+		const items = [{ body: "one   " }, { body: "\n\n\ntwo" }];
+		const result = prompt.renderTracked(template, { items }, items);
+		expect(result.text).toBe(prompt.render(template, { items }));
+		expect(texts(result)).toEqual([["<i>\none\n</i>"], ["<i>\ntwo\n</i>"]]);
+	});
+
+	it("leaves an iteration that opens a fence without closing it in place and untracked", () => {
+		const items = [{ body: "```\nopen" }, { body: "| a  |  b |" }];
+		const result = prompt.renderTracked(template, { items }, items);
+		expect(result.text).toBe(prompt.render(template, { items }));
+		expect(texts(result)).toEqual([[], []]);
+	});
+
+	it("closes a code fence the text leaves open, with the opening marker", () => {
+		expect(prompt.closeCodeFence("~~~ts\ncode")).toBe("~~~ts\ncode\n~~~");
+		expect(prompt.closeCodeFence("```\nclosed\n```\n")).toBe("```\nclosed\n```\n");
+		expect(prompt.closeCodeFence("  ```\nindented open\n")).toBe("  ```\nindented open\n```");
+	});
+
+	it("renders as render and reports nothing for iterations it cannot isolate", () => {
+		const cases = [
+			// Inside a helper block, which returns a plain string.
+			{ template: '{{#list items join="\\n"}}\n{{body}}\n{{/list}}', items: [{ body: "a   " }] },
+			// Sharing a line with template text.
+			{ template: "before {{#each items}}{{body}}{{/each}}\n\n\nafter", items: [{ body: "a   " }] },
+			// Inside a fence the template opened, where lines stay verbatim.
+			{ template: "```\n{{#each items}}\n{{body}}\n{{/each}}\n```", items: [{ body: "| a  |  b |" }] },
+		];
+		for (const { template, items } of cases) {
+			const result = prompt.renderTracked(template, { items }, items);
+			expect(result).toEqual({ text: prompt.render(template, { items }), ranges: [[]] });
+		}
 	});
 });

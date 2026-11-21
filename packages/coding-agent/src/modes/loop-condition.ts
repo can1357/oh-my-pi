@@ -16,18 +16,11 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { BashResult } from "../exec/bash-executor";
 import { executeBash } from "../exec/bash-executor";
-import { TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
-import { sanitizeStatusText } from "./shared";
-
-/** A `/loop --while` / `/loop --until` continue-condition. */
-export interface LoopConditionConfig {
-	/** Shell command line, run through the user's configured shell. */
-	command: string;
-	/** `--until`: continue while the command *fails*. `--while`: while it succeeds. */
-	until: boolean;
-}
+import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 
 export type LoopConditionVerdict =
 	/** The condition says run another iteration. */
@@ -46,6 +39,8 @@ export interface LoopConditionOptions {
 	signal?: AbortSignal;
 	/** Owning session id, so the condition's shell session cannot leak state into (or from) another session's. */
 	sessionId: string;
+	/** Asked once the run settles; `false` drops the condition shell if the owning session was left mid-run. */
+	isSessionCurrent?: () => boolean;
 }
 
 /**
@@ -90,12 +85,6 @@ export function describeLoopCondition(condition: LoopConditionConfig): string {
 	return `${condition.until ? "until" : "while"} ${quoteCommand(condition.command)} succeeds`;
 }
 
-/** Compact status-line form: `until: bun test`. */
-export function summarizeLoopCondition(condition: LoopConditionConfig, maxWidth: number): string {
-	const label = condition.until ? "until" : "while";
-	return `${label}: ${truncateToWidth(sanitizeStatusText(condition.command), Math.max(1, maxWidth - label.length - 2))}`;
-}
-
 /**
  * Run one condition evaluation and map its exit status onto a loop verdict.
  *
@@ -113,6 +102,7 @@ export async function evaluateLoopCondition(
 			timeout: options.timeoutMs,
 			signal: options.signal,
 			sessionKey: `${LOOP_CONDITION_SESSION_KEY}:${options.sessionId}`,
+			isSessionCurrent: options.isSessionCurrent,
 		});
 	} catch (error) {
 		logger.error("loop condition failed to start", { command: condition.command, error: String(error) });

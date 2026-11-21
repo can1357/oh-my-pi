@@ -34,6 +34,21 @@ export const CONTEXT_MODE_NO_INSTRUCTIONS_MODE = "--context-mode-no-instructions
 const CONTEXT_MODE_TOOL_NAME = "ctx_execute";
 /** One more tool than the 64-row prompt budget, forcing the static fallback. */
 export const BOUNDED_GUIDANCE_TOOL_COUNT = 65;
+/** Gives the default tool a schema whose rendered docs exceed the per-device prompt cap. */
+export const OVERSIZED_SCHEMA_MODE = "--oversized-schema";
+
+function defaultInputSchema(): Record<string, unknown> {
+	if (!process.argv.includes(OVERSIZED_SCHEMA_MODE)) {
+		return { type: "object", properties: {}, additionalProperties: false };
+	}
+	const properties = Object.fromEntries(
+		Array.from({ length: 400 }, (_, index) => [
+			`field_${index}`,
+			{ type: "string", description: `Oversized schema fixture field ${index}.` },
+		]),
+	);
+	return { type: "object", properties, additionalProperties: false };
+}
 
 type JsonRpcRequest = {
 	jsonrpc: "2.0";
@@ -70,7 +85,7 @@ function buildResult(method: string): Record<string, unknown> {
 							description: contextModeWithoutInstructions
 								? "Execute code through the Context Mode fixture."
 								: "Fixture tool returning a deterministic sentinel.",
-							inputSchema: { type: "object", properties: {}, additionalProperties: false },
+							inputSchema: defaultInputSchema(),
 						},
 					];
 			return { tools };

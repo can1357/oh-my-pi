@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-account-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { toSessionPinAccounts } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/session-pin";
 
 beforeAll(async () => {

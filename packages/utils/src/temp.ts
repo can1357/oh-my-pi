@@ -3,6 +3,13 @@ import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
+/**
+ * Owned temporary directory, removed via `remove()` or `using`/`await using`.
+ *
+ * Prefixes follow `mkdtemp`: `"@name-"` creates under the OS temp dir, any other
+ * prefix is a path (a bare `"name-"` lands in the process cwd), and no prefix
+ * means `"@pi-temp-"`.
+ */
 export class TempDir {
 	#path: string;
 	private constructor(path: string) {
@@ -84,7 +91,6 @@ const kRemoveRetries = 40;
 // was too short for some test cleanup scenarios.
 const kRemoveRetryDelayMs = 50;
 const kRetryableRemoveErrorCodes = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
-const kSleepBuffer = new Int32Array(new SharedArrayBuffer(4));
 
 /** Removes a path recursively, retrying transient Windows deletion failures. */
 export async function removeWithRetries(target: string): Promise<void> {
@@ -94,6 +100,11 @@ export async function removeWithRetries(target: string): Promise<void> {
 			return;
 		} catch (err) {
 			if (!shouldRetryRemove(err, attempt)) throw err;
+			// bun on Windows finalizes SQLite's db/-wal/-shm file and directory
+			// handles on GC, so a closed database can still block deletion for
+			// seconds. One forced major collection on the first retry releases
+			// them immediately instead of burning the retry window.
+			if (attempt === 0) Bun.gc(true);
 			await Bun.sleep(kRemoveRetryDelayMs);
 		}
 	}
@@ -106,7 +117,8 @@ export function removeSyncWithRetries(target: string): void {
 			return;
 		} catch (err) {
 			if (!shouldRetryRemove(err, attempt)) throw err;
-			sleepSync(kRemoveRetryDelayMs);
+			if (attempt === 0) Bun.gc(true);
+			Bun.sleepSync(kRemoveRetryDelayMs);
 		}
 	}
 }
@@ -123,12 +135,4 @@ function isRetryableRemoveError(err: unknown): boolean {
 		typeof err.code === "string" &&
 		kRetryableRemoveErrorCodes.has(err.code)
 	);
-}
-
-function sleepSync(ms: number): void {
-	if ("sleepSync" in Bun && typeof Bun.sleepSync === "function") {
-		Bun.sleepSync(ms);
-		return;
-	}
-	Atomics.wait(kSleepBuffer, 0, 0, ms);
 }

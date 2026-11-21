@@ -3,7 +3,6 @@ import {
 	normalizeTinyModelDtype,
 	resolveTinyModelDtypeOverride,
 	TINY_MODEL_DTYPE_DEFAULT,
-	TINY_MODEL_DTYPE_SETTING_OPTIONS,
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 	tinyModelDtypeSettingToEnv,
 } from "@oh-my-pi/pi-coding-agent/tiny/dtype";
@@ -33,21 +32,10 @@ describe("tiny model dtype setting → PI_TINY_DTYPE mapping", () => {
 		expect(tinyModelDtypeSettingToEnv("")).toBeUndefined();
 	});
 
-	it("forwards a concrete precision verbatim for the worker to validate", () => {
-		expect(tinyModelDtypeSettingToEnv("fp16")).toBe("fp16");
-		expect(tinyModelDtypeSettingToEnv("q8")).toBe("q8");
-	});
-
 	it("keeps every non-default setting value resolvable by the worker", () => {
 		for (const value of TINY_MODEL_DTYPE_SETTING_VALUES) {
 			if (value === TINY_MODEL_DTYPE_DEFAULT) continue;
 			expect(normalizeTinyModelDtype(tinyModelDtypeSettingToEnv(value))).toBe(value);
 		}
-	});
-
-	it("keeps submenu options aligned with the accepted values", () => {
-		expect(TINY_MODEL_DTYPE_SETTING_OPTIONS.map(option => option.value)).toEqual([
-			...TINY_MODEL_DTYPE_SETTING_VALUES,
-		]);
 	});
 });

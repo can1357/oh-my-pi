@@ -5,9 +5,10 @@ import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { computeContextBreakdown } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { computeSessionContextBreakdown } from "@oh-my-pi/pi-coding-agent/session/context-usage-runtime";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -24,8 +25,8 @@ describe("Context usage consolidation", () => {
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@pi-context-shared-");
 		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		await Settings.init({ inMemory: true });
 		await initTheme();
@@ -339,52 +340,14 @@ describe("Context usage consolidation", () => {
 		const breakdownVal = session.getContextBreakdown();
 		const used = breakdownVal?.usedTokens;
 
-		const cb = computeContextBreakdown(session);
+		const cb = computeSessionContextBreakdown(session);
 		expect(cb.usedTokens).toBe(used!);
 
-		const sl = statusLines.track(new StatusLineComponent(session));
+		const sl = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		expect(sl.getCachedContextBreakdown().usedTokens).toBe(used!);
 
 		const cu = session.getContextUsage();
 		expect(cu?.tokens).toBe(used!);
-
-		await tempDir.remove();
-	});
-
-	it("invalidates status-line cache on reasoning-signature growth", async () => {
-		const tempDir = TempDir.createSync("@cache-invalidate-");
-		const { session, sessionManager, agent } = createSession(tempDir);
-
-		sessionManager.appendMessage({ role: "user", content: "query", timestamp: 1000 } as Message);
-		const assistant: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "text content" }],
-			usage: {
-				input: 250,
-				output: 20,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 270,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			contextSnapshot: { promptTokens: 250, nonMessageTokens: 10 },
-			timestamp: 2000,
-			stopReason: "stop",
-			api: mockModel.api,
-			provider: mockModel.provider,
-			model: mockModel.id,
-		};
-		sessionManager.appendMessage(assistant);
-		syncSession(session, agent);
-
-		const sl = statusLines.track(new StatusLineComponent(session));
-		const initialBreakdown = sl.getCachedContextBreakdown();
-
-		const assistantExt = assistant as unknown as { thinkingSignature: string };
-		assistantExt.thinkingSignature = "signature_grows";
-
-		const nextBreakdown = sl.getCachedContextBreakdown();
-		expect(nextBreakdown.usedTokens).toBe(initialBreakdown.usedTokens);
 
 		await tempDir.remove();
 	});

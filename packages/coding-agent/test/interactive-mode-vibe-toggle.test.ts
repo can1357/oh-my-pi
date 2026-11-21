@@ -16,7 +16,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -186,7 +186,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 			builtInToolNames: registryTools.map(tool => tool.name),
 			createVibeTools: () => VIBE_TOOL_NAMES.map(stubTool),
 		});
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, new EventBus());
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, new EventBus());
 	});
 
 	afterEach(async () => {
@@ -465,7 +465,6 @@ describe("InteractiveMode vibe mode toggle", () => {
 			undefined,
 			undefined,
 			undefined,
-			undefined,
 			new EventBus(),
 		);
 
@@ -532,7 +531,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 			});
 			return {
 				session: opened,
-				mode: new InteractiveMode(opened, "test", undefined, undefined, undefined, undefined, new EventBus()),
+				mode: new InteractiveMode(opened, "test", undefined, undefined, undefined, new EventBus()),
 			};
 		};
 
@@ -606,7 +605,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 			});
 			return {
 				session: opened,
-				mode: new InteractiveMode(opened, "test", undefined, undefined, undefined, undefined, new EventBus()),
+				mode: new InteractiveMode(opened, "test", undefined, undefined, undefined, new EventBus()),
 			};
 		};
 
@@ -734,10 +733,12 @@ describe("InteractiveMode vibe mode toggle", () => {
 		await session.sessionManager.ensureOnDisk();
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) throw new Error("Expected persisted session file");
+		const entryId = session.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
 
 		await expect(session.newSession()).rejects.toThrow("Exit vibe mode first");
 		await expect(session.newSession({ drop: true })).rejects.toThrow("Exit vibe mode first");
 		await expect(session.fork()).rejects.toThrow("Exit vibe mode first");
+		await expect(session.fork(entryId)).rejects.toThrow("Exit vibe mode first");
 		await expect(session.moveSession(path.join(tempDir.path(), "other-project"))).rejects.toThrow(
 			"Exit vibe mode first",
 		);
@@ -755,7 +756,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		const warning = vi.spyOn(mode, "showWarning");
 
 		await expect(mode.handleClearCommand()).resolves.toBeUndefined();
-		await expect(mode.handleDropCommand()).resolves.toBeUndefined();
+		await expect(mode.handleDeleteCommand()).resolves.toBeUndefined();
 		await expect(mode.handleForkCommand()).resolves.toBeUndefined();
 		await expect(mode.handleMoveCommand(path.join(tempDir.path(), "other-project"))).resolves.toBeUndefined();
 

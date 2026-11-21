@@ -1,6 +1,10 @@
 // Provider-wire compat for "lm-studio".
 
 provider "lm-studio" {
+	default-model "llama-3-8b"
+	env "LM_STUDIO_API_KEY"
+	allow-unauthenticated #true
+
 	// Replaces the string-only named-tool-choice provider table.
 	supports-named-tool-choice #false
 }

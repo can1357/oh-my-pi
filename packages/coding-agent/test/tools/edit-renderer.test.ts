@@ -5,10 +5,10 @@ import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { editToolRenderer, renderStreamingFallback } from "@oh-my-pi/pi-coding-agent/edit/renderer";
-import { renderDiff } from "@oh-my-pi/pi-coding-agent/modes/components/diff";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { editToolRenderer, renderStreamingFallback } from "@oh-my-pi/pi-tui/tools/edit";
+import { renderDiff } from "@oh-my-pi/pi-tui/chrome/diff";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -80,23 +80,25 @@ describe("editToolRenderer", () => {
 						.render(200)
 						.join("\n"),
 				);
+			// The card's bottom rule, where the preview label sits.
+			const bottomRule = (text: string): string =>
+				text.split("\n").findLast(line => line.includes(uiTheme.boxRound.bottomLeft)) ?? "";
 
 			const collapsed = renderPreview(makeDiff(20), false);
 			expect(collapsed).toContain("tail-line-20");
 			expect(collapsed).not.toContain("head-line-1");
 			expect(collapsed).toContain("content above");
-			expect(collapsed).toContain("(preview)");
+			expect(bottomRule(collapsed)).toContain(" preview ");
 
 			// Within the viewport window, expanded shows the whole diff.
 			const expanded = renderPreview(makeDiff(20), true);
 			expect(expanded).toContain("head-line-1");
 			expect(expanded).toContain("tail-line-20");
 			expect(expanded).not.toContain("content above");
-			expect(expanded).not.toContain("(preview)");
+			expect(bottomRule(expanded)).not.toContain("preview");
 
-			// Beyond it, expanded stays a viewport-sized tail window: an unbounded
-			// live preview scrolls above the native-scrollback commit boundary and
-			// freezes a stale snapshot that duplicates the block at finalize.
+			// Beyond it, expanded stays a viewport-sized tail window, so a long
+			// streaming edit keeps its header and newest lines on screen.
 			const expandedTall = renderPreview(makeDiff(40), true);
 			expect(expandedTall).toContain("tail-line-40");
 			expect(expandedTall).not.toContain("head-line-1");
@@ -171,21 +173,9 @@ describe("editToolRenderer", () => {
 		expect(rendered).not.toContain("The first line of the patch must be");
 	});
 
-	it("uses sloppy input section headers for the streaming call path", async () => {
-		const uiTheme = await getUiTheme();
-		const component = editToolRenderer.renderCall(
-			{ input: `<SM:EDIT path="src/engine/disk.rs">\n<SM:FIND>\nfn parse_disk_ref(` },
-			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },
-			uiTheme,
-		);
-
-		const rendered = Bun.stripANSI(component.render(160).join("\n"));
-		expect(rendered).toContain("src/engine/disk.rs");
-	});
-
 	it("counts extra sloppy sections in the streaming call header", async () => {
 		const uiTheme = await getUiTheme();
-		const input = `<SM:EDIT path="a.ts">\n<SM:FIND>\nfoo\n</SM:FIND>\n<SM:EDIT path="b.ts">\n<SM:FIND>\nbar`;
+		const input = "*** Edit File: a.ts\n*** Find\nfoo\n*** Edit File: b.ts\n*** Find\nbar";
 		const component = editToolRenderer.renderCall(
 			{ input },
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },
@@ -197,6 +187,27 @@ describe("editToolRenderer", () => {
 		expect(rendered).toContain("(+1 more)");
 	});
 
+	it("never serves lagged streamed header facts to final args or to another call", () => {
+		const context = { expanded: false, isPartial: true, renderContext: { editMode: "hashline" } };
+		const first = "[a.ts]\nPUT >$:\n+one\n";
+		const grown = `${first}[b.ts]\nPUT >$:\n+two\n`;
+		// The reveal hands over a fresh args object per frame; header facts may
+		// lag a few hundred bytes behind the stream while it grows.
+		expect(editToolRenderer.activitySummary({ input: first, __partialJson: first }, context).detail).toContain(
+			"a.ts",
+		);
+		editToolRenderer.activitySummary({ input: grown, __partialJson: grown }, context);
+		// Final args (no raw stream prefix) always derive exact facts.
+		expect(editToolRenderer.activitySummary({ input: grown }, context).detail).toContain("(+1 more)");
+
+		const other = "[c.ts]\nPUT >$:\n+three\n";
+		editToolRenderer.activitySummary({ input: first, __partialJson: first }, context);
+		// A payload that does not extend the cached one is another call: exact facts.
+		const summary = editToolRenderer.activitySummary({ input: other, __partialJson: other }, context);
+		expect(summary.detail).toContain("c.ts");
+		expect(summary.detail).not.toContain("a.ts");
+	});
+
 	it("shows hashline envelope target path while preview diff is not computable yet", async () => {
 		await getUiTheme();
 		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
@@ -206,7 +217,7 @@ describe("editToolRenderer", () => {
 			{
 				input: [
 					"*** Begin Patch",
-					"[crates/pi-natives/src/shell.rs]",
+					"[crates/natives/src/shell.rs]",
 					"PUT >$:",
 					"+pub fn streaming_preview() {",
 				].join("\n"),
@@ -217,7 +228,7 @@ describe("editToolRenderer", () => {
 		);
 
 		const rendered = Bun.stripANSI(component.render(160).join("\n"));
-		expect(rendered).toContain("crates/pi-natives/src/shell.rs");
+		expect(rendered).toContain("crates/natives/src/shell.rs");
 		expect(rendered).not.toContain("PUT >$:");
 		expect(rendered).not.toContain("+pub fn streaming_preview() {");
 		expect(rendered).not.toContain("*** Begin Patch");
@@ -459,6 +470,26 @@ describe("editToolRenderer", () => {
 		expect(replacement).toContain("plain streamed text");
 		expect(renderStreamingFallback("patch", { new_string: "plain streamed text" }, uiTheme)).toBe("");
 		expect(renderStreamingFallback("hashline", { input: "plain streamed text" }, uiTheme)).toBe("");
+	});
+
+	it("sanitizes the replace-mode preview head and counts every hidden line", async () => {
+		const uiTheme = await getUiTheme();
+		const preview = (text: string) =>
+			Bun.stripANSI(renderStreamingFallback("replace", { new_string: text }, uiTheme))
+				.trim()
+				.split("\n");
+		// CRLF endings and control bytes are stripped; lines past the 6-line head are counted.
+		expect(preview("l1\r\nl2\x07\nl3\nl4\nl5\nl6\nl7\r\nl8\n")).toEqual([
+			"l1",
+			"l2",
+			"l3",
+			"l4",
+			"l5",
+			"l6",
+			"… 3 more lines",
+		]);
+		// Exactly six lines: nothing hidden.
+		expect(preview("1\n2\n3\n4\n5\n6")).toEqual(["1", "2", "3", "4", "5", "6"]);
 	});
 
 	it("uses the supplied theme when the injected diff renderer is unavailable", async () => {

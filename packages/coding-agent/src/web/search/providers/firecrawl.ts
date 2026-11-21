@@ -4,17 +4,10 @@
  * Calls Firecrawl's search API and maps web results into the unified
  * SearchResponse shape used by the web search tool.
  */
-import {
-	type AuthStorage,
-	type FetchImpl,
-	getEnvApiKey,
-	resolveApiKeyOnce,
-	seedApiKeyResolver,
-	withAuth,
-} from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import { type AuthStorage, type FetchImpl, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
-import { resolveFirecrawlUrl } from "../../firecrawl";
+import { configuredFirecrawlBaseUrl, resolveFirecrawlUrl } from "../../firecrawl";
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery, type StructuredQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
@@ -71,7 +64,7 @@ export function findApiKey(
 	sessionId?: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	return authStorage.getApiKey("firecrawl", sessionId, { signal });
+	return authStorage.keys.get("firecrawl", sessionId, { signal });
 }
 
 function buildRequestBody(params: FirecrawlSearchParams): Record<string, unknown> {
@@ -167,7 +160,7 @@ export async function searchFirecrawl(params: SearchParams): Promise<SearchRespo
 		timeoutMs: params.timeoutMs,
 		fetch: params.fetch,
 	};
-	const keyResolver = params.authStorage.resolver("firecrawl", {
+	const keyResolver = params.authStorage.keys.resolver("firecrawl", {
 		sessionId: params.sessionId,
 	});
 	const numResults = clampNumResults(firecrawlParams.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
@@ -180,6 +173,12 @@ export async function searchFirecrawl(params: SearchParams): Promise<SearchRespo
 		data = await withAuth(seededResolver, key => callFirecrawlSearch(key, firecrawlParams), {
 			signal: params.signal,
 		});
+	} else if (params.authStorage.keys.source("firecrawl") !== undefined && configuredFirecrawlBaseUrl() === undefined) {
+		// A failed credential lookup must not downgrade a configured user to hosted keyless mode.
+		throw new SearchProviderError(
+			"firecrawl",
+			"Firecrawl credentials could not be resolved. Check your configured API key or credential helper.",
+		);
 	} else {
 		// Keyless mode — omit Authorization header
 		data = await callFirecrawlSearch(undefined, firecrawlParams);
@@ -209,22 +208,14 @@ export class FirecrawlProvider extends SearchProvider {
 	readonly id = "firecrawl";
 	readonly label = "Firecrawl";
 
-	/**
-	 * Auto-chain admission requires either a credential or an explicitly
-	 * configured self-hosted endpoint. Hosted keyless mode remains explicit-only
-	 * so it does not displace providers the user configured.
-	 */
-	isAvailable(authStorage: AuthStorage): boolean {
-		const configuredBaseUrl = process.env.FIRECRAWL_BASE_URL ?? process.env.FIRECRAWL_API_URL;
-		return !!configuredBaseUrl?.trim() || authStorage.hasAuth("firecrawl") || !!getEnvApiKey("firecrawl");
+	/** Always available: without a credential or self-hosted endpoint, search runs in keyless mode. */
+	isAvailable(_authStorage: AuthStorage): boolean {
+		return true;
 	}
 
-	/**
-	 * Firecrawl supports keyless mode, so an explicit user selection
-	 * (`webSearch: firecrawl`) works without any credential configured.
-	 */
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
-		return true;
+	/** Keyless unless a credential or a self-hosted endpoint is configured. */
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return authStorage.keys.source("firecrawl") === undefined && configuredFirecrawlBaseUrl() === undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

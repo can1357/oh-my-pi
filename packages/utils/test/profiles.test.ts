@@ -8,7 +8,6 @@ import {
 	getActiveProfile,
 	getAgentDbPath,
 	getAgentDir,
-	getConfigAgentDirName,
 	getConfigRootDir,
 	getPythonGatewayDir,
 	getSessionsDir,
@@ -124,7 +123,6 @@ describe("profile directories", () => {
 		const agent = path.join(root, "agent");
 		expect(getActiveProfile()).toBe("work");
 		expect(getConfigRootDir()).toBe(root);
-		expect(getConfigAgentDirName()).toBe(path.join(configDir, "profiles", "work", "agent"));
 		expect(getAgentDir()).toBe(agent);
 		expect(getAgentDbPath()).toBe(path.join(agent, "agent.db"));
 		expect(getSessionsDir()).toBe(path.join(agent, "sessions"));

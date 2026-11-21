@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
 	const deadline = Date.now() + 2_000;
@@ -175,22 +176,35 @@ describe("AsyncJobManager", () => {
 		]);
 	});
 
-	test("preserves agentId in a delayed delivery rebuilt after eviction", async () => {
-		// Regression: a collision-suffixed job id (e.g. `Foo-t1` -> `Foo-t1-2`)
-		// still writes artifacts under the unsuffixed `agentId`. When the row
-		// is evicted before a retried delivery lands, the delivery must be
-		// rebuilt from a snapshot that still carries `agentId`, or the
-		// reconstructed job falls back to the suffixed `jobId` and the
-		// advertised `agent://` URL points at nothing on disk (PR #10625
-		// review).
+	test("preserves native metadata in a delayed delivery rebuilt after eviction", async () => {
+		// A collision-suffixed job id still writes artifacts under the
+		// unsuffixed agentId. Force the first delivery to fail, wait for the
+		// short test-only retention to evict the live row, then inspect the
+		// reconstructed AsyncJob received by the successful sink.
 		let sinkCalls = 0;
-		const delivered: Array<{ jobId: string; agentId: string | undefined }> = [];
+		const delivered: Array<{
+			jobId: string;
+			reconstructedJobId: string | undefined;
+			status: string | undefined;
+			agentId: string | undefined;
+			details: unknown;
+		}> = [];
 		const manager = new AsyncJobManager({
 			retentionMs: 25,
-			onJobComplete: async (jobId, _text, job) => {
+			onJobComplete: async (jobId, text, job) => {
 				sinkCalls += 1;
 				if (sinkCalls === 1) throw new Error("simulated delivery failure");
-				delivered.push({ jobId, agentId: job?.agentId });
+				expect(manager.getJob(jobId)).toBeUndefined();
+				const message = buildAsyncResultBatchMessage([
+					{ jobId, result: text, job, durationMs: job ? Date.now() - job.startTime : undefined, epoch: 0 },
+				]);
+				delivered.push({
+					jobId,
+					reconstructedJobId: job?.id,
+					status: job?.status,
+					agentId: job?.agentId,
+					details: message?.details?.jobs[0],
+				});
 			},
 		});
 
@@ -204,7 +218,22 @@ describe("AsyncJobManager", () => {
 		await manager.drainDeliveries({ timeoutMs: 2_000 });
 
 		expect(sinkCalls).toBe(2);
-		expect(delivered).toEqual([{ jobId: "Foo-t1-2", agentId: "Foo-t1" }]);
+		expect(delivered).toEqual([
+			{
+				jobId: "Foo-t1-2",
+				reconstructedJobId: "Foo-t1-2",
+				status: "completed",
+				agentId: "Foo-t1",
+				details: {
+					jobId: "Foo-t1-2",
+					type: "task",
+					status: "completed",
+					agentId: "Foo-t1",
+					label: "agent task",
+					durationMs: expect.any(Number),
+				},
+			},
+		]);
 	});
 
 	test("defers retained artifacts cleanup until this job's delivery settles", async () => {
@@ -411,6 +440,40 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
 	});
 
+	test.each(["single", "bulk"] as const)("keeps %s cancelled work reapable past retention", async kind => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ retentionMs: 25 });
+		const release = Promise.withResolvers<void>();
+		const jobId = manager.register(
+			"bash",
+			"pending cleanup",
+			async () => {
+				await release.promise;
+				return "cleanup finished";
+			},
+			{ ownerId: "owner" },
+		);
+		try {
+			if (kind === "single") manager.cancel(jobId);
+			else manager.cancelAll({ ownerId: "owner" });
+			vi.advanceTimersByTime(50);
+			const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now());
+			expect(reap.settled).toBe(false);
+			expect(reap.pendingJobIds).toEqual([jobId]);
+			release.resolve();
+			await reap.completion;
+			expect(manager.getJob(jobId)?.resultText).toBe("cleanup finished");
+			expect(await manager.waitForOwnerJobs("owner")).toBe(true);
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+		} finally {
+			release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	test("enforces maxRunningJobs cap", () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,
@@ -487,6 +550,193 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.status).toBe("completed");
 		await waitForJobEviction(manager, jobId);
 		expect(manager.getJob(jobId)).toBeUndefined();
+	});
+
+	test("never recycles auto ids after settled jobs are evicted", async () => {
+		const manager = new AsyncJobManager({ retentionMs: 0, onJobComplete: async () => {} });
+		const first = manager.register("bash", "first", async () => "one");
+		const second = manager.register("bash", "second", async () => "two");
+		await manager.waitForAll();
+		expect(manager.getJob(first)).toBeUndefined();
+		expect(manager.getJob(second)).toBeUndefined();
+
+		const third = manager.register("bash", "third", async () => "three");
+		expect([first, second, third]).toEqual(["bg_1", "bg_2", "bg_3"]);
+		await manager.dispose();
+	});
+
+	test("keeps a foreground-backed job out of listings and delivery unless promoted", async () => {
+		const completions: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async jobId => {
+				completions.push(jobId);
+			},
+		});
+
+		// Released before its body settles (the foreground waiter wins the race).
+		const pending = Promise.withResolvers<string>();
+		const racing = manager.register("bash", "racing foreground", () => pending.promise, { foreground: true });
+		expect(manager.getAllJobs()).toEqual([]);
+		expect(manager.getRunningJobs()).toEqual([]);
+		manager.releaseForegroundJob(racing);
+		pending.resolve("done");
+		await manager.waitForAll();
+		expect(manager.getJob(racing)).toBeUndefined();
+
+		// Settled before promotion: stays hidden until promoted, then delivers once.
+		const promoted = manager.register("bash", "promoted", async () => "slow", { foreground: true });
+		expect(promoted).toBe(racing);
+		await manager.waitForAll();
+		expect(manager.getRecentJobs()).toEqual([]);
+		expect(manager.backgroundJob(promoted)).toBeTrue();
+		expect(manager.getAllJobs().map(job => job.id)).toEqual([promoted]);
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+		expect(completions).toEqual([promoted]);
+		await manager.dispose();
+	});
+
+	test("evicts a consumed settled row on the short grace instead of full retention", async () => {
+		// A settled job whose result reached its consumer (sink delivery or a
+		// foreground snapshot) must not linger in `hub jobs` reads for the full
+		// 5-minute retention window — that lingering is the "background jobs
+		// hang around after they complete" complaint. Delivery success marks
+		// the result consumed, which re-arms eviction on the short grace.
+		const manager = new AsyncJobManager({
+			consumedResultEvictionMs: 25,
+			onJobComplete: async () => {},
+		});
+
+		const jobId = manager.register("task", "delivered", async () => "done");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		expect(manager.isJobResultConsumed(jobId)).toBe(true);
+		await waitForJobEviction(manager, jobId);
+		expect(manager.getJob(jobId)).toBeUndefined();
+	});
+
+	test("keeps an unconsumed dead-lettered row inspectable until a snapshot consumes it", async () => {
+		// No default sink and no owner sink: the delivery dead-letters, so the
+		// result is never consumed. The row must outlive the consumed grace
+		// (its result text is the only inspectable copy) and only evict once a
+		// foreground snapshot consumes it. Fake timers drive the eviction
+		// clocks deterministically — the survival half asserts an absence, which
+		// polling cannot express.
+		vi.useFakeTimers();
+		try {
+			const manager = new AsyncJobManager({
+				retentionMs: 60_000,
+				consumedResultEvictionMs: 25,
+			});
+
+			const jobId = manager.register("bash", "orphan", async () => "orphan result");
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+			vi.advanceTimersByTime(1_000);
+			expect(manager.getJob(jobId)?.resultText).toBe("orphan result");
+
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("keeps the consumed row while its async-result delivery is still parked", async () => {
+		// Regression (autoreview): a foreground snapshot consuming a result
+		// whose delivery is parked on the owner's yield queue must NOT arm the
+		// short consumed grace. Evicting would clear the suppression marker
+		// (#evictJob) before the queue's isStale check drains the parked entry,
+		// letting the already-consumed result inject a duplicate async-result
+		// follow-up once the tool batch settles. Fake timers prove the absence
+		// of eviction past the consumed grace deterministically.
+		vi.useFakeTimers();
+		try {
+			const gate = Promise.withResolvers<void>();
+			const manager = new AsyncJobManager({ consumedResultEvictionMs: 25 });
+			manager.registerDeliverySink("Main", async () => {
+				await gate.promise; // parked async-result entry (receipt pending)
+			});
+
+			const jobId = manager.register("task", "parked", async () => "done", { ownerId: "Main" });
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
+
+			// A foreground recovery read consumes the result mid-park.
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			vi.advanceTimersByTime(1_000);
+
+			// Row and suppression marker both survive the consumed grace: the
+			// parked entry's isStale check still resolves through the marker.
+			expect(manager.getJob(jobId)?.status).toBe("completed");
+			expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+
+			gate.resolve();
+			await scheduler.yield();
+			expect(await manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+			// Once the parked delivery settles, its suppression marker has served
+			// its purpose and the already-consumed row starts the short grace.
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+			await manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("keeps a consumed result suppressed while its delivery stays parked past full retention", async () => {
+		// Regression (#15625): an eval cell consumed results via handle.wait()
+		// while their async-result entries sat parked on the busy owner's yield
+		// queue for longer than the retention window. Retention eviction cleared
+		// the suppression marker, so every consumed result was re-injected once
+		// the tool call returned.
+		vi.useFakeTimers();
+		try {
+			const gate = Promise.withResolvers<void>();
+			const manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 25 });
+			manager.registerDeliverySink("Main", async () => {
+				await gate.promise; // parked async-result entry (receipt pending)
+			});
+
+			const jobId = manager.register("task", "parked", async () => "done", { ownerId: "Main" });
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
+
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			vi.advanceTimersByTime(120_000);
+			expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+
+			gate.resolve();
+			await scheduler.yield();
+			expect(await manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+			await manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("still evicts an unconsumed row on retention while its delivery hangs", async () => {
+		// A receipt that never settles (owner session gone) must not pin an
+		// unsuppressed row forever: only a consumed result's parked delivery
+		// defers retention eviction.
+		vi.useFakeTimers();
+		try {
+			const manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 25 });
+			manager.registerDeliverySink("Main", () => new Promise<void>(() => {}));
+
+			const jobId = manager.register("task", "hung", async () => "done", { ownerId: "Main" });
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
+
+			vi.advanceTimersByTime(60_000);
+			expect(manager.getJob(jobId)).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("cancelAll does not clear retention timers for already completed jobs", async () => {
@@ -775,6 +1025,24 @@ describe("AsyncJobManager", () => {
 		expect(defaultDeliveries).toEqual(["unowned-1"]);
 	});
 
+	test("delivers a completion that settled while a wait watched it but returned something else", async () => {
+		const delivered: string[] = [];
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			delivered.push(text);
+		});
+		const id = manager.register("task", "EchoPeer", async () => "received=kestrel42", { ownerId: "Main" });
+		manager.watchJobs([id]);
+		await manager.getJob(id)?.promise;
+		await manager.drainDeliveries({ timeoutMs: 500 });
+		expect(delivered).toEqual([]);
+
+		// The wait returned a peer message instead of this job's result.
+		manager.unwatchJobs([id]);
+		await manager.drainDeliveries({ timeoutMs: 500 });
+		expect(delivered).toEqual(["received=kestrel42"]);
+	});
+
 	test("dead-letters an owned delivery when its owner has no live sink", async () => {
 		const defaultDeliveries: string[] = [];
 		const manager = new AsyncJobManager({
@@ -822,60 +1090,5 @@ describe("AsyncJobManager", () => {
 		manager.cancelAll({ ownerId: "Sub" });
 		await expect(reap).resolves.toBe(true);
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
-	});
-});
-
-describe("AsyncJobManager smart poll-wait escalation", () => {
-	const newManager = () => new AsyncJobManager({ onJobComplete: async () => {} });
-
-	test("first poll waits the ladder floor", () => {
-		const m = newManager();
-		expect(m.nextPollWaitMs("Main", 1_000)).toBe(5_000);
-		// A fresh owner also starts at the floor.
-		expect(m.nextPollWaitMs("Other", 1_000)).toBe(5_000);
-	});
-
-	test("back-to-back polls climb the ladder to the top rung", () => {
-		const m = newManager();
-		const owner = "Main";
-		const t = 1_000;
-		const waits: number[] = [];
-		for (let i = 0; i < 6; i++) {
-			// Same timestamp every time → zero gap → always escalates.
-			waits.push(m.nextPollWaitMs(owner, t));
-			m.recordPollWaitEnd(owner, t);
-		}
-		// Climbs the rungs, then saturates at the top.
-		expect(waits).toEqual([5_000, 10_000, 30_000, 60_000, 300_000, 300_000]);
-	});
-
-	test("a quiet gap of a minute resets back to the floor", () => {
-		const m = newManager();
-		const owner = "Main";
-
-		expect(m.nextPollWaitMs(owner, 0)).toBe(5_000);
-		m.recordPollWaitEnd(owner, 0);
-
-		// Still within the reset window (just under a minute) → keeps climbing.
-		expect(m.nextPollWaitMs(owner, 59_999)).toBe(10_000);
-		m.recordPollWaitEnd(owner, 60_000);
-
-		// A full minute without polling resets the climb to the floor.
-		expect(m.nextPollWaitMs(owner, 120_000)).toBe(5_000);
-	});
-
-	test("escalation is tracked independently per owner", () => {
-		const m = newManager();
-		const t = 1_000;
-
-		m.nextPollWaitMs("A", t);
-		m.recordPollWaitEnd("A", t);
-		m.nextPollWaitMs("A", t);
-		m.recordPollWaitEnd("A", t);
-
-		// A fresh owner starts at the floor regardless of A's escalation.
-		expect(m.nextPollWaitMs("B", t)).toBe(5_000);
-		// A keeps climbing from where it left off.
-		expect(m.nextPollWaitMs("A", t)).toBe(30_000);
 	});
 });

@@ -12,8 +12,14 @@ import * as path from "node:path";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager, SessionResolutionError, writeStartupNotice } from "@oh-my-pi/pi-coding-agent/main";
+import {
+	collectPendingToolCalls,
+	TOOL_EXECUTION_START_CUSTOM_TYPE,
+} from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { loadEntriesFromFile, loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { ForkSourceNotFoundError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 function buildResumeArgs(resume: string, sessionDir?: string): Args {
 	return {
@@ -23,6 +29,7 @@ function buildResumeArgs(resume: string, sessionDir?: string): Args {
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 	};
 }
 
@@ -34,17 +41,19 @@ function buildContinueArgs(message: string, sessionDir?: string): Args {
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 	};
 }
-
-function buildForkArgs(fork: string, noSession = false): Args {
+function buildForkArgs(fork: string, noSession = false, sessionDir?: string): Args {
 	return {
 		fork,
 		noSession: noSession || undefined,
+		sessionDir,
 		messages: [],
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 	};
 }
 
@@ -194,6 +203,296 @@ describe("createSessionManager — missing session (#2084)", () => {
 			name: "SessionResolutionError",
 			message: "--fork requires session persistence",
 			hint: undefined,
+		});
+	});
+	it.each(["path", "selector"] as const)(
+		"preserves an unknown started-tool outcome in a CLI --fork via %s",
+		async route => {
+			const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-live-tail-"));
+			const sessionDir = path.join(cwd, "sessions");
+			const source = path.join(sessionDir, "source.jsonl");
+			const id = "019ea530-0000-7000-0000-000000000000";
+			const timestamp = new Date().toISOString();
+			const sourceEntries = [
+				{ type: "session", version: 3, id, timestamp, cwd },
+				{
+					type: "message",
+					id: "m1",
+					parentId: null,
+					timestamp,
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "toolu_live", name: "bash", arguments: { command: "sleep 40" } }],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude",
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+						usage: {
+							input: 10,
+							output: 5,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 15,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					},
+				},
+				{
+					type: "custom",
+					id: "m2",
+					parentId: "m1",
+					timestamp,
+					customType: TOOL_EXECUTION_START_CUSTOM_TYPE,
+					data: { toolCallId: "toolu_live", toolName: "bash", startedAt: timestamp },
+				},
+			];
+			const sourceText = `${sourceEntries.map(entry => JSON.stringify(entry)).join("\n")}\n`;
+			await Bun.write(source, sourceText);
+			if (route === "selector") {
+				vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue({
+					session: {
+						id,
+						path: source,
+						cwd,
+						title: "live parent",
+						created: new Date(0),
+						modified: new Date(0),
+						messageCount: 1,
+						size: 0,
+						firstMessage: "",
+						allMessagesText: "",
+					},
+					scope: "local",
+				});
+			}
+			try {
+				const forked = await createSessionManager(
+					buildForkArgs(route === "path" ? source : id, false, sessionDir),
+					cwd,
+					stubSettings,
+				);
+				if (!forked) throw new Error("Expected a persisted fork");
+				const branch = forked.getBranch();
+				expect(branch.some(entry => entry.type === "message" && entry.message.role === "assistant")).toBe(true);
+				expect(collectPendingToolCalls(branch)).toEqual([]);
+				expect(await Bun.file(source).text()).toBe(sourceText);
+
+				const resultEntry = branch.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolCallId === "toolu_live",
+				);
+				if (resultEntry?.type !== "message" || resultEntry.message.role !== "toolResult") {
+					throw new Error("expected the unknown tool result");
+				}
+				expect(resultEntry.message.isError).toBe(true);
+				expect(resultEntry.message).not.toHaveProperty("details");
+				expect(
+					resultEntry.message.content.some(
+						block => block.type === "text" && block.text.includes("may still be running this tool"),
+					),
+				).toBe(true);
+
+				const forkFile = forked.getSessionFile();
+				if (!forkFile) throw new Error("Expected a persisted fork file");
+				const persistedEntries = await loadEntriesFromFile(forkFile);
+				const forkHeader = persistedEntries.find(entry => entry.type === "session");
+				expect(forkHeader?.parentSession).toBe(id);
+				const persistedResult = persistedEntries.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolCallId === "toolu_live",
+				);
+				if (persistedResult?.type !== "message" || persistedResult.message.role !== "toolResult") {
+					throw new Error("expected the unknown result to be persisted");
+				}
+				expect(persistedResult.message.isError).toBe(true);
+				expect(persistedResult.message).not.toHaveProperty("details");
+			} finally {
+				vi.restoreAllMocks();
+				await fsp.rm(cwd, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("rejects --fork with missing path without writing a session (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-missing-path-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		try {
+			await expect(
+				createSessionManager(buildForkArgs(missingPath, false, sessionDir), cwd, stubSettings),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${missingPath}" not found.`,
+				hint: expect.stringContaining("omp --resume"),
+			});
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("forkFrom rejects a missing source without writing a session (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-missing-path-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		try {
+			const caught = await SessionManager.forkFrom(missingPath, cwd, sessionDir).catch((err: unknown) => err);
+			expect(caught).toBeInstanceOf(ForkSourceNotFoundError);
+			expect(caught).toMatchObject({
+				message: `Session "${missingPath}" not found.`,
+			});
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("forkFrom rejects a vanished source on the streaming path (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-missing-path-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		const storage = new FileSessionStorage();
+		const realStatSync = storage.statSync.bind(storage);
+		vi.spyOn(storage, "statSync").mockImplementation(((filePath: string) =>
+			filePath === missingPath
+				? { size: 8 * 1024 * 1024, mtimeMs: Date.now(), mtime: new Date() }
+				: realStatSync(filePath)) as typeof storage.statSync);
+		try {
+			const caught = await SessionManager.forkFrom(missingPath, cwd, sessionDir, storage).catch(
+				(err: unknown) => err,
+			);
+			expect(caught).toBeInstanceOf(ForkSourceNotFoundError);
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects --fork <id> when resolved session vanished before forkFrom reads it (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-vanished-id-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const vanishedPath = path.join(cwd, "vanished.jsonl");
+		const forkId = "019ea530-0000-7000-0000-000000000000";
+		const session: sessionListingModule.SessionInfo = {
+			id: forkId,
+			path: vanishedPath,
+			cwd,
+			title: "vanished",
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 0,
+			size: 0,
+			firstMessage: "",
+			allMessagesText: "",
+		};
+		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue({
+			session,
+			scope: "local",
+		});
+		try {
+			await expect(
+				createSessionManager(buildForkArgs(forkId, false, sessionDir), cwd, stubSettings),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${forkId}" not found.`,
+				hint: expect.stringContaining("omp --resume"),
+			});
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects --fork with ENOTDIR path without writing a session (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-enotdir-"));
+		const sessionDir = path.join(cwd, "sessions");
+		const regularFile = path.join(cwd, "file.txt");
+		await Bun.write(regularFile, "not a directory");
+		const enotdirChild = path.join(regularFile, "child.jsonl");
+		try {
+			await expect(
+				createSessionManager(buildForkArgs(enotdirChild, false, sessionDir), cwd, stubSettings),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${enotdirChild}" not found.`,
+				hint: expect.stringContaining("omp --resume"),
+			});
+			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
+		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	// Windows reports a path through a regular file as ENOENT, never ENOTDIR.
+	it.skipIf(process.platform === "win32")(
+		"propagates ENOTDIR on ordinary session loads when throwIfMissing is false (#11491)",
+		async () => {
+			const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-enotdir-ordinary-"));
+			const regularFile = path.join(cwd, "file.txt");
+			await Bun.write(regularFile, "not a directory");
+			const enotdirChild = path.join(regularFile, "child.jsonl");
+			try {
+				await expect(loadSessionFile(enotdirChild)).rejects.toMatchObject({
+					code: "ENOTDIR",
+				});
+			} finally {
+				await fsp.rm(cwd, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("rejects --resume combined with --no-session instead of silently discarding it (#12008)", async () => {
+		await expect(
+			createSessionManager({ ...buildResumeArgs("019ea530"), noSession: true }, "/current/project", stubSettings),
+		).rejects.toMatchObject({
+			name: "SessionResolutionError",
+			message: "--resume requires session persistence",
+			hint: undefined,
+		});
+	});
+
+	it("defers --resume + --no-session rejection while extension flag ownership is unresolved", async () => {
+		const manager = await createSessionManager(
+			{ ...buildResumeArgs("019ea530"), noSession: true },
+			"/current/project",
+			stubSettings,
+			async () => "unavailable",
+			{ nativeFlagOwnership: "preliminary" },
+		);
+
+		expect(manager?.getEntries()).toEqual([]);
+	});
+
+	it("rejects the --resume picker (no value) combined with --no-session (#12008)", async () => {
+		await expect(
+			createSessionManager(
+				{ ...buildResumeArgs("019ea530"), resume: true, noSession: true },
+				"/current/project",
+				stubSettings,
+			),
+		).rejects.toMatchObject({
+			name: "SessionResolutionError",
+			message: "--resume requires session persistence",
+		});
+	});
+
+	it("rejects --continue combined with --no-session (#12008)", async () => {
+		await expect(
+			createSessionManager(
+				{ ...buildContinueArgs("hello there"), noSession: true },
+				"/current/project",
+				stubSettings,
+			),
+		).rejects.toMatchObject({
+			name: "SessionResolutionError",
+			message: "--continue requires session persistence",
 		});
 	});
 });

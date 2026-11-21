@@ -1,17 +1,20 @@
 import type { SessionEntry } from "../session/session-entries";
-import { inferMetricUnitFromName, isBetter } from "./helpers";
+import { inferMetricUnitFromName } from "./helpers";
+import { currentResults, findBaselineMetric, isBetter } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
 import type { RunRow, SessionRow } from "./storage";
 import type {
 	AutoresearchControlEntryData,
 	AutoresearchRuntime,
+	ReconstructedControlState,
+	RuntimeStore,
+} from "./types";
+import type {
 	ExperimentResult,
 	ExperimentState,
 	MetricDef,
 	MetricDirection,
 	NumericMetricMap,
-	ReconstructedControlState,
-	RuntimeStore,
-} from "./types";
+} from "@oh-my-pi/pi-tui/tools/autoresearch";
 
 export function createExperimentState(): ExperimentState {
 	return {
@@ -74,19 +77,6 @@ function cloneResult(result: ExperimentResult): ExperimentResult {
 	};
 }
 
-export function currentResults(results: ExperimentResult[], segment: number): ExperimentResult[] {
-	return results.filter(result => result.segment === segment);
-}
-
-export function findBaselineResult(results: ExperimentResult[], segment: number): ExperimentResult | null {
-	return currentResults(results, segment).find(result => result.status === "keep" && !result.flagged) ?? null;
-}
-
-export function findBaselineMetric(results: ExperimentResult[], segment: number): number | null {
-	const baseline = findBaselineResult(results, segment);
-	return baseline ? baseline.metric : null;
-}
-
 export function findBestKeptMetric(
 	results: ExperimentResult[],
 	segment: number,
@@ -100,35 +90,6 @@ export function findBestKeptMetric(
 		}
 	}
 	return best;
-}
-
-export function findBaselineRunNumber(results: ExperimentResult[], segment: number): number | null {
-	const baseline = findBaselineResult(results, segment);
-	if (!baseline) return null;
-	if (baseline.runNumber !== null) return baseline.runNumber;
-	const index = results.indexOf(baseline);
-	return index >= 0 ? index + 1 : null;
-}
-
-export function findBaselineSecondary(
-	results: ExperimentResult[],
-	segment: number,
-	knownMetrics: MetricDef[],
-): NumericMetricMap {
-	const baseline = findBaselineResult(results, segment);
-	const values: NumericMetricMap = baseline ? { ...baseline.metrics } : {};
-	for (const metric of knownMetrics) {
-		if (values[metric.name] !== undefined) continue;
-		for (const result of currentResults(results, segment)) {
-			if (result.flagged) continue;
-			const value = result.metrics[metric.name];
-			if (value !== undefined) {
-				values[metric.name] = value;
-				break;
-			}
-		}
-	}
-	return values;
 }
 
 export function sortedMedian(values: number[]): number {

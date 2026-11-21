@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { $which } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
 
@@ -9,21 +9,30 @@ async function runPrelude(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 	const prelude = PYTHON_PRELUDE.replace(
 		"from __future__ import annotations",
-		"from __future__ import annotations\n__omp_display = lambda *args, **kwargs: None",
+		"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
 	);
 	const script = `${prelude}\n${code}`;
-	const proc = Bun.spawn([pythonPath, "-c", script], {
-		stdout: "pipe",
-		stderr: "pipe",
-		env: { ...process.env, ...env },
-	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	// Python's text-mode stdout emits \r\n on Windows.
-	return { stdout: stdout.replaceAll("\r\n", "\n"), stderr: stderr.replaceAll("\r\n", "\n"), exitCode };
+	// The full prelude exceeds Windows' ~32k `python -c` command-line limit
+	// (ENAMETOOLONG); a script file behaves identically on every platform.
+	const dir = await TempDir.create("@omp-py-prelude-");
+	try {
+		const scriptPath = dir.join("script.py");
+		await Bun.write(scriptPath, script);
+		const proc = Bun.spawn([pythonPath, scriptPath], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, ...env },
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		// Python's text-mode stdout emits \r\n on Windows.
+		return { stdout: stdout.replaceAll("\r\n", "\n"), stderr: stderr.replaceAll("\r\n", "\n"), exitCode };
+	} finally {
+		await dir.remove();
+	}
 }
 
 describe("python prelude", () => {
@@ -67,6 +76,35 @@ describe("python prelude", () => {
 		expect(lines[1]).toBe("True []");
 	});
 
+	it("infers tool schemas on Pythons without types.UnionType", async () => {
+		// Python 3.9 has no types.UnionType. Hide it from the prelude's own `types`
+		// name (typing itself still needs it on 3.10+), so any interpreter runs this case.
+		const result = await runPrelude(
+			[
+				"from types import SimpleNamespace",
+				"types = SimpleNamespace(**{k: v for k, v in vars(types).items() if k != 'UnionType'})",
+				"from typing import Optional",
+				"@tool",
+				"def lookup(name: str, limit: Optional[int] = None) -> dict:",
+				"    return {}",
+				"print(json.dumps(__omp_tools__['lookup'].describe()['parameters'], sort_keys=True))",
+			].join("\n"),
+			{},
+		);
+
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			type: "object",
+			properties: {
+				name: { type: "string" },
+				limit: { anyOf: [{ type: "integer" }, { type: "null" }], default: null },
+			},
+			required: ["name"],
+			additionalProperties: false,
+		});
+	});
+
 	it("appends line selectors to delegated URI paths", async () => {
 		const requests: unknown[] = [];
 		const server = Bun.serve({
@@ -82,17 +120,14 @@ describe("python prelude", () => {
 		});
 
 		try {
-			const result = await runPrelude(
-				[`print(read("artifact://21", 3, 2))`, `print(read("mcp://server/resource", 10, 5))`].join("\n"),
-				{
-					PI_TOOL_BRIDGE_URL: server.url.toString(),
-					PI_TOOL_BRIDGE_TOKEN: "test-token",
-					PI_TOOL_BRIDGE_SESSION: "test-session",
-				},
-			);
+			const result = await runPrelude(`print(read("mcp://server/resource", 10, 5))`, {
+				PI_TOOL_BRIDGE_URL: server.url.toString(),
+				PI_TOOL_BRIDGE_TOKEN: "test-token",
+				PI_TOOL_BRIDGE_SESSION: "test-session",
+			});
 
 			expect(result).toEqual({
-				stdout: "resource contents\nresource contents\n",
+				stdout: "resource contents\n",
 				stderr: "",
 				exitCode: 0,
 			});
@@ -101,18 +136,66 @@ describe("python prelude", () => {
 					session: "test-session",
 					run: null,
 					name: "read",
-					args: { path: "artifact://21:3-4" },
-				},
-				{
-					session: "test-session",
-					run: null,
-					name: "read",
-					args: { path: "mcp://server/resource:10-14" },
+					args: { path: "mcp://server/resource:raw:10-14" },
 				},
 			]);
 		} finally {
 			server.stop(true);
 		}
+	});
+
+	async function runWithReadBridge(
+		code: string,
+		env: Record<string, string>,
+		readTool: (args: { path: string }) => Promise<unknown>,
+	): Promise<{ stdout: string; stderr: string; requests: unknown[] }> {
+		const requests: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				const body = (await request.json()) as { args: { path: string } };
+				requests.push(body);
+				return Response.json({ ok: true, value: await readTool(body.args) });
+			},
+		});
+		try {
+			// No inherited local:// root (an Eval cell running these tests has one); tests that want one pass it.
+			const result = await runPrelude(code, {
+				PI_EVAL_LOCAL_ROOTS: "{}",
+				...env,
+				PI_TOOL_BRIDGE_URL: server.url.toString(),
+				PI_TOOL_BRIDGE_TOKEN: "test-token",
+				PI_TOOL_BRIDGE_SESSION: "test-session",
+			});
+			return { stdout: result.stdout, stderr: result.stderr, requests };
+		} finally {
+			server.stop(true);
+		}
+	}
+
+	// Over the 50 KB a bare `:raw` read inlines, with a line wider than any column cap and a trailing newline.
+	const largeArtifact = ["head", "w".repeat(60_000), ...Array.from({ length: 3000 }, (_, i) => `row ${i}`), ""].join(
+		"\n",
+	);
+
+	it("reads a large spill local://<N>.log from the injected root without the read tool", async () => {
+		using tmp = TempDir.createSync("@omp-py-prelude-spill-");
+		await Bun.write(tmp.join("local", "7.log"), largeArtifact);
+		const out = tmp.join("out.txt");
+		const { stdout, stderr, requests } = await runWithReadBridge(
+			[
+				`open(${JSON.stringify(out)}, "w", newline="").write(read("local://7.log"))`,
+				`print(repr(read("local://7.log", offset=3, limit=2)))`,
+			].join("\n"),
+			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ local: tmp.join("local") }) },
+			async () => ({ text: "from the read tool" }),
+		);
+
+		expect(stderr).toBe("");
+		expect(await Bun.file(out).text()).toBe(largeArtifact);
+		expect(stdout).toBe("'row 0\\nrow 1\\n'\n");
+		expect(requests).toEqual([]);
 	});
 
 	it("bypasses discovered proxies for loopback bridge calls", async () => {
@@ -173,6 +256,40 @@ describe("python prelude", () => {
 		} finally {
 			bridge.stop(true);
 			proxy.stop(true);
+		}
+	});
+});
+
+describe("python workpool model selection", () => {
+	it("forwards an exact model selector and preserves omission through the real Python bridge", async () => {
+		const requests: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push(await request.json());
+				return Response.json({ ok: true, value: { name: "chosen", agent: "scout", limit: 2 } });
+			},
+		});
+		try {
+			const result = await runPrelude('workpool("scout", model="p/chosen:high")\nworkpool("scout")', {
+				PI_TOOL_BRIDGE_URL: server.url.toString(),
+				PI_TOOL_BRIDGE_TOKEN: "test-token",
+				PI_TOOL_BRIDGE_SESSION: "test-session",
+			});
+			expect(result.stderr).toBe("");
+			expect(result.exitCode).toBe(0);
+			expect(requests).toEqual([
+				{
+					session: "test-session",
+					run: null,
+					name: "__workpool__",
+					args: { op: "create", agent: "scout", model: "p/chosen:high" },
+				},
+				{ session: "test-session", run: null, name: "__workpool__", args: { op: "create", agent: "scout" } },
+			]);
+		} finally {
+			server.stop(true);
 		}
 	});
 });

@@ -1,19 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
-import subagentSystemPrompt from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
-import { HubTool } from "../../src/tools/hub";
+import { WaitTool } from "../../src/tools/wait";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
 import * as structured from "../../src/task/structured-subagent";
-import type { AgentDefinition, SingleResult } from "../../src/task/types";
+import type { AgentDefinition } from "../../src/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
-import { prompt } from "@oh-my-pi/pi-utils";
 
 const AGENT: AgentDefinition = {
 	name: "scout",
@@ -27,6 +26,7 @@ const POLICY = {
 	agentName: "scout",
 	agent: AGENT,
 	effectiveAgent: AGENT,
+	structured: true,
 	schema: { schema: undefined, source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
 	planMode: false,
 	isIsolated: false,
@@ -58,6 +58,7 @@ function makeSession(
 			"task.maxConcurrency": concurrency,
 			"task.maxRuntimeMs": 0,
 			"eval.workpool.freshAgents": freshAgents,
+			"launch.enabled": false,
 		}),
 		asyncJobManager: manager,
 		getAgentId: () => "Main",
@@ -149,16 +150,6 @@ afterEach(async () => {
 });
 
 describe("WorkPool dispatch", () => {
-	it("renders the flat workpool yield contract after shared context", () => {
-		const rendered = prompt.render(subagentSystemPrompt, {
-			agent: "Worker",
-			context: "Shared context for every item.",
-			workPoolYieldItems: [{ id: "pool#1", index: 1 }],
-			outputSchema: { type: "object", properties: { "pool#1": {} } },
-		});
-		expect(rendered).toContain("{ key: <1-based number>, data: <outcome> }");
-		expect(rendered).not.toContain("Your terminal `yield` MUST use exactly this shape");
-	});
 	it("spawns while there is room, then queues round-robin, and dispatches to an idle agent", async () => {
 		const cards: CustomMessage[] = [];
 		const session = makeSession(cards);
@@ -220,6 +211,50 @@ describe("WorkPool dispatch", () => {
 		follow.resolve();
 		await finishPool(session, workpool);
 	});
+	it("marks only the submitted error item failed after a mixed-result batch", async () => {
+		const session = makeSession([], 1);
+		const first = Promise.withResolvers<void>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await first.promise;
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return {
+				...singleResult(
+					options.id,
+					JSON.stringify({
+						"mixed#2": { error: "review unavailable" },
+						"mixed#3": { ok: true },
+					}),
+				),
+				extractedToolData: {
+					yield: [
+						{
+							status: "success",
+							type: ["mixed#2"],
+							error: "review unavailable",
+							data: { error: "review unavailable" },
+						},
+						{ status: "success", type: ["mixed#3"], data: { ok: true }, complete: true },
+					],
+				},
+			};
+		});
+		const workpool = pool(session, "mixed");
+		workpool.push(["warmup"]);
+		await until(() => workpool.agents[0]?.state === "running");
+		workpool.push(["failed review", "independent review"]);
+		await until(() => workpool.agents[0]?.queue.length === 2);
+		first.resolve();
+		await finishPool(session, workpool);
+		expect(workpool.batches[1]?.status).toBe("completed");
+		expect(workpool.items.map(item => item.status)).toEqual(["completed", "failed", "completed"]);
+		expect(workpool.batches[1]?.output).toContain("review unavailable");
+	});
+
 	it("tombstones the worker session when clearing the yield contract fails", async () => {
 		const session = makeSession([], 1);
 		let workerId = "";
@@ -301,9 +336,9 @@ describe("WorkPool dispatch", () => {
 		const poolJob = manager.getJob("waiter");
 		expect(poolJob?.id).toBe("waiter");
 		expect(poolJob?.label).toBe("waiter");
-		const polled = await new HubTool(session).execute("poll-workpool", { op: "wait", ids: [workpool.name] });
+		const polled = await new WaitTool(session).execute("wait-workpool", {});
 		const details = polled.details;
-		if (!details || !("jobs" in details)) throw new Error("Expected a background-job poll result");
+		if (!details?.jobs) throw new Error("Expected a background-job wait result");
 		expect(details.jobs?.map(job => job.id)).toEqual(["waiter"]);
 		expect(details.jobs?.map(job => job.status)).toEqual(["completed"]);
 		expect(workpool.peek().pending).toBe(0);
@@ -420,5 +455,57 @@ describe("WorkPool dispatch", () => {
 		first.resolve();
 		await finishPool(session, workpool);
 		expect(workpool.peek().pending).toBe(0);
+	});
+});
+
+describe("WorkPool model selection", () => {
+	it("forwards the pool model to every fresh worker", async () => {
+		const session = makeSession([], 1, true);
+		const selected = "p/reviewer:high";
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const follow = vi.spyOn(executor, "runSubagentFollowUpTurn");
+		const workpool = new WorkPool(session, { name: "fresh-models", policy: POLICY, model: selected });
+		workpool.push(["one", "two", "three"]);
+		await finishPool(session, workpool);
+
+		expect(initial.mock.calls.map(([request]) => request.perCallModel)).toEqual([selected, selected, selected]);
+		expect(initial.mock.calls.map(([request]) => request.identity?.id)).toEqual([
+			"fresh-models-1",
+			"fresh-models-2",
+			"fresh-models-3",
+		]);
+		expect(follow).not.toHaveBeenCalled();
+	});
+
+	it("selects each worker on the first turn and reuses its session on subsequent turns", async () => {
+		const session = makeSession([], 1);
+		const first = Promise.withResolvers<void>();
+		const selected = "p/reviewer:high";
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await first.promise;
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const follow = vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return singleResult(options.id);
+		});
+		const workpool = new WorkPool(session, { name: "models", policy: POLICY, model: selected });
+		workpool.push(["one", "two"]);
+		await until(() => workpool.agents[0]?.queue.length === 1);
+		first.resolve();
+		await finishPool(session, workpool);
+		expect(initial.mock.calls).toHaveLength(1);
+		expect(initial.mock.calls[0]?.[0].perCallModel).toEqual(selected);
+		expect(follow.mock.calls).toHaveLength(1);
+		const workerId = initial.mock.calls[0]?.[0].identity?.id;
+		if (!workerId) throw new Error("First turn did not receive a worker id");
+		expect(follow.mock.calls[0]?.[0].id).toBe(workerId);
+		expect((follow.mock.calls[0]?.[0] as { perCallModel?: string } | undefined)?.perCallModel).toBeUndefined();
 	});
 });

@@ -1,0 +1,16 @@
+// Converse rejects image blocks nested inside toolResult content for OpenAI models,
+// so their tool-result images move into sibling user blocks. The rule is scoped by
+// adapter, not provider name, so a custom provider on bedrock-converse-stream gets
+// it too.
+on-api "bedrock-converse-stream" {
+	class "openai" {
+		requires-tool-result-image-hoisting #true
+	}
+	// Opaque application-inference-profile ARNs carry no vendor signal, so an
+	// OpenAI-backed profile classifies here and would otherwise nest images in
+	// toolResult content and hit the same rejection. Hoisting is accepted by
+	// every Converse model measured, so it is the safe default for unknowns.
+	class "unknown" {
+		requires-tool-result-image-hoisting #true
+	}
+}

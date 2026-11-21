@@ -6,9 +6,9 @@ import type { TinyModelDtype } from "../tiny/dtype";
  *
  * - `transformers` — a transformers.js / ONNX Whisper repo, loaded by the
  *   `@huggingface/transformers` `automatic-speech-recognition` pipeline.
- * - `sherpa` — a sherpa-onnx (Next-gen Kaldi) offline model, loaded by the
- *   native `sherpa-onnx-node` addon. Used for NVIDIA Parakeet, the Open ASR
- *   Leaderboard accuracy/speed leader.
+ * - `sherpa` — a sherpa-onnx (Next-gen Kaldi) offline or native streaming model,
+ *   loaded by the native `sherpa-onnx-node` addon. Used for NVIDIA Parakeet
+ *   and Nemotron.
  *
  * The worker resolves the spec by key and loads the model lazily (kept warm
  * afterwards). Both engines run inside the hard-killed subprocess worker.
@@ -18,7 +18,7 @@ import type { TinyModelDtype } from "../tiny/dtype";
 export type SttEngine = "transformers" | "sherpa";
 
 interface SttModelBase {
-	/** Stable key persisted in `stt.modelName` and sent over the worker protocol. */
+	/** Canonical catalog model id sent over the worker protocol. */
 	key: string;
 	engine: SttEngine;
 	/** Hugging Face repo id (transformers.js ONNX repo, or sherpa-onnx model repo). */
@@ -38,10 +38,12 @@ export interface TransformersSttModelSpec extends SttModelBase {
 	dtype: TinyModelDtype;
 }
 
-/** A sherpa-onnx offline tier (e.g. NeMo Parakeet transducer) loaded natively. */
+/** A sherpa-onnx tier loaded natively, with offline or online recognition. */
 export interface SherpaSttModelSpec extends SttModelBase {
 	engine: "sherpa";
-	/** sherpa-onnx offline model family (e.g. `nemo_transducer`). */
+	/** Recognizer API: offline utterance decoding or native online streaming. */
+	mode: "offline" | "online";
+	/** sherpa-onnx model family (e.g. `nemo_transducer`); empty for automatic detection. */
 	modelType: string;
 	/** Model files (relative to the repo root) fetched into the local cache. */
 	files: { encoder: string; decoder: string; joiner: string; tokens: string };
@@ -50,14 +52,13 @@ export interface SherpaSttModelSpec extends SttModelBase {
 export type SttModelSpec = TransformersSttModelSpec | SherpaSttModelSpec;
 
 /**
- * Speech model tiers, ordered light → SoTA. Defaults to {@link DEFAULT_STT_MODEL_KEY}.
- * `fast`/`balanced`/`turbo` are multilingual Whisper checkpoints on transformers.js;
- * `parakeet` is NVIDIA Parakeet TDT 0.6B v3 on sherpa-onnx — the Open ASR
- * Leaderboard leader (lower WER and far higher throughput than Whisper).
+ * Speech models. Defaults to the multilingual {@link DEFAULT_STT_MODEL_KEY}.
+ * Whisper uses transformers.js; Parakeet and native streaming Nemotron use
+ * sherpa-onnx.
  */
 export const STT_MODELS = [
 	{
-		key: "fast",
+		key: "whisper-base",
 		engine: "transformers",
 		repo: "onnx-community/whisper-base",
 		dtype: "q8",
@@ -67,7 +68,7 @@ export const STT_MODELS = [
 		sizeHint: "~60 MB",
 	},
 	{
-		key: "balanced",
+		key: "whisper-small",
 		engine: "transformers",
 		repo: "onnx-community/whisper-small",
 		dtype: "q8",
@@ -77,7 +78,7 @@ export const STT_MODELS = [
 		sizeHint: "~190 MB",
 	},
 	{
-		key: "turbo",
+		key: "whisper-large-v3-turbo",
 		engine: "transformers",
 		repo: "onnx-community/whisper-large-v3-turbo",
 		dtype: "q4",
@@ -87,8 +88,9 @@ export const STT_MODELS = [
 		sizeHint: "~600 MB",
 	},
 	{
-		key: "parakeet",
+		key: "parakeet-tdt-0.6b-v3",
 		engine: "sherpa",
+		mode: "offline",
 		repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
 		modelType: "nemo_transducer",
 		files: {
@@ -103,20 +105,44 @@ export const STT_MODELS = [
 			"NVIDIA Parakeet TDT 0.6B v3, 25 languages. Open ASR Leaderboard leader — best accuracy and far fastest decoding. Default.",
 		sizeHint: "~680 MB",
 	},
+	{
+		key: "nemotron-streaming-en-0.6b",
+		engine: "sherpa",
+		mode: "online",
+		repo: "csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
+		modelType: "",
+		files: {
+			encoder: "encoder.int8.onnx",
+			decoder: "decoder.int8.onnx",
+			joiner: "joiner.int8.onnx",
+			tokens: "tokens.txt",
+		},
+		englishOnly: true,
+		label: "Nemotron 0.6B (live streaming, English)",
+		description:
+			"NVIDIA Nemotron Speech 0.6B, English only. Native streaming recognition with live words while you speak; 160 ms audio chunks.",
+		sizeHint: "~630 MB",
+	},
 ] as const satisfies readonly SttModelSpec[];
 
 /**
  * SoTA default — NVIDIA Parakeet TDT 0.6B v3 (sherpa-onnx). Tops the Open ASR
  * Leaderboard on accuracy while decoding ~20× faster than Whisper large-v3.
  */
-export const DEFAULT_STT_MODEL_KEY = "parakeet";
+export const DEFAULT_STT_MODEL_KEY = "parakeet-tdt-0.6b-v3";
 
 export type SttModelKey = (typeof STT_MODELS)[number]["key"];
 
 /** A concrete entry from {@link STT_MODELS}; `key` is the literal tier union. */
 export type SttModel = (typeof STT_MODELS)[number];
 
-export const STT_MODEL_VALUES = ["fast", "balanced", "turbo", "parakeet"] as const satisfies readonly SttModelKey[];
+export const STT_MODEL_VALUES = [
+	"whisper-base",
+	"whisper-small",
+	"whisper-large-v3-turbo",
+	"parakeet-tdt-0.6b-v3",
+	"nemotron-streaming-en-0.6b",
+] as const satisfies readonly SttModelKey[];
 
 type MissingSttModelValue = Exclude<SttModelKey, (typeof STT_MODEL_VALUES)[number]>;
 type ExtraSttModelValue = Exclude<(typeof STT_MODEL_VALUES)[number], SttModelKey>;
@@ -141,10 +167,7 @@ export function getSttModelSpec(key: string): SttModel | undefined {
 	return STT_MODELS.find(model => model.key === key);
 }
 
-/**
- * Resolve a (possibly stale or legacy) `stt.modelName` value onto a concrete
- * spec, falling back to the SoTA default when the key is unknown.
- */
+/** Resolve a catalog model id, falling back to the SoTA default when unknown. */
 export function resolveSttModelSpec(key: string | undefined): SttModel {
 	return (key !== undefined ? getSttModelSpec(key) : undefined) ?? getSttModelSpec(DEFAULT_STT_MODEL_KEY)!;
 }

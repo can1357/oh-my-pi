@@ -32,6 +32,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CmuxKind } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
@@ -42,6 +43,7 @@ import {
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
 function makeKind(socketSuffix: string): CmuxKind {
@@ -53,12 +55,12 @@ function makeKind(socketSuffix: string): CmuxKind {
 }
 
 function makeSession(cwd: string, screenshotDir?: string): ToolSession {
-	// Minimal shape: `runInTab` reads `cwd`, `settings.get("browser.screenshotDir")`,
+	// Minimal shape: `runInTab` reads `cwd`, the `browser.screenshotDir` setting,
 	// and `getActiveModel?.()`. Everything else is untouched by this flow.
 	return {
 		cwd,
 		hasUI: false,
-		settings: { get: (key: string) => (key === "browser.screenshotDir" ? screenshotDir : undefined) },
+		settings: Settings.isolated({ "browser.screenshotDir": screenshotDir }),
 		getSessionFile: () => null,
 	} as unknown as ToolSession;
 }
@@ -546,5 +548,68 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 		} finally {
 			await fs.rm(screenshotDir, { recursive: true, force: true });
 		}
+	});
+
+	it.each([
+		// The 2000x20 capture is drawn inside a 2000x200 image (the vision limits pad it), so a click at the
+		// image's centre is the centre of the 1000x10 viewport.
+		{ name: "measured", width: { value: 1000 }, note: "1000x10 viewport", clicked: '"x":500,"y":5' },
+		// With no scale to map by, the click takes the position as CSS pixels.
+		{
+			name: "missing",
+			width: { value: "" },
+			note: "scale to CSS pixels could not be read",
+			clicked: '"x":1000,"y":100',
+		},
+		{
+			name: "failed",
+			width: new Error("eval failed"),
+			note: "scale to CSS pixels could not be read",
+			clicked: '"x":1000,"y":100',
+		},
+	])("screenshot and clickAt with $name viewport width", async ({ width, note, clicked }) => {
+		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
+		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		// A 2x capture of a 1000 CSS px wide viewport.
+		const png = encodeRawPng(new Uint8Array(2000 * 20 * 3), 2000, 20, 3).toBase64();
+		const scripts: string[] = [];
+		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+				switch (method) {
+					case "browser.open_split":
+						return { surface_id: "surface-screenshot-scale", url: "about:blank" };
+					case "browser.url.get":
+						return { url: "about:blank" };
+					case "browser.snapshot":
+						return { page: { html: "" } };
+					case "browser.eval":
+						if (typeof params.script === "string") scripts.push(params.script);
+						if (params.script !== "window.innerWidth") return { value: "" };
+						if (width instanceof Error) throw width;
+						return width;
+					case "browser.screenshot":
+						return { png_base64: png };
+					default:
+						return {};
+				}
+			},
+		);
+
+		const browser = await acquireBrowser(makeKind("screenshot-scale"), { cwd: "/tmp" });
+		await acquireTab("screenshot-scale", browser, {
+			timeoutMs: 5_000,
+			ownerSessionId: "session-screenshot-scale",
+		});
+
+		const result = await runInTab("screenshot-scale", {
+			code: "const shot = await tab.screenshot(); await tab.clickAt(1000, 100); return shot;",
+			timeoutMs: 5_000,
+			session: makeSession("/tmp"),
+		});
+		const text = result.displays.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(text).toContain(note);
+		expect(result.displays.filter(block => block.type === "image")).toHaveLength(1);
+		expect(scripts.find(script => script.includes("clickCount"))).toContain(clicked);
+		if (typeof result.returnValue === "string") await fs.rm(result.returnValue);
 	});
 });

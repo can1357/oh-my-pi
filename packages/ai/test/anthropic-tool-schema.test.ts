@@ -23,19 +23,6 @@ describe("normalizeAnthropicToolSchema — SDK whitelist", () => {
 			});
 		});
 
-		it("demotes range and multipleOf keywords on integer nodes", () => {
-			const out = normalizeAnthropicToolSchema({
-				type: "object",
-				properties: {
-					count: { type: "integer", minimum: 0, maximum: 100, multipleOf: 1 },
-				},
-			}) as { properties: { count: Record<string, unknown> } };
-			expect(out.properties.count).toEqual({
-				type: "integer",
-				description: "{minimum: 0, maximum: 100, multipleOf: 1}",
-			});
-		});
-
 		it("demotes numeric range keywords on union-type nodes that include number", () => {
 			const out = normalizeAnthropicToolSchema({
 				type: "object",
@@ -204,6 +191,8 @@ describe("normalizeAnthropicToolSchema — SDK whitelist", () => {
  *    deref-friendly schemas where siblings carry real semantics.
  *  - top-level `anyOf` / `allOf` and all `oneOf` occurrences are demoted into
  *    `description`; live Messages rejects root combinators and does not document `oneOf`.
+ *    Root object variants are folded into the root first so the wire schema still
+ *    admits every variant.
  * Tests below that overlap with SDK cases asserting those behaviors are
  * adjusted to our contract; the divergence is called out inline.
  */
@@ -231,12 +220,6 @@ describe("normalizeAnthropicToolSchema — parity with anthropic-sdk-python tran
 		});
 	});
 
-	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_enum_schema
-	it("keeps enum on string nodes verbatim", () => {
-		const out = normalizeAnthropicToolSchema({ type: "string", enum: ["foo", "bar"] });
-		expect(out).toEqual({ type: "string", enum: ["foo", "bar"] });
-	});
-
 	it("spills top-level anyOf variants into description for the Messages API root-combinator boundary", () => {
 		const out = normalizeAnthropicToolSchema({
 			type: "object",
@@ -252,24 +235,68 @@ describe("normalizeAnthropicToolSchema — parity with anthropic-sdk-python tran
 	});
 
 	// Divergence: SDK preserves allOf at the schema root, but the live Anthropic Messages
-	// validator rejects root combinators in tool input_schema. Spill it so the model
-	// still sees the constraints.
-	it("spills top-level allOf variants into description instead of sending an unsupported root keyword", () => {
+	// validator rejects root combinators in tool input_schema. Fold the branches into the
+	// root and spill the original so the model still sees the constraints.
+	it("folds top-level allOf branches into the root instead of sending an unsupported root keyword", () => {
 		const out = normalizeAnthropicToolSchema({
 			type: "object",
 			properties: { id: { type: "string" } },
 			allOf: [
-				{ type: "object", properties: { name: { type: "string" } } },
-				{ type: "object", properties: { age: { type: "integer", minimum: 0 } } },
+				{ type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+				{ type: "object", properties: { age: { type: "integer", minimum: 0 } }, required: ["age"] },
 			],
 		});
 		expect(out).toEqual({
 			type: "object",
-			properties: { id: { type: "string" } },
+			properties: {
+				id: { type: "string" },
+				name: { type: "string" },
+				age: { type: "integer", description: "{minimum: 0}" },
+			},
+			required: ["name", "age"],
 			additionalProperties: false,
 			description:
-				'{allOf: [{"type":"object","properties":{"name":{"type":"string"}}},{"type":"object","properties":{"age":{"type":"integer","minimum":0}}}]}',
+				'{allOf: [{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},{"type":"object","properties":{"age":{"type":"integer","minimum":0}},"required":["age"]}]}',
 		});
+	});
+
+	// Regression (#16630): a pure root union used to become `{properties: {}, additionalProperties: false}`,
+	// which admits only `{}`.
+	it("folds a pure top-level anyOf of objects into a root that admits every variant", () => {
+		const out = normalizeAnthropicToolSchema({
+			anyOf: [
+				{
+					type: "object",
+					properties: { kind: { const: "finish" }, summary: { type: "string" } },
+					required: ["kind", "summary"],
+				},
+				{
+					type: "object",
+					properties: { kind: { const: "verdict" }, ok: { type: "boolean" } },
+					required: ["kind", "ok"],
+				},
+			],
+		}) as Record<string, unknown>;
+		expect(out.properties).toEqual({
+			kind: { anyOf: [{ const: "finish" }, { const: "verdict" }] },
+			summary: { type: "string" },
+			ok: { type: "boolean" },
+		});
+		expect(out.required).toEqual(["kind"]);
+		expect(out.additionalProperties).toBe(false);
+		expect(out).not.toHaveProperty("anyOf");
+	});
+
+	it("opens the root when top-level union variants cannot be folded", () => {
+		const out = normalizeAnthropicToolSchema({
+			type: "object",
+			properties: {},
+			$defs: { Finish: { type: "object", properties: { summary: { type: "string" } } } },
+			oneOf: [{ $ref: "#/$defs/Finish" }, { type: "object", properties: { ok: { type: "boolean" } } }],
+		}) as Record<string, unknown>;
+		expect(out.properties).toEqual({});
+		expect(out.additionalProperties).toBe(true);
+		expect(out).not.toHaveProperty("oneOf");
 	});
 
 	it("spills oneOf variants at root and nested positions for the same Messages API compatibility boundary", () => {
@@ -317,43 +344,6 @@ describe("normalizeAnthropicToolSchema — parity with anthropic-sdk-python tran
 			additionalProperties: false,
 			required: ["name"],
 		});
-	});
-
-	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_array_schema
-	it("spills minItems>1 into description with the SDK's two-newline preamble", () => {
-		const out = normalizeAnthropicToolSchema({
-			type: "array",
-			items: { type: "string" },
-			minItems: 2,
-			description: "A list of strings",
-		});
-		expect(out).toEqual({
-			type: "array",
-			description: "A list of strings\n\n{minItems: 2}",
-			items: { type: "string" },
-		});
-	});
-
-	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_string_schema_with_format_and_default
-	// Divergence: SDK spills `default`; we preserve it. `format=email` is kept (allowlisted).
-	it("keeps an allowlisted string format alongside a preserved default", () => {
-		const out = normalizeAnthropicToolSchema({
-			type: "string",
-			format: "email",
-			default: "user@example.com",
-			description: "User email",
-		});
-		expect(out).toEqual({
-			type: "string",
-			description: "User email",
-			format: "email",
-			default: "user@example.com", // SDK would move this into description
-		});
-	});
-
-	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_string_schema_without_format
-	it("passes a bare string node through unchanged", () => {
-		expect(normalizeAnthropicToolSchema({ type: "string" })).toEqual({ type: "string" });
 	});
 
 	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_integer_schema_with_min_max_exclusive

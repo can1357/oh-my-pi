@@ -1,5 +1,5 @@
 {
-  "name": "hello-plugin",
-  "description": "A test plugin",
-  "version": "1.0.0"
+	"name": "hello-plugin",
+	"description": "A test plugin",
+	"version": "1.0.0"
 }

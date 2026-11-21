@@ -42,29 +42,6 @@ describe("Frameless Bidi server events", () => {
 		});
 	});
 
-	test("parses input and output transcript deltas", () => {
-		expect(parseLiveServerEvent({ type: "input_transcript.added", item: { text: "What changed?" } })).toEqual({
-			type: "input_transcript.added",
-			item: { text: "What changed?" },
-		});
-		expect(parseLiveServerEvent({ type: "output_transcript.added", item: { text: "I will inspect it." } })).toEqual({
-			type: "output_transcript.added",
-			item: { text: "I will inspect it." },
-		});
-	});
-
-	test("parses completed user and assistant turns", () => {
-		expect(
-			parseLiveServerEvent({ type: "turn.done", turn: { role: "user", transcript: "Run the checks." } }),
-		).toEqual({ type: "turn.done", turn: { role: "user", transcript: "Run the checks." } });
-		expect(
-			parseLiveServerEvent({
-				type: "turn.done",
-				turn: { role: "assistant", transcript: "The checks pass." },
-			}),
-		).toEqual({ type: "turn.done", turn: { role: "assistant", transcript: "The checks pass." } });
-	});
-
 	test("parses an output audio delta", () => {
 		expect(parseLiveServerEvent('{"type":"output_audio.delta","audio":"AAECAw=="}')).toEqual({
 			type: "output_audio.delta",

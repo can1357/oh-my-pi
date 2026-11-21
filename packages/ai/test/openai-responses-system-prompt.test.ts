@@ -66,18 +66,6 @@ afterEach(() => {
 
 describe("openai-responses system prompt routing", () => {
 	describe("non-reasoning model (canonical instructions field)", () => {
-		it("sends single system prompt as top-level instructions", async () => {
-			const context: Context = {
-				systemPrompt: ["You are a helpful assistant."],
-				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-			};
-			const body = await captureRequestBody(gpt4oMiniModel, context);
-
-			expect(body.instructions).toBe("You are a helpful assistant.");
-			const input = body.input as Array<{ role: string }>;
-			expect(input.every(m => m.role !== "system")).toBe(true);
-		});
-
 		it("joins multiple system prompts into a single instructions string", async () => {
 			const context: Context = {
 				systemPrompt: ["Primary prompt.", "Secondary prompt."],
@@ -109,40 +97,9 @@ describe("openai-responses system prompt routing", () => {
 
 			expect(body.instructions).toBeUndefined();
 		});
-
-		it("uses instructions for custom proxy base URL (third-party /v1/responses compatibility)", async () => {
-			const proxyModel: Model<"openai-responses"> = buildModel({
-				...gpt4oMiniModel,
-				api: "openai-responses",
-				baseUrl: "https://proxy.example.com/v1",
-				compat: gpt4oMiniModel.compatConfig,
-			} as ModelSpec<"openai-responses">);
-			const context: Context = {
-				systemPrompt: ["You are a proxy assistant."],
-				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-			};
-			const body = await captureRequestBody(proxyModel, context);
-
-			expect(body.instructions).toBe("You are a proxy assistant.");
-			const input = body.input as Array<{ role: string }>;
-			expect(input.every(m => m.role !== "system")).toBe(true);
-		});
 	});
 
 	describe("reasoning model on known OpenAI endpoints (developer role)", () => {
-		it("sends all system prompts as input[role=developer] for api.openai.com", async () => {
-			const context: Context = {
-				systemPrompt: ["Developer prompt."],
-				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-			};
-			const body = await captureRequestBody(o4MiniModel, context);
-
-			expect(body.instructions).toBeUndefined();
-			const input = body.input as Array<{ role: string; content: string }>;
-			const devMessages = input.filter(m => m.role === "developer");
-			expect(devMessages).toEqual([{ role: "developer", content: "Developer prompt." }]);
-		});
-
 		it("sends multiple system prompts as input[role=developer] for api.openai.com", async () => {
 			const context: Context = {
 				systemPrompt: ["First.", "Second."],
@@ -177,6 +134,28 @@ describe("openai-responses system prompt routing", () => {
 			expect(body.instructions).toBe("Proxy reasoning prompt.");
 			const input = body.input as Array<{ role: string }>;
 			expect(input.every(m => m.role !== "developer" && m.role !== "system")).toBe(true);
+		});
+
+		// GPT-6.2 bills `instructions` at the full input rate every turn (openai/codex#62312).
+		it("sends GPT-6.2 system prompts as input[role=developer] on a non-official endpoint", async () => {
+			const sol = getBundledModel("openai", "gpt-6.2-sol") as Model<"openai-responses">;
+			const proxyModel: Model<"openai-responses"> = buildModel({
+				...sol,
+				baseUrl: "https://proxy.example.com/v1",
+				compat: sol.compatConfig,
+			} as ModelSpec<"openai-responses">);
+			const context: Context = {
+				systemPrompt: ["First.", "Second."],
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			};
+			const body = await captureRequestBody(proxyModel, context);
+
+			expect(body.instructions).toBeUndefined();
+			const input = body.input as Array<{ role: string; content: string }>;
+			expect(input.slice(0, 2)).toEqual([
+				{ role: "developer", content: "First." },
+				{ role: "developer", content: "Second." },
+			]);
 		});
 	});
 });

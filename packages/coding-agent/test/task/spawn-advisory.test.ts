@@ -5,7 +5,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { buildSpecializationAdvisory, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 // Contract: the task tool appends an advisory (never a rejection) steering the
@@ -40,7 +41,7 @@ describe("buildSpecializationAdvisory", () => {
 	it("counts sonic as generic alongside task", () => {
 		const advice = buildSpecializationAdvisory(["sonic", "task"], true);
 		expect(advice).toBeDefined();
-		expect(advice).toContain("2 generic");
+		expect(advice).toContain("2 generic workers (`sonic`, `task`)");
 	});
 });
 

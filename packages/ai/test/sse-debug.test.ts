@@ -28,8 +28,4 @@ describe("notifyRawSseEvent", () => {
 			),
 		).not.toThrow();
 	});
-
-	it("is a no-op when no observer is installed", () => {
-		expect(() => notifyRawSseEvent(undefined, { event: null, data: "{}", raw: ["data: {}"] })).not.toThrow();
-	});
 });

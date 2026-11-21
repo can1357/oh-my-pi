@@ -80,7 +80,7 @@ export function createDeviceCodeLogin(
 			intervalSeconds: numberAt(device.body, response.interval),
 			expiresInSeconds: numberAt(device.body, response.expiresIn),
 			signal,
-			poll: async (): Promise<OAuthDeviceCodePollResult<unknown>> => {
+			poll: async (pollSignal): Promise<OAuthDeviceCodePollResult<unknown>> => {
 				const result = await postTokenRequest(
 					tokenRequest,
 					{
@@ -89,7 +89,7 @@ export function createDeviceCodeLogin(
 						device_code: deviceCode,
 					},
 					pollVars,
-					context,
+					{ ...context, signal: pollSignal },
 					"device-auth",
 				);
 				const error = jsonPath(result.body, "error");

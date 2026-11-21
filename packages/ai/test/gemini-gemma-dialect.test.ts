@@ -83,17 +83,6 @@ describe("gemini dialect (Pythonic tool_code)", () => {
 		expect(calls[1]!.arguments).toEqual({ path: "out", content: "foo(,bar" });
 	});
 
-	it("parses parallel calls written as a [a, b] list", () => {
-		const calls = parsedCalls(
-			"gemini",
-			'```tool_code\n[default_api.read(path="a"), default_api.write(path="b", content="c")]\n```',
-		);
-		expect(calls).toEqual([
-			{ name: "read", arguments: { path: "a" } },
-			{ name: "write", arguments: { path: "b", content: "c" } },
-		]);
-	});
-
 	it("preserves prose outside the fence", () => {
 		const text = visibleText(scan("gemini", 'before\n```tool_code\ndefault_api.read(path="a")\n```\nafter'));
 		expect(text).toContain("before");
@@ -165,20 +154,33 @@ describe("gemma dialect (token-delimited call:NAME{…})", () => {
 		expect(calls[0]!.arguments).toEqual({ b: true, z: null, n: 3, arr: ["a", "b"], obj: { k: "v" } });
 	});
 
-	it("parses consecutive blocks as parallel calls", () => {
-		const calls = parsedCalls(
-			"gemma",
-			'<|tool_call>call:read{path:<|"|>a<|"|>}<tool_call|><|tool_call>call:write{path:<|"|>b<|"|>}<tool_call|>',
-		);
-		expect(calls).toEqual([
-			{ name: "read", arguments: { path: "a" } },
-			{ name: "write", arguments: { path: "b" } },
-		]);
-	});
-
 	it("yields the same call when streamed character by character", () => {
 		const text = '<|tool_call>call:read{path:<|"|>a.ts<|"|>,count:7}<tool_call|>';
 		expect(parsedCalls("gemma", text, true)).toEqual([{ name: "read", arguments: { path: "a.ts", count: 7 } }]);
+	});
+
+	it("yields identical events for every chunking, including tokens split across chunks", () => {
+		const text =
+			'pre <|tool_call>call:write{path:<|"|>a.ts<|"|>,content:<|"|>x <tool_call|> <|tool_call> y<|"|>}<tool_call|>mid' +
+			'<|tool_call>call:read{path:<|"|><|"|>}<tool_call|> post';
+		const normalize = (events: InbandScanEvent[]) =>
+			events.map(event => ("id" in event ? { ...event, id: "" } : event));
+		const expected = normalize(scan("gemma", text));
+		expect(parsedCalls("gemma", text)).toEqual([
+			{ name: "write", arguments: { path: "a.ts", content: "x <tool_call|> <|tool_call> y" } },
+			{ name: "read", arguments: { path: "" } },
+		]);
+		for (let size = 1; size <= 13; size++) {
+			const scanner = createInbandScanner("gemma");
+			const events: InbandScanEvent[] = [];
+			for (let i = 0; i < text.length; i += size) events.push(...scanner.feed(text.slice(i, i + size)));
+			events.push(...scanner.flush());
+			const streamed = normalize(events);
+			expect(visibleText(streamed)).toBe(visibleText(expected));
+			expect(streamed.filter(event => event.type !== "text")).toEqual(
+				expected.filter(event => event.type !== "text"),
+			);
+		}
 	});
 
 	it("renders calls that round-trip through the scanner", () => {

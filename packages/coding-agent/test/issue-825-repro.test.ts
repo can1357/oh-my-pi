@@ -20,7 +20,7 @@
 
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 
@@ -63,12 +63,13 @@ function makeFakeSession() {
 		extensionRunner: undefined,
 		customCommands: [] as Array<{ command: { name: string } }>,
 		getQueuedMessages: () => ({ steering: steering.map(e => e.text), followUp: followUp.map(e => e.text) }),
-		clearQueue: () => {
-			const s = [...steering];
-			const f = [...followUp];
-			steering.length = 0;
-			followUp.length = 0;
-			return { steering: s, followUp: f };
+		// Faithful stub of AgentSession.dropQueuedMessages: removes exactly the given entries.
+		dropQueuedMessages: (messages: Iterable<object>) => {
+			const dropped = new Set(messages);
+			const s = steering.filter(entry => !dropped.has(entry));
+			const f = followUp.filter(entry => !dropped.has(entry));
+			steering.splice(0, steering.length, ...s);
+			followUp.splice(0, followUp.length, ...f);
 		},
 		prompt,
 		steer,
@@ -91,7 +92,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[]) {
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: { addToHistory: () => {}, setText: () => {}, getText: () => "" },
-		keybindings: { getDisplayString: () => "Alt+Up" },
+		keybindings: { getKeys: () => ["alt+up"] },
 		fileSlashCommands: new Set<string>(),
 		locallySubmittedUserSignatures,
 		isKnownSlashCommand,

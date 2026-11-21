@@ -1,6 +1,9 @@
 // Provider-wire compat for "gitlab-duo"; regenerated from the frozen census using deployment contract selectors.
 
 provider "gitlab-duo" {
+	default-model "duo-chat-opus-4-6"
+	env "GITLAB_TOKEN"
+
 	class "openai" {
 		revision ">=5 <5.2" {
 			thinking-mode "effort"
@@ -20,5 +23,10 @@ provider "gitlab-duo" {
 	// upstream OpenAI serving path.
 	models "duo-chat-gpt-5*" {
 		supports-sampling-params #false
+	}
+	// residue: taxonomy leaves the Duo Claude aliases unclassified, but the
+	// Claude behind them keeps its input classifier (`reasoning_extraction`).
+	models "duo-chat-opus-*" "duo-chat-sonnet-*" "duo-chat-haiku-*" {
+		classifier-cot-extraction #true
 	}
 }

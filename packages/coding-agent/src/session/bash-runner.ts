@@ -2,12 +2,20 @@ import * as path from "node:path";
 import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { type BashPtyOptions, type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
+import {
+	type BashPtyOptions,
+	type BashResult,
+	drainAbortedShells,
+	executeBash as executeBashCommand,
+	releaseShellSessions,
+} from "../exec/bash-executor";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { outputMeta } from "../tools/output-meta";
 import { clampTimeout } from "../tools/tool-timeouts";
 import type { BashExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
+
+import { cfgToolsMaxTimeout } from "../tools/settings";
 
 /** Destination that owns a bash result after a session or branch transition. */
 export type BashAppendDestination =
@@ -26,6 +34,14 @@ export interface BashSessionTarget {
 interface PendingBashMessage {
 	target: BashSessionTarget;
 	message: BashExecutionMessage;
+}
+
+export interface BashExecuteOptions {
+	excludeFromContext?: boolean;
+	useUserShell?: boolean;
+	pty?: BashPtyOptions;
+	/** Receives the `bashExecution` message the run is recorded as, once it is persisted or queued for a mid-turn flush. */
+	onRecorded?: (message: BashExecutionMessage) => void;
 }
 
 /** Ownership snapshot spanning a session or branch transition. */
@@ -53,6 +69,8 @@ export interface BashRunnerHost {
 export class BashRunner {
 	readonly #host: BashRunnerHost;
 	#abortControllers = new Set<AbortController>();
+	/** Session ids of cancelled commands; a command keeps the id it started under across transitions. */
+	#cancelledSessionIds = new Set<string>();
 	#pendingMessages: PendingBashMessage[] = [];
 	#sessionTarget: BashSessionTarget;
 
@@ -69,7 +87,7 @@ export class BashRunner {
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
+		options?: BashExecuteOptions,
 	): Promise<BashResult> {
 		const target = this.#captureSessionTarget();
 		let targetTransferred = false;
@@ -115,8 +133,11 @@ export class BashRunner {
 					onChunk,
 					signal: abortController.signal,
 					sessionKey: target.sessionId,
+					// A command still pending when its session was left must not keep a
+					// shell under that session after the transition released its shells.
+					isSessionCurrent: () => this.#host.sessionManager.getSessionId() === target.sessionId,
 					cwd,
-					timeout: clampTimeout("bash", undefined, this.#host.settings.get("tools.maxTimeout")) * 1000,
+					timeout: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.#host.settings)) * 1000,
 					onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),
 					env: shellEnv,
 					useUserShell: options?.useUserShell,
@@ -125,6 +146,7 @@ export class BashRunner {
 			} finally {
 				this.#abortControllers.delete(abortController);
 			}
+			if (result.cancelled) this.#cancelledSessionIds.add(target.sessionId);
 			targetTransferred = true;
 			await this.#recordResultForTarget(target, command, result, options);
 			return result;
@@ -157,6 +179,11 @@ export class BashRunner {
 	/** Cancels every running bash command. */
 	abort(): void {
 		for (const abortController of this.#abortControllers) abortController.abort();
+	}
+
+	/** Waits for every cancelled command's native TERM→KILL cleanup, whichever session it started under. */
+	async drainCancelled(): Promise<void> {
+		await Promise.all([...this.#cancelledSessionIds].map(drainAbortedShells));
 	}
 
 	/** Whether a bash command is currently running. */
@@ -257,6 +284,11 @@ export class BashRunner {
 		transition.newTarget.destination = currentDestination;
 		if (!success) transition.newTarget.sessionId = manager.getSessionId();
 		transition.resolveNew(currentDestination);
+		// The left session's persistent shells are unreachable under the new id; drop
+		// them as dispose does, rather than holding each one until process exit.
+		if (success && transition.oldSessionId !== manager.getSessionId()) {
+			releaseShellSessions(transition.oldSessionId);
+		}
 		if (transition.detachedManager && (oldDestination.kind !== "detached" || transition.oldTarget.refs === 0)) {
 			void transition.detachedManager.close().catch(error => {
 				logger.warn("Failed to close detached bash session writer", { error: String(error) });
@@ -267,7 +299,7 @@ export class BashRunner {
 	async #saveOriginalArtifact(target: BashSessionTarget, originalText: string): Promise<string | undefined> {
 		try {
 			const destination = target.destination ?? (await target.pending);
-			return await destination?.manager.saveArtifact(originalText, "bash-original");
+			return await destination?.manager.saveArtifact(originalText);
 		} catch {
 			return undefined;
 		}
@@ -278,7 +310,7 @@ export class BashRunner {
 		result: BashResult,
 		options?: { excludeFromContext?: boolean },
 	): BashExecutionMessage {
-		const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
+		const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).minimized(result.minimized).get();
 		return {
 			role: "bashExecution",
 			command,
@@ -333,13 +365,18 @@ export class BashRunner {
 		target: BashSessionTarget,
 		command: string,
 		result: BashResult,
-		options?: { excludeFromContext?: boolean },
+		options?: BashExecuteOptions,
 	): Promise<void> {
 		const message = this.#createMessage(command, result, options);
 		if (this.#host.isStreaming() && target === this.#sessionTarget) {
 			this.#pendingMessages.push({ target, message });
-			return;
+		} else {
+			await this.#appendOwnedMessage(target, message);
 		}
-		await this.#appendOwnedMessage(target, message);
+		try {
+			options?.onRecorded?.(message);
+		} catch (error) {
+			logger.error("bash onRecorded callback failed", { error: String(error) });
+		}
 	}
 }

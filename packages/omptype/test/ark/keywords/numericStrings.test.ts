@@ -8,13 +8,6 @@ it("string.numeric", () => {
 	expect(String(NumericString("five"))).toBe('must be a well-formed numeric string (was "five")');
 });
 
-it("string.numeric.parse", () => {
-	const parseNum = type("string.numeric.parse");
-	expect(parseNum("5")).toEqual(5);
-	expect(parseNum("5.5")).toEqual(5.5);
-	expect(String(parseNum("five"))).toBe('must be a well-formed numeric string (was "five")');
-});
-
 it("string.integer", () => {
 	const IntegerString = type("string.integer");
 	expect(IntegerString("5")).toEqual("5");

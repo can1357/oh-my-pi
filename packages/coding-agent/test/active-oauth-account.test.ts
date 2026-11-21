@@ -128,6 +128,23 @@ describe("limitMatchesActiveAccount", () => {
 		).toBe(true);
 	});
 
+	test("a shared Google project or Team account id never stands in for a different email", () => {
+		const project = "aicode-consumers";
+		const alice = { email: "alice@example.com", projectId: project };
+		const antigravityReport = (email: string) =>
+			makeReport({ provider: "google-antigravity", metadata: { email, projectId: project } });
+		const sharedProjectLimit = makeLimit({ provider: "google-antigravity", projectId: project });
+		expect(limitMatchesActiveAccount(antigravityReport("bob@example.com"), sharedProjectLimit, alice)).toBe(false);
+		expect(limitMatchesActiveAccount(antigravityReport("alice@example.com"), sharedProjectLimit, alice)).toBe(true);
+		// Codex Team seats share the workspace account and org ids.
+		const seat = { email: "alice@example.com", accountId: "workspace", orgId: "workspace" };
+		const teammateReport = makeReport({
+			provider: "openai-codex",
+			metadata: { email: "bob@example.com", accountId: "workspace", orgId: "workspace" },
+		});
+		expect(limitMatchesActiveAccount(teammateReport, makeLimit({ accountId: "workspace" }), seat)).toBe(false);
+	});
+
 	test("org-only active identity matches same-org reports on the org alone", () => {
 		// Login recovered neither email nor account: the org is all the session
 		// knows about itself.
@@ -218,6 +235,31 @@ describe("toLogoutAccounts org scoping", () => {
 		expect(activeIds).toEqual([1]);
 	});
 
+	test("Antigravity accounts on one Google project: only the active email's row is marked active", () => {
+		const row = (id: number, email: string): StoredAuthCredential => ({
+			id,
+			provider: "google-antigravity",
+			credential: {
+				type: "oauth",
+				access: `access-${id}`,
+				refresh: `refresh-${id}`,
+				expires: Date.now() + 60_000,
+				email,
+				projectId: "aicode-consumers",
+			},
+			disabledCause: null,
+		});
+		const accounts = toLogoutAccounts(
+			"google-antigravity",
+			[row(1, "alice@example.com"), row(2, "bob@example.com")],
+			{
+				activeIdentity: { email: "alice@example.com", projectId: "aicode-consumers" },
+			},
+		);
+		const activeIds = accounts.filter(account => account.active).map(account => account.credentialId);
+		expect(activeIds).toEqual([1]);
+	});
+
 	test("org-only active identity marks same-org rows active on the org alone", () => {
 		const accounts = toLogoutAccounts(
 			"anthropic",
@@ -240,5 +282,51 @@ describe("toLogoutAccounts org scoping", () => {
 			"shared@example.com (Personal Max)",
 			"shared@example.com (Team Workspace)",
 		]);
+	});
+});
+
+describe("limitMatchesActiveAccount: credential-scoped identity (API-key accounts)", () => {
+	test("matches only the report probed from the pinned credential row", () => {
+		const identity = { credentialId: 4 };
+		expect(limitMatchesActiveAccount(makeReport({ metadata: { credentialId: 4 } }), makeLimit(), identity)).toBe(
+			true,
+		);
+		expect(limitMatchesActiveAccount(makeReport({ metadata: { credentialId: 2 } }), makeLimit(), identity)).toBe(
+			false,
+		);
+	});
+
+	test("an untagged report never matches a pinned row", () => {
+		// Env-key probes and broker aggregates carry no row id; letting them
+		// match would merge sibling API-key accounts into one quota pool.
+		const identity = { credentialId: 4 };
+		expect(limitMatchesActiveAccount(makeReport(), makeLimit(), identity)).toBe(false);
+		expect(
+			limitMatchesActiveAccount(
+				makeReport({ metadata: { email: "a@b.c", accountId: "acc-1" } }),
+				makeLimit(),
+				identity,
+			),
+		).toBe(false);
+	});
+
+	test("reportMatchesActiveAccount reflects the same rule across limits", () => {
+		const identity = { credentialId: 4 };
+		const report = makeReport({
+			metadata: { credentialId: 4 },
+			limits: [makeLimit({ windowId: "7d" }), makeLimit({ windowId: "monthly" })],
+		});
+		expect(reportMatchesActiveAccount(report, identity)).toBe(true);
+		expect(reportMatchesActiveAccount(makeReport({ metadata: { credentialId: 2 } }), identity)).toBe(false);
+	});
+});
+
+describe("limitMatchesActiveAccount: merged same-account reports", () => {
+	test("a report carrying every contributing row id matches a pin on any of them", () => {
+		const identity = { credentialId: 4 };
+		const merged = makeReport({ metadata: { credentialId: 2, credentialIds: [2, 4] } });
+		expect(limitMatchesActiveAccount(merged, makeLimit(), { credentialId: 2 })).toBe(true);
+		expect(limitMatchesActiveAccount(merged, makeLimit(), identity)).toBe(true);
+		expect(limitMatchesActiveAccount(merged, makeLimit(), { credentialId: 7 })).toBe(false);
 	});
 });

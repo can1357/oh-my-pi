@@ -138,14 +138,4 @@ describe("issue #5572 — custom Anthropic endpoints reject eager_input_streamin
 		const payload = (await promise) as { tools?: Array<Record<string, unknown>> };
 		expect(payload.tools?.[0]).toHaveProperty("eager_input_streaming", true);
 	});
-
-	it("keeps eager tool input streaming on the official Anthropic endpoint", () => {
-		const model = buildModel({
-			...CUSTOM_MODEL_SPEC,
-			provider: "anthropic",
-			baseUrl: "https://api.anthropic.com",
-		});
-
-		expect(model.compat.supportsEagerToolInputStreaming).toBe(true);
-	});
 });

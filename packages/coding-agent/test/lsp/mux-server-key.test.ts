@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { type MuxConnectParams, muxServerKey } from "@oh-my-pi/pi-coding-agent/lsp/mux/protocol";
+import { type LspServerParams, muxServerKey } from "@oh-my-pi/pi-coding-agent/lsp/mux/protocol";
 
-const base: MuxConnectParams = {
+const base: LspServerParams = {
 	command: "typescript-language-server",
 	args: ["--stdio"],
 	cwd: "/workspace/project",
@@ -48,5 +48,15 @@ describe("muxServerKey", () => {
 
 	it("treats an absent env as an empty env", () => {
 		expect(muxServerKey({ ...base, env: {} })).toBe(muxServerKey(base));
+	});
+
+	it("treats initialization option key order as irrelevant at every depth", () => {
+		const forward = muxServerKey({ ...base, initializationOptions: { a: 1, nested: { x: 1, y: 2 } } });
+		const reverse = muxServerKey({ ...base, initializationOptions: { nested: { y: 2, x: 1 }, a: 1 } });
+		expect(forward).toBe(reverse);
+	});
+
+	it("treats absent initialization options as the empty options the client sends", () => {
+		expect(muxServerKey({ ...base, initializationOptions: {} })).toBe(muxServerKey(base));
 	});
 });

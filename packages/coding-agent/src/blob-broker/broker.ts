@@ -3,9 +3,9 @@
  *
  * `LocalBlobBackend` runs everything in-process — either a loopback HTTP
  * server behind a tunnel/direct exposure (serve mode) or a push-once uploader
- * (upload mode). The daemon-shared variant in `daemon.ts` implements the same
- * {@link BlobBackend} contract over the project blob daemon so every omp
- * process reuses one exposure and one URL per blob.
+ * (upload mode). The omp daemon's `blob` module hosts one per project and
+ * config, and `service.ts` reaches it through the same {@link BlobBackend}
+ * contract so every omp process reuses one exposure and one URL per blob.
  *
  * Design invariants:
  * - **Stable, multi-use URLs.** A blob's URL is keyed by content hash for the
@@ -35,7 +35,7 @@ import type {
 } from "./protocol";
 import type { BlobPublication, BlobUploadRequest, RemoteDeleteAction } from "./publication";
 import { BlobRegistry, type BlobRegistryEntry, EXT_BY_MIME, type LazyBlobFetcher } from "./store";
-import { DestinationUnavailableError } from "./uploader-runtime";
+import { type DestinationProcessContext, DestinationUnavailableError } from "./uploader-runtime";
 import { createConfiguredUploader, memoizeUploader } from "./uploaders";
 
 /** Turns blob bytes into externally fetchable publications. */
@@ -46,8 +46,16 @@ export interface BlobBackend {
 	 * Stable publication for the content behind `key`, or `null` when the backend
 	 * cannot provide one. `getBytes` is invoked only when the key is unknown —
 	 * persisted or already-registered blobs never decode or transfer bytes.
+	 * `getBase64`, when supplied, yields the same content already base64-encoded
+	 * so base64 transports (the daemon socket) forward it without a decode and
+	 * re-encode round trip.
 	 */
-	ensureBlob(key: string, mimeType: string, getBytes: () => Uint8Array): Promise<BlobPublication | null>;
+	ensureBlob(
+		key: string,
+		mimeType: string,
+		getBytes: () => Uint8Array,
+		getBase64?: () => string,
+	): Promise<BlobPublication | null>;
 	/** Stable publication served by invoking `fetcher` on demand; `null` when unsupported. */
 	ensureLazy(key: string, mimeType: string, fetcher: LazyBlobFetcher): Promise<BlobPublication | null>;
 	/** Release backend-owned stores, servers, and exposure processes. */
@@ -68,6 +76,19 @@ const SERVE_KINDS: Readonly<Partial<Record<BlobDestinationId, true>>> = {
 	"named-cloudflared": true,
 };
 
+/** `url` without userinfo (`user:password@`), for logs and the `omp ps` label. */
+export function redactUrl(url: string): string {
+	try {
+		const parsed = new URL(url);
+		if (!parsed.username && !parsed.password) return url;
+		parsed.username = "";
+		parsed.password = "";
+		return parsed.toString().replace(/\/$/, "");
+	} catch {
+		return "(unparseable url)";
+	}
+}
+
 /** Whether a destination exposes the local blob server. */
 export function isServeKind(kind: BlobDestinationId): kind is ExposureKind {
 	return SERVE_KINDS[kind] === true;
@@ -78,27 +99,48 @@ export function isUploaderKind(kind: BlobDestinationId): boolean {
 	return !isServeKind(kind);
 }
 
+/** Longest render-on-fetch a caller may allow before the fetch answers 410. */
+export const MAX_LAZY_RENDER_MS = 60_000;
+/**
+ * Idle timeout of the blob server, in seconds. A fetch waiting on a lazy
+ * render sends nothing, so Bun's default (10 s) would reset the socket before
+ * the render settles; this exceeds {@link MAX_LAZY_RENDER_MS} so a slow render
+ * always ends in a real HTTP status.
+ */
+const SERVER_IDLE_TIMEOUT_S = MAX_LAZY_RENDER_MS / 1000 + 30;
+
 /** In-process backend hosting the store, exposure, or uploader directly. */
 export class LocalBlobBackend implements BlobBackend {
 	#config: BlobBrokerWorkerConfig;
 	#store: BlobRegistry;
 	#server: Bun.Server<undefined> | undefined;
-	#exposure: { baseUrl: string; stop(): void } | undefined;
+	#exposure: { baseUrl: string; pid?(): number | undefined; stop(): void } | undefined;
 	#startPromise: Promise<string | null> | undefined;
 	#upload: ((hash: string, request: BlobUploadRequest) => Promise<BlobPublication | null>) | undefined;
 	#fetch: typeof globalThis.fetch;
+	#spawn: DestinationProcessContext | undefined;
 	#dead = false;
+	#died = Promise.withResolvers<void>();
 
-	/** Create one local serving or configured upload backend. */
-	constructor(config: BlobBrokerWorkerConfig, fetchFn: typeof globalThis.fetch = globalThis.fetch) {
+	/**
+	 * Create one local serving or configured upload backend. `options.spawn`
+	 * supplies env and cwd for tunnel and uploader children (the daemon passes
+	 * the opening client's); omitted, they inherit this process's.
+	 */
+	constructor(
+		config: BlobBrokerWorkerConfig,
+		options: { fetch?: typeof globalThis.fetch; spawn?: DestinationProcessContext } = {},
+	) {
 		this.#config = config;
-		this.#fetch = fetchFn;
+		this.#fetch = options.fetch ?? globalThis.fetch;
+		this.#spawn = options.spawn;
 		const servesBlobs = isServeKind(config.kind);
 		const uploader = servesBlobs
 			? null
 			: createConfiguredUploader(config.kind, {
 					options: config.options,
 					credentials: config.credentials,
+					...(options.spawn ? { spawn: options.spawn } : {}),
 				});
 		if (!servesBlobs && !uploader) {
 			throw new DestinationUnavailableError(config.kind, "no built-in uploader or serving adapter is implemented");
@@ -127,6 +169,7 @@ export class LocalBlobBackend implements BlobBackend {
 			this.#server = Bun.serve({
 				hostname: this.#config.bindHost,
 				port: 0,
+				idleTimeout: SERVER_IDLE_TIMEOUT_S,
 				fetch: request => {
 					if (new URL(request.url).pathname === "/.well-known/omp-blob-health") {
 						return new Response(null, { status: 204 });
@@ -149,6 +192,7 @@ export class LocalBlobBackend implements BlobBackend {
 				sshRemotePort: this.#config.sshRemotePort,
 				options: this.#config.options,
 				credentials: this.#config.credentials,
+				...(this.#spawn ? { spawn: this.#spawn } : {}),
 			};
 			const exposure = await startExposure(exposureConfig, port);
 			try {
@@ -161,13 +205,14 @@ export class LocalBlobBackend implements BlobBackend {
 			void exposure.exited?.then(() => {
 				if (this.#dead) return;
 				this.#dead = true;
+				this.#died.resolve();
 				logger.warn("blob-broker: exposure process exited; image URLs disabled, falling back to inline base64", {
 					kind: this.#config.kind,
 				});
 			});
 			logger.info("blob-broker: serving image URLs", {
 				kind: this.#config.kind,
-				baseUrl: exposure.baseUrl,
+				baseUrl: redactUrl(exposure.baseUrl),
 				localPort: port,
 			});
 			return exposure.baseUrl;
@@ -180,6 +225,21 @@ export class LocalBlobBackend implements BlobBackend {
 			});
 			return null;
 		}
+	}
+
+	/** Settles when the exposure process died after a successful start. */
+	get died(): Promise<void> {
+		return this.#died.promise;
+	}
+
+	/** Pid of the live exposure child, if the destination runs one. */
+	get exposurePid(): number | undefined {
+		return this.#exposure?.pid?.();
+	}
+
+	/** Write the persisted URL index now instead of on its debounce. */
+	flush(): void {
+		this.#store.flush();
 	}
 
 	/** Ensure eager bytes have a stable publication. */
@@ -237,12 +297,28 @@ export class LocalBlobBackend implements BlobBackend {
 
 	#publish(key: string, baseUrl: string, entry: BlobRegistryEntry): BlobPublication {
 		const ttlMs = this.#config.persist?.ttlMs ?? 0;
+		const url = `${baseUrl}/${entry.path}`;
+		const now = Date.now();
+		const current = entry.publication;
+		// Matches the registry's re-arm granularity: a publication renewed within
+		// the last tenth of its window is returned as-is, so per-request lookups
+		// do not rewrite the persisted index.
+		if (
+			current?.url === url &&
+			current.destination === this.#config.kind &&
+			current.bytes === entry.bytes &&
+			(ttlMs > 0
+				? current.expiresAt !== undefined && current.expiresAt - now > ttlMs * 0.9
+				: current.expiresAt === undefined)
+		) {
+			return current;
+		}
 		const publication: BlobPublication = {
-			...entry.publication,
-			url: `${baseUrl}/${entry.path}`,
+			...current,
+			url,
 			destination: this.#config.kind,
 			bytes: entry.bytes,
-			...(ttlMs > 0 ? { expiresAt: Date.now() + ttlMs } : {}),
+			...(ttlMs > 0 ? { expiresAt: now + ttlMs } : {}),
 		};
 		this.#store.setPublication(key, publication);
 		return publication;
@@ -394,7 +470,7 @@ export class LocalBlobBackend implements BlobBackend {
 		};
 	}
 
-	/** Local server origin for tests, diagnostics, and the daemon worker. */
+	/** Local server origin for tests and diagnostics. */
 	get localBaseUrl(): string | null {
 		return this.#server ? `http://${this.#config.bindHost}:${this.#server.port}` : null;
 	}

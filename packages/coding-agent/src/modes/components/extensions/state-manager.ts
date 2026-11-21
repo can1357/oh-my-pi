@@ -2,8 +2,8 @@
  * State manager for the Extension Control Center.
  * Handles data loading, tree building, filtering, and toggle persistence.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import type { ContextFile } from "../../../capability/context-file";
 import type { ExtensionModule } from "../../../capability/extension-module";
@@ -14,67 +14,129 @@ import type { Rule } from "../../../capability/rule";
 import type { Skill } from "../../../capability/skill";
 import type { SlashCommand } from "../../../capability/slash-command";
 import type { CustomTool } from "../../../capability/tool";
-import type { SourceMeta } from "../../../capability/types";
+import type { EffectiveExtensionRoots, SourceMeta } from "../../../capability/types";
 import {
 	disableProvider,
 	disableUserSource,
 	enableProvider,
 	enableUserSource,
-	getAllProvidersInfo,
+	getProviderInfo,
 	isProviderEnabled,
 	isUserSourceEnabled,
 	loadCapability,
 } from "../../../discovery";
+import { createSourceMeta, getExtensionNameFromPath } from "../../../discovery/helpers";
+import { isExtensionFile, listPackageExtensionModules } from "../../../extensibility/extensions/loader";
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
-import { commandPreview } from "./inspector-model";
-import { inferMcpTransport } from "./mcp-runtime";
+import type { MCPDroppedServer } from "../../../mcp/transforms";
+import { commandPreview } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
+import { inferMcpTransport } from "@oh-my-pi/pi-tui/overlays/extensions/mcp-runtime";
 import {
-	type DashboardState,
 	type DisabledReason,
 	type Extension,
 	type ExtensionKind,
 	type ExtensionState,
-	type FlatTreeItem,
-	isShadowedExtension,
 	makeExtensionId,
-	type ProviderTab,
 	sourceFromMeta,
-	type TreeNode,
-} from "./types";
-
-/**
- * Settings manager interface for granular toggle persistence.
- */
-export interface ExtensionSettingsManager {
-	getDisabledExtensions(): string[];
-	setDisabledExtensions(ids: string[]): void;
-}
+} from "@oh-my-pi/pi-tui/overlays/extensions/types";
 
 /**
  * Provider-level gate for one discovered item: the whole-provider switch, plus
  * the `~/` opt-in for user-level items of foreign tools. Item-level disable and
  * shadowing take precedence and are decided by the caller.
+ *
+ * Mirrors the loader's foreign gate (`allowedRoots` / `isSourceEnabled`,
+ * #10666/#10743): a user-scope `claude-plugins` item whose `origin` is not the
+ * foreign `~/.claude` tree is an omp-native marketplace root under
+ * `~/.omp/plugins` and loads without the opt-in — so the dashboard must render
+ * it active, not a phantom `user-opt-in` disabled (#12776).
  */
 function resolveState(
-	source: { provider: string; level: string },
+	source: SourceMeta,
 	isDisabled: boolean,
 	isShadowed: boolean | undefined,
 ): { state: ExtensionState; disabledReason?: DisabledReason } {
 	if (isDisabled) return { state: "disabled", disabledReason: "item-disabled" };
 	if (isShadowed) return { state: "shadowed", disabledReason: "shadowed" };
 	if (!isProviderEnabled(source.provider)) return { state: "disabled", disabledReason: "provider-disabled" };
+	if (source.provider === "claude-plugins" && source.origin !== undefined && source.origin !== "claude") {
+		return { state: "active" };
+	}
 	if (source.level === "user" && !isUserSourceEnabled(source.provider)) {
 		return { state: "disabled", disabledReason: "user-opt-in" };
 	}
 	return { state: "active" };
 }
 
+/** Provider that labels installed-plugin and configured-package modules; it owns their sibling skills/tools. */
+const PACKAGE_MODULE_PROVIDER = "omp-plugins";
+
+/**
+ * Extension modules the loader appends after native discovery — installed
+ * plugin entries and configured `extensions` paths — that `disabledExtensions`
+ * can toggle. Configured file paths are omitted: they load regardless of that
+ * list. Explicit-only sessions ignore the list entirely, so they contribute none.
+ * Entries whose real file a native module or a loaded JS/TS hook factory
+ * already covers are skipped, matching the loader's realpath dedup: the loader
+ * adds those paths first, so `extension-module:<name>` could not unload them.
+ */
+async function loadPackageModules(
+	cwd: string,
+	roots: EffectiveExtensionRoots,
+	nativeModules: readonly ExtensionModule[],
+	disabledIds: string[],
+): Promise<ExtensionModule[]> {
+	if (roots.mode !== "merge") return [];
+	const [explicit, configured, hooks] = await Promise.all([
+		listPackageExtensionModules(roots.explicit, cwd, { plugins: true, configuredLevel: "user" }),
+		listPackageExtensionModules(roots.configured, cwd, { plugins: false, configuredLevel: roots.configuredLevel }),
+		// Runtime view (no includeDisabled): a disabled hook is not loaded, so its
+		// file falls through to the package lane and the module id gates it.
+		loadCapability<Hook>("hooks", { cwd, disabledExtensions: disabledIds, extensionRoots: roots }),
+	]);
+	const hookFactories = hooks.items.map(hook => hook.path).filter(file => isExtensionFile(path.basename(file)));
+	const realpath = (file: string) => fs.realpath(file).catch(() => path.resolve(file));
+	const seen = new Set(
+		await Promise.all([...nativeModules.map(module => module.path), ...hookFactories].map(realpath)),
+	);
+	const providerName = getProviderInfo(PACKAGE_MODULE_PROVIDER)?.displayName ?? PACKAGE_MODULE_PROVIDER;
+	const modules: ExtensionModule[] = [];
+	for (const entry of [...explicit, ...configured]) {
+		if (!entry.toggleable) continue;
+		const key = await realpath(entry.path);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		modules.push({
+			name: getExtensionNameFromPath(entry.path),
+			path: entry.path,
+			level: entry.level,
+			_source: { ...createSourceMeta(PACKAGE_MODULE_PROVIDER, entry.path, entry.level), providerName },
+		});
+	}
+	return modules;
+}
+
 /**
  * Load all extensions from all capabilities.
+ *
+ * `extensionRoots` are the session's extension-package lanes; when given,
+ * installed-plugin and configured-package modules are listed beside native
+ * ones. Only `disabledExtensions` gates those at runtime, so their state
+ * ignores provider switches.
+ *
+ * `builtinDrops` are the MCP servers the session's manager left unconnected
+ * because a built-in transform dropped them (`MCPManager.getBuiltinDrops`);
+ * their rows show as disabled.
  */
-export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): Promise<Extension[]> {
+export async function loadAllExtensions(
+	cwd?: string,
+	disabledIds?: string[],
+	extensionRoots?: EffectiveExtensionRoots,
+	builtinDrops?: ReadonlyMap<string, MCPDroppedServer>,
+): Promise<Extension[]> {
 	const extensions: Extension[] = [];
-	const disabledExtensions = new Set<string>(disabledIds ?? []);
+	const effectiveDisabledIds = disabledIds ?? [];
+	const disabledExtensions = new Set<string>(effectiveDisabledIds);
 
 	// Helper to convert capability items to extensions
 	function addItems<T extends { name: string; path: string; _source: SourceMeta }>(
@@ -84,15 +146,17 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			getDescription?: (item: T) => string | undefined;
 			getTrigger?: (item: T) => string | undefined;
 			getShadowedBy?: (item: T) => string | undefined;
+			/** Skip provider/user-source gates for items only `disabledExtensions` controls. */
+			itemGateOnly?: boolean;
 		},
 	): void {
 		for (const item of items) {
 			const id = makeExtensionId(kind, item.name);
-			const { state, disabledReason } = resolveState(
-				item._source,
-				disabledExtensions.has(id),
-				(item as { _shadowed?: boolean })._shadowed,
-			);
+			const isDisabled = disabledExtensions.has(id);
+			const { state, disabledReason }: { state: ExtensionState; disabledReason?: DisabledReason } =
+				opts?.itemGateOnly && !isDisabled
+					? { state: "active" }
+					: resolveState(item._source, isDisabled, (item as { _shadowed?: boolean })._shadowed);
 
 			extensions.push({
 				id,
@@ -111,7 +175,12 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 		}
 	}
 
-	const loadOpts = cwd ? { cwd, includeDisabled: true } : { includeDisabled: true };
+	const loadOpts = {
+		cwd,
+		includeDisabled: true,
+		disabledExtensions: effectiveDisabledIds,
+		isSourceDisabled: (source: SourceMeta) => resolveState(source, false, undefined).state === "disabled",
+	};
 
 	// Load skills
 	try {
@@ -145,11 +214,21 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 		logger.warn("Failed to load tools capability", { error: String(error) });
 	}
 
-	// Load extension modules
+	// Load extension modules: native capability items, then the plugin and
+	// configured-package entries the loader appends outside that capability.
 	try {
 		const modules = await loadCapability<ExtensionModule>("extension-modules", loadOpts);
 		const nativeModules = modules.all.filter(module => module._source.provider === "native");
 		addItems(nativeModules, "extension-module");
+		if (extensionRoots) {
+			const packageModules = await loadPackageModules(
+				cwd ?? process.cwd(),
+				extensionRoots,
+				nativeModules,
+				effectiveDisabledIds,
+			);
+			addItems(packageModules, "extension-module", { itemGateOnly: true });
+		}
 	} catch (error) {
 		logger.warn("Failed to load extension-modules capability", { error: String(error) });
 	}
@@ -159,7 +238,8 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 	// the per-server `enabled: false` flag, and the user-level `disabledServers`
 	// denylist that `/mcp disable` writes through `setServerDisabled`. The
 	// user-level `enabledServers` allowlist overrides a non-writable source's
-	// `enabled: false` (e.g. opencode.json) but never the denylist.
+	// `enabled: false` (e.g. opencode.json) but never the denylist. A server a
+	// built-in transform dropped is disabled too, until it is enabled explicitly.
 	try {
 		const userMcpPath = cwd ? getMCPConfigPath("user", cwd) : undefined;
 		const [mcpDisabledNames, mcpForcedEnabled] = await Promise.all([
@@ -179,7 +259,11 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const id = makeExtensionId("mcp", server.name);
 			const forced = mcpForcedEnabled.has(server.name);
 			const sourceSaysDisabled = server.enabled === false && !forced;
-			const isDisabled = mcpDisabledNames.has(server.name) || disabledExtensions.has(id) || sourceSaysDisabled;
+			const isDisabled =
+				mcpDisabledNames.has(server.name) ||
+				disabledExtensions.has(id) ||
+				sourceSaysDisabled ||
+				builtinDrops?.has(server.name) === true;
 			const { state, disabledReason } = resolveState(
 				server._source,
 				isDisabled,
@@ -294,270 +378,6 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 }
 
 /**
- * Build sidebar tree from extensions.
- * Groups by provider → kind.
- */
-export function buildSidebarTree(extensions: Extension[]): TreeNode[] {
-	const providers = getAllProvidersInfo();
-	const tree: TreeNode[] = [];
-
-	// Group extensions by provider and kind
-	const byProvider = new Map<string, Map<ExtensionKind, Extension[]>>();
-
-	for (const ext of extensions) {
-		const providerId = ext.source.provider;
-		if (!byProvider.has(providerId)) {
-			byProvider.set(providerId, new Map());
-		}
-		const byKind = byProvider.get(providerId)!;
-		if (!byKind.has(ext.kind)) {
-			byKind.set(ext.kind, []);
-		}
-		byKind.get(ext.kind)!.push(ext);
-	}
-
-	// Build tree nodes for each provider (show ALL providers, even if disabled/empty)
-	for (const provider of providers) {
-		// Skip the 'native' provider as it cannot be toggled
-		if (provider.id === "native") continue;
-
-		const byKind = byProvider.get(provider.id);
-		const kindNodes: TreeNode[] = [];
-		let totalCount = 0;
-
-		if (byKind && byKind.size > 0) {
-			for (const [kind, exts] of byKind) {
-				totalCount += exts.length;
-				kindNodes.push({
-					id: `${provider.id}:${kind}`,
-					label: getKindDisplayName(kind),
-					type: "kind",
-					enabled: provider.enabled,
-					collapsed: true,
-					children: [],
-					count: exts.length,
-				});
-			}
-
-			// Sort kind nodes by count (most items first)
-			kindNodes.sort((a, b) => (b.count || 0) - (a.count || 0));
-		}
-
-		tree.push({
-			id: provider.id,
-			label: provider.displayName,
-			type: "provider",
-			enabled: provider.enabled,
-			collapsed: false,
-			children: kindNodes,
-			count: totalCount,
-		});
-	}
-
-	return tree;
-}
-
-/**
- * Flatten tree for keyboard navigation.
- */
-export function flattenTree(tree: TreeNode[]): FlatTreeItem[] {
-	const flat: FlatTreeItem[] = [];
-	let index = 0;
-
-	function walk(node: TreeNode, depth: number): void {
-		flat.push({ node, depth, index: index++ });
-		if (!node.collapsed) {
-			for (const child of node.children) {
-				walk(child, depth + 1);
-			}
-		}
-	}
-
-	for (const node of tree) {
-		walk(node, 0);
-	}
-
-	return flat;
-}
-
-/**
- * Apply fuzzy filter to extensions.
- */
-export function applyFilter(extensions: Extension[], query: string): Extension[] {
-	if (!query.trim()) {
-		return extensions;
-	}
-
-	const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
-	if (tokens.length === 0) {
-		return extensions;
-	}
-
-	return extensions.filter(ext => {
-		const searchable = [
-			ext.name,
-			ext.displayName,
-			ext.description || "",
-			ext.trigger || "",
-			ext.source.providerName,
-			ext.kind,
-		].join(" ");
-
-		return tokens.every(token => fuzzyMatch(token, searchable).matches);
-	});
-}
-
-/**
- * Get display name for extension kind.
- */
-function getKindDisplayName(kind: ExtensionKind): string {
-	switch (kind) {
-		case "extension-module":
-			return "Extension Modules";
-		case "skill":
-			return "Skills";
-		case "rule":
-			return "Rules";
-		case "tool":
-			return "Tools";
-		case "mcp":
-			return "MCP Servers";
-		case "prompt":
-			return "Prompts";
-		case "instruction":
-			return "Instructions";
-		case "context-file":
-			return "Context Files";
-		case "hook":
-			return "Hooks";
-		case "slash-command":
-			return "Slash Commands";
-		default:
-			return kind;
-	}
-}
-
-/**
- * Build provider tabs from extensions.
- */
-export function buildProviderTabs(extensions: Extension[]): ProviderTab[] {
-	const providers = getAllProvidersInfo();
-	const tabs: ProviderTab[] = [];
-
-	// Count extensions per provider
-	const countByProvider = new Map<string, number>();
-	for (const ext of extensions) {
-		const count = countByProvider.get(ext.source.provider) ?? 0;
-		countByProvider.set(ext.source.provider, count + 1);
-	}
-
-	// ALL tab first
-	tabs.push({
-		id: "all",
-		label: "ALL",
-		enabled: true,
-		count: extensions.length,
-	});
-
-	// Provider tabs (skip native)
-	for (const provider of providers) {
-		if (provider.id === "native") continue;
-		const count = countByProvider.get(provider.id) ?? 0;
-		tabs.push({
-			id: provider.id,
-			label: provider.displayName,
-			enabled: provider.enabled,
-			count,
-		});
-	}
-
-	// Sort: ALL first, then enabled by count, then disabled by count, then empty
-	tabs.sort((a, b) => {
-		if (a.id === "all") return -1;
-		if (b.id === "all") return 1;
-
-		// Categorize: 0 = enabled with content, 1 = disabled, 2 = empty+enabled
-		const category = (t: ProviderTab) => {
-			if (t.count === 0 && t.enabled) return 2; // empty
-			if (!t.enabled) return 1; // disabled
-			return 0; // enabled with content
-		};
-
-		const aCat = category(a);
-		const bCat = category(b);
-		if (aCat !== bCat) return aCat - bCat;
-
-		// Within same category, sort by count descending
-		return b.count - a.count;
-	});
-
-	return tabs;
-}
-
-/**
- * Filter extensions by provider tab.
- */
-export function filterByProvider(extensions: Extension[], providerId: string): Extension[] {
-	if (providerId === "all") {
-		return extensions;
-	}
-	return extensions.filter(ext => ext.source.provider === providerId);
-}
-
-export { isShadowedExtension } from "./types";
-
-/**
- * Apply setting-backed item disable overrides to an existing dashboard state.
- * This gives the UI immediate feedback while the full capability refresh runs.
- */
-export function applyDisabledExtensionsToState(state: DashboardState, disabledIds: string[]): DashboardState {
-	const disabled = new Set(disabledIds);
-	const updateExtension = (ext: Extension): Extension => {
-		if (disabled.has(ext.id)) {
-			if (ext.state === "disabled" && ext.disabledReason === "item-disabled") return ext;
-			return { ...ext, state: "disabled", disabledReason: "item-disabled" };
-		}
-
-		if (ext.state !== "disabled" || ext.disabledReason !== "item-disabled") return ext;
-		const { state, disabledReason } = resolveState(ext.source, false, isShadowedExtension(ext));
-		if (disabledReason) return { ...ext, state, disabledReason };
-		const enabled: Extension = { ...ext, state };
-		delete enabled.disabledReason;
-		return enabled;
-	};
-
-	return {
-		...state,
-		extensions: state.extensions.map(updateExtension),
-		tabFiltered: state.tabFiltered.map(updateExtension),
-		searchFiltered: state.searchFiltered.map(updateExtension),
-		selected: state.selected ? updateExtension(state.selected) : null,
-	};
-}
-
-/**
- * Create initial dashboard state.
- */
-export async function createInitialState(cwd?: string, disabledIds?: string[]): Promise<DashboardState> {
-	const extensions = await loadAllExtensions(cwd, disabledIds);
-	const tabs = buildProviderTabs(extensions);
-	const tabFiltered = extensions; // "all" tab by default
-	const searchFiltered = tabFiltered;
-
-	return {
-		tabs,
-		activeTabIndex: 0,
-		extensions,
-		tabFiltered,
-		searchFiltered,
-		searchQuery: "",
-		listIndex: 0,
-		scrollOffset: 0,
-		selected: searchFiltered[0] ?? null,
-	};
-}
-
-/**
  * Toggle provider enabled state.
  */
 export function toggleProvider(providerId: string): boolean {
@@ -580,46 +400,4 @@ export function toggleUserSource(providerId: string): boolean {
 	}
 	enableUserSource(providerId);
 	return true;
-}
-
-/**
- * Refresh state after toggle.
- */
-export async function refreshState(
-	state: DashboardState,
-	cwd?: string,
-	disabledIds?: string[],
-): Promise<DashboardState> {
-	const extensions = await loadAllExtensions(cwd, disabledIds);
-	const tabs = buildProviderTabs(extensions);
-
-	// Get current provider from tabs
-	const activeTab = state.tabs[state.activeTabIndex];
-	const providerId = activeTab?.id ?? "all";
-
-	// Re-apply filters
-	const tabFiltered = filterByProvider(extensions, providerId);
-	const searchFiltered = applyFilter(tabFiltered, state.searchQuery);
-
-	// Find new index for current provider (tabs may have reordered)
-	const newActiveTabIndex = tabs.findIndex(t => t.id === providerId);
-	const activeTabIndex = newActiveTabIndex >= 0 ? newActiveTabIndex : 0;
-
-	// Try to preserve selection
-	const selectedId = state.selected?.id;
-	let selected = selectedId ? searchFiltered.find(e => e.id === selectedId) : null;
-	if (!selected && searchFiltered.length > 0) {
-		selected = searchFiltered[Math.min(state.listIndex, searchFiltered.length - 1)];
-	}
-
-	return {
-		...state,
-		tabs,
-		activeTabIndex,
-		extensions,
-		tabFiltered,
-		searchFiltered,
-		selected: selected ?? null,
-		listIndex: selected ? searchFiltered.indexOf(selected) : 0,
-	};
 }

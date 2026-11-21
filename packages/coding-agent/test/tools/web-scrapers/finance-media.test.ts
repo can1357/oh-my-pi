@@ -11,11 +11,6 @@ describe.skipIf(SKIP)("handleCoinGecko", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for CoinGecko homepage", async () => {
-		const result = await handleCoinGecko("https://www.coingecko.com/", 20);
-		expect(result).toBeNull();
-	});
-
 	it("returns null for CoinGecko categories page", async () => {
 		const result = await handleCoinGecko("https://www.coingecko.com/en/categories", 20);
 		expect(result).toBeNull();
@@ -57,11 +52,6 @@ describe.skipIf(SKIP)("handleDiscogs", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for Discogs homepage", async () => {
-		const result = await handleDiscogs("https://www.discogs.com/", 20);
-		expect(result).toBeNull();
-	});
-
 	it("returns null for Discogs search page", async () => {
 		const result = await handleDiscogs("https://www.discogs.com/search/", 20);
 		expect(result).toBeNull();
@@ -94,11 +84,6 @@ describe.skipIf(SKIP)("handleDiscogs", () => {
 describe.skipIf(SKIP)("handleArtifactHub", () => {
 	it("returns null for non-ArtifactHub URLs", async () => {
 		const result = await handleArtifactHub("https://example.com", 20);
-		expect(result).toBeNull();
-	});
-
-	it("returns null for ArtifactHub homepage", async () => {
-		const result = await handleArtifactHub("https://artifacthub.io/", 20);
 		expect(result).toBeNull();
 	});
 

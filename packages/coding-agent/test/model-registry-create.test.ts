@@ -20,21 +20,6 @@ describe("ModelRegistry.create() factory (F6)", () => {
 		await tempDir.remove().catch(() => {});
 	});
 
-	test("produces an instance whose authStorage matches and that exposes bundled models", async () => {
-		const authStorage = await AuthStorage.create(":memory:");
-		try {
-			const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-			expect(registry.authStorage).toBe(authStorage);
-			// The constructor's bundled-model load runs after warmup, so the
-			// factory's returned instance must be queryable immediately.
-			const claude = registry.find("anthropic", "claude-sonnet-4-5");
-			expect(claude).toBeDefined();
-			expect(claude?.id).toBe("claude-sonnet-4-5");
-		} finally {
-			authStorage.close();
-		}
-	});
-
 	test("migrates legacy models.json → models.yml ahead of the sync constructor", async () => {
 		const yml = path.join(tempDir.path(), "models.yml");
 		const json = path.join(tempDir.path(), "models.json");

@@ -124,4 +124,19 @@ describe("applyCanonicalLimitFallback", () => {
 		expect(peer.contextWindow).toBe(400000);
 		expect(peer.maxTokens).toBe(128000);
 	});
+
+	it("clamps maxTokens to contextWindow when canonical reference exceeds smaller provider context", () => {
+		const models: ModelSpec<Api>[] = [
+			// Reference: 1M context, 384k maxTokens
+			spec({ id: "deepseek-flash", provider: "deepseek", contextWindow: 1000000, maxTokens: 384000 }),
+			// Provider-specific context ceiling (128k) with null maxTokens
+			spec({ id: "deepseek-flash-v4", provider: "yolo-auto", contextWindow: 131072, maxTokens: null }),
+		];
+
+		applyCanonicalLimitFallback(models);
+
+		const yolo = find(models, "yolo-auto", "deepseek-flash-v4");
+		expect(yolo.contextWindow).toBe(131072);
+		expect(yolo.maxTokens).toBe(131072);
+	});
 });

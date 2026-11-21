@@ -1,0 +1,72 @@
+// Most questions one System One judgment request may carry. A server that
+// validates the `questions` map rejects an oversized request (HTTP 400/422)
+// before judging anything, so the judge splits larger requests. Scoped by
+// adapter, not provider name: self-hosted servers are user-configured judge
+// rows under arbitrary provider ids.
+//
+// Unassigned, verified without a count cap (token budget only): Kev
+// (github.com/jaredpalmer/kev: "A request may carry any number of
+// questions"), and wev / OpenJev-4B (github.com/alanhuangyoo/OpenJev, which
+// answers under any requested name).
+//
+// Unassigned: OpenAI Decisions (`openai-decisions`); its guide
+// (developers.openai.com/api/docs/guides/decisions) documents no question cap.
+//
+// Not isolatable: openjev-sglang (github.com/ekzhang/openjev-sglang) caps at
+// 64 but answers as `jev-latest` or its upstream model name, the same ids as
+// hosted jev; the hosted cap of 32 below stays under it.
+on-api "typesafe" "openrouter-decisions" {
+	// Hosted jev (TypeSafe, and the same backend behind OpenRouter Decisions,
+	// Command Code and OpenCode Zen) answers HTTP 400 `questions must map 1
+	// through 32 ids to typed questions` above 32 questions, observed since
+	// 2026-10-01 despite docs.typesafe.ai/models citing only a 64k-token budget.
+	models "jev*" "*/jev*" {
+		judgment-questions-max 32
+	}
+	// residue: no taxonomy class covers self-hosted OpenJEV deployments. An
+	// `openjev-*` gateway answered HTTP 422 `at most 16 items`
+	// (https://github.com/can1357/oh-my-pi/issues/15081); which server that is
+	// remains unidentified, so unknown OpenJEV ids keep the smallest cap
+	// observed. Over-splitting costs requests; under-splitting fails them.
+	models "*openjev*" {
+		judgment-questions-max 16
+	}
+	// residue: razorback16/openjev and its Swift port (Algorythm-Canada/
+	// OpenJevSwift) reject more than OPENJEV_MAX_QUESTIONS, default 256, with
+	// `at most 256 questions per request`. These are the wire names their
+	// DiffusionGemma, Laya, Verdict and JevK5 backends answer under; exact ids
+	// outrank the glob above.
+	models "openjev-latest" "openjev-0.1" "laya-1.0" "verdict-1.4" "jevk5-0.2" {
+		judgment-questions-max 256
+	}
+}
+// Cloudflare Clef, Clef Flash and Clef Omni: the Workers AI input schema
+// bounds `questions` to 1-64 entries (`maxProperties: 64`,
+// developers.cloudflare.com/workers-ai/models/clef, /clef-flash, /clef-omni).
+on-api "workers-ai-systemone" {
+	models "@cf/cloudflare/clef*" {
+		judgment-questions-max 64
+	}
+}
+// OpenRouter Decisions serves its `cloudflare/clef*` rows from Workers AI (and
+// PrimeIntellect, whose cap is unpublished), so the Workers AI schema's 64
+// applies; scoped apart from the TypeSafe block above.
+on-api "openrouter-decisions" {
+	models "cloudflare/clef*" {
+		judgment-questions-max 64
+	}
+}
+// Nace Drex rejects more than 512 questions with `at most 512 questions
+// allowed` (console.nace.ai/docs/drex/guides/questions#batch-questions-into-one-call).
+on-api "nace-systemone" {
+	models "*" {
+		judgment-questions-max 512
+	}
+}
+// Gemini Decisions takes 1 to 1,000 questions per request
+// (aistudio.google.com/docs/decisions-api#limits).
+on-api "google-decisions" {
+	models "*" {
+		judgment-questions-max 1000
+	}
+}

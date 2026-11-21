@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { areJsonValuesEqual } from "./equality";
 import { epochNext, once } from "./stamps";
 
@@ -11,10 +12,6 @@ import { epochNext, once } from "./stamps";
  */
 
 type Json = unknown;
-
-function isPlainObject(value: Json): value is Record<string, Json> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 const TYPE_NAMES: Record<string, true> = {
 	string: true,
@@ -55,7 +52,7 @@ function checkSchemaArray(value: Json, epoch: number): boolean {
 }
 
 function checkSchemaMap(value: Json, epoch: number): boolean {
-	if (!isPlainObject(value)) return false;
+	if (!isRecord(value)) return false;
 	for (const k in value) {
 		if (!checkNode(value[k], epoch)) return false;
 	}
@@ -66,7 +63,7 @@ function checkSchemaMap(value: Json, epoch: number): boolean {
 function checkNode(node: Json, epoch: number): boolean {
 	// Boolean schemas (`true` / `false`) are valid JSON Schema.
 	if (node === true || node === false) return true;
-	if (!isPlainObject(node)) return false;
+	if (!isRecord(node)) return false;
 	if (!once(node, epoch)) return true;
 
 	if ("type" in node && !checkTypeKeyword(node.type)) return false;
@@ -115,7 +112,7 @@ function checkNode(node: Json, epoch: number): boolean {
 	if ("dependentSchemas" in node && !checkSchemaMap(node.dependentSchemas, epoch)) return false;
 	if ("dependentRequired" in node) {
 		const value = node.dependentRequired;
-		if (!isPlainObject(value)) return false;
+		if (!isRecord(value)) return false;
 		for (const k in value) {
 			const entry = value[k];
 			if (!Array.isArray(entry) || !entry.every(item => typeof item === "string")) return false;

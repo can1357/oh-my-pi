@@ -12,4 +12,5 @@ export const DEVICE_CODE_VALUE_HOOKS: Record<string, Lazy<ValueHook>> = {
 };
 export const DEVICE_CODE_AFTER_EXCHANGE_HOOKS: Record<string, Lazy<AfterExchangeHook>> = {
 	"muse-code-key": () => import("../oauth/muse-code").then(module => module.attachMuseCodeApiKey),
+	"factory-droid-region": () => import("../oauth/factory-droid").then(module => module.attachFactoryDroidRegion),
 };

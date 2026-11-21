@@ -28,7 +28,7 @@ describe("agentic commit model routing", () => {
 		if (!primaryModel || !smolModel) throw new Error("Expected bundled commit test models");
 
 		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		vi.spyOn(Settings, "init").mockResolvedValue(Settings.isolated());
 		vi.spyOn(ModelRegistry.prototype, "refresh").mockResolvedValue(undefined);
 		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);

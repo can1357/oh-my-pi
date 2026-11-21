@@ -142,19 +142,17 @@ describe("buildSessionContext dangling toolCalls", () => {
 		expect((assistant as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBe(1);
 	});
 
-	it("keeps a dangling toolCall in transcript mode with keepDanglingToolCalls", () => {
+	it("keeps an in-flight toolCall in the transcript", () => {
 		const context = buildSessionContext(danglingToolCallEntries, undefined, undefined, {
 			transcript: true,
-			keepDanglingToolCalls: true,
+			inFlightToolCallIds: new Set(["call-1"]),
 		});
 
 		expect(danglingCallIds(context.messages)).toEqual(["call-1"]);
 	});
 
 	it("always strips dangling toolCalls from the LLM context and drops the emptied turn", () => {
-		const context = buildSessionContext(danglingToolCallEntries, undefined, undefined, {
-			keepDanglingToolCalls: true,
-		});
+		const context = buildSessionContext(danglingToolCallEntries);
 
 		expect(danglingCallIds(context.messages)).toEqual([]);
 		expect(context.messages.some(message => message.role === "assistant")).toBe(false);
@@ -376,7 +374,7 @@ describe("buildSessionContext failed replay tails", () => {
 			],
 			undefined,
 			undefined,
-			{ transcript: true, keepDanglingToolCalls: true },
+			{ transcript: true },
 		);
 
 		expect(context.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);

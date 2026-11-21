@@ -8,7 +8,7 @@
  * tests to spy on.
  */
 
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, truncate, tryParseJson } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 import type { HindsightConfig } from "./config";
 
@@ -18,6 +18,10 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_REFLECT_TIMEOUT_MS = 120_000;
 const DEFAULT_RECALL_TIMEOUT_MS = 30_000;
 const DEFAULT_RETAIN_TIMEOUT_MS = 60_000;
+/** Server-side maximum `limit` on the mental-model list endpoint; keeps typical banks to one request. */
+const MENTAL_MODEL_PAGE_SIZE = 1000;
+/** Cap on server-supplied error text copied into `HindsightError.message` (logged unconditionally). */
+const MAX_ERROR_DETAIL_CHARS = 2000;
 
 export type Budget = "low" | "mid" | "high" | string;
 export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
@@ -177,8 +181,14 @@ export interface MentalModelSummary {
 	[key: string]: unknown;
 }
 
+/** Complete mental-model listing; also the wire shape of one list page. */
 export interface MentalModelListResponse {
 	items: MentalModelSummary[];
+	/**
+	 * Match count across all pages. `listMentalModels` always sets it to the complete item count;
+	 * on a single wire page it is server-reported (Hindsight ≥ 0.9) and absent on older servers.
+	 */
+	total?: number;
 	[key: string]: unknown;
 }
 
@@ -235,7 +245,36 @@ interface RequestOptions {
 	timeoutMs?: number;
 }
 
-export class HindsightApi {
+/** Public surface of {@link HindsightApi}; a subagent worker holds a remote implementation of main's client. */
+export interface HindsightClientApi {
+	retain(bankId: string, content: string, options?: RetainOptions): Promise<RetainResponse>;
+	retainBatch(bankId: string, items: MemoryItemInput[], options?: RetainBatchOptions): Promise<RetainResponse>;
+	recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResponse>;
+	reflect(bankId: string, query: string, options?: ReflectOptions): Promise<ReflectResponse>;
+	createBank(bankId: string, options?: CreateBankOptions): Promise<BankProfileResponse>;
+	listMemories(bankId: string, options?: ListMemoriesOptions): Promise<ListMemoriesResponse>;
+	listDocuments(bankId: string, options?: ListDocumentsOptions): Promise<ListDocumentsResponse>;
+	getDocument(bankId: string, documentId: string): Promise<DocumentResponse | null>;
+	updateDocument(bankId: string, documentId: string, options: UpdateDocumentOptions): Promise<DocumentResponse>;
+	deleteDocument(bankId: string, documentId: string): Promise<boolean>;
+	listMentalModels(bankId: string, options?: ListMentalModelsOptions): Promise<MentalModelListResponse>;
+	getMentalModel(
+		bankId: string,
+		mentalModelId: string,
+		options?: GetMentalModelOptions,
+	): Promise<MentalModelSummary | null>;
+	createMentalModel(
+		bankId: string,
+		name: string,
+		sourceQuery: string,
+		options?: CreateMentalModelOptions,
+	): Promise<CreateMentalModelResponse>;
+	refreshMentalModel(bankId: string, mentalModelId: string): Promise<RefreshMentalModelResponse>;
+	deleteMentalModel(bankId: string, mentalModelId: string): Promise<boolean>;
+	getMentalModelHistory(bankId: string, mentalModelId: string): Promise<MentalModelHistoryEntry[]>;
+}
+
+export class HindsightApi implements HindsightClientApi {
 	#baseUrl: string;
 	#headers: Record<string, string>;
 	#reflectTimeoutMs: number;
@@ -435,18 +474,28 @@ export class HindsightApi {
 	}
 
 	/**
-	 * List mental models in a bank. Default `detail=content` includes the
-	 * generated `content` text but excludes the heavyweight `reflect_response`
-	 * provenance chain (which can exceed 200KB). Use `detail=metadata` for
-	 * inventory and `detail=full` only for debug surfaces.
+	 * List every mental model in a bank, following `limit`/`offset` pages until
+	 * the server runs out — the endpoint defaults to 100 per page, so a single
+	 * request would silently drop the rest of a shared bank. Default
+	 * `detail=content` includes the generated `content` text but excludes the
+	 * heavyweight `reflect_response` provenance chain (which can exceed 200KB).
+	 * Use `detail=metadata` for inventory and `detail=full` only for debug surfaces.
 	 */
 	async listMentalModels(bankId: string, options?: ListMentalModelsOptions): Promise<MentalModelListResponse> {
-		return this.#request<MentalModelListResponse>(
-			"GET",
-			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models`,
-			"listMentalModels",
-			{ query: { detail: options?.detail ?? "content" }, signal: options?.signal },
-		);
+		const path = `/v1/default/banks/${encodeURIComponent(bankId)}/mental-models`;
+		const detail = options?.detail ?? "content";
+		const items: MentalModelSummary[] = [];
+		while (true) {
+			const page = await this.#request<MentalModelListResponse>("GET", path, "listMentalModels", {
+				query: { detail, limit: MENTAL_MODEL_PAGE_SIZE, offset: items.length },
+				signal: options?.signal,
+			});
+			const pageItems = page.items ?? [];
+			items.push(...pageItems);
+			if (pageItems.length < MENTAL_MODEL_PAGE_SIZE) break;
+			if (typeof page.total === "number" && items.length >= page.total) break;
+		}
+		return { items, total: items.length };
 	}
 
 	/** Fetch a single mental model. Returns `null` on 404. */
@@ -561,7 +610,7 @@ export class HindsightApi {
 		}
 
 		const text = await response.text();
-		const parsed = text ? safeJsonParse(text) : null;
+		const parsed = text ? tryParseJson(text) : null;
 
 		if (!response.ok) {
 			const details =
@@ -571,8 +620,9 @@ export class HindsightApi {
 					: undefined) ??
 				parsed ??
 				text;
+			const detailText = typeof details === "string" ? details : JSON.stringify(details);
 			throw new HindsightError(
-				`${operation} failed: ${typeof details === "string" ? details : JSON.stringify(details)}`,
+				`${operation} failed: ${truncate(detailText, MAX_ERROR_DETAIL_CHARS)}`,
 				response.status,
 				details,
 			);
@@ -658,13 +708,6 @@ function pruneUndefined(obj: Record<string, unknown>): Record<string, unknown> {
 	return out;
 }
 
-function safeJsonParse(text: string): unknown {
-	try {
-		return JSON.parse(text);
-	} catch {
-		return null;
-	}
-}
 export function createHindsightClient(config: HindsightConfig & { hindsightApiUrl: string }): HindsightApi {
 	return new HindsightApi({
 		baseUrl: config.hindsightApiUrl,

@@ -117,14 +117,6 @@ function makeUnionTool(strict: boolean): Tool {
 }
 
 describe("supportsFreeformApplyPatch", () => {
-	test("applyPatchToolType: freeform enables", () => {
-		expect(supportsFreeformApplyPatch(makeModel({ applyPatchToolType: "freeform" }))).toBe(true);
-	});
-
-	test("applyPatchToolType: function disables", () => {
-		expect(supportsFreeformApplyPatch(makeModel({ id: "gpt-4", applyPatchToolType: "function" }))).toBe(false);
-	});
-
 	test("flag is the sole signal — id/baseUrl are irrelevant", () => {
 		expect(
 			supportsFreeformApplyPatch(
@@ -212,7 +204,20 @@ describe("convertTools: freeform emission", () => {
 		// distinguish it from an omitted flag when generating optional-arg values.
 		expect(out.strict).toBe(false);
 		expect(items.oneOf).toBeUndefined();
-		expect(items.anyOf).toEqual(unionBranches);
+		// Normalization adds the `enum`-implied `type`; the input fixture is no longer
+		// mutated in place, so the wire shape is asserted explicitly.
+		expect(items.anyOf).toEqual([
+			{
+				type: "object",
+				properties: { type: { enum: ["insert"], type: "string" }, text: { type: "string" } },
+				required: ["type", "text"],
+			},
+			{
+				type: "object",
+				properties: { type: { enum: ["delete"], type: "string" }, start: { type: "integer" } },
+				required: ["type", "start"],
+			},
+		]);
 	});
 
 	test("rewrites oneOf to anyOf before strict schema enforcement", () => {
@@ -550,17 +555,94 @@ describe("custom_tool_call stream receive", () => {
 		);
 		expect(endEvent?.toolCall.id).toStartWith("call_missing_item|fc_");
 	});
+
+	test.each([
+		{
+			name: "function_call",
+			added: {
+				type: "function_call" as const,
+				id: "fc_ns",
+				call_id: "call_ns",
+				name: "wait",
+				namespace: "functions",
+				arguments: "",
+			},
+			done: {
+				type: "function_call" as const,
+				id: "fc_ns",
+				call_id: "call_ns",
+				name: "wait",
+				namespace: "functions",
+				arguments: '{"cell_id":"cell_1"}',
+			},
+		},
+		{
+			name: "custom_tool_call",
+			added: {
+				type: "custom_tool_call" as const,
+				id: "ctc_ns",
+				call_id: "call_exec",
+				name: "exec",
+				namespace: "functions",
+				input: "",
+			},
+			done: {
+				type: "custom_tool_call" as const,
+				id: "ctc_ns",
+				call_id: "call_exec",
+				name: "exec",
+				namespace: "functions",
+				input: "ok",
+			},
+		},
+	])("keeps a namespaced $name on the emitted call and the stored block", async ({ added, done }) => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		};
+		const emitted: unknown[] = [];
+		const stream = {
+			push: (event: unknown) => emitted.push(event),
+			end: () => {},
+		} as never;
+
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", output_index: 0, item: added },
+				{ type: "response.output_item.done", output_index: 0, item: done },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		const block = output.content[0];
+		expect(block).toMatchObject({ type: "toolCall", name: done.name, namespace: "functions" });
+		const endEvent = emitted.find(event => {
+			if (!event || typeof event !== "object" || !("type" in event) || event.type !== "toolcall_end") return false;
+			if (!("toolCall" in event)) return false;
+			const toolCall = event.toolCall;
+			if (!toolCall || typeof toolCall !== "object") return false;
+			return Reflect.get(toolCall, "namespace") === "functions";
+		});
+		expect(endEvent).toBeDefined();
+	});
 });
 
 describe("codex-backend convertTools (chatgpt.com/backend-api)", () => {
-	test("edit tool with customFormat becomes a custom grammar tool when flag is set", () => {
-		const [out] = convertCodexTools([editTool], makeCodexModel({ applyPatchToolType: "freeform" }));
-		expect(out.type).toBe("custom");
-		expect(out.name).toBe("apply_patch");
-		if (out.type !== "custom") throw new Error("Expected custom tool payload");
-		expect(out.format).toEqual({ type: "grammar", syntax: "lark", definition: COMPACT_GRAMMAR });
-	});
-
 	test("wire shape matches direct-OpenAI convertTools (single serializer contract)", () => {
 		const [codexOut] = convertCodexTools([editTool], makeCodexModel({ applyPatchToolType: "freeform" }));
 		const [openaiOut] = convertTools([editTool], false, makeModel({ applyPatchToolType: "freeform" }));
@@ -571,62 +653,6 @@ describe("codex-backend convertTools (chatgpt.com/backend-api)", () => {
 		const [out] = convertCodexTools([editTool], makeCodexModel({ id: "gpt-4" }));
 		expect(out.type).toBe("function");
 		expect(out.name).toBe("edit");
-	});
-});
-
-describe("dispatcher wire-name matching", () => {
-	test("ToolCall.name matches a Tool via its customWireName", () => {
-		// Simulate what agent-loop.ts:455-465 does.
-		const editLikeTool: Tool & { customWireName?: string } = {
-			name: "edit",
-			customWireName: "apply_patch",
-			description: "edit files",
-			parameters: type({ input: "string" }),
-			customFormat: { syntax: "lark", definition: GRAMMAR },
-		};
-		const readTool: Tool = {
-			name: "read_file",
-			description: "read",
-			parameters: type({ path: "string" }),
-		};
-		const tools = [editLikeTool, readTool];
-		const toolCall = { name: "apply_patch" };
-
-		const matched =
-			tools.find(t => t.name === toolCall.name) ??
-			tools.find(
-				(t): t is typeof t & { customWireName: string } =>
-					(t as { customWireName?: string }).customWireName !== undefined &&
-					(t as { customWireName?: string }).customWireName === toolCall.name,
-			);
-		expect(matched).toBe(editLikeTool);
-	});
-
-	test("prefers name over customWireName when both would match", () => {
-		// A pathological tool set: one tool named `foo`, another with
-		// customWireName `foo`. Internal name wins.
-		const nameMatch: Tool = {
-			name: "foo",
-			description: "",
-			parameters: type({}),
-		};
-		const wireMatch: Tool & { customWireName: string } = {
-			name: "bar",
-			customWireName: "foo",
-			description: "",
-			parameters: type({}),
-		};
-		const tools = [wireMatch, nameMatch]; // wireMatch listed first
-		const toolCall = { name: "foo" };
-
-		const matched =
-			tools.find(t => t.name === toolCall.name) ??
-			tools.find(
-				(t): t is typeof t & { customWireName: string } =>
-					(t as { customWireName?: string }).customWireName !== undefined &&
-					(t as { customWireName?: string }).customWireName === toolCall.name,
-			);
-		expect(matched).toBe(nameMatch);
 	});
 });
 

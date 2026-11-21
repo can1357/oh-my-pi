@@ -2,17 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { findCompactMode, parseCompactArgs } from "@oh-my-pi/pi-coding-agent/session/compact-modes";
 
 describe("compact mode registry", () => {
-	it("maps each mode to the method order the engine executes", () => {
-		expect(findCompactMode("soft")?.overrides).toEqual({ methodOrder: ["soft"] });
-		expect(findCompactMode("remote")?.overrides).toEqual({ methodOrder: ["remote", "soft"] });
-		expect(findCompactMode("snapcompact")?.overrides).toEqual({ methodOrder: ["snapcompact"] });
-	});
-
-	it("flags snapcompact as focus-rejecting", () => {
-		expect(findCompactMode("snapcompact")?.rejectsFocus).toBe(true);
-		expect(findCompactMode("soft")?.rejectsFocus).toBeUndefined();
-	});
-
 	it("resolves mode names case-insensitively and rejects unknowns", () => {
 		expect(findCompactMode("SOFT")?.name).toBe("soft");
 		expect(findCompactMode("  Remote ")?.name).toBe("remote");

@@ -61,4 +61,23 @@ describe.skipIf(!SHOULD_RUN)("python eval workflow helpers", () => {
 			await kernel.shutdown();
 		}
 	});
+
+	it("read() returns a spill's full text from the local:// root", async () => {
+		using tempDir = TempDir.createSync("@eval-workflow-spill-");
+		const root = path.join(tempDir.path(), "local");
+		await Bun.write(path.join(root, "12.log"), `${"v".repeat(14_430)}\nsecond\nthird\n`);
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const code = [
+				"print('LEN', len(read('local://12.log')))",
+				"print('LINE', read('local://12.log', offset=2, limit=1).strip())",
+			].join("\n");
+			const result = await executePythonWithKernel(kernel, code, { localRoots: { local: root } });
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("LEN 14444");
+			expect(result.output).toContain("LINE second");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
 });

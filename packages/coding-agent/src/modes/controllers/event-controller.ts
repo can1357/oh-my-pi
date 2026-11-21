@@ -1,59 +1,94 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
-import { AssistantMessageComponent } from "../../modes/components/assistant-message";
-import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { detectCacheInvalidation } from "@oh-my-pi/pi-tui/chat/cache-invalidation-marker";
 import {
 	groupedReadUsageCallIds,
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
 	readArgsHaveTarget,
-} from "../../modes/components/read-tool-group";
-import { TodoReminderComponent } from "../../modes/components/todo-reminder";
+} from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
 import {
+	isReplyWrite,
+	ReplyWriteComponent,
+	replyDisplayMessage,
+	toolResultReplies,
+} from "@oh-my-pi/pi-tui/chat/reply-write";
+import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
+import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
+import { isNativeRendering, nativePacing } from "@oh-my-pi/pi-tui/native/state";
+import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import {
+	asyncJobState,
+	isSettledJobFrame,
+	parksAsBackground,
+	settleWithJobFrame,
 	ToolExecutionComponent,
 	type ToolExecutionHandle,
 	toolRenderName,
-} from "../../modes/components/tool-execution";
-import { TtsrNotificationComponent } from "../../modes/components/ttsr-notification";
-import { createUsageRowBlock, turnElapsedMs } from "../../modes/components/usage-row";
-import { getSymbolTheme, theme } from "../../modes/theme/theme";
-import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
-import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
+} from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
+import { eventBlockId, PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
+import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import type { InteractiveModeContext } from "../../modes/types";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { AgentSessionEvent } from "../../session/agent-session";
+import type { WakeSources } from "../../session/agent-session-events";
 import {
 	isSilentAbort,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
 	readQueueChipText,
 	resolveAbortLabel,
+	isUserInterruptAbort,
+	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
-import { type ApprovalMode, resolveApproval } from "../../tools/approval";
-import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
-import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../../tools/resolve";
-import { nextActionableTask } from "../../tools/todo";
+import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
+import { PROPOSE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
+import { proposeDispatchDetails } from "../../tools/resolve";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
-import { canonicalizeMessage } from "../../utils/thinking-display";
-import { setTerminalTitleState } from "../../utils/title-generator";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
 import {
 	assistantMessageLinkTargets,
 	createAssistantMessageComponent,
 	refreshAssistantMessageLinkTargets,
-} from "../utils/interactive-context-helpers";
+} from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
 	splitAssistantMessageToolTimeline,
-} from "../utils/transcript-render-helpers";
+} from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { isWarpCliAgentProtocolActive } from "../warp-events";
+import { ComposerPredictionController } from "./composer-prediction-controller";
 import { StreamingRevealController } from "./streaming-reveal";
 import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
+import { createToolCallBlock } from "./tool-call-block";
+
+import {
+	cfgCompletionNotify,
+	cfgDisplayCacheMissMarker,
+	cfgDisplayShowTokenUsage,
+	cfgDisplayShowTurnTime,
+	cfgDisplaySmoothStreaming,
+	cfgErrorNotify,
+	cfgTerminalShowImages,
+	cfgTerminalShowProgress,
+} from "../settings";
+import { cfgReadToolResultPreview } from "../../tools/settings";
+import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
 
@@ -68,10 +103,47 @@ const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
  * oldest live-region card retires as soon as a new one would exceed the cap.
  */
 const MAX_LIVE_IRC_CARDS = 4;
-const IDLE_RECAP_MIN_SECONDS = 1;
-const IDLE_RECAP_MAX_SECONDS = 3600;
 
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
+
+function hasCommittedTodo(events: unknown): boolean {
+	return (
+		Array.isArray(events) && events.some(event => isRecord(event) && event.op === "todo" && event.committed === true)
+	);
+}
+
+/** Eval status events live on each cell. */
+function hasNestedTodo(details: unknown): boolean {
+	if (!isRecord(details)) return false;
+	return (
+		Array.isArray(details.cells) && details.cells.some(cell => isRecord(cell) && hasCommittedTodo(cell.statusEvents))
+	);
+}
+
+interface AsyncResultJob {
+	jobId?: string;
+	type?: string;
+	label?: string;
+	durationMs?: number;
+}
+
+/**
+ * Toast text for an `async-result` delivery whose jobs are all background
+ * task spawns, or undefined when it is anything else (bash jobs keep their
+ * transcript rows). Native rendering only: the task call's agent nodes carry
+ * the outcome, so the delivery needs no transcript block of its own.
+ */
+function nativeTaskJobToast(message: { role: string; customType?: string; details?: unknown }): string | undefined {
+	if (message.role !== "custom" || message.customType !== "async-result" || !isRecord(message.details)) return;
+	const details = message.details as AsyncResultJob & { jobs?: AsyncResultJob[] };
+	const jobs = details.jobs && details.jobs.length > 0 ? details.jobs : [details];
+	if (!jobs.every(job => job.type === "task")) return;
+	if (jobs.length > 1) return `${jobs.length} background tasks completed`;
+	const job = jobs[0]!;
+	const name = sanitizeText(job.label ?? job.jobId ?? "task").trim() || "task";
+	const took = typeof job.durationMs === "number" ? ` · ${formatDuration(job.durationMs)}` : "";
+	return `Background task ${name} completed${took}`;
+}
 
 function exposesRawPartialJson(toolName: string, rawInput: boolean, tool: unknown): boolean {
 	if (rawInput) return true;
@@ -90,10 +162,79 @@ interface ApprovalPreviewGate {
 	started: boolean;
 }
 
+/** `value` as plan approval details, when it has their shape. */
+function planApprovalDetails(value: unknown): PlanApprovalDetails | undefined {
+	if (
+		value &&
+		typeof value === "object" &&
+		"planFilePath" in value &&
+		"title" in value &&
+		"planExists" in value &&
+		typeof value.planFilePath === "string" &&
+		typeof value.title === "string" &&
+		typeof value.planExists === "boolean"
+	) {
+		return { planFilePath: value.planFilePath, title: value.title, planExists: value.planExists };
+	}
+	return undefined;
+}
+
+/**
+ * Working-line text for a streamed tool intent, or `undefined` when unusable.
+ * Streamed JSON can deliver non-string `i` (object, number, boolean) before
+ * schema validation, so the type is guarded too.
+ */
+function normalizeIntent(intent: unknown): string | undefined {
+	if (typeof intent !== "string") return undefined;
+	return (
+		intent
+			.trim()
+			.replace(/\s*\.+$/, "")
+			.trim() || undefined
+	);
+}
+
+function workingIntentLabel(intent: unknown): string | undefined {
+	return typeof intent === "string" ? normalizeIntent(toolIntentLabel(intent)) : undefined;
+}
+
+/** Ids per kind the awaiting working row lists before collapsing the rest to `+N`. */
+const ASYNC_WAIT_LISTED_IDS = 3;
+
+function describeWaitedIds(ids: readonly string[], noun: string): string | undefined {
+	if (ids.length === 0) return undefined;
+	if (ids.length === 1) return `${noun} ${ids[0]}`;
+	const listed = ids.slice(0, ASYNC_WAIT_LISTED_IDS).join(", ");
+	const more = ids.length > ASYNC_WAIT_LISTED_IDS ? ` +${ids.length - ASYNC_WAIT_LISTED_IDS}` : "";
+	return `${ids.length} ${noun}s: ${listed}${more}`;
+}
+
+/**
+ * Working-row text while a paused run waits only on outside sources (background
+ * jobs, child agents, queued results or peer messages); short enough for a
+ * narrow terminal.
+ */
+function formatAsyncWaitLabel(sources: WakeSources | undefined): string {
+	const parts = [
+		describeWaitedIds(sources?.jobs ?? [], "background job"),
+		describeWaitedIds(sources?.agents ?? [], "agent"),
+	].filter(part => part !== undefined);
+	if (parts.length > 0) return `Waiting for ${parts.join("; ")}`;
+	return sources?.queued ? "Delivering queued results" : "Waiting for background work";
+}
+
+/** Render args for a live card: the harness strips `i` from executed args, but the stored block keeps it. */
+function renderArgsWithIntent(args: unknown, intent: string | undefined): unknown {
+	if (intent === undefined || !isRecord(args) || INTENT_FIELD in args) return args;
+	return { ...args, [INTENT_FIELD]: intent };
+}
+
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	/** Timestamp of the current turn's user prompt; drives the usage row's prompt→yield delta. */
 	#turnStartedAt: number | undefined = undefined;
+	/** The running turn's token and cost totals, shown under its last answer on a TSP terminal. */
+	readonly #turnUsage = new TurnUsageTally();
 	/** When the last completed run ended; stale `#turnStartedAt` anchors are cleared against it. */
 	#lastAgentEndAt: number | undefined = undefined;
 	// Count of visible assistant content blocks (rendered non-empty text/thinking)
@@ -105,16 +246,20 @@ export class EventController {
 	#lastVisibleBlockCount = 0;
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
-	#backgroundTaskCallIds = new Set<string>();
-	/** Tool calls whose approval prompt drove the title into `attention`; cleared
-	 *  at their tool_execution_end so the title returns to `working`. */
-	#approvalAttentionToolCallIds = new Set<string>();
+	/** Returned calls parked for their background job's frames ({@link parksAsBackground}). */
+	#backgroundCallIds = new Set<string>();
+	/**
+	 * A job's settled frame ({@link isSettledJobFrame}) that landed while its
+	 * call was still executing, keyed by call id: a fast job can settle before
+	 * the call's `tool_execution_end` carries its `running` start result.
+	 */
+	#settledBeforeReturn = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#pendingStreamPreviews = new Map<string, unknown>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
-	#toolTimelineComponents = new Map<string, Component>();
+	#toolTimelineComponents = new Map<string, ToolExecutionHandle>();
 	// Stable identity for a streamed tool call while its assistant message is
 	// live: maps the tool-call block's position in the streaming message to the
 	// id last seen at that position. A streamed id can CHANGE across cumulative
@@ -155,6 +300,8 @@ export class EventController {
 	// with the other transcript anchors.
 	#orphanedToolCompletions = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_end" }>>();
 	#postToolAssistantComponents = new Map<string, AssistantMessageComponent>();
+	/** Reply blocks drawn per call from its frames' `details.replies`, in order; the count dedupes repeated frames. */
+	#toolReplyBlocks = new Map<string, AssistantMessageComponent[]>();
 	#lastAssistantComponent: AssistantMessageComponent | undefined = undefined;
 	// Assistant component whose turn-ending error is currently mirrored in the
 	// pinned banner. Its inline `Error: …` line is suppressed while pinned and
@@ -174,17 +321,14 @@ export class EventController {
 	// mid-retry blip or the final settle — only the retry lifecycle events
 	// (never deferred) can tell them apart.
 	#retryPending = false;
-	#idleCompactionTimer?: NodeJS.Timeout;
-	#idleRecapTimer?: NodeJS.Timeout;
-	// In-flight ephemeral recap turn; aborted by #cancelIdleRecap when any
-	// activity (new turn, compaction, editor draft) supersedes the idle recap.
-	#idleRecapAbort?: AbortController;
+	/** Next-message prediction offered as composer ghost text after a completed turn. */
+	readonly composerPrediction: ComposerPredictionController;
 	#ircExpiryTimers = new Map<string, NodeJS.Timeout>();
 	// Insertion-ordered IRC cards not yet retired; values are the transcript
 	// components each card contributed (see #retireIrcCard for the guard).
 	#liveIrcCards = new Map<string, Component[]>();
-	// Most recent `hub` tool block whose result still had every watched job
-	// running. Kept un-finalized (live) so the next `hub` call displaces it —
+	// Most recent `wait` tool block whose result still had every watched job
+	// running. Kept un-finalized (live) so the next `wait` call displaces it —
 	// one persistent poll instead of a stack of "waiting on N jobs" frames —
 	// and sealed in place the moment anything else lands below it.
 	#displaceablePollComponent: ToolExecutionComponent | undefined = undefined;
@@ -194,12 +338,30 @@ export class EventController {
 	#displaceableTodoComponent: ToolExecutionComponent | undefined = undefined;
 	// Most recent TTSR notification block. A new ttsr_triggered event merges its
 	// rules into this block while it is still the (live-region) transcript tail.
-	#lastTtsrNotification: TtsrNotificationComponent | undefined = undefined;
+	#lastTtsrNotification: PresentedBlock<TtsrNotificationComponent> | undefined = undefined;
 	#streamingReveal: StreamingRevealController;
 	#toolArgsReveal: ToolArgsRevealController;
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
 	#terminalProgressActive = false;
+	/**
+	 * Whether the running auto-compaction turned terminal progress on itself.
+	 * Only then does its end turn progress off: a compaction inside a live turn
+	 * leaves the turn's progress for that turn's `agent_end`, so Tern (which
+	 * reads progress as busy state) never sees the agent stop mid-run.
+	 */
+	#compactionOwnsProgress = false;
+	/**
+	 * The working row names what a paused run awaits instead of the last intent,
+	 * until the next loop starts or the run ends.
+	 */
+	#showingAsyncWait = false;
+	/**
+	 * The user ended a wait on outside work ({@link stopAwaitingAsyncWork}): the
+	 * run's next `agent_end` is a user interrupt, though its messages are the
+	 * last loop's normal yield.
+	 */
+	#stoppedWaiting = false;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -209,11 +371,15 @@ export class EventController {
 	// feeds it. Speech stays intact: `#vocalizeDelta` runs at ARRIVAL for every
 	// delta before the snapshot is coalesced away.
 	#pendingMessageUpdate: Extract<AgentSessionEvent, { type: "message_update" }> | undefined = undefined;
+	// Provider replay resets are not cumulative: retain the boundary even when
+	// the empty restart snapshot is replaced by a later delta before painting.
+	#pendingMessageRestart = false;
 	#messageUpdateTimer: NodeJS.Timeout | undefined = undefined;
 	/** Tail of the serialized dispatch chain; see #runSerialized. */
 	#dispatchTail: Promise<void> = Promise.resolve();
 	/** Whether a chained run is currently in flight (awaiting its own awaits). */
 	#dispatchInFlight = false;
+	#dispatchGeneration = 0;
 	// Deltas already fed to speech at arrival by the coalescer. `#handleMessageUpdate`
 	// also vocalizes so the direct `handleEvent` path (tests, session focus replay)
 	// keeps working — the WeakSet makes the coalesced path speak each delta exactly
@@ -230,6 +396,15 @@ export class EventController {
 		this.#detachToolApprovalPreviewWaiter = session?.extensionRunner?.setToolApprovalPreviewWaiter(toolCallId =>
 			this.#waitForToolApprovalPreview(toolCallId),
 		);
+		vocalizer.setModelSource(
+			session?.modelRegistry && session.settings
+				? {
+						settings: session.settings,
+						registry: session.modelRegistry,
+						getSessionProvider: () => session.model?.provider,
+					}
+				: null,
+		);
 		vocalizer.setEnhancer(
 			session?.modelRegistry && session.agent && session.settings
 				? new SpeechEnhancer({
@@ -237,21 +412,31 @@ export class EventController {
 						registry: session.modelRegistry,
 						sessionId: session.sessionId,
 						metadataResolver: provider => session.agent.metadataForProvider(provider),
+						getSessionProvider: () => session.model?.provider,
+						usageLedger: session.sessionManager,
 					})
 				: null,
 		);
 		this.#streamingReveal = new StreamingRevealController({
-			getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
+			// Extension text renderers get the full text so far on each drawn update (deltas within one
+			// frame are coalesced), never a partly revealed prefix from the typing reveal. A terminal that
+			// paces streamed `md` itself (Tern) gets the text as it arrives: pacing it here too is wasted work.
+			getSmoothStreaming: () =>
+				cfgDisplaySmoothStreaming.get(this.ctx.settings) &&
+				!nativePacing() &&
+				!this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.().length,
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			getProseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			requestRender: component => this.ctx.ui.requestComponentRender(component),
 		});
 		this.#toolArgsReveal = new ToolArgsRevealController({
-			getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
+			getSmoothStreaming: () => cfgDisplaySmoothStreaming.get(this.ctx.settings),
 			requestRender: component => this.ctx.ui.requestComponentRender(component),
 		});
+		this.composerPrediction = new ComposerPredictionController(ctx);
 		this.#handlers = {
 			agent_start: e => this.#handleAgentStart(e),
+			agent_pause: e => this.#handleAgentPause(e),
 			agent_end: e => this.#handleAgentEnd(e),
 			turn_start: async () => {},
 			turn_end: async e => this.#handleTurnEnd(e),
@@ -271,8 +456,20 @@ export class EventController {
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
+			// `/compact` drives its own loader (command-controller); these exist for RPC hosts.
+			manual_compaction_start: async () => {},
+			manual_compaction_end: async () => {},
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
+			// The cache details show a refresh in flight; its hit moves the entry's expiry, a miss turns it cold.
+			cache_warming_start: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
+			cache_warming_end: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
@@ -281,6 +478,7 @@ export class EventController {
 			irc_message: e => this.#handleIrcMessage(e),
 			notice: e => this.#handleNotice(e),
 			model_changed: async () => {
+				vocalizer.enforceProviderPolicy();
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
 			},
@@ -323,16 +521,20 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
+			// The pending-messages bar mirrors the queue snapshot this event carries.
+			// Refreshing only at the TUI's own call sites left pills of messages the
+			// agent drained by itself (live steering, a queued batch it delivered)
+			// standing above the prompt after they were sent.
+			queue_update: async () => {
+				this.ctx.updatePendingMessagesDisplay();
+			},
 		} satisfies AgentSessionEventHandlers;
 	}
 
-	/** Rearm idle compaction after a live idle setting changes. */
-	refreshIdleCompactionTimer(): void {
-		if (this.ctx.viewSession.isStreaming) {
-			this.#cancelIdleCompaction();
-			return;
-		}
-		this.#scheduleIdleCompaction();
+	/** Surface an idle recap reply in the transcript as a one-line {@link RecapNotice}; a blank reply mounts nothing. */
+	presentIdleRecap(reply: string): void {
+		const recap = previewLine(reply, TRUNCATE_LENGTHS.RECAP);
+		if (recap) this.ctx.present(new RecapNotice(recap));
 	}
 
 	dispose(): void {
@@ -344,10 +546,10 @@ export class EventController {
 			this.#messageUpdateTimer = undefined;
 		}
 		this.#pendingMessageUpdate = undefined;
+		this.#pendingMessageRestart = false;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
-		this.#cancelIdleCompaction();
-		this.#cancelIdleRecap();
+		this.composerPrediction.cancel();
 		this.#setTerminalProgress(false);
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
@@ -360,10 +562,18 @@ export class EventController {
 		this.#lastReadGroup?.finalize();
 		this.#lastReadGroup = undefined;
 	}
+
+	/** A rebuild may replace settled read groups while preserving groups with in-flight reads. */
+	reconcileReadGroupAfterRebuild(): void {
+		if (this.#lastReadGroup && !this.ctx.chatContainer.children.includes(this.#lastReadGroup)) {
+			this.#resetReadGroup();
+		}
+	}
+
 	/** Freeze foreground tool cards once no live agent turn can complete them. */
 	#sealAbandonedForegroundTools(): void {
 		const background = new Set<ToolExecutionHandle>();
-		for (const toolCallId of this.#backgroundTaskCallIds) {
+		for (const toolCallId of this.#backgroundCallIds) {
 			const component = this.ctx.pendingTools.get(toolCallId);
 			if (component) background.add(component);
 		}
@@ -376,15 +586,49 @@ export class EventController {
 			}
 		}
 		for (const [toolCallId, component] of this.ctx.pendingTools) {
-			if (this.#backgroundTaskCallIds.has(toolCallId)) continue;
+			if (this.#backgroundCallIds.has(toolCallId)) continue;
 			component.seal();
 			this.ctx.pendingTools.delete(toolCallId);
 		}
-		this.#backgroundTaskCallIds = new Set(
-			Array.from(this.#backgroundTaskCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
+		this.#backgroundCallIds = new Set(
+			Array.from(this.#backgroundCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
 		);
 		this.#finalizeAbandonedPostToolSegments();
 	}
+	/**
+	 * Seal live tool cards no result can reach any more, as a new assistant message opens: a card
+	 * no call id routes to, and, when the message is new rather than restored (`fresh`), a streamed
+	 * preview from an earlier message whose call never started. One such card at the transcript
+	 * frontier blocks history retirement for the rest of the session, squeezing every later block
+	 * to its one-line live allocation.
+	 */
+	#sealOrphanedToolCards(fresh: boolean): void {
+		const children = this.ctx.chatContainer.children;
+		const states = this.ctx.chatContainer.blockStates();
+		const idsByCard = new Map<Component, string[]>();
+		for (const [toolCallId, card] of this.ctx.pendingTools) {
+			const ids = idsByCard.get(card);
+			if (ids) ids.push(toolCallId);
+			else idsByCard.set(card, [toolCallId]);
+		}
+		for (let index = children.length - 1; index >= 0 && states[index] !== "committed"; index--) {
+			const card = children[index];
+			if (!(card instanceof ToolExecutionComponent) || card.isTranscriptBlockFinalized()) continue;
+			const ids = idsByCard.get(card);
+			if (ids === undefined) {
+				card.seal();
+				continue;
+			}
+			if (!fresh) continue;
+			if (ids.some(id => this.#executionStartedCallIds.has(id) || this.#backgroundCallIds.has(id))) continue;
+			for (const id of ids) {
+				this.#toolArgsReveal.finish(id);
+				this.ctx.pendingTools.delete(id);
+			}
+			card.seal();
+		}
+	}
+
 	/**
 	 * Finalize post-tool assistant segments whose `message_end` never fired (a
 	 * mid-stream throw or dropped agent_end). They are created unfinalized at
@@ -397,6 +641,62 @@ export class EventController {
 		for (const component of this.#postToolAssistantComponents.values()) {
 			component.markTranscriptBlockFinalized();
 		}
+	}
+
+	/**
+	 * Reply blocks of calls still executing. Their results are not in the session's committed
+	 * messages yet, so a transcript rebuild must carry these over itself; replies of finished
+	 * calls are replayed from the persisted results.
+	 */
+	liveToolReplies(): Component[] {
+		const live: Component[] = [];
+		for (const toolCallId of this.#executionStartedCallIds) {
+			const blocks = this.#toolReplyBlocks.get(toolCallId);
+			if (blocks) live.push(...blocks);
+		}
+		return live;
+	}
+
+	/** Draw the replies of a call's frame (`details.replies`, see {@link toolResultReplies}) it has not drawn yet. */
+	#showToolReplies(toolCallId: string, details: unknown): void {
+		const replies = toolResultReplies(details);
+		const shown = this.#toolReplyBlocks.get(toolCallId) ?? [];
+		if (replies.length <= shown.length) return;
+		for (const text of replies.slice(shown.length)) {
+			const block = createAssistantMessageComponent(this.ctx, replyDisplayMessage(text));
+			this.ctx.chatContainer.addChild(block);
+			shown.push(block);
+		}
+		this.#toolReplyBlocks.set(toolCallId, shown);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Post-tool text segments of the reply still streaming. The reply is not in the session's
+	 * committed messages until `message_end`, so a transcript rebuild must carry these over itself;
+	 * segments of replies already committed are replayed instead.
+	 */
+	liveAssistantSegments(): AssistantMessageComponent[] {
+		const live = this.ctx.viewSession.agent.state.streamMessage;
+		if (live?.role !== "assistant") return [];
+		const segments: AssistantMessageComponent[] = [];
+		for (const block of live.content) {
+			if (block.type !== "toolCall") continue;
+			const segment = this.#postToolAssistantComponents.get(block.id);
+			if (segment) segments.push(segment);
+		}
+		return segments;
+	}
+
+	/**
+	 * Hand the streaming reply's components the current extension text renderers (the setting enabling
+	 * them changed). Renderers take the full text, so a running typing reveal is dropped first.
+	 */
+	applyAssistantTextRenderers(): void {
+		this.#streamingReveal.resyncSmoothStreaming();
+		const renderers = this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [];
+		this.ctx.streamingComponent?.setTextRenderers(renderers);
+		for (const segment of this.liveAssistantSegments()) segment.setTextRenderers(renderers);
 	}
 	#approvalPreviewGate(toolCallId: string): ApprovalPreviewGate {
 		let gate = this.#approvalPreviewGates.get(toolCallId);
@@ -432,7 +732,7 @@ export class EventController {
 	#getReadGroup(): ReadToolGroupComponent {
 		if (!this.#lastReadGroup) {
 			const group = new ReadToolGroupComponent({
-				showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
+				showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 			});
 			group.setExpanded(this.ctx.toolOutputExpanded);
 			this.ctx.chatContainer.addChild(group);
@@ -452,19 +752,26 @@ export class EventController {
 		}
 	}
 
+	inheritReadToolAssistant(toolCallId: string, component: AssistantMessageComponent | undefined): void {
+		if (component) this.#readToolCallAssistantComponents.set(toolCallId, component);
+		else this.#readToolCallAssistantComponents.delete(toolCallId);
+	}
+
 	#clearReadToolCall(toolCallId: string): void {
 		this.#readToolCallArgs.delete(toolCallId);
 		this.#readToolCallAssistantComponents.delete(toolCallId);
 	}
 
 	#retractToolCardEntry(toolCallId: string, component: ToolExecutionHandle): void {
-		component.seal();
 		let removeComponent = true;
 		if (component instanceof ReadToolGroupComponent) {
 			removeComponent = component.removeEntry(toolCallId);
 			if (component === this.#lastReadGroup) this.#resetReadGroup();
 		}
-		if (removeComponent) this.ctx.chatContainer.removeChild(component);
+		if (removeComponent) {
+			component.seal();
+			this.ctx.chatContainer.removeChild(component);
+		}
 		this.ctx.pendingTools.delete(toolCallId);
 		this.#toolTimelineComponents.delete(toolCallId);
 		this.#clearReadToolCall(toolCallId);
@@ -474,9 +781,9 @@ export class EventController {
 	 * Re-key a live streamed tool card whose id changed mid-stream (see
 	 * {@link #streamedToolCallIdByIndex}). Moves every id-keyed tracker from the
 	 * old id to the new one so the next cumulative `message_update` reuses the
-	 * existing card instead of creating a duplicate (#6879). The card component
-	 * itself is id-agnostic (routing is via `pendingTools`), so only the maps and
-	 * the shared read group's entry need re-keying.
+	 * existing card instead of creating a duplicate (#6879). Routing is via
+	 * `pendingTools`; the card (or the shared read group's entry) takes the new
+	 * id too, which is what transcript presenters see and refresh by.
 	 */
 	#migrateStreamedToolCallId(oldId: string, newId: string): void {
 		// `oldId` may be "" (the block streamed before its id): that empty key still
@@ -491,6 +798,14 @@ export class EventController {
 		if (timeline && !this.#toolTimelineComponents.has(newId)) {
 			this.#toolTimelineComponents.delete(oldId);
 			this.#toolTimelineComponents.set(newId, timeline);
+		}
+		// A held stream preview is id-keyed and consumed under the card's final id
+		// (message_update creation / tool_execution_start); move it with the card
+		// or the lookup under `newId` misses and the preview is lost.
+		const preview = this.#pendingStreamPreviews.get(oldId);
+		if (preview !== undefined && !this.#pendingStreamPreviews.has(newId)) {
+			this.#pendingStreamPreviews.delete(oldId);
+			this.#pendingStreamPreviews.set(newId, preview);
 		}
 		// The reveal controller is id-keyed; drop the stale target so the loop's
 		// setTarget/bind under the new id owns the paced reveal.
@@ -511,15 +826,76 @@ export class EventController {
 		// A collapsed read renders into a shared group keyed by id; rename its
 		// entry so the row isn't duplicated under the new id.
 		if (pending instanceof ReadToolGroupComponent) pending.renameEntry(oldId, newId);
+		// A card now owning `newId` hands presenters (and refreshTranscript) that id.
+		else if (pending instanceof ToolExecutionComponent && this.ctx.pendingTools.get(newId) === pending) {
+			pending.renameToolCallId(newId);
+		}
 		// A fast completion can land under `newId` while the card is still keyed
 		// by `oldId`. Consume it now that the card owns the final id; the normal
 		// creation path is skipped on a re-key (Codex review on #6881).
 		if (pending) this.#settleHeldCompletionIfPresent(newId, pending);
 	}
 
+	/**
+	 * Reconcile every tool-call block's live card key with the id its content
+	 * block currently carries (see {@link #streamedToolCallIdByIndex}), moving
+	 * the id-keyed card state via {@link #migrateStreamedToolCallId}. A streamed
+	 * id can change across cumulative `message_update`s (#6879), and the final
+	 * snapshot can carry a per-index id change no delta ever showed — agent-loop
+	 * mints and re-keys tool-call ids at `done`, after the last
+	 * `message_update` — so the `message_end` path replays the same
+	 * reconciliation the delta path runs. Without it the pre-mint card is never
+	 * re-keyed: `tool_execution_start` mounts a second card under the minted id
+	 * and the streamed one ghosts until sealed.
+	 *
+	 * Several indices can share one streamed id (a reused provider id, or
+	 * siblings that all streamed before their ids materialized) and then split
+	 * into distinct ids. The shared card migrates only when the old id is no
+	 * longer referenced by any content index — the last referencer keeps the
+	 * card; the other indices pick up their own card at `tool_execution_start`.
+	 * Migrating unconditionally would move the one shared card to the first
+	 * re-keyed sibling and leave the index that kept the old id with no streamed
+	 * card (a reverse ghost).
+	 */
+	#reconcileStreamedToolCallIds(content: AssistantMessage["content"]): void {
+		const finalIdByIndex = new Map<number, string>();
+		for (let contentIndex = 0; contentIndex < content.length; contentIndex++) {
+			const block = content[contentIndex]!;
+			if (block.type === "toolCall") finalIdByIndex.set(contentIndex, block.id);
+		}
+		for (const [contentIndex, id] of finalIdByIndex) {
+			const priorId = this.#streamedToolCallIdByIndex.get(contentIndex);
+			if (priorId === undefined || priorId === id) {
+				this.#streamedToolCallIdByIndex.set(contentIndex, id);
+				continue;
+			}
+			const oldIdStaysOwned = [...finalIdByIndex].some(([otherIndex, otherId]) => {
+				if (otherIndex === contentIndex) return false;
+				// The other index either already resolved to the old id or still
+				// streams under it and has not been re-keyed yet.
+				return otherId === priorId || this.#streamedToolCallIdByIndex.get(otherIndex) === priorId;
+			});
+			if (oldIdStaysOwned) {
+				// The shared card stays under `priorId` for its remaining
+				// referencer; make it show THAT call's arguments, not the last
+				// cumulative update's (every sibling updated the one shared card
+				// while the id was still shared).
+				const card = this.ctx.pendingTools.get(priorId);
+				for (const [keeperIndex, keeperId] of finalIdByIndex) {
+					if (keeperId !== priorId || keeperIndex === contentIndex) continue;
+					const keeper = content[keeperIndex];
+					if (card && keeper?.type === "toolCall") card.updateArgs(keeper.arguments, priorId);
+				}
+			} else {
+				this.#migrateStreamedToolCallId(priorId, id);
+			}
+			this.#streamedToolCallIdByIndex.set(contentIndex, id);
+		}
+	}
+
 	#inlineReadToolImages(
 		toolCallId: string,
-		result: { content: Array<{ type: string; data?: string; mimeType?: string }> },
+		result: { content: Array<{ type: string; data?: string; mimeType?: string }>; details?: unknown },
 	): boolean {
 		const assistantComponent = this.#readToolCallAssistantComponents.get(toolCallId);
 		if (!assistantComponent) return false;
@@ -529,9 +905,11 @@ export class EventController {
 					content.type === "image" && typeof content.data === "string" && typeof content.mimeType === "string",
 			)
 			.map(content => ({ type: "image", data: content.data, mimeType: content.mimeType }));
-		if (images.length === 0) return false;
-		assistantComponent.setToolResultImages(toolCallId, images);
-		return settings.get("terminal.showImages");
+		const mediaPath = readMediaPath(result.details);
+		if (images.length === 0 && !mediaPath) return false;
+		assistantComponent.setToolResultImages(toolCallId, images, mediaPath);
+		// A media-only result (a model, a PDF) still settles through the read group.
+		return images.length > 0 && cfgTerminalShowImages.get(settings);
 	}
 
 	#insertAfterTranscriptComponent(anchor: Component | undefined, component: Component): boolean {
@@ -541,26 +919,28 @@ export class EventController {
 		if (children.slice(anchorIndex + 1).some(child => !this.ctx.chatContainer.canRemoveBlock(child))) {
 			return false;
 		}
-		this.ctx.chatContainer.addChild(component);
-		children.splice(children.length - 1, 1);
-		children.splice(anchorIndex + 1, 0, component);
+		this.ctx.chatContainer.insertChildAt(component, anchorIndex + 1);
 		return true;
 	}
 
 	#upsertPostToolAssistantSegment(
 		toolCallId: string,
 		segment: AssistantMessage | undefined,
+		contentOffset: number | undefined,
 		linkTargets?: ReadonlyMap<string, string>,
+		opts?: { transient?: boolean },
 	): AssistantMessageComponent | undefined {
 		if (!segment || !assistantHasVisibleContent(segment)) return undefined;
 		const existing = this.#postToolAssistantComponents.get(toolCallId);
 		if (existing) {
 			if (linkTargets) existing.setLinkTargets(linkTargets);
-			existing.updateContent(segment);
+			// Closed segments may already be committed to append-only terminal history.
+			if (existing.isTranscriptBlockFinalized()) return existing;
+			existing.updateContent(segment, opts);
 			return existing;
 		}
-		const component = createAssistantMessageComponent(this.ctx, undefined, linkTargets);
-		component.updateContent(segment);
+		const component = createAssistantMessageComponent(this.ctx, undefined, linkTargets, contentOffset);
+		component.updateContent(segment, opts);
 		this.#postToolAssistantComponents.set(toolCallId, component);
 		if (!this.#insertAfterTranscriptComponent(this.#toolTimelineComponents.get(toolCallId), component)) {
 			this.ctx.chatContainer.addChild(component);
@@ -568,15 +948,8 @@ export class EventController {
 		return component;
 	}
 
-	#updateWorkingMessageFromIntent(intent: unknown): void {
+	#updateWorkingMessageFromIntent(trimmed: string | undefined): void {
 		if (this.ctx.session.isAborting) return;
-		// Streamed JSON can deliver non-string `i` (object, number, boolean) before
-		// schema validation; `?.` only guards null/undefined, so guard the type too.
-		if (typeof intent !== "string") return;
-		const trimmed = intent
-			.trim()
-			.replace(/\s*\.+$/, "")
-			.trim();
 		if (!trimmed || trimmed === this.#lastIntent) return;
 		this.#lastIntent = trimmed;
 		this.ctx.setWorkingMessage(trimmed);
@@ -594,24 +967,43 @@ export class EventController {
 		// the listener's first await, preserving the timing the coalescing
 		// tests assert on. `message_update` enqueue is itself synchronous and
 		// needs no serialization.
-		this.ctx.unsubscribe = this.ctx.session.subscribe(async (event: AgentSessionEvent) => {
-			// Coalesce the cumulative `message_update` deltas of a streaming turn
-			// into at most one handler run per window. `#handleMessageUpdate` is
-			// synchronous, so without this every token re-runs the whole
-			// streaming rebuild (splitAssistantMessageToolTimeline, reveal
-			// setTarget, per-block tool-call reconciliation) even though the TUI
-			// paints at most ~30fps — at 40-100 tps the handler work then
-			// dominates the CPU profile of an idle-looking streaming session
-			// (issue #7443). Only the latest snapshot is meaningful; non-update
-			// events flush the pending snapshot first so ordering is preserved.
-			if (event.type === "message_update") {
-				this.#enqueueMessageUpdate(event);
-				return;
-			}
-			await this.#runSerialized(async () => {
-				await this.#flushPendingMessageUpdate();
-				await this.handleEvent(event);
-			});
+		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event));
+	}
+
+	/**
+	 * Route one session event through the same pipeline as the live
+	 * subscription: coalesce the cumulative `message_update` deltas of a
+	 * streaming turn into at most one handler run per window, and serialize
+	 * every other event behind any in-flight run.
+	 *
+	 * `#handleMessageUpdate` is synchronous, so without coalescing every token
+	 * re-runs the whole streaming rebuild (splitAssistantMessageToolTimeline,
+	 * reveal setTarget, per-block tool-call reconciliation) even though the TUI
+	 * paints at most ~30fps — at 40-100 tps the handler work then dominates the
+	 * CPU profile of an idle-looking streaming session (issue #7443). Only the
+	 * latest snapshot is meaningful; non-update events flush the pending
+	 * snapshot first so ordering is preserved.
+	 */
+	async dispatchSessionEvent(event: AgentSessionEvent): Promise<void> {
+		if (event.type === "message_update") {
+			this.#enqueueMessageUpdate(event);
+			return;
+		}
+		await this.runSerialized(async () => {
+			await this.handleEvent(event);
+		});
+	}
+
+	/**
+	 * Run `run` in the serialized session-event dispatch pipeline, flushing any
+	 * pending coalesced `message_update` first. This does not drop work when the
+	 * viewed session changes: a caller that queues across that change must skip
+	 * the stale work itself.
+	 */
+	async runSerialized(run: () => Promise<void>): Promise<void> {
+		await this.#runSerialized(async () => {
+			await this.#flushPendingMessageUpdate();
+			await run();
 		});
 	}
 
@@ -678,6 +1070,7 @@ export class EventController {
 		this.#vocalizeDelta(event);
 		this.#vocalizedMessageUpdates.add(event);
 		this.#pendingMessageUpdate = event;
+		this.#pendingMessageRestart ||= event.assistantMessageEvent.type === "start";
 		if (this.#messageUpdateTimer) return;
 		this.#messageUpdateTimer = setTimeout(() => {
 			this.#messageUpdateTimer = undefined;
@@ -710,6 +1103,11 @@ export class EventController {
 		const event = this.#pendingMessageUpdate;
 		if (!event) return;
 		this.#pendingMessageUpdate = undefined;
+		const restarted = this.#pendingMessageRestart;
+		this.#pendingMessageRestart = false;
+		if (restarted && event.assistantMessageEvent.type !== "start") {
+			await this.#restartAssistantStream(event.message);
+		}
 		await this.handleEvent(event);
 	}
 
@@ -730,6 +1128,8 @@ export class EventController {
 			this.#messageUpdateTimer = undefined;
 		}
 		this.#pendingMessageUpdate = undefined;
+		this.#pendingMessageRestart = false;
+		this.#dispatchGeneration++;
 		this.#resetReadGroup();
 		this.#lastVisibleBlockCount = 0;
 		this.#renderedCustomMessages.clear();
@@ -742,19 +1142,20 @@ export class EventController {
 		this.#syntheticFailureCards.clear();
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
-		this.#backgroundTaskCallIds.clear();
-		this.#approvalAttentionToolCallIds.clear();
+		this.#toolReplyBlocks.clear();
+		this.#backgroundCallIds.clear();
+		this.#settledBeforeReturn.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
 		this.#turnStartedAt = undefined;
+		this.#turnUsage.reset();
 		this.#lastAgentEndAt = undefined;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
 		this.#retryPending = this.ctx.viewSession.isRetrying;
-		this.#cancelIdleCompaction();
-		this.#cancelIdleRecap();
+		this.composerPrediction.cancel();
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
 		}
@@ -765,6 +1166,33 @@ export class EventController {
 		this.#lastTtsrNotification = undefined;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
+		this.#seedHeldCompletionsFromPendingResults();
+	}
+
+	/** Restore display state without replaying completion notifications or persistence. */
+	#seedHeldCompletionsFromPendingResults(): void {
+		const pending = this.ctx.viewSession.agent.getPendingToolResults();
+		for (const result of pending) {
+			if (this.#toolTimelineComponents.has(result.toolCallId) && !this.ctx.pendingTools.has(result.toolCallId)) {
+				continue;
+			}
+			this.#orphanedToolCompletions.set(result.toolCallId, {
+				type: "tool_execution_end",
+				toolCallId: result.toolCallId,
+				toolName: result.toolName,
+				result: { content: result.content, details: result.details },
+				isError: result.isError,
+			});
+		}
+	}
+
+	/** Settle replay-created cards without waiting for another streaming update. */
+	restorePendingToolResults(): void {
+		this.#seedHeldCompletionsFromPendingResults();
+		for (const [toolCallId, component] of this.ctx.pendingTools) {
+			this.#toolTimelineComponents.set(toolCallId, component);
+			this.#settleHeldCompletionIfPresent(toolCallId, component);
+		}
 	}
 
 	async handleEvent(event: AgentSessionEvent): Promise<void> {
@@ -785,7 +1213,13 @@ export class EventController {
 
 	#setTerminalProgress(active: boolean): void {
 		if (active) {
-			if (this.#terminalProgressActive || this.ctx.settings?.get("terminal.showProgress") !== true) return;
+			// Tern reads the progress as the pane's busy state (its tab's live
+			// dot), so it gets it whatever the setting says. Tern's panes carry
+			// `KITTY_WINDOW_ID`, so `TERMINAL.id` says kitty there.
+			const wanted =
+				Bun.env.TERM_PROGRAM?.toLowerCase() === "tern" ||
+				(this.ctx.settings ? cfgTerminalShowProgress.get(this.ctx.settings) : undefined) === true;
+			if (this.#terminalProgressActive || !wanted) return;
 			this.ctx.ui.terminal.setProgress(true);
 			this.#terminalProgressActive = true;
 			return;
@@ -832,6 +1266,9 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		// A loop started before the interrupt landed; that abort ends this loop
+		// as a plain user interrupt.
+		this.#stoppedWaiting = false;
 		// A run with no user prompt in it (synthetic-only: `/goal` kickoff,
 		// approved-plan execution) must not measure prompt→yield from an unrelated
 		// earlier prompt. Normal user turns reseed via message_start before
@@ -858,10 +1295,18 @@ export class EventController {
 		this.#syntheticFailureCards.clear();
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
+		this.#toolReplyBlocks.clear();
 		this.#lastIntent = undefined;
+		// Something outside woke the run: the row stops naming the wait and
+		// follows this loop's intents again.
+		if (this.#showingAsyncWait) {
+			this.#showingAsyncWait = false;
+			this.ctx.setWorkingMessage();
+		}
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#resetReadGroup();
+		this.#seedHeldCompletionsFromPendingResults();
 		this.#resolveDisplaceableTodo();
 		this.#lastAssistantComponent = undefined;
 		// Restore terminal errors in transcript history when their banner clears.
@@ -877,18 +1322,30 @@ export class EventController {
 			this.ctx.retryLoader = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		this.#cancelIdleCompaction();
-		this.#cancelIdleRecap();
+		this.composerPrediction.cancel();
 		this.ctx.statusLine.markActivityStart();
+		// The turn owns progress from here; a compaction that started it hands it over.
+		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
-		setTerminalTitleState("working");
+		setRunStatus({ state: "working" });
 		this.ctx.ui.requestRender();
 	}
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
 		this.#ensureWorkingLoaderWhileStreaming();
 		if (event.message.role === "hookMessage" || event.message.role === "custom") {
+			if (event.message.role === "custom" && !this.ctx.initialChatRendered && !this.ctx.viewSession.isStreaming) {
+				// Idle custom append while no transcript render has committed (e.g. a startup
+				// display:true sendMessage before renderInitialMessages): AgentSession persists the
+				// entry before emitting this event, so the replay owns the paint — a render not yet
+				// started reads it from session entries, and one in progress sees the entry count
+				// change and restarts. Painting live too would duplicate it, since
+				// renderInitialMessages({ preserveExistingChat: true }) re-appends existing chat
+				// children. Mirrors ExtensionUiController.#applyCustomMessageDisplay's gate.
+				// Streaming is excluded so live-turn rendering is unchanged.
+				return;
+			}
 			const signature = `${event.message.role}:${event.message.customType}:${event.message.timestamp}`;
 			if (this.#renderedCustomMessages.has(signature)) {
 				return;
@@ -900,7 +1357,9 @@ export class EventController {
 			// delta from it, the same as a user message.
 			if (event.message.role === "custom" && isUserTurnInitiator(event.message)) {
 				this.#turnStartedAt = event.message.timestamp;
+				this.#turnUsage.reset();
 			}
+			const taskJobToast = isNativeRendering() ? nativeTaskJobToast(event.message) : undefined;
 			if (
 				event.message.role === "custom" &&
 				this.ctx.optimisticSkillMessagePending &&
@@ -909,6 +1368,11 @@ export class EventController {
 				// The optimistic `/skill:` row painted at submit time (issue #8895):
 				// swap it for the canonical message instead of appending a duplicate.
 				this.ctx.reconcileOptimisticSkillMessage(event.message);
+			} else if (taskJobToast) {
+				// Native: the task call's `agent` nodes already settled in place
+				// (its terminal async update); a toast replaces the appended
+				// "Background job completed" rows.
+				this.ctx.showStatus(taskJobToast);
 			} else {
 				this.ctx.addMessageToChat(event.message);
 			}
@@ -923,8 +1387,11 @@ export class EventController {
 			vocalizer.clear();
 			// Only genuinely user-attributed prompts anchor the delta; a mid-run
 			// agent-attributed `user` message (advisor tool-loop redirect) must not.
-			if (event.message.attribution !== "agent") this.#turnStartedAt = event.message.timestamp;
-			const textContent = this.ctx.getUserMessageText(event.message);
+			if (event.message.attribution !== "agent") {
+				this.#turnStartedAt = event.message.timestamp;
+				this.#turnUsage.reset();
+			}
+			const userText = textContent(event.message.content);
 			const imageBlocks =
 				typeof event.message.content === "string"
 					? []
@@ -935,7 +1402,7 @@ export class EventController {
 								typeof content.mimeType === "string",
 						);
 			const imageCount = imageBlocks.length;
-			const signature = `${textContent}\u0000${imageCount}`;
+			const signature = `${userText}\u0000${imageCount}`;
 
 			this.#resetReadGroup();
 			this.#resolveDisplaceablePoll();
@@ -944,7 +1411,6 @@ export class EventController {
 			const matchedLocalSubmission = this.ctx.locallySubmittedUserSignatures.delete(signature);
 			const replacesOptimistic =
 				this.ctx.optimisticUserMessageSignature !== undefined && !wasOptimistic && !matchedLocalSubmission;
-			const wasLocallySubmitted = matchedLocalSubmission || wasOptimistic || replacesOptimistic;
 			if (wasOptimistic) {
 				this.ctx.clearOptimisticUserMessage();
 			} else if (replacesOptimistic) {
@@ -959,15 +1425,15 @@ export class EventController {
 				this.ctx.addMessageToChat(event.message);
 			}
 
-			// Clear the editor only when the submission did not originate from a
-			// local submission (optimistic or queued-while-streaming). Both local
-			// paths already cleared the editor at submit time; clearing again here
-			// would race with the user typing the next prompt while the previous
-			// large redraw lands and erase their in-progress draft (#783).
+			// Never clear the editor here. A local submission (optimistic or
+			// queued-while-streaming) already cleared it at submit time, so clearing
+			// again races with the user typing the next prompt while the previous
+			// large redraw lands and erases their in-progress draft (#783). An inbound
+			// user message this session did not submit locally — an extension
+			// delivering `sendUserMessage`, e.g. HCOM — is a real non-synthetic prompt
+			// that arrives *while* the user may be composing, so it must not touch the
+			// draft either.
 			if (!event.message.synthetic) {
-				if (!wasLocallySubmitted) {
-					this.ctx.editor.setText("");
-				}
 				this.ctx.updatePendingMessagesDisplay();
 			}
 			this.ctx.ui.requestRender(true);
@@ -981,6 +1447,7 @@ export class EventController {
 				// turn's own prompt: anchor the delta to it instead of clearing.
 				if (event.message.userInitiated) this.#turnStartedAt = event.message.timestamp;
 				else this.#turnStartedAt = undefined;
+				this.#turnUsage.reset();
 			}
 		} else if (event.message.role === "fileMention") {
 			this.#resetReadGroup();
@@ -994,12 +1461,11 @@ export class EventController {
 			// still removable, and finalize it regardless so it can retire.
 			const abandoned = this.ctx.streamingComponent;
 			if (abandoned) {
-				if (this.ctx.chatContainer.canRemoveBlock(abandoned)) {
-					this.ctx.chatContainer.removeChild(abandoned);
-				}
+				this.ctx.chatContainer.removeChild(abandoned);
 				abandoned.markTranscriptBlockFinalized();
 			}
 			this.#finalizeAbandonedPostToolSegments();
+			this.#sealOrphanedToolCards(event.message.content.length === 0);
 			this.#lastVisibleBlockCount = 0;
 			this.#streamedToolCallIdByIndex.clear();
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
@@ -1013,6 +1479,7 @@ export class EventController {
 	}
 
 	async #handleIrcMessage(event: Extract<AgentSessionEvent, { type: "irc_message" }>): Promise<void> {
+		if (!event.message.display) return;
 		const signature = `${event.message.role}:${event.message.customType}:${event.message.timestamp}`;
 		if (this.#renderedCustomMessages.has(signature)) {
 			return;
@@ -1070,7 +1537,7 @@ export class EventController {
 
 	/**
 	 * Resolve the pending displaceable poll block before the next block lands.
-	 * A follow-up `hub` call displaces it — the stale "waiting on N jobs" frame
+	 * A follow-up `wait` call displaces it — the stale "waiting on N jobs" frame
 	 * is removed so repeated polls read as one persistent poll — while anything
 	 * else seals it in place as final history. Removal is gated on none of the
 	 * block's rows having entered native scrollback: rows already on the tape
@@ -1081,7 +1548,11 @@ export class EventController {
 		const previous = this.#displaceablePollComponent;
 		if (!previous) return;
 		this.#displaceablePollComponent = undefined;
-		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.ctx.chatContainer.canRemoveBlock(previous)) {
+		if (
+			nextToolName === "wait" &&
+			previous.isDisplaceableBlock() &&
+			this.ctx.chatContainer.canDisplaceBlock(previous)
+		) {
 			this.ctx.chatContainer.removeChild(previous);
 		}
 		// Sealing stops the waiting-poll spinner and freezes the block (for a
@@ -1099,9 +1570,7 @@ export class EventController {
 		}
 		if (previous.canBeDisplacedBy(nextToolName)) {
 			this.#displaceableTodoComponent = undefined;
-			if (this.ctx.chatContainer.canRemoveBlock(previous)) {
-				this.ctx.chatContainer.removeChild(previous);
-			}
+			this.ctx.chatContainer.removeChild(previous);
 			previous.seal();
 			this.ctx.ui.requestRender();
 			return;
@@ -1110,6 +1579,27 @@ export class EventController {
 		this.#displaceableTodoComponent = undefined;
 		previous.seal();
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Detach both displacement trackers and return whichever components were
+	 * live, without touching their animation state. `#handleToolExecutionEnd`
+	 * settles a displaceable `wait`/`todo` result out of `pendingTools` into
+	 * these trackers instead (see the `isDisplaceableBlock()` branch there), so
+	 * a caller that enumerates only `pendingTools` before replacing the whole
+	 * transcript — the collab guest resync (`guest.ts#finalizeSnapshot`) —
+	 * misses a still-animated "waiting" card. That caller must fold this
+	 * method's result into its own live-block accounting.
+	 */
+	takeDisplaceableComponents(): ToolExecutionHandle[] {
+		const components: ToolExecutionHandle[] = [];
+		if (this.#displaceablePollComponent) components.push(this.#displaceablePollComponent);
+		if (this.#displaceableTodoComponent && this.#displaceableTodoComponent !== this.#displaceablePollComponent) {
+			components.push(this.#displaceableTodoComponent);
+		}
+		this.#displaceablePollComponent = undefined;
+		this.#displaceableTodoComponent = undefined;
+		return components;
 	}
 
 	/**
@@ -1136,15 +1626,15 @@ export class EventController {
 	}
 
 	/**
-	 * Re-register parked background task cards after a transcript rebuild so a
-	 * detached task's replayed and live progress frames keep routing to the
-	 * preserved component. Focus attach clears {@link #backgroundTaskCallIds}
+	 * Re-register parked background cards after a transcript rebuild so a
+	 * background job's replayed and live progress frames keep routing to the
+	 * preserved component. Focus attach clears {@link #backgroundCallIds}
 	 * via {@link resetTranscriptAnchors} before the rebuild repopulates it.
 	 * Ids whose component did not survive into `pendingTools` are skipped.
 	 */
-	markBackgroundTaskCalls(toolCallIds: Iterable<string>): void {
+	markBackgroundCalls(toolCallIds: Iterable<string>): void {
 		for (const toolCallId of toolCallIds) {
-			if (this.ctx.pendingTools.has(toolCallId)) this.#backgroundTaskCallIds.add(toolCallId);
+			if (this.ctx.pendingTools.has(toolCallId)) this.#backgroundCallIds.add(toolCallId);
 		}
 	}
 
@@ -1166,8 +1656,8 @@ export class EventController {
 	 * live (the final message is spoken at turn end).
 	 */
 	#vocalizeDelta(event: Extract<AgentSessionEvent, { type: "message_update" }>): void {
-		if (!settings.get("speech.enabled")) return;
-		const mode = settings.get("speech.mode");
+		if (!cfgSpeechEnabled.get(settings)) return;
+		const mode = cfgSpeechMode.get(settings);
 		const delta = event.assistantMessageEvent;
 		if (delta.type === "text_delta" && (mode === "assistant" || mode === "all")) {
 			vocalizer.pushDelta(delta.delta);
@@ -1182,8 +1672,8 @@ export class EventController {
 	 * sure the live buffer's trailing partial gets flushed.
 	 */
 	#handleTurnEnd(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
-		if (!settings.get("speech.enabled")) return;
-		if (settings.get("speech.mode") !== "yield") {
+		if (!cfgSpeechEnabled.get(settings)) return;
+		if (cfgSpeechMode.get(settings) !== "yield") {
 			vocalizer.flush();
 			return;
 		}
@@ -1193,18 +1683,55 @@ export class EventController {
 		if (text) vocalizer.speak(text);
 	}
 
+	async #restartAssistantStream(message: AgentMessage): Promise<void> {
+		this.#retractStreamedToolPreviews();
+		await this.handleEvent({ type: "message_start", message });
+	}
+
+	#retractStreamedToolPreviews(): void {
+		// A provider replay can abandon previews without ever executing them.
+		// No result will settle those cards; leaving one pins all later history.
+		for (const toolCallId of this.#streamedToolCallIdByIndex.values()) {
+			if (this.#executionStartedCallIds.has(toolCallId) || this.#backgroundCallIds.has(toolCallId)) continue;
+			this.#toolArgsReveal.finish(toolCallId);
+			this.#pendingStreamPreviews.delete(toolCallId);
+			const component = this.ctx.pendingTools.get(toolCallId);
+			if (component) this.#retractToolCardEntry(toolCallId, component);
+			const segment = this.#postToolAssistantComponents.get(toolCallId);
+			if (segment) {
+				this.ctx.chatContainer.removeChild(segment);
+				segment.markTranscriptBlockFinalized();
+				this.#postToolAssistantComponents.delete(toolCallId);
+			}
+		}
+		this.#resetReadGroup();
+	}
+
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
+		const generation = this.#dispatchGeneration;
 		this.#ensureWorkingLoaderWhileStreaming();
 		if (!this.#vocalizedMessageUpdates.delete(event)) {
 			this.#vocalizeDelta(event);
 		}
-		if (this.ctx.streamingComponent && event.message.role === "assistant") {
-			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(event.message);
+		if (event.assistantMessageEvent?.type === "start") {
+			await this.#restartAssistantStream(event.message);
+		}
+		// A focus switch reset the view while the restart was in flight: this
+		// update belongs to the previous session's stream.
+		if (generation !== this.#dispatchGeneration) return;
+		if (event.message.role === "assistant") await this.syncAssistantMessage(event.message);
+	}
+
+	/** Resync a cumulative snapshot without replay cleanup or speech side effects. */
+	async syncAssistantMessage(message: AssistantMessage): Promise<void> {
+		const generation = this.#dispatchGeneration;
+		if (this.ctx.streamingComponent) {
+			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(message);
 			if (unlockedThinkingVisibility) {
 				this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
 				this.#streamingReveal.resyncVisibility();
 			}
-			this.ctx.streamingMessage = event.message;
+			this.ctx.streamingMessage = message;
 			const timeline = splitAssistantMessageToolTimeline(this.ctx.streamingMessage);
 			this.#streamingReveal.setTarget(timeline.beforeTools, timeline.hasToolCalls);
 
@@ -1232,40 +1759,43 @@ export class EventController {
 				!this.ctx.streamingComponent.isTranscriptBlockFinalized()
 			) {
 				const linkTargets = await refreshAssistantMessageLinkTargets(this.ctx, [timeline.beforeTools]);
+				// A focus switch reset the view during link resolution (it waits
+				// behind this run): the streaming state below is gone or the next
+				// session's, so none of this snapshot may be drawn into it.
+				if (generation !== this.#dispatchGeneration || !this.ctx.streamingComponent) return;
 				this.ctx.streamingComponent.setLinkTargets(assistantMessageLinkTargets(timeline.beforeTools, linkTargets));
 				this.ctx.streamingComponent.markTranscriptBlockFinalized();
 			}
+			// Re-key live cards when a provider rewrites a block's id across
+			// deltas, so the changed id reuses the existing card instead of
+			// spawning a duplicate (#6879).
+			this.#reconcileStreamedToolCallIds(this.ctx.streamingMessage.content);
 			for (let contentIndex = 0; contentIndex < this.ctx.streamingMessage.content.length; contentIndex++) {
 				const content = this.ctx.streamingMessage.content[contentIndex]!;
 				if (content.type !== "toolCall") continue;
-				// Re-key the live card when a provider rewrites this block's id
-				// across deltas, so the changed id reuses the existing card
-				// instead of spawning a duplicate (#6879).
-				const priorId = this.#streamedToolCallIdByIndex.get(contentIndex);
-				if (priorId !== undefined && priorId !== content.id) {
-					this.#migrateStreamedToolCallId(priorId, content.id);
-				}
-				this.#streamedToolCallIdByIndex.set(contentIndex, content.id);
 				const tool = this.ctx.viewSession.getToolByName(content.name);
 				const renderToolName = toolRenderName(content.name, tool);
 				if (renderToolName === "read") {
 					if (!readArgsHaveTarget(content.arguments)) {
 						// Args still streaming — defer until path is parseable so we can route to the
-						// read group (files + xd:// devices) vs ToolExecutionComponent (other internal URLs).
+						// read group (files and `help://` doc topics) vs ToolExecutionComponent (other internal URLs).
 						// Creating either component now would lock the read into the wrong shape.
 						continue;
 					}
 					if (readArgsCollapseIntoGroup(content.arguments)) {
-						if (!this.ctx.pendingTools.has(content.id)) this.#resolveDisplaceablePoll(renderToolName);
-						this.#trackReadToolCall(content.id, content.arguments);
-						const component = this.ctx.pendingTools.get(content.id);
-						if (component) {
-							component.updateArgs(content.arguments, content.id);
-						} else {
+						const existing = this.ctx.pendingTools.get(content.id);
+						if (existing) {
+							this.#trackReadToolCall(content.id, content.arguments);
+							existing.updateArgs(content.arguments, content.id);
+						} else if (!this.#toolTimelineComponents.has(content.id)) {
+							// A completed read remains in the timeline after leaving pendingTools.
+							this.#resolveDisplaceablePoll(renderToolName);
+							this.#trackReadToolCall(content.id, content.arguments);
 							const group = this.#getReadGroup();
 							group.updateArgs(content.arguments, content.id);
 							this.ctx.pendingTools.set(content.id, group);
 							this.#toolTimelineComponents.set(content.id, group);
+							this.#settleHeldCompletionIfPresent(content.id, group);
 						}
 						continue;
 					}
@@ -1281,6 +1811,14 @@ export class EventController {
 				let renderArgs: Record<string, unknown>;
 				const partialJson = getStreamingPartialJson(content);
 				const rawInput = content.customWireName !== undefined;
+				// `message_update` is cumulative — every update re-lists all blocks
+				// of the streaming message — so creation must also be guarded by the
+				// timeline map: `pendingTools` loses the id the moment a completion
+				// settles the card, and for server-resolved (Cursor) tools that can
+				// happen while the message is still streaming. Without the second
+				// check the next cumulative update would recreate a card for a call
+				// that already finished, permanently pending.
+				const isNew = !this.ctx.pendingTools.has(content.id) && !this.#toolTimelineComponents.has(content.id);
 				if (partialJson) {
 					renderArgs = this.#toolArgsReveal.setTarget(content.id, partialJson, {
 						rawInput,
@@ -1291,31 +1829,27 @@ export class EventController {
 					this.#toolArgsReveal.finish(content.id);
 					renderArgs = content.arguments;
 				}
-				// `message_update` is cumulative — every update re-lists all blocks
-				// of the streaming message — so creation must also be guarded by the
-				// timeline map: `pendingTools` loses the id the moment a completion
-				// settles the card, and for server-resolved (Cursor) tools that can
-				// happen while the message is still streaming. Without the second
-				// check the next cumulative update would recreate a card for a call
-				// that already finished, permanently pending.
-				if (!this.ctx.pendingTools.has(content.id) && !this.#toolTimelineComponents.has(content.id)) {
+				if (isNew) {
+					// A write's streamed path may still grow into a reply URL (`ou…` → `out://`), which
+					// draws as prose rather than a card; the block waits until the path tells. Empty partial
+					// JSON (`toolcall_start`) is still streaming, not final empty args. An unbound reveal
+					// never advances, so drop it: the next update's fresh entry shows all received.
+					if (partialJson !== undefined && isReplyWrite(renderToolName, renderArgs) === undefined) {
+						this.#toolArgsReveal.finish(content.id);
+						continue;
+					}
 					this.#resolveDisplaceablePoll(renderToolName);
 					this.#resetReadGroup();
-					const component = new ToolExecutionComponent(
-						renderToolName,
-						renderArgs,
-						{
-							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-							showImages: settings.get("terminal.showImages"),
-						},
+					const component = createToolCallBlock(this.ctx, {
+						name: renderToolName,
+						args: renderArgs,
 						tool,
-						this.ctx.ui,
-						this.ctx.sessionManager.getCwd(),
-						content.id,
-					);
+						id: content.id,
+						cwd: this.ctx.sessionManager.getCwd(),
+					});
 					const pendingPreview = this.#pendingStreamPreviews.get(content.id);
 					if (pendingPreview !== undefined) {
-						component.updateStreamPreview(pendingPreview);
+						component.updateStreamPreview?.(pendingPreview);
 						this.#pendingStreamPreviews.delete(content.id);
 					}
 					component.setExpanded(this.ctx.toolOutputExpanded);
@@ -1335,28 +1869,45 @@ export class EventController {
 				}
 			}
 			for (const [toolCallId, segment] of timeline.afterToolCalls) {
-				this.#upsertPostToolAssistantSegment(toolCallId, segment);
+				if (this.#postToolAssistantComponents.get(toolCallId)?.isTranscriptBlockFinalized()) continue;
+				const closed = toolCallId !== timeline.lastToolCallId;
+				const linkTargets = closed ? await refreshAssistantMessageLinkTargets(this.ctx, [segment]) : undefined;
+				if (generation !== this.#dispatchGeneration || !this.ctx.streamingMessage) return;
+				const component = this.#upsertPostToolAssistantSegment(
+					toolCallId,
+					segment,
+					timeline.contentOffsets.get(toolCallId),
+					linkTargets ? assistantMessageLinkTargets(segment, linkTargets) : undefined,
+					closed ? undefined : { transient: true },
+				);
+				if (closed) component?.markTranscriptBlockFinalized();
 			}
 
-			// Update working message with intent from streamed tool arguments
-			for (const content of this.ctx.streamingMessage.content) {
-				if (content.type !== "toolCall") continue;
-				const args = content.arguments;
+			// Update working message with the intent of the LAST intent-bearing
+			// streamed tool call. Scanning in reverse skips the redundant
+			// intermediate setWorkingMessage calls a forward pass would make
+			// (only the last one survives the flush anyway).
+			const blocks = this.ctx.streamingMessage.content;
+			for (let index = blocks.length - 1; index >= 0; index--) {
+				const block = blocks[index];
+				if (block?.type !== "toolCall") continue;
+				const args = block.arguments;
 				if (!args || typeof args !== "object") continue;
+				let intent: string | undefined;
 				if (INTENT_FIELD in args) {
-					this.#updateWorkingMessageFromIntent(args[INTENT_FIELD]);
-					continue;
-				}
-				const tool = this.ctx.viewSession.getToolByName(content.name);
-				if (typeof tool?.intent !== "function") continue;
-				try {
-					const derived = tool.intent(args as never)?.trim();
-					if (derived) {
-						this.#updateWorkingMessageFromIntent(derived);
+					intent = workingIntentLabel(args[INTENT_FIELD]);
+				} else {
+					const tool = this.ctx.viewSession.getToolByName(block.name);
+					if (typeof tool?.intent !== "function") continue;
+					try {
+						intent = normalizeIntent(tool.intent(args as never));
+					} catch {
+						// intent function must never break the UI
 					}
-				} catch {
-					// intent function must never break the UI
 				}
+				if (!intent) continue;
+				this.#updateWorkingMessageFromIntent(intent);
+				break;
 			}
 
 			this.ctx.ui.requestRender();
@@ -1364,25 +1915,49 @@ export class EventController {
 	}
 
 	async #handleMessageEnd(event: Extract<AgentSessionEvent, { type: "message_end" }>): Promise<void> {
-		if (event.message.role === "user") return;
+		// The persistence slot exists before message_end notification, unlike
+		// tool_execution_end. Resolve HUD identity only after canonical append.
+		if (event.message.role === "toolResult" && event.message.toolName === "todo" && !event.message.isError) {
+			const details = event.message.details as { op?: string; phases?: TodoPhase[] } | undefined;
+			if (details?.op !== "view" && details?.phases) {
+				const owner = this.ctx.viewSession;
+				const sessionId = owner.sessionManager.getSessionId();
+				const sessionFile = owner.sessionManager.getSessionFile();
+				await owner.settleInFlightMessagePersistence();
+				if (
+					this.ctx.viewSession === owner &&
+					owner.sessionManager.getSessionId() === sessionId &&
+					owner.sessionManager.getSessionFile() === sessionFile
+				) {
+					this.ctx.setTodos(owner.getTodoPhases());
+				}
+			}
+		}
+		if (event.message.role === "user") {
+			// Live steering stays listed until the agent appends it, which follows
+			// message_start: drop its Steering chip now.
+			this.ctx.updatePendingMessagesDisplay();
+			return;
+		}
 		const unlockedThinkingVisibility =
 			event.message.role === "assistant" && this.ctx.noteDisplayableThinkingContent(event.message);
 		if (unlockedThinkingVisibility && this.ctx.streamingComponent) {
 			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
 			this.#streamingReveal.resyncVisibility();
 		}
-		if (event.message.role === "assistant" && settings.get("speech.enabled")) {
+		if (event.message.role === "assistant" && cfgSpeechEnabled.get(settings)) {
 			if (event.message.stopReason === "aborted") {
 				// Esc / Ctrl+C / interrupt: stop speaking now and drop the trailing partial.
 				vocalizer.clear();
 			} else {
-				const mode = settings.get("speech.mode");
+				const mode = cfgSpeechMode.get(settings);
 				// Speak the last partial sentence of a completed message; yield mode
 				// instead speaks the whole final message at turn end.
 				if (mode === "assistant" || mode === "all") vocalizer.flush();
 			}
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
+			const generation = this.#dispatchGeneration;
 			this.ctx.streamingMessage = event.message;
 			this.#streamingReveal.stop();
 			this.#toolArgsReveal.flushAll();
@@ -1412,11 +1987,19 @@ export class EventController {
 				: this.ctx.streamingMessage;
 			const displayTimeline = splitAssistantMessageToolTimeline(displayMessage);
 			const linkTargets = await refreshAssistantMessageLinkTargets(this.ctx, [displayMessage]);
+			if (generation !== this.#dispatchGeneration || !this.ctx.streamingComponent) return;
 			if (!this.ctx.streamingComponent.isTranscriptBlockFinalized()) {
 				this.ctx.streamingComponent.setLinkTargets(
 					assistantMessageLinkTargets(displayTimeline.beforeTools, linkTargets),
 				);
 			}
+			// The final snapshot can carry a per-index id change no delta ever
+			// showed — agent-loop mints and re-keys tool-call ids at `done`, after
+			// the last `message_update` — so replay the same reconciliation
+			// `#handleMessageUpdate` runs per delta. Without it the pre-mint card
+			// is never re-keyed: tool_execution_start mounts a second card under
+			// the minted id and the streamed one ghosts until sealed.
+			this.#reconcileStreamedToolCallIds(this.ctx.streamingMessage.content);
 			this.ctx.streamingComponent.updateContent(displayTimeline.beforeTools);
 
 			if (this.ctx.streamingMessage.stopReason !== "aborted" && this.ctx.streamingMessage.stopReason !== "error") {
@@ -1440,11 +2023,13 @@ export class EventController {
 				const supersededByRewind =
 					this.ctx.streamingMessage.stopReason === "aborted" && this.ctx.viewSession.isTtsrAbortPending;
 				if (supersededByRewind) {
+					this.ctx.streamingComponent.markRewound();
 					for (const [toolCallId, component] of Array.from(this.ctx.pendingTools.entries())) {
-						if (this.#backgroundTaskCallIds.has(toolCallId)) continue;
+						if (this.#backgroundCallIds.has(toolCallId)) continue;
 						if (
 							!(component instanceof ToolExecutionComponent) &&
-							!(component instanceof ReadToolGroupComponent)
+							!(component instanceof ReadToolGroupComponent) &&
+							!(component instanceof ReplyWriteComponent)
 						) {
 							continue;
 						}
@@ -1464,27 +2049,31 @@ export class EventController {
 			// meaningful prefix and this request read none of it back, flag the turn.
 			const usage = event.message.usage;
 			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
-				if (settings.get("display.cacheMissMarker")) {
+				if (cfgDisplayCacheMissMarker.get(settings)) {
 					const invalidation = detectCacheInvalidation(this.ctx.lastAssistantUsage, usage);
 					if (invalidation) this.ctx.streamingComponent.setCacheInvalidation(invalidation);
 				}
 				this.ctx.lastAssistantUsage = usage;
 			}
+			this.ctx.streamingComponent.setServedModelMismatch(this.ctx.servedModelTracker.check(event.message));
 			this.ctx.streamingComponent.markTranscriptBlockFinalized();
 			let lastPostToolAssistantComponent: AssistantMessageComponent | undefined;
 			for (const [toolCallId, segment] of displayTimeline.afterToolCalls) {
 				const component = this.#upsertPostToolAssistantSegment(
 					toolCallId,
 					segment,
+					displayTimeline.contentOffsets.get(toolCallId),
 					assistantMessageLinkTargets(segment, linkTargets),
 				);
 				component?.markTranscriptBlockFinalized();
 				if (component) lastPostToolAssistantComponent = component;
 			}
 			this.#lastAssistantComponent = lastPostToolAssistantComponent ?? this.ctx.streamingComponent;
-			if (settings.get("display.showTokenUsage") && assistantUsageIsBilled(event.message.usage)) {
+			const turnUsage = this.#turnUsage.add(event.message, this.#turnStartedAt);
+			if (turnUsage) this.#lastAssistantComponent.setTurnUsage(turnUsage);
+			if (cfgDisplayShowTokenUsage.get(settings) && assistantUsageIsBilled(event.message.usage)) {
 				const readCallIds = groupedReadUsageCallIds(event.message);
-				const turnElapsed = settings.get("display.showTurnTime")
+				const turnElapsed = cfgDisplayShowTurnTime.get(settings)
 					? turnElapsedMs(this.#turnStartedAt, event.message)
 					: undefined;
 				const usageAttached =
@@ -1540,15 +2129,13 @@ export class EventController {
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
 		if (this.#retractedToolCallIds.has(event.toolCallId)) return;
 		this.#ensureWorkingLoaderWhileStreaming();
-		this.#updateWorkingMessageFromIntent(event.intent);
+		this.#updateWorkingMessageFromIntent(
+			workingIntentLabel(event.intent ?? (isRecord(event.args) ? event.args[INTENT_FIELD] : undefined)),
+		);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
-		if (renderToolName === "ask" || this.#toolWillPromptForApproval(renderToolName, event.args)) {
-			this.#approvalAttentionToolCallIds.add(event.toolCallId);
-			setTerminalTitleState("attention");
-		}
 		this.#resolveDisplaceablePoll(renderToolName);
-		if (!this.ctx.pendingTools.has(event.toolCallId)) {
+		if (!this.ctx.pendingTools.has(event.toolCallId) && !this.#toolTimelineComponents.has(event.toolCallId)) {
 			const stale = this.#priorTurnToolComponents.get(event.toolCallId);
 			if (stale) {
 				this.#priorTurnToolComponents.delete(event.toolCallId);
@@ -1559,36 +2146,27 @@ export class EventController {
 			}
 			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
-				const component = this.ctx.pendingTools.get(event.toolCallId);
-				if (component) {
-					component.updateArgs(event.args, event.toolCallId);
-				} else {
-					const group = this.#getReadGroup();
-					group.updateArgs(event.args, event.toolCallId);
-					this.ctx.pendingTools.set(event.toolCallId, group);
-					this.#toolTimelineComponents.set(event.toolCallId, group);
-				}
+				const group = this.#getReadGroup();
+				group.updateArgs(event.args, event.toolCallId);
+				this.ctx.pendingTools.set(event.toolCallId, group);
+				this.#toolTimelineComponents.set(event.toolCallId, group);
+				this.#settleHeldCompletionIfPresent(event.toolCallId, group);
 				this.#startToolApprovalPreview(event.toolCallId);
 				this.ctx.ui.requestRender();
 				return;
 			}
 
 			this.#resetReadGroup();
-			const component = new ToolExecutionComponent(
-				renderToolName,
-				event.args,
-				{
-					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-					showImages: settings.get("terminal.showImages"),
-				},
+			const component = createToolCallBlock(this.ctx, {
+				name: renderToolName,
+				args: renderArgsWithIntent(event.args, event.intent),
 				tool,
-				this.ctx.ui,
-				this.ctx.sessionManager.getCwd(),
-				event.toolCallId,
-			);
+				id: event.toolCallId,
+				cwd: this.ctx.sessionManager.getCwd(),
+			});
 			const pendingPreview = this.#pendingStreamPreviews.get(event.toolCallId);
 			if (pendingPreview !== undefined) {
-				component.updateStreamPreview(pendingPreview);
+				component.updateStreamPreview?.(pendingPreview);
 				this.#pendingStreamPreviews.delete(event.toolCallId);
 			}
 			component.setArgsComplete(event.toolCallId);
@@ -1611,16 +2189,22 @@ export class EventController {
 			// authoritative args here and drop any live reveal so a late tick can't
 			// re-truncate them: tool_execution_start is the one event every
 			// execution path emits with the full args immediately before the result.
+			// Also reuses a card already settled in `#toolTimelineComponents` (when
+			// `restoreAssistant` consumed a buffered result ahead of a queued start).
+			// That card stays out of `pendingTools`: call ids are unique within a
+			// run and the timeline is cleared at agent_start/agent_end, so a
+			// timeline-only hit cannot be a fresh execution — its queued
+			// update/end duplicate the settled result and are dropped as such.
 			this.#toolArgsReveal.finish(event.toolCallId);
-			const component = this.ctx.pendingTools.get(event.toolCallId);
-			if (component && typeof component.updateArgs === "function") {
-				component.updateArgs(event.args, event.toolCallId);
-				if (typeof component.setArgsComplete === "function") {
-					component.setArgsComplete(event.toolCallId);
-				}
-				if (typeof component.setExecutionStarted === "function") {
-					component.setExecutionStarted(event.toolCallId);
-				}
+			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
+				this.#trackReadToolCall(event.toolCallId, event.args);
+			}
+			const component =
+				this.ctx.pendingTools.get(event.toolCallId) ?? this.#toolTimelineComponents.get(event.toolCallId);
+			if (component) {
+				component.updateArgs(renderArgsWithIntent(event.args, event.intent), event.toolCallId);
+				component.setArgsComplete(event.toolCallId);
+				component.setExecutionStarted(event.toolCallId);
 				this.#executionStartedCallIds.add(event.toolCallId);
 				this.ctx.ui.requestRender();
 			}
@@ -1628,45 +2212,28 @@ export class EventController {
 		this.#startToolApprovalPreview(event.toolCallId);
 	}
 
-	/**
-	 * Whether this tool call will block on an approval prompt before executing.
-	 * The extension wrapper waits on `uiContext.select(...)` after emitting
-	 * `tool_execution_start`, so an approval-mode / per-tool `prompt` policy is
-	 * user-blocking — the title should read `attention`, not `working`. Mirrors
-	 * the wrapper's `resolveApproval` inputs (approvalMode + tools.approval); uses
-	 * `resolveApproval` rather than `requiresApproval` so a `deny` policy does not
-	 * throw in the render path.
-	 */
-	#toolWillPromptForApproval(toolName: string, args: unknown): boolean {
-		const tool = this.ctx.viewSession.getToolByName(toolName);
-		if (!tool) return false;
-		const mode = (settings.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
-		const userPolicies = (settings.get("tools.approval") ?? {}) as Record<string, unknown>;
-		return resolveApproval(tool, args, mode, userPolicies).policy === "prompt";
-	}
-
 	async #handleToolExecutionUpdate(
 		event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>,
 	): Promise<void> {
 		this.#ensureWorkingLoaderWhileStreaming();
+		this.#showToolReplies(event.toolCallId, event.partialResult.details);
 		const component = this.ctx.pendingTools.get(event.toolCallId);
 		if (component) {
-			const asyncState = (event.partialResult.details as { async?: { state?: string } } | undefined)?.async?.state;
-			const isFinalAsyncState = asyncState === "completed" || asyncState === "failed";
+			const isFinalAsyncState = isSettledJobFrame(event.partialResult.details);
 			// A final async snapshot is terminal only for a parked background
 			// block (the call already returned and was kept alive for its jobs).
 			// While the call is still executing — a mixed blocking+async task
 			// call whose jobs settle before its blocking subset — treat it as a
 			// partial frame: `tool_execution_end` still owns the terminal result.
-			const isTerminal = isFinalAsyncState && this.#backgroundTaskCallIds.has(event.toolCallId);
-			component.updateResult(
-				{ ...event.partialResult, isError: asyncState === "failed" },
-				!isTerminal,
-				event.toolCallId,
-			);
-			if (isTerminal) {
+			const isParkedFinal = isFinalAsyncState && this.#backgroundCallIds.has(event.toolCallId);
+			if (isParkedFinal) {
+				settleWithJobFrame(component, event.partialResult, event.toolCallId);
 				this.ctx.pendingTools.delete(event.toolCallId);
-				this.#backgroundTaskCallIds.delete(event.toolCallId);
+				this.#backgroundCallIds.delete(event.toolCallId);
+			} else {
+				if (isFinalAsyncState) this.#settledBeforeReturn.set(event.toolCallId, event);
+				const isError = asyncJobState(event.partialResult.details) === "failed";
+				component.updateResult({ ...event.partialResult, isError }, true, event.toolCallId);
 			}
 			this.ctx.ui.requestRender();
 		}
@@ -1694,8 +2261,9 @@ export class EventController {
 		component: ToolExecutionHandle,
 		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 	): void {
-		component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
-		this.ctx.pendingTools.delete(event.toolCallId);
+		if (event.toolName === "read") this.#inlineReadToolImages(event.toolCallId, event.result);
+		this.#applyToolCompletion(component, event);
+		if (event.toolName === "read") this.#clearReadToolCall(event.toolCallId);
 		if (
 			component instanceof ToolExecutionComponent &&
 			component.isDisplaceableBlock() &&
@@ -1707,14 +2275,36 @@ export class EventController {
 			const previous = this.#displaceableTodoComponent;
 			if (previous && previous !== component && previous.isDisplaceableBlock()) {
 				this.#displaceableTodoComponent = undefined;
-				if (this.ctx.chatContainer.canRemoveBlock(previous)) {
-					this.ctx.chatContainer.removeChild(previous);
-				}
+				this.ctx.chatContainer.removeChild(previous);
 				previous.seal();
 			}
 			this.#displaceableTodoComponent = component;
 		}
 		this.ctx.ui.requestRender();
+	}
+
+	#applyToolCompletion(
+		component: ToolExecutionHandle,
+		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
+	): void {
+		const settled = this.#settledBeforeReturn.get(event.toolCallId)?.partialResult;
+		this.#settledBeforeReturn.delete(event.toolCallId);
+		const parks = parksAsBackground(event.toolName, event.result.details);
+		if (parks && settled) {
+			// The job finished before the call returned: its settled frame, not the
+			// `running` start result, is the card's final state.
+			settleWithJobFrame(component, settled, event.toolCallId);
+			this.ctx.pendingTools.delete(event.toolCallId);
+			return;
+		}
+		component.updateResult({ ...event.result, isError: event.isError }, parks, event.toolCallId);
+		if (parks) {
+			component.parkAsBackground();
+			this.#backgroundCallIds.add(event.toolCallId);
+		} else {
+			this.ctx.pendingTools.delete(event.toolCallId);
+			this.#backgroundCallIds.delete(event.toolCallId);
+		}
 	}
 
 	async #handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): Promise<void> {
@@ -1723,6 +2313,7 @@ export class EventController {
 		// message_end; consume the completion instead of recreating/updating UI.
 		if (this.#retractedToolCallIds.delete(event.toolCallId)) return;
 		this.#executionStartedCallIds.delete(event.toolCallId);
+		this.#showToolReplies(event.toolCallId, event.result.details);
 		// A synthetic aborted/error completion (agent-loop's placeholder for a
 		// never-run call on a terminal error/abort) settles the card in place so a
 		// terminal failure stays visible. Remember it so `#handleAutoRetryStart`
@@ -1743,17 +2334,6 @@ export class EventController {
 		// which only fire `tool_execution_end`, never `_update` — do not leave
 		// the UI looking idle while the session keeps streaming (#3857).
 		this.#ensureWorkingLoaderWhileStreaming();
-		// Return to `working` only when the LAST outstanding user-blocking prompt
-		// resolves: with queued approval prompts (always-ask/write), the first tool
-		// to finish must not clear the attention signal while another prompt still
-		// waits. `ask` ids are in the set too (added at tool_execution_start), so
-		// the delete also covers them without leaking ids until turn end.
-		if (
-			this.#approvalAttentionToolCallIds.delete(event.toolCallId) &&
-			this.#approvalAttentionToolCallIds.size === 0
-		) {
-			setTerminalTitleState("working");
-		}
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
 				const component = this.ctx.pendingTools.get(event.toolCallId);
@@ -1764,48 +2344,34 @@ export class EventController {
 				this.#clearReadToolCall(event.toolCallId);
 				this.ctx.ui.requestRender();
 			} else {
-				let component = this.ctx.pendingTools.get(event.toolCallId);
+				const component = this.ctx.pendingTools.get(event.toolCallId);
 				if (!component) {
 					// A persisted result can win a mid-stream transcript rebuild
 					// before this live completion handler runs. Rebuild removes the
 					// pending handle and replay owns the completed card, but the
 					// original timeline entry remains as proof that a card already
 					// existed. Do not create a fallback read group beside replay
-					// (#6879); the fallback is only for a completion that genuinely
-					// outran every streamed card.
+					// (#6879). A completion that outran every streamed card is held
+					// and settled when the card is created, matching non-read tools.
 					if (this.#toolTimelineComponents.has(event.toolCallId)) {
 						this.#clearReadToolCall(event.toolCallId);
 						return;
 					}
-					const group = this.#getReadGroup();
-					const args = this.#readToolCallArgs.get(event.toolCallId);
-					if (args) {
-						group.updateArgs(args, event.toolCallId);
-					}
-					component = group;
-					this.ctx.pendingTools.set(event.toolCallId, group);
+					this.#orphanedToolCompletions.set(event.toolCallId, event);
+				} else {
+					component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
+					this.ctx.pendingTools.delete(event.toolCallId);
+					this.#clearReadToolCall(event.toolCallId);
+					this.ctx.ui.requestRender();
 				}
-				component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
-				this.ctx.pendingTools.delete(event.toolCallId);
-				this.#clearReadToolCall(event.toolCallId);
-				this.ctx.ui.requestRender();
 			}
 		} else {
 			const component = this.ctx.pendingTools.get(event.toolCallId);
 			if (component) {
-				const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
-				const isBackgroundTask = event.toolName === "task" && asyncState === "running";
-				component.updateResult({ ...event.result, isError: event.isError }, isBackgroundTask, event.toolCallId);
-				if (isBackgroundTask) {
-					component.parkAsBackground();
-					this.#backgroundTaskCallIds.add(event.toolCallId);
-				} else {
-					this.ctx.pendingTools.delete(event.toolCallId);
-					this.#backgroundTaskCallIds.delete(event.toolCallId);
-				}
+				this.#applyToolCompletion(component, event);
 				if (component instanceof ToolExecutionComponent && component.isDisplaceableBlock()) {
-					if (event.toolName === "hub" && component.canBeDisplacedBy("hub")) {
-						// Remember the waiting poll so the next `hub` call can displace it.
+					if (event.toolName === "wait" && component.canBeDisplacedBy("wait")) {
+						// Remember the waiting poll so the next `wait` call can displace it.
 						this.#displaceablePollComponent = component;
 					} else if (event.toolName === "todo" && component.canBeDisplacedBy("todo")) {
 						// Successful todo update supersedes the prior live snapshot. A failed
@@ -1814,9 +2380,7 @@ export class EventController {
 						const previous = this.#displaceableTodoComponent;
 						if (previous && previous !== component && previous.isDisplaceableBlock()) {
 							this.#displaceableTodoComponent = undefined;
-							if (this.ctx.chatContainer.canRemoveBlock(previous)) {
-								this.ctx.chatContainer.removeChild(previous);
-							}
+							this.ctx.chatContainer.removeChild(previous);
 							previous.seal();
 						}
 						this.#displaceableTodoComponent = component;
@@ -1833,13 +2397,14 @@ export class EventController {
 			}
 		}
 		if (syntheticFailureCard) this.#syntheticFailureCards.set(event.toolCallId, syntheticFailureCard);
-		// Update todo display when todo tool completes
 		if (event.toolName === "todo" && !event.isError) {
-			const details = event.result.details as { phases?: TodoPhase[] } | undefined;
-			if (details?.phases) {
-				this.ctx.setTodos(details.phases);
-			}
-		} else if (event.toolName === "todo" && event.isError) {
+			const details = event.result.details as { op?: string; phases?: TodoPhase[] } | undefined;
+			if (details?.op !== "view" && details?.phases) this.ctx.setTodos(details.phases);
+		}
+		if (event.toolName === "eval" && hasNestedTodo(event.result.details)) {
+			this.ctx.setTodos(this.ctx.viewSession.getTodoPhases());
+		}
+		if (event.toolName === "todo" && event.isError) {
 			const textContent = event.result.content.find(
 				(content: { type: string; text?: string }) => content.type === "text",
 			)?.text;
@@ -1862,85 +2427,149 @@ export class EventController {
 				{ hideWithToolActivity: true },
 			);
 		}
-		// Plan approval rides a `write` to xd://propose: the dispatch metadata on
-		// the write details carries the approval payload as `inner`.
-		if (!event.isError) {
-			const dispatch = writeDeviceDispatch(event.toolName, event.result);
-			const details =
-				dispatch?.tool === PROPOSE_DEVICE_NAME && dispatch.mode === "execute" ? dispatch.inner : undefined;
-			if (
-				details &&
-				typeof details === "object" &&
-				"planFilePath" in details &&
-				"title" in details &&
-				"planExists" in details &&
-				typeof details.planFilePath === "string" &&
-				typeof details.title === "string" &&
-				typeof details.planExists === "boolean"
-			) {
-				// Dispatch the approval WITHOUT blocking the serialized event
-				// dispatch chain. `handlePlanApproval` -> `#approvePlan` awaits
-				// `session.prompt` for the ENTIRE approved-execution turn; awaiting
-				// it here (this handler runs inside `#runSerialized`) would hold the
-				// single dispatch link for the whole run, so the run's own
-				// agent_start / message_start / tool / coalesced message_update
-				// events queue behind it on `#dispatchTail` and the chat stays blank
-				// until execution finishes (issue #7684, follow-up to #5688 which
-				// only closed the overlay). Detaching frees the link the moment this
-				// handler returns; the approval overlay and the turn's live events
-				// then render. The approval flow surfaces its own failures via
-				// `showError`, so only an unexpected rejection is logged here.
-				void this.ctx
-					.handlePlanApproval({
-						planFilePath: details.planFilePath,
-						title: details.title,
-						planExists: details.planExists,
-					})
-					.catch(err => {
-						logger.warn("Plan approval dispatch failed", {
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-			}
+		// A submitted plan carries the approval payload as the `propose` details:
+		// on a direct `propose` result, or on its execute record in a `bash` run.
+		// A failed direct `propose` submitted nothing; a `bash` run is judged by
+		// each record's own exit status, not the outer shell status.
+		const details =
+			event.isError && event.toolName === PROPOSE_COMMAND_NAME
+				? undefined
+				: planApprovalDetails(proposeDispatchDetails(event.toolName, event.result));
+		if (details) {
+			// Dispatch the approval WITHOUT blocking the serialized event
+			// dispatch chain. `handlePlanApproval` -> `#approvePlan` awaits
+			// `session.prompt` for the ENTIRE approved-execution turn; awaiting
+			// it here (this handler runs inside `#runSerialized`) would hold the
+			// single dispatch link for the whole run, so the run's own
+			// agent_start / message_start / tool / coalesced message_update
+			// events queue behind it on `#dispatchTail` and the chat stays blank
+			// until execution finishes (issue #7684, follow-up to #5688 which
+			// only closed the overlay). Detaching frees the link the moment this
+			// handler returns; the approval overlay and the turn's live events
+			// then render. The approval flow surfaces its own failures via
+			// `showError`, so only an unexpected rejection is logged here.
+			void this.ctx.handlePlanApproval(details).catch(err => {
+				logger.warn("Plan approval dispatch failed", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
 		}
 	}
+	/**
+	 * A model loop stopped and the run goes on. Nothing is torn down and the
+	 * program status stays `working`: the session's own continuation follows
+	 * (`yielded: false`), or queued input, a peer message, a background job or a
+	 * child agent resumes it (`yielded: true`), or the run's `agent_end` closes it.
+	 */
+	async #handleAgentPause(event: Extract<AgentSessionEvent, { type: "agent_pause" }>): Promise<void> {
+		if (event.yielded) this.showAsyncWait();
+		// The plan-mode reconciler queues a model switch to apply once the current
+		// stream ends; the continuation must not run on the old model.
+		await this.ctx.flushPendingModelSwitch();
+		// Nothing streams now, so a command issued from here mounts immediately;
+		// earlier queued panels would otherwise render out of order much later.
+		this.ctx.flushPendingCommandOutput();
+	}
+
 	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
-		// A superseded agent_end: the agent is already streaming a fresh turn, so
-		// this event belongs to a turn that has already been replaced. The session
-		// dispatches to listeners fire-and-forget across an async extension-emit hop
-		// (#emitSessionEvent), so an interrupted turn's agent_end can land AFTER the
-		// resumed turn's agent_start (e.g. any post-turn agent.continue()). Running
-		// the turn-end teardown now would stop the loader the live turn just created,
-		// leaving "Working…" gone while the agent keeps running. The live turn owns
-		// the loader and finalizes it at its own agent_end (isStreaming === false by
-		// then). Mirrors the collab guest's !isStreaming loader reconciler.
-		if (this.ctx.session.isStreaming) return;
-		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
-		// end of the run: an unsuppressed async job (a `/vibe` worker turn, a bash
-		// `async` job, etc.) will re-wake the loop when its result is delivered.
-		// `AgentSession` tags this on the deferred event (see `#hasPendingAsyncWake`
-		// in agent-session.ts). Skip the idle title/loader teardown so the tab keeps
-		// reading "working"; the later terminal `agent_end` performs it. Still flush
-		// a deferred model switch — the plan-mode reconciler queues it to apply once
-		// the current stream ends, and `#finishAgentEnd` is otherwise its only flush
-		// site, so the automatic continuation would otherwise run on the old
-		// model/thinking level until the terminal settle.
-		if (event.isTerminal === false) {
-			await this.ctx.flushPendingModelSwitch();
-			// Reaching here means the first guard passed, so `isStreaming` is already
-			// false: a command issued from now on mounts immediately. Leaving earlier
-			// panels queued would render them out of order, minutes later, after the
-			// user was told they were only waiting for the turn. The transcript is
-			// quiescent at a settle, which is the condition #4806 wanted.
-			this.ctx.flushPendingCommandOutput();
+		const stoppedWaiting = this.#stoppedWaiting;
+		this.#stoppedWaiting = false;
+		const view = this.ctx.viewSession;
+		// A run is open again by the time this event reaches the serialized
+		// dispatch chain: a superseded end, or a subscriber that started the next
+		// run while this one waited. That ended run still owns its teardown, but
+		// it must not report `done`/`idle` now — that tells OSC 7501 receivers
+		// such as Rex the agent finished while it is still working (#17307).
+		const runActive = this.ctx.session.isRunActive;
+		if (view !== this.ctx.session && runActive) {
+			// A focused worker's run ended while main's run goes on: tear down
+			// only what the viewed worker owns (its loader); main's status stays
+			// `working` until main's own `agent_end`.
+			if (this.ctx.loadingAnimation) {
+				this.ctx.loadingAnimation.stop();
+				this.ctx.loadingAnimation = undefined;
+				this.ctx.statusContainer.disposeChildren();
+			}
 			return;
 		}
-		setTerminalTitleState("idle");
-
-		await this.#finishAgentEnd(event);
+		if (stoppedWaiting) {
+			if (!runActive) setRunStatus({ state: "idle" });
+			await this.#finishAgentEnd(event, { interrupted: true });
+			const running = this.ctx.session.getAsyncJobSnapshot()?.running.length ?? 0;
+			if (running > 0) {
+				this.ctx.showStatus(
+					`Stopped waiting · ${running} background ${running === 1 ? "job" : "jobs"} still running (/jobs)`,
+				);
+			}
+		} else {
+			if (!runActive) setRunStatus(this.#settledRunStatus(event));
+			await this.#finishAgentEnd(event);
+		}
+		// This run may be extension-started while the main input loop remains
+		// asleep. Do not await session-idle from its own event.
+		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
 	}
 
-	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+	/**
+	 * When the main session's run is paused waiting only on outside sources, the
+	 * working row says so and names the jobs and child agents, instead of
+	 * repeating the last tool call's intent. The label is live, so a job
+	 * cancelled without a wake (`/jobs kill`) leaves the row at once. A user
+	 * prompt's own completion may have torn its loader down, so mount one for
+	 * the wait; the next loop or the run's `agent_end` takes it over.
+	 */
+	showAsyncWait(): void {
+		const session = this.ctx.session;
+		if (this.ctx.viewSession !== session || !this.isAwaitingAsyncWork()) return;
+		this.#showingAsyncWait = true;
+		this.ctx.ensureLoadingAnimation();
+		this.ctx.setWorkingMessage(() => formatAsyncWaitLabel(session.wakeSources));
+		this.ctx.ui.requestRender();
+	}
+
+	/** The main run is paused waiting only on outside sources, and the interrupt key would end that wait. */
+	isAwaitingAsyncWork(): boolean {
+		const session = this.ctx.session;
+		return session.isRunActive && !session.isStreaming && session.wakeSources !== undefined;
+	}
+
+	/**
+	 * End a wait on outside work (Esc while {@link isAwaitingAsyncWork}). The
+	 * user interrupt ends the paused run with `agent_end` right away; background
+	 * results then land in context for the next prompt and the jobs keep running.
+	 * That `agent_end` is torn down as user-interrupted and says what still runs.
+	 */
+	async stopAwaitingAsyncWork(): Promise<void> {
+		if (!this.isAwaitingAsyncWork()) return;
+		this.#stoppedWaiting = true;
+		try {
+			await this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+		} catch (error) {
+			this.#stoppedWaiting = false;
+			logger.warn("Ending the background-work wait failed", { error: String(error) });
+		}
+	}
+
+	/**
+	 * The run status a settled turn leaves: `done` with a result to read,
+	 * `error` with the failure, or `idle` when there is nothing new — the user
+	 * interrupted, or a pending auto-retry will start the turn over (a cancelled
+	 * retry leaves the user at the prompt). Reads the turn's own `agent_end`
+	 * messages for the reason `sendErrorNotification` does.
+	 */
+	#settledRunStatus(event: Extract<AgentSessionEvent, { type: "agent_end" }>): RunFlowStatus {
+		if (this.#retryPending) return { state: "idle" };
+		const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
+		if (last?.stopReason === "error") return { state: "error", msg: last.errorMessage };
+		if (!last || last.stopReason === "aborted") return { state: "idle" };
+		return { state: "done" };
+	}
+
+	async #finishAgentEnd(
+		event: Extract<AgentSessionEvent, { type: "agent_end" }>,
+		options?: { interrupted?: boolean },
+	): Promise<void> {
+		this.#showingAsyncWait = false;
 		this.#setTerminalProgress(false);
 		this.ctx.statusLine.markActivityEnd();
 		this.#lastAgentEndAt = Date.now();
@@ -1953,7 +2582,6 @@ export class EventController {
 		}
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
-		this.#approvalAttentionToolCallIds.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);
@@ -1965,6 +2593,7 @@ export class EventController {
 		this.#syntheticFailureCards.clear();
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
+		this.#toolReplyBlocks.clear();
 		this.#resetReadGroup();
 		// The turn is over: nothing else lands this turn, so the waiting poll is
 		// final history — seal it instead of letting its spinner tick while idle.
@@ -1976,8 +2605,18 @@ export class EventController {
 		// torn-down "Working…" row with the "F5 to Retry" affordance.
 		this.ctx.syncRetryHintRow();
 		this.ctx.ui.requestRender();
-		this.#scheduleIdleCompaction();
-		this.#scheduleIdleRecap();
+		// The run yielded: a `/compact` queued behind it runs now. A run the user stopped (Esc, including
+		// the loop-mode pause) did not yield: the request goes back to the editor like other queued input.
+		if (this.ctx.yieldCompaction) {
+			const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
+			const userStopped = options?.interrupted || (last?.stopReason === "aborted" && isUserInterruptAbort(last));
+			if (userStopped)
+				this.ctx.restoreCompactionQueueToEditor("Run stopped: queued compaction returned to the editor");
+			else this.ctx.runYieldCompaction();
+		}
+		// The user stopped the run themselves: no prediction or toast for it.
+		if (options?.interrupted) return;
+		if (this.#settledRunStatus(event).state === "done") this.composerPrediction.request();
 		this.sendErrorNotification(event);
 		this.sendCompletionNotification(event);
 	}
@@ -2017,15 +2656,17 @@ export class EventController {
 	 * label carries no dangling whitespace.
 	 */
 	#maintenanceEscHint(): string {
-		return this.ctx.focusedAgentId ? "" : " (esc to cancel)";
+		return this.ctx.focusedAgentId ? "" : ` (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
 	}
 
 	async #handleAutoCompactionStart(
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
-		this.#cancelIdleCompaction();
-		this.#cancelIdleRecap();
-		this.#setTerminalProgress(true);
+		this.composerPrediction.cancel();
+		if (!this.#terminalProgressActive) {
+			this.#setTerminalProgress(true);
+			this.#compactionOwnsProgress = this.#terminalProgressActive;
+		}
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
 		const reasonText =
@@ -2053,14 +2694,25 @@ export class EventController {
 			`${reasonText}${actionLabel}…${this.#maintenanceEscHint()}`,
 			getSymbolTheme().spinnerFrames,
 		);
+		const compactionStartMs = Date.now();
+		this.ctx.autoCompactionLoader.setWorkingRow(
+			() => ({
+				label: `${reasonText}${actionLabel}…`,
+				startedAt: compactionStartMs,
+				variant: { kind: "compaction" },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
+		);
 		this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
 		this.ctx.ui.requestRender();
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
-		this.#cancelIdleCompaction();
-		this.#cancelIdleRecap();
-		this.#setTerminalProgress(false);
+		if (this.#compactionOwnsProgress) {
+			this.#compactionOwnsProgress = false;
+			this.#setTerminalProgress(false);
+		}
 		if (this.ctx.autoCompactionLoader) {
 			this.ctx.autoCompactionLoader.stop();
 			this.ctx.autoCompactionLoader = undefined;
@@ -2091,33 +2743,29 @@ export class EventController {
 				if (!event.skipped) {
 					this.ctx.rebuildChatFromMessages();
 					this.ctx.statusLine.invalidate();
-					this.ctx.ui.requestRender();
+					this.ctx.ui.requestRender(true, { clearScrollback: true });
 				}
 				this.ctx.showWarning(event.errorMessage);
 			} else if (!event.skipped) {
 				this.ctx.lastAssistantUsage = undefined;
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.statusLine.invalidate();
-				this.ctx.ui.requestRender();
+				this.ctx.ui.requestRender(true, { clearScrollback: true });
 				this.ctx.showStatus("Auto-shake completed");
 			}
 		} else if (event.result) {
-			this.ctx.lastAssistantUsage = undefined;
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 			this.ctx.statusLine.invalidate();
-			// When history collapses behind the summary divider, the frame
-			// shrinks far below the committed row count; without clearing, the
-			// differential renderer's "duplication, never loss" resync repaints
-			// the whole collapsed transcript (welcome box included) BELOW the
-			// stale pre-compaction scrollback. Compaction is an intentional
-			// transcript replacement then — same as auto-handoff below. With
-			// collapse disabled the rebuilt transcript keeps the full history,
-			// so the resync handles it and scrollback stays.
-			if (settings.get("display.collapseCompacted")) {
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
-			} else {
-				this.ctx.ui.requestRender();
-			}
+			// rebuildChatFromMessages clears the container's emission ledger,
+			// so every block re-emits on this frame while the previous copy is
+			// still in native scrollback; the differential resync only ever
+			// adds rows, so without a clear the collapse-disabled arm
+			// duplicates the full transcript (#12140). Pair the rebuild with a
+			// forced scrollback-clearing repaint in both arms — the pairing
+			// transcript-container documents for ledger resets — so compaction
+			// replaces history instead of appending a second copy. The force
+			// matters too: post-clear the frame looks unchanged to the diff.
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
 		} else if (event.errorMessage) {
 			this.ctx.showWarning(event.errorMessage);
 		} else if (isHandoffAction) {
@@ -2159,26 +2807,38 @@ export class EventController {
 		this.#syntheticFailureCards.clear();
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
-		if (AIError.is(event.errorId, AIError.Flag.ThinkingLoop)) {
-			// The retry path drops the failed assistant from runtime context. Do not
-			// restore its inline Error row; just unpin the fixed-region banner so the
-			// retry UI is the visible state.
-			this.#pinnedErrorComponent = undefined;
-			this.#pinnedErrorMessage = undefined;
-			this.#restorePinnedErrorInline = true;
-			this.ctx.clearPinnedError();
-		}
+		// The failed attempt is not the turn's outcome while a retry is pending:
+		// unpin its banner and keep its inline error hidden, so a recovered retry
+		// leaves no error in the transcript. The retry row names the reason;
+		// `auto_retry_end` marks the attempt recovered or superseded, or restores
+		// its error when the saga fails without accounting for it.
+		this.#pinnedErrorComponent = undefined;
+		this.#pinnedErrorMessage = undefined;
+		this.#restorePinnedErrorInline = true;
+		this.ctx.clearPinnedError();
+		const reason = previewLine(sanitizeText(event.errorMessage), TRUNCATE_LENGTHS.CONTENT);
 		const retryStartMs = Date.now();
 		const retryLabel = `Retrying (${event.attempt}/${event.maxAttempts})`;
+		const attemptLabel = `Retrying · attempt ${event.attempt} of ${event.maxAttempts}`;
 		this.ctx.retryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
 			() => {
 				const remaining = Math.max(0, event.delayMs - (Date.now() - retryStartMs));
-				return `${retryLabel} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
+				const wait = `${retryLabel} in ${formatDuration(remaining)}`;
+				return `${reason ? `${wait} · ${reason}` : `${wait}…`}${this.#maintenanceEscHint()}`;
 			},
 			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.retryLoader.setWorkingRow(
+			() => ({
+				label: reason ? `${attemptLabel} · ${reason}` : attemptLabel,
+				startedAt: retryStartMs,
+				variant: { kind: "retry", attempt: event.attempt, max: event.maxAttempts, delayMs: event.delayMs },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
 		);
 		this.ctx.statusContainer.addChild(this.ctx.retryLoader);
 		this.ctx.ui.requestRender();
@@ -2218,6 +2878,13 @@ export class EventController {
 			}
 			appliedRetryUpdate = true;
 		}
+		if (!event.success) {
+			// Attempts the saga did not account for (a cancelled wait, a failed
+			// local continuation) were hidden at `auto_retry_start`; show their errors.
+			for (const component of this.#retrySupersededAssistantQueue) {
+				if (component !== this.#pinnedErrorComponent) component.setErrorPinned(false);
+			}
+		}
 		if (
 			!terminalFailurePinned &&
 			!stalePinnedErrorCleared &&
@@ -2244,7 +2911,10 @@ export class EventController {
 	async #handleRetryFallbackApplied(
 		event: Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>,
 	): Promise<void> {
-		this.ctx.showWarning(`Fallback: ${event.from} -> ${event.to}`);
+		const reason = event.reason
+			? `\n${previewLine(sanitizeText(event.reason), TRUNCATE_LENGTHS.LINE * PREVIEW_LIMITS.COLLAPSED_LINES)}`
+			: "";
+		this.ctx.showWarning(`Fallback: ${event.from} -> ${event.to}${reason}`);
 	}
 
 	async #handleRetryFallbackSucceeded(
@@ -2265,149 +2935,41 @@ export class EventController {
 			this.ctx.chatContainer.children.at(-1) === previous &&
 			this.ctx.chatContainer.canRemoveBlock(previous)
 		) {
-			previous.addRules(event.rules);
+			previous.inner.addRules(event.rules);
+			previous.setBlock({
+				type: "event",
+				id: previous.block.id,
+				event: { type: "ttsr_triggered", rules: previous.inner.rules },
+			});
 			this.ctx.ui.requestRender();
 			return;
 		}
-		const component = new TtsrNotificationComponent(event.rules);
+		const notification = new TtsrNotificationComponent(event.rules);
+		const component = new PresentedBlock(notification, {
+			type: "event",
+			id: eventBlockId("ttsr"),
+			event: { type: "ttsr_triggered", rules: notification.rules },
+		});
 		component.setExpanded(this.ctx.toolOutputExpanded);
 		this.ctx.present(component);
 		this.#lastTtsrNotification = component;
 	}
 
 	async #handleTodoReminder(event: Extract<AgentSessionEvent, { type: "todo_reminder" }>): Promise<void> {
-		const component = new TodoReminderComponent(event.todos, event.attempt, event.maxAttempts);
+		const { todos, attempt, maxAttempts } = event;
+		const component = new PresentedBlock(new TodoReminderComponent(todos, attempt, maxAttempts), {
+			type: "event",
+			id: eventBlockId("todo-reminder"),
+			event: { type: "todo_reminder", todos, attempt, maxAttempts },
+		});
+		component.setExpanded(this.ctx.toolOutputExpanded);
 		this.ctx.present(component);
 	}
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {
 		await this.ctx.reloadTodos();
 	}
 
-	#cancelIdleCompaction(): void {
-		if (this.#idleCompactionTimer) {
-			clearTimeout(this.#idleCompactionTimer);
-			this.#idleCompactionTimer = undefined;
-		}
-	}
-
-	#cancelIdleRecap(): void {
-		if (this.#idleRecapTimer) {
-			clearTimeout(this.#idleRecapTimer);
-			this.#idleRecapTimer = undefined;
-		}
-		if (this.#idleRecapAbort) {
-			this.#idleRecapAbort.abort();
-			this.#idleRecapAbort = undefined;
-		}
-	}
-
-	#scheduleIdleCompaction(): void {
-		this.#cancelIdleCompaction();
-		// Don't schedule idle work while context maintenance is already running; the
-		// maintenance flow may reset the session before this timer fires.
-		if (this.ctx.viewSession.isCompacting) return;
-
-		const idleSettings = settings.getGroup("compaction");
-		if (!idleSettings.idleEnabled) return;
-
-		// Only if input is empty
-		if (this.ctx.editor.getText().trim()) return;
-
-		const threshold = idleSettings.idleThresholdTokens;
-		if (threshold <= 0) return;
-		if (this.#currentContextTokens() < threshold) return;
-
-		const timeoutMs = Math.max(60, Math.min(3600, idleSettings.idleTimeoutSeconds)) * 1000;
-		this.#idleCompactionTimer = setTimeout(() => {
-			this.#idleCompactionTimer = undefined;
-			// Re-check conditions before firing. Pruning may have run between arming
-			// the timer and now, dropping usage back below the idle threshold.
-			if (this.ctx.viewSession.isStreaming) return;
-			if (this.ctx.viewSession.isCompacting) return;
-			if (this.ctx.editor.getText().trim()) return;
-			if (this.#currentContextTokens() < threshold) return;
-			void this.ctx.viewSession.runIdleCompaction();
-		}, timeoutMs);
-		this.#idleCompactionTimer.unref?.();
-	}
-
-	#scheduleIdleRecap(): void {
-		this.#cancelIdleRecap();
-		if (this.ctx.viewSession.isCompacting) return;
-
-		const recapSettings = settings.getGroup("recap");
-		if (!recapSettings.enabled) return;
-		if (this.ctx.editor.getText().trim()) return;
-
-		const timeoutMs =
-			Math.max(IDLE_RECAP_MIN_SECONDS, Math.min(IDLE_RECAP_MAX_SECONDS, recapSettings.idleSeconds)) * 1000;
-		this.#idleRecapTimer = setTimeout(() => {
-			this.#idleRecapTimer = undefined;
-			void this.#runIdleRecap();
-		}, timeoutMs);
-		this.#idleRecapTimer.unref?.();
-	}
-
-	/**
-	 * Generate the idle recap with an ephemeral side-channel turn over the
-	 * current conversation (same pipeline as `/btw`) and surface it as a status
-	 * line. Live goal/title and the active todo task are passed as anchoring
-	 * hints because the snapshot only carries conversation history, not the
-	 * controller's todo/goal state. The request is abortable: any activity
-	 * cancels it via #cancelIdleRecap, and idle conditions are re-checked after
-	 * the reply lands so a stale recap never paints over fresh work.
-	 */
-	async #runIdleRecap(): Promise<void> {
-		if (!this.#idleConditionsHold()) return;
-		if (!this.ctx.viewSession.model) return;
-		if (this.ctx.viewSession.messages.length === 0) return;
-
-		const promptText = prompt.render(idleRecapPrompt, {
-			goal: this.#idleRecapGoalText() ?? "",
-			task: nextActionableTask(this.ctx.todoPhases)?.content ?? "",
-		});
-
-		const abort = new AbortController();
-		this.#idleRecapAbort = abort;
-		try {
-			const { replyText } = await this.ctx.viewSession.runEphemeralTurn({ promptText, signal: abort.signal });
-			if (this.#idleRecapAbort !== abort || abort.signal.aborted || !this.#idleConditionsHold()) return;
-			const recap = previewLine(replyText, TRUNCATE_LENGTHS.RECAP);
-			if (!recap) return;
-			this.ctx.showStatus(theme.fg("dim", theme.italic(`※ recap: ${recap}`)), { dim: false });
-		} catch (error) {
-			if (!abort.signal.aborted) logger.debug("Idle recap turn failed", { error: String(error) });
-		} finally {
-			if (this.#idleRecapAbort === abort) this.#idleRecapAbort = undefined;
-		}
-	}
-
-	/** Idle gate shared by the recap timer fire and its post-reply re-check. */
-	#idleConditionsHold(): boolean {
-		if (this.ctx.viewSession.isStreaming) return false;
-		if (this.ctx.viewSession.isCompacting) return false;
-		if (this.ctx.editor.getText().trim()) return false;
-		return true;
-	}
-
-	#idleRecapGoalText(): string | undefined {
-		const goal = this.ctx.viewSession.getGoalModeState?.()?.goal.objective.trim();
-		if (goal) return goal;
-		const title = this.ctx.sessionManager.getSessionName()?.trim();
-		return title || undefined;
-	}
-
-	#currentContextTokens(): number {
-		return this.ctx.viewSession.getContextUsage()?.tokens ?? 0;
-	}
-
 	sendErrorNotification(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
-		// A running async job or queued delivery will wake the session again, so
-		// its current agent_end is a scheduling pause rather than a user-visible
-		// terminal failure. AgentSession marks that stable outcome before
-		// dispatching the deferred event; do not infer it from mutable job state.
-		if (event.isTerminal === false) return;
-
 		// `AgentSession` defers and coalesces the wire-level `agent_end` while a
 		// prompt is still in flight (see `#emitSessionEvent` in agent-session.ts):
 		// every mid-retry attempt's own settle is superseded, so this method often
@@ -2424,7 +2986,7 @@ export class EventController {
 		// protocol is negotiated — avoid a second legacy desktop/OSC-9 toast.
 		if (isWarpCliAgentProtocolActive()) return;
 
-		const notify = settings.get("error.notify");
+		const notify = cfgErrorNotify.get(settings);
 		if (notify === "off") return;
 
 		// Read the turn's own outcome from `agent_end.messages`, not the mutable
@@ -2438,7 +3000,7 @@ export class EventController {
 
 		const sessionName = this.ctx.sessionManager.getSessionName();
 		TERMINAL.sendNotification({
-			title: sessionName || "Oh My Pi",
+			title: sessionName || "omp",
 			body: "Stopped with error",
 			type: "error",
 			actions: "focus",
@@ -2446,7 +3008,7 @@ export class EventController {
 	}
 
 	sendCompletionNotification(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
-		const notify = settings.get("completion.notify");
+		const notify = cfgCompletionNotify.get(settings);
 		if (notify === "off") return;
 
 		// Warp structured OSC 777 already drives native completion UX when the
@@ -2463,7 +3025,7 @@ export class EventController {
 
 		const sessionName = this.ctx.sessionManager.getSessionName();
 		TERMINAL.sendNotification({
-			title: sessionName || "Oh My Pi",
+			title: sessionName || "omp",
 			body: "Complete",
 			type: "completion",
 			actions: "focus",

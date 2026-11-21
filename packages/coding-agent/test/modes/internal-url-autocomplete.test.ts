@@ -12,8 +12,8 @@ import {
 	extractInternalUrlContext,
 	getInternalUrlSuggestions,
 	isInternalUrlPrefix,
-} from "@oh-my-pi/pi-coding-agent/modes/internal-url-autocomplete";
-import { PromptActionAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/modes/prompt-action-autocomplete";
+} from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
+import { PromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 
 function skill(name: string, description = ""): Skill {
 	return { name, description, filePath: `/skills/${name}/SKILL.md`, baseDir: `/skills/${name}`, source: "test" };
@@ -144,22 +144,6 @@ describe("internal-url-autocomplete", () => {
 
 		it("returns null for an unknown scheme", async () => {
 			expect(await InternalUrlRouter.instance().complete("bogus", "")).toBeNull();
-		});
-
-		it("exposes the completion-capable schemes", () => {
-			const schemes = InternalUrlRouter.instance().completionSchemes().sort();
-			expect(schemes).toEqual([
-				"agent",
-				"artifact",
-				"history",
-				"local",
-				"memory",
-				"omp",
-				"rule",
-				"security",
-				"skill",
-				"ssh",
-			]);
 		});
 	});
 

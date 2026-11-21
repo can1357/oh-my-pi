@@ -299,17 +299,23 @@ registerProvider<ContextFile>(contextFileCapability.id, {
 	load: loadContextFiles,
 });
 
-// System Prompt (SYSTEM.md)
+// System Prompt (SYSTEM.md, SYSTEM_TEMPLATE.md)
 async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
-	const load = async (filePath: string, level: "user" | "project"): Promise<SystemPrompt | null> => {
+	const load = async (
+		filePath: string,
+		level: "user" | "project",
+		kind: "text" | "template",
+	): Promise<SystemPrompt | null> => {
 		const content = await readFile(filePath);
 		if (!content) return null;
-		return { path: filePath, content, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) };
+		return { path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) };
 	};
 
 	const results = await Promise.all([
-		...getProjectPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "project")),
-		...getUserPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "user")),
+		...getProjectPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "project", "text")),
+		...getProjectPathCandidates(ctx, "SYSTEM_TEMPLATE.md").map(p => load(p, "project", "template")),
+		...getUserPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "user", "text")),
+		...getUserPathCandidates(ctx, "SYSTEM_TEMPLATE.md").map(p => load(p, "user", "template")),
 	]);
 
 	return { items: results.filter((r): r is SystemPrompt => r !== null), warnings: [] };
@@ -318,7 +324,7 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 registerProvider<SystemPrompt>(systemPromptCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load SYSTEM.md from .agent and .agents (project walk-up + user home)",
+	description: "Load SYSTEM.md and SYSTEM_TEMPLATE.md from .agent and .agents (project walk-up + user home)",
 	priority: PRIORITY,
 	load: loadSystemPrompt,
 });

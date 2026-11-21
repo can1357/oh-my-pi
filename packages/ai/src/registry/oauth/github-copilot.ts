@@ -23,14 +23,13 @@ import {
 	normalizeDomain,
 	normalizeGitHubCopilotEnterpriseDomain,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
-import { $env } from "@oh-my-pi/pi-utils";
 import {
 	resolveCopilotIntegrationIdOverride,
 	wrapFetchForCopilotFallback,
 } from "../../providers/github-copilot-headers";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
-import type { OAuthController, OAuthCredentials } from "./types";
+import type { OAuthController, OAuthCredentials, OAuthPrompt } from "./types";
 
 const OPENCODE_CLIENT_ID = "Ov23li8tweQw6odWQebz";
 const COPILOT_CLI_CLIENT_ID = "Ov23ctDVkRmgkPke0Mmm";
@@ -56,7 +55,7 @@ const SLOW_DOWN_POLL_INTERVAL_MULTIPLIER = 1.4;
 
 type GitHubCopilotLoginOptions = {
 	onAuth: (url: string, instructions?: string) => void;
-	onPrompt: (prompt: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
+	onPrompt: (prompt: OAuthPrompt) => Promise<string>;
 	onProgress?: (message: string) => void;
 	copilotIntegrationId?: unknown;
 	signal?: AbortSignal;

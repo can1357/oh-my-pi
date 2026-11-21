@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
 const ALT_A = "\x1ba";
@@ -83,13 +83,6 @@ function visibleRows(selector: TreeSelectorComponent): string[] {
 describe("tree selector entry labels", () => {
 	beforeAll(async () => {
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	});
-
-	it("never renders a row as a bare bullet", () => {
-		const selector = selectorFor([userEntry, ...bookkeeping]);
-		selector.handleInput(ALT_A);
-		const bullets = visibleRows(selector).filter(row => /^[\s│├└─›]*•\s*$/.test(row));
-		expect(bullets).toEqual([]);
 	});
 
 	it("labels each bookkeeping entry with what it recorded", () => {

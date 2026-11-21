@@ -8,11 +8,10 @@ import { e2eApiKey, resolveApiKey } from "./oauth";
 const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
-	resolveApiKey("google-gemini-cli"),
 	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, geminiCliToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, antigravityToken, openaiCodexToken] = oauthTokens;
 
 async function testTokensOnAbort<TApi extends Api>(llm: Model<TApi>, options: OptionsForApi<TApi> = {}) {
 	const context: Context = {
@@ -50,7 +49,6 @@ async function testTokensOnAbort<TApi extends Api>(llm: Model<TApi>, options: Op
 		llm.api === "openai-completions" ||
 		llm.api === "openai-responses" ||
 		llm.api === "openai-codex-responses" ||
-		llm.provider === "google-gemini-cli" ||
 		llm.provider === "zai" ||
 		(llm.provider === "google-antigravity" && llm.id.includes("gpt-oss"))
 	) {
@@ -212,22 +210,11 @@ describe("Token Statistics on Abort", () => {
 		);
 	});
 
-	describe("Google Gemini CLI Provider", () => {
-		it.skipIf(!geminiCliToken)(
-			"gemini-2.5-flash - should include token stats when aborted mid-stream",
-			async () => {
-				const llm = getBundledModel("google-gemini-cli", "gemini-2.5-flash");
-				await testTokensOnAbort(llm, { apiKey: geminiCliToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-	});
-
 	describe("Google Antigravity Provider", () => {
 		it.skipIf(!antigravityToken)(
-			"gemini-3-flash - should include token stats when aborted mid-stream",
+			"gemini-3.8-flash - should include token stats when aborted mid-stream",
 			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-3-flash");
+				const llm = getBundledModel("google-antigravity", "gemini-3.8-flash");
 				await testTokensOnAbort(llm, { apiKey: antigravityToken });
 			},
 			{ retry: 3, timeout: 30000 },

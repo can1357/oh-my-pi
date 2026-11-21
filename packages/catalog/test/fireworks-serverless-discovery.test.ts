@@ -75,14 +75,14 @@ const PAGE_2 = [
 	},
 ];
 
-function createMockFetch(): { fetch: FetchImpl; controlPlaneUrls: string[] } {
+function createMockFetch(catalog: Record<string, unknown> = {}): { fetch: FetchImpl; controlPlaneUrls: string[] } {
 	const controlPlaneUrls: string[] = [];
 	const fetch = (async (input: string | URL | Request): Promise<Response> => {
 		const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-		// stencil.so reference fetch — return an empty catalog so the mapper relies
-		// purely on control-plane + bundled references.
-		if (url.startsWith("https://stencil.so")) {
-			return jsonResponse({});
+		// models.dev catalog fetch — empty unless a test supplies rows, so the
+		// mapper otherwise relies purely on control-plane + bundled references.
+		if (url.startsWith("https://catalog.stencil.so")) {
+			return jsonResponse(catalog);
 		}
 		if (url.includes("/v1/accounts/fireworks/models")) {
 			controlPlaneUrls.push(url);
@@ -96,8 +96,10 @@ function createMockFetch(): { fetch: FetchImpl; controlPlaneUrls: string[] } {
 	return { fetch, controlPlaneUrls };
 }
 
-async function discover(): Promise<{ models: ModelSpec<"openai-completions">[]; controlPlaneUrls: string[] }> {
-	const { fetch, controlPlaneUrls } = createMockFetch();
+async function discover(
+	catalog?: Record<string, unknown>,
+): Promise<{ models: ModelSpec<"openai-completions">[]; controlPlaneUrls: string[] }> {
+	const { fetch, controlPlaneUrls } = createMockFetch(catalog);
 	const options = fireworksModelManagerOptions({ apiKey: "fw_test_key", fetch });
 	const result = (await options.fetchDynamicModels?.()) ?? [];
 	return { models: result as ModelSpec<"openai-completions">[], controlPlaneUrls };
@@ -164,10 +166,90 @@ describe("Fireworks control-plane serverless discovery", () => {
 		expect(built.thinking?.mode).toBe("effort");
 	});
 
+	it("prices discovered models from Fireworks' own models.dev rows, not another host's", async () => {
+		const { models } = await discover({
+			// Another host's row for the same bare id becomes the metadata reference.
+			deepseek: {
+				models: {
+					"deepseek-v4-flash": {
+						name: "DeepSeek V4 Flash",
+						tool_call: true,
+						reasoning: true,
+						cost: { input: 0.14, output: 0.28, cache_read: 0.028 },
+						limit: { context: 1048576, output: 393216 },
+					},
+				},
+			},
+			// Fireworks' own rows, keyed by wire id.
+			"fireworks-ai": {
+				models: {
+					"accounts/fireworks/models/deepseek-v4-flash": {
+						name: "DeepSeek V4 Flash",
+						tool_call: true,
+						cost: { input: 0.3, output: 1.2, cache_read: 0.06 },
+					},
+					"accounts/fireworks/models/kimi-k2p7-code": {
+						name: "Kimi K2.7 Code",
+						tool_call: true,
+						cost: { input: 1, output: 4.5, cache_read: 0.2 },
+					},
+				},
+			},
+		});
+		expect(models.find(m => m.id === "deepseek-v4-flash")?.cost).toEqual({
+			input: 0.3,
+			output: 1.2,
+			cacheRead: 0.06,
+			cacheWrite: 0,
+		});
+		// Also overrides the bundled row's price when no other host carries the id.
+		expect(models.find(m => m.id === "kimi-k2.7-code")?.cost).toEqual({
+			input: 1,
+			output: 4.5,
+			cacheRead: 0.2,
+			cacheWrite: 0,
+		});
+	});
+
+	it("keeps a published free Fireworks price and falls back only when Fireworks publishes none", async () => {
+		const { models } = await discover({
+			deepseek: {
+				models: {
+					"deepseek-v4-flash": {
+						name: "DeepSeek V4 Flash",
+						tool_call: true,
+						cost: { input: 0.14, output: 0.28 },
+						limit: { context: 1048576, output: 393216 },
+					},
+				},
+			},
+			"fireworks-ai": {
+				models: {
+					"accounts/fireworks/models/deepseek-v4-flash": {
+						name: "DeepSeek V4 Flash",
+						tool_call: true,
+						cost: { input: 0, output: 0, cache_read: 0 },
+					},
+					"accounts/fireworks/models/kimi-k2p7-code": { name: "Kimi K2.7 Code", tool_call: true },
+				},
+			},
+		});
+		expect(models.find(m => m.id === "deepseek-v4-flash")?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+		// A Fireworks row without a price leaves the bundled reference price in place.
+		expect(models.find(m => m.id === "kimi-k2.7-code")?.cost).toEqual(
+			getBundledModel("fireworks", "kimi-k2.7-code")?.cost,
+		);
+	});
+
 	it("returns null on a control-plane transport failure so the manager keeps its cache", async () => {
 		const fetch = (async (input: string | URL | Request): Promise<Response> => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			if (url.startsWith("https://stencil.so")) return jsonResponse({});
+			if (url.startsWith("https://catalog.stencil.so")) return jsonResponse({});
 			return new Response("server error", { status: 500 });
 		}) as unknown as FetchImpl;
 		const options = fireworksModelManagerOptions({ apiKey: "fw_test_key", fetch });

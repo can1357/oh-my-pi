@@ -545,7 +545,7 @@ function archiveLinkLine(changelogPath: string, commit: string): string {
  * returned body keeps its trailing newline; `archiveLink` is the bare footer
  * line when present.
  */
-export function splitArchiveFooter(content: string): { body: string; archiveLink: string | undefined } {
+function splitArchiveFooter(content: string): { body: string; archiveLink: string | undefined } {
 	const lines = splitContentLines(content);
 	let end = lines.length;
 	while (end > 0 && (lines[end - 1] ?? "").trim() === "") end--;
@@ -567,7 +567,7 @@ function appendArchiveFooter(body: string, archiveLink: string): string {
  * result may exceed `maxBytes` when those alone are over budget. Returns the
  * body without the footer appended.
  */
-export function collapseChangelogTail(
+function collapseChangelogTail(
 	content: string,
 	archiveLink: string,
 	maxBytes: number = MAX_CHANGELOG_BYTES,
@@ -614,7 +614,7 @@ export function collapseChangelogTail(
 	};
 }
 
-export function fixChangelogContent(
+function fixChangelogContent(
 	content: string,
 	promotableAddedItemStartLines: ReadonlySet<number>,
 	historicalReleasedItemKeys: ReadonlySet<string> = new Set<string>(),
@@ -676,7 +676,7 @@ function itemKey(pathName: string, text: string): string {
 	return `${pathName}\0${normalizeItemText(text)}`;
 }
 
-export function collectPromotableAddedItemLines(diffText: string): Map<string, Set<number>> {
+function collectPromotableAddedItemLines(diffText: string): Map<string, Set<number>> {
 	const candidates: AddedItemCandidate[] = [];
 	const removals: RemovedItemOccurrence[] = [];
 	const addedReleaseHeadingHunks = new Set<string>();
@@ -905,7 +905,10 @@ export async function changelogPaths(repoRoot: string): Promise<string[]> {
 	const glob = new Glob(CHANGELOG_GLOB);
 	const paths: string[] = [];
 	for await (const changelogPath of glob.scan(repoRoot)) {
-		paths.push(path.isAbsolute(changelogPath) ? path.relative(repoRoot, changelogPath) : changelogPath);
+		const relative = path.isAbsolute(changelogPath) ? path.relative(repoRoot, changelogPath) : changelogPath;
+		// Repo-relative paths feed git pathspecs and GitHub archive URLs, so they
+		// must use `/` even when the glob reports Windows separators.
+		paths.push(relative.split(path.sep).join("/"));
 	}
 	paths.sort();
 	return paths;

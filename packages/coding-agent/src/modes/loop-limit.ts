@@ -1,5 +1,5 @@
 import { readShellWord } from "../tools/shell-tokenize";
-import type { LoopConditionConfig } from "./loop-condition";
+import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 
 export type LoopLimitConfig =
 	| {
@@ -9,18 +9,6 @@ export type LoopLimitConfig =
 	| {
 			kind: "duration";
 			durationMs: number;
-	  };
-
-export type LoopLimitRuntime =
-	| {
-			kind: "iterations";
-			initial: number;
-			remaining: number;
-	  }
-	| {
-			kind: "duration";
-			durationMs: number;
-			deadlineMs: number;
 	  };
 
 const TIME_UNITS_MS = new Map<string, number>([
@@ -239,17 +227,18 @@ export function describeLoopLimit(config: LoopLimitConfig): string {
 	if (config.kind === "iterations") {
 		return `${config.iterations} ${config.iterations === 1 ? "iteration" : "iterations"}`;
 	}
-	return formatDuration(config.durationMs);
+	return formatLoopBudget(config.durationMs);
 }
 
 export function describeLoopLimitRuntime(limit: LoopLimitRuntime): string {
 	if (limit.kind === "iterations") {
 		return `${limit.remaining} of ${limit.initial} ${limit.initial === 1 ? "iteration" : "iterations"} remaining`;
 	}
-	return `${formatDuration(limit.durationMs)} limit`;
+	return `${formatLoopBudget(limit.durationMs)} limit`;
 }
 
-function formatDuration(durationMs: number): string {
+// Budget descriptions retain full precision in one spelled-out unit, unlike compact elapsed times.
+function formatLoopBudget(durationMs: number): string {
 	if (durationMs % 3_600_000 === 0) {
 		const hours = durationMs / 3_600_000;
 		return `${hours} ${hours === 1 ? "hour" : "hours"}`;

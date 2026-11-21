@@ -1,15 +1,6 @@
 /**
- * Perplexity login and token refresh.
- *
- * Login paths (in priority order):
- * 1. macOS native app: reads JWT from NSUserDefaults (`defaults read ai.perplexity.mac authToken`)
- * 2. HTTP email OTP: `GET /api/auth/csrf` → `POST /api/auth/signin-email` → `POST /api/auth/signin-otp`
- *
- * No browser or manual cookie paste required.
- * Refresh: Socket.IO `refreshJWT` RPC over authenticated WebSocket connection.
- *
- * Protocol: Engine.IO v4 + Socket.IO v4 over WebSocket (bypasses Cloudflare managed challenge).
- * Architecture reverse-engineered from Perplexity macOS app (ai.perplexity.mac).
+ * Perplexity login via legacy macOS session borrowing, host-managed browser SSO,
+ * or HTTP email OTP (including authenticator challenges).
  */
 import * as os from "node:os";
 import { $env } from "@oh-my-pi/pi-utils";
@@ -20,6 +11,8 @@ import type { OAuthController, OAuthCredentials } from "./types";
 const API_VERSION = "2.18";
 const NATIVE_APP_BUNDLE = "ai.perplexity.mac";
 const APP_USER_AGENT = "Perplexity/641 CFNetwork/1568 Darwin/25.2.0";
+/** Shape check that tells an address from a mistyped method; Perplexity validates the address itself. */
+const EMAIL_ADDRESS = /^[^\s@]+@[^\s@]+$/;
 
 function serializeCookies(cookies: CookieMap): string {
 	let header = "";
@@ -80,10 +73,7 @@ function jwtToCredentials(jwt: string, email?: string): OAuthCredentials {
 // Desktop app extraction
 // ---------------------------------------------------------------------------
 
-/**
- * Read the Perplexity JWT from the native macOS Catalyst app's UserDefaults.
- * Tokens are stored in NSUserDefaults (not Keychain), readable by any same-UID process.
- */
+/** Read the legacy ai.perplexity.mac app's session; newer Mac apps use a restricted Keychain. */
 async function extractFromNativeApp(): Promise<string | null> {
 	if (os.platform() !== "darwin") return null;
 
@@ -99,21 +89,24 @@ async function extractFromNativeApp(): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
-// Socket.IO email OTP login
+// HTTP email OTP login
 // ---------------------------------------------------------------------------
 
 /**
  * Send email OTP and exchange it for a Perplexity JWT via HTTP endpoints.
+ * Prompts for the address unless the login-method answer already supplied it.
  */
-async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> {
+async function httpEmailLogin(ctrl: OAuthController, email?: string): Promise<OAuthCredentials> {
 	if (!ctrl.onPrompt) {
 		throw new AIError.OnPromptRequiredError("Perplexity");
 	}
-	const email = await ctrl.onPrompt({
-		message: "Enter your Perplexity email address",
-		placeholder: "user@example.com",
-	});
-	const trimmedEmail = email.trim();
+	const trimmedEmail = (
+		email ??
+		(await ctrl.onPrompt({
+			message: "Enter your Perplexity email address",
+			placeholder: "user@example.com",
+		}))
+	).trim();
 	if (!trimmedEmail)
 		throw new AIError.OAuthError("Email is required for Perplexity login", {
 			kind: "validation",
@@ -275,31 +268,108 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 }
 
 // ---------------------------------------------------------------------------
+// Browser SSO login
+// ---------------------------------------------------------------------------
+
+const SESSION_COOKIE_NAME = "__Secure-next-auth.session-token";
+const PERPLEXITY_BASE_URL = "https://www.perplexity.ai";
+
+async function browserSsoLogin(ctrl: OAuthController): Promise<OAuthCredentials> {
+	if (!ctrl.onBrowserSession) {
+		throw new AIError.OAuthError("Browser SSO is unavailable in this client", {
+			kind: "validation",
+			provider: "perplexity",
+		});
+	}
+	ctrl.onProgress?.("Complete Perplexity sign-in in the browser window. Choose SSO for your organization.");
+	const token = (
+		await ctrl.onBrowserSession(
+			{
+				url: `${PERPLEXITY_BASE_URL}/auth/signin`,
+				cookieNames: [SESSION_COOKIE_NAME, "next-auth.session-token"],
+			},
+			ctrl.signal,
+		)
+	).trim();
+	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+	if (!token || /[\s;]/.test(token)) {
+		throw new AIError.OAuthError("Perplexity SSO captured an invalid session cookie", {
+			kind: "validation",
+			provider: "perplexity",
+		});
+	}
+
+	ctrl.onProgress?.("Validating Perplexity session...");
+	const response = await (ctrl.fetch ?? fetch)(`${PERPLEXITY_BASE_URL}/api/auth/session`, {
+		headers: {
+			Cookie: `${SESSION_COOKIE_NAME}=${token}`,
+			"User-Agent": APP_USER_AGENT,
+			"X-App-ApiVersion": API_VERSION,
+		},
+		redirect: "error",
+		signal: ctrl.signal,
+	});
+	if (!response.ok) {
+		throw new AIError.ProviderHttpError(`Perplexity session validation failed (${response.status})`, response.status);
+	}
+	let email: unknown;
+	try {
+		const session = (await response.json()) as { user?: { email?: unknown } } | null;
+		email = session?.user?.email;
+	} catch (error) {
+		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+		if (!(error instanceof SyntaxError)) throw error;
+		throw new AIError.OAuthError("Perplexity returned an invalid session response", {
+			kind: "validation",
+			provider: "perplexity",
+		});
+	}
+	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+	if (typeof email !== "string" || !email.trim()) {
+		throw new AIError.OAuthError("Perplexity session is invalid or expired. Sign in again.", {
+			kind: "validation",
+			provider: "perplexity",
+		});
+	}
+	return jwtToCredentials(token, email.trim());
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/**
- * Login to Perplexity.
- *
- * Tries auto-extraction from the desktop app, then runs HTTP email OTP login.
- *
- * No browser/manual token paste fallback is used.
- */
+/** Prefer legacy app borrowing, then offer browser SSO when the host supports it. */
 export async function loginPerplexity(ctrl: OAuthController): Promise<OAuthCredentials> {
-	if (!ctrl.onPrompt) {
-		throw new AIError.OnPromptRequiredError("Perplexity");
-	}
+	if (!ctrl.onPrompt) throw new AIError.OnPromptRequiredError("Perplexity");
+	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 
-	// Path 1: Native macOS app JWT (skip if PI_AUTH_NO_BORROW=1)
 	if (!$env.PI_AUTH_NO_BORROW) {
 		ctrl.onProgress?.("Checking for Perplexity desktop app...");
 		const nativeJwt = await extractFromNativeApp();
+		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 		if (nativeJwt) {
 			ctrl.onProgress?.("Found Perplexity JWT from native app");
 			return jwtToCredentials(nativeJwt);
 		}
 	}
 
-	// Path 2: HTTP email OTP
+	if (ctrl.onBrowserSession) {
+		const answer = (
+			await ctrl.onPrompt({
+				message: "Perplexity email address for a login code (blank for browser SSO)",
+				placeholder: "user@example.com",
+				allowEmpty: true,
+			})
+		).trim();
+		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+		const method = answer.toLowerCase();
+		if (!method || method === "sso") return browserSsoLogin(ctrl);
+		if (method === "email") return httpEmailLogin(ctrl);
+		if (EMAIL_ADDRESS.test(answer)) return httpEmailLogin(ctrl, answer);
+		throw new AIError.OAuthError("Expected a Perplexity email address, or a blank answer for browser SSO", {
+			kind: "validation",
+			provider: "perplexity",
+		});
+	}
 	return httpEmailLogin(ctrl);
 }

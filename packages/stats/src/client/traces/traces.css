@@ -1,0 +1,305 @@
+/* Traces page: session list + single-session trace viewer. */
+
+.traces-models {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 220px;
+	min-width: 0;
+	color: var(--ink-2);
+}
+
+.traces-title {
+	display: block;
+	max-width: 720px;
+}
+
+.traces-spin {
+	animation: traces-spin 900ms linear infinite;
+}
+
+@keyframes traces-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* Toolbar above the timeline. */
+.traces-toolbar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 12px;
+}
+
+.traces-check {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12.5px;
+	color: var(--ink-2);
+	cursor: pointer;
+	user-select: none;
+}
+
+.traces-check input {
+	accent-color: var(--accent);
+	margin: 0;
+}
+
+.traces-search {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.traces-match-count {
+	font-size: 12px;
+	min-width: 36px;
+	text-align: center;
+}
+
+.traces-legend {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	margin-left: auto;
+	font-size: 12px;
+	color: var(--ink-2);
+}
+
+.traces-legend-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* Minimap brush strip. */
+.traces-minimap {
+	width: 100%;
+	display: block;
+	cursor: crosshair;
+	border-radius: var(--r-chip);
+	border: 1px solid var(--line-2);
+	background: var(--panel);
+	touch-action: none;
+}
+
+/* Flamegraph: DOM gutter + canvas. */
+.traces-timeline {
+	position: relative;
+	display: flex;
+	max-height: 560px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	border-top: 1px solid var(--line-1);
+}
+
+.traces-canvas {
+	cursor: grab;
+	outline: none;
+	touch-action: none;
+}
+
+.traces-canvas:focus-visible {
+	outline: 1px solid var(--focus);
+	outline-offset: -1px;
+	border-radius: var(--r-chip);
+}
+
+.traces-canvas:active {
+	cursor: grabbing;
+}
+
+/* Scene canvas with the hover/selection boxes stacked on top. */
+.traces-canvas-stack {
+	position: relative;
+	flex-shrink: 0;
+	overflow: hidden;
+}
+
+.traces-canvas-stack > canvas {
+	display: block;
+}
+
+.traces-canvas-hover,
+.traces-canvas-selection {
+	position: absolute;
+	pointer-events: none;
+	box-sizing: border-box;
+}
+
+.traces-canvas-hover {
+	background: rgba(255, 255, 255, 0.16);
+}
+
+.traces-canvas-selection {
+	border: 1.5px solid;
+}
+
+.traces-chevron {
+	display: inline-flex;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+	color: var(--ink-3);
+	border-radius: 4px;
+}
+
+.traces-chevron:hover {
+	color: var(--ink-1);
+}
+
+.traces-chevron:focus-visible {
+	outline: 2px solid var(--focus);
+}
+
+.traces-gutter-track {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--ink-1);
+}
+
+.traces-gutter-model {
+	font-size: 10.5px;
+	color: var(--ink-3);
+}
+
+.traces-gutter-lane {
+	position: absolute;
+	font-size: 10.5px;
+	color: var(--ink-3);
+}
+
+.traces-tooltip {
+	position: fixed;
+	z-index: 60;
+	max-width: 300px;
+	pointer-events: none;
+	background: var(--overlay);
+	backdrop-filter: blur(12px);
+	border: 1px solid var(--line-3);
+	border-radius: var(--r-control);
+	padding: 8px 10px;
+	font-size: 12px;
+	line-height: 1.5;
+	box-shadow: var(--shadow-2);
+}
+
+.traces-tooltip-title {
+	font-weight: 500;
+	color: var(--ink-1);
+}
+
+.traces-tooltip-detail {
+	color: var(--ink-2);
+	word-break: break-word;
+}
+
+/* Transcript list (virtualised, fixed 28px rows). */
+.traces-list {
+	height: 340px;
+	overflow-y: auto;
+}
+
+.traces-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	height: 28px;
+	width: 100%;
+	padding: 0 16px;
+	background: transparent;
+	border: none;
+	border-bottom: 1px solid var(--line-1);
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: background var(--dur-1) var(--ease);
+}
+
+.traces-row:hover {
+	background: var(--hover);
+}
+
+.traces-row:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: -2px;
+}
+
+.traces-row[data-selected="true"] {
+	background: var(--selected);
+	box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.traces-row[data-static="true"] {
+	cursor: default;
+}
+
+.traces-row[data-static="true"]:hover {
+	background: transparent;
+}
+
+.traces-kind {
+	flex-shrink: 0;
+	width: 72px;
+	font-size: 11px;
+	font-weight: 500;
+	border-radius: var(--r-chip);
+	padding: 1px 0;
+	text-align: center;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--ink-1);
+	background: color-mix(in srgb, var(--traces-kind-color) 18%, transparent);
+	box-shadow: inset 2px 0 0 var(--traces-kind-color);
+}
+
+.traces-row-track {
+	flex-shrink: 0;
+	max-width: 110px;
+	font-size: 11px;
+	color: var(--ink-3);
+}
+
+.traces-row-label {
+	font-size: 12.5px;
+	color: var(--ink-1);
+	min-width: 0;
+	flex-shrink: 1;
+}
+
+.traces-row-detail {
+	font-size: 12px;
+	color: var(--ink-3);
+	min-width: 0;
+	flex: 1;
+}
+
+.traces-row-meta {
+	margin-left: auto;
+	flex-shrink: 0;
+	display: inline-flex;
+	gap: 12px;
+	font-size: 11.5px;
+	color: var(--ink-3);
+}
+
+/* Span drawer. */
+.traces-drawer {
+	gap: 16px;
+}
+
+.traces-pre {
+	margin: 0;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.traces-pre[data-scroll="true"] {
+	max-height: 360px;
+	overflow-y: auto;
+}

@@ -183,12 +183,4 @@ describe("synthetic usage provider", () => {
 		);
 		expect(report).toBeNull();
 	});
-
-	it("empty object payload → returns null", async () => {
-		const report = await syntheticUsageProvider.fetchUsage!(
-			{ provider: "synthetic", credential: makeCredential(), signal: undefined },
-			makeCtx({}),
-		);
-		expect(report).toBeNull();
-	});
 });

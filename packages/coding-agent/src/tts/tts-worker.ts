@@ -1,83 +1,37 @@
-import { createRequire } from "node:module";
-import type { ProgressInfo, RawAudio } from "@huggingface/transformers";
-import { ensureRuntimeInstalled, getTinyModelsCacheDir, resolveRuntimeModule } from "@oh-my-pi/pi-utils";
+import { PhononTts } from "@oh-my-pi/pi-natives";
+import { errorText, replayCachedReady, sendLog } from "../subprocess/worker-runtime";
+import { ensureTtsCheckpoint } from "./checkpoint";
 import {
-	errorMessage,
-	errorText,
-	installSharpStubResolver,
-	MemoizedRuntime,
-	replayCachedReady,
-	sendLog,
-	sendProgress,
-	TRANSFORMERS_PACKAGE,
-} from "../subprocess/worker-runtime";
-import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
-import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
-import { getTtsLocalModelSpec, resolveTtsVoice, type TtsLocalModelKey, type TtsLocalModelSpec } from "./models";
-import {
-	getTtsRuntimeDir,
-	KOKORO_PACKAGE,
-	KOKORO_VERSION,
-	ONNXRUNTIME_NODE_PACKAGE,
-	ONNXRUNTIME_NODE_VERSION,
-} from "./runtime";
-import type { TtsTransport, TtsWorkerInbound } from "./tts-protocol";
+	getTtsLocalModelSpec,
+	resolveTtsSpeed,
+	resolveTtsVoice,
+	type TtsLocalModelKey,
+	ttsDurationDelta,
+} from "./models";
+import { runFramedStdioWorker } from "../daemon/modules/speech-frames";
+import type { TtsTransport, TtsWorkerInbound, TtsWorkerOutbound } from "./tts-protocol";
 
 const TTS_TASK = "text-to-speech";
-// kokoro-js is NEVER a dependency of the main tree: its transformers@3.8.1 +
-// onnxruntime-node@1.21 graph must not pollute it (1.21 segfaults Bun on session
-// creation). It is lazily `bun install`ed into a side runtime dir on first use,
-// with onnxruntime-node force-pinned to the Bun-safe version the rest of the
-// stack runs. Bump KOKORO_VERSION to roll the cached runtime + model wrapper.
-
-const ttsDevicePreference = resolveTinyModelDevicePreference();
-const ttsDtypeOverride = resolveTinyModelDtypeOverride();
-
-/** Device values `kokoro-js` accepts; the tiny device order is mapped onto these. */
-type KokoroDevice = "cpu" | "wasm" | "webgpu";
-
-/** A loaded Kokoro voice synthesizer (subset of `kokoro-js`'s `KokoroTTS`). */
-interface KokoroTtsInstance {
-	generate(text: string, options: { voice: string }): Promise<RawAudio>;
-}
-
-/** `KokoroTTS` static surface used to load a model from the Hugging Face Hub. */
-interface KokoroRuntime {
-	KokoroTTS: {
-		from_pretrained(
-			repo: string,
-			options: {
-				dtype: TinyModelDtype;
-				device: KokoroDevice;
-				progress_callback: (info: ProgressInfo) => void;
-			},
-		): Promise<KokoroTtsInstance>;
-	};
-}
 
 /**
- * The `@huggingface/transformers` instance `kokoro-js` runs on. We only touch its
- * `env` (cache dir + log level) and `LogLevel`; inference goes through Kokoro.
+ * Text budget of one streaming synthesis call after the first. Segments already
+ * queued are joined up to it so the model paces the sentences itself: spoken
+ * one by one, short sentences come out slower and each trails ~0.6 s of
+ * silence. ~400 chars is ~1 s of compute, short enough that playback of the
+ * previous chunk never drains.
  */
-interface TransformersEnv {
-	env: {
-		cacheDir?: string;
-		allowLocalModels?: boolean;
-		logLevel?: unknown;
-		backends?: {
-			onnx?: {
-				logLevel?: unknown;
-			};
-		};
-	};
-	LogLevel?: {
-		ERROR: unknown;
-	};
-}
+const BATCH_CHARS = 400;
+/** A segment that already ends its sentence (optionally inside closing quotes/brackets). */
+const SENTENCE_END_RE = /[.!?…]["'”’)\]]*$/;
 
-const models = new Map<TtsLocalModelKey, Promise<KokoroTtsInstance>>();
+const models = new Map<TtsLocalModelKey, Promise<PhononTts>>();
 let synthesizeQueue = Promise.resolve();
-const kokoroRuntime = new MemoizedRuntime<KokoroRuntime>();
+
+/** Per-request native options: a voice the model ships and the conditioner value for the rate. */
+interface SpeechRequest {
+	voice: string;
+	durationDelta: number;
+}
 
 /**
  * In-flight streaming sessions keyed by request id. A session is created on
@@ -89,6 +43,7 @@ const kokoroRuntime = new MemoizedRuntime<KokoroRuntime>();
 interface StreamSession {
 	modelKey: TtsLocalModelKey;
 	voice: string | undefined;
+	speed: number | undefined;
 	/** Speakable segments awaiting synthesis, in arrival order. */
 	queue: string[];
 	/** Resolves the run loop's idle wait when a push/end/cancel arrives. */
@@ -98,172 +53,63 @@ interface StreamSession {
 }
 const streamSessions = new Map<string, StreamSession>();
 
-/**
- * Map a tiny-model device onto the narrow set `kokoro-js` accepts. The worker
- * always runs `kokoro-js` on Node, where `cpu` (onnxruntime-node) is the only
- * safe option; `webgpu`/`wasm` are honored if explicitly requested.
- */
-function toKokoroDevice(device: TinyModelDevice): KokoroDevice {
-	if (device === "wasm") return "wasm";
-	if (device === "webgpu" || device === "gpu") return "webgpu";
-	return "cpu";
-}
-
-function configureTransformers(transformers: TransformersEnv): void {
-	transformers.env.cacheDir = getTinyModelsCacheDir();
-	transformers.env.allowLocalModels = false;
-	transformers.env.logLevel = transformers.LogLevel?.ERROR ?? "error";
-	if (transformers.env.backends?.onnx) transformers.env.backends.onnx.logLevel = "error";
-}
-
-/**
- * Lazily `bun install` `kokoro-js` into a side runtime dir (idempotent, version-
- * keyed) and return its module, with the `@huggingface/transformers` instance it
- * loads configured (cache dir + quiet logging). `kokoro-js` is NEVER a dependency
- * of the main tree: its transformers@3.8.1 graph pulls onnxruntime-node@1.21,
- * which segfaults Bun on session creation, so the runtime manifest force-pins
- * onnxruntime-node to the Bun-safe version via `overrides`. `sharp` is stubbed —
- * the TTS pipeline is audio-only, so the native image codec transformers eagerly
- * requires is dead weight. Memoized so the runtime loads once per process.
- */
-function loadKokoroRuntime(
-	transport: TtsTransport,
-	requestId: string,
+function speechRequest(
 	modelKey: TtsLocalModelKey,
-): Promise<KokoroRuntime> {
-	return kokoroRuntime.load(async () => {
-		const runtimeDir = await ensureRuntimeInstalled({
-			runtimeDir: getTtsRuntimeDir(),
-			install: {
-				dependencies: { [KOKORO_PACKAGE]: KOKORO_VERSION },
-				overrides: { [ONNXRUNTIME_NODE_PACKAGE]: ONNXRUNTIME_NODE_VERSION },
-				trustedDependencies: [ONNXRUNTIME_NODE_PACKAGE],
+	voice: string | undefined,
+	speed: number | undefined,
+): SpeechRequest {
+	const spec = getTtsLocalModelSpec(modelKey);
+	if (!spec) throw new Error(`Unknown local TTS model: ${modelKey}`);
+	return { voice: resolveTtsVoice(modelKey, voice), durationDelta: ttsDurationDelta(spec, resolveTtsSpeed(speed)) };
+}
+
+/**
+ * Install the model's checkpoint (first use downloads it, streaming per-file
+ * byte progress) and load it through the native binding; memoized per model.
+ */
+function loadModel(modelKey: TtsLocalModelKey, transport: TtsTransport, requestId: string): Promise<PhononTts> {
+	const spec = getTtsLocalModelSpec(modelKey);
+	if (!spec) throw new Error(`Unknown local TTS model: ${modelKey}`);
+	const cached = replayCachedReady(models, modelKey, transport, requestId, TTS_TASK, spec.label);
+	if (cached) return cached;
+
+	const startedAt = performance.now();
+	const loaded = ensureTtsCheckpoint(spec, ({ target, loaded, size }) =>
+		transport.send({
+			type: "progress",
+			id: requestId,
+			event: {
+				modelKey,
+				status: loaded === 0 ? "download" : "progress",
+				file: target,
+				loaded,
+				total: size,
+				progress: (loaded / size) * 100,
 			},
-			probePackage: KOKORO_PACKAGE,
-			onPhase: phase =>
+		}),
+	)
+		.then(dir => PhononTts.load(dir))
+		.then(
+			model => {
+				sendLog(transport, "debug", "tts: local model loaded", {
+					modelKey,
+					voices: model.voices.length,
+					elapsedMs: Math.round(performance.now() - startedAt),
+				});
 				transport.send({
 					type: "progress",
 					id: requestId,
-					event: { modelKey, status: phase, name: `${KOKORO_PACKAGE}@${KOKORO_VERSION}` },
-				}),
-		});
-		const nodeModules = await installSharpStubResolver(runtimeDir);
-		const kokoroEntry = resolveRuntimeModule(nodeModules, KOKORO_PACKAGE);
-		if (!kokoroEntry) throw new Error(`Unable to resolve ${KOKORO_PACKAGE} in runtime at ${nodeModules}`);
-		const transformersEntry = resolveRuntimeModule(nodeModules, TRANSFORMERS_PACKAGE);
-		if (!transformersEntry) throw new Error(`Unable to resolve ${TRANSFORMERS_PACKAGE} in runtime at ${nodeModules}`);
-		const runtimeRequire = createRequire(kokoroEntry);
-		configureTransformers(runtimeRequire(transformersEntry) as TransformersEnv);
-		return runtimeRequire(kokoroEntry) as KokoroRuntime;
-	});
-}
-
-async function loadModelOnDevice(
-	runtime: KokoroRuntime,
-	spec: TtsLocalModelSpec,
-	modelKey: TtsLocalModelKey,
-	transport: TtsTransport,
-	requestId: string,
-	device: KokoroDevice,
-): Promise<KokoroTtsInstance> {
-	return runtime.KokoroTTS.from_pretrained(spec.repo, {
-		device,
-		dtype: ttsDtypeOverride ?? spec.dtype,
-		progress_callback: info => sendProgress(transport, requestId, modelKey, info),
-	});
-}
-
-async function loadModelWithDeviceFallback(
-	runtime: KokoroRuntime,
-	spec: TtsLocalModelSpec,
-	modelKey: TtsLocalModelKey,
-	transport: TtsTransport,
-	requestId: string,
-): Promise<{ model: KokoroTtsInstance; device: KokoroDevice }> {
-	const order = tinyModelDeviceLoadOrder(ttsDevicePreference);
-	if (order[0] !== ttsDevicePreference.device) {
-		sendLog(transport, "warn", "tts: requested device is unsafe in the worker; using CPU", {
-			modelKey,
-			repo: spec.repo,
-			requestedDevice: ttsDevicePreference.device,
-			device: order[0],
-		});
-	}
-	const devices: KokoroDevice[] = [];
-	for (const device of order) {
-		const mapped = toKokoroDevice(device);
-		if (!devices.includes(mapped)) devices.push(mapped);
-	}
-	for (let i = 0; i < devices.length; i += 1) {
-		const device = devices[i]!;
-		try {
-			return { model: await loadModelOnDevice(runtime, spec, modelKey, transport, requestId, device), device };
-		} catch (error) {
-			if (i === devices.length - 1) throw error;
-			const fallbackDevice = devices[i + 1]!;
-			sendLog(transport, "warn", "tts: accelerated device failed; falling back", {
-				modelKey,
-				repo: spec.repo,
-				device,
-				fallbackDevice,
-				error: errorMessage(error),
-			});
-		}
-	}
-	throw new Error("No TTS devices configured");
-}
-
-async function loadModel(
-	modelKey: TtsLocalModelKey,
-	transport: TtsTransport,
-	requestId: string,
-): Promise<KokoroTtsInstance> {
-	const spec = getTtsLocalModelSpec(modelKey);
-	if (!spec) throw new Error(`Unknown local TTS model: ${modelKey}`);
-	const cached = replayCachedReady(models, modelKey, transport, requestId, TTS_TASK, spec.repo);
-	if (cached) return cached;
-
-	const runtime = await loadKokoroRuntime(transport, requestId, modelKey);
-	const startedAt = performance.now();
-	const loaded = loadModelWithDeviceFallback(runtime, spec, modelKey, transport, requestId).then(
-		({ model, device }) => {
-			sendLog(transport, "debug", "tts: local model loaded", {
-				modelKey,
-				repo: spec.repo,
-				device,
-				requestedDevice: ttsDevicePreference.device,
-				dtype: ttsDtypeOverride ?? spec.dtype,
-				elapsedMs: Math.round(performance.now() - startedAt),
-			});
-			transport.send({
-				type: "progress",
-				id: requestId,
-				event: { modelKey, status: "ready", task: TTS_TASK, model: spec.repo },
-			});
-			return model;
-		},
-		error => {
-			models.delete(modelKey);
-			throw error;
-		},
-	);
+					event: { modelKey, status: "ready", task: TTS_TASK, model: spec.label },
+				});
+				return model;
+			},
+			error => {
+				models.delete(modelKey);
+				throw error;
+			},
+		);
 	models.set(modelKey, loaded);
 	return loaded;
-}
-
-async function synthesize(
-	transport: TtsTransport,
-	requestId: string,
-	modelKey: TtsLocalModelKey,
-	text: string,
-	voice: string | undefined,
-): Promise<{ pcm: Float32Array; sampleRate: number }> {
-	const synthesizer = await loadModel(modelKey, transport, requestId);
-	const output = await synthesizer.generate(text, { voice: resolveTtsVoice(modelKey, voice) });
-	const spec = getTtsLocalModelSpec(modelKey);
-	const audio = Array.isArray(output.audio) ? output.audio[0] : output.audio;
-	if (!audio) throw new Error("Kokoro synthesis returned no audio samples");
-	return { pcm: audio, sampleRate: output.sampling_rate || spec?.sampleRate || 24_000 };
 }
 
 function enqueueRequest(
@@ -290,34 +136,43 @@ async function handleQueuedRequest(
 			transport.send({ type: "downloaded", id: request.id });
 			return;
 		}
-		const { pcm, sampleRate } = await synthesize(
-			transport,
-			request.id,
-			request.modelKey,
-			request.text,
-			request.voice,
-		);
-		transport.send({ type: "audio", id: request.id, pcm, sampleRate });
+		const options = speechRequest(request.modelKey, request.voice, request.speed);
+		const model = await loadModel(request.modelKey, transport, request.id);
+		const pcm = await model.synthesize(request.text, options);
+		transport.send({ type: "audio", id: request.id, pcm, sampleRate: model.sampleRate });
 	} catch (error) {
 		transport.send({ type: "error", id: request.id, error: errorText(error) });
 	}
 }
 
 /**
+ * Take the next synthesis input off `queue`: the first segment of a session
+ * alone (fastest first audio), later ones joined with every queued segment that
+ * fits {@link BATCH_CHARS}. A joined segment without sentence-final punctuation
+ * (a list item or heading cut at a newline) gets a full stop, so the boundary
+ * is still spoken as one.
+ */
+function takeBatch(queue: string[], first: string, spoke: boolean): string {
+	let batch = first;
+	while (spoke && queue.length > 0 && batch.length + queue[0]!.length < BATCH_CHARS) {
+		batch = `${SENTENCE_END_RE.test(batch) ? batch : `${batch}.`} ${queue.shift()}`;
+	}
+	return batch;
+}
+
+/**
  * Drive one streaming session to completion: load the model, then synthesize
- * each queued segment in arrival order — one `audio-chunk` per segment,
- * followed by a single `stream-done`. Chunk sends are drained before the next
- * segment's inference (see the comment at the send site). Serialized through
+ * queued segments in arrival order (batched by {@link takeBatch}) — one
+ * `audio-chunk` per synthesis call, followed by a single `stream-done`. Serialized through
  * {@link synthesizeQueue} so it never interleaves model access with a batch
  * synthesize/download.
  */
 async function runStreamSession(transport: TtsTransport, id: string, session: StreamSession): Promise<void> {
 	try {
 		if (session.cancelled) return;
-		const synthesizer = await loadModel(session.modelKey, transport, id);
+		const options = speechRequest(session.modelKey, session.voice, session.speed);
+		const model = await loadModel(session.modelKey, transport, id);
 		if (session.cancelled) return;
-		const spec = getTtsLocalModelSpec(session.modelKey);
-		const voice = resolveTtsVoice(session.modelKey, session.voice);
 		let index = 0;
 		while (!session.cancelled) {
 			const segment = session.queue.shift();
@@ -333,22 +188,19 @@ async function runStreamSession(transport: TtsTransport, id: string, session: St
 				await promise;
 				continue;
 			}
-			const output = await synthesizer.generate(segment, { voice });
+			const text = takeBatch(session.queue, segment, index > 0);
+			const pcm = await model.synthesize(text, options);
 			if (session.cancelled) break;
-			const audio = Array.isArray(output.audio) ? output.audio[0] : output.audio;
-			if (!audio) continue;
-			// Drain the IPC write before the next segment's inference: ONNX
-			// blocks this event loop for seconds at a time, so a fire-and-forget
-			// send would sit in the pipe queue until the session ends and every
-			// chunk would arrive in one burst (long silence, then all segments
-			// at once) instead of streaming per-segment.
+			if (pcm.length === 0) continue;
+			// Drain each chunk before the next segment so playback starts on the
+			// first segment instead of after a burst at the end of the session.
 			await transport.sendAndFlush({
 				type: "audio-chunk",
 				id,
 				index: index++,
-				text: segment,
-				pcm: audio,
-				sampleRate: output.sampling_rate || spec?.sampleRate || 24_000,
+				text,
+				pcm,
+				sampleRate: model.sampleRate,
 			});
 		}
 		if (!session.cancelled) transport.send({ type: "stream-done", id });
@@ -366,6 +218,7 @@ function startStreamSession(
 	const session: StreamSession = {
 		modelKey: message.modelKey,
 		voice: message.voice,
+		speed: message.speed,
 		queue: [],
 		wake: null,
 		ended: false,
@@ -431,4 +284,9 @@ export function startTtsWorker(transport: TtsTransport): void {
 				return;
 		}
 	});
+}
+
+/** Process entry of `__omp_worker_tts`: serve the daemon `speech` module over stdio frames. */
+export function runTtsWorker(): Promise<void> {
+	return runFramedStdioWorker<TtsWorkerInbound, TtsWorkerOutbound>(startTtsWorker);
 }

@@ -1,10 +1,17 @@
 import { expect, test, vi } from "bun:test";
-import type { CustomToolContext } from "../src/extensibility/custom-tools/types";
-import { MCPManager } from "../src/mcp/manager";
-import { MCPTool } from "../src/mcp/tool-bridge";
-import type { MCPRequestOptions, MCPServerConnection, MCPToolDefinition, MCPTransport } from "../src/mcp/types";
-import { createMCPProxyTools } from "../src/task/executor";
-import { ToolAbortError } from "../src/tools/tool-errors";
+import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import { HostLink } from "@oh-my-pi/pi-coding-agent/mcp/link";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import type {
+	MCPRequestOptions,
+	MCPServerConnection,
+	MCPToolDefinition,
+	MCPTransport,
+} from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { createMCPProxyTools } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { FakeHost, REMOTE_SPEC } from "./mcp-host/link-fake-host";
 
 function createFakeConnection() {
 	let capturedSignal: AbortSignal | undefined;
@@ -62,7 +69,7 @@ test("MCP proxy tool aborts underlying operation on caller abort", async () => {
 	const manager = new MCPManager(process.cwd());
 	mockSourceTool(manager, fake.connection);
 
-	const tools = createMCPProxyTools(manager);
+	const tools = createMCPProxyTools(manager, "child");
 	const proxyTool = tools[0];
 	if (!proxyTool?.execute) {
 		expect.unreachable("Tool execute method missing");
@@ -95,47 +102,50 @@ test("MCP proxy tool aborts underlying operation on caller abort", async () => {
 	expect(capturedSignal.aborted).toBe(true);
 });
 
-test("MCP proxy tool aborts underlying operation on timeout", async () => {
-	vi.useFakeTimers();
+test.each([180_000, 0])("MCP proxy honors a link deadline of %i beyond 60s", async timeout => {
+	// The link owns the deadline; an environment override would replace both rows' values.
+	const savedTimeout = Bun.env.OMP_MCP_TIMEOUT_MS;
+	delete Bun.env.OMP_MCP_TIMEOUT_MS;
+	const host = new FakeHost();
+	const link = new HostLink({
+		name: "test-server",
+		spec: REMOTE_SPEC,
+		instance: "manager-1",
+		roots: () => [],
+		idleMs: 1_000,
+		timeout,
+		access: host,
+	});
+	const manager = new MCPManager(process.cwd());
+	mockSourceTool(manager, {
+		name: "test-server",
+		config: { type: "http", url: REMOTE_SPEC.url, timeout },
+		transport: link,
+		serverInfo: { name: "test", version: "1" },
+		capabilities: {},
+	});
 	try {
-		const fake = createFakeConnection();
-		const manager = new MCPManager(process.cwd());
-		mockSourceTool(manager, fake.connection);
-
-		const tools = createMCPProxyTools(manager);
-		const proxyTool = tools[0];
-		if (!proxyTool?.execute) {
-			expect.unreachable("Tool execute method missing");
-			return;
-		}
-
-		const executePromise = proxyTool.execute("call_1", {}, () => {}, {} as CustomToolContext, undefined);
-
-		// Let the promise reach transport.request
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(fake.requestCalled()).toBe(true);
-		const capturedSignal = fake.getCapturedSignal();
-		expect(capturedSignal).toBeDefined();
-		if (!capturedSignal) return;
-		expect(capturedSignal.aborted).toBe(false);
-
-		// MCP_CALL_TIMEOUT_MS is 60_000
-		vi.advanceTimersByTime(65_000);
-
-		// On timeout, the tool returns an error content array rather than throwing ToolAbortError
-		const result = await executePromise;
-		expect(result.content[0]?.type).toBe("text");
-		if (result.content[0]?.type !== "text") {
-			expect.unreachable("Expected text content block");
-			return;
-		}
-		expect(result.content[0].text).toContain("MCP error: MCP tool call timed out");
-
-		expect(capturedSignal.aborted).toBe(true);
+		await link.connect();
+		const [proxy] = createMCPProxyTools(manager, "child");
+		if (!proxy?.execute) throw new Error("Tool execute method missing");
+		vi.useFakeTimers();
+		const resultPromise = proxy.execute("queued-report", {}, undefined, {} as CustomToolContext);
+		const call = await host.tunnel.next("tools/call");
+		// Advance the proxy's and the link's timers while the host holds the call.
+		// The former independent 60s watchdog discarded this server's answer.
+		vi.advanceTimersByTime(61_000);
+		host.tunnel.push({
+			id: call.id,
+			result: { resultType: "complete", content: [{ type: "text", text: "Queued report completed" }] },
+		});
+		const result = await resultPromise;
+		expect(result.content).toEqual([{ type: "text", text: "Queued report completed" }]);
+		expect(result.isError).not.toBe(true);
 	} finally {
 		vi.useRealTimers();
+		await link.close();
+		vi.restoreAllMocks();
+		if (savedTimeout === undefined) delete Bun.env.OMP_MCP_TIMEOUT_MS;
+		else Bun.env.OMP_MCP_TIMEOUT_MS = savedTimeout;
 	}
 });

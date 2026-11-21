@@ -10,9 +10,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, ToolChoice } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { createUserMessage } from "./helpers";
+import { createHarmonyMitigationModel, createUserMessage } from "./helpers";
 
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
@@ -138,18 +136,20 @@ describe("agentLoop soft tool requirement", () => {
 
 	it("uses the satisfies predicate over bare name matching for compliance", async () => {
 		let pendingPreview = true;
-		const writeRuns: string[] = [];
-		const reminder = createUserMessage("<system-reminder>Write the resolution to /xdev/resolve.</system-reminder>");
-		const writeSchema = type({ path: "string" });
-		const writeTool: AgentTool<typeof writeSchema, Record<string, never>> = {
-			name: "write",
-			label: "Write",
-			description: "Write a file or device",
-			parameters: writeSchema,
+		const bashRuns: string[] = [];
+		const reminder = createUserMessage(
+			"<system-reminder>Run `resolve` to finalize the staged preview.</system-reminder>",
+		);
+		const bashSchema = type({ command: "string" });
+		const bashTool: AgentTool<typeof bashSchema, Record<string, never>> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a shell command",
+			parameters: bashSchema,
 			async execute(_id, args) {
-				writeRuns.push(args.path);
-				if (args.path === "/xdev/resolve") pendingPreview = false;
-				return { content: [{ type: "text", text: "written" }], details: {} };
+				bashRuns.push(args.command);
+				if (args.command.startsWith("resolve")) pendingPreview = false;
+				return { content: [{ type: "text", text: "ok" }], details: {} };
 			},
 		};
 		const getToolChoice = (): SoftToolRequirement | undefined =>
@@ -157,18 +157,23 @@ describe("agentLoop soft tool requirement", () => {
 				? {
 						soft: true,
 						id: "preview-1",
-						toolName: "write",
-						satisfies: toolCall => toolCall.name === "write" && toolCall.arguments?.path === "/xdev/resolve",
+						toolName: "bash",
+						satisfies: toolCall => {
+							const command = toolCall.arguments?.command;
+							return toolCall.name === "bash" && typeof command === "string" && command.startsWith("resolve");
+						},
 						reminder: [reminder],
 					}
 				: undefined;
-		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: [writeTool] };
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: [bashTool] };
 		const mock = createMockModel({
 			responses: [
-				// Turn 1: right tool name, wrong target — the predicate rejects it.
-				{ content: [{ type: "toolCall", id: "w1", name: "write", arguments: { path: "/tmp/out.md" } }] },
-				// Turn 2: forced to write; this call satisfies the predicate.
-				{ content: [{ type: "toolCall", id: "w2", name: "write", arguments: { path: "/xdev/resolve" } }] },
+				// Turn 1: the requirement's tool name, but a command that resolves nothing.
+				{ content: [{ type: "toolCall", id: "b1", name: "bash", arguments: { command: "echo hi" } }] },
+				// Turn 2: forced to bash; this command satisfies the predicate.
+				{
+					content: [{ type: "toolCall", id: "b2", name: "bash", arguments: { command: "resolve 'preview ok'" } }],
+				},
 				{ content: ["done"] },
 			],
 		});
@@ -184,13 +189,13 @@ describe("agentLoop soft tool requirement", () => {
 		}
 		const messages = await stream.result();
 
-		// The non-satisfying write was skipped, not executed; only the device write ran.
-		expect(writeRuns).toEqual(["/xdev/resolve"]);
-		// Escalation still forces the requirement's toolName.
+		// The non-satisfying bash run was skipped, not executed; only the resolving run ran.
+		expect(bashRuns).toEqual(["resolve 'preview ok'"]);
+		// Escalation still forces the requirement's tool name.
 		expect(mock.calls[0]?.options?.toolChoice).toBeUndefined();
-		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "write" });
-		// The skipped write call still produced a paired tool result (API pairing).
-		const skipped = messages.find(m => m.role === "toolResult" && m.toolCallId === "w1");
+		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "bash" });
+		// The skipped bash call still produced a paired tool result (API pairing).
+		const skipped = messages.find(m => m.role === "toolResult" && m.toolCallId === "b1");
 		expect(skipped).toBeDefined();
 	});
 
@@ -251,7 +256,7 @@ describe("agentLoop soft tool requirement", () => {
 			responses: [{ content: [leak] }, { content: ["clean retry"] }],
 		});
 		const config: AgentLoopConfig = {
-			model: buildModel({ ...getBundledModel("openai-codex", "gpt-5.4") }),
+			model: createHarmonyMitigationModel(),
 			convertToLlm: identityConverter,
 			getToolChoice: () => queue.shift(),
 		};

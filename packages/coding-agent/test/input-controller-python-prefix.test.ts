@@ -24,6 +24,7 @@ function createContext() {
 	const startPendingSubmission = vi.fn((submission: unknown) => submission);
 	const onInputCallback = vi.fn((submission: unknown) => submitted.push(submission));
 	const prompt = vi.fn(async (_text: string, _options?: unknown) => {});
+	const handleBtwCommand = vi.fn(async (_question: string) => true);
 
 	const editor: FakeEditor = {
 		setText(text) {
@@ -49,8 +50,10 @@ function createContext() {
 			isBashRunning: false,
 			isEvalRunning: false,
 			extensionRunner: undefined,
-			maybeStartTitleGeneration: vi.fn(),
 			prompt,
+			messages: [],
+			customCommands: [],
+			promptTemplates: [],
 			queuedMessageCount: 0,
 			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		} as unknown as InteractiveModeContext["session"],
@@ -68,9 +71,11 @@ function createContext() {
 		isBashMode: false,
 		isPythonMode: false,
 		fileSlashCommands: new Set<string>(),
+		skillCommands: new Map(),
 		isKnownSlashCommand: () => false,
 		handlePythonCommand,
 		handleBashCommand,
+		handleBtwCommand,
 		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
 	} as unknown as InteractiveModeContext;
 
@@ -78,6 +83,7 @@ function createContext() {
 		ctx,
 		editor,
 		handlePythonCommand,
+		handleBtwCommand,
 		onInputCallback,
 		startPendingSubmission,
 		submitted,
@@ -93,12 +99,15 @@ describe("InputController Python prompt prefix", () => {
 		await editor.onSubmit?.("$HOME is home");
 
 		expect(handlePythonCommand).not.toHaveBeenCalled();
-		expect(startPendingSubmission).toHaveBeenCalledWith({
-			text: "$HOME is home",
-			images: undefined,
-			imageLinks: undefined,
-			streamingBehavior: "steer",
-		});
+		expect(startPendingSubmission).toHaveBeenCalledWith(
+			{
+				text: "$HOME is home",
+				images: undefined,
+				imageLinks: undefined,
+				streamingBehavior: "steer",
+			},
+			{ clearEditor: false },
+		);
 		expect(onInputCallback).toHaveBeenCalledTimes(1);
 		expect(submitted).toEqual([
 			{
@@ -123,12 +132,15 @@ describe("InputController Python prompt prefix", () => {
 		await editor.onSubmit?.(transcript);
 
 		expect(handlePythonCommand).not.toHaveBeenCalled();
-		expect(startPendingSubmission).toHaveBeenCalledWith({
-			text: transcript,
-			images: undefined,
-			imageLinks: undefined,
-			streamingBehavior: "steer",
-		});
+		expect(startPendingSubmission).toHaveBeenCalledWith(
+			{
+				text: transcript,
+				images: undefined,
+				imageLinks: undefined,
+				streamingBehavior: "steer",
+			},
+			{ clearEditor: false },
+		);
 		expect(onInputCallback).toHaveBeenCalledTimes(1);
 		expect(submitted).toEqual([
 			{
@@ -160,5 +172,29 @@ describe("InputController Python prompt prefix", () => {
 
 		expect(handlePythonCommand).toHaveBeenCalledWith("print(1)", true);
 		expect(onInputCallback).not.toHaveBeenCalled();
+	});
+
+	it("runs a `?` draft as the /btw side question it stands for", async () => {
+		const { ctx, editor, handleBtwCommand, handlePythonCommand, onInputCallback } = createContext();
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await editor.onSubmit?.("? what does this do");
+
+		expect(handleBtwCommand).toHaveBeenCalledTimes(1);
+		expect(handleBtwCommand.mock.calls[0]?.[0]).toBe("what does this do");
+		expect(handlePythonCommand).not.toHaveBeenCalled();
+		expect(onInputCallback).not.toHaveBeenCalled();
+	});
+
+	it("submits a bare `?` as a normal prompt", async () => {
+		const { ctx, editor, handleBtwCommand, submitted } = createContext();
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await editor.onSubmit?.("?");
+
+		expect(handleBtwCommand).not.toHaveBeenCalled();
+		expect(submitted).toEqual([{ text: "?", images: undefined, imageLinks: undefined, streamingBehavior: "steer" }]);
 	});
 });

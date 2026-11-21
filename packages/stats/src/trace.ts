@@ -11,10 +11,12 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { getSessionRollups, getToolCallCountsBySession, isScheduledCatalogModel } from "./db";
+import { initDb, isScheduledCatalogModel } from "./db";
 import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
+import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
 	SessionSummary,
@@ -33,13 +35,16 @@ export class TracePathError extends Error {}
  * span assembly changes so browsers don't revalidate stale cached bodies
  * against an unchanged transcript mtime.
  */
-export const TRACE_ETAG_VERSION = 3;
+export const TRACE_ETAG_VERSION = 6;
 
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
 const DETAIL_MAX = 160;
 const TITLE_SCAN_BYTES = 4096;
 const LIST_FOLD_LIMIT = 300;
+
+/** Async job statuses after which no async-result delivery follows a `wait` or cancel handover. */
+const SETTLED_JOB_STATUSES: Record<string, true> = { completed: true, failed: true, cancelled: true };
 
 // ---------------------------------------------------------------------------
 // Structural entry views (journal shapes mirrored without importing coding-agent)
@@ -56,6 +61,8 @@ interface EntryView {
 	timestamp?: string;
 	customType?: string;
 	data?: Record<string, unknown>;
+	// custom_message
+	details?: Record<string, unknown>;
 	message?: MessageView;
 	// session header
 	cwd?: string;
@@ -80,7 +87,6 @@ interface MessageView {
 	toolName?: string;
 	isError?: boolean;
 	details?: Record<string, unknown>;
-	customType?: string;
 	timestamp?: number;
 	completedAt?: number;
 	duration?: number;
@@ -113,6 +119,15 @@ interface PendingToolCall {
 	argsPreview?: string;
 	assistantEntryId: string;
 	modelEnd: number;
+}
+
+/** Background job opened by an async-running tool result. */
+interface PendingBackgroundJob {
+	jobId: string;
+	start: number;
+	label: string;
+	entryId?: string;
+	end?: number;
 }
 
 /** Task tool result row, used to place subagent spans on the parent track. */
@@ -219,7 +234,7 @@ function unionLength(intervals: Array<[number, number]>): number {
 // Single-transcript scan
 
 /** Keep only the active branch: the parentId chain walked back from the last entry. */
-function activeChain(views: EntryView[]): EntryView[] {
+function activeChain(views: readonly EntryView[]): EntryView[] {
 	const byId = new Map<string, EntryView>();
 	let last: EntryView | undefined;
 	for (const entry of views) {
@@ -262,33 +277,42 @@ function argsPreview(args: unknown): string | undefined {
 	}
 }
 
+/** End the open background job with `jobId` at `at`, never before it opened; a later job may reuse the id. */
+function closeBackgroundJob(active: Map<string, PendingBackgroundJob>, jobId: string, at: number): void {
+	const job = active.get(jobId);
+	if (!job) return;
+	job.end = Math.max(job.start, at);
+	active.delete(jobId);
+}
+
 /**
  * Scan one transcript into a track: model/tool/turn/background spans plus
  * markers, and the cross-track facts (task results, request counts).
  */
 function scanTranscript(
-	entries: SessionEntry[],
+	entries: readonly SessionEntry[],
 	trackId: string,
 	parentTrackId: string | null,
 	file: string,
+	header?: TraceSnapshotHeader | null,
 ): TrackScan {
 	// Boundary cast: persisted JSONL entries are re-validated field-by-field below.
-	const views = entries as EntryView[];
+	const views = entries as readonly EntryView[];
 	const chain = activeChain(views);
 	const spans: TraceSpan[] = [];
 	const markers: TraceMarker[] = [];
 	const pendingTools: PendingToolCall[] = [];
 	const toolStarts = new Map<string, ToolStartFact>();
 	const toolResults = new Map<string, { end: number; isError: boolean; entryId?: string; toolName: string }>();
-	const backgroundOpens: Array<{ jobId: string; start: number; label: string; entryId?: string }> = [];
-	const asyncCloses = new Map<string, number>();
+	const backgroundJobs: PendingBackgroundJob[] = [];
+	const activeBackgroundJobs = new Map<string, PendingBackgroundJob>();
 	const turns: Array<{ time: number; label: string; entryId?: string }> = [];
 	const taskResults: TaskResultFact[] = [];
 
 	let sessionExit: { recordedAt: number; pendingIds: Set<string> } | undefined;
-	let cwd: string | null = null;
-	let headerTitle: string | null = null;
-	let headerTs: number | undefined;
+	let cwd = typeof header?.cwd === "string" ? header.cwd : null;
+	let headerTitle = typeof header?.title === "string" ? header.title : null;
+	let headerTs = toMs(header?.timestamp);
 	let slotTitle: string | null = null;
 	let initAgent: string | null = null;
 	let initModel: string | null = null;
@@ -343,6 +367,18 @@ function scanTranscript(
 			continue;
 		}
 
+		if (entry.type === "custom_message") {
+			// Async-result deliveries persist as `custom_message` entries carrying `details.jobs[].jobId`.
+			if (entry.customType === "async-result" && envelopeTs !== undefined && Array.isArray(entry.details?.jobs)) {
+				for (const job of entry.details.jobs) {
+					if (job && typeof job === "object" && "jobId" in job && typeof job.jobId === "string") {
+						closeBackgroundJob(activeBackgroundJobs, job.jobId, envelopeTs);
+					}
+				}
+			}
+			continue;
+		}
+
 		if (entry.type === "compaction" && envelopeTs !== undefined) {
 			markers.push({
 				time: envelopeTs,
@@ -383,11 +419,13 @@ function scanTranscript(
 			if (totalTokens > 0 && (costTotal === undefined || costTotal === 0)) {
 				const provider = typeof msg.provider === "string" ? msg.provider : "";
 				const model = typeof msg.model === "string" ? msg.model : "";
-				if (provider === "xai-oauth" && model) {
-					const ref = getBundledModel("xai" as GeneratedProvider, model)?.cost;
-					if (!(ref && (ref.input !== 0 || ref.output !== 0 || ref.cacheRead !== 0 || ref.cacheWrite !== 0))) {
-						unpricedRequests++;
-					}
+				const peer = provider && model ? pricingPeerFor(provider, model) : undefined;
+				if (peer) {
+					const priced = peer.peers.some(peerProvider => {
+						const ref = getBundledModel(peerProvider as GeneratedProvider, peer.peerId)?.cost;
+						return ref && (ref.input !== 0 || ref.output !== 0 || ref.cacheRead !== 0 || ref.cacheWrite !== 0);
+					});
+					if (!priced) unpricedRequests++;
 				} else if (costObj == null && provider && model) {
 					const hasTimestamp =
 						(typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) && msg.timestamp > 0) ||
@@ -467,12 +505,42 @@ function scanTranscript(
 				"jobId" in asyncInfo &&
 				typeof asyncInfo.jobId === "string"
 			) {
-				backgroundOpens.push({
+				const job: PendingBackgroundJob = {
 					jobId: asyncInfo.jobId,
 					start: end,
 					label: headText(`${msg.toolName ?? "tool"} job`, LABEL_MAX),
 					entryId: entry.id,
-				});
+				};
+				backgroundJobs.push(job);
+				activeBackgroundJobs.set(job.jobId, job);
+			}
+			// A `wait` (`details.jobs`) or proc:// cancel (`details.proc.jobs`) that reports a settled
+			// job replaces its async-result delivery, so the job closes when it settled, or at this result.
+			const proc = details?.proc;
+			const reportedJobs =
+				details?.op === "wait"
+					? details.jobs
+					: proc && typeof proc === "object" && "op" in proc && proc.op === "cancel" && "jobs" in proc
+						? proc.jobs
+						: undefined;
+			if (Array.isArray(reportedJobs)) {
+				for (const job of reportedJobs) {
+					if (
+						job &&
+						typeof job === "object" &&
+						"id" in job &&
+						typeof job.id === "string" &&
+						"status" in job &&
+						typeof job.status === "string" &&
+						SETTLED_JOB_STATUSES[job.status] === true
+					) {
+						const settledAt =
+							"settledAtMs" in job && typeof job.settledAtMs === "number" && Number.isFinite(job.settledAtMs)
+								? Math.min(job.settledAtMs, end)
+								: end;
+						closeBackgroundJob(activeBackgroundJobs, job.id, settledAt);
+					}
+				}
 			}
 			if (msg.toolName === "task" && Array.isArray(details?.results)) {
 				for (const result of details.results) {
@@ -487,19 +555,6 @@ function scanTranscript(
 						resultEntryId: entry.id ?? "",
 						toolSpanEnd: end,
 					});
-				}
-			}
-			continue;
-		}
-
-		if (msg.role === "custom" && msg.customType === "async-result") {
-			const closeAt =
-				typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) ? msg.timestamp : envelopeTs;
-			const jobs = msg.details?.jobs;
-			if (closeAt !== undefined && Array.isArray(jobs)) {
-				for (const job of jobs) {
-					if (!job || typeof job !== "object" || !("jobId" in job) || typeof job.jobId !== "string") continue;
-					if (!asyncCloses.has(job.jobId)) asyncCloses.set(job.jobId, closeAt);
 				}
 			}
 			continue;
@@ -549,19 +604,18 @@ function scanTranscript(
 		spans.push(span);
 	}
 
-	// Background spans: opened by an async-running tool result, closed by async-result delivery.
-	for (const open of backgroundOpens) {
-		const close = asyncCloses.get(open.jobId);
-		const end = close ?? (lastChainTs || open.start);
+	// Background spans: opened by an async-running tool result, closed by the async-result delivery.
+	for (const [backgroundIndex, job] of backgroundJobs.entries()) {
+		const end = job.end ?? (lastChainTs || job.start);
 		const span: TraceSpan = {
-			id: `${trackId}:bg:${open.jobId}`,
+			id: `${trackId}:bg:${backgroundIndex}:${job.jobId}`,
 			kind: "background",
-			start: open.start,
-			end: Math.max(open.start, end),
-			label: open.label,
+			start: job.start,
+			end: Math.max(job.start, end),
+			label: job.label,
 		};
-		if (open.entryId) span.entryId = open.entryId;
-		if (close === undefined) span.unterminated = true;
+		if (job.entryId) span.entryId = job.entryId;
+		if (job.end === undefined) span.unterminated = true;
 		spans.push(span);
 	}
 
@@ -672,7 +726,7 @@ async function buildTrackTree(
 			const childTrackId = trackId === "main" ? stem : `${trackId}/${stem}`;
 			const childScan = await buildTrackTree(childFile, childTrackId, trackId, depth + 1, visited, out, scans);
 			if (!childScan) continue;
-			const isAdvisor = name === "__advisor.jsonl" || (name.startsWith("__advisor.") && name.endsWith(".jsonl"));
+			const isAdvisor = stem === "__advisor" || stem.startsWith("__advisor.");
 			childScan.track.label = isAdvisor
 				? "Advisor"
 				: headText(`${childScan.track.agent ?? "agent"} ${stem}`, LABEL_MAX);
@@ -680,6 +734,13 @@ async function buildTrackTree(
 		}
 	}
 
+	linkChildTracks(scan, childrenById);
+	return scan;
+}
+
+/** Place child activity and structured task-result spans on their parent track. */
+function linkChildTracks(scan: TrackScan, childrenById: ReadonlyMap<string, TrackScan>): void {
+	const trackId = scan.track.id;
 	// Subagent spans on this track, one per task SingleResult.
 	const linkedChildren = new Set<string>();
 	for (const result of scan.taskResults) {
@@ -729,21 +790,138 @@ async function buildTrackTree(
 		scan.track.spans.push(span);
 	}
 	scan.track.spans.sort((a, b) => a.start - b.start || a.end - b.end);
-
-	return scan;
 }
 
 // ---------------------------------------------------------------------------
 // Public surface
 
+// Single-entry memo: the dashboard polls one open trace every 15s. Keyed on
+// the root file's mtime PLUS a fingerprint of the child-transcript SET under
+// the root's artifacts tree (one cheap readdir+stat walk, no parse). A
+// high-water mark alone is blind to deletions and to older-mtime
+// replacements, so the fingerprint encodes every child's (name, mtimeMs)
+// pair: any append, delete, rename, or content swap changes the key and the
+// memo misses. Membership diffs are bounded (depth + file count caps) so a
+// pathological artifacts tree cannot blow the key.
+interface TraceMemoEntry {
+	mtimeMs: number;
+	childFingerprint: string;
+	trace: SessionTrace;
+}
+
+let traceMemo: { file: string; entry: TraceMemoEntry } | undefined;
+
+/**
+ * Fingerprint of the child-transcript set: per-directory file COUNT plus
+ * sorted `name@mtimeMs` pairs, mirroring buildTrackTree's discovery (stats
+ * only, no parse). The count makes an empty directory distinguishable from a
+ * missing one and keeps renames visible. The walk is depth-capped; the raw
+ * string still grows with child count, but the wire ETag hashes it, so a large
+ * tree cannot inflate the request header. Best-effort: a raced gc deletion is
+ * recorded as `name@gone` (which itself changes the fingerprint and misses the
+ * memo — the safe direction).
+ */
+async function childTranscriptsFingerprint(rootFile: string, depth = 0): Promise<string> {
+	if (depth > MAX_TRACK_DEPTH) return "";
+	let names: string[] = [];
+	try {
+		names = await fs.readdir(transcriptStem(rootFile));
+	} catch {
+		return "";
+	}
+	names.sort();
+	const dir = transcriptStem(rootFile);
+	const transcriptNames = names.filter(name => name.endsWith(".jsonl") || name.endsWith(".jsonl.gz"));
+	const childParts = await Promise.all(
+		transcriptNames.map(async name => {
+			const childFile = path.join(dir, name);
+			try {
+				const stat = await fs.stat(childFile);
+				// Recurse like the builder (nested subagents), without parsing.
+				const nested = await childTranscriptsFingerprint(childFile, depth + 1);
+				return nested ? `${name}@${stat.mtimeMs},${name}/{${nested}}` : `${name}@${stat.mtimeMs}`;
+			} catch {
+				return `${name}@gone`;
+			}
+		}),
+	);
+	return [`n=${transcriptNames.length}`, ...childParts].join(",");
+}
+
+/** Freshness of a root trace: root mtime+size plus the child-transcript set fingerprint. */
+export interface TraceFingerprint {
+	rootMtimeMs: number;
+	rootSize: number;
+	childFingerprint: string;
+}
+
+/**
+ * Compact wire ETag key. The raw child fingerprint is unbounded — a
+ * subagent-heavy session can produce tens of kilobytes of `name@mtime` pairs.
+ * Sending that string back in `If-None-Match` exceeds Bun's 16 KiB request
+ * header limit (HTTP 431), so hash it to a fixed-size key first. Root size is
+ * part of the key because a coarse mtime can miss an append.
+ */
+function traceEtagKey(rootMtimeMs: number, rootSize: number, childFingerprint: string): string {
+	const digest = new Bun.CryptoHasher("sha256").update(childFingerprint).digest("hex");
+	return `${rootMtimeMs}:${rootSize}:${digest}`;
+}
+
+/** Build the wire ETag from a fingerprint already computed by the caller. */
+export function traceEtagForFingerprint(fingerprint: TraceFingerprint): string {
+	return traceEtagKey(fingerprint.rootMtimeMs, fingerprint.rootSize, fingerprint.childFingerprint);
+}
+
+/** Stat the root and walk its child transcripts (readdir+stat, no parse). */
+async function readTraceFingerprint(resolved: string): Promise<TraceFingerprint> {
+	const stat = await fs.stat(resolved);
+	const childFingerprint = await childTranscriptsFingerprint(resolved);
+	return { rootMtimeMs: stat.mtimeMs, rootSize: stat.size, childFingerprint };
+}
+
+/**
+ * Freshness fingerprint for the trace ETag pre-check; `SessionTrace.etag` is
+ * the compact `${rootMtimeMs}:${rootSize}:${digest}` key for an unraced build.
+ * Returns undefined when the path is rejected or missing (the caller falls
+ * through to the full build, which maps those to 400/404).
+ */
+export async function traceFingerprintForEtag(fileParam: string): Promise<TraceFingerprint | undefined> {
+	try {
+		return await readTraceFingerprint(resolveSessionPath(fileParam));
+	} catch {
+		return undefined;
+	}
+}
+
+export function traceMemoForTests(): { file: string; mtimeMs: number } | undefined {
+	if (!traceMemo) return undefined;
+	return { file: traceMemo.file, mtimeMs: traceMemo.entry.mtimeMs };
+}
+
 /**
  * Assemble the full span tree for one root session transcript.
  * Throws {@link TracePathError} for paths outside the sessions root; ENOENT
- * passes through for the caller's 404 mapping.
+ * passes through for the caller's 404 mapping. `fingerprint` may carry the
+ * {@link traceFingerprintForEtag} value the caller just computed for the same
+ * file (its ETag pre-check), sparing a second walk.
  */
-export async function buildSessionTrace(fileParam: string): Promise<SessionTrace> {
+export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFingerprint): Promise<SessionTrace> {
 	const resolved = resolveSessionPath(fileParam);
-	const rootStat = await fs.stat(resolved);
+	const memo = traceMemo?.file === resolved ? traceMemo.entry : undefined;
+	// Pre-build child fingerprint on EVERY path (hit check and rebuild
+	// alike): the post-build race guard compares against this, so a child
+	// append landing mid-parse is detected even on first builds and
+	// memo-less rebuilds, where no prior fingerprint exists to compare.
+	const {
+		rootMtimeMs,
+		rootSize,
+		childFingerprint: preChildFingerprint,
+	} = fingerprint ?? (await readTraceFingerprint(resolved));
+	if (memo && memo.mtimeMs === rootMtimeMs) {
+		// Equality, not <=: a LOWER mark (delete/older-mtime replace) is
+		// also stale — only an identical child set may reuse the trace.
+		if (preChildFingerprint === memo.childFingerprint) return memo.trace;
+	}
 
 	const tracks: TraceTrack[] = [];
 	const scans: TrackScan[] = [];
@@ -751,6 +929,112 @@ export async function buildSessionTrace(fileParam: string): Promise<SessionTrace
 	if (!rootScan) {
 		throw Object.assign(new Error(`ENOENT: session not found: ${resolved}`), { code: "ENOENT" });
 	}
+	// Re-collect the fingerprint AFTER the parse: a child append landing
+	// between the pre-build check and now would otherwise be baked into
+	// neither the trace nor the key.
+	const childFingerprint = await childTranscriptsFingerprint(resolved);
+	// Root rewritten mid-build: same no-cache rule as the child race below.
+	const rootChanged = (await fs.stat(resolved).catch(() => null))?.mtimeMs !== rootMtimeMs;
+	const raced = childFingerprint !== preChildFingerprint;
+	// Raced builds keep the PRE-build fingerprint as their ETag: the parsed
+	// bytes predate the racy write, so claiming the post-write state would
+	// 304 stale forever when that write was the child's last. The pre-build
+	// key guarantees the next conditional poll misses (filesystem moved on)
+	// and rebuilds — at most one stale response per race, never an
+	// indefinitely cached one. Unraced builds use the post-build key, which
+	// equals the pre-build key by construction.
+	const etagFingerprint = raced || rootChanged ? preChildFingerprint : childFingerprint;
+	const trace = assembleSessionTrace(
+		rootScan,
+		tracks,
+		scans,
+		rootMtimeMs,
+		traceEtagKey(rootMtimeMs, rootSize, etagFingerprint),
+	);
+	if (!raced && !rootChanged) {
+		traceMemo = {
+			file: resolved,
+			entry: { mtimeMs: rootMtimeMs, childFingerprint, trace },
+		};
+	}
+	return trace;
+}
+
+/** Header metadata used by snapshot traces, including journals without a schema version. */
+export interface TraceSnapshotHeader {
+	timestamp?: string;
+	cwd?: string;
+	title?: string;
+}
+
+/** The journal data for one embedded transcript; its header may be stored separately. */
+export interface SessionTraceSnapshot {
+	header?: TraceSnapshotHeader | null;
+	entries: readonly SessionEntry[];
+}
+
+/** A collected child transcript, keyed by its slash-joined path from the root. */
+export interface SubSessionTraceSnapshot extends SessionTraceSnapshot {
+	parent: string | null;
+}
+
+/**
+ * Assemble an offline trace using the same timing joins and rollups as the live
+ * filesystem builder. Only supplied snapshots participate: no filesystem, DB,
+ * network, or wall-clock reads. Track files are snapshot keys, never disk paths.
+ *
+ * Missing parent transcripts attach their readable descendants to main. Unlike
+ * filesystem discovery, already-collected snapshots need no depth limit.
+ * `mtimeMs` is the root's last activity (or header time, then 0); the constant
+ * `etag` identifies a snapshot, not a conditional HTTP response.
+ */
+export function buildSessionTraceFromSnapshots(
+	root: SessionTraceSnapshot,
+	subSessions?: Readonly<Record<string, SubSessionTraceSnapshot>>,
+): SessionTrace {
+	const children = new Map<string | null, Array<[string, SubSessionTraceSnapshot]>>();
+	if (subSessions) {
+		for (const key of Object.keys(subSessions).sort()) {
+			const snapshot = subSessions[key];
+			const parent =
+				snapshot.parent !== null && Object.hasOwn(subSessions, snapshot.parent) ? snapshot.parent : null;
+			const siblings = children.get(parent);
+			if (siblings) siblings.push([key, snapshot]);
+			else children.set(parent, [[key, snapshot]]);
+		}
+	}
+
+	const tracks: TraceTrack[] = [];
+	const scans: TrackScan[] = [];
+	const visit = (snapshot: SessionTraceSnapshot, key: string, parentId: string | null): TrackScan => {
+		const scan = scanTranscript(snapshot.entries, key, parentId, key, snapshot.header);
+		tracks.push(scan.track);
+		scans.push(scan);
+		const childrenById = new Map<string, TrackScan>();
+		for (const [childKey, childSnapshot] of children.get(parentId === null ? null : key) ?? []) {
+			const child = visit(childSnapshot, childKey, key);
+			const stem = childKey.slice(childKey.lastIndexOf("/") + 1);
+			child.track.label =
+				stem === "__advisor" || stem.startsWith("__advisor.")
+					? "Advisor"
+					: headText(`${child.track.agent ?? "agent"} ${stem}`, LABEL_MAX);
+			childrenById.set(stem, child);
+		}
+		linkChildTracks(scan, childrenById);
+		return scan;
+	};
+	const rootScan = visit(root, "main", null);
+	return assembleSessionTrace(rootScan, tracks, scans, rootScan.lastActivity ?? rootScan.headerTs ?? 0, "snapshot");
+}
+
+/** Shared aggregation after either filesystem discovery or snapshot traversal. */
+function assembleSessionTrace(
+	rootScan: TrackScan,
+	tracks: TraceTrack[],
+	scans: TrackScan[],
+	rootMtimeMs: number,
+	etag: string,
+): SessionTrace {
 	rootScan.track.label = "Main";
 
 	let startedAt: number | undefined;
@@ -804,7 +1088,7 @@ export async function buildSessionTrace(fileParam: string): Promise<SessionTrace
 		else if (span.kind === "turn") turns++;
 	}
 
-	const start = startedAt ?? rootScan.headerTs ?? rootStat.mtimeMs;
+	const start = startedAt ?? rootScan.headerTs ?? rootMtimeMs;
 	const end = endedAt ?? start;
 	const wallMs = end - start;
 
@@ -824,12 +1108,13 @@ export async function buildSessionTrace(fileParam: string): Promise<SessionTrace
 	};
 
 	return {
-		file: resolved,
+		file: rootScan.track.file,
 		title: rootScan.title,
 		cwd: rootScan.cwd,
 		startedAt: start,
 		endedAt: end,
-		mtimeMs: rootStat.mtimeMs,
+		mtimeMs: rootMtimeMs,
+		etag,
 		tracks,
 		summary,
 	};
@@ -854,22 +1139,54 @@ export async function getTraceEntry(fileParam: string, entryId: string): Promise
 // ---------------------------------------------------------------------------
 // Session list
 
-const titleCache = new Map<string, { mtimeMs: number; title: string | null }>();
+interface SessionMetadata {
+	title: string | null;
+	cwd: string | null;
+}
 
-/** Read the session title from the fixed title slot or the header line. */
-async function readSessionTitle(file: string): Promise<string | null> {
+const metadataCache = new Map<string, SessionMetadata & { mtimeMs: number }>();
+
+/** Read enough decompressed transcript bytes to cover the title slot and session header. */
+async function readSessionMetadataHead(file: string): Promise<string> {
+	if (!file.endsWith(".gz")) return Bun.file(file).slice(0, TITLE_SCAN_BYTES).text();
+
+	const reader = Bun.file(file).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
+	const decoder = new TextDecoder();
+	let remaining = TITLE_SCAN_BYTES;
+	let head = "";
+	try {
+		while (remaining > 0) {
+			const { done, value } = await reader.read();
+			if (done) {
+				head += decoder.decode();
+				break;
+			}
+			const chunk = value.subarray(0, remaining);
+			remaining -= chunk.byteLength;
+			head += decoder.decode(chunk, { stream: remaining > 0 && chunk.byteLength === value.byteLength });
+			if (chunk.byteLength < value.byteLength) break;
+		}
+	} finally {
+		await reader.cancel();
+	}
+	return head;
+}
+
+/** Read list metadata from the fixed title slot and session header. */
+async function readSessionMetadata(file: string): Promise<SessionMetadata> {
 	let mtimeMs: number;
 	try {
 		mtimeMs = (await fs.stat(file)).mtimeMs;
 	} catch {
-		return null;
+		return { title: null, cwd: null };
 	}
-	const cached = titleCache.get(file);
-	if (cached && cached.mtimeMs === mtimeMs) return cached.title;
+	const cached = metadataCache.get(file);
+	if (cached && cached.mtimeMs === mtimeMs) return cached;
 
 	let title: string | null = null;
+	let cwd: string | null = null;
 	try {
-		const head = await Bun.file(file).slice(0, TITLE_SCAN_BYTES).text();
+		const head = await readSessionMetadataHead(file);
 		for (const line of head.split("\n")) {
 			if (!line.trim()) continue;
 			let parsed: EntryView;
@@ -881,18 +1198,20 @@ async function readSessionTitle(file: string): Promise<string | null> {
 			}
 			if (parsed.type === "title" && typeof parsed.title === "string") {
 				title = parsed.title;
-				break;
+				continue;
 			}
 			if (parsed.type === "session") {
-				if (typeof parsed.title === "string") title = parsed.title;
+				if (title === null && typeof parsed.title === "string") title = parsed.title;
+				if (typeof parsed.cwd === "string") cwd = parsed.cwd;
 				break;
 			}
 		}
 	} catch {
-		// Unreadable head (gc'd, gz, permission) → keep the row, title null.
+		// Unreadable head (gc'd, gz, permission) → keep the row with path-derived metadata.
 	}
-	titleCache.set(file, { mtimeMs, title });
-	return title;
+	const metadata = { mtimeMs, title, cwd };
+	metadataCache.set(file, metadata);
+	return metadata;
 }
 
 interface SummaryFold extends SessionSummary {
@@ -911,8 +1230,28 @@ function basenameTimestamp(base: string): number | undefined {
  * Traces list include sessions the sync pass hasn't indexed yet (most
  * importantly the currently running one).
  */
+// Short-TTL memo for the disk sweep behind /api/sessions (30s poll): the
+// session list changes only on create/edit, so readdir+stat of every file per
+// poll is pure syscall churn. TTL is deliberately short so a just-created
+// session appears within seconds. Only the newest `limit` roots are kept, so
+// the memo stays small however many sessions exist.
+let diskRootsMemo:
+	| {
+			atMs: number;
+			sessionsDir: string;
+			limit: number;
+			roots: Array<{ file: string; mtimeMs: number; startedAt: number }>;
+	  }
+	| undefined;
+const DISK_ROOTS_TTL_MS = 5_000;
+
 async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtimeMs: number; startedAt: number }>> {
+	const now = Date.now();
 	const sessionsDir = getSessionsDir();
+	const memo = diskRootsMemo;
+	if (memo && memo.sessionsDir === sessionsDir && memo.limit >= limit && now - memo.atMs < DISK_ROOTS_TTL_MS) {
+		return memo.roots.slice(0, limit);
+	}
 	let projects: string[] = [];
 	try {
 		projects = await fs.readdir(sessionsDir);
@@ -944,7 +1283,9 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
 		}),
 	);
 	roots.sort((a, b) => b.mtimeMs - a.mtimeMs);
-	return roots.slice(0, limit);
+	const newest = roots.slice(0, limit);
+	diskRootsMemo = { atMs: Date.now(), sessionsDir, limit, roots: newest };
+	return newest.slice();
 }
 
 /**
@@ -952,8 +1293,9 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
  * transcript (subagents, advisors) into its root row.
  */
 export async function listSessionSummaries(limit = 100, q?: string): Promise<SessionSummary[]> {
+	// The Traces page may be the first thing a dashboard serves.
+	await initDb();
 	const sessionsDir = getSessionsDir();
-	const toolCounts = getToolCallCountsBySession();
 	const byRoot = new Map<string, SummaryFold>();
 
 	for (const row of getSessionRollups()) {
@@ -984,7 +1326,7 @@ export async function listSessionSummaries(limit = 100, q?: string): Promise<Ses
 			byRoot.set(rootFile, fold);
 		}
 		fold.requests += row.requests;
-		fold.toolCalls += toolCounts.get(row.sessionFile) ?? 0;
+		fold.toolCalls += row.toolCalls;
 		if (isChild) fold.subagents++;
 		if (row.startedAt < fold.startedAt) fold.startedAt = row.startedAt;
 		if (row.endedAt > fold.endedAt) fold.endedAt = row.endedAt;
@@ -1027,7 +1369,9 @@ export async function listSessionSummaries(limit = 100, q?: string): Promise<Ses
 	const folds = [...byRoot.values()].sort((a, b) => b.endedAt - a.endedAt).slice(0, LIST_FOLD_LIMIT);
 	await Promise.all(
 		folds.map(async fold => {
-			fold.title = await readSessionTitle(fold.file);
+			const metadata = await readSessionMetadata(fold.file);
+			fold.title = metadata.title;
+			fold.folder = metadata.cwd ?? extractFolderFromPath(fold.file);
 			fold.models = [...fold.modelSet].sort();
 		}),
 	);

@@ -15,6 +15,7 @@ import { type Args, parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import * as modelResolverModule from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { createSessionManager, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -22,7 +23,43 @@ import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-list
 import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getProjectDir, normalizePathForComparison, setProjectDir } from "@oh-my-pi/pi-utils";
+import {
+	__resetDirsFromEnvForTests,
+	getProjectDir,
+	normalizePathForComparison,
+	setAgentDir,
+	setProjectDir,
+} from "@oh-my-pi/pi-utils";
+
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const originalPiProfile = process.env.PI_PROFILE;
+const originalOmpProfile = process.env.OMP_PROFILE;
+let agentDirRoot: string | undefined;
+
+function restoreEnv(key: string, value: string | undefined): void {
+	if (value === undefined) {
+		delete process.env[key];
+	} else {
+		process.env[key] = value;
+	}
+}
+
+beforeEach(async () => {
+	agentDirRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-xproj-agent-dir-"));
+	setAgentDir(path.join(agentDirRoot, "agent"));
+});
+
+afterEach(async () => {
+	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
+	clearOmpExtensionCliRoots();
+	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
+	restoreEnv("PI_PROFILE", originalPiProfile);
+	restoreEnv("OMP_PROFILE", originalOmpProfile);
+	__resetDirsFromEnvForTests();
+	if (agentDirRoot) {
+		await fsp.rm(agentDirRoot, { recursive: true, force: true });
+	}
+});
 
 function buildArgs(resume: string, sessionDir?: string): Args {
 	return {
@@ -32,6 +69,7 @@ function buildArgs(resume: string, sessionDir?: string): Args {
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 	};
 }
 
@@ -39,7 +77,7 @@ function buildGlobalMatch(cwd: string): { session: SessionInfo; scope: "global" 
 	return {
 		scope: "global",
 		session: {
-			path: `${cwd}/019e84ed-b4cc-7000-9c87-5afe6df992c1.jsonl`,
+			path: path.join(cwd, "019e84ed-b4cc-7000-9c87-5afe6df992c1.jsonl"),
 			id: "019e84ed-b4cc-7000-9c87-5afe6df992c1",
 			cwd,
 			title: "in-other-project",

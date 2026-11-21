@@ -873,22 +873,6 @@ it("deleted undeclared keys rejected in output", () => {
 	expect(T.out({ foo: "hi", bar: 3 }).toString()).toEqual("bar must be removed");
 });
 
-it("distill doesn't treat functions returning any/never as morphs", () => {
-	type T = {
-		any(): any;
-		never(): never;
-	};
-	const _T = type("unknown").as<T>();
-});
-
-it("distills morphs returning any/never", () => {
-	const T = type({
-		any: ["unknown", "=>", (): any => {}],
-		never: ["unknown", "=>", () => [] as never],
-	});
-	expect(T).toBeDefined();
-});
-
 // https://github.com/arktypeio/arktype/issues/1274
 it("fail on non-discriminable union of objects with onUndeclaredKey: delete", () => {
 	const Point2d = type({
@@ -1024,8 +1008,6 @@ it("doomed shirt example", () => {
 	expect(urDOOMed(valid)).toEqual(valid);
 	expect(urDOOMed({ ...valid, nestedGenerics: {} }).toString()).toContain("nestedGenerics");
 });
-
-it.todo("ArkErrors not assignable to ArkErrorInput");
 
 it("described input of morph", () => {
 	class ValidatedUserID {

@@ -49,6 +49,7 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 	const session = {
 		effectiveExtensionRoots: TEST_EXTENSION_ROOTS,
 		getEvalPreludes: () => [],
+		getActiveToolNames: () => [],
 		refreshMCPTools: vi.fn(async (_tools: unknown) => {}),
 		setMCPPromptCommands: vi.fn((_commands: unknown) => {}),
 	};
@@ -56,7 +57,7 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		mcpManager,
 		session,
 		sessionManager: { getCwd: () => cwd },
-		settings: { get: (key: string): unknown => settingsValues[key] },
+		settings: Settings.isolated(settingsValues),
 		refreshSkillState: vi.fn(async () => {}),
 		refreshSlashCommandState: vi.fn(async () => {}),
 		showStatus: vi.fn(() => {}),
