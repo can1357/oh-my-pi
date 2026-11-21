@@ -169,6 +169,7 @@ import {
 	cfgTaskAgentSoftRequestBudget,
 	cfgTaskAgentIdleTtlMs,
 	cfgTaskMaxRuntimeMs,
+	cfgTaskMaxRetries,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentAccountPools,
@@ -1267,6 +1268,7 @@ export function createSubagentSettings(
 	// overlay so createAgentSession's tier.* reads pick it up.
 	const inheritedTiers = inheritedSubagentServiceTiers(baseSettings, inheritedServiceTier);
 	const subagentTiers = resolveSubagentServiceTier(cfgTierSubagent.get(baseSettings), inheritedTiers);
+	const maxRetries = cfgTaskMaxRetries.get(baseSettings);
 	// A parent subagent's own per-agent threshold must not leak to its children: descendants
 	// of a subagent pin the root's thresholds. A root parent's children read them through live.
 	const inheritedRootThresholds = baseSettings[kRootCompactionThresholds];
@@ -1289,6 +1291,7 @@ export function createSubagentSettings(
 			"tier.openai": subagentTiers.openai ?? "none",
 			"tier.anthropic": subagentTiers.anthropic ?? "none",
 			"tier.google": subagentTiers.google ?? "none",
+			...(maxRetries >= 0 && { "retry.maxRetries": maxRetries }),
 			// Async jobs and bash/eval auto-backgrounding are inherited from the parent:
 			// background jobs are owner-routed to the subagent's own session, and
 			// the run driver's quiescence barrier + teardown reap guarantee no
