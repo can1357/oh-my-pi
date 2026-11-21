@@ -181,12 +181,21 @@ describe("SelectorController model selector writes", () => {
 		const { callbacks } = openModelPicker(controller);
 
 		// A deliberate pick of another model lands while the first apply is still awaiting
-		// the model switch; only a repeat of the same pick is dropped.
+		// the model switch; only a repeat of the same pick is dropped. The first apply is
+		// the slower one: it must not land after and overwrite the newer pick.
+		const realSetModelTemporary = session!.setModelTemporary.bind(session!);
+		vi.spyOn(session!, "setModelTemporary").mockImplementation(async (picked, level) => {
+			if (picked.id === "claude-opus-4-5") await new Promise(resolve => setTimeout(resolve, 50));
+			return realSetModelTemporary(picked, level);
+		});
 		const first = callbacks.onPick(opus, "anthropic/claude-opus-4-5", { overContext: false });
 		const second = callbacks.onPick(sonnet, "anthropic/claude-sonnet-4-5", { overContext: false });
 		await Promise.all([first, second]);
 
-		// The second pick applied despite the first being in flight: the session ends on it.
+		// The second pick applied despite the first being in flight and slower: the session
+		// ends on it, with one model_change recorded for the final choice.
+		const switches = session!.sessionManager.getBranch().filter(entry => entry.type === "model_change");
+		expect(switches).toHaveLength(1);
 		expect(session!.model?.id).toBe("claude-sonnet-4-5");
 		expect(showError).not.toHaveBeenCalled();
 	});
