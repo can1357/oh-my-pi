@@ -1091,6 +1091,64 @@ export const cfgAsyncWidgets = register({
 	},
 });
 
+// Process watch: the `judge` role looks at running background jobs on a schedule and tells the
+// agent about ones that look stalled, failing, or ready (a server waited on as if it would exit).
+export const cfgAsyncProcessWatchEnabled = register({
+	id: "async.processWatch.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Process Watch",
+		description:
+			"While background jobs run, ask the `judge` model role on a schedule whether each one is progressing, waiting as expected, stalled, failing, or a server that is up and waited on as if it would exit, and tell the agent about the stalled, failing and ready ones at its next turn. Never stops a job; a judge that is unavailable or errors changes nothing",
+	},
+});
+
+export const cfgAsyncProcessWatchThreshold = register({
+	id: "async.processWatch.threshold",
+	type: "number",
+	default: 0.6,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || raw > 1) {
+			throw new Error("async.processWatch.threshold must be a number in (0, 1]");
+		}
+	},
+});
+
+export const cfgAsyncProcessWatchSchedule = register({
+	id: "async.processWatch.schedule",
+	type: "array",
+	default: [30, 60, 120, 240, 480, 960] as readonly number[],
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (!Array.isArray(raw) || raw.length === 0) {
+			throw new Error("async.processWatch.schedule must be a non-empty list of job ages in seconds");
+		}
+		let previous = 0;
+		for (const age of raw) {
+			if (typeof age !== "number" || !Number.isFinite(age) || age <= previous) {
+				throw new Error("async.processWatch.schedule must list positive job ages in seconds, ascending");
+			}
+			previous = age;
+		}
+	},
+});
+
+export const cfgAsyncProcessWatchEverySeconds = register({
+	id: "async.processWatch.everySeconds",
+	type: "number",
+	default: 1800,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
+			throw new Error("async.processWatch.everySeconds must be a positive number of seconds");
+		}
+	},
+});
+
 export const cfgToolsCommands = register({
 	id: "tools.commands",
 	type: "boolean",

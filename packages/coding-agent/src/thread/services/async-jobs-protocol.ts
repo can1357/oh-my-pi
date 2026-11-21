@@ -48,6 +48,7 @@ export interface AsyncJobWire {
 	readonly errorText?: string;
 	readonly structured?: AsyncJob["structured"];
 	readonly progressText?: string;
+	readonly lastProgressAt?: number;
 	readonly latestDetails?: AsyncJobDetails;
 	readonly ownerId?: string;
 	readonly agentId?: string;

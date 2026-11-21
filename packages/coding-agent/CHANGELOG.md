@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `async.processWatch.enabled` (off by default): while background jobs run, the `judge` model role checks them on a schedule (30 s, 1, 2, 4, 8 and 16 minutes, then every 30 minutes) and tells the agent at its next turn about jobs that look stalled, failing, or like a server it is waiting on as if it would exit. Tune with `async.processWatch.threshold`, `async.processWatch.schedule` and `async.processWatch.everySeconds`. ([#19901](https://github.com/can1357/oh-my-pi/pull/19901) by [@Xytronix](https://github.com/Xytronix))
+- On Linux, process-watch checks also see host resource pressure (CPU, memory and I/O stall averages, free memory and swap, free disk space), so a job starved by the host is reported as stalled with the cause named and a suggestion to move heavy work off the host or free resources. ([#19901](https://github.com/can1357/oh-my-pi/pull/19901) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))

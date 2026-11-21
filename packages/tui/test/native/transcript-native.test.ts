@@ -19,6 +19,7 @@ import {
 	buildAsyncNotifyBlock,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
+	buildProcessWatchBlock,
 } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
@@ -1018,6 +1019,42 @@ describe("background job output notice", () => {
 		expect(texts).toEqual(["Background job output · bg_5 · 2 lines", long, "03 shell: 43 KB"]);
 		// The text terminal still cuts the overlong line to keep its row.
 		expect(Bun.stripANSI(block.render(200).join("\n"))).not.toContain(long);
+	});
+});
+
+describe("process watch notice", () => {
+	it("draws one row per flagged job with its command and output beneath, not the agent's notice text", async () => {
+		const block = buildProcessWatchBlock(
+			createCustomMessage(
+				"process-watch",
+				"<system-notice>\nA check on the background jobs running now found:\n</system-notice>",
+				true,
+				{
+					jobs: [
+						{
+							jobId: "bg_7",
+							command: "npm install",
+							ageMs: 120_000,
+							quietMs: 90_000,
+							lastOutput: "fetching metadata\nretrying registry",
+							verdict: "stalled",
+						},
+					],
+					hostStrain: ["memory pressure"],
+				},
+				"2026",
+			),
+		);
+		const terminal = Bun.stripANSI(block.render(120).join("\n"));
+		expect(terminal).toContain("Looks stalled bg_7");
+		expect(terminal).toContain("npm install");
+		expect(terminal).toContain("retrying registry");
+		expect(terminal).toContain("Host shows memory pressure");
+		expect(terminal).not.toContain("system-notice");
+
+		const h = await startWith(h => h.tui.addChild(block));
+		// The job row and the host row carry icons; the command and output are its body.
+		expect(h.findAll(n => n.k === "icon")).toHaveLength(2);
 	});
 });
 
