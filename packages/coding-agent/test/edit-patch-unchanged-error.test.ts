@@ -54,4 +54,35 @@ describe("EditTool patch post-write verification", () => {
 		expect(text).not.toContain(tempDir);
 		expect(await Bun.file(path.join(tempDir, relPath)).text()).toBe("a\n");
 	});
+
+	test("accepts a formatter restoring the pre-write content", async () => {
+		const relPath = "example.py";
+		const original = "def run():\n    pass\n";
+		const absolutePath = path.join(tempDir, relPath);
+		await fs.writeFile(absolutePath, original);
+
+		spyOn(lsp, "writethroughNoop").mockImplementation(async (dst, _content) => {
+			await fs.writeFile(dst, original);
+			return {
+				finalContent: original,
+				diagnostics: {
+					messages: [],
+					summary: "OK",
+					errored: false,
+					formatter: lsp.FileFormatResult.FORMATTED,
+				},
+			};
+		});
+		const result = await new EditTool(makeSession(tempDir), "patch").execute("formatted-unchanged", {
+			path: relPath,
+			edits: [{ op: "update", diff: "@@\n def run():\n+    print('running')\n     pass" }],
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(absolutePath).text()).toBe(original);
+		expect(result.details).toMatchObject({
+			newText: original,
+			diagnostics: { formatter: lsp.FileFormatResult.FORMATTED },
+		});
+	});
 });
