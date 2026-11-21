@@ -19,12 +19,14 @@ import {
 	openSqliteDatabase,
 } from "@oh-my-pi/pi-utils";
 import type { AuthCredentialStore, CredentialRefreshLeaseFence, CredentialRefreshLeaseHolder } from "./store";
-import type {
-	AuthCredential,
-	DisabledCredentialSummary,
-	OAuthCredential,
-	StoredAuthCredential,
-	StoredCredentialBlock,
+import {
+	type AuthCredential,
+	type DisabledCredentialSummary,
+	isAutoDisabledCredential,
+	isUserRemovalCause,
+	type OAuthCredential,
+	type StoredAuthCredential,
+	type StoredCredentialBlock,
 } from "./types";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
@@ -410,6 +412,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#deleteIfMatchesStmt: Statement;
 	#updateIfMatchesStmt: Statement;
 	#deleteByProviderStmt: Statement;
+	#retireTombstoneStmt: Statement;
 	#hardDeleteStmt: Statement;
 	#getCacheStmt: Statement;
 	#getCacheIncludingExpiredStmt: Statement;
@@ -499,6 +502,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 		this.#deleteByProviderStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE provider = ? AND disabled_cause IS NULL`,
+		);
+		this.#retireTombstoneStmt = this.#db.prepare(
+			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NOT NULL`,
 		);
 		this.#hardDeleteStmt = this.#db.prepare("DELETE FROM auth_credentials WHERE id = ?");
 		this.#getCacheStmt = this.#db.prepare(
@@ -1308,6 +1314,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
+		return this.#listDisabled(provider);
+	}
+
+	#listDisabled(provider?: string): DisabledCredentialSummary[] {
 		const rows =
 			(provider
 				? (this.#listDisabledByProviderStmt.all(provider) as DisabledAuthRow[])
@@ -1333,6 +1343,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			results.push(summary);
 		}
 		return results;
+	}
+
+	/**
+	 * Record the user's removal on the tombstones of the provider's logins a failure
+	 * disabled ({@link isAutoDisabledCredential}): such a login reads as one a new
+	 * login restores, and a turn waits for it. Without this, removing a provider whose
+	 * only login a failure had already disabled would change no row.
+	 */
+	#retireAutoDisabledTombstones(provider: string, disabledCause: string): void {
+		if (!isUserRemovalCause(disabledCause)) return;
+		for (const tombstone of this.#listDisabled(provider)) {
+			if (isAutoDisabledCredential(tombstone)) {
+				this.#retireTombstoneStmt.run(normalizeDisabledCause(disabledCause), tombstone.id);
+			}
+		}
 	}
 
 	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
@@ -1597,7 +1622,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
 		try {
-			this.#deleteByProviderStmt.run(normalizeDisabledCause(disabledCause), provider);
+			this.#db.transaction(() => {
+				this.#deleteByProviderStmt.run(normalizeDisabledCause(disabledCause), provider);
+				this.#retireAutoDisabledTombstones(provider, disabledCause);
+			})();
 		} catch {
 			// Ignore delete failures
 		}
@@ -2167,6 +2195,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#deleteStmt.finalize();
 		this.#deleteIfMatchesStmt.finalize();
 		this.#deleteByProviderStmt.finalize();
+		this.#retireTombstoneStmt.finalize();
 		this.#hardDeleteStmt.finalize();
 		this.#getCacheStmt.finalize();
 		this.#getCacheIncludingExpiredStmt.finalize();

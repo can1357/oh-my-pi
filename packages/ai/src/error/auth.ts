@@ -31,12 +31,27 @@ export class ProviderDisabledError extends MissingApiKeyError {
 }
 
 /**
+ * A configured credential source produced no key for this request (for example
+ * a key helper failed, or the stored credentials are disabled or refreshing).
+ * Unlike {@link MissingApiKeyError} it is transient: the same source may produce
+ * a key on retry. Nothing was sent, so an agent turn that ends on it is marked
+ * `credentialUnavailable` on its assistant message.
+ */
+export class CredentialUnavailableError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "CredentialUnavailableError";
+		attach(this, create(Flag.Transient));
+	}
+}
+
+/**
  * Every usable OAuth credential for a provider failed to refresh with a
  * retryable error (network blip, timeout, 5xx). The stored credentials are
  * intact, so this is classified transient: retrying the request can succeed,
  * unlike {@link MissingApiKeyError}. The refresh failure is kept as `cause`.
  */
-export class OAuthRefreshUnavailableError extends Error {
+export class OAuthRefreshUnavailableError extends CredentialUnavailableError {
 	readonly provider: string;
 
 	constructor(provider: string, cause: unknown) {
@@ -46,7 +61,6 @@ export class OAuthRefreshUnavailableError extends Error {
 		);
 		this.name = "OAuthRefreshUnavailableError";
 		this.provider = provider;
-		attach(this, create(Flag.Transient));
 	}
 }
 

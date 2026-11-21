@@ -1434,6 +1434,12 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
+	 * The turn failed because no credential could give a key when the request was
+	 * made (a thrown `CredentialUnavailableError`): nothing was sent to the
+	 * provider, so no provider refused the request.
+	 */
+	credentialUnavailable?: true;
+	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
 	 * triggered an in-provider fallback retry that succeeded without the

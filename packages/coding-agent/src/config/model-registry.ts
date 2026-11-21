@@ -1,14 +1,26 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
-import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
+import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
+import {
+	type AuthApiKeyOptions,
+	type AuthPeekOptions,
+	type DisabledCredentialSummary,
+	isRecoverableDisabledCredential,
+	oauthAccountKey,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { getProviderHooks, type ProviderHooks, setProviderHooks } from "@oh-my-pi/pi-ai/provider-hooks";
-import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import {
+	providerPauseReason,
+	registerOAuthProvider,
+	unregisterOAuthProvider,
+	unregisterOAuthProviders,
+} from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
-import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { CredentialUnavailableError, OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
 	Api,
 	Context,
@@ -58,14 +70,19 @@ import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-refere
 import { withThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability";
 import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
-import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isBunTestRuntime, logger, untilAborted, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
 import { redactUrlForLog } from "../utils/redact-url";
 import type { SearchParams } from "../web/search/providers/base";
 import type { SearchResponse } from "../web/search/types";
-import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
+import {
+	ApiKeyCommandError,
+	type ApiKeyResolverModel,
+	type ApiKeyResolverOptions,
+	createApiKeyResolver,
+} from "./api-key-resolver";
 import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
 	buildCustomModelOverlay,
@@ -77,6 +94,7 @@ import {
 	resolveModelOverrideWithAliases,
 } from "./custom-models";
 import {
+	commandFailureRetryAfterMs,
 	createConfigHeaderResolver,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
@@ -362,6 +380,13 @@ function yieldMacrotask(): Promise<void> {
  * the fully composed catalog and returns the list the host should serve.
  */
 type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) => Model<Api>[];
+
+/**
+ * Why a provider's stored credentials may give a key again: `cannot-serve`, they
+ * exist but none can serve now; `unreadable`, the store could not tell, since its
+ * lookup of disabled credentials failed.
+ */
+type StoredCredentialsOutage = "cannot-serve" | "unreadable";
 
 function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
 	try {
@@ -3979,13 +4004,79 @@ export class ModelRegistry {
 
 	/**
 	 * Whether the provider's configured API key is resolved from a command.
+	 * False for a disabled provider, which gets no credential at all.
 	 *
 	 * Callers use this to distinguish the registry's command-first resolver
 	 * path from lower-priority credentials in {@link authStorage}.
 	 */
 	hasCommandBackedApiKey(provider: string): boolean {
+		if (this.#isProviderDisabled(provider)) return false;
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		return isCommandConfigValue(keyConfig);
+	}
+
+	/**
+	 * Whether a missing key for the provider means its `!command` apiKey produced
+	 * nothing, which a turn's request reports retryably ({@link turnResolver}).
+	 * False for a provider whose catalog dispatches without a key instead.
+	 */
+	retriesFailedCommandKey(provider: string): boolean {
+		return this.hasCommandBackedApiKey(provider) && !getProviderDefinition(provider)?.allowsMissingApiKey;
+	}
+
+	/**
+	 * Whether a missing key for the provider may come back without the user
+	 * configuring one: its `!command` apiKey produced nothing
+	 * ({@link retriesFailedCommandKey}), or its stored credentials exist but none
+	 * can serve now ({@link #storedCredentialsOutage}). A turn's request
+	 * reports such a key retryably ({@link turnResolver}).
+	 */
+	async missingKeyMayRecover(provider: string, signal?: AbortSignal): Promise<boolean> {
+		return (
+			this.retriesFailedCommandKey(provider) || (await this.#storedCredentialsOutage(provider, signal)) !== undefined
+		);
+	}
+
+	/**
+	 * Why the provider's stored credentials may give a key again, if they may:
+	 * `cannot-serve` when they exist but could not serve a request: an active row
+	 * that resolved no key, or an OAuth credential a failure disabled
+	 * ({@link isRecoverableDisabledCredential}) that the user has not since removed.
+	 * A new login, here or in another session sharing the store, brings such a
+	 * credential back, so a turn waits for it; a provider whose latest teardown was
+	 * the user's own (a logout), or that never had a credential, does not count: no
+	 * key comes back until the user logs in again, so waiting would only delay the error.
+	 * A tombstone lookup that fails is `unreadable`, since the store could not tell;
+	 * one the caller aborted does not count. Undefined for a disabled provider (in
+	 * settings, or paused by its auth rules: no key comes back until the user or the
+	 * rules change) and for one whose catalog dispatches without a key. A session
+	 * restricted to an OAuth account pool never gets here: its key lookup throws.
+	 */
+	async #storedCredentialsOutage(
+		provider: string,
+		signal?: AbortSignal,
+	): Promise<StoredCredentialsOutage | undefined> {
+		if (
+			this.#isProviderDisabled(provider) ||
+			providerPauseReason(provider) !== undefined ||
+			getProviderDefinition(provider)?.allowsMissingApiKey
+		)
+			return undefined;
+		if (this.authStorage.credentials.list(provider).length > 0) return "cannot-serve";
+		let tombstones: DisabledCredentialSummary[];
+		try {
+			tombstones = await this.authStorage.credentials.listDisabled(provider, signal);
+		} catch (error) {
+			if (signal?.aborted) return undefined;
+			logger.debug("Disabled credential lookup failed; treating the missing key as recoverable", {
+				provider,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return "unreadable";
+		}
+		return tombstones.some(failure => isRecoverableDisabledCredential(failure, tombstones))
+			? "cannot-serve"
+			: undefined;
 	}
 
 	getDiscoverableProviders(): string[] {
@@ -4227,19 +4318,82 @@ export class ModelRegistry {
 	 * session id (`resolver(model, sessionId)`) which derives `baseUrl`/`modelId`
 	 * from the model. Callers that need the initial key for a guard can call
 	 * `resolveApiKeyOnce(resolver)`.
+	 *
+	 * For a provider whose apiKey is a `!command`, the initial resolve settles as
+	 * soon as the request's signal aborts instead of waiting on the command. Other
+	 * providers resolve as before: a request already scheduled when its signal
+	 * aborts still gets its key.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
-		if (typeof target === "string") {
-			return createApiKeyResolver(this, target, options);
-		}
-		return createApiKeyResolver(this, target.provider, {
-			...options,
-			baseUrl: target.baseUrl,
-			modelId: target.id,
-		});
+		const provider = typeof target === "string" ? target : target.provider;
+		const resolve =
+			typeof target === "string"
+				? createApiKeyResolver(this, target, options)
+				: createApiKeyResolver(this, target.provider, { ...options, baseUrl: target.baseUrl, modelId: target.id });
+		return this.settleCommandKeyOnAbort(provider, resolve);
+	}
+
+	/**
+	 * `resolve` with {@link resolver}'s abort handling: for a provider whose apiKey
+	 * is a `!command`, the initial resolve settles as soon as the request's signal
+	 * aborts instead of waiting on the command. Other providers get `resolve`
+	 * itself. A registry view that builds its own resolvers wraps them with this.
+	 */
+	settleCommandKeyOnAbort(provider: string, resolve: ApiKeyResolver): ApiKeyResolver {
+		if (!this.hasCommandBackedApiKey(provider)) return resolve;
+		return async ctx => (ctx.error === undefined ? untilAborted(ctx.signal, async () => resolve(ctx)) : resolve(ctx));
+	}
+
+	/**
+	 * The {@link resolver} for an agent turn's requests. When the initial resolve
+	 * finds no key that may come back ({@link failCommandKeyRetryably}), it throws
+	 * a {@link CredentialUnavailableError} instead of returning no key, so the
+	 * turn fails retryably and turn recovery resolves again. Other callers keep
+	 * {@link resolver}, where such a request fails at once as a missing key.
+	 */
+	turnResolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver {
+		return this.failCommandKeyRetryably(model.provider, this.resolver(model, sessionId));
+	}
+
+	/**
+	 * `resolve` as {@link turnResolver} hands it out. An initial resolve that
+	 * finds no key throws a transient {@link CredentialUnavailableError} when the
+	 * key may come back without the user configuring one:
+	 * - the provider's apiKey is a `!command` that produced nothing ({@link ApiKeyCommandError});
+	 * - the provider's stored credentials exist but none can serve now, or the store
+	 *   could not tell ({@link #storedCredentialsOutage}).
+	 * A registry view that builds its own resolvers wraps them with this.
+	 */
+	failCommandKeyRetryably(provider: string, resolve: ApiKeyResolver): ApiKeyResolver {
+		return async ctx => {
+			const resolved = await resolve(ctx);
+			if (ctx.error !== undefined || resolvedApiKeyBearer(resolved) !== undefined) return resolved;
+			if (this.retriesFailedCommandKey(provider)) {
+				throw new ApiKeyCommandError(provider, await this.commandKeyRetryAfterMs(provider));
+			}
+			const outage = await this.#storedCredentialsOutage(provider, ctx.signal);
+			if (outage !== undefined) {
+				throw new CredentialUnavailableError(
+					outage === "unreadable"
+						? `No API key for provider: ${provider} (its stored credentials could not be read)`
+						: `No API key for provider: ${provider} (its stored credentials are disabled or cannot serve now)`,
+				);
+			}
+			return resolved;
+		};
+	}
+
+	/**
+	 * Milliseconds until the provider's failed `!command` apiKey runs again, undefined when it
+	 * is not backing off. A mirror asks its owner: the owner runs the command for it and keeps
+	 * the backoff, so a retry sooner would land inside it and never run the command again.
+	 */
+	async commandKeyRetryAfterMs(provider: string): Promise<number | undefined> {
+		if (this.#owner) return this.#owner.commandKeyRetryAfterMs(provider);
+		return commandFailureRetryAfterMs(this.#customProviderApiKeys.get(provider));
 	}
 
 	async #peekApiKeyForProvider(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {
@@ -4712,6 +4866,8 @@ export class ModelRegistry {
 export interface ModelRegistryOwner {
 	/** Drop the owner's cached `!command` results for `provider` (every provider when omitted). */
 	invalidateCommandConfigs(provider?: string): void;
+	/** {@link ModelRegistry.commandKeyRetryAfterMs} on the owner, which runs the command and keeps its backoff. */
+	commandKeyRetryAfterMs(provider: string): Promise<number | undefined>;
 	/** {@link ModelRegistry.refresh} on the owner. */
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void>;
 	/** {@link ModelRegistry.refreshProvider} on the owner. */

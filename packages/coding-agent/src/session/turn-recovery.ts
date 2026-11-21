@@ -30,6 +30,7 @@ import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-cat
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import { isApiKeyCommandFailureMessage } from "../config/api-key-resolver";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -111,6 +112,7 @@ const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+const KEY_COMMAND_MAX_RETRIES = 3;
 const GENERIC_ABORT_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 /** Bounds best-effort usage-limit bookkeeping so a stalled report or sibling probe cannot hold the terminal agent_end event. */
@@ -311,6 +313,7 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		onSkip?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -430,6 +433,7 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
 	#streamStallContinueCount = 0;
+	#keyCommandRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -582,6 +586,7 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#streamStallContinueCount = 0;
+		this.#keyCommandRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
 	}
@@ -2818,8 +2823,24 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
+		// A failing apiKey command has its own cap, like the other per-kind retry
+		// limits, counted within this retry run (`#retryAttempt` is 1 on its first failure).
+		this.#keyCommandRetryCount = isApiKeyCommandFailureMessage(message.errorMessage)
+			? (this.#retryAttempt === 1 ? 0 : this.#keyCommandRetryCount) + 1
+			: 0;
+		const keyCommandCapReached = this.#keyCommandRetryCount > KEY_COMMAND_MAX_RETRIES;
+		if (keyCommandCapReached) {
+			logger.warn("apiKey command kept producing no key after retry cap", {
+				attempts: this.#keyCommandRetryCount - 1,
+				model: message.model,
+				provider: message.provider,
+			});
+			this.#keyCommandRetryCount = 0;
+		}
 		const retryBudgetExhausted =
-			this.#retryAttempt > maxRetries || this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
+			this.#retryAttempt > maxRetries ||
+			keyCommandCapReached ||
+			this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
@@ -3378,9 +3399,6 @@ export class TurnRecovery {
 			// Aborted during sleep - emit end event so UI can clean up
 			return this.#endCancelledRetry();
 		}
-		if (this.#retryAbortController === retryAbortController) {
-			this.#retryAbortController = undefined;
-		}
 
 		// The identity-keyed removal above can miss when a context rebuild
 		// recreated the failed turn's message object between settle and retry
@@ -3399,11 +3417,22 @@ export class TurnRecovery {
 		// continuation that still fails locally must close the retry saga —
 		// otherwise auto_retry_end never fires, retryPromise stays pending, and
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
+		// The backoff's controller stays the retry's until the continuation runs:
+		// a stop in between (Esc, an abort, a quit) skips it and closes the saga
+		// as a stop during the backoff does.
 		this.#host.scheduleAgentContinue({
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
-			shouldContinue: () => this.#retryAttempt > 0,
+			shouldContinue: () => this.#retryAttempt > 0 && !retryAbortController.signal.aborted,
+			onSkip: () => {
+				if (!retryAbortController.signal.aborted || this.#retryAbortController !== retryAbortController) return;
+				void this.#endCancelledRetry().catch(failure =>
+					logger.error("Closing a retry saga stopped before its continuation threw", {
+						error: failure instanceof Error ? failure.message : String(failure),
+					}),
+				);
+			},
 			onError: error =>
 				void this.#failRetryAfterLocalContinueError(message, error).catch(failure =>
 					logger.error("Closing a retry saga after a failed local continuation threw", {
