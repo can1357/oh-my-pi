@@ -18,7 +18,8 @@ import * as path from "node:path";
 import type { FromNativeHost, ToNativeHost } from "../../../../../browser-relay/extension/messages";
 import { RpcFrameDecoder } from "../../../modes/rpc/rpc-frame";
 import { resolveCliEntryCmd } from "../../../subprocess/worker-client";
-import { DEFAULT_RELAY_URL } from "./kind";
+import type { RelaySocket } from "./bridge";
+import { type RelayServer, startRelayServer } from "./server";
 import { serveRelayLink } from "./native-relay";
 
 /** Largest encoded frame the host writes; under Chrome's 1 MiB host→extension cap with headroom. */
@@ -51,7 +52,7 @@ export interface NativeHostIo {
 	/** Writes one complete length-prefixed frame to Chrome. */
 	write(bytes: Uint8Array): void;
 	/** Starts the rpc child in `cwd`. */
-	spawn(cwd: string): RpcChild;
+	spawn(cwd: string, relayUrl: string): RpcChild;
 	/** Port a link port serves (or joins) the relay on. */
 	relayPort: number;
 	/** Diagnostics; never stdout. */
@@ -69,8 +70,8 @@ export async function runNativeHost(): Promise<void> {
 			process.stdout.write(bytes, () => resolve());
 			flushed = promise;
 		},
-		spawn: cwd => spawnRpcChild(command, cwd),
-		relayPort: Number(new URL(DEFAULT_RELAY_URL).port),
+		spawn: (cwd, relayUrl) => spawnRpcChild(command, cwd, relayUrl),
+		relayPort: 0,
 		log: message => {
 			process.stderr.write(`omp native host: ${message}\n`);
 		},
@@ -82,12 +83,13 @@ export async function runNativeHost(): Promise<void> {
 
 /**
  * Starts `command` in `cwd` with an environment for a headless panel session: the browser tool drives the user's
- * Chrome through the relay (`PI_BROWSER_RELAY=1`), whatever the configured default.
+ * Chrome through the relay and nothing else (`PI_BROWSER_RELAY=only`), whatever the configured default: the user
+ * watching the panel sees every tab the session opens.
  */
-export function spawnRpcChild(command: readonly string[], cwd: string): RpcChild {
+export function spawnRpcChild(command: readonly string[], cwd: string, relayUrl: string): RpcChild {
 	const child = Bun.spawn([...command], {
 		cwd,
-		env: { ...process.env, PI_BROWSER_RELAY: "1" },
+		env: { ...process.env, PI_BROWSER_RELAY: "only", PI_PANEL_RELAY_URL: relayUrl },
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -154,6 +156,7 @@ export function lineFrames(t: "rpc" | "relay", line: string, chunkId: number): F
 			if (end < line.length && last >= 0xd800 && last <= 0xdbff) end--;
 			const frame: FromNativeHost = {
 				t: "chunk",
+				...(t === "relay" ? { relay: true } : {}),
 				id: chunkId,
 				index: frames.length,
 				last: end === line.length,
@@ -178,10 +181,15 @@ export function resolveSessionCwd(cwd: string): string {
 	return path.resolve(cwd);
 }
 
-function isToNativeHost(value: unknown): value is ToNativeHost {
+type NativeRequest = ToNativeHost | { t: "open"; cwd: string; extensionId?: undefined };
+
+function isToNativeHost(value: unknown): value is NativeRequest {
 	if (typeof value !== "object" || value === null) return false;
 	const t: unknown = Reflect.get(value, "t");
-	if (t === "open") return typeof Reflect.get(value, "cwd") === "string";
+	if (t === "open") {
+		const extensionId = Reflect.get(value, "extensionId");
+		return typeof Reflect.get(value, "cwd") === "string" && (extensionId === undefined || typeof extensionId === "string");
+	}
 	if (t === "link") return typeof Reflect.get(value, "extensionId") === "string";
 	if (t === "rpc" || t === "relay") return typeof Reflect.get(value, "line") === "string";
 	return false;
@@ -198,10 +206,10 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 	};
 	const reader = io.input.getReader();
 	const frames = new NativeFrameReader();
-	const queued: ToNativeHost[] = [];
+	const queued: NativeRequest[] = [];
 
 	/** Next extension message, or null once the port closed. */
-	const next = async (): Promise<ToNativeHost | null> => {
+	const next = async (): Promise<NativeRequest | null> => {
 		for (;;) {
 			const message = queued.shift();
 			if (message) return message;
@@ -224,7 +232,12 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 		return serveRelayLink({
 			port: io.relayPort,
 			extensionId: open.extensionId,
-			next,
+			next: async () => {
+				for (;;) {
+					const message = await next();
+					if (message?.t !== "open" || message.extensionId !== undefined) return message;
+				}
+			},
 			send,
 			relayLine: line => {
 				for (const frame of lineFrames("relay", line, ++chunkSeq)) send(frame);
@@ -236,6 +249,10 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 		send({ t: "exit", code: null, stderr: "the first message must be open{cwd} or link{extensionId}" });
 		return;
 	}
+	if (open.extensionId === undefined) {
+		send({ t: "exit", code: null, stderr: "Chrome is running an older omp extension worker. Reload omp at chrome://extensions, then reopen the side panel." });
+		return;
+	}
 	const cwd = resolveSessionCwd(open.cwd);
 	const stat = await fs.stat(cwd).catch(() => null);
 	if (!stat?.isDirectory()) {
@@ -244,12 +261,24 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 	}
 
 	let child: RpcChild;
+	let relay: RelayServer | undefined;
+	let chunkSeq = 0;
+	const socket: RelaySocket = {
+		send: line => {
+			for (const frame of lineFrames("relay", line, ++chunkSeq)) send(frame);
+		},
+		close: () => queueMicrotask(() => relay?.bridge.extClosed(socket)),
+	};
 	try {
-		child = io.spawn(cwd);
+		relay = startRelayServer({ port: 0, chatOnly: true, group: false });
+		relay.bridge.extConnected(socket, open.extensionId);
+		child = io.spawn(cwd, `http://127.0.0.1:${relay.port}`);
 	} catch (error) {
+		relay?.stop();
 		send({ t: "exit", code: null, stderr: `failed to start omp: ${error instanceof Error ? error.message : String(error)}` });
 		return;
 	}
+	send({ t: "linked" });
 	send({ t: "ready", pid: child.pid });
 	// First on stdin, so the child answers every extension command under v2's limits: a command queued behind the
 	// negotiation would get v1's 1 MiB ceiling and fail (an early `get_available_models` does).
@@ -263,7 +292,6 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 		}
 	})().catch(() => {});
 
-	let chunkSeq = 0;
 	const stdoutDone = (async () => {
 		const decoder = new TextDecoder();
 		let rpcFrames = new RpcFrameDecoder();
@@ -314,6 +342,10 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 			const message = await next();
 			if (message === null) return;
 			if (exited) continue;
+			if (message.t === "relay") {
+				relay.bridge.extMessage(socket, message.line);
+				continue;
+			}
 			if (message.t !== "rpc") {
 				io.log("ignoring a second open");
 				continue;
@@ -327,6 +359,8 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 	})();
 
 	await Promise.race([exit, inbound]);
+	relay.bridge.extClosed(socket);
+	relay.stop();
 	if (exited) {
 		await exit;
 		await reader.cancel().catch(() => {});

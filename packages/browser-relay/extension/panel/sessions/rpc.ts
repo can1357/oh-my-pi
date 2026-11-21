@@ -34,6 +34,7 @@ import type {
 	AutoRetryStartEvent,
 	CommandOutputEvent,
 	ConfigUpdateEvent,
+	ConfiguredThinkingLevel,
 	ExtensionError,
 	ExtensionUiRequest,
 	ExtensionUiResponse,
@@ -41,6 +42,7 @@ import type {
 	ManualCompactionStartEvent,
 	ModelChangedEvent,
 	ModelInfo,
+	ModelPickerResult,
 	NoticeEvent,
 	PromptResultEvent,
 	QueueUpdateEvent,
@@ -54,7 +56,7 @@ import type {
 	ToolExecutionUpdateEvent,
 } from "../../../../coding-agent/src/modes/rpc/wire/rpc-wire.generated";
 import type { RpcSessionInfo } from "../../messages";
-import type { PanelModel, PanelSession, PanelSnapshot, PanelWorker } from "../session";
+import type { PanelModel, PanelSession, PanelSnapshot, PanelThinking, PanelWorker } from "../session";
 
 const MAX_NOTICES = 50;
 /** Coalescing window for high-rate events: about one display frame. */
@@ -80,10 +82,11 @@ type RpcOk =
 			data: { entries: unknown[]; leafId: string | null };
 	  }
 	| { type: "response"; id?: string; command: "get_available_models"; success: true; data: { models: ModelInfo[] } }
+	| { type: "response"; id?: string; command: "get_model_picker"; success: true; data: ModelPickerResult }
 	| {
 			type: "response";
 			id?: string;
-			command: "prompt" | "abort" | "set_model" | "compact" | "set_subagent_subscription";
+			command: "prompt" | "abort" | "set_model" | "set_thinking_level" | "compact" | "set_subagent_subscription";
 			success: true;
 			data?: unknown;
 	  };
@@ -136,7 +139,9 @@ type RpcCommand =
 	| { type: "get_available_models" }
 	| { type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior: "steer" }
 	| { type: "abort" }
-	| { type: "set_model"; provider: string; modelId: string }
+	| { type: "get_model_picker"; query: string }
+	| { type: "set_model"; provider: string; modelId: string; thinkingLevel?: ConfiguredThinkingLevel; role?: string }
+	| { type: "set_thinking_level"; level: ConfiguredThinkingLevel }
 	| { type: "compact" }
 	| { type: "set_subagent_subscription"; level: "progress" };
 
@@ -204,6 +209,7 @@ export class RpcPanelSession implements PanelSession {
 	#queuedMessageCount = 0;
 	#header: SessionHeader | null = null;
 	#state: SessionState | null = null;
+	#thinking: PanelThinking | undefined;
 	#entries: readonly SessionEntry[] = [];
 	/** Id of the last raw session entry fetched (any type); the `get_entries` cursor. */
 	#cursor: string | undefined;
@@ -325,9 +331,22 @@ export class RpcPanelSession implements PanelSession {
 		return response.data.models.map(model => ({ provider: model.provider, id: model.id, name: model.name }));
 	}
 
-	async setModel(model: PanelModel): Promise<void> {
-		await this.#call({ type: "set_model", provider: model.provider, modelId: model.id });
+	async pickModels(query: string): Promise<ModelPickerResult> {
+		const response = await this.#call({ type: "get_model_picker", query });
+		if (response.command !== "get_model_picker") throw new Error("unexpected response to get_model_picker");
+		return response.data;
+	}
+
+	async setModel(
+		model: PanelModel,
+		options: { thinkingLevel?: ConfiguredThinkingLevel; role?: string } = {},
+	): Promise<void> {
+		await this.#call({ type: "set_model", provider: model.provider, modelId: model.id, ...options });
 		this.#refreshState();
+	}
+
+	async setThinkingLevel(level: ConfiguredThinkingLevel): Promise<void> {
+		await this.#call({ type: "set_thinking_level", level });
 	}
 
 	async compact(): Promise<void> {
@@ -509,6 +528,8 @@ export class RpcPanelSession implements PanelSession {
 			participants: [],
 			...(this.#aborting ? { isAborting: true } : {}),
 		};
+		const level = rpc.configuredThinkingLevel ?? rpc.thinkingLevel;
+		this.#thinking = level === undefined ? undefined : { level, levels: rpc.thinkingLevels ?? [] };
 	}
 
 	#applyLine(line: string): void {
@@ -634,7 +655,11 @@ export class RpcPanelSession implements PanelSession {
 				return;
 			case "thinking_level_changed":
 				if (!this.#rpcState) return;
-				this.#rpcState = { ...this.#rpcState, thinkingLevel: frame.thinkingLevel };
+				this.#rpcState = {
+					...this.#rpcState,
+					thinkingLevel: frame.thinkingLevel,
+					configuredThinkingLevel: frame.configured ?? frame.thinkingLevel,
+				};
 				this.#rebuildState();
 				break;
 			case "queue_update":
@@ -651,9 +676,13 @@ export class RpcPanelSession implements PanelSession {
 				this.#rpcState = {
 					...this.#rpcState,
 					...(frame.model ? { model: frame.model } : {}),
-					...(frame.thinkingLevel ? { thinkingLevel: frame.thinkingLevel } : {}),
+					...(frame.thinkingLevel
+						? { thinkingLevel: frame.thinkingLevel, configuredThinkingLevel: frame.thinkingLevel }
+						: {}),
 				};
 				this.#rebuildState();
+				// A new model accepts other thinking selectors.
+				if (frame.model) this.#refreshState();
 				break;
 			case "prompt_result":
 				if (frame.status !== "error" || !frame.error) return;
@@ -802,6 +831,7 @@ export class RpcPanelSession implements PanelSession {
 			agents: this.#agents,
 			progress: this.#progress,
 			lifecycle: this.#lifecycle,
+			...(this.#thinking ? { thinking: this.#thinking } : {}),
 		};
 	}
 

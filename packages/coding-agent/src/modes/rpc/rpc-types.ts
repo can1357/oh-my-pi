@@ -26,7 +26,9 @@ import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { UsageLimitState } from "../../session/usage-limit";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { RpcModelPickerResult } from "./rpc-model-picker";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
@@ -97,12 +99,20 @@ export type RpcCommand =
 	| { id?: string; type: "dictation_stop" }
 
 	// Model
-	| { id?: string; type: "set_model"; provider: string; modelId: string }
+	| {
+			id?: string;
+			type: "set_model";
+			provider: string;
+			modelId: string;
+			thinkingLevel?: ConfiguredThinkingLevel;
+			role?: string;
+	  }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
+	| { id?: string; type: "get_model_picker"; query?: string; limit?: number }
 
 	// Thinking
-	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
+	| { id?: string; type: "set_thinking_level"; level: ConfiguredThinkingLevel }
 	| { id?: string; type: "cycle_thinking_level" }
 	| { id?: string; type: "get_available_thinking_levels" }
 
@@ -174,6 +184,10 @@ export type RpcCommand =
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
+	/** The user's thinking selector: `auto` while auto mode picks the effort. */
+	configuredThinkingLevel?: ConfiguredThinkingLevel;
+	/** Selectors the active model accepts: `off`, `auto`, then its efforts. */
+	thinkingLevels?: ConfiguredThinkingLevel[];
 	isStreaming: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
@@ -556,6 +570,13 @@ export type RpcResponse =
 			command: "get_available_models";
 			success: true;
 			data: { models: Model[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_model_picker";
+			success: true;
+			data: RpcModelPickerResult;
 	  }
 
 	// Thinking

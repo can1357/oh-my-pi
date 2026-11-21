@@ -91,6 +91,7 @@ import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcBtwController } from "./rpc-btw";
 import { RpcGoalController } from "./rpc-goal";
+import { DEFAULT_MODEL_PICKER_LIMIT, RpcModelPicker } from "./rpc-model-picker";
 import { RpcDictationBridge, type RpcDictationControllerFactory } from "./rpc-dictation";
 import { RpcLiveBridge, type RpcLiveSessionFactory } from "./rpc-live";
 import { RpcOutputWriter } from "./rpc-output";
@@ -1568,6 +1569,7 @@ export interface RpcModeOptions {
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession, options: RpcModeOptions = {}): Promise<never> {
+	const modelPicker = new RpcModelPicker(session);
 	const {
 		setToolUIContext,
 		headless = false,
@@ -2452,6 +2454,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
+					configuredThinkingLevel: session.configuredThinkingLevel(),
+					thinkingLevels: session.getAvailableEffortSelectors(),
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,
@@ -2717,7 +2721,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (!model) {
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 				}
-				await session.setModel(model);
+				await session.setModel(model, command.role);
+				if (command.thinkingLevel !== undefined) session.setThinkingLevel(command.thinkingLevel);
 				return success(id, "set_model", model);
 			}
 
@@ -2733,6 +2738,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				await session.modelRegistry.awaitBackgroundRefresh();
 				const models = session.getAvailableModels();
 				return success(id, "get_available_models", { models });
+			}
+
+			case "get_model_picker": {
+				const limit = command.limit ?? DEFAULT_MODEL_PICKER_LIMIT;
+				if (!Number.isInteger(limit) || limit < 1) {
+					return error(id, "get_model_picker", "`limit` must be a positive integer.");
+				}
+				await session.modelRegistry.awaitBackgroundRefresh();
+				return success(id, "get_model_picker", modelPicker.query(command.query ?? "", limit));
 			}
 
 			// =================================================================

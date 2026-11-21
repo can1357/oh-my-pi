@@ -493,6 +493,10 @@ export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
 	thinkingLevel?: ThinkingLevel;
+	/** The user's thinking selector: `auto` while auto mode picks the effort, else `thinkingLevel`. */
+	configuredThinkingLevel?: ConfiguredThinkingLevel;
+	/** Selectors the active model accepts, as omp's thinking selector lists them: `off`, `auto`, then its efforts. */
+	thinkingLevels?: ConfiguredThinkingLevel[];
 	isStreaming?: boolean;
 	isCompacting?: boolean;
 	steeringMode?: QueueMode;
@@ -587,6 +591,42 @@ export interface CompactionResult {
 	details?: unknown;
 	preserveData?: Record<string, unknown>;
 	providerReplayThroughEntryId?: string;
+}
+
+/** A role a model holds, as picker rows chip it. */
+export interface ModelPickerRole {
+	role: string;
+	/** The role's display tag. */
+	label: string;
+	/** Auto-selected: the role has no configured model. */
+	auto?: boolean;
+}
+
+/** One row of omp's session model picker. */
+export interface ModelPickerRow {
+	provider: string;
+	id: string;
+	name: string;
+	/** The quick role this row applies (`@` search); pass it to `set_model`. */
+	role?: string;
+	/** Visible roles the model holds, built-in order first. */
+	roles?: ModelPickerRole[];
+	/** Steps of the model's thinking slider, low to high: `auto`, `off`, then its efforts. Absent when it has no effort to pick. */
+	thinking?: ConfiguredThinkingLevel[];
+	/** Model rows: the session's level as this model would run it (the untouched slider). Quick-role rows: the role's explicit level, which `set_model` should carry. */
+	thinkingLevel?: ConfiguredThinkingLevel;
+	/** The session's context exceeds the model's window. */
+	overContext?: boolean;
+	/** The session runs this row: its model, or under `@` its active quick role. */
+	current?: boolean;
+}
+
+export interface ModelPickerResult {
+	rows: ModelPickerRow[];
+	/** Leading rows that are recently used or role-held (the picker's Recent block); 0 when there is no such split. */
+	recent: number;
+	/** Matching rows before `limit`. */
+	total: number;
 }
 
 export interface ModelCycleResult {
@@ -1771,14 +1811,26 @@ export interface DictationStopResult {
 export interface SetModelParams {
 	provider: string;
 	modelId: string;
+	/** Thinking level to run the model at, clamped to it; omitted re-applies the session's level. */
+	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted. */
+	role?: string;
 }
 
 export interface GetAvailableModelsResult {
 	models: ModelInfo[];
 }
 
+export interface GetModelPickerParams {
+	/** Search text; blank browses every model, `provider/` limits matches to a provider. */
+	query?: string;
+	/** Most rows to return; default 100. */
+	limit?: number;
+}
+
 export interface SetThinkingLevelParams {
-	level: ThinkingLevel;
+	/** `auto` lets omp pick the effort per turn. */
+	level: ConfiguredThinkingLevel;
 }
 
 export interface GetAvailableThinkingLevelsResult {
@@ -1996,6 +2048,7 @@ export interface RpcWireCommands {
 	set_model: { params: SetModelParams; result: ModelInfo };
 	cycle_model: { params: undefined; result: ModelCycleResult | null };
 	get_available_models: { params: undefined; result: GetAvailableModelsResult };
+	get_model_picker: { params: GetModelPickerParams; result: ModelPickerResult };
 	set_thinking_level: { params: SetThinkingLevelParams; result: undefined };
 	cycle_thinking_level: { params: undefined; result: ThinkingLevelCycleResult | null };
 	get_available_thinking_levels: { params: undefined; result: GetAvailableThinkingLevelsResult };

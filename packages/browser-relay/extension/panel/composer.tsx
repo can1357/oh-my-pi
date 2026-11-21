@@ -4,6 +4,7 @@
  */
 import type { CollabUiRequest, ImageContent } from "@oh-my-pi/pi-wire";
 import {
+	Brain,
 	AppWindow,
 	ArrowUp,
 	CalendarClock,
@@ -43,7 +44,7 @@ import type { Shortcut, TabContext } from "../messages";
 import { Editor, type EditorHandle } from "./editor";
 import { NotAnImageError, prepareImage, prepareWireImage } from "./images";
 import { Lightbox, type LightboxImage } from "./media";
-import { ModelPicker, useModelList } from "./model-picker";
+import { levelLabel, ModelPicker, ThinkingMenu } from "./model-picker";
 import { scheduleCaption } from "./schedule";
 import type { PanelSession, PanelSnapshot, PanelWorker } from "./session";
 import { sortShortcuts } from "./storage";
@@ -243,9 +244,8 @@ export function Composer(props: ComposerProps): ReactNode {
 	const [preview, setPreview] = useState<LightboxImage | null>(null);
 	const [tabMode, setTabMode] = useState<TabMode>({ kind: "follow" });
 	const [extraTabs, setExtraTabs] = useState<TabContext[]>([]);
-	const [menu, setMenu] = useState<"actions" | "tab" | "model" | null>(null);
+	const [menu, setMenu] = useState<"actions" | "tab" | "model" | "thinking" | null>(null);
 	const [windowTabs, setWindowTabs] = useState<chrome.tabs.Tab[]>([]);
-	const models = useModelList(session, menu === "model");
 
 	const working = snapshot?.working ?? false;
 	const readOnly = snapshot?.readOnly ?? false;
@@ -255,7 +255,9 @@ export function Composer(props: ComposerProps): ReactNode {
 	const queued = snapshot?.state?.queuedMessageCount ?? 0;
 	const currentModel = snapshot?.state?.model ?? null;
 	// The picker hangs off the model chip, so switching needs a current model to show.
-	const canSwitchModel = session?.listModels !== undefined && session.setModel !== undefined && currentModel !== null;
+	const canSwitchModel = session?.pickModels !== undefined && session.setModel !== undefined && currentModel !== null;
+	const thinking = session?.setThinkingLevel !== undefined ? snapshot?.thinking : undefined;
+	const canSetThinking = thinking !== undefined && thinking.levels.length > 0;
 	const primaryTab = tabMode.kind === "follow" ? activeTab : tabMode.kind === "pinned" ? tabMode.tab : null;
 	const captureTab = primaryTab ?? activeTab;
 	const uploading = attachments.some(attachment => attachment.status === "uploading");
@@ -525,6 +527,18 @@ export function Composer(props: ComposerProps): ReactNode {
 					window.setTimeout(() => setMenu("model"), 0);
 				},
 			});
+		if (canSetThinking && matches("thinking", "effort", "reasoning"))
+			commands.push({
+				kind: "item",
+				id: "cmd-thinking",
+				label: "Thinking level",
+				meta: "/thinking",
+				icon: <Brain size={16} />,
+				onSelect: () => {
+					editorRef.current?.resolveSlash(null);
+					window.setTimeout(() => setMenu("thinking"), 0);
+				},
+			});
 		if (matches("export", "markdown", "gif"))
 			commands.push({
 				kind: "item",
@@ -613,7 +627,7 @@ export function Composer(props: ComposerProps): ReactNode {
 		return groups.flatMap((group, index) =>
 			index === 0 ? group : [{ kind: "separator" as const, id: `sep-${index}` }, ...group],
 		);
-	}, [slashQuery, props.shortcuts, props.onCommand, session, canSwitchModel, capture]);
+	}, [slashQuery, props.shortcuts, props.onCommand, session, canSwitchModel, canSetThinking, capture]);
 
 	const slashOpen = slashQuery !== null && !slashDismissed && slashEntries.length > 0;
 	const onEditorKey = (event: KeyboardEvent<HTMLDivElement>): boolean =>
@@ -809,6 +823,38 @@ export function Composer(props: ComposerProps): ReactNode {
 					</span>
 					{queued > 0 && <span className="sh-queued pn-queued">queued ×{queued}</span>}
 					<span className="pn-footer-spacer" />
+					{canSetThinking && (
+						<span className="pn-pop-anchor">
+							<button
+								type="button"
+								className="pn-model-chip"
+								aria-haspopup="menu"
+								aria-expanded={menu === "thinking"}
+								aria-label={`Thinking: ${levelLabel(thinking.level)}`}
+								data-tip={menu === "thinking" ? undefined : "Thinking level"}
+								data-tip-side="above"
+								onClick={() => setMenu(open => (open === "thinking" ? null : "thinking"))}
+							>
+								<Brain size={12} />
+								<span className="pn-model-name">{levelLabel(thinking.level)}</span>
+							</button>
+							{menu === "thinking" && (
+								<ThinkingMenu
+									level={thinking.level}
+									levels={thinking.levels}
+									onPick={level => {
+										session?.setThinkingLevel?.(level).catch(error => {
+											props.onNotify(
+												"error",
+												`Couldn’t set thinking: ${error instanceof Error ? error.message : String(error)}`,
+											);
+										});
+									}}
+									onClose={() => setMenu(null)}
+								/>
+							)}
+						</span>
+					)}
 					{canSwitchModel && (
 						<span className="pn-pop-anchor">
 							<button
@@ -821,12 +867,11 @@ export function Composer(props: ComposerProps): ReactNode {
 								<span className="pn-model-name">{currentModel.name || currentModel.id}</span>
 								<ChevronDown size={11} />
 							</button>
-							{menu === "model" && (
+							{menu === "model" && session !== null && (
 								<ModelPicker
-									list={models}
-									current={currentModel}
-									onPick={model => {
-										session?.setModel?.(model).catch(error => {
+									session={session}
+									onPick={(model, options) => {
+										session.setModel?.(model, options).catch(error => {
 											props.onNotify(
 												"error",
 												`Couldn’t switch model: ${error instanceof Error ? error.message : String(error)}`,

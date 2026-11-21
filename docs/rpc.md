@@ -165,19 +165,22 @@ Important edge behavior from runtime:
 
 ### Model
 
-- `{ id?, type: "set_model", provider: string, modelId: string }`
+- `{ id?, type: "set_model", provider: string, modelId: string, thinkingLevel?: ConfiguredThinkingLevel, role?: string }`
 - `{ id?, type: "cycle_model" }`
 - `{ id?, type: "get_available_models" }`
+- `{ id?, type: "get_model_picker", query?: string, limit?: number }`
 
-`get_available_models` waits for background model discovery before returning. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure.
+`get_available_models` waits for background model discovery before returning. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure. An optional `role` records the model role the switch belongs to (a quick-role pick passes its role); nothing is persisted either way.
+
+`get_model_picker` returns `{ rows, recent, total }`: omp's session model picker (alt+p) served to any client, so a remote picker lists and ranks models exactly as the TUI does. A blank `query` browses with the Recent block first (`recent` counts its leading rows; role-held and recently used models), `provider/` limits matches to a provider, and a query starting with `@` lists the ctrl+p quick roles. A row carries the roles the model holds (`roles`), the steps of its thinking slider (`thinking`) with the level the session would run it at (`thinkingLevel`), `overContext`, and `current`; a quick-role row carries `role`, which `set_model` takes back.
 
 ### Thinking
 
-- `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
+- `{ id?, type: "set_thinking_level", level: ConfiguredThinkingLevel }`
 - `{ id?, type: "cycle_thinking_level" }`
 - `{ id?, type: "get_available_thinking_levels" }`
 
-`ThinkingLevel` is `"inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`. Discovery returns `"off"` followed by the live model's supported efforts, omitting `"inherit"` and the session-only `"auto"` selector.
+`ThinkingLevel` is `"inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`. Discovery returns `"off"` followed by the live model's supported efforts, omitting `"inherit"` and the session-only `"auto"` selector. `set_thinking_level` itself takes `ConfiguredThinkingLevel` (that plus `"auto"`), so a client can opt into per-turn auto effort.
 
 ### Queue modes
 
@@ -498,6 +501,8 @@ field is absent outside both stages. No event carries it, so re-read
 {
 	"model": { "provider": "...", "id": "..." },
 	"thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
+	"configuredThinkingLevel": "auto|off|minimal|low|medium|high|xhigh|max",
+	"thinkingLevels": ["off", "auto", "low", "medium", "high"],
 	"isStreaming": false,
 	"isCompacting": false,
 	"steeringMode": "all|one-at-a-time",

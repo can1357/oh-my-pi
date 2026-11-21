@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `get_model_picker` RPC command: omp's session model picker (Recent block, search ranking, role chips, `@` quick roles, thinking slider) for remote pickers such as the Chrome side panel.
+- `get_state` reports `configuredThinkingLevel` and `thinkingLevels`; `set_model` takes `thinkingLevel` and `role`, and `set_thinking_level` accepts `auto`.
+
 ### Breaking Changes
 
 - Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
@@ -51,6 +56,7 @@
 
 ### Fixed
 
+- Sessions started from the omp extension's side panel drive only your Chrome: Eval's `browser.open` no longer launches omp's own browser there (`app` other than `"relay"` is refused), so every tab it opens shows up in your window
 - In Tern, answers keep their turn footer and its Copy button after a resume, a compaction or any other transcript rebuild; previously every answer drawn before the rebuild lost them
 - `--continue` (and `autoResume`) no longer resumes a session another running omp is writing, which duplicated its conversation into a new file on the first message; it starts a new session as plain `omp` does
 - `/handoff` now shows its progress like `/compact` while it writes the summary: a working row with a spinner and timer while the agent is idle, and a row above it while a turn runs. Previously only a one-off status line said it had started

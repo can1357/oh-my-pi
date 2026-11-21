@@ -222,7 +222,18 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	{
 		name: "set_model",
 		doc: "Select a model by provider and id.",
-		params: { provider: "string", modelId: "string" },
+		params: {
+			provider: "string",
+			modelId: "string",
+			"thinkingLevel?": doc(
+				"ConfiguredThinkingLevel",
+				"Thinking level to run the model at, clamped to it; omitted re-applies the session's level.",
+			),
+			"role?": doc(
+				"string",
+				"Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted.",
+			),
+		},
 		result: "ModelInfo",
 	},
 	{ name: "cycle_model", doc: "Cycle to the next model.", result: "ModelCycleResult", nullable: true },
@@ -232,7 +243,20 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { models: "ModelInfo[]" },
 		unwrap: "models",
 	},
-	{ name: "set_thinking_level", doc: "Set the thinking level.", params: { level: "ThinkingLevel" } },
+	{
+		name: "get_model_picker",
+		doc: "Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles.",
+		params: {
+			"query?": doc("string", "Search text; blank browses every model, `provider/` limits matches to a provider."),
+			"limit?": doc("number.integer", "Most rows to return; default 100."),
+		},
+		result: "ModelPickerResult",
+	},
+	{
+		name: "set_thinking_level",
+		doc: "Set the thinking level.",
+		params: { level: doc("ConfiguredThinkingLevel", "`auto` lets omp pick the effort per turn.") },
+	},
 	{
 		name: "cycle_thinking_level",
 		doc: "Cycle to the next thinking level.",

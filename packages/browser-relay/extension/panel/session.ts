@@ -5,6 +5,10 @@
  */
 import type { GuestSnapshot } from "@oh-my-pi/collab-web/src/lib/client";
 import type { CollabUiResponseValue, ImageContent } from "@oh-my-pi/pi-wire";
+import type {
+	ConfiguredThinkingLevel,
+	ModelPickerResult,
+} from "../../../coding-agent/src/modes/rpc/wire/rpc-wire.generated";
 import type { PanelEvent, PanelRequestMap, PanelRequestOp, PanelResult } from "../messages";
 
 /** The panel's connection to the service worker (`panel/worker-client.ts`); rpc sessions talk through it. */
@@ -15,7 +19,20 @@ export interface PanelWorker {
 }
 
 /** The transcript-facing part of collab-web's guest snapshot; rpc sessions produce the same shape. */
-export type PanelSnapshot = Pick<
+export type PanelSnapshot = PanelTranscript & {
+	/** The session's thinking selector, when the host lets the panel change it (rpc sessions). */
+	thinking?: PanelThinking;
+};
+
+/** The session's thinking selector. */
+export interface PanelThinking {
+	/** Active selector: `auto` while auto mode picks the effort per turn. */
+	level: ConfiguredThinkingLevel;
+	/** Selectors the model accepts, in omp's order (`off`, `auto`, then efforts); empty when it does not reason. */
+	levels: readonly ConfiguredThinkingLevel[];
+}
+
+type PanelTranscript = Pick<
 	GuestSnapshot,
 	| "phase"
 	| "endedReason"
@@ -61,7 +78,15 @@ export interface PanelSession {
 	 * call. Absent when the host doesn't allow switching (collab guests).
 	 */
 	listModels?(): Promise<readonly PanelModel[]>;
-	setModel?(model: PanelModel): Promise<void>;
+	/**
+	 * omp's session model picker rows for `query` (blank browses; `@` lists quick roles), ordered and ranked as the TUI
+	 * picker shows them. Absent when the host doesn't allow switching.
+	 */
+	pickModels?(query: string): Promise<ModelPickerResult>;
+	/** Switch model; `thinkingLevel` runs it at that level, `role` records a quick-role pick. */
+	setModel?(model: PanelModel, options?: { thinkingLevel?: ConfiguredThinkingLevel; role?: string }): Promise<void>;
+	/** Set the thinking selector; absent when the host doesn't allow it. */
+	setThinkingLevel?(level: ConfiguredThinkingLevel): Promise<void>;
 	/** Compact the context now; absent when the host doesn't allow it (collab guests). */
 	compact?(): Promise<void>;
 	/**

@@ -15,7 +15,7 @@ import {
 	RELAY_EXTENSION_BUILD,
 	writeRelayExtension,
 } from "./extension-files";
-import { DEFAULT_RELAY_URL } from "./kind";
+import { discoverRelayEndpoints } from "./discovery";
 import { refreshRelayNativeHost } from "./native-host-manifest";
 import {
 	isOlderOmpVersion,
@@ -77,7 +77,7 @@ function resolveLocations(
 				? options.relayUrl
 				: options.registryFile
 					? null
-					: DEFAULT_RELAY_URL,
+					: discoverRelayEndpoints()[0] ?? null,
 	};
 }
 

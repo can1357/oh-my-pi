@@ -2533,19 +2533,23 @@ func (v *UsageLimitState) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type SessionState struct {
-	SessionID             string         `json:"sessionId"`
-	Model                 *ModelInfo     `json:"model,omitempty"`
-	ThinkingLevel         *ThinkingLevel `json:"thinkingLevel,omitempty"`
-	IsStreaming           bool           `json:"isStreaming"`
-	IsCompacting          bool           `json:"isCompacting"`
-	SteeringMode          QueueMode      `json:"steeringMode"`
-	FollowUpMode          QueueMode      `json:"followUpMode"`
-	InterruptMode         InterruptMode  `json:"interruptMode"`
-	SessionFile           *string        `json:"sessionFile,omitempty"`
-	SessionName           *string        `json:"sessionName,omitempty"`
-	AutoCompactionEnabled bool           `json:"autoCompactionEnabled"`
-	FastModeEnabled       bool           `json:"fastModeEnabled"`
-	FastModeActive        bool           `json:"fastModeActive"`
+	SessionID     string         `json:"sessionId"`
+	Model         *ModelInfo     `json:"model,omitempty"`
+	ThinkingLevel *ThinkingLevel `json:"thinkingLevel,omitempty"`
+	// The user's thinking selector: `auto` while auto mode picks the effort, else `thinkingLevel`.
+	ConfiguredThinkingLevel *ConfiguredThinkingLevel `json:"configuredThinkingLevel,omitempty"`
+	// Selectors the active model accepts, as omp's thinking selector lists them: `off`, `auto`, then its efforts.
+	ThinkingLevels        []ConfiguredThinkingLevel `json:"thinkingLevels,omitempty"`
+	IsStreaming           bool                      `json:"isStreaming"`
+	IsCompacting          bool                      `json:"isCompacting"`
+	SteeringMode          QueueMode                 `json:"steeringMode"`
+	FollowUpMode          QueueMode                 `json:"followUpMode"`
+	InterruptMode         InterruptMode             `json:"interruptMode"`
+	SessionFile           *string                   `json:"sessionFile,omitempty"`
+	SessionName           *string                   `json:"sessionName,omitempty"`
+	AutoCompactionEnabled bool                      `json:"autoCompactionEnabled"`
+	FastModeEnabled       bool                      `json:"fastModeEnabled"`
+	FastModeActive        bool                      `json:"fastModeActive"`
 	// `/slow` applies to the active model.
 	SlowModeSupported bool `json:"slowModeSupported"`
 	// `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.
@@ -2581,6 +2585,8 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("sessionId", &out.SessionID)
 	d.optional("model", &out.Model)
 	d.optional("thinkingLevel", &out.ThinkingLevel)
+	d.optional("configuredThinkingLevel", &out.ConfiguredThinkingLevel)
+	d.optional("thinkingLevels", &out.ThinkingLevels)
 	d.defaulted("isStreaming", &out.IsStreaming, `false`)
 	d.defaulted("isCompacting", &out.IsCompacting, `false`)
 	d.defaulted("steeringMode", &out.SteeringMode, `"one-at-a-time"`)
@@ -2774,6 +2780,99 @@ func (v *CompactionResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("details", &out.Details)
 	d.optional("preserveData", &out.PreserveData)
 	d.optional("providerReplayThroughEntryId", &out.ProviderReplayThroughEntryID)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// A role a model holds, as picker rows chip it.
+type ModelPickerRole struct {
+	Role string `json:"role"`
+	// The role's display tag.
+	Label string `json:"label"`
+	// Auto-selected: the role has no configured model.
+	Auto *bool `json:"auto,omitempty"`
+}
+
+func (v *ModelPickerRole) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ModelPickerRole", v.decodeFrom)
+}
+
+func (v *ModelPickerRole) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ModelPickerRole
+	d := fieldDecoder{raw: raw, owner: "ModelPickerRole"}
+	d.required("role", &out.Role)
+	d.required("label", &out.Label)
+	d.optional("auto", &out.Auto)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// One row of omp's session model picker.
+type ModelPickerRow struct {
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	// The quick role this row applies (`@` search); pass it to `set_model`.
+	Role *string `json:"role,omitempty"`
+	// Visible roles the model holds, built-in order first.
+	Roles []ModelPickerRole `json:"roles,omitempty"`
+	// Steps of the model's thinking slider, low to high: `auto`, `off`, then its efforts. Absent when it has no effort to pick.
+	Thinking []ConfiguredThinkingLevel `json:"thinking,omitempty"`
+	// Model rows: the session's level as this model would run it (the untouched slider). Quick-role rows: the role's explicit level, which `set_model` should carry.
+	ThinkingLevel *ConfiguredThinkingLevel `json:"thinkingLevel,omitempty"`
+	// The session's context exceeds the model's window.
+	OverContext *bool `json:"overContext,omitempty"`
+	// The session runs this row: its model, or under `@` its active quick role.
+	Current *bool `json:"current,omitempty"`
+}
+
+func (v *ModelPickerRow) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ModelPickerRow", v.decodeFrom)
+}
+
+func (v *ModelPickerRow) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ModelPickerRow
+	d := fieldDecoder{raw: raw, owner: "ModelPickerRow"}
+	d.required("provider", &out.Provider)
+	d.required("id", &out.ID)
+	d.required("name", &out.Name)
+	d.optional("role", &out.Role)
+	d.optional("roles", &out.Roles)
+	d.optional("thinking", &out.Thinking)
+	d.optional("thinkingLevel", &out.ThinkingLevel)
+	d.optional("overContext", &out.OverContext)
+	d.optional("current", &out.Current)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type ModelPickerResult struct {
+	Rows []ModelPickerRow `json:"rows"`
+	// Leading rows that are recently used or role-held (the picker's Recent block); 0 when there is no such split.
+	Recent int64 `json:"recent"`
+	// Matching rows before `limit`.
+	Total int64 `json:"total"`
+}
+
+func (v *ModelPickerResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ModelPickerResult", v.decodeFrom)
+}
+
+func (v *ModelPickerResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ModelPickerResult
+	d := fieldDecoder{raw: raw, owner: "ModelPickerResult"}
+	d.required("rows", &out.Rows)
+	d.required("recent", &out.Recent)
+	d.required("total", &out.Total)
 	if d.err != nil {
 		return d.err
 	}
@@ -8278,6 +8377,10 @@ func (c Commands) DictationStop(ctx context.Context) (string, error) {
 type SetModelCommand struct {
 	Provider string `json:"provider"`
 	ModelID  string `json:"modelId"`
+	// Thinking level to run the model at, clamped to it; omitted re-applies the session's level.
+	ThinkingLevel *ConfiguredThinkingLevel `json:"thinkingLevel,omitempty"`
+	// Model role the switch records (a quick-role pick passes its role); default `default`. Nothing is persisted.
+	Role *string `json:"role,omitempty"`
 }
 
 // SetModel sends "set_model": Select a model by provider and id.
@@ -8301,9 +8404,25 @@ func (c Commands) GetAvailableModels(ctx context.Context) ([]ModelInfo, error) {
 	return out.Models, err
 }
 
+// GetModelPickerCommand holds the parameters of "get_model_picker".
+type GetModelPickerCommand struct {
+	// Search text; blank browses every model, `provider/` limits matches to a provider.
+	Query *string `json:"query,omitempty"`
+	// Most rows to return; default 100.
+	Limit *int64 `json:"limit,omitempty"`
+}
+
+// GetModelPicker sends "get_model_picker": Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles.
+func (c Commands) GetModelPicker(ctx context.Context, p GetModelPickerCommand) (ModelPickerResult, error) {
+	var out ModelPickerResult
+	err := c.call(ctx, "get_model_picker", p, 0, &out)
+	return out, err
+}
+
 // SetThinkingLevelCommand holds the parameters of "set_thinking_level".
 type SetThinkingLevelCommand struct {
-	Level ThinkingLevel `json:"level"`
+	// `auto` lets omp pick the effort per turn.
+	Level ConfiguredThinkingLevel `json:"level"`
 }
 
 // SetThinkingLevel sends "set_thinking_level": Set the thinking level.

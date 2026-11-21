@@ -178,6 +178,7 @@
   // extension/worker/relay.ts
   var RECONNECT_MIN_MS = 1000;
   var RECONNECT_MAX_MS = 1e4;
+  var LINK_DEADLINE_MS = 15000;
 
   class Link {
     calls = new RelayCalls;
@@ -195,6 +196,7 @@
   var link = null;
   var reconnectDelay = RECONNECT_MIN_MS;
   var reconnectTimer = null;
+  var deadlineTimer = null;
   var busyReasons = new Set;
   function post(message) {
     if (!link || !hostPort)
@@ -230,7 +232,8 @@
   }
   async function setBadge(connected) {
     try {
-      await chrome.action.setBadgeText({ text: connected ? "on" : "off" });
+      await chrome.action.setBadgeText({ text: connected ? "on" : "" });
+      await chrome.action.setTitle({ title: connected ? "omp · Terminal browser relay connected" : "omp · Terminal browser relay disconnected" });
       await chrome.action.setBadgeBackgroundColor({
         color: connected ? "#1a7f37" : "#8b8b8b"
       });
@@ -266,10 +269,7 @@
       attachedTabIds
     };
   }
-  function handleRelayLine(raw) {
-    const origin = link;
-    if (!origin)
-      return;
+  function handleRelayLine(raw, origin, sendReply) {
     let msg;
     try {
       msg = JSON.parse(raw);
@@ -289,7 +289,7 @@
       case "rpc": {
         const answer = (reply) => {
           if (origin.open)
-            post(reply);
+            sendReply(reply);
         };
         const { id } = msg;
         const run = handlers ? handlers.rpc(msg, origin) : Promise.reject(new Error("worker not ready"));
@@ -305,9 +305,39 @@
       }
     }
   }
+  var chatLinks = new Set;
+  function broadcastRelayEvent(message) {
+    post(message);
+    for (const send of chatLinks)
+      send(message);
+  }
+  function connectChatRelay(port) {
+    const origin = new Link;
+    const send = (message) => {
+      if (!origin.open)
+        return;
+      try {
+        port.postMessage({ t: "relay", line: JSON.stringify(message) });
+      } catch {
+        close();
+      }
+    };
+    const close = () => {
+      origin.close("chat relay disconnected");
+      chatLinks.delete(send);
+    };
+    buildHello().then((hello) => {
+      if (!origin.open)
+        return;
+      chatLinks.add(send);
+      send(hello);
+    }).catch(() => port.disconnect());
+    return { receive: (line) => handleRelayLine(line, origin, send), close };
+  }
   function linked() {
     if (link)
       unlinked("omp relay changed");
+    clearLinkDeadline();
     reconnectDelay = RECONNECT_MIN_MS;
     const epoch = new Link;
     link = epoch;
@@ -321,6 +351,7 @@
     handlers?.status(relayStatus());
   }
   function unlinked(reason) {
+    clearLinkDeadline();
     const epoch = link;
     link = null;
     setBadge(false);
@@ -339,11 +370,27 @@
       connectRelay();
     }, delay);
   }
+  function clearLinkDeadline() {
+    clearTimeout(deadlineTimer ?? undefined);
+    deadlineTimer = null;
+  }
+  function enforceLinkDeadline(port) {
+    clearLinkDeadline();
+    deadlineTimer = setTimeout(() => {
+      deadlineTimer = null;
+      if (link || hostPort !== port)
+        return;
+      hostPort = null;
+      port.disconnect();
+      scheduleReconnect();
+    }, LINK_DEADLINE_MS);
+  }
   function connectRelay() {
     if (hostPort)
       return;
     const port = chrome.runtime.connectNative(NATIVE_HOST);
     hostPort = port;
+    enforceLinkDeadline(port);
     const chunks = new Map;
     port.onMessage.addListener((message) => {
       if (hostPort !== port)
@@ -356,7 +403,8 @@
           unlinked(message.reason);
           return;
         case "relay":
-          handleRelayLine(message.line);
+          if (link)
+            handleRelayLine(message.line, link, post);
           return;
         case "chunk": {
           const parts = chunks.get(message.id) ?? [];
@@ -366,7 +414,8 @@
             return;
           }
           chunks.delete(message.id);
-          handleRelayLine(parts.join(""));
+          if (link)
+            handleRelayLine(parts.join(""), link, post);
           return;
         }
       }
@@ -376,6 +425,7 @@
       if (hostPort !== port)
         return;
       hostPort = null;
+      clearLinkDeadline();
       unlinked(detail ? `omp native host disconnected: ${detail}` : "omp native host disconnected");
       scheduleReconnect();
     });
@@ -1124,34 +1174,34 @@
       if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
         downloads.report(params.guid, params.url);
       }
-      post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
+      broadcastRelayEvent({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
     });
     chrome.debugger.onDetach.addListener((source, reason) => {
       if (source.tabId === undefined)
         return;
       const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
-      post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
+      broadcastRelayEvent({ t: "detached", tabId: source.tabId, reason, relayInitiated });
     });
-    onForeignFramesHidden((tabId, frames) => post({ t: "framesHidden", tabId, frames }));
+    onForeignFramesHidden((tabId, frames) => broadcastRelayEvent({ t: "framesHidden", tabId, frames }));
     chrome.tabs.onCreated.addListener((tab) => {
       const snap = snapshot(tab);
       if (snap)
-        post({ t: "tabCreated", tab: snap });
+        broadcastRelayEvent({ t: "tabCreated", tab: snap });
     });
     chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
       const snap = snapshot(tab);
       if (snap)
-        post({ t: "tabUpdated", tab: snap });
+        broadcastRelayEvent({ t: "tabUpdated", tab: snap });
     });
     chrome.tabs.onActivated.addListener(({ tabId }) => {
       chrome.tabs.get(tabId).then((tab) => {
         const snap = snapshot(tab);
         if (snap)
-          post({ t: "tabUpdated", tab: snap });
+          broadcastRelayEvent({ t: "tabUpdated", tab: snap });
       }).catch(() => {});
     });
     chrome.tabs.onRemoved.addListener((tabId) => {
-      post({ t: "tabRemoved", tabId });
+      broadcastRelayEvent({ t: "tabRemoved", tabId });
     });
   }
 
@@ -1258,6 +1308,7 @@
       this.#live.set(info.sessionKey, live);
       const ready = Promise.withResolvers();
       let started = false;
+      let relay;
       const timer = setTimeout(() => {
         ready.reject(new Error(`omp native host did not start omp within ${READY_TIMEOUT_MS / 1000}s`));
         port.disconnect();
@@ -1279,6 +1330,12 @@
       };
       port.onMessage.addListener((message) => {
         switch (message.t) {
+          case "linked":
+            relay = connectChatRelay(port);
+            return;
+          case "relay":
+            relay?.receive(message.line);
+            return;
           case "ready":
             started = true;
             clearTimeout(timer);
@@ -1295,7 +1352,11 @@
               return;
             }
             live.chunks.delete(message.id);
-            this.#deliver(info.sessionKey, parts.join(""));
+            const line = parts.join("");
+            if (message.relay)
+              relay?.receive(line);
+            else
+              this.#deliver(info.sessionKey, line);
             return;
           }
           case "exit":
@@ -1305,9 +1366,10 @@
         }
       });
       port.onDisconnect.addListener(() => {
+        relay?.close();
         exit(null, chrome.runtime.lastError?.message ?? "omp native host disconnected");
       });
-      const open = { t: "open", cwd: options.cwd };
+      const open = { t: "open", cwd: options.cwd, extensionId: chrome.runtime.id };
       port.postMessage(open);
       await ready.promise;
       sessions.push(info);

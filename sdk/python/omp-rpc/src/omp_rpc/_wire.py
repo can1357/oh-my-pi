@@ -651,6 +651,10 @@ class SessionState:
     session_id: str
     model: ModelInfo | None = None
     thinking_level: ThinkingLevel | None = None
+    configured_thinking_level: ConfiguredThinkingLevel | None = None
+    """The user's thinking selector: `auto` while auto mode picks the effort, else `thinkingLevel`."""
+    thinking_levels: tuple[ConfiguredThinkingLevel, ...] | None = None
+    """Selectors the active model accepts, as omp's thinking selector lists them: `off`, `auto`, then its efforts."""
     is_streaming: bool = False
     is_compacting: bool = False
     steering_mode: QueueMode = "one-at-a-time"
@@ -750,6 +754,45 @@ class CompactionResult:
     details: JsonValue | None = None
     preserve_data: JsonObject | None = None
     provider_replay_through_entry_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ModelPickerRole:
+    """A role a model holds, as picker rows chip it."""
+    role: str
+    label: str
+    """The role's display tag."""
+    auto: bool | None = None
+    """Auto-selected: the role has no configured model."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ModelPickerRow:
+    """One row of omp's session model picker."""
+    provider: str
+    id: str
+    name: str
+    role: str | None = None
+    """The quick role this row applies (`@` search); pass it to `set_model`."""
+    roles: tuple[ModelPickerRole, ...] | None = None
+    """Visible roles the model holds, built-in order first."""
+    thinking: tuple[ConfiguredThinkingLevel, ...] | None = None
+    """Steps of the model's thinking slider, low to high: `auto`, `off`, then its efforts. Absent when it has no effort to pick."""
+    thinking_level: ConfiguredThinkingLevel | None = None
+    """Model rows: the session's level as this model would run it (the untouched slider). Quick-role rows: the role's explicit level, which `set_model` should carry."""
+    over_context: bool | None = None
+    """The session's context exceeds the model's window."""
+    current: bool | None = None
+    """The session runs this row: its model, or under `@` its active quick role."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ModelPickerResult:
+    rows: tuple[ModelPickerRow, ...]
+    recent: int
+    """Leading rows that are recently used or role-held (the picker's Recent block); 0 when there is no such split."""
+    total: int
+    """Matching rows before `limit`."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2077,6 +2120,8 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
         session_id=required(payload, "sessionId", decode_str, path),
         model=optional(payload, "model", parse_model_info, path),
         thinking_level=optional(payload, "thinkingLevel", _decode_thinking_level, path),
+        configured_thinking_level=optional(payload, "configuredThinkingLevel", _decode_configured_thinking_level, path),
+        thinking_levels=optional(payload, "thinkingLevels", array(_decode_configured_thinking_level), path),
         is_streaming=defaulted(payload, "isStreaming", decode_bool, path, False),
         is_compacting=defaulted(payload, "isCompacting", decode_bool, path, False),
         steering_mode=defaulted(payload, "steeringMode", _decode_queue_mode, path, "one-at-a-time"),
@@ -2168,6 +2213,39 @@ def parse_compaction_result(value: object, path: str = "CompactionResult") -> Co
         details=optional(payload, "details", decode_json, path),
         preserve_data=optional(payload, "preserveData", decode_json_object, path),
         provider_replay_through_entry_id=optional(payload, "providerReplayThroughEntryId", decode_str, path),
+    )
+
+
+def parse_model_picker_role(value: object, path: str = "ModelPickerRole") -> ModelPickerRole:
+    payload = expect_object(value, path)
+    return ModelPickerRole(
+        role=required(payload, "role", decode_str, path),
+        label=required(payload, "label", decode_str, path),
+        auto=optional(payload, "auto", decode_bool, path),
+    )
+
+
+def parse_model_picker_row(value: object, path: str = "ModelPickerRow") -> ModelPickerRow:
+    payload = expect_object(value, path)
+    return ModelPickerRow(
+        provider=required(payload, "provider", decode_str, path),
+        id=required(payload, "id", decode_str, path),
+        name=required(payload, "name", decode_str, path),
+        role=optional(payload, "role", decode_str, path),
+        roles=optional(payload, "roles", array(parse_model_picker_role), path),
+        thinking=optional(payload, "thinking", array(_decode_configured_thinking_level), path),
+        thinking_level=optional(payload, "thinkingLevel", _decode_configured_thinking_level, path),
+        over_context=optional(payload, "overContext", decode_bool, path),
+        current=optional(payload, "current", decode_bool, path),
+    )
+
+
+def parse_model_picker_result(value: object, path: str = "ModelPickerResult") -> ModelPickerResult:
+    payload = expect_object(value, path)
+    return ModelPickerResult(
+        rows=required(payload, "rows", array(parse_model_picker_row), path),
+        recent=required(payload, "recent", decode_int, path),
+        total=required(payload, "total", decode_int, path),
     )
 
 
@@ -3598,11 +3676,15 @@ class WireClient:
         params: dict[str, object] = {}
         return required(expect_object(self._command("dictation_stop", params, timeout=600), "dictation_stop"), "text", decode_str, "dictation_stop")
 
-    def set_model(self, provider: str, model_id: str) -> ModelInfo:
+    def set_model(self, provider: str, model_id: str, *, thinking_level: ConfiguredThinkingLevel | None = None, role: str | None = None) -> ModelInfo:
         """Select a model by provider and id."""
         params: dict[str, object] = {}
         params["provider"] = provider
         params["modelId"] = model_id
+        if thinking_level is not None:
+            params["thinkingLevel"] = thinking_level
+        if role is not None:
+            params["role"] = role
         return parse_model_info(self._command("set_model", params), "set_model")
 
     def cycle_model(self) -> ModelCycleResult | None:
@@ -3616,7 +3698,16 @@ class WireClient:
         params: dict[str, object] = {}
         return required(expect_object(self._command("get_available_models", params), "get_available_models"), "models", array(parse_model_info), "get_available_models")
 
-    def set_thinking_level(self, level: ThinkingLevel) -> None:
+    def get_model_picker(self, *, query: str | None = None, limit: int | None = None) -> ModelPickerResult:
+        """Model picker rows ordered and ranked as omp's session model picker shows them; a query starting with `@` lists quick roles."""
+        params: dict[str, object] = {}
+        if query is not None:
+            params["query"] = query
+        if limit is not None:
+            params["limit"] = limit
+        return parse_model_picker_result(self._command("get_model_picker", params), "get_model_picker")
+
+    def set_thinking_level(self, level: ConfiguredThinkingLevel) -> None:
         """Set the thinking level."""
         params: dict[str, object] = {}
         params["level"] = level
@@ -4189,6 +4280,9 @@ __all__ = [
     "ModelCost",
     "ModelCycleResult",
     "ModelInfo",
+    "ModelPickerResult",
+    "ModelPickerRole",
+    "ModelPickerRow",
     "NavigateTreeResult",
     "NegotiateProtocolResult",
     "NoticeEvent",
@@ -4375,6 +4469,9 @@ __all__ = [
     "parse_model_cost",
     "parse_model_cycle_result",
     "parse_model_info",
+    "parse_model_picker_result",
+    "parse_model_picker_role",
+    "parse_model_picker_row",
     "parse_navigate_tree_result",
     "parse_negotiate_protocol_result",
     "parse_notice_event",
