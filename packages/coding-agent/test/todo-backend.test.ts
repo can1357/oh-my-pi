@@ -448,6 +448,28 @@ describe("todo backend", () => {
 		expect(taken).toEqual([list("a"), list("a")]);
 	});
 
+	it("a backend its extension registers again while the session runs gets the list at the next commit, changed or not", async () => {
+		const called: string[] = [];
+		let again = () => {};
+		const { session } = await open(
+			[
+				pi => {
+					pi.registerTodoBackend({ id: "tracker", replace: () => void called.push("first") });
+					again = () => pi.registerTodoBackend({ id: "tracker", replace: () => void called.push("second") });
+				},
+			],
+			"tracker",
+		);
+
+		session.commitTodoPhases(list("a"));
+		await settled(session);
+		again();
+		session.commitTodoPhases(list("a"));
+		await settled(session);
+
+		expect(called).toEqual(["first", "second"]);
+	});
+
 	it("native, a malformed id and a missing replace are refused; a second registration replaces the extension's first", async () => {
 		const refused: string[] = [];
 		const called: string[] = [];
