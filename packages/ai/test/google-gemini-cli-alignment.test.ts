@@ -19,7 +19,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getAntigravityUserAgent, getAntigravityVersion } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 function createModel(
-	provider: "google-gemini-cli" | "google-antigravity",
+	provider: "custom-cca" | "google-antigravity",
 	id = provider === "google-antigravity" ? "gemini-3-flash" : "gemini-2.5-flash",
 	reasoning = false,
 ): Model<"google-gemini-cli"> {
@@ -83,8 +83,8 @@ const validationRequiredBody = JSON.stringify({
 describe("Google Gemini CLI alignment", () => {
 	it("encodes enriched OAuth JSON while preserving token + projectId", async () => {
 		const expiresAt = Date.now() + 60 * 60 * 1000;
-		const result = await getOAuthApiKey("google-gemini-cli", {
-			"google-gemini-cli": {
+		const result = await getOAuthApiKey("google-antigravity", {
+			"google-antigravity": {
 				access: "access-token",
 				refresh: "refresh-token",
 				expires: expiresAt,
@@ -177,7 +177,7 @@ describe("Google Gemini CLI alignment", () => {
 	});
 
 	it("omits antigravity-only metadata in non-antigravity request payloads", () => {
-		const model = createModel("google-gemini-cli");
+		const model = createModel("custom-cca");
 		const payload = buildRequest(model, createContext(), "proj-123", {}, false) as {
 			request: { sessionId?: string };
 			requestType?: string;
@@ -191,7 +191,7 @@ describe("Google Gemini CLI alignment", () => {
 		expect(payload.requestId).toBeUndefined();
 	});
 	it("keeps every system prompt block in systemInstruction instead of conversation contents", () => {
-		const model = createModel("google-gemini-cli");
+		const model = createModel("custom-cca");
 		const context: Context = {
 			systemPrompt: ["primary instruction", "", "supplemental \uD800instruction"],
 			messages: [{ role: "user", content: "implement token refresh", timestamp: Date.now() }],
@@ -462,13 +462,7 @@ describe("Google Gemini CLI alignment", () => {
 			],
 		};
 
-		const cli = buildRequest(
-			createModel("google-gemini-cli"),
-			context,
-			"proj-123",
-			{ toolChoice: "auto" },
-			false,
-		) as {
+		const cli = buildRequest(createModel("custom-cca"), context, "proj-123", { toolChoice: "auto" }, false) as {
 			request: { tools?: unknown; toolConfig?: unknown };
 		};
 		expect(cli.request.tools).toBeDefined();
@@ -585,7 +579,7 @@ describe("Google Gemini CLI alignment", () => {
 			return { captured, fetchMock };
 		}
 
-		async function send(provider: "google-gemini-cli" | "google-antigravity", fetchMock: FetchImpl) {
+		async function send(provider: "custom-cca" | "google-antigravity", fetchMock: FetchImpl) {
 			await streamGoogleGeminiCli(createModel(provider), createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
 				fetch: fetchMock,
@@ -629,9 +623,9 @@ describe("Google Gemini CLI alignment", () => {
 			expect(body.userAgent).toStartWith(`antigravity/hub/${getAntigravityVersion()} `);
 		});
 
-		it("leaves the Gemini CLI transport without Antigravity identity headers", async () => {
+		it("leaves a custom Cloud Code Assist provider without Antigravity identity headers", async () => {
 			const { captured, fetchMock } = captureGenerateRequests();
-			await send("google-gemini-cli", fetchMock);
+			await send("custom-cca", fetchMock);
 
 			expect(captured).toHaveLength(1);
 			const [{ headers, body }] = captured;
@@ -837,7 +831,7 @@ describe("Google Gemini CLI alignment", () => {
 				});
 			};
 
-			const model = createModel("google-gemini-cli");
+			const model = createModel("custom-cca");
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
 				maxRetryDelayMs: 1000,
@@ -888,7 +882,7 @@ describe("Google Gemini CLI alignment", () => {
 				return response;
 			};
 
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -931,7 +925,7 @@ describe("Google Gemini CLI alignment", () => {
 				});
 			};
 
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -975,7 +969,7 @@ describe("Google Gemini CLI alignment", () => {
 				});
 			};
 
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -1015,7 +1009,7 @@ describe("Google Gemini CLI alignment", () => {
 					headers: { "Content-Type": "text/event-stream" },
 				});
 			};
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -1051,7 +1045,7 @@ describe("Google Gemini CLI alignment", () => {
 					headers: { "Content-Type": "text/event-stream" },
 				});
 			};
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -1088,7 +1082,7 @@ describe("Google Gemini CLI alignment", () => {
 					headers: { "Content-Type": "text/event-stream" },
 				});
 			};
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -1128,7 +1122,7 @@ describe("Google Gemini CLI alignment", () => {
 				});
 			};
 
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -1151,7 +1145,7 @@ describe("Google Gemini CLI alignment", () => {
 
 		it("lands held reply text ahead of the thought that ends it", async () => {
 			// "{" is held as a possible planning leak; the thought ends that run of reply text.
-			const result = await streamParts(createModel("google-gemini-cli"), [
+			const result = await streamParts(createModel("google-antigravity", "gemini-2.5-flash"), [
 				[{ text: "{" }, { thought: true, text: "plan" }],
 				[{ text: " x: 1 }" }],
 			]);
@@ -1170,7 +1164,7 @@ describe("Google Gemini CLI alignment", () => {
 			["markup healing", "<thi", "", "<thi"],
 		] as const) {
 			it(`signs reply text held by the ${stage} with a trailing signature`, async () => {
-				const result = await streamParts(createModel("google-gemini-cli"), [
+				const result = await streamParts(createModel("google-antigravity", "gemini-2.5-flash"), [
 					[{ thought: true, text: "plan" }, { text: held }, { text: "", thoughtSignature: "U0lH" }],
 					rest ? [{ text: rest }] : [],
 				]);
@@ -1201,7 +1195,7 @@ describe("Google Gemini CLI alignment", () => {
 					headers: { "Content-Type": "text/event-stream" },
 				});
 			};
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -1237,7 +1231,7 @@ describe("Google Gemini CLI alignment", () => {
 					headers: { "Content-Type": "text/event-stream" },
 				});
 			};
-			const model = createModel("google-gemini-cli");
+			const model = createModel("google-antigravity", "gemini-2.5-flash");
 			const events: AssistantMessageEvent[] = [];
 			const stream = streamGoogleGeminiCli(model, createContext(), {
 				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),

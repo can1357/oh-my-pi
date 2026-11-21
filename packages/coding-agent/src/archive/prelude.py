@@ -29,12 +29,14 @@ def _make_archive():
         async def session(self, id, *, limit=None, silent=False):
             return await _call("session", {"id": id, "limit": limit}, silent)
 
-        async def prompts(self, *, project=None, limit=None, silent=False):
-            return await _call("prompts", {"project": project, "limit": limit}, silent)
+        async def prompts(self, *, query=None, project=None, limit=None, silent=False):
+            return await _call(
+                "prompts", {"query": query, "project": project, "limit": limit}, silent
+            )
 
         async def search(self, query, *, project=None, limit=None, silent=False):
             return await _call(
-                "prompts", {"query": query, "project": project, "limit": limit}, silent
+                "search", {"query": query, "project": project, "limit": limit}, silent
             )
 
         async def recaps(self, *, project=None, limit=None, silent=False):

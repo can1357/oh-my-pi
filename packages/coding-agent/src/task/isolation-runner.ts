@@ -881,7 +881,6 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 							tool: "task",
 							before: before.text,
 							after: after.text,
-							beforeMtimeMs: before.mtimeMs,
 							agent: { agent: result.id, parent: opts.parentAgentId },
 						});
 					}

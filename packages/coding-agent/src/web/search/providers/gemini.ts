@@ -22,7 +22,6 @@ import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare"
 import {
 	getAntigravityHeaders,
 	getAntigravityUserAgent,
-	getGeminiCliHeaders,
 	newAntigravityTraceId,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { type ConfiguredThinkingLevel, concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
@@ -396,9 +395,7 @@ async function callGeminiSearch(
 ): Promise<GeminiSearchResult> {
 	const endpoint = baseUrl.replace(/\/+$/, "");
 	const antigravityUserAgent = auth.isAntigravity ? getAntigravityUserAgent() : undefined;
-	const headers = auth.isAntigravity
-		? getAntigravityHeaders(antigravityUserAgent)
-		: { Accept: "text/event-stream", ...getGeminiCliHeaders() };
+	const headers = auth.isAntigravity ? getAntigravityHeaders(antigravityUserAgent) : { Accept: "text/event-stream" };
 
 	const requestMetadata = auth.isAntigravity
 		? {
@@ -691,11 +688,7 @@ export class GeminiProvider extends SearchProvider {
 			if (model.api === "google-generative-ai") return authStorage.keys.source(model.provider) !== undefined;
 			return false;
 		}
-		return (
-			authStorage.credentials.hasOAuth("google-antigravity") ||
-			authStorage.credentials.hasOAuth("google-gemini-cli") ||
-			authStorage.keys.source("google") !== undefined
-		);
+		return authStorage.credentials.hasOAuth("google-antigravity") || authStorage.keys.source("google") !== undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

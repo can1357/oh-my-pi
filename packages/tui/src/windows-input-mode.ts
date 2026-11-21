@@ -111,7 +111,14 @@ function parseRecord(data: string): KeyRecord | undefined {
 		const raw = params[index];
 		return raw ? Number.parseInt(raw, 10) : fallback;
 	};
-	return { vk: at(0, 0), uc: at(2, 0), down: at(3, 0) === 1, state: at(4, 0), repeat: Math.max(1, at(5, 1)) };
+	// The console's wRepeatCount is a WORD; anything larger is a spoofed or pasted record.
+	return {
+		vk: at(0, 0),
+		uc: at(2, 0),
+		down: at(3, 0) === 1,
+		state: at(4, 0),
+		repeat: Math.min(Math.max(1, at(5, 1)), 0xffff),
+	};
 }
 
 /** Lowercase codepoint a letter/digit virtual key stands for, or 0. */

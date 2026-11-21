@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(unix)]
 use crate::file::POLL_SLICE;
 use crate::{
+	changes::{ChangeGuard, ChangeSink, Changes},
 	dir::{EntryBinding, ReadDir},
 	error::{
 		already_exists, invalid_argument, no_provider, not_a_directory, not_permitted,
@@ -158,6 +159,13 @@ fn host_mask(scope: &Scope) -> Option<u32> {
 /// on creation, so the new file's mode is set again afterwards: a looser mask
 /// (`umask 000`) must keep the bits the process umask clears.
 fn native_open(scope: &Scope, path: &Path, options: &OpenOptions) -> io::Result<File> {
+	if options.is_writable()
+		|| options.is_create()
+		|| options.is_create_new()
+		|| options.is_truncate()
+	{
+		scope.changes.touch(path);
+	}
 	let Some(mask) = host_mask(scope) else {
 		return native::open(path, options);
 	};
@@ -712,11 +720,7 @@ impl Fs {
 		Self {
 			provider: Some(provider),
 			mounts:   None,
-			scope:    Scope {
-				cancel:        None,
-				closes:        Some(Arc::new(CloseTracker::default())),
-				creation_mask: None,
-			},
+			scope:    Scope { closes: Some(Arc::new(CloseTracker::default())), ..Scope::default() },
 		}
 	}
 
@@ -795,6 +799,50 @@ impl Fs {
 	/// The mask set by [`Fs::with_creation_mask`].
 	pub const fn creation_mask(&self) -> Option<u32> {
 		self.scope.creation_mask
+	}
+
+	/// A view whose [`Fs::begin_changes`] views report the host files they
+	/// change to `sink`; see [`ChangeSink`]. Provider paths and descriptor
+	/// overlays are never reported.
+	pub fn with_change_sink(&self, sink: Arc<dyn ChangeSink>) -> Self {
+		let mut fs = self.clone();
+		fs.scope.changes = Changes::to(sink);
+		fs
+	}
+
+	/// A view for one unit of work (a command): the host files created,
+	/// written, renamed or removed through it and its clones are compared
+	/// with what they held before, and the ones that differ are reported to
+	/// the installed [`ChangeSink`] once the last clone is dropped. The same
+	/// view when no sink is installed.
+	pub fn begin_changes(&self) -> Self {
+		let mut fs = self.clone();
+		fs.scope.changes = self.scope.changes.begin();
+		fs
+	}
+
+	/// Declares that the caller is about to change host `path` without this
+	/// facade (a descriptor-relative unlink, a clone by path, an open of its
+	/// own), so the change is reported like one made through it. A directory
+	/// stands for every file below it.
+	pub fn note_change(&self, path: impl AsRef<Path>) {
+		let path = path.as_ref();
+		if matches!(self.route(path), Ok(Route::Native)) {
+			self.scope.changes.touch(path);
+		}
+	}
+
+	/// [`Fs::note_change`] as a unit of work of its own, for a change that
+	/// outlives the caller's view (a file the caller opens itself and hands
+	/// on): what host `path` holds now is compared with what it holds once
+	/// the guard and its clones are dropped. `None` when nothing would be
+	/// reported: no sink is installed, it refuses the path, or the path is
+	/// not a host path.
+	pub fn changing(&self, path: impl AsRef<Path>) -> Option<ChangeGuard> {
+		let path = path.as_ref();
+		matches!(self.route(path), Ok(Route::Native))
+			.then(|| self.scope.changes.guard(path))
+			.flatten()
 	}
 
 	/// The same filesystem without cancellation, for deleting the caller's
@@ -982,7 +1030,10 @@ impl Fs {
 	pub async fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
 		let (path, contents) = (path.as_ref(), contents.as_ref());
 		match self.route(path)? {
-			Route::Native => std::fs::write(path, contents),
+			Route::Native => {
+				self.scope.changes.touch(path);
+				std::fs::write(path, contents)
+			},
 			Route::Provider(provider) => self.guard(provider.write(path, contents)).await,
 			Route::Mounted(file) => {
 				mount_open_async(file, &create_options())
@@ -1108,7 +1159,10 @@ impl Fs {
 	pub async fn remove_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
 		let path = path.as_ref();
 		match self.route(path)? {
-			Route::Native => std::fs::remove_file(path),
+			Route::Native => {
+				self.scope.changes.touch(path);
+				std::fs::remove_file(path)
+			},
 			Route::Provider(provider) => self.guard(provider.remove_file(path)).await,
 			Route::Mounted(_) => Err(not_permitted()),
 		}
@@ -1126,7 +1180,10 @@ impl Fs {
 	pub async fn remove_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
 		let path = path.as_ref();
 		match self.route(path)? {
-			Route::Native => std::fs::remove_dir_all(path),
+			Route::Native => {
+				self.scope.changes.touch(path);
+				std::fs::remove_dir_all(path)
+			},
 			Route::Provider(provider) => self.guard(provider.remove_dir_all(path)).await,
 			Route::Mounted(_) => Err(not_permitted()),
 		}
@@ -1137,7 +1194,11 @@ impl Fs {
 	pub async fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
 		let (from, to) = (from.as_ref(), to.as_ref());
 		match self.route_pair(from, to)? {
-			PairRoute::Native => std::fs::rename(from, to),
+			PairRoute::Native => {
+				self.scope.changes.touch(from);
+				self.scope.changes.touch(to);
+				std::fs::rename(from, to)
+			},
 			PairRoute::Provider(provider) => self.guard(provider.rename(from, to)).await,
 		}
 	}
@@ -1146,7 +1207,10 @@ impl Fs {
 	pub async fn copy(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
 		let (from, to) = (from.as_ref(), to.as_ref());
 		match (self.route(from)?, self.route(to)?) {
-			(Route::Native, Route::Native) => std::fs::copy(from, to),
+			(Route::Native, Route::Native) => {
+				self.scope.changes.touch(to);
+				std::fs::copy(from, to)
+			},
 			(Route::Mounted(_), _) | (_, Route::Mounted(_)) => {
 				let source = self.open(from).await?;
 				let target = self.create(to).await?;
@@ -1176,7 +1240,10 @@ impl Fs {
 	) -> io::Result<()> {
 		let (original, link) = (original.as_ref(), link.as_ref());
 		match self.route_pair(original, link)? {
-			PairRoute::Native => std::fs::hard_link(original, link),
+			PairRoute::Native => {
+				self.scope.changes.touch(link);
+				std::fs::hard_link(original, link)
+			},
 			PairRoute::Provider(provider) => self.guard(provider.hard_link(original, link)).await,
 		}
 	}
@@ -1492,6 +1559,16 @@ impl BlockingFs {
 		self.fs.scope.creation_mask
 	}
 
+	/// See [`Fs::begin_changes`].
+	pub fn begin_changes(&self) -> Self {
+		Self { fs: self.fs.begin_changes(), runtime: self.runtime.clone() }
+	}
+
+	/// See [`Fs::note_change`].
+	pub fn note_change(&self, path: impl AsRef<Path>) {
+		self.fs.note_change(path);
+	}
+
 	/// See [`Fs::mount_file`].
 	pub fn mount_file(&self, path: impl Into<PathBuf>, file: File) -> Self {
 		Self { fs: self.fs.mount_file(path, file), runtime: self.runtime.clone() }
@@ -1605,7 +1682,10 @@ impl BlockingFs {
 	pub fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
 		let (path, contents) = (path.as_ref(), contents.as_ref());
 		match self.fs.route(path)? {
-			Route::Native => std::fs::write(path, contents),
+			Route::Native => {
+				self.fs.scope.changes.touch(path);
+				std::fs::write(path, contents)
+			},
 			Route::Provider(provider) => self.run(provider.write(path, contents)),
 			Route::Mounted(file) => {
 				io::Write::write_all(&mut mount_open(file, &create_options())?, contents)
@@ -1718,7 +1798,10 @@ impl BlockingFs {
 	pub fn remove_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
 		let path = path.as_ref();
 		match self.fs.route(path)? {
-			Route::Native => std::fs::remove_file(path),
+			Route::Native => {
+				self.fs.scope.changes.touch(path);
+				std::fs::remove_file(path)
+			},
 			Route::Provider(provider) => self.run(provider.remove_file(path)),
 			Route::Mounted(_) => Err(not_permitted()),
 		}
@@ -1736,7 +1819,10 @@ impl BlockingFs {
 	pub fn remove_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
 		let path = path.as_ref();
 		match self.fs.route(path)? {
-			Route::Native => std::fs::remove_dir_all(path),
+			Route::Native => {
+				self.fs.scope.changes.touch(path);
+				std::fs::remove_dir_all(path)
+			},
 			Route::Provider(provider) => self.run(provider.remove_dir_all(path)),
 			Route::Mounted(_) => Err(not_permitted()),
 		}
@@ -1746,7 +1832,11 @@ impl BlockingFs {
 	pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
 		let (from, to) = (from.as_ref(), to.as_ref());
 		match self.fs.route_pair(from, to)? {
-			PairRoute::Native => std::fs::rename(from, to),
+			PairRoute::Native => {
+				self.fs.scope.changes.touch(from);
+				self.fs.scope.changes.touch(to);
+				std::fs::rename(from, to)
+			},
 			PairRoute::Provider(provider) => self.run(provider.rename(from, to)),
 		}
 	}
@@ -1755,7 +1845,10 @@ impl BlockingFs {
 	pub fn copy(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
 		let (from, to) = (from.as_ref(), to.as_ref());
 		match (self.fs.route(from)?, self.fs.route(to)?) {
-			(Route::Native, Route::Native) => std::fs::copy(from, to),
+			(Route::Native, Route::Native) => {
+				self.fs.scope.changes.touch(to);
+				std::fs::copy(from, to)
+			},
 			(Route::Mounted(_), _) | (_, Route::Mounted(_)) => {
 				let source = self.open(from)?;
 				let target = self.create(to)?;
@@ -1772,7 +1865,10 @@ impl BlockingFs {
 	pub fn hard_link(&self, original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
 		let (original, link) = (original.as_ref(), link.as_ref());
 		match self.fs.route_pair(original, link)? {
-			PairRoute::Native => std::fs::hard_link(original, link),
+			PairRoute::Native => {
+				self.fs.scope.changes.touch(link);
+				std::fs::hard_link(original, link)
+			},
 			PairRoute::Provider(provider) => self.run(provider.hard_link(original, link)),
 		}
 	}

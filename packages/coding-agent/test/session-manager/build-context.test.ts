@@ -833,6 +833,25 @@ describe("buildSessionContext", () => {
 			// cacheMissExplainedAt: the kept assistant (index 1) should NOT be a miss;
 			// the post-compaction assistant (index 4) SHOULD be a miss.
 			expect(transcript.cacheMissExplainedAt).toEqual([false, false, false, false, true]);
+			expect(transcript.nextCacheMissExplained).toBe(false);
+		});
+
+		it("collapsed transcript explains the next live turn when compaction ends the path", () => {
+			// The rebuild right after compaction reseeds the live cache baseline from
+			// the kept assistant; its warm read must not flag the next turn's miss.
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "kept question"),
+				msg("2", "1", "assistant", "kept response"),
+				compaction("3", "2", "Compacted", "1"),
+				msg("4", "3", "user", "after compact"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.nextCacheMissExplained).toBe(true);
 		});
 
 		it("collapsed display trims a mid-turn kept head instead of leading with stale fragments", () => {

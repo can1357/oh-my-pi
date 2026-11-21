@@ -129,7 +129,7 @@ Register tools with `WithHostTools` (sent once connected) or `SetCustomTools`. T
 `host_tool_cancel` or `Close`, may stream `SendUpdate`s, and return a result or an error
 (`isError`). Unknown tools and non-object arguments get error results. Host tool frames are not
 delivered on `Frames()`; `tool_execution_update`/`tool_execution_end` events of a host call carry
-the host tool's name even when the agent ran it through `write` (an `xd://` device).
+the host tool's name even when the agent ran it as a tool command inside a `bash` call.
 
 ### Host URIs
 

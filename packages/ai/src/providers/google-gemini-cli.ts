@@ -1,7 +1,6 @@
 /**
- * Google Gemini CLI / Antigravity provider.
- * Shared implementation for both google-gemini-cli and google-antigravity providers.
- * Uses the Cloud Code Assist API endpoint to access Gemini and Claude models.
+ * Cloud Code Assist transport for Antigravity and custom providers.
+ * The `google-gemini-cli` API identifier is retained for configured models.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { scheduler } from "node:timers/promises";
@@ -13,7 +12,6 @@ import {
 	getAntigravityHeaders,
 	getAntigravityModelWireProfile,
 	getAntigravityUserAgent,
-	getGeminiCliHeaders,
 	newAntigravityTraceId,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { extractHttpStatusFromError, fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
@@ -628,7 +626,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							"x-cloudaicompanion-trace-id": newAntigravityTraceId(),
 							...(requestBody.requestId ? { "X-Aicode-Request-Id": requestBody.requestId } : {}),
 						}
-					: { Accept: "text/event-stream", ...getGeminiCliHeaders(model.id) }),
+					: { Accept: "text/event-stream" }),
 				...(model.compat.claudeThinkingBetaHeader && model.identity.class === "anthropic" && model.reasoning
 					? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER }
 					: {}),
