@@ -5,13 +5,20 @@
 //! directory is identical before and after a call.
 
 use std::{
-	fs, io,
+	fs::{self, File, OpenOptions},
+	io,
 	path::{Path, PathBuf},
+	time::Duration,
 };
 
-use omp_core::Str;
+use omp_core::{Str, Ulid};
 use omp_journal::{
-	Journal, JournalError, data::MsgAssistantStart, kind::MSG_ASSISTANT_START, live_chain,
+	Journal, JournalError,
+	blob::{BlobStore, Error as BlobError},
+	data::MsgAssistantStart,
+	gc::{GcError, journal_blob_roots},
+	kind::MSG_ASSISTANT_START,
+	live_chain,
 };
 
 use crate::sessions::SessionIndex;
@@ -67,6 +74,16 @@ pub enum ConsultError {
 	#[error("the session records no model; pass --model")]
 	NoSavedModel {
 		/// The journal that holds no `msg.assistant.start`.
+		path: PathBuf,
+	},
+	/// A blob the journal reaches is missing or corrupt, so no private copy
+	/// exists.
+	#[error("a session blob is missing or corrupt; the consult cannot start")]
+	BlobCopy(#[from] GcError),
+	/// The private root is held by another owner.
+	#[error("consult root `{path}` is already owned")]
+	RootOwned {
+		/// The contested root.
 		path: PathBuf,
 	},
 	/// The journal could not be read.
@@ -184,18 +201,211 @@ fn saved_model(entries: &[omp_journal::Entry]) -> Option<Str> {
 		.map(|start| start.model)
 }
 
+/// Directory-name prefix of every private consult root.
+pub const ROOT_PREFIX: &str = "omp-consult-";
+
+const OWNER_LOCK: &str = "owner.lock";
+const JOURNAL_FILE: &str = "session.oms";
+
+/// Roots younger than this are never swept; their creator may still be locking.
+pub const SWEEP_GRACE: Duration = Duration::from_secs(10);
+
+fn session_local_tree(journal: &Path) -> Option<PathBuf> {
+	let stem = journal.file_stem().filter(|stem| !stem.is_empty())?;
+	Some(journal.with_file_name(stem))
+}
+
+/// A private, self-contained copy of one session, removed when dropped.
+///
+/// The root holds the journal bytes, the session-local tree and the blobs the
+/// journal reaches. The owner keeps an exclusive lock on `owner.lock` for the
+/// guard's lifetime, so [`sweep`] can tell a live root from an abandoned one.
+#[derive(Debug)]
+pub struct ConsultRoot {
+	root:    PathBuf,
+	journal: PathBuf,
+	// Held for its advisory lock; closing it releases ownership.
+	_owner:  File,
+}
+
+impl ConsultRoot {
+	/// The root directory.
+	#[must_use]
+	pub fn path(&self) -> &Path {
+		&self.root
+	}
+
+	/// The private copy of the journal.
+	#[must_use]
+	pub fn journal(&self) -> &Path {
+		&self.journal
+	}
+}
+
+impl Drop for ConsultRoot {
+	fn drop(&mut self) {
+		if let Err(error) = fs::remove_dir_all(&self.root)
+			&& error.kind() != io::ErrorKind::NotFound
+		{
+			tracing::warn!(root = %self.root.display(), %error, "consult root cleanup failed");
+		}
+	}
+}
+
+/// Copies `source` into a fresh private root under `temp`.
+///
+/// Nothing under the source's sessions directory is created or changed. Any
+/// failure removes the half-built root before returning.
+///
+/// # Errors
+///
+/// Returns [`ConsultError::BlobCopy`] when a reachable blob is missing or
+/// corrupt, [`ConsultError::Io`] for filesystem failures and
+/// [`ConsultError::Journal`] when the journal cannot be read.
+pub fn prepare_root(temp: &Path, source: &ConsultSource) -> Result<ConsultRoot, ConsultError> {
+	let root = loop {
+		let root = temp.join(format!("{ROOT_PREFIX}{}", Ulid::generate()));
+		match fs::create_dir(&root) {
+			Ok(()) => break root,
+			Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {},
+			Err(error) => return Err(error.into()),
+		}
+	};
+	let owner = match lock_owner(&root) {
+		Ok(owner) => owner,
+		Err(error) => {
+			let _ = fs::remove_dir_all(&root);
+			return Err(error);
+		},
+	};
+	let journal = root.join(JOURNAL_FILE);
+	// The guard exists before the copy so a failure or panic removes the root.
+	let guard = ConsultRoot { root, journal, _owner: owner };
+	copy_into(&guard, source)?;
+	Ok(guard)
+}
+
+fn lock_owner(root: &Path) -> Result<File, ConsultError> {
+	let file = OpenOptions::new()
+		.create(true)
+		.read(true)
+		.write(true)
+		.truncate(false)
+		.open(root.join(OWNER_LOCK))?;
+	match file.try_lock() {
+		Ok(()) => Ok(file),
+		Err(fs::TryLockError::WouldBlock) => {
+			Err(ConsultError::RootOwned { path: root.to_path_buf() })
+		},
+		Err(fs::TryLockError::Error(error)) => Err(ConsultError::Io(error)),
+	}
+}
+
+fn copy_into(root: &ConsultRoot, source: &ConsultSource) -> Result<(), ConsultError> {
+	let mut input = File::open(&source.path)?;
+	let mut output = OpenOptions::new()
+		.write(true)
+		.create_new(true)
+		.open(root.journal())?;
+	io::copy(&mut input, &mut output)?;
+	output.sync_all()?;
+	let sessions = source.path.parent().unwrap_or_else(|| Path::new("."));
+	let roots = journal_blob_roots(std::slice::from_ref(&source.path))?;
+	if !roots.is_empty() {
+		// `BlobStore::open` creates directories, so the source store is opened only
+		// when it already exists; a journal that reaches blobs without one fails.
+		if !sessions.join("blobs").is_dir() {
+			return Err(GcError::Blob(BlobError::NotFound).into());
+		}
+		let origin = BlobStore::open(sessions).map_err(GcError::from)?;
+		let destination = BlobStore::open(root.path()).map_err(GcError::from)?;
+		origin
+			.copy_retained_to(&destination, &roots)
+			.map_err(GcError::from)?;
+	}
+	if let Some(local) = session_local_tree(&source.path)
+		&& local.is_dir()
+	{
+		// Mirrors the child's lookup: the tree sits beside the journal copy.
+		if let Some(destination) = session_local_tree(root.journal()) {
+			copy_tree(&local, &destination)?;
+		}
+	}
+	Ok(())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+	fs::create_dir_all(to)?;
+	for entry in fs::read_dir(from)? {
+		let entry = entry?;
+		let kind = entry.file_type()?;
+		let target = to.join(entry.file_name());
+		if kind.is_dir() {
+			copy_tree(&entry.path(), &target)?;
+		} else if kind.is_file() {
+			fs::copy(entry.path(), target)?;
+		}
+	}
+	Ok(())
+}
+
+/// Removes consult roots under `temp` whose owner is gone.
+///
+/// A root is dead when its `owner.lock` can be taken. A root whose lock is
+/// held, or that cannot be inspected, is left alone. A root younger than
+/// `grace` is also left alone, because its creator may not have taken the lock
+/// yet. Returns the removed roots.
+///
+/// # Errors
+///
+/// Returns [`ConsultError::Io`] when `temp` cannot be listed.
+pub fn sweep(temp: &Path, grace: Duration) -> Result<Vec<PathBuf>, ConsultError> {
+	let mut removed = Vec::new();
+	for entry in fs::read_dir(temp)? {
+		let Ok(entry) = entry else { continue };
+		let path = entry.path();
+		let named = entry
+			.file_name()
+			.to_str()
+			.is_some_and(|name| name.starts_with(ROOT_PREFIX));
+		if !named || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+			continue;
+		}
+		let Ok(lock) = File::open(path.join(OWNER_LOCK)) else {
+			continue;
+		};
+		let young = entry
+			.metadata()
+			.and_then(|meta| meta.modified())
+			.ok()
+			.and_then(|modified| modified.elapsed().ok())
+			.is_none_or(|age| age < grace);
+		if young {
+			continue;
+		}
+		if lock.try_lock().is_ok() && fs::remove_dir_all(&path).is_ok() {
+			removed.push(path);
+		}
+	}
+	Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
-	use std::{collections::BTreeMap, fs, os::unix::fs::symlink, path::Path};
+	use std::{collections::BTreeMap, fs, os::unix::fs::symlink, path::Path, time::Duration};
 
 	use omp_core::Str;
 	use omp_journal::{
 		EntryDraft, EntryId, Journal, Kind,
+		blob::BlobStore,
 		kind::{JOURNAL, MSG_ASSISTANT_START, MSG_USER},
 	};
 	use tempfile::tempdir;
 
-	use super::{ConsultError, resolve_source};
+	use super::{
+		ConsultError, ConsultSource, OWNER_LOCK, ROOT_PREFIX, SWEEP_GRACE, prepare_root,
+		resolve_source, sweep,
+	};
 
 	fn kind(name: &'static str) -> Kind {
 		Kind { name: Str::new_static(name), rev: 1 }
@@ -380,5 +590,140 @@ mod tests {
 		write_session(dir.path(), ID, &["saved"]);
 		let source = resolve_source(dir.path(), ID, Some("chosen")).expect("resolve");
 		assert_eq!(source.model.as_str(), "chosen");
+	}
+
+	/// Writes a journal whose user message names `digest` as an attached blob.
+	fn write_blob_session(dir: &Path, stem: &str, digest: &str, size: u64) {
+		let mut journal = Journal::create(dir.join(format!("{stem}.oms"))).expect("create");
+		let genesis = journal
+			.append(draft(JOURNAL, None, None, r#"{"version":1,"cwd":"/tmp","created":"now"}"#))
+			.expect("genesis")
+			.id;
+		let text = format!(r#"{{"attachment":{{"hash":"{digest}","size":{size}}}}}"#);
+		let last = journal
+			.append(draft(MSG_USER, Some(genesis), Some(genesis), &text))
+			.expect("user")
+			.id;
+		journal
+			.append(draft(MSG_ASSISTANT_START, Some(genesis), Some(last), &start("saved")))
+			.expect("start");
+	}
+
+	fn source_of(dir: &Path) -> ConsultSource {
+		resolve_source(dir, ID, None).expect("resolve")
+	}
+
+	#[test]
+	fn a_blob_bearing_journal_resolves_its_blob_from_the_copy() {
+		let sessions = tempdir().expect("sessions");
+		let store = BlobStore::open(sessions.path()).expect("store");
+		let blob = store.put(b"attached bytes").expect("put");
+		write_blob_session(sessions.path(), ID, &blob.to_hex(), blob.size);
+		let temp = tempdir().expect("temp");
+		let root = prepare_root(temp.path(), &source_of(sessions.path())).expect("prepare");
+		assert!(root.journal().is_file());
+		let copy = BlobStore::open(root.path()).expect("copy store");
+		assert_eq!(copy.get(&blob).expect("blob in copy").as_ref(), b"attached bytes");
+	}
+
+	#[test]
+	fn a_missing_blob_fails_closed_and_leaves_no_root() {
+		let sessions = tempdir().expect("sessions");
+		let store = BlobStore::open(sessions.path()).expect("store");
+		let blob = store.put(b"soon gone").expect("put");
+		write_blob_session(sessions.path(), ID, &blob.to_hex(), blob.size);
+		fs::remove_file(store.path(&blob)).expect("remove blob");
+		let temp = tempdir().expect("temp");
+		let error = prepare_root(temp.path(), &source_of(sessions.path())).expect_err("missing");
+		assert!(matches!(error, ConsultError::BlobCopy(_)), "{error:?}");
+		assert_eq!(fs::read_dir(temp.path()).expect("list").count(), 0);
+	}
+
+	#[test]
+	fn a_journal_that_reaches_blobs_without_a_store_fails_closed() {
+		let sessions = tempdir().expect("sessions");
+		let digest = "ab".repeat(32);
+		write_blob_session(sessions.path(), ID, &digest, 4);
+		let temp = tempdir().expect("temp");
+		let error = prepare_root(temp.path(), &source_of(sessions.path())).expect_err("no store");
+		assert!(matches!(error, ConsultError::BlobCopy(_)), "{error:?}");
+		assert_eq!(fs::read_dir(temp.path()).expect("list").count(), 0);
+		assert!(!sessions.path().join("blobs").exists(), "the source store was not created");
+	}
+
+	#[test]
+	fn the_root_is_removed_on_drop_and_the_sessions_dir_is_untouched() {
+		let sessions = tempdir().expect("sessions");
+		write_session(sessions.path(), ID, &["saved"]);
+		let before = listing(sessions.path());
+		let temp = tempdir().expect("temp");
+		let root = prepare_root(temp.path(), &source_of(sessions.path())).expect("prepare");
+		let path = root.path().to_path_buf();
+		assert!(
+			path
+				.file_name()
+				.expect("name")
+				.to_string_lossy()
+				.starts_with(ROOT_PREFIX)
+		);
+		assert!(path.join(OWNER_LOCK).is_file());
+		drop(root);
+		assert!(!path.exists());
+		assert_eq!(listing(sessions.path()), before);
+	}
+
+	#[test]
+	fn the_root_is_removed_on_panic() {
+		let sessions = tempdir().expect("sessions");
+		write_session(sessions.path(), ID, &["saved"]);
+		let temp = tempdir().expect("temp");
+		let source = source_of(sessions.path());
+		let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let _root = prepare_root(temp.path(), &source).expect("prepare");
+			panic!("consult panicked");
+		}));
+		assert!(outcome.is_err());
+		assert_eq!(fs::read_dir(temp.path()).expect("list").count(), 0);
+	}
+
+	#[test]
+	fn the_session_local_tree_is_copied() {
+		let sessions = tempdir().expect("sessions");
+		write_session(sessions.path(), ID, &["saved"]);
+		fs::create_dir_all(sessions.path().join(ID).join("nested")).expect("tree");
+		fs::write(sessions.path().join(ID).join("nested").join("note.txt"), b"local").expect("file");
+		let temp = tempdir().expect("temp");
+		let root = prepare_root(temp.path(), &source_of(sessions.path())).expect("prepare");
+		let copied = root.path().join("session").join("nested").join("note.txt");
+		assert_eq!(fs::read(copied).expect("copied"), b"local");
+	}
+
+	#[test]
+	fn sweep_keeps_a_held_root_and_removes_a_dead_one() {
+		let sessions = tempdir().expect("sessions");
+		write_session(sessions.path(), ID, &["saved"]);
+		let temp = tempdir().expect("temp");
+		let live = prepare_root(temp.path(), &source_of(sessions.path())).expect("live");
+		let dead = temp.path().join(format!("{ROOT_PREFIX}DEAD"));
+		fs::create_dir(&dead).expect("dead dir");
+		fs::write(dead.join(OWNER_LOCK), b"").expect("dead lock");
+		let unrelated = temp.path().join("keep-me");
+		fs::create_dir(&unrelated).expect("unrelated");
+		let removed = sweep(temp.path(), Duration::ZERO).expect("sweep");
+		assert_eq!(removed, vec![dead.clone()]);
+		assert!(live.path().is_dir(), "a held root is not swept");
+		assert!(!dead.exists());
+		assert!(unrelated.is_dir(), "only consult roots are swept");
+	}
+
+	#[test]
+	fn sweep_skips_a_root_younger_than_the_grace() {
+		let temp = tempdir().expect("temp");
+		let young = temp.path().join(format!("{ROOT_PREFIX}YOUNG"));
+		fs::create_dir(&young).expect("young dir");
+		fs::write(young.join(OWNER_LOCK), b"").expect("young lock");
+		let removed = sweep(temp.path(), SWEEP_GRACE).expect("sweep");
+		assert!(removed.is_empty());
+		assert!(young.is_dir(), "a fresh root may still be mid-creation");
 	}
 }
