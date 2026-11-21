@@ -1054,7 +1054,7 @@ describe("todo backend", () => {
 			expect(session.getTodoPhases()).toEqual([]);
 		});
 
-		it("whatever lands as the backend accepts, the change is committed in its own session or not at all, and the backend ends with omp's list", async () => {
+		it("whatever lands as the backend accepts, the change is committed in its own session or not at all, and the backend is sent nothing older than omp's list", async () => {
 			// `ends` is what omp may hold afterwards, `outcomes` how the call may end. `unsent` marks an
 			// edit the backend is not sent: once the call has committed, it keeps the call's list.
 			const cases: Array<{
