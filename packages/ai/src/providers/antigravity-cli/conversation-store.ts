@@ -20,7 +20,7 @@ export function conversationStorePath(geminiDir: string, id: string): string {
 export function readConversationCheckpoint(geminiDir: string, id: string, digest: string): AntigravityCliCheckpoint {
 	if (!DIGEST.test(digest)) throw new Error("Invalid Antigravity CLI transcript digest");
 	const store = conversationStorePath(geminiDir, id);
-	const db = new Database(store, { readonly: true, create: false });
+	const db = openStore(store);
 	let checkpoint: AntigravityCliCheckpoint;
 	let fingerprint: string;
 	try {
@@ -57,7 +57,7 @@ export function forkConversation(
 	const forkId = crypto.randomUUID();
 	const target = conversationStorePath(geminiDir, forkId);
 	try {
-		const source = new Database(store, { readonly: true, create: false });
+		const source = openStore(store);
 		try {
 			assertIdentity(source, sourceId);
 			source.run("VACUUM INTO ?", [target]);
@@ -107,6 +107,15 @@ export async function deleteConversation(geminiDir: string, id: string): Promise
 		fs.rm(path.join(appDir, "brain", id), { recursive: true, force: true }),
 		fs.rm(path.join(appDir, "annotations", `${id}.pbtxt`), { force: true }),
 	]);
+}
+
+/**
+ * Open an existing agy store for reading. Not `readonly`: after agy exits cleanly SQLite has unlinked
+ * `-wal`/`-shm`, and Apple's system SQLite cannot recreate the WAL index on a read-only handle
+ * (`SQLITE_CANTOPEN`). Callers only SELECT or `VACUUM INTO`, neither of which writes the source.
+ */
+function openStore(store: string): Database {
+	return new Database(store, { create: false });
 }
 
 function assertCheckpoint(value: AntigravityCliCheckpoint): void {
