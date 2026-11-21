@@ -359,9 +359,9 @@ export interface ToolCallEventResult {
 	 * concurrency scheduling, `tool_execution_start`, and the approval gate: the revision is
 	 * revalidated against the tool schema and becomes what the loop schedules, displays, persists,
 	 * and executes — the user always approves what actually runs. For dispatches the loop never
-	 * sees (nested `write xd://` device calls, Cursor direct execution) the tool wrapper applies
-	 * the revision before its own approval gate; a revised nested xd:// input forfeits the outer
-	 * write gate's approval and faces the full prompt again.
+	 * sees (a tool command run inside a `bash` call, Cursor direct execution) the tool wrapper applies
+	 * the revision before its own approval gate; a revised nested tool command input forfeits the outer
+	 * bash gate's approval and faces the full prompt again.
 	 */
 	input?: Record<string, unknown>;
 	/**

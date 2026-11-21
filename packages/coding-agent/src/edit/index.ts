@@ -58,6 +58,8 @@ import { resolveEditMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
+import { MAGIC_EDIT_GRAMMAR, magicEditPaths, runMagicEdit } from "./magic";
+import magicEditDescription from "../prompts/tools/magic-edit.md" with { type: "text" };
 import { getLspBatchRequest } from "../lsp/batch";
 import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "@oh-my-pi/pi-tui/tools/edit";
 import {
@@ -65,6 +67,8 @@ import {
 	applyPatchSchema,
 	type HashlineParams,
 	hashlineEditParamsSchema,
+	type MagicEditParams,
+	magicEditSchema,
 	type PatchParams,
 	patchEditSchema,
 	type ReplaceBatchParams,
@@ -105,9 +109,17 @@ type TInput =
 	| typeof patchEditSchema
 	| typeof hashlineEditParamsSchema
 	| typeof applyPatchSchema
-	| typeof sloppyEditSchema;
+	| typeof sloppyEditSchema
+	| typeof magicEditSchema;
 
-type EditParams = ReplaceParams | ReplaceBatchParams | PatchParams | HashlineParams | ApplyPatchParams | SloppyParams;
+type EditParams =
+	| ReplaceParams
+	| ReplaceBatchParams
+	| PatchParams
+	| HashlineParams
+	| ApplyPatchParams
+	| SloppyParams
+	| MagicEditParams;
 
 const PATCH_EXAMPLES = [
 	{
@@ -391,15 +403,26 @@ export class EditTool implements AgentTool<TInput> {
 	get mode(): EditMode {
 		if (this.#editMode) return this.#editMode;
 		const mode = resolveEditMode(this.session);
-		// `edit.mode: none` unregisters this tool on the next built-in reconcile; until then keep a valid schema.
-		return mode === "none" ? "replace" : mode;
+		// `magic` applies its model-written batch through `replace` (see `#magic`). `edit.mode: none`
+		// unregisters this tool on the next built-in reconcile; until then keep a valid schema.
+		return mode === "none" || mode === "magic" ? "replace" : mode;
+	}
+
+	/**
+	 * `edit.mode: magic`: calls carry described changes, which {@link runMagicEdit} turns
+	 * into one `replace` batch per file before anything reaches the native engine.
+	 */
+	get #magic(): boolean {
+		return this.#editMode === undefined && resolveEditMode(this.session) === "magic";
 	}
 
 	get description(): string {
+		if (this.#magic) return prompt.render(magicEditDescription);
 		return resolveEditToolDescription(this.mode, this.session.getActiveModel?.());
 	}
 
 	get parameters(): TInput {
+		if (this.#magic) return magicEditSchema;
 		switch (this.mode) {
 			case "replace":
 				return replaceEditSchema;
@@ -421,6 +444,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get customFormat(): { syntax: "lark"; definition: string } | undefined {
+		if (this.#magic) return MAGIC_EDIT_GRAMMAR;
 		const definition = editGrammar(this.mode);
 		return definition === null ? undefined : { syntax: "lark", definition };
 	}
@@ -532,6 +556,25 @@ export class EditTool implements AgentTool<TInput> {
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
+		if (this.#magic && "input" in params) {
+			return runMagicEdit({
+				session: this.session,
+				input: params.input,
+				signal,
+				apply: (path, edits, rawSnapshot) =>
+					this.#execute(toolCallId, { path, edits }, signal, context, rawSnapshot),
+			});
+		}
+		return this.#execute(toolCallId, params, signal, context);
+	}
+
+	async #execute(
+		toolCallId: string,
+		params: EditParams,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+		rawSnapshot?: string,
+	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		let open = this.#sessions.get(toolCallId);
 		const argsJson = JSON.stringify(params);
 		if (open && this.#streamedArgs.get(toolCallId) !== argsJson) {
@@ -558,7 +601,14 @@ export class EditTool implements AgentTool<TInput> {
 		try {
 			outcome = await editSession.apply(
 				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
-				(_error, request) => this.#write(request, signal),
+				async (_error, request) => {
+					if (rawSnapshot !== undefined && (await Bun.file(request.path).text()) !== rawSnapshot) {
+						throw new ToolError("The file changed after the numbered snapshot was read; re-read and retry.", {
+							path: request.path,
+						});
+					}
+					return this.#write(request, signal);
+				},
 			);
 			if (outcome.isError && batch?.flush) {
 				await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
@@ -632,6 +682,11 @@ export class EditTool implements AgentTool<TInput> {
 	 * so repeat lookups for one object pay once.
 	 */
 	#inspect(args: unknown): EditInspection {
+		if (this.#magic) {
+			// The payload names its files itself; the native inspectors do not know its syntax.
+			const input = (args as { input?: unknown } | null | undefined)?.input;
+			return { paths: typeof input === "string" ? magicEditPaths(input) : [], entries: [], fileOps: [] };
+		}
 		const tagged = typeof args === "object" && args !== null ? (args as InspectedArgs) : undefined;
 		const cached = tagged?.[kInspection];
 		if (cached?.mode === this.mode) return cached.inspection;

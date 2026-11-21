@@ -24,6 +24,7 @@ import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageCredential,
 	UsageFetchContext,
@@ -137,11 +138,16 @@ function devinQuotaApplies(quota: DevinQuotaWindow, plan: PlanInfo | undefined):
 	return plan?.billingStrategy === BillingStrategy.QUOTA;
 }
 
-function devinQuotaLimit(quota: DevinQuotaWindow, scope: UsageScope): UsageLimit {
+/**
+ * `overageFunded`: the account's on-demand balance is positive, so Devin keeps
+ * serving past a spent quota window.
+ */
+function devinQuotaLimit(quota: DevinQuotaWindow, scope: UsageScope, overageFunded: boolean): UsageLimit {
 	const remaining = Math.max(0, Math.min(100, quota.remainingPercent));
 	const used = 100 - remaining;
 	const usedFraction = used / 100;
 	const resetsAt = parsePositiveTimestamp(Number(quota.resetAtUnix));
+	const status = usageStatus(usedFraction);
 	return {
 		id: `devin:quota:${quota.id}`,
 		label: quota.label,
@@ -160,7 +166,9 @@ function devinQuotaLimit(quota: DevinQuotaWindow, scope: UsageScope): UsageLimit
 			remainingFraction: remaining / 100,
 			unit: "percent",
 		},
-		status: usageStatus(usedFraction),
+		// Preserve 100% as a warning while the on-demand balance funds requests;
+		// a live quota error from Devin remains authoritative for blocking.
+		status: status === "exhausted" && overageFunded ? "warning" : status,
 	};
 }
 
@@ -234,8 +242,9 @@ function buildDevinReport(response: GetUserStatusResponse): UsageReport | null {
 				hidden: plan?.hideWeeklyQuota === true,
 			},
 		];
+		const overageFunded = planStatus.overageBalanceMicros > 0n;
 		for (const quota of quotas) {
-			if (devinQuotaApplies(quota, plan)) limits.push(devinQuotaLimit(quota, scope));
+			if (devinQuotaApplies(quota, plan)) limits.push(devinQuotaLimit(quota, scope, overageFunded));
 		}
 	}
 
@@ -305,7 +314,34 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 
 export const devinUsageProvider: UsageProvider = {
 	id: PROVIDER,
+	cacheVersion: 1,
 	fetchUsage: fetchDevinUsage,
 	supports: params => params.provider === PROVIDER && devinCredential(params.credential) !== undefined,
 	validatesCredentials: true,
+};
+
+const DAILY_QUOTA_LIMIT_ID = "devin:quota:daily";
+const WEEKLY_QUOTA_LIMIT_ID = "devin:quota:weekly";
+
+/** The renewable daily and weekly quota windows; credit buckets are plan-period balances. */
+function devinQuotaLimits(report: UsageReport): UsageLimit[] {
+	return report.limits.filter(limit => limit.id === DAILY_QUOTA_LIMIT_ID || limit.id === WEEKLY_QUOTA_LIMIT_ID);
+}
+
+/** Ranks Devin logins by their daily and weekly quota windows; only those can block a login. */
+export const devinRankingStrategy: CredentialRankingStrategy = {
+	findWindowLimits(report) {
+		return {
+			primary: report.limits.find(limit => limit.id === DAILY_QUOTA_LIMIT_ID),
+			secondary: report.limits.find(limit => limit.id === WEEKLY_QUOTA_LIMIT_ID),
+		};
+	},
+	scopeLimits: devinQuotaLimits,
+	// The quota windows are the renewable allowance; a plan without them keeps
+	// its credit buckets in the reserve check.
+	scopeLimitsForReserve(report) {
+		const quotaLimits = devinQuotaLimits(report);
+		return quotaLimits.length > 0 ? quotaLimits : report.limits;
+	},
+	windowDefaults: { primaryMs: DAY_MS, secondaryMs: WEEK_MS },
 };

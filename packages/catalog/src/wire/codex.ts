@@ -42,9 +42,8 @@ export const OPENAI_HEADERS = {
 	ACCOUNT_ID: "chatgpt-account-id",
 	ORIGINATOR: "originator",
 	VERSION: "version",
-	SESSION_ID: "session_id",
-	CONVERSATION_ID: "conversation_id",
-	SCOPED_SESSION_ID: "session-id",
+	/** Session correlation header (codex-rs `SESSION_ID_HEADER`); value is the session-id string. */
+	SESSION_ID: "session-id",
 	THREAD_ID: "thread-id",
 	INSTALLATION_ID: "x-codex-installation-id",
 	WINDOW_ID: "x-codex-window-id",

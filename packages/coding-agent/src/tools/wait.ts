@@ -31,7 +31,9 @@ const waitSchema = type({});
  * nothing new. The first idle wait hands the agent its turn back early while
  * work warms up; a back-to-back idle wait means it has nothing else to do, so
  * it takes the top window, and keeps taking it while the waits stay
- * back-to-back. Every idle return re-reads the whole prompt, and each one is a
+ * back-to-back. The top-level interactive session skips the floor on job
+ * waits: an early return there can only end its turn, one more request
+ * than blocking until the result. Every idle return re-reads the whole prompt, and each one is a
  * request. A job or service wait keeps this top window, inside the shortest
  * (5-minute) prompt-cache lifetime, since each return also reports the job's
  * progress. A reply or parent wait reports nothing until the answer, so its
@@ -47,8 +49,6 @@ const AGENT_WAIT_CACHE_MARGIN_MS = 60_000;
 const AGENT_WAIT_TOP_MAX_MS = 30 * 60_000;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
-/** First rung whose elapsed window appends the progress reminder: one idle wait is patience, a second back-to-back is a loop. */
-const WAIT_NOTICE_RUNG = 1;
 /** After one watched job settles, keep collecting briefly so near-simultaneous completions share one wait result. */
 const WAIT_SETTLE_WINDOW_MS = 1500;
 const PROGRESS_INTERVAL_MS = 500;
@@ -70,8 +70,6 @@ function agentWaitTopMs(entry: PromptCacheEntry | undefined): number {
 
 /** Back-to-back waits that each elapsed with nothing new. */
 interface IdleStreak {
-	/** Rung of the latest elapsed wait. */
-	rung: number;
 	/** When the latest elapsed wait returned. */
 	endedAt: number;
 	/** Window time spent across the streak. */
@@ -296,7 +294,8 @@ export function hasWaitTool(session: ToolSession): boolean {
  * blocks on agents (subagents' jobs, the agents asked, the parent), a wait
  * holds on them in `AgentAwaits`, which their own waits and turn ends read.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}:
- * the first for a first idle wait, the top for each back-to-back one. A
+ * the first for a first idle wait (the top for the interactive session's job
+ * waits), the top for each back-to-back one. A
  * direct message arriving mid-wait ends any wait. Messages never ride in the wait's result: each one
  * reaches the caller as a user turn right after it (see `handOffMail`).
  * Broadcast legs and progress notes ask the caller nothing, so they never end
@@ -459,12 +458,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}): Promise<AgentToolResult<CoordinationDetails>> {
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, startedAtMs, settledAtEntry } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
-		const rung = streak ? WAIT_TOP_RUNG : 0;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
 		const serviceLeg = serviceRunning ? waitForOwnedServiceCompletion(this.session, serviceAbort.signal) : undefined;
 		const replyWait = messaging !== undefined && jobs.length === 0 && !serviceRunning;
+		const rung = streak || (this.#endTurn && jobs.length > 0) ? WAIT_TOP_RUNG : 0;
 		const topMs = replyWait ? agentWaitTopMs(this.session.getPromptCacheEntry?.()) : WAIT_LADDER_MS[WAIT_TOP_RUNG];
 		const span = { ms: rung === WAIT_TOP_RUNG ? topMs : WAIT_LADDER_MS[rung], topMs };
 		const initialReplies = replyWait ? pendingReplies(messaging) : undefined;
@@ -593,7 +592,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					const report = result.content.find(block => block.type === "text")?.text ?? "";
 					const blocking = this.#blockedOnIdleCaller(messaging, jobs, serviceRunning);
 					const text = `${report}\n\n${elapsedReport("No job finished", span, this.#endTurn, blocking)}`;
-					return this.#elapsed({ ...result, content: [{ type: "text", text }] }, rung, span.ms, streak);
+					return this.#elapsed({ ...result, content: [{ type: "text", text }] }, span.ms, streak);
 				}
 				// A finished service is news even while every watched job still runs.
 				if (wake !== "service") return result;
@@ -616,7 +615,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					details: { op: "wait", jobs: [] },
 					useless: true,
 				};
-				return this.#elapsed(result, rung, span.ms, streak);
+				return this.#elapsed(result, span.ms, streak);
 			}
 			return {
 				content: [
@@ -656,18 +655,18 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 
 	/**
 	 * End a wait whose window elapsed with nothing new: extend the idle streak
-	 * and, from {@link WAIT_NOTICE_RUNG} on, append the reminder to get on with
+	 * and, once the streak holds a second wait, append the reminder to get on with
 	 * work that does not need the result instead of waiting again.
 	 */
 	#elapsed(
 		result: AgentToolResult<CoordinationDetails>,
-		rung: number,
 		windowMs: number,
 		streak: IdleStreak | undefined,
 	): AgentToolResult<CoordinationDetails> {
 		const waitedMs = (streak?.waitedMs ?? 0) + windowMs;
-		this.#idle = { rung, endedAt: Date.now(), waitedMs };
-		if (rung < WAIT_NOTICE_RUNG) return result;
+		this.#idle = { endedAt: Date.now(), waitedMs };
+		// One idle wait is patience; a second back-to-back is a loop.
+		if (!streak) return result;
 		const notice = prompt.render(waitIdleTemplate, { waited: formatDuration(waitedMs) });
 		return { ...result, content: [...result.content, { type: "text", text: notice }] };
 	}
