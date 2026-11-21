@@ -167,6 +167,43 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getPlanModeState()).toMatchObject({ enabled: true, planFilePath: "local://PLAN.md" });
 		expect(session?.getActiveToolNames()).toContain("read");
 	});
+	it("restores the pre-plan routed model and thinking level when a plan session resumes", async () => {
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }));
+		const currentSession = session;
+		const routedBase = currentSession?.modelRegistry.find("openrouter", "anthropic/claude-sonnet-4.5");
+		const planModel = currentSession?.modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!currentSession || !routedBase || !planModel) throw new Error("Expected routed sonnet and plan opus models");
+		const routedModel = {
+			...routedBase,
+			compat: { ...routedBase.compat, openRouterRouting: { only: ["anthropic"] } },
+		} as Model;
+		currentSession.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
+		await currentSession.setModelTemporary(routedModel, Effort.High);
+
+		await created.handlePlanModeCommand();
+		expect(currentSession.model?.id).toBe(planModel.id);
+		expect(currentSession.sessionManager.getEntries().at(-1)).toMatchObject({
+			type: "mode_change",
+			mode: "plan",
+			data: {
+				prePlanModelIdentity: "openrouter/anthropic/claude-sonnet-4.5@anthropic",
+				prePlanThinkingLevel: "high",
+			},
+		});
+
+		const resumedMode = new InteractiveMode(currentSession, "test");
+		mode = resumedMode;
+		await resumedMode.init({ suppressWelcomeIntro: true });
+		expect(resumedMode.planModeEnabled).toBe(true);
+		await resumedMode.handlePlanModeCommand();
+
+		expect(currentSession.model?.id).toBe(routedModel.id);
+		expect(currentSession.model).toMatchObject({
+			compat: { openRouterRouting: { only: ["anthropic"] } },
+		});
+		expect(currentSession.configuredThinkingLevel()).toBe(Effort.High);
+	});
 
 	it("activates write when entering plan mode even if it was hidden by discoveryMode (issue #3165)", async () => {
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
