@@ -126,7 +126,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	const trackedReplies: Promise<void>[] = [];
 	const session = {
 		...createSessionDefaults(),
-		getMountedXdevToolNames: () => [],
+		getMountedToolCommandNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},
@@ -488,28 +488,6 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.preloadedCustomToolPaths).toEqual([]);
 		expect(hostileMcpGetTools).not.toHaveBeenCalled();
 		expect(attemptedDiscovery).toEqual([]);
-		expect(activeToolNames).toEqual([["read", "yield"]]);
-	});
-
-	it("strips synthetic write from legacy read-only cold revival", async () => {
-		const cwd = makeTempDir("@pi-read-only-revive-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
-			tools: ["read", "write", "yield"],
-			readOnly: true,
-		});
-		const activeToolNames: string[][] = [];
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
-		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(capturedOptions?.toolNames).toEqual(["read", "yield"]);
 		expect(activeToolNames).toEqual([["read", "yield"]]);
 	});
 

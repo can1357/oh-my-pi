@@ -17,7 +17,7 @@ use std::{
 };
 
 use anyhow::{Error, Result};
-use bstr::{BString, ByteSlice};
+use bstr::{BStr, BString, ByteSlice};
 use bytes::Bytes;
 use flume::Sender;
 use omp_builtins::extras::SpeechHost;
@@ -29,8 +29,12 @@ use tokio_util::sync::CancellationToken;
 
 pub use crate::git::GIT_REPO_LOCATION_ENV_VARS;
 use crate::{
-	bash::trace::{RunTrace, SegmentSource},
+	bash::{
+		PipeMirror, PipeTap, TapSite,
+		trace::{RunTrace, SegmentSource, viz::model::NodeKey},
+	},
 	cancel::{AbortReason, AbortToken, CancelToken},
+	commands::{RunLease, SessionCommands},
 	git::is_git_repo_location_var,
 	minimizer,
 	mounts::Mounts,
@@ -169,6 +173,9 @@ struct ShellRunConfig {
 	trace:      Option<Arc<RunTrace>>,
 	/// The speech synthesizer `say` speaks through.
 	speech:     Option<Arc<dyn SpeechHost>>,
+	/// The run's session commands; they end when the run's config is
+	/// dropped.
+	commands:   Option<RunLease>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -179,7 +186,9 @@ pub struct ShellRunOptions {
 	pub timeout_ms: Option<u32>,
 	/// Filesystem for this run only; the session filesystem when `None`.
 	pub filesystem: Option<Fs>,
-	/// Receives a copy of every byte crossing the run's pipeline pipes.
+	/// Receives a copy of every byte crossing the run's pipeline pipes; with
+	/// a `trace` too, each stream names its writer's node in it
+	/// ([`PipeStreamInfo::node`](crate::PipeStreamInfo::node)).
 	pub pipe_taps:  Option<Arc<PipeTaps>>,
 	/// Folds the run's engine events into a live model of `command`
 	/// (built over the same command text).
@@ -187,6 +196,11 @@ pub struct ShellRunOptions {
 	/// The application's speech synthesizer, which `say` speaks through
 	/// when it has one configured; `None` leaves `say` to the system's.
 	pub speech:     Option<Arc<dyn SpeechHost>>,
+	/// Commands the host provides for this run ([`crate::commands`]):
+	/// resolved after the shell's builtins, pi's tools and extras, and before
+	/// shell functions, aliases and `PATH`; ended with the run, so a
+	/// background job that outlives it cannot reach the handler.
+	pub commands:   Option<SessionCommands>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -373,6 +387,7 @@ impl Shell {
 			pipe_taps:  options.pipe_taps,
 			trace:      options.trace,
 			speech:     options.speech,
+			commands:   options.commands.as_ref().map(RunLease::new),
 		};
 		let result = run_shell_session(
 			self.session.clone(),
@@ -455,6 +470,7 @@ pub async fn execute_shell(
 		pipe_taps: None,
 		trace: None,
 		speech: None,
+		commands: None,
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -497,6 +513,7 @@ pub async fn execute_shell_streams(
 		pipe_taps:  None,
 		trace:      None,
 		speech:     None,
+		commands:   None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -1215,13 +1232,18 @@ impl CommandScope<'_> {
 			command,
 			env: self.env.clone(),
 			cwd,
-			pipe_tap: self
-				.options
-				.pipe_taps
-				.as_ref()
-				.map(|taps| Arc::clone(taps) as Arc<dyn crate::bash::PipeTap>),
+			pipe_tap: self.options.pipe_taps.as_ref().map(|taps| {
+				let taps = Arc::clone(taps);
+				match &self.options.trace {
+					Some(trace) => {
+						Arc::new(TracedTaps { taps, trace: Arc::clone(trace) }) as Arc<dyn PipeTap>
+					},
+					None => taps as Arc<dyn PipeTap>,
+				}
+			}),
 			reported_error,
 			speech: self.options.speech.clone(),
+			commands: self.options.commands.as_ref().map(RunLease::commands),
 			text_capture: false,
 			events: self
 				.options
@@ -1229,6 +1251,33 @@ impl CommandScope<'_> {
 				.as_ref()
 				.map(|trace| Arc::clone(trace) as Arc<dyn crate::bash::EventSink>),
 		}
+	}
+}
+
+/// The pipe tap of a run with both [`PipeTaps`] and a [`RunTrace`]: each
+/// stream's writer ([`TapSite`]) is resolved to its trace node
+/// ([`RunTrace::node_key`]) as the stream opens, while the trace has just
+/// folded the writer unit's announcement for the current segment.
+struct TracedTaps {
+	taps:  Arc<PipeTaps>,
+	trace: Arc<RunTrace>,
+}
+
+impl TracedTaps {
+	fn node(&self, site: TapSite<'_>) -> Option<NodeKey> {
+		self.trace.node_key(site.vpid, site.node?)
+	}
+}
+
+impl PipeTap for TracedTaps {
+	fn open(&self, producer: TapSite<'_>, consumer: &BStr) -> Option<Arc<dyn PipeMirror>> {
+		self
+			.taps
+			.open_pipe(producer.text, consumer, self.node(producer))
+	}
+
+	fn file(&self, command: TapSite<'_>, path: &BStr) {
+		self.taps.add_file(command.text, path, self.node(command));
 	}
 }
 

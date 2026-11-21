@@ -176,6 +176,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"replay-reasoning-content": wire("replayReasoningContent", ["openai"]),
 	"synthetic-reasoning-content-fallback": wire("syntheticReasoningContentFallback", ["openai"]),
 	"requires-assistant-after-tool-result": wire("requiresAssistantAfterToolResult", ["openai"]),
+	"fold-user-after-tool-result": wire("foldUserAfterToolResult", OAI),
 	"requires-assistant-content-for-tool-calls": wire("requiresAssistantContentForToolCalls", OAI),
 	"requires-mistral-tool-ids": wire("requiresMistralToolIds", ["openai"]),
 	"requires-reasoning-content-for-all-assistant-turns": wire("requiresReasoningContentForAllAssistantTurns", OAI),
@@ -355,6 +356,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["freeform", "function"],
 	},
+	/** Paraphrase model-visible prompt prose per install (`perturbContext` in pi-ai). */
+	"prompt-perturbation": { key: "promptPerturbation", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-native-tools": { key: "requiresNativeTools", set: "catalog", shape: "scalar", values: [true, false] },
 	"tool-schemas-in-context": { key: "toolSchemasInContext", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-tool-free-history-for-tool-opt-out": {
@@ -736,3 +739,97 @@ export const API_COMPAT_RECORDS: Readonly<Record<string, readonly CompatRecordNa
 	"google-vertex": ["google"],
 	"google-gemini-cli": ["google"],
 };
+
+/** Axis assignments of one rule block, split by namespace and keyed by resolved field. */
+export interface RuleAxes {
+	wire: Record<string, unknown>;
+	thinking: Record<string, unknown>;
+	catalog: Record<string, unknown>;
+}
+
+/**
+ * Object-payload child name → resolved JSON key. Authored names are
+ * kebab-case; an axis-directive spelling maps to its resolved axis key
+ * (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else
+ * converts mechanically (`input-threshold` → `inputThreshold`).
+ */
+export function axisPayloadKey(name: string): string {
+	return AXES[name]?.key ?? name.replace(/-([a-z0-9])/g, (_, first: string) => first.toUpperCase());
+}
+
+/** Whether `value` is in the axis's closed vocabulary; axes without one accept any value. */
+export function axisAcceptsValue(axis: AxisDef, value: unknown): boolean {
+	return (
+		axis.values === undefined ||
+		((typeof value === "string" || typeof value === "boolean") && axis.values.includes(value))
+	);
+}
+
+function isPayloadScalar(value: unknown): value is string | number | boolean {
+	return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+function isPayloadObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** JSON object payload → resolved JSON, with the KDL compiler's key rules (`extra-body` subtrees stay verbatim). */
+function payloadValue(directive: string, object: Record<string, unknown>, verbatim: boolean): Record<string, unknown> {
+	const resolved: Record<string, unknown> = {};
+	for (const name in object) {
+		if (!verbatim && /[A-Z]/.test(name)) {
+			throw new Error(`\`${directive}\`: object payload key \`${name}\` must be kebab-case`);
+		}
+		const value = object[name];
+		const key = verbatim ? name : axisPayloadKey(name);
+		if (isPayloadScalar(value)) resolved[key] = value;
+		else if (isPayloadObject(value))
+			resolved[key] = payloadValue(directive, value, verbatim || name === "extra-body");
+		else throw new Error(`\`${directive}\`: payload key \`${name}\` must be a scalar or an object`);
+	}
+	return resolved;
+}
+
+function directiveValue(name: string, axis: AxisDef, value: unknown): unknown {
+	const scalar = (item: unknown): string | number | boolean => {
+		if (!isPayloadScalar(item)) throw new Error(`\`${name}\` takes a string, number, or boolean`);
+		if (!axisAcceptsValue(axis, item)) throw new Error(`axis \`${name}\` rejects value \`${item}\``);
+		return item;
+	};
+	switch (axis.shape) {
+		case "scalar": {
+			const item = scalar(value);
+			if (axis.key === "editRevision" && (typeof item !== "string" || !item.trim())) {
+				throw new Error(`\`${name}\` takes a non-empty string`);
+			}
+			return item;
+		}
+		case "array":
+			if (!Array.isArray(value)) throw new Error(`\`${name}\` takes an array`);
+			if (value.length === 0 && axis.emptyArray !== true) throw new Error(`\`${name}\` takes at least one value`);
+			return value.map(scalar);
+		case "object":
+			if (!isPayloadObject(value)) throw new Error(`\`${name}\` takes an object`);
+			return payloadValue(name, value, axis.verbatimKeys === true);
+	}
+}
+
+/**
+ * Compiles directive → value assignments, the JSON form of a KDL rule block's
+ * axis lines (`{ "prompt-perturbation": true }`), into resolved axes with the
+ * same validation as the KDL compiler. Object payloads use kebab-case keys.
+ *
+ * @throws Error naming an unknown directive, a value of the wrong shape, a
+ * value outside the axis vocabulary, or two directives assigning one axis.
+ */
+export function compileRuleDirectives(directives: Readonly<Record<string, unknown>>): RuleAxes {
+	const axes: RuleAxes = { wire: {}, thinking: {}, catalog: {} };
+	for (const name in directives) {
+		const axis = AXES[name];
+		if (!axis) throw new Error(`unknown directive \`${name}\``);
+		const map = axes[axis.set];
+		if (axis.key in map) throw new Error(`axis \`${axis.key}\` assigned twice`);
+		map[axis.key] = directiveValue(name, axis, directives[name]);
+	}
+	return axes;
+}

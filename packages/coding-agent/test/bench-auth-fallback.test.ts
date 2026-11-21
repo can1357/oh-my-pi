@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
@@ -11,6 +11,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
@@ -362,10 +363,12 @@ describe("bench OAuth account selection", () => {
 	});
 
 	it("sends a structured-credential provider's encoded key for the selected account", async () => {
+		// Antigravity is paused in its auth rules; account selection stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		const auth = createInMemoryAuthStorage();
 		try {
 			await auth.credentials.set(
-				"google-gemini-cli",
+				"google-antigravity",
 				["a", "b"].map(suffix => ({
 					type: "oauth" as const,
 					access: `access-${suffix}`,
@@ -375,11 +378,11 @@ describe("bench OAuth account selection", () => {
 					email: `${suffix}@example.com`,
 				})),
 			);
-			const model = fakeModel("google-gemini-cli", "test-model");
-			const registry = fakeRegistry({ models: [model], authedProviders: ["google-gemini-cli"] });
+			const model = fakeModel("google-antigravity", "test-model");
+			const registry = fakeRegistry({ models: [model], authedProviders: ["google-antigravity"] });
 			const keys: unknown[] = [];
 			const summary = await runBenchCommand(
-				{ models: ["google-gemini-cli/test-model"], flags: { account: 2, runs: 1, json: true } },
+				{ models: ["google-antigravity/test-model"], flags: { account: 2, runs: 1, json: true } },
 				{
 					createRuntime: async () => ({ modelRegistry: registry, oauth: auth.oauth }),
 					writeStdout: () => {},
@@ -394,6 +397,7 @@ describe("bench OAuth account selection", () => {
 			]);
 		} finally {
 			auth.close();
+			vi.restoreAllMocks();
 		}
 	});
 });

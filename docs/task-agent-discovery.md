@@ -175,7 +175,7 @@ Because bundled parsing uses `level: "fatal"`, unrecoverable YAML errors or inva
 
 The OMP extension-package surface is disabled when the `omp-plugins` capability provider is disabled. Marketplace roots are excluded from `listOmpExtensionRoots` and enter only through the separately gated Claude-plugin path.
 
-Claude-dialect plugin agents discard their frontmatter `model` so Claude aliases are not misread as OMP selectors. This applies to foreign Claude roots and packages whose manifest declares the Claude format, including OMP installs or `--plugin-dir` roots. OMP-native and Agent-Plugins-standard packages retain their model selectors.
+Claude-dialect plugin agents discard their frontmatter `model` so Claude aliases are not misread as OMP selectors, and translate their `tools` from Claude Code names (`Read`, `WebFetch`, `TodoWrite`, `AskUserQuestion`, `MultiEdit`, `Agent`, …) into OMP built-ins, leaving names with no equivalent such as `ExitPlanMode` untouched. This applies to foreign Claude roots and packages whose manifest declares the Claude format, including OMP installs or `--plugin-dir` roots. OMP-native and Agent-Plugins-standard packages retain their model selectors and OMP tool names.
 
 ## Merge and collision rules
 
