@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -400,7 +401,7 @@ interface OpOptions {
 	/** What the call saw when its deadline fired (e.g. the current URL), appended to the timeout error. */
 	timeoutNote?: () => string;
 }
-/** Longest a look waits for the effects of the actions before it to land. */
+/** Longest a look or read waits for the effects of the actions before it to land. */
 const SETTLE_TIMEOUT_MS = 3_000;
 /** DOM silence that counts as settled once the action's requests have finished. */
 const SETTLE_QUIET_MS = 150;
@@ -426,7 +427,7 @@ interface TabApi {
 	readonly name: string;
 	readonly page: Page;
 	readonly signal?: AbortSignal;
-	url(): string;
+	url(): Promise<string>;
 	title(): Promise<string>;
 	goto(
 		url: string,
@@ -648,8 +649,7 @@ export type HandleOpGuard = <T>(
  * work and can therefore stall on a busy page. When {@link toActionableHandle} is given a
  * guard, each is routed through the per-op fail-fast wrapper; without it the inherited
  * puppeteer method runs outside the op map and a stall consumes the whole cell (issue #9535).
- * Pure reads (`boundingBox`, `screenshot`, `evaluate`, queries) are omitted — they are not
- * user-driven actions and keep their native puppeteer behavior.
+ * Read methods use a separate guard: they settle preceding actions without creating another action mark.
  */
 const GUARDED_HANDLE_METHODS = [
 	"click",
@@ -671,12 +671,21 @@ const GUARDED_HANDLE_METHODS = [
 	"touchEnd",
 	"autofill",
 ] as const satisfies readonly (keyof ElementHandle)[];
+const GUARDED_HANDLE_READS = [
+	"evaluate",
+	"screenshot",
+	"boundingBox",
+	"isVisible",
+	"isHidden",
+] as const satisfies readonly (keyof ElementHandle)[];
+type HandleReadMethod = (typeof GUARDED_HANDLE_READS)[number];
 
 type GuardedHandleMethod = (typeof GUARDED_HANDLE_METHODS)[number];
 type RawHandleMethod = (...args: unknown[]) => Promise<unknown>;
 
 interface RawHandleMethods {
 	interactive: Partial<Record<GuardedHandleMethod, RawHandleMethod>>;
+	reads?: Partial<Record<HandleReadMethod, RawHandleMethod>>;
 	invalidatedBy?: string;
 }
 
@@ -684,6 +693,18 @@ interface RawHandleMethods {
 const RAW_HANDLE_METHODS = Symbol("browser.rawHandleMethods");
 
 type HandleWithRawMethods = ActionableHandle & { [RAW_HANDLE_METHODS]?: RawHandleMethods };
+
+/** Signal of the handle action running in this async call chain, for the reads it makes on the way. */
+const HANDLE_ACTION_SCOPE = new AsyncLocalStorage<AbortSignal>();
+
+/**
+ * `handle.evaluate` without the read guard a run wrapped it in: a cached handle keeps the wrappers of the
+ * run that last enriched it, whose signal is gone once that run ends.
+ */
+function rawHandleEvaluate(handle: ElementHandle): ElementHandle["evaluate"] {
+	const raw = (handle as HandleWithRawMethods)[RAW_HANDLE_METHODS]?.reads?.evaluate;
+	return (raw ?? handle.evaluate.bind(handle)) as ElementHandle["evaluate"];
+}
 
 async function runGuardedHandleAction<T>(
 	handle: ElementHandle,
@@ -1093,11 +1114,18 @@ export function toActionableHandle(
 	const enriched = handle as HandleWithRawMethods;
 	const methods = enriched as unknown as Partial<Record<GuardedHandleMethod, RawHandleMethod>>;
 	const preserved = enriched[RAW_HANDLE_METHODS];
+	const readMethods = enriched as unknown as Partial<Record<HandleReadMethod, RawHandleMethod>>;
 	if (!guard) {
 		if (preserved) {
 			for (const method of GUARDED_HANDLE_METHODS) {
 				const original = preserved.interactive[method];
 				if (original) methods[method] = original;
+			}
+		}
+		if (preserved?.reads) {
+			for (const method of GUARDED_HANDLE_READS) {
+				const original = preserved.reads[method];
+				if (original) readMethods[method] = original;
 			}
 		}
 		enriched.fill = value => fillViaHandle(enriched, value, "handle.fill()");
@@ -1116,6 +1144,16 @@ export function toActionableHandle(
 		return enrichElementQueries(enriched, (_label, fn) => fn(controller.signal));
 	}
 
+	// The reads a handle action makes before dispatching its input run inside it: they must not consume the
+	// action mark (it is set when the action starts) nor pay a settle.
+	const actionGuard = guard;
+	guard = (label, fn, dialog) =>
+		actionGuard(label, signal => HANDLE_ACTION_SCOPE.run(signal, () => fn(signal)), dialog);
+	const readGuard = queryGuard ?? actionGuard;
+	const handleRead: HandleOpGuard = (label, fn) => {
+		const action = HANDLE_ACTION_SCOPE.getStore();
+		return action ? fn(action) : readGuard(label, fn);
+	};
 	let originals = preserved;
 	if (!originals) {
 		const interactive: Partial<Record<GuardedHandleMethod, RawHandleMethod>> = {};
@@ -1277,7 +1315,18 @@ export function toActionableHandle(
 			await uploadThroughHandle(enriched, originals, filePaths, guard, uploads, invalidate);
 		};
 	}
-	return enrichElementQueries(enriched, queryGuard ?? guard);
+	if (!originals.reads) {
+		originals.reads = {};
+		for (const method of GUARDED_HANDLE_READS) {
+			const original = readMethods[method];
+			if (typeof original === "function") originals.reads[method] = original.bind(enriched);
+		}
+	}
+	for (const method of GUARDED_HANDLE_READS) {
+		const original = originals.reads[method];
+		if (original) readMethods[method] = (...args) => handleRead(`handle.${method}()`, () => original(...args));
+	}
+	return enrichElementQueries(enriched, handleRead);
 }
 
 /**
@@ -1972,10 +2021,10 @@ export class WorkerCore {
 	#certificateOverride?: CDPSession;
 	/** Names the native windows a call raised on screen; only for a browser that shows windows, on macOS. */
 	#nativeWindows?: NativeWindowWatch;
-	/** Request boundary of the earliest action since the last look; the next look settles it. */
+	/** Request boundary of the earliest action since the last look or read, which settles it. */
 	#actionRequestSeq?: number;
 	#actionGeneration = 0;
-	/** The settle a look started, which looks arriving while it runs wait for too. */
+	/** The settle a look or read started, which calls arriving while it runs wait for too. */
 	#settling?: Promise<void>;
 	readonly #recording = new RecordingController();
 	/** Set once the core stops for good: by {@link terminate}, or by a close. */
@@ -3060,13 +3109,29 @@ export class WorkerCore {
 		// events (navigation, response, download), dialogs and network setup run at once: they may be what the
 		// navigation waits on, or must catch its first request.
 		// Both run the page's script, which a confirm or prompt stops until it is answered (`OpOptions.dialog`).
+		// A read first pays the settle the actions since the last look or read are owed; `settled` runs at once as
+		// `op` does, `settledRead` keeps the navigation barrier.
+		const settled = <T>(
+			label: string,
+			perOpMs: number,
+			fn: (sig: AbortSignal) => Promise<T>,
+			selectorOpts?: OpOptions,
+		): Promise<T> =>
+			op(
+				label,
+				perOpMs,
+				async sig => {
+					await this.#settleAfterAction(sig, perOpMs);
+					return await fn(sig);
+				},
+				selectorOpts,
+			);
+		const settledRead = <T>(label: string, perOpMs: number, fn: (sig: AbortSignal) => Promise<T>): Promise<T> =>
+			settled(label, perOpMs, fn, { awaitNavigation: true, dialog: "blocks" });
 		const read = <T>(label: string, perOpMs: number, fn: (sig: AbortSignal) => Promise<T>): Promise<T> =>
-			op(label, perOpMs, sig => this.#rereadAfterNavigation(sig, perOpMs, () => fn(sig)), {
-				awaitNavigation: true,
-				dialog: "blocks",
-			});
-		// An action marks the next look for settling; `input` runs at once, as `op` does (raw input, navigations,
-		// handle and frame actions, dialogs), and `act` keeps the navigation barrier for selector actions.
+			settledRead(label, perOpMs, sig => this.#rereadAfterNavigation(sig, perOpMs, () => fn(sig)));
+		// An action marks the next look or read for settling; `input` runs at once, as `op` does (raw input,
+		// navigations, handle and frame actions, dialogs), and `act` keeps the navigation barrier for selector actions.
 		const input = <T>(
 			label: string,
 			perOpMs: number,
@@ -3098,7 +3163,7 @@ export class WorkerCore {
 		): Promise<T> => op(label, perOpMs, fn, { dialog: "blocks", ...selectorOpts, awaitNavigation: true });
 		// Hand user-facing handles the fail-fast per-op guard so their interactive
 		// methods (`.click()`, `.type()`, …) can't outrun the cell budget (issue #9535).
-		// Only the interactive methods count as actions for the next look's settle.
+		// Only the interactive methods count as actions for the next look or read's settle.
 		const enrich = (handle: ElementHandle): ActionableHandle =>
 			toActionableHandle(
 				handle,
@@ -3123,13 +3188,13 @@ export class WorkerCore {
 						),
 					deliverGuard: (label, fn) => op(label, budgetBound, fn),
 				},
-				(label, fn) => op(label, actionOpMs, fn),
+				(label, fn) => settled(label, actionOpMs, fn),
 			);
 		return {
 			name,
 			page,
 			signal,
-			url: () => page.url(),
+			url: () => settled("tab.url()", quickOpMs, async () => page.url(), { awaitNavigation: true }),
 			title: () => read("tab.title()", INF, sig => untilAborted(sig, () => page.title())),
 			goto: (url, opts) =>
 				input(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
@@ -3153,11 +3218,7 @@ export class WorkerCore {
 						throw err;
 					}
 				}),
-			observe: opts =>
-				read("tab.observe()", quickOpMs, async sig => {
-					await this.#settleAfterAction(sig, quickOpMs);
-					return await this.#collectObservation({ ...opts, signal: sig });
-				}),
+			observe: opts => read("tab.observe()", quickOpMs, sig => this.#collectObservation({ ...opts, signal: sig })),
 			ariaSnapshot: (selectorArg, optsArg) => {
 				const { selector, opts } = optionalSelectorArgs(selectorArg, optsArg);
 				if (selector !== undefined) assertSelectorString(selector);
@@ -3165,7 +3226,6 @@ export class WorkerCore {
 					selector ? `tab.ariaSnapshot(${JSON.stringify(selector)})` : "tab.ariaSnapshot()",
 					quickOpMs,
 					async sig => {
-						await this.#settleAfterAction(sig, quickOpMs);
 						let root: ElementHandle | null = null;
 						if (selector) {
 							root = (await untilAborted(sig, () =>
@@ -3366,7 +3426,7 @@ export class WorkerCore {
 			evaluate: (fn, ...args) =>
 				// User code may have side effects and may throw any message, so it waits for a requested navigation but
 				// never runs again.
-				documentOp("tab.evaluate()", INF, sig =>
+				settledRead("tab.evaluate()", INF, sig =>
 					untilAborted(sig, () =>
 						evaluateInRealm(page.mainFrame().mainRealm(), fn as PageFunction, args, false, sig),
 					),
@@ -3527,6 +3587,7 @@ export class WorkerCore {
 						normalizeSelector,
 						waitMs,
 						op,
+						read: settled,
 						act: input,
 						captureScreenshot: (target, selector, screenshotSignal) =>
 							captureFrameScreenshot(target, selector, screenshotSignal, normalizeSelector, shots),
@@ -3828,11 +3889,11 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Before a look, let the actions since the previous look land: the document, fetch and XHR
+	 * Before a look or read, let the actions since the previous one land: the document, fetch and XHR
 	 * requests they started finish, and the DOM then stays quiet for {@link SETTLE_QUIET_MS}. Bounded
-	 * by {@link SETTLE_TIMEOUT_MS}, and by half the look's own `perOpMs` so a short cell still gets its
-	 * page, after which the page is read as it is. A look with no action before it returns at once; a
-	 * look arriving while another one settles waits for that settle.
+	 * by {@link SETTLE_TIMEOUT_MS}, and by half the call's own `perOpMs` so a short cell still gets its
+	 * page, after which the page is read as it is. A call with no action before it returns at once; a
+	 * call arriving while another one settles waits for that settle.
 	 */
 	async #settleAfterAction(signal: AbortSignal, perOpMs: number): Promise<void> {
 		const since = this.#actionRequestSeq;
@@ -4290,7 +4351,7 @@ export class WorkerCore {
 			return resolved;
 		}
 		try {
-			const isConnected = (await handle.evaluate(el => el.isConnected)) as boolean;
+			const isConnected = (await rawHandleEvaluate(handle)(el => el.isConnected)) as boolean;
 			if (!isConnected) {
 				this.#clearElementCache();
 				throw new ToolError(`Element id ${id} is stale. Run tab.observe() again.`);

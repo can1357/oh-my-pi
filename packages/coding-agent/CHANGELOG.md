@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Inside `tab.run`, `tab.url()` on a Chromium tab now returns a promise, since it waits for the page after an action like the other reads: use `await tab.url()`; it remains available while a dialog is open, and cmux and Tern tabs still return a string ([#19633](https://github.com/can1357/oh-my-pi/pull/19633) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Browser reads on Chromium tabs (`text`, `html`, `value`, `evaluate`, `screenshot`, `url` and the other tab, frame and element reads) wait the same way after an action, so `click()` then `text()` reads the result instead of the loading state ([#19633](https://github.com/can1357/oh-my-pi/pull/19633) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes

@@ -47,6 +47,19 @@ afterAll(() => {
 });
 
 async function runOnPage(url: string, code: string, timeoutMs = 20_000): Promise<unknown> {
+	const [value] = await runCellsOnPage(url, [() => code], timeoutMs);
+	return value;
+}
+
+/**
+ * Run cells one after another in one tab on `url`, each its own `tab.run` as a direct helper call is;
+ * each cell's code is built from the values the earlier cells returned.
+ */
+async function runCellsOnPage(
+	url: string,
+	cells: ((earlier: unknown[]) => string)[],
+	timeoutMs = 20_000,
+): Promise<unknown[]> {
 	const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 	if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
 	const name = `observe-${process.pid}`;
@@ -58,8 +71,10 @@ async function runOnPage(url: string, code: string, timeoutMs = 20_000): Promise
 	} as unknown as ToolSession;
 	try {
 		await acquireTab(name, browser, { url, timeoutMs: 30_000 });
-		const result = await runInTab(name, { code, timeoutMs, session });
-		return result.returnValue;
+		const values: unknown[] = [];
+		for (const cell of cells)
+			values.push((await runInTab(name, { code: cell(values), timeoutMs, session })).returnValue);
+		return values;
 	} finally {
 		await releaseTab(name, { kill: true });
 		if (browser.browser.connected) await releaseBrowser(browser, { kill: true });
@@ -421,5 +436,178 @@ describe("browser observe after an action", () => {
 			}
 		},
 		45_000,
+	);
+});
+
+/**
+ * Load fills the pane from `/detail`, which answers at once: `page.emulateNetworkConditions` delays it
+ * in Chromium, so the DOM stays quiet while the response is outstanding. Never also opens a request the
+ * server holds until the test ends, plus a `/mark` request whose response sets `data-late` on the body.
+ * `startPoll()` opens the same two requests from the page itself, not from an action.
+ */
+function detailServer() {
+	const held = new Set<() => void>();
+	const server = Bun.serve({
+		port: 0,
+		async fetch(request) {
+			const { pathname } = new URL(request.url);
+			if (pathname === "/detail") return new Response("Detail");
+			if (pathname === "/mark") return new Response("late");
+			if (pathname === "/hold") {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				held.add(resolve);
+				await promise;
+				return new Response("released");
+			}
+			const hold = "fetch('/hold'); fetch('/mark').then(() => { document.body.dataset.late = 'late'; })";
+			return new Response(
+				`<button id="load" onclick="pane.textContent = 'Loading'; fetch('/detail').then(r => r.text()).then(t => pane.textContent = t)">Load</button>` +
+					`<button id="never" onclick="pane.textContent = 'Loading'; ${hold}">Never</button>` +
+					`<div id="pane">Empty</div><script>function startPoll() { ${hold}; }</script>`,
+				{ headers: { "content-type": "text/html" } },
+			);
+		},
+	});
+	return {
+		url: `http://127.0.0.1:${server.port}/`,
+		stop() {
+			for (const release of held) release();
+			server.stop(true);
+		},
+	};
+}
+
+/** Cell code making Chromium deliver every response `ms` late. */
+const latency = (ms: number) => `await page.emulateNetworkConditions({ download: -1, upload: -1, latency: ${ms} });`;
+
+/** The pane's text and whether the `/mark` response had landed when the read ran. */
+const READ_PANE = `await tab.evaluate(() => [pane.textContent, document.body.dataset.late ?? "early"])`;
+
+describe("browser reads after an action", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"read a fetch the click started once it answers, without waiting when no action came before",
+		async () => {
+			const pages = detailServer();
+			try {
+				const result = await runOnPage(
+					pages.url,
+					`
+						await tab.observe();
+						${latency(1500)}
+						const sent = page.waitForRequest(request => request.url().endsWith("/hold"));
+						await tab.evaluate(() => startPoll());
+						await sent;
+						const unprompted = [await tab.text("#pane"), ${READ_PANE}];
+						const reads = [];
+						for (const latency of [300, 800, 2000]) {
+							await page.emulateNetworkConditions({ download: -1, upload: -1, latency });
+							await tab.click("#load");
+							reads.push(await tab.text("#pane"));
+						}
+						await tab.click("#load");
+						reads.push(...(await Promise.all([tab.text("#pane"), tab.text("#pane")])));
+						return [unprompted, reads];
+					`,
+				);
+				expect(result).toEqual([
+					["Empty", ["Empty", "early"]],
+					["Detail", "Detail", "Detail", "Detail", "Detail"],
+				]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"settles a handle action before a handle read, without settling the next read again",
+		async () => {
+			const pages = detailServer();
+			try {
+				const result = await runOnPage(
+					pages.url,
+					`
+						const load = await tab.waitForSelector("#load");
+						const pane = await tab.waitForSelector("#pane");
+						${latency(1500)}
+						await load.click();
+						const text = await pane.text();
+						const sent = page.waitForRequest(request => request.url().endsWith("/hold"));
+						await page.evaluate(() => startPoll());
+						await sent;
+						return [text, await pane.evaluate(el => [el.textContent, document.body.dataset.late ?? "early"])];
+					`,
+				);
+				expect(result).toEqual(["Detail", ["Detail", "early"]]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("reads the URL while a confirm is pending", async () => {
+		const url = `data:text/html,${encodeURIComponent(`<button id="b" onclick="confirm('Go?')">Go</button>`)}`;
+		const result = await runOnPage(
+			url,
+			`
+					await tab.click("#b");
+					try {
+						return await tab.url();
+					} finally {
+						await tab.handleDialog({ accept: true });
+					}
+				`,
+		);
+		expect(result).toBe(url);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"return the page as it is at the bound when the click's request never answers",
+		async () => {
+			const pages = detailServer();
+			try {
+				// `/mark` lands after the emulated 1.5 s; the held request keeps the read waiting past it.
+				const result = await runOnPage(
+					pages.url,
+					`${latency(1500)} await tab.click("#never"); return ${READ_PANE};`,
+				);
+				expect(result).toEqual(["Loading", "late"]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"keep an element id used in one call valid in the next after an action",
+		async () => {
+			const [id, , title] = await runCellsOnPage(PAGE, [
+				() => `return (await tab.observe()).elements.find(entry => entry.name === "Item 7").id;`,
+				([id]) => `await (await tab.id(${id})).click();`,
+				([id]) => `await (await tab.id(${id})).click(); return await tab.title();`,
+			]);
+			expect(typeof id).toBe("number");
+			expect(title).toBe("clicked 7");
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"returns from a handle click that opens a confirm, leaving it pending",
+		async () => {
+			const result = await runOnPage(
+				`data:text/html,${encodeURIComponent(`<button id="b" onclick="globalThis.r = confirm('Go?')">Go</button>`)}`,
+				`
+					const outcome = await (await tab.waitForSelector("#b")).click().then(() => "returned", error => String(error));
+					await tab.handleDialog({ accept: true });
+					return { outcome, answered: await tab.evaluate(() => globalThis.r) };
+				`,
+			);
+			expect(result).toEqual({ outcome: "returned", answered: true });
+		},
+		30_000,
 	);
 });
