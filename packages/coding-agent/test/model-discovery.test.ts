@@ -3546,6 +3546,118 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(rosterFor("image")).toEqual(["image-generator"]);
 	});
 
+	test("openai-models-list routes gateway speech and transcription rows by their declared modalities", async () => {
+		writeRawModelsJson({
+			"gateway-test": {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9993/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							// Poe's rows, verbatim: a TTS voice and a music generator declare
+							// the same `text->audio`, and Poe serves both on chat completions.
+							{
+								id: "orpheus-tts",
+								architecture: {
+									input_modalities: ["text"],
+									output_modalities: ["audio"],
+									modality: "text->audio",
+								},
+							},
+							{
+								id: "lyria",
+								architecture: {
+									input_modalities: ["text"],
+									output_modalities: ["audio"],
+									modality: "text->audio",
+								},
+							},
+							{
+								id: "vendor/audio-reader",
+								architecture: { input_modalities: ["audio"], output_modalities: ["text"] },
+							},
+							// OpenRouter's TTS and STT rows, verbatim from its roster.
+							{
+								id: "speechify/simba-3.5",
+								architecture: {
+									modality: "text->speech",
+									input_modalities: ["text"],
+									output_modalities: ["speech"],
+								},
+							},
+							{
+								id: "x-ai/grok-stt-2.0",
+								architecture: {
+									modality: "audio->transcription",
+									input_modalities: ["audio"],
+									output_modalities: ["transcription"],
+								},
+							},
+							{ id: "openrouter/vendor/tts-lite", architecture: { modality: "text->speech" } },
+							// Nothing declared: stays chat, whatever the id suggests.
+							{ id: "vendor/flash-tts", supported_methods: ["generateContent"] },
+							{
+								id: "vendor/chat",
+								architecture: { modality: "text+image->text", output_modalities: ["text"] },
+							},
+							{
+								id: "vendor/voice-chat",
+								architecture: { input_modalities: ["text", "audio"], output_modalities: ["text", "audio"] },
+							},
+							{ id: "vendor/plain-chat" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		// Audio output, or text from audio input, names no endpoint: chat API.
+		for (const id of ["orpheus-tts", "lyria", "vendor/audio-reader"]) {
+			const model = registry.find("gateway-test", id);
+			expect(model?.kind).toBeUndefined();
+			expect(model?.api).toBe("openai-completions");
+		}
+		expect(registry.find("gateway-test", "speechify/simba-3.5")).toMatchObject({
+			kind: "tts",
+			api: "openai-speech",
+			baseUrl: "http://127.0.0.1:9993/v1",
+			supportsTools: false,
+		});
+		expect(registry.find("gateway-test", "x-ai/grok-stt-2.0")).toMatchObject({
+			kind: "stt",
+			api: "openai-transcriptions",
+			baseUrl: "http://127.0.0.1:9993/v1",
+			supportsTools: false,
+		});
+		const rosterFor = (kind: ModelKind) =>
+			registry
+				.getAll(kind)
+				.filter(model => model.provider === "gateway-test")
+				.map(model => model.id)
+				.sort();
+		expect(rosterFor("chat")).toEqual([
+			"lyria",
+			"orpheus-tts",
+			"vendor/audio-reader",
+			"vendor/chat",
+			"vendor/flash-tts",
+			"vendor/plain-chat",
+			"vendor/voice-chat",
+		]);
+		expect(rosterFor("tts")).toEqual(["openrouter/vendor/tts-lite", "speechify/simba-3.5"]);
+		expect(rosterFor("stt")).toEqual(["x-ai/grok-stt-2.0"]);
+	});
+
 	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {
 		// Gateways like opper.ai root their OpenAI-compatible surface at a
 		// versioned path (`https://api.opper.ai/v3/compat`); the default

@@ -441,6 +441,7 @@ import {
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
 	isEmptyErrorTurn,
+	isInterruptReason,
 	titleContextWordCount,
 	isUserAuthoredMessage,
 	isUserInterruptAbort,
@@ -12711,10 +12712,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 *
-	 * `reason` (e.g. `USER_INTERRUPT_LABEL`) rides the agent's `AbortController`
-	 * and surfaces verbatim on the aborted assistant message's `errorMessage`, so
-	 * the transcript can distinguish a deliberate user interrupt from an opaque
-	 * abort. Omit it for internal/lifecycle aborts.
+	 * `reason` rides the agent's `AbortController` and surfaces verbatim on the aborted assistant
+	 * message's `errorMessage`. Interrupt reasons (`USER_INTERRUPT_LABEL` for a person and
+	 * `AGENT_KILL_LABEL` for a parent agent's kill) also flag the abort as deliberate. Omit it for
+	 * internal/lifecycle aborts.
 	 */
 	async abort(options?: {
 		goalReason?: "interrupted" | "internal";
@@ -12724,7 +12725,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
 	}): Promise<void> {
-		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
+		const userInterrupt = isInterruptReason(options?.reason);
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
 		// every later background completion for the rest of the session. A paused run counts:

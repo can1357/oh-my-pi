@@ -1863,7 +1863,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		const scope = { agentRegistry: AgentRegistry.global(), agentLifecycle: () => AgentLifecycleManager.global() };
-		stopAgentRun(scope, this.session.asyncJobManager, id).then(
+		stopAgentRun(scope, this.session.asyncJobManager, id, USER_INTERRUPT_LABEL).then(
 			outcome => {
 				if (outcome.status !== "cancelled") this.showWarning(outcome.message);
 				this.ui.requestRender();
@@ -2649,7 +2649,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		// Progress of every server connecting or failing: a toast per change
 		// is noise on a native terminal (Tern), so it stays in the ANSI transcript.
-		if (message) this.showStatus(message, { toast: false });
+		// Keyed so the line updates in place across notices shown meanwhile.
+		if (message) this.showStatus(message, { toast: false, key: "mcp-status" });
 	}
 
 	#trackMcpStatusServer(serverName: string): void {

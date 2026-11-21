@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AstGrepTool } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -252,6 +253,49 @@ describe("ast_grep parse errors", () => {
 			});
 			const details = result.details as { matchCount?: number } | undefined;
 			expect(details?.matchCount).toBe(2);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("names explicit host and local:// file targets alongside directory targets", async () => {
+		const tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-files-")));
+		try {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localOpts = { getArtifactsDir: () => artifactsDir, getSessionId: () => "ast-grep-files" };
+			const examplePath = path.join(tempDir, "a", "example.ts");
+			const otherPath = path.join(tempDir, "b", "other.ts");
+			const childPath = path.join(tempDir, "c", "nested", "child.ts");
+			const localNoteUrl = "local://scratch/note.ts";
+			const localDirChildUrl = "local://dir/nested.ts";
+			await Bun.write(examplePath, "legacyWrap(value, other)\n");
+			await Bun.write(otherPath, "legacyWrap(value, other)\n");
+			await Bun.write(childPath, "legacyWrap(nested, other)\n");
+			await Bun.write(resolveLocalUrlToPath(localNoteUrl, localOpts), "legacyWrap(note, other)\n");
+			await Bun.write(resolveLocalUrlToPath(localDirChildUrl, localOpts), "legacyWrap(dirChild, other)\n");
+			const tools = await createTools(
+				createTestSession(tempDir, {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "ast-grep-files",
+				}),
+				["ast_grep"],
+			);
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-grep-sibling-files", {
+				pat: "legacyWrap($A, $B)",
+				path: [examplePath, otherPath, localNoteUrl, path.join(tempDir, "c"), "local://dir"].join(";"),
+			});
+			const details = result.details as
+				| { matchCount?: number; files?: string[]; fileMatches?: Array<{ path: string; count: number }> }
+				| undefined;
+			const expected = ["a/example.ts", "b/other.ts", "c/nested/child.ts", localDirChildUrl, localNoteUrl];
+			expect(details?.matchCount).toBe(5);
+			expect([...(details?.files ?? [])].sort()).toEqual([...expected].sort());
+			expect([...(details?.fileMatches ?? [])].sort((left, right) => left.path.localeCompare(right.path))).toEqual(
+				[...expected].sort().map(filePath => ({ path: filePath, count: 1 })),
+			);
 		} finally {
 			await removeWithRetries(tempDir);
 		}
