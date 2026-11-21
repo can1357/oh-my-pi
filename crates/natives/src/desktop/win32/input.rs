@@ -134,13 +134,11 @@ fn scroll_steps(delta: f64) -> i32 {
 const WHEEL_DELTA: i32 = 120;
 
 /// Both background routes accept only wheel steps that fit one posted message.
-fn background_scroll(delta: f64) -> CoreResult<(i32, i16)> {
-	let steps = scroll_steps(delta);
+pub(super) fn background_wheel(steps: i32) -> CoreResult<i16> {
 	let wheel = steps.saturating_mul(WHEEL_DELTA);
-	let wheel = i16::try_from(wheel).map_err(|_| {
+	i16::try_from(wheel).map_err(|_| {
 		DesktopError::input_failed(format!("scroll delta {wheel} exceeds Win32 range"))
-	})?;
-	Ok((steps, wheel))
+	})
 }
 
 fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
@@ -567,8 +565,8 @@ mod background {
 				})
 			},
 			PointerEvent::Scroll { x, y, dx, dy } => {
-				let (horizontal_steps, horizontal) = super::background_scroll(dx)?;
-				let (vertical_steps, vertical) = super::background_scroll(dy)?;
+				let horizontal_steps = super::scroll_steps(dx);
+				let vertical_steps = super::scroll_steps(dy);
 				let point = screen_point(x, y);
 				// Wheel messages carry screen coordinates; unhandled wheel input
 				// bubbles from the child up its parent chain.
@@ -591,6 +589,8 @@ mod background {
 					DesktopError::input_failed("cannot map wheel coordinates to the target's DPI")
 				})?;
 				let location = packed_point(point.x, point.y)?;
+				let horizontal = super::background_wheel(horizontal_steps)?;
+				let vertical = super::background_wheel(vertical_steps)?;
 				if horizontal != 0 {
 					post(target, WM_MOUSEHWHEEL, wheel_wparam(horizontal), location)?;
 				}
@@ -2042,14 +2042,14 @@ mod tests {
 	#[test]
 	fn background_scroll_keeps_the_posted_wheel_range() {
 		for (delta, expected) in [
-			(0.0, Some((0, 0))),
-			(27_300.0, Some((273, 32_760))),
-			(-27_300.0, Some((-273, -32_760))),
+			(0.0, Some(0)),
+			(27_300.0, Some(32_760)),
+			(-27_300.0, Some(-32_760)),
 			(27_400.0, None),
 			(f64::MAX, None),
 		] {
 			assert_eq!(
-				background_scroll(delta).map_err(|error| error.code),
+				background_wheel(scroll_steps(delta)).map_err(|error| error.code),
 				expected.ok_or(super::super::super::error::ErrorCode::InputFailed),
 				"{delta}"
 			);
