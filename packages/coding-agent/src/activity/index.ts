@@ -77,6 +77,7 @@ function sameRow(a: AgentActivityRow, b: AgentActivityRow): boolean {
 		a.kind === b.kind &&
 		a.title === b.title &&
 		a.summary === b.summary &&
+		a.summaryIsToolIntent === b.summaryIsToolIntent &&
 		a.status === b.status &&
 		a.entryId === b.entryId &&
 		a.toolCallId === b.toolCallId &&
@@ -124,9 +125,8 @@ function firstString(value: Record<string, unknown>, ...keys: string[]): string 
 	return undefined;
 }
 
-function argumentsSummary(toolName: string, value: unknown): string {
-	const args = recordOf(value) ?? {};
-	const intent = firstString(args, "i", "intent");
+function argumentsSummary(toolName: string, args: Record<string, unknown>): string {
+	const intent = firstString(args, "intent");
 	if (intent) return intent;
 	switch (toolName) {
 		case "read":
@@ -450,13 +450,16 @@ export class AgentActivityIndex {
 					changed = true;
 				}
 				for (const call of toolBlocks(message.content)) {
+					const args = recordOf(call.args) ?? {};
+					const intent = firstString(args, "i");
 					const row: AgentActivityRow = {
 						id: `${agentId}:tool:${call.id}`,
 						agentId,
 						timestamp,
 						kind: "tool",
 						title: call.name,
-						summary: argumentsSummary(call.name, call.args),
+						summary: intent ?? argumentsSummary(call.name, args),
+						summaryIsToolIntent: intent !== undefined,
 						status: "pending",
 						entryId: entry.id,
 						toolCallId: call.id,

@@ -75,6 +75,17 @@ describe("compileSecretRegex", () => {
 	});
 });
 
+it("redacts from a slash-delimited Unicode set without changing excluded characters", () => {
+	const obfuscator = new SecretObfuscator([{ type: "regex", content: String.raw`/[[\p{L}]--[a-z]]+/v` }]);
+	const secret = "帳戶密碼測試資料";
+	const input = `public ${secret} reserved`;
+	const output = obfuscator.obfuscate(input);
+	expect(output).toStartWith("public ");
+	expect(output).toEndWith(" reserved");
+	expect(output).not.toContain(secret);
+	expect(obfuscator.deobfuscate(output)).toBe(input);
+});
+
 describe("Unicode empty regex matches", () => {
 	// A broken scan loops synchronously forever, so bound the real RegExp calls
 	// and surface the lack of progress as a failure instead of hanging the suite.

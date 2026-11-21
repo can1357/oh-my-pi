@@ -61,7 +61,7 @@ const SAVED: SpotlightDetails = {
 		task: "Why does ingest\nstall?",
 		commands: ["make build", "./ingest.sh --dry-run"],
 		said: "",
-		intent: "Find the failing step",
+		intent: "Find the failing step: Which ingest step failed, and why?",
 		source: "./ingest.sh",
 		probe: "The most important line in this output is: `",
 		model: "whiskers-latest",
@@ -387,7 +387,7 @@ describe("spotlight notice", () => {
 			spans: [{ t: "Find the failing step" }],
 			lines: 1,
 			truncate: "end",
-			title: "Find the failing step",
+			title: SAVED.request!.intent,
 		});
 		expect(more?.p).toMatchObject({
 			role: "omp.spotlight.more",
@@ -400,6 +400,7 @@ describe("spotlight notice", () => {
 		params = h.find(node => node.p?.role === "omp.spotlight.params");
 		const names = (params?.c ?? []).map(paramRow => words(within(paramRow, "text")[0]));
 		expect(names).toEqual(["intent", "task", "commands", "source", "probe", "model"]);
+		expect(words(within(params?.c?.[0], "text")[1])).toBe(SAVED.request!.intent);
 		expect(words(h.find(node => node.p?.role === "omp.spotlight.more"))).toBe("fewer ▾");
 		const task = h.find(node => node.p?.title === "Why does ingest\nstall?");
 		expect(task?.p).toMatchObject({ spans: [{ t: "Why does ingest stall?" }], lines: 2, truncate: "end" });
