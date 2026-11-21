@@ -9,6 +9,7 @@
 - Added Vim mode to ask-form textareas, one-line text fields, "Other" answers, option notes, and text prompts: `Escape` leaves Insert mode first instead of discarding what you typed, and `j`/`k` move between a form's option rows ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added `tui.vimYankToClipboard` (on by default); turn it off so only `"+y`/`"*y` copy to the system clipboard, as in Vim ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added Vim `/` and `?` in Normal mode to open prompt-history search, the same as `Ctrl+R`, and `"+p` to put the system clipboard ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Added Vim `:` in Normal mode on an empty prompt: it starts a slash command, opening the command menu as a typed `/` does ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - Added `tui.vimStartMode` (`/settings` → Interaction → "Vim Start Mode"): `normal` starts each prompt, and dialog text boxes, in Vim Normal mode ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - With Vim editing mode on, Normal-mode `k`/`j` (and Up/Down) past the first or last line step through prompt history, as in zsh's vi mode; `j` past the newest prompt brings back your draft ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 

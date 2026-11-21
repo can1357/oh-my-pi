@@ -150,6 +150,7 @@ Text boxes in dialogs use the same Vim mode: ask-form textareas, one-line text f
 | `"x` prefix                         | Use register `x` for the next yank, delete, or put (see [Registers](#registers))                                                                                                  |
 | `u` `Ctrl+R`                        | Undo / redo, with counts (`3u`); a whole Insert session, or a whole `.`, is one step, and the cursor returns to where the change began                                            |
 | `/` `?`                             | Open prompt-history search, the same one `Ctrl+R` opens                                                                                                                           |
+| `:`                                 | On an empty prompt, start a slash command: types `/` in Insert mode, so the command menu opens. With a draft it does nothing                                                      |
 | `.`                                 | Repeat the last change, including text typed in the Insert session it opened; a count replaces the original one (`3.`)                                                            |
 | `gv`                                | Reselect the last Visual selection                                                                                                                                                |
 
@@ -200,4 +201,4 @@ A selection that would cut through an attachment placeholder such as `[Image #1,
 
 Vim keys never shadow app chords: `Ctrl`-combinations, `Enter`, and `Tab` keep their normal behavior in every mode, so `Enter` still submits from Normal mode. The one exception is `Ctrl+R`, which is Vim's redo in Normal mode; history search stays on it in Insert mode. Such a key also cancels a half-typed command (`d`, `r`, `f`) first, so the command never carries over into the next prompt. In Normal mode `Up`/`Down` are `k`/`j`, history steps included; in Insert mode they browse history as without Vim mode.
 
-Not supported: marks (`m`, `'`, `` ` ``), searching the draft (`/` and `?` open history search), `n` / `N`, `*` and `#`, macros (`q`, `@`), `Ctrl+A` / `Ctrl+X`, line undo (`U`), and Ex commands (`:`).
+Not supported: marks (`m`, `'`, `` ` ``), searching the draft (`/` and `?` open history search), `n` / `N`, `*` and `#`, macros (`q`, `@`), `Ctrl+A` / `Ctrl+X`, line undo (`U`), and Ex commands (`:` only starts a slash command).

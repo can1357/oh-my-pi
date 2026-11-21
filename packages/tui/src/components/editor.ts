@@ -2937,6 +2937,10 @@ export class Editor implements Component, Focusable {
 				case "historySearch":
 					this.onHistorySearch?.();
 					break;
+				case "commandLine":
+					// Typed like a key, so the slash-command menu opens on it as it does for a typed `/`.
+					this.#insertCharacter("/");
+					break;
 				case "historyStep":
 					this.#stepVimHistory(command.older, command.count);
 					break;

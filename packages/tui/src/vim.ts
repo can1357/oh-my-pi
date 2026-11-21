@@ -71,6 +71,8 @@ export type VimCommand =
 	| { kind: "insertRepeat"; times: number; newline: boolean }
 	/** `/` and `?`: open the host's prompt-history search (`Ctrl+R`'s), as a shell's vi mode does. */
 	| { kind: "historySearch" }
+	/** `:` on an empty prompt: type `/` in Insert mode, so the host's slash-command menu opens. */
+	| { kind: "commandLine" }
 	/** `k`/`j` (and `-`/`+`) with no line left above or below: step `count` prompts through history, as zsh's vi mode. */
 	| { kind: "historyStep"; older: boolean; count: number };
 
@@ -748,6 +750,8 @@ export class VimState {
 	/** `"` typed, waiting for the register name; then the named register the command will use. */
 	#registerPending = false;
 	#register: string | null = null;
+	/** `:` opened the Insert session: what it types is a slash command, not a change `.` repeats. */
+	#unrecordedInsert = false;
 	/** The editor's wrapped-row lookup for `gj`/`gk`; without one they move by lines like `j`/`k`. */
 	screenMove: VimScreenMove | null = null;
 
@@ -827,6 +831,7 @@ export class VimState {
 		this.#cmdKeys = [];
 		this.#cmdCount = "";
 		this.#insertRepeat = 1;
+		this.#unrecordedInsert = false;
 	}
 
 	reset(): void {
@@ -904,10 +909,11 @@ export class VimState {
 			const mode = this.mode as VimMode;
 			const editing = mode === "insert" || mode === "replace";
 			// `.` is skipped only as the top-level repeat command; as an `f`/`t`/`r` target (`df.`)
-			// it completes a recordable edit.
+			// it completes a recordable edit. `:` types a command, not an edit.
 			if (
 				commands !== null &&
 				(key !== "." || dotIsTarget) &&
+				key !== ":" &&
 				(editing || commands.some(c => EDIT_KINDS[c.kind] === true))
 			) {
 				// An Insert-family count (`3ifoo`) repeats the typed text, so `.` keeps it too.
@@ -935,6 +941,10 @@ export class VimState {
 	 * split the session, Vim's redo becomes a plain insert of the text typed since.
 	 */
 	recordInsert(record: VimInsertRecord, afterArrow: boolean): void {
+		if (this.#unrecordedInsert) {
+			this.#unrecordedInsert = false;
+			return;
+		}
 		if (afterArrow) {
 			this.#lastChange = { kind: "keys", keys: ["i"], count: null, insert: record };
 		} else if (this.#lastChange !== null) {
@@ -1820,6 +1830,16 @@ export class VimState {
 				}
 				this.#takeCount();
 				return [{ kind: "historySearch" }];
+			case ":": {
+				// No Ex command line: on an empty prompt `:` starts a slash command instead, so the host's
+				// command menu opens as if `/` were typed. With a draft it would mix into the text, so it does nothing.
+				const operator = this.#operator;
+				this.#clearPending();
+				if (operator !== null || buf.lines.length !== 1 || buf.lines[0] !== "") return [];
+				this.mode = "insert";
+				this.#unrecordedInsert = true;
+				return [{ kind: "mode", mode: "insert" }, { kind: "commandLine" }];
+			}
 			case "j":
 			case "k":
 			case "-":

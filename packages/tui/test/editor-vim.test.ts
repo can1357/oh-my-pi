@@ -1819,6 +1819,24 @@ describe("Editor vim mode", () => {
 			expect(opened).toBe(2);
 			expect(editor.getText()).toBe("raft");
 		});
+
+		it(": on an empty prompt starts a slash command in Insert mode; with a draft it does nothing", () => {
+			const editor = vimEditor("");
+			editor.handleInput(":");
+			expect(editor.getText()).toBe("/");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("settings");
+			editor.submit();
+			// The command is not a change: `.` on the next prompt types nothing.
+			editor.handleInput(ESC);
+			editor.handleInput(".");
+			expect(editor.getText()).toBe("");
+
+			const draft = vimEditor("keep me");
+			draft.handleInput(":");
+			expect(draft.getText()).toBe("keep me");
+			expect(draft.vimMode).toBe("normal");
+		});
 	});
 
 	describe("Vim mode chrome", () => {
