@@ -566,7 +566,7 @@ describe("todo backend", () => {
 			});
 			const ok = { content: ["ok"] };
 			const mock = createMockModel({
-				responses: [calls("changed"), ok, calls("refused", "refused too"), ok, calls("aborted"), ok],
+				responses: [calls("waited"), ok, calls("refused", "refused too"), ok, calls("aborted"), ok],
 			});
 			session.agent.streamFn = mock.stream;
 			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
@@ -576,14 +576,27 @@ describe("todo backend", () => {
 				return { asked: backend.entered(), release: resolve };
 			};
 
-			const edited = held();
-			const changed = session.prompt("plan");
-			await edited.asked;
-			// A phase without tasks: a list with open tasks would make omp prompt the model to go on.
+			// The list changes while the call waits its turn behind a slow `replace`. Phases without
+			// tasks: a list with open tasks would make omp prompt the model to go on.
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("no extension runner");
+			const queued = Promise.withResolvers<void>();
+			const applyTodoBackend = runner.applyTodoBackend.bind(runner);
+			spyOn(runner, "applyTodoBackend").mockImplementation((...args) => {
+				queued.resolve();
+				return applyTodoBackend(...args);
+			});
+			const sending = Promise.withResolvers<void>();
+			backend.hold = sending.promise;
+			const inFlight = backend.entered();
+			session.commitTodoPhases([{ name: "Later", tasks: [] }]);
+			await inFlight;
+			const waited = session.prompt("plan");
+			await queued.promise;
 			session.commitTodoPhases(list());
-			edited.release();
-			await changed;
-			backend.applyHold = undefined;
+			sending.resolve();
+			await waited;
+			backend.hold = undefined;
 			backend.error = new Error("not this week");
 			await session.prompt("plan again");
 			backend.error = undefined;
@@ -596,11 +609,11 @@ describe("todo backend", () => {
 			await session.waitForIdle();
 			await session.prompt("next");
 
-			expect(backend.asked.map(change => change.op)).toEqual(["init", "init", "init", "init"]);
+			expect(backend.asked.map(change => change.op)).toEqual(["init", "init", "init"]);
 			const reminders = session.messages.filter(
 				message => message.role === "custom" && message.customType === "todo-error-reminder",
 			);
-			expect(reminders).toMatchObject([{ details: { attemptedArgs: { items: ["changed"] } } }]);
+			expect(reminders).toMatchObject([{ details: { attemptedArgs: { items: ["waited"] } } }]);
 		});
 
 		it("an edit that lands while the backend decides fails the call, keeps the edit and reaches the backend", async () => {
@@ -841,6 +854,7 @@ describe("todo backend", () => {
 			session.commitTodoPhases(list("a", "d"));
 			cfgTodoBackend.override(session.settings, "tracker");
 			late.resolve();
+			// The backend's late answer is handled in a continuation of its own promise.
 			await Bun.sleep(0);
 			slow.resolve();
 			await settled(session);

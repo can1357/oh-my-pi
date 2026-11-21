@@ -1184,8 +1184,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	/**
 	 * `todo` calls of this run whose failure is not a payload to fix and retry: the backend refused
-	 * or did not answer in time, the session was closing, or the user aborted the call while it
-	 * waited for the backend. A call made from an eval cell has no result that takes its id out.
+	 * or did not answer in time, the session was closing, or the call was aborted while it waited
+	 * for the backend. A call made from an eval cell has no result that takes its id out.
 	 */
 	#todoTurnedDown = new Set<string>();
 	/** Rows kept out of context that arrived while a run was live; drawn and saved once it ends or the next prompt starts. */

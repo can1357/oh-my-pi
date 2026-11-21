@@ -1877,13 +1877,13 @@ export interface TodoBackendDefinition {
 	 * `todo` tool call makes; nothing else reaches it. Throw to refuse the change: the call fails,
 	 * naming the backend and the error's message, and the list stays as it was, as it does when no
 	 * answer comes within the extension handler timeout. A change accepted here is not passed to
-	 * `replace` as well when this backend held `previous`; when it did not (its last call failed,
-	 * or it was selected or took the id over since the list last went out), the committed list
-	 * follows. When `apply` accepts after omp stopped waiting (a timeout or an abort), omp's list
-	 * is sent through `replace` once more, unless by then the session has changed or is closing,
-	 * or this backend is no longer selected or its extension no longer holds the id. Edits the
-	 * user or a client makes (`/todo`, RPC `set_todos`) and resets cannot be refused; they only
-	 * reach `replace`.
+	 * `replace` as well when this backend held `previous`; when it did not (its last `replace`
+	 * failed, its last `apply` timed out or was aborted, or a list was committed while it was not
+	 * selected or did not hold the id), the committed list follows. When `apply` accepts after omp
+	 * stopped waiting (a timeout or an abort), omp's list is sent through `replace` once more,
+	 * unless by then the session has changed or is closing, or this backend is no longer selected
+	 * or its extension no longer holds the id. Edits the user or a client makes (`/todo`, RPC
+	 * `set_todos`) and resets cannot be refused; they only reach `replace`.
 	 */
 	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
 }
