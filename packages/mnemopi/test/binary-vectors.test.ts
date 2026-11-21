@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 
 import {
@@ -88,5 +89,28 @@ describe("BinaryVectorStore", () => {
 		});
 
 		expect(search.search(query, 2).map(row => row.memory_id)).toEqual(["same", "far"]);
+	});
+
+	it("keeps a sibling store usable after another store closes its borrowed connection", () => {
+		// Regression: both stores reused the one Statement that `Database.query()` memoizes per
+		// SQL string on the shared connection, so close() finalized it for the sibling too and
+		// its next search()/getStats() threw "Statement has finalized".
+		const db = new Database(":memory:");
+		const first = new BinaryVectorStore({ conn: db });
+		const second = new BinaryVectorStore({ conn: db });
+		try {
+			first.storeVector("same", [1, -1, 1, -1]);
+			first.close();
+
+			expect(second.search([1, -1, 1, -1]).map(row => row.memory_id)).toEqual(["same"]);
+			expect(second.getStats().total_vectors).toBe(1);
+
+			second.storeVector("opposite", [-1, 1, -1, 1]);
+			expect(second.search([1, -1, 1, -1], 2).map(row => row.memory_id)).toEqual(["same", "opposite"]);
+			expect(second.getStats().total_vectors).toBe(2);
+		} finally {
+			second.close();
+			db.close();
+		}
 	});
 });
