@@ -183,7 +183,6 @@ import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
 	removeExitWorktrees,
-	runSessionWorktreeHook,
 	type WorktreeExitPlan,
 } from "../session/session-worktree";
 import type { SessionWorktree } from "../worktree/backend";
@@ -8558,8 +8557,16 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	async #planOwnedWorktreeExit(signal: AbortSignal): Promise<WorktreeExitPlan[]> {
 		const policy = cfgWorktreeOnExit.get(this.settings);
-		const owned = this.#ownedWorktrees.filter(worktree => !this.#worktreesInHook.has(worktree));
-		if (policy === "keep" || owned.length === 0) return [];
+		if (policy === "keep") return [];
+		const owned: SessionWorktree[] = [];
+		for (const worktree of this.#ownedWorktrees) {
+			if (this.#worktreesInHook.has(worktree)) {
+				this.showWarning(`Kept worktree ${shortenPath(worktree.path)}: its post-checkout hook is still running.`);
+			} else {
+				owned.push(worktree);
+			}
+		}
+		if (owned.length === 0) return [];
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
 		try {
@@ -9571,9 +9578,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!worktree) return;
 		this.#ownedWorktrees.push(worktree);
 		this.#worktreesInHook.add(worktree);
-		const warnings = await runSessionWorktreeHook(worktree, this.session);
-		this.#worktreesInHook.delete(worktree);
-		for (const warning of warnings) this.showWarning(warning);
+		try {
+			await this.#commandController.runWorktreeHook(worktree);
+		} finally {
+			this.#worktreesInHook.delete(worktree);
+		}
 	}
 
 	/**
