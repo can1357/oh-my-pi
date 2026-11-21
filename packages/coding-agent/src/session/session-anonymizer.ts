@@ -422,7 +422,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		// Eval cell pretty views: printed tables/JSON/Markdown of user data.
 		"views",
 		"structured",
-		"xdev",
+		"toolCommands",
 		"response",
 		"results",
 		"projectAgentsDir",
@@ -1138,7 +1138,6 @@ const KNOWN_SCHEMES = new Set([
 	"security",
 	"skill",
 	"vault",
-	"xd",
 ]);
 
 /** File extensions kept on mock names; `.test`/`.spec`/`.d` qualify a known final extension. */

@@ -89,7 +89,7 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 			options,
 			uiTheme!,
 		);
-		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+		if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 
 		const first = component.render(80);
 		const second = component.render(120);
@@ -111,7 +111,7 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 			{ expanded: true, isPartial: true, spinnerFrame: 0 },
 			uiTheme,
 		);
-		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+		if (!component) throw new Error("expected a rendered component for a non-tool-command write path");
 
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("object first");

@@ -573,6 +573,30 @@ describe("UsageDashboardComponent", () => {
 		expect(lines).toContain("Usage history unavailable (worker spawn failed).");
 		expect(lines).not.toContain("stats database could not be read");
 	});
+	it("keeps painted history marked not synced when the refresh after it fails", async () => {
+		const { promise: settled, resolve: markSettled } = Promise.withResolvers<void>();
+		let renders = 0;
+		const today = new Date();
+		const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+		const component = new UsageDashboardComponent({
+			reports: [],
+			renderDetail: () => "",
+			loadActivity: async push => {
+				push([{ day, cost: 1.5, requests: 3 }]);
+				throw new Error("database is locked");
+			},
+			// The push renders once; the settled load renders again.
+			requestRender: () => {
+				if (++renders === 2) markSettled();
+			},
+			onClose: () => {},
+		});
+		await settled;
+		const lines = component.render(120).join("\n");
+		expect(lines).not.toContain("Usage history unavailable");
+		expect(lines).toContain("not synced (database is locked)");
+		expect(lines).toContain("3 requests");
+	});
 	it("sanitizes control sequences, collapses multiline errors, and shortens paths", async () => {
 		const home = os.homedir();
 		const rawError = `subprocess crashed at ${home}/.omp/stats.db:\n\tfailed to open\x1b[2J\r\nline 2\x1b[31m...`;

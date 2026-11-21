@@ -29,6 +29,7 @@ import {
 	formatSearchProviderFailures,
 	getGroundedSearchProvider,
 	getSearchProvider,
+	type SearchParams,
 	type SearchProvider,
 	type SearchProviderFailure,
 } from "./provider";
@@ -386,7 +387,7 @@ async function executeSearch(
 			lastProvider = provider;
 
 			const sentAt = Date.now();
-			const response = await provider.search({
+			const searchParams: SearchParams = {
 				query: params.query,
 				parsedQuery,
 				limit: params.limit,
@@ -404,7 +405,10 @@ async function executeSearch(
 				explicit: candidate.explicit,
 				sessionId,
 				antigravityEndpointMode,
-			});
+			};
+			// An extension may own the request for its provider's models; availability stays the backend's.
+			const extensionSearch = modelRegistry.getProviderWebSearch(model.provider);
+			const response = await (extensionSearch ? extensionSearch(searchParams) : provider.search(searchParams));
 			// Before any rejection below: a response a later check discards was still billed.
 			const billed = searchUsageMessage(model, response, Date.now() - sentAt);
 			if (billed) journal?.(billed);
