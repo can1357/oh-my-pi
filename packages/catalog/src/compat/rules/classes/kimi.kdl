@@ -132,3 +132,10 @@ class "kimi" {
 		portable-reasoning #true
 	}
 }
+
+// Snapcompact frames: kimi-k3 chunked bench: `8on22-bw` scored F1 .915 @ $0.66
+// vs .813 on `8on16-bw` ($0.70); 1568 wins on chars/$ (the image processor
+// downscales past 1792px).
+class "kimi" {
+	snapcompact-variant "8on22-bw"
+}

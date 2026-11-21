@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, Message, Model, ModelSpec, Usage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveSnapcompactShape } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -364,6 +365,24 @@ describe("shape resolution", () => {
 		).toBe(8);
 	});
 
+	it("lets a model's configured shape replace its catalog rules' shape, frame size included", () => {
+		// Opus 5.5's catalog rules draw 11on16-bw at 1932px.
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		expect(resolveSnapcompactShape(opus)).toMatchObject({ variant: "11on16-bw", frameSize: 1932 });
+		const configured = snapcompact.resolveShape({ ...opus, snapcompactShape: { variant: "8on22-bw" } });
+		expect(configured.cellWidth).toBe(8);
+		expect(configured.cellHeight).toBe(22);
+		// The variant's own edge, not the frame size the catalog rule gave the model.
+		expect(configured.frameSize).toBe(1568);
+		expect(
+			snapcompact.resolveShape({ ...opus, snapcompactShape: { variant: "11on16-bw", frameSize: 1024 } }).frameSize,
+		).toBe(1024);
+		// An explicit setting still wins over the configured shape.
+		expect(
+			snapcompact.resolveShape({ ...opus, snapcompactShape: { variant: "8on22-bw" } }, "11on16-bw").cellWidth,
+		).toBe(11);
+	});
+
 	it("detects the ideal shape from the model id across gateways", () => {
 		// A high-res Claude served through an OpenAI-compatible gateway keeps
 		// its own geometry (tracked 8x13), its 1932px frame, and Anthropic's
@@ -385,6 +404,22 @@ describe("shape resolution", () => {
 		expect(claudeOnVertex.cellWidth).toBe(11);
 		expect(claudeOnVertex.frameSize).toBe(1932);
 		expect(claudeOnVertex.frameTokenEstimate).toBe(4761);
+
+		// A custom model gets the shape of the lineage the catalog classifies it
+		// as, even when its own id names none: an Opus 5.5 behind a gateway alias
+		// reads Opus's 1932px frames.
+		const customOpus = snapcompact.resolveShape(
+			buildModel({
+				...toModelSpec(getBundledModel("anthropic", "claude-opus-5-5")),
+				provider: "custom-gateway",
+				api: "openai-completions",
+				baseUrl: "https://gateway.example/v1",
+				id: "my-opus",
+				requestModelId: "claude-opus-5-5",
+			}),
+		);
+		expect(customOpus.cellWidth).toBe(11);
+		expect(customOpus.frameSize).toBe(1932);
 
 		// High-res frames are reserved for the lines that read them natively;
 		// older Claude lines keep the safe 1568px family default.
@@ -439,13 +474,17 @@ describe("shape resolution", () => {
 		const glmShape = snapcompact.resolveShape({ api: "openai-completions" }, "8on16-bw");
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "moonshotai/kimi-k2.6" })).toEqual(kimiShape);
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "z-ai/glm-4.6v" })).toEqual(glmShape);
+		// A GLM row the taxonomy leaves unclassified, on Bedrock's Anthropic-family wire: the residue
+		// rule keeps GLM's layout instead of the wire fallback's `11on16-bw`.
+		const bedrockGlm = getBundledModel("amazon-bedrock", "global.zai.glm-5.3");
+		expect(bedrockGlm.identity?.class).toBe("unknown");
+		expect(snapcompact.resolveShape(bedrockGlm)).toEqual(snapcompact.resolveShape(bedrockGlm, "8on16-bw"));
 
 		// Unmeasured model ids fall back to the API family default shape and,
 		// without a catalog image rule, to the wire family's billing.
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" })).toEqual(
 			snapcompact.SHAPES.openai,
 		);
-		expect(snapcompact.idealShapeVariant("qwen/qwen3-vl")).toBeUndefined();
 
 		// An explicit variant wins over identity detection, at the variant's
 		// own research frame size.

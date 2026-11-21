@@ -65,6 +65,30 @@ export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
  * babysitting. `gated` forbids subagents unless the user or a skill asks.
  */
 export const DELEGATION_BIASES = ["eager", "balanced", "restrained", "gated"] as const;
+/**
+ * Snapcompact frame variants a reader's `snapcompact-variant` rules may pick:
+ * the research names of the layouts `@oh-my-pi/snapcompact` renders (its
+ * `SHAPE_VARIANTS` keys).
+ */
+export const SNAPCOMPACT_VARIANTS = [
+	"8x8r-bw",
+	"8x8r-sent",
+	"8x8u-bw",
+	"8x8u-sent",
+	"6x6u-bw",
+	"6x6u-sent",
+	"5x8-bw",
+	"5x8-sent",
+	"6x12-dim",
+	"8x13-bw",
+	"8on16-bw",
+	"8on22-bw",
+	"11on16-bw",
+	"silver16-bw",
+	"doc-8on16-bw",
+	"doc-8on16-sent",
+	"doc-8on16-sent-dim",
+] as const;
 const THINKING_MODES = [
 	"effort",
 	"budget",
@@ -522,6 +546,22 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
 	/** Longest image edge the host passes to the model: it downscales larger images to fit first. */
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
+	/**
+	 * Frame variant snapcompact renders the reader's archive edges in: the
+	 * layout it reads best. Unassigned: `8on22-bw`.
+	 */
+	"snapcompact-variant": {
+		key: "snapcompactVariant",
+		set: "catalog",
+		shape: "scalar",
+		values: SNAPCOMPACT_VARIANTS,
+	},
+	/**
+	 * Frame edge, in pixels, for the reader's snapcompact frames when it reads
+	 * larger frames than its variant's own at no extra cost. Unassigned: the
+	 * variant's size. Frames never exceed `image-max-edge`.
+	 */
+	"snapcompact-frame-size": { key: "snapcompactFrameSize", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	/**
 	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps images within what the

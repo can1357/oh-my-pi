@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `snapcompact-variant` and `snapcompact-frame-size` catalog rules and `resolveSnapcompactShape()`, which now hold each model's snapcompact frame shape below a configured `snapcompactShape` ([#19880](https://github.com/can1357/oh-my-pi/pull/19880) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))

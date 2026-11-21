@@ -229,3 +229,10 @@ class "openai" {
 		}
 	}
 }
+
+// Snapcompact frames: 8x13 glyphs on a 22px pitch (`8on22-bw`) at 1568px. GPT
+// patch billing is area-proportional and uncapped (GPT-6.1 Sol reads 8px
+// glyphs to 3072px); 1568 still wins (2048: ΔF1 +.001, 8on16 -.032).
+class "openai" {
+	snapcompact-variant "8on22-bw"
+}

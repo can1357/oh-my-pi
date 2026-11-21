@@ -125,3 +125,8 @@ class "glm" {
 		}
 	}
 }
+
+// Snapcompact frames: glm-4.6v read `8on16-bw` at F1 .780 via direct vendor routing.
+class "glm" {
+	snapcompact-variant "8on16-bw"
+}
