@@ -457,7 +457,9 @@ describe("AgentSession model persistence", () => {
 
 	it("cycles from an implicit default pinned to a variant using refreshed model metadata", async () => {
 		const base = getBundledModel("openrouter", "z-ai/glm-4.7");
-		if (!base || base.contextWindow === null) throw new Error("Expected a context window for the OpenRouter base model");
+		if (!base || base.contextWindow === null) {
+			throw new Error("Expected a context window for the OpenRouter base model");
+		}
 		const selector = "openrouter/z-ai/glm-4.7:nitro@cerebras";
 		const initialModel = parseModelPattern(selector, [base]).model;
 		if (!initialModel) throw new Error(`Expected ${selector} to resolve from the base model`);
