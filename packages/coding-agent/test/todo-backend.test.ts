@@ -152,17 +152,28 @@ describe("todo backend", () => {
 	const textOf = (result: AgentToolResult): string =>
 		result.content.map(part => (part.type === "text" ? part.text : "")).join("");
 
-	/** The `todo` tool wired to `session` as omp wires it, without the wrappers that defer its first step. */
-	const directTodo = (session: AgentSession) =>
+	/**
+	 * The `todo` tool wired to `session` as omp wires it, without the wrappers that defer its first
+	 * step. `landed` runs between the backend's answer and the tool's next step.
+	 */
+	const directTodo = (session: AgentSession, landed?: () => Promise<unknown>) =>
 		new TodoTool({
 			cwd: dir.path(),
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			settings: session.settings,
+			getSessionId: () => session.sessionManager.getSessionId(),
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
-			applyTodoBackend: (change, signal, id) => session.applyTodoBackend(change, signal, id),
+			applyTodoBackend: (change, signal, id) => {
+				const answer = session.applyTodoBackend(change, signal, id);
+				if (!landed) return answer;
+				return answer?.then(async why => {
+					await landed();
+					return why;
+				});
+			},
 		});
 
 	const settled = (session: AgentSession) => session.extensionRunner?.todoBackendSettled();
@@ -763,6 +774,18 @@ describe("todo backend", () => {
 			expect((await append).isError).toBe(true);
 			expect(waiting.asked).toEqual([]);
 			expect(committed(forked.session)).toEqual(["a"]);
+		});
+
+		it("a session change between the backend's answer and the tool's commit fails the call", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+
+			// Both sessions' lists are empty: only the session id tells them apart.
+			const tool = directTodo(session, () => session.newSession());
+			const result = await tool.execute("call", { op: "init", items: ["a"] });
+
+			expect(result.isError).toBe(true);
+			expect(session.getTodoPhases()).toEqual([]);
 		});
 
 		it("a call waiting its turn is not put to a backend that was disabled or deselected meanwhile", async () => {
