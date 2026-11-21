@@ -97,15 +97,28 @@ export function isSilentAbort(message: Pick<AssistantMessage, "errorId" | "error
 	return AIError.is(message.errorId, AIError.Flag.SilentAbort) || message.errorMessage === SILENT_ABORT_MARKER;
 }
 
-/** Reason threaded through `AbortController.abort(reason)` when the user aborts
+/** Reason threaded through `AbortController.abort(reason)` when a person aborts
  *  the turn with Esc (see `AgentSession.abort`). The agent keeps it on the
- *  aborted assistant message's `errorMessage` so queued follow-ups/tool-result
+ *  aborted assistant message's `errorMessage` so queued follow-ups and tool
  *  placeholders can distinguish a deliberate interrupt from a bare lifecycle
- *  abort, but interactive renderers suppress this redundant transcript line. */
+ *  abort, but interactive renderers suppress this redundant transcript line.
+ *  Parent kills use {@link AGENT_KILL_LABEL}. */
 export const USER_INTERRUPT_LABEL = "Interrupted by user";
 
+/** Reason passed to `AgentSession.abort` when a parent kills a subagent through
+ *  `proc://<id>/kill`. It interrupts the turn just like
+ *  {@link USER_INTERRUPT_LABEL}, with distinct transcript text. */
+export const AGENT_KILL_LABEL = "Stopped by parent agent";
+
+/** An abort reason that marks a deliberate interrupt by a person or a parent agent. */
+export type InterruptReason = typeof USER_INTERRUPT_LABEL | typeof AGENT_KILL_LABEL;
+
+export function isInterruptReason(reason: unknown): reason is InterruptReason {
+	return reason === USER_INTERRUPT_LABEL || reason === AGENT_KILL_LABEL;
+}
+
 export function isUserInterruptAbort(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
-	return AIError.is(message.errorId, AIError.Flag.UserInterrupt) || message.errorMessage === USER_INTERRUPT_LABEL;
+	return AIError.is(message.errorId, AIError.Flag.UserInterrupt) || isInterruptReason(message.errorMessage);
 }
 
 export function shouldRenderAbortReason(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {

@@ -291,7 +291,7 @@ export type TeachEvent = { omp: "teach-step"; step: Omit<TeachStep, "screenshot"
  *   serves); then `relay` carries the extension's relay protocol messages (`ExtToRelayMessage` JSON).
  */
 export type ToNativeHost =
-	| { t: "open"; cwd: string }
+	| { t: "open"; cwd: string; extensionId: string }
 	| { t: "link"; extensionId: string }
 	| { t: "rpc"; line: string }
 	| { t: "relay"; line: string };
@@ -308,7 +308,7 @@ export type FromNativeHost =
 	| { t: "linked" }
 	| { t: "unlinked"; reason: string }
 	| { t: "relay"; line: string }
-	| { t: "chunk"; id: number; index: number; last: boolean; data: string }
+	| { t: "chunk"; relay?: true; id: number; index: number; last: boolean; data: string }
 	| { t: "exit"; code: number | null; stderr: string };
 
 // ---- worker modules ---------------------------------------------------------------------------
