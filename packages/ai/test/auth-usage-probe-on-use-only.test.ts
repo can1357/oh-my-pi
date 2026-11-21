@@ -2,7 +2,7 @@ import { describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
-import type { OAuthCredentials, OAuthProviderInterface } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 import { antigravityUsageProvider } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import * as fs from "node:fs/promises";
@@ -34,16 +34,10 @@ async function probeOnce(provider: string, accountId: string): Promise<string[]>
 			email: `${accountId}@example.com`,
 		};
 		await storage.credentials.set(provider as never, [{ type: "oauth", ...credential }]);
-		const oauthProvider: OAuthProviderInterface = {
-			id: provider,
-			name: provider,
-			login: async () => "",
-			refreshToken: async (current: OAuthCredentials) => {
-				minted.push(current.accountId ?? "unknown");
-				return { ...current, access: `access-new-${current.accountId}`, expires: Date.now() + HOUR_MS };
-			},
-		};
-		vi.spyOn(oauthUtils, "getOAuthProvider").mockImplementation(() => oauthProvider);
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (_provider, current) => {
+			minted.push(current.accountId ?? "unknown");
+			return { ...current, access: `access-new-${current.accountId}`, expires: Date.now() + HOUR_MS };
+		});
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(
 			new Response(JSON.stringify({}), { status: 200, headers: { "Content-Type": "application/json" } }),
 		);

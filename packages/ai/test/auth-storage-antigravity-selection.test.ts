@@ -16,7 +16,7 @@ import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
-import type { OAuthCredentials, OAuthProviderInterface } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { antigravityUsageProvider } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -496,20 +496,14 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 				{ type: "oauth", ...stale("acct-stale-c") },
 			]);
 			const minted: string[] = [];
-			const oauthProvider: OAuthProviderInterface = {
-				id: "google-antigravity",
-				name: "Google Antigravity",
-				login: async () => "",
-				refreshToken: async (credential: OAuthCredentials) => {
-					minted.push(credential.accountId ?? "unknown");
-					return {
-						...credential,
-						access: `access-new-${credential.accountId}`,
-						expires: Date.now() + HOUR_MS,
-					};
-				},
-			};
-			vi.spyOn(oauthUtils, "getOAuthProvider").mockImplementation(() => oauthProvider);
+			vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (_provider, credential) => {
+				minted.push(credential.accountId ?? "unknown");
+				return {
+					...credential,
+					access: `access-new-${credential.accountId}`,
+					expires: Date.now() + HOUR_MS,
+				};
+			});
 
 			const apiKey = await scopedStorage.keys.get("google-antigravity", "session-on-use-only", {
 				modelId: "gemini-3-flash",
