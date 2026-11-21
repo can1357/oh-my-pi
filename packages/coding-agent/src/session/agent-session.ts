@@ -555,7 +555,12 @@ const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
 import { StallGuard, stalledWaiters } from "./stalled-waiters";
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { AutoParallelCoordinator } from "./auto-parallel";
-import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import {
+	EAGER_TODO_PRELUDE_MESSAGE_TYPE,
+	POST_COMPACTION_TODO_MESSAGE_TYPE,
+	TodoTracker,
+	type TodoTrackerHost,
+} from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
@@ -4710,8 +4715,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		if (message.role === "hookMessage" || message.role === "custom") {
 			// One-run instructions must not return from persisted history: prewalk
-			// nudges are consumed once, and Vibe context is rebuilt only while active.
-			if (!isPrewalkPlanNudge(message) && message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE) {
+			// nudges are consumed once, Vibe context is rebuilt only while active,
+			// and post-compaction todo reassertions are rebuilt from canonical state.
+			if (
+				!isPrewalkPlanNudge(message) &&
+				message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE &&
+				message.customType !== POST_COMPACTION_TODO_MESSAGE_TYPE
+			) {
 				this.sessionManager.appendCustomMessageEntry(
 					message.customType,
 					message.content,

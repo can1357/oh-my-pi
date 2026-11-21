@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Automatic continuation after compaction now restores the todo list with task statuses when work remains, skipping retained native todo results that still show the list ([#16753](https://github.com/can1357/oh-my-pi/pull/16753) by [@Bensonluo](https://github.com/Bensonluo))
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))

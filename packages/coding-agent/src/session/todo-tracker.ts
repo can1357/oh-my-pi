@@ -1,12 +1,16 @@
 import type { Agent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import { getAnthropicCompactionPayload } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Message, Model, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import postCompactionTodoPrompt from "../prompts/system/post-compaction-todo.md" with { type: "text" };
 import { toolWireName } from "../tools/builtin-names";
-import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
+import { getLatestTodoPhasesFromEntries, getLatestTodoSnapshotIdentity, isTodoPhase } from "../tools/todo";
+import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
+import type { CompactionEntry, SessionEntry } from "../session/session-entries";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -41,6 +45,8 @@ const MUTATING_TOOLS: Record<string, true> = {
 const MID_RUN_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
 /** Message type of the hidden first-turn reminder {@link TodoTracker.createEagerTodoPrelude} builds. */
 export const EAGER_TODO_PRELUDE_MESSAGE_TYPE = "eager-todo-prelude";
+/** Message type of the reminder-only todo reassertion {@link TodoTracker.buildPostCompactionTodoReassertion} builds. */
+export const POST_COMPACTION_TODO_MESSAGE_TYPE = "post-compaction-todo";
 const MARKDOWN_PROMPT_PREFIX_RE = /^(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)*/;
 const PROMPT_LABEL_RE = /^(?:q(?:uestion)?|ask)\s*\d*\s*[:.)-]\s*/i;
 const INLINE_EMPHASIS_RE = /(\*\*|__)(.*?)\1/g;
@@ -80,6 +86,109 @@ const WRAPPED_EMPHASIS_RE = /^(\*\*\*|\*\*|\*|___|__|_)([\s\S]+)\1$/;
 interface PromptLine {
 	text: string;
 	hadPromptLabel: boolean;
+}
+
+interface IncompletePhase {
+	name: string;
+	tasks: { content: string; status: "pending" | "in_progress" }[];
+}
+
+function formatTodoList(incompleteByPhase: IncompletePhase[]): string {
+	return incompleteByPhase
+		.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
+		.join("\n");
+}
+
+/**
+ * Skip a retained todo tool result, but not a data-only user edit. Raw custom
+ * entries never reach the model; an adjacent message does not prove they do.
+ */
+function snapshotKeptAfterCompaction(
+	entries: SessionEntry[],
+	compaction: CompactionEntry,
+	snapshotEntryId: string,
+): boolean {
+	let boundaryIndex = -1;
+	let replayThroughIndex = -1;
+	let snapshotIndex = -1;
+	let compactionIndex = -1;
+	for (let index = 0; index < entries.length; index++) {
+		const id = entries[index]?.id;
+		if (id === compaction.firstKeptEntryId && boundaryIndex < 0) boundaryIndex = index;
+		if (id === compaction.providerReplayThroughEntryId && replayThroughIndex < 0) replayThroughIndex = index;
+		if (id === snapshotEntryId) snapshotIndex = index;
+		if (id === compaction.id) compactionIndex = index;
+	}
+	const snapshotEntry = entries[snapshotIndex];
+	if (snapshotEntry?.type !== "message" || snapshotEntry.message.role !== "toolResult") return false;
+	// Native todo operations render the list; Cursor's canonical sync results have
+	// no operation metadata and render only counts. Their details are not sent to
+	// the model, so retaining the result does not make the tasks visible. Legacy
+	// blocked statuses also need reassertion after canonical loading makes them pending.
+	const details = snapshotEntry.message.details;
+	if (
+		!isRecord(details) ||
+		typeof details.op !== "string" ||
+		!Array.isArray(details.phases) ||
+		!details.phases.every(isTodoPhase)
+	) {
+		return false;
+	}
+	// Pruning preserves details.phases for tracker rehydration but replaces the
+	// model-visible result with a placeholder, so it is not a visible todo list.
+	if (snapshotEntry.message.prunedAt !== undefined) return false;
+	// Every compaction lane emits the raw suffix after the compaction itself,
+	// independently of whether its kept/replay boundary can be resolved.
+	if (compactionIndex >= 0 && snapshotIndex > compactionIndex) return true;
+	// OpenAI replacement history does not guarantee the original todo toolResult
+	// survives (V2 retains selected user items plus opaque compaction state). Only
+	// the raw suffix after a prefix-replay boundary or entries after compaction
+	// prove the snapshot is still model-visible without a separate reassertion.
+	if (getOpenAiRemoteCompactionPayload(compaction) !== undefined) {
+		if (compaction.providerReplayThroughEntryId) {
+			return replayThroughIndex >= 0 && snapshotIndex > replayThroughIndex;
+		}
+		return false;
+	}
+	// Only an actual native payload makes an empty keep boundary's replay suffix
+	// visible; a bare replay id on a local summary does not (buildSessionContext).
+	if (
+		getAnthropicCompactionPayload(compaction.preserveData) !== undefined &&
+		compaction.firstKeptEntryId === "" &&
+		compaction.providerReplayThroughEntryId
+	) {
+		return replayThroughIndex >= 0 && snapshotIndex > replayThroughIndex;
+	}
+	return boundaryIndex >= 0 && snapshotIndex >= boundaryIndex;
+}
+
+/** Marker a task carries in the canonical render: pending stays bare, every other status is bracketed. */
+function formatCanonicalTaskMarker(task: TodoItem): string {
+	switch (task.status) {
+		case "pending":
+			return "";
+		case "in_progress":
+			return " [in_progress]";
+		case "completed":
+			return " [completed]";
+		case "abandoned":
+			return " [abandoned]";
+	}
+}
+
+/**
+ * Renders the full canonical todo list for the post-compaction reassertion: every
+ * real status keeps its marker (abandoned included, so deliberately dropped work is
+ * not presented as open), so the resumed turn has the complete state and does not
+ * re-`init` from a subset.
+ */
+function formatCanonicalTodoList(phases: TodoPhase[]): string {
+	return phases
+		.map(phase => {
+			const tasks = phase.tasks.map(task => `  - ${task.content}${formatCanonicalTaskMarker(task)}`).join("\n");
+			return `- ${phase.name}\n${tasks}`;
+		})
+		.join("\n");
 }
 
 /** Capabilities the todo tracker borrows from its owning session. */
@@ -238,11 +347,58 @@ export class TodoTracker {
 	/** Builds reminder-only eager preludes after compaction. */
 	buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
+		// A todo list that survived compaction is invisible to the eager prelude path
+		// (it bails when phases exist), so reassert it alongside the opt-in preludes.
+		const reassertion = this.buildPostCompactionTodoReassertion();
+		if (reassertion) nudges.push(reassertion);
 		const todo = this.createEagerTodoPrelude(undefined);
 		if (todo) nudges.push(todo.message);
 		const task = this.createEagerTaskPrelude(undefined);
 		if (task) nudges.push(task);
 		return nudges;
+	}
+
+	/**
+	 * Builds a reminder-only reassertion of the surviving todo list for the
+	 * post-compaction auto-continuation turn. Unlike {@link createEagerTodoPrelude}
+	 * (gated on `todo.eager`, and deliberately silent once a list exists), this
+	 * nudge fires exactly then: compaction summarized away the `todo` tool results
+	 * that created the list, so the resumed turn no longer sees it (#16738). It
+	 * skips retained native results that still render current task statuses and
+	 * renders the full list, including abandoned tasks. Data-only user edits are reasserted even if a
+	 * separate manual-edit reminder may also have survived. Snapshots saved
+	 * before the `blocked` status was removed already read those tasks back
+	 * as `pending`, so previously blocked work still counts as surviving.
+	 */
+	buildPostCompactionTodoReassertion(): AgentMessage | undefined {
+		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) {
+			return undefined;
+		}
+		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) {
+			return undefined;
+		}
+		const branch = this.#host.sessionManager.getBranch();
+		const compaction = getLatestCompactionEntry(branch);
+		const snapshot = getLatestTodoSnapshotIdentity(branch);
+		if (compaction && snapshot && snapshotKeptAfterCompaction(branch, compaction, snapshot.sourceEntryId)) {
+			return undefined;
+		}
+		const hasSurvivingWork = this.#phases.some(phase =>
+			phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
+		);
+		if (!hasSurvivingWork) return undefined;
+		const { toolRefs } = this.#buildEagerPreludeContext();
+		return {
+			role: "custom",
+			customType: POST_COMPACTION_TODO_MESSAGE_TYPE,
+			content: prompt.render(postCompactionTodoPrompt, {
+				toolRefs,
+				todoList: formatCanonicalTodoList(this.#phases),
+			}),
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
 	}
 
 	/** Checks a terminal assistant turn and schedules continuation for incomplete todos. */
@@ -275,17 +431,7 @@ export class TodoTracker {
 			this.#reminderAwaitingProgress = false;
 			return false;
 		}
-		const incompleteByPhase = phases
-			.map(phase => ({
-				name: phase.name,
-				tasks: phase.tasks
-					.filter(
-						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
-							task.status === "pending" || task.status === "in_progress",
-					)
-					.map(task => ({ content: task.content, status: task.status })),
-			}))
-			.filter(phase => phase.tasks.length > 0);
+		const incompleteByPhase = this.#incompleteByPhase();
 		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
 		if (incomplete.length === 0) {
 			this.#reminderCount = 0;
@@ -305,9 +451,7 @@ export class TodoTracker {
 			return false;
 		}
 		this.#reminderCount++;
-		const todoList = incompleteByPhase
-			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
-			.join("\n");
+		const todoList = formatTodoList(incompleteByPhase);
 		const reminder =
 			`<system-reminder>\n` +
 			`You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n` +
@@ -379,6 +523,21 @@ export class TodoTracker {
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
+	}
+
+	/** Returns phases that still have pending or in-progress tasks, with only those tasks kept. */
+	#incompleteByPhase(): IncompletePhase[] {
+		return this.#phases
+			.map(phase => ({
+				name: phase.name,
+				tasks: phase.tasks
+					.filter(
+						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
+							task.status === "pending" || task.status === "in_progress",
+					)
+					.map(task => ({ content: task.content, status: task.status })),
+			}))
+			.filter(phase => phase.tasks.length > 0);
 	}
 
 	#buildEagerPreludeContext(): { toolRefs: Record<string, string>; taskBatch: boolean } {
