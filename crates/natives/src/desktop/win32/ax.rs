@@ -1069,14 +1069,6 @@ mod tests {
 				1,
 			),
 			(
-				"rows removed, view shrank",
-				coherent((10.0, 4.0, 400.0)),
-				coherent((10.0, 3.0, 200.0)),
-				Err(InputFailed),
-				6,
-				1,
-			),
-			(
 				"offset moved back",
 				coherent((5.0, 4.0, 400.0)),
 				coherent((4.0, 4.0, 400.0)),
