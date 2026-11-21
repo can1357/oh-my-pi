@@ -548,7 +548,7 @@ describe("todo backend", () => {
 			session.getTodoPhases().flatMap(phase => phase.tasks.map(task => task.content));
 
 		it("an accepted todo call commits, and the backend is not told a second time, nor sent a list a client set again meanwhile", async () => {
-			for (const waitsFor of ["tracker", "other", "heir"]) {
+			for (const waitsFor of ["tracker", "native", "other", "heir"]) {
 				const backend = tracker("tracker", true);
 				const [heir, other] = [tracker(), tracker("other")];
 				const { session } = await open([backend.extension, heir.extension, other.extension], "tracker");
@@ -558,9 +558,9 @@ describe("todo backend", () => {
 				const deciding = backend.entered();
 				const call = todo(session, { op: "init", items: ["a", "b"] });
 				await deciding;
-				// The list omp already has: sent after the backend's answer, it would take the change back.
-				// Set while another backend was selected, or after the id went to the next extension, it
-				// is still theirs to get.
+				// The list omp already has: sent after the backend's answer, it would take the change back,
+				// also when `native` is selected by then. Set while another backend was selected, or after
+				// the id went to the next extension, it is still theirs to get.
 				if (waitsFor === "other") cfgTodoBackend.override(session.settings, "other");
 				const holder = session.extensionRunner?.getTodoBackends().get("tracker")?.extension;
 				if (waitsFor === "heir") session.extensionRunner?.setSuspendedExtensions(extension => extension === holder);
@@ -884,7 +884,7 @@ describe("todo backend", () => {
 				backend.applyHold = gate.promise;
 
 				const deciding = backend.entered();
-				// With a signal, as the agent loop calls the tool, the commit comes a step after the backend's answer.
+				// With a signal, as the agent loop calls the tool.
 				const retry = todo(session, { op: "append", phase: "Work", items: ["c"] }, new AbortController().signal);
 				await deciding;
 				if (edited) {
@@ -1055,11 +1055,13 @@ describe("todo backend", () => {
 		});
 
 		it("whatever lands as the backend accepts, the change is committed in its own session or not at all, and the backend ends with omp's list", async () => {
-			// `ends` is what omp may hold afterwards, `outcomes` how the call may end.
+			// `ends` is what omp may hold afterwards, `outcomes` how the call may end. `unsent` marks an
+			// edit the backend is not sent: once the call has committed, it keeps the call's list.
 			const cases: Array<{
 				land: (session: AgentSession, abort: AbortController) => unknown;
 				ends: string[][];
 				outcomes: string[];
+				unsent?: boolean;
 			}> = [
 				{ land: (_session, abort) => abort.abort(), ends: [["a"], ["a", "b"]], outcomes: ["aborted", "committed"] },
 				{ land: session => session.newSession(), ends: [[]], outcomes: ["committed", "failed"] },
@@ -1068,10 +1070,21 @@ describe("todo backend", () => {
 					ends: [["edit"]],
 					outcomes: ["committed", "failed"],
 				},
+				{
+					// An edit made while no backend was selected for a moment.
+					land: session => {
+						cfgTodoBackend.override(session.settings, "native");
+						session.setTodoPhases(list("edit"));
+						cfgTodoBackend.override(session.settings, "tracker");
+					},
+					ends: [["edit"]],
+					outcomes: ["committed", "failed"],
+					unsent: true,
+				},
 				// A client that sets the list omp already has.
 				{ land: session => session.setTodoPhases(list("a")), ends: [["a"], ["a", "b"]], outcomes: ["committed"] },
 			];
-			for (const { land, ends, outcomes } of cases) {
+			for (const { land, ends, outcomes, unsent } of cases) {
 				const seen = { ends: new Set<string>(), outcomes: new Set<string>() };
 				// It lands while the backend still decides (`steps` below zero), or some microtasks after
 				// its answer: before omp has read the answer, or after the commit. Both sides are seen
@@ -1102,10 +1115,14 @@ describe("todo backend", () => {
 					await Bun.sleep(0);
 					await settled(session);
 
-					const held = backend.calls.length > 1 ? tasksOf(backend).at(-1) : ["a", "b"];
-					expect({ steps, held }).toEqual({ steps, held: committed(session) });
-					if (outcome !== "committed") expect(committed(session)).not.toContain("b");
-					seen.ends.add(JSON.stringify(committed(session)));
+					const end = committed(session);
+					// Every list sent since the answer is omp's last: none takes the accepted change back.
+					const sent = tasksOf(backend).slice(1);
+					expect({ steps, sent }).toEqual({ steps, sent: sent.map(() => end) });
+					// Sent none, the backend holds the list it accepted.
+					if (sent.length === 0 && !(unsent && outcome === "committed")) expect(end).toEqual(["a", "b"]);
+					if (outcome !== "committed") expect(end).not.toContain("b");
+					seen.ends.add(JSON.stringify(end));
 					seen.outcomes.add(outcome);
 				}
 				expect([...seen.ends].sort()).toEqual(ends.map(end => JSON.stringify(end)).sort());

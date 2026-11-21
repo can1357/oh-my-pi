@@ -1839,9 +1839,10 @@ export class ExtensionRunner {
 			// one for a backend that is no longer selected). Not as the session closes, nor once it has
 			// changed: the backend keeps that change for a session omp is no longer in. Nor once it is no
 			// longer selected, or its extension no longer holds the id: omp has stopped mirroring to it.
+			const owns = () => this.getTodoBackends().get(backend)?.extension === extension;
 			const resync = () => {
 				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
-				if (this.getTodoBackends().get(backend)?.extension !== extension) return;
+				if (!owns()) return;
 				this.#todoStale = true;
 				this.#todoPending = { backend, sessionId, phases: current() };
 				this.#queueTodoBackendCall();
@@ -1886,8 +1887,11 @@ export class ExtensionRunner {
 					resync();
 					return TODO_LIST_CHANGED_ERROR;
 				}
-				// The commit's own list takes the place of one still waiting (a late acceptance's
-				// correction, or a client setting the list it had), so nothing older goes out after it.
+				// A list waiting for this backend (a late acceptance's correction, or a client setting
+				// the list it had) would go out after the commit and take the change back: with `native`
+				// selected meanwhile the commit sends none of its own in its place. Not when the id went
+				// to another extension meanwhile: the list is that one's to get.
+				if (this.#todoPending?.backend === backend && owns()) this.#todoPending = undefined;
 				commit();
 				committed = true;
 				// `next` is recorded as held only when this backend held `previous`. After a failed call,
