@@ -1884,8 +1884,10 @@ export interface TodoBackendDefinition {
 	 * omp does not commit (after omp stopped waiting: a timeout or an abort; or in time, when the
 	 * list changed meanwhile), omp's list is sent through `replace` once more, unless by then the
 	 * session has changed or is closing, or this backend is no longer selected or its extension no
-	 * longer holds the id. Edits the user or a client makes (`/todo`, RPC `set_todos`) and resets
-	 * cannot be refused; they only reach `replace`.
+	 * longer holds the id. A call still running when the session is disposed is given up after the
+	 * `session_shutdown` handler timeout, without an extension error: the `todo` call fails. Edits
+	 * the user or a client makes (`/todo`, RPC `set_todos`) and resets cannot be refused; they only
+	 * reach `replace`.
 	 */
 	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
 }
