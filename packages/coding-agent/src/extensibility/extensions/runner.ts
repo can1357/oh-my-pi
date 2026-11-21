@@ -680,8 +680,8 @@ export class ExtensionRunner {
 	 * an id can pass to another extension, which has not seen that list. `undefined` when omp does
 	 * not know what the backend holds, so the next list is sent whatever it holds: while a call
 	 * runs, after one failed, after an `apply` accepted a change to a list the backend did not hold,
-	 * and after a backend omp never sent a list refused a change to one that is not empty. `"none"`
-	 * until then or the first list sent, when an empty list has nothing to tell a backend.
+	 * and after one refused a change to a list that is not empty and that no backend was sent.
+	 * `"none"` otherwise while no backend has taken a list: an empty one has nothing to tell it.
 	 */
 	#todoSent: { list: TodoBackendList; definition: TodoBackendDefinition } | "none" | undefined = "none";
 	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
@@ -1850,8 +1850,8 @@ export class ExtensionRunner {
 						await definition.apply?.(event.change, ctx);
 					} catch (error) {
 						// A refusal is the backend's answer, not an extension error. Given in time, it
-						// leaves the backend holding what it held. One omp never sent a list holds nothing
-						// omp knows of, unless `previous` was empty: the next list goes out, empty or not.
+						// leaves the backend holding what it held. While no backend was sent a list, this one
+						// holds nothing omp knows of unless `previous` was empty: the next list goes out.
 						if (waiting && (sent !== "none" || change.previous.length === 0)) this.#todoSent = sent;
 						return error instanceof Error ? error.message : String(error);
 					}

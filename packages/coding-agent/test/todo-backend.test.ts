@@ -603,18 +603,23 @@ describe("todo backend", () => {
 				expect(late.calls.map(call => call.phases)).toEqual([next]);
 			}
 
-			// Selected from the start: the refused call was built on the empty list it holds, so the
-			// retry it accepts is not sent to it a second time.
-			const fresh = tracker("tracker", true);
-			const { session } = await open([fresh.extension], "tracker");
-			fresh.error = new Error("not now");
-			await todo(session, { op: "init", items: ["a"] });
-			fresh.error = undefined;
-			await todo(session, { op: "init", items: ["a"] });
-			await settled(session);
+			// Selected from the start: the refused call was built on the empty list any backend holds,
+			// so the retry is not sent a second time to the backend that accepts it, this one or another.
+			for (const retryWith of ["tracker", "other"]) {
+				const fresh = tracker("tracker", true);
+				const other = tracker("other", true);
+				const { session } = await open([fresh.extension, other.extension], "tracker");
+				fresh.error = new Error("not now");
+				const refused = await todo(session, { op: "init", items: ["a"] });
+				fresh.error = undefined;
+				cfgTodoBackend.override(session.settings, retryWith);
+				await todo(session, { op: "init", items: ["a"] });
+				await settled(session);
 
-			expect(committed(session)).toEqual(["a"]);
-			expect(tasksOf(fresh)).toEqual([]);
+				expect(refused.isError).toBe(true);
+				expect(committed(session)).toEqual(["a"]);
+				expect([tasksOf(fresh), tasksOf(other)]).toEqual([[], []]);
+			}
 		});
 
 		it("of the todo calls that fail with a backend, only one whose list changed leaves a reminder to retry it", async () => {
