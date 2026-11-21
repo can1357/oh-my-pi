@@ -224,7 +224,7 @@ the call's arguments in this order:
 3. For a property declared by the MCP schema but not listed in `required`, a
    value of `undefined`, an empty string, or an empty non-array object is
    omitted. Required properties, undeclared properties, `0`, `false`, `null`,
-   and arrays (including empty arrays) are preserved.
+   and arrays (including empty arrays) are preserved. By this point shared validation has already removed a `null` on an optional property whose schema does not accept `null`; a `null` the property's schema accepts (for example `type: ["string", "null"]`) reaches the server.
 4. String values are walked recursively through nested objects and arrays.
    Registered file-backed internal URLs (not only `local://`) are passed
    through `InternalUrlRouter.locate()` and become backing filesystem paths
