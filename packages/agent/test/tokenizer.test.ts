@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as path from "node:path";
-import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model, ProviderSessionState, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { adoptFactoryReplay } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -472,6 +472,26 @@ describe("chat-completions history estimate", () => {
 		expect(withoutReplay.countMessage(turn)).toBe(withoutReplay.countMessage({ ...turn, content: [toolCall] }));
 	});
 
+	test("bills surviving reasoning details but not opaque state in a mixed envelope", () => {
+		const model = completionsModel("mixed-envelope-test", {
+			replayReasoningContent: false,
+			reasoningOpaqueReplay: false,
+		});
+		const reasoningDetails = [{ type: "reasoning.text", text: THINKING, signature: "signed-text" }];
+		const turn = thinkingTurn(
+			model,
+			JSON.stringify({ reasoningOpaque: "opaque-state".repeat(300), reasoningDetails }),
+		);
+		const [assistant] = convertMessages(model, { messages: [turn] }, model.compat);
+		expect(assistant).toMatchObject({ reasoning_details: reasoningDetails });
+		expect(assistant).not.toHaveProperty("reasoning_opaque");
+
+		const tokenizer = new Tokenizer(model);
+		expect(tokenizer.countMessage(turn)).toBe(
+			tokenizer.countMessage(turn, floor) + tokenizer.countTokens(JSON.stringify(reasoningDetails)),
+		);
+	});
+
 	test.each([
 		{ view: "base", compatConfig: { reasoningOpaqueReplay: true } },
 		{ view: "whenThinking", compatConfig: { whenThinking: { reasoningOpaqueReplay: true } } },
@@ -490,6 +510,14 @@ describe("chat-completions history estimate", () => {
 		const expected = tokenizer.countMessage({ ...turn, content: [toolCall] }) + tokenizer.countTokens(THINKING);
 		expect(tokenizer.countMessage(turn)).toBe(expected);
 		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
+
+		const malformed = { ...toolCall, id: "" };
+		const invalidated = { ...turn, content: [...turn.content, malformed] };
+		const withoutEnvelope: AssistantMessage = {
+			...turn,
+			content: [{ type: "thinking", thinking: THINKING }, toolCall, malformed],
+		};
+		expect(tokenizer.countMessages([invalidated])).toBe(tokenizer.countMessage(withoutEnvelope));
 
 		const wrapper = model as Model<"openai-completions">;
 		const [replayed] = convertMessages(wrapper, { messages: [turn] }, compat);
@@ -518,6 +546,40 @@ describe("chat-completions history estimate", () => {
 		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
 	});
 
+	test.each([{ baseReplay: false }, { baseReplay: true }])(
+		"budgets a summary when the thinking view preserves its call ID (base replay: $baseReplay)",
+		({ baseReplay }) => {
+			const model = completionsModel("view-specific-call-test", {
+				replayReasoningContent: false,
+				reasoningOpaqueReplay: baseReplay,
+				usesOpenAIToolCallIdLimit: true,
+				whenThinking: { reasoningOpaqueReplay: true, usesOpenAIToolCallIdLimit: false },
+			});
+			const call = { ...toolCall, id: "x".repeat(41) };
+			const original = thinkingTurn(model, '{"reasoningOpaque":"prior-state","field":"reasoning_text"}');
+			const turn = { ...original, content: [...original.content.slice(0, -1), call] };
+			const [assistant] = convertMessages(model, { messages: [turn] }, model.compat.whenThinking!);
+			expect(assistant).toMatchObject({
+				tool_calls: [{ id: call.id }],
+				reasoning_opaque: "prior-state",
+				reasoning_text: THINKING,
+			});
+			const tokenizer = new Tokenizer(model);
+			const expected = tokenizer.countMessage({ ...turn, content: [call] }) + tokenizer.countTokens(THINKING);
+			expect(tokenizer.countMessage(turn)).toBe(expected);
+			expect(tokenizer.countMessages([turn], floor)).toBe(expected);
+		},
+	);
+
+	test.each([{ id: undefined }, { id: null }, { id: 123 }])("ignores malformed stored call IDs ($id)", ({ id }) => {
+		const original = thinkingTurn(copilotGemini, '{"reasoningOpaque":"prior-state","field":"reasoning_text"}');
+		const malformed = { ...toolCall, id: id as unknown as string };
+		const turn = { ...original, content: [...original.content, malformed] };
+		const tokenizer = new Tokenizer(copilotGemini);
+		const expected = tokenizer.countMessage({ ...turn, content: [toolCall, malformed] });
+		expect(tokenizer.countMessages([turn])).toBe(expected);
+	});
+
 	test("does not budget Copilot's summary when the wire drops a malformed call", () => {
 		const original = thinkingTurn(copilotGemini, '{"reasoningOpaque":"prior-state","field":"reasoning_text"}');
 		const nameless = { ...toolCall, id: "call_bad", name: "", arguments: {} };
@@ -532,6 +594,99 @@ describe("chat-completions history estimate", () => {
 		expect(tokenizer.countMessage(turn, floor)).toBe(
 			tokenizer.countMessage({ ...turn, content: [nameless, toolCall] }, floor),
 		);
+	});
+
+	test("budgets only the first Copilot summary when later turns reuse original and generated call IDs", () => {
+		const first = thinkingTurn(copilotGemini, '{"reasoningOpaque":"first-state","field":"reasoning_text"}');
+		const second = thinkingTurn(copilotGemini, '{"reasoningOpaque":"second-state","field":"reasoning_text"}');
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "file contents" }],
+			isError: false,
+			timestamp: 2,
+		};
+		const generatedId = `${toolCall.id}_dup1`;
+		const thirdCall = { ...toolCall, id: generatedId };
+		const third = { ...second, content: [...second.content.slice(0, -1), thirdCall] };
+		const messages = [
+			first,
+			result,
+			second,
+			{ ...result, timestamp: 3 },
+			third,
+			{ ...result, toolCallId: generatedId, timestamp: 4 },
+		];
+		const replayed = convertMessages(copilotGemini, { messages }, copilotGemini.compat).filter(
+			message => message.role === "assistant",
+		);
+		expect(replayed).toHaveLength(3);
+		expect(replayed[0]).toMatchObject({ reasoning_opaque: "first-state", reasoning_text: THINKING });
+		expect(replayed[1]).toMatchObject({ tool_calls: [{ id: generatedId }] });
+		expect(replayed[2]).toMatchObject({ tool_calls: [{ id: `${generatedId}_dup1` }] });
+		for (const rewritten of replayed.slice(1)) {
+			expect(rewritten).not.toHaveProperty("reasoning_opaque");
+			expect(rewritten).not.toHaveProperty("reasoning_text");
+		}
+
+		const tokenizer = new Tokenizer(copilotGemini);
+		for (const options of [undefined, floor]) {
+			const standalone = tokenizer.countMessage(second, options);
+			const withoutSummary = tokenizer.countMessage({ ...second, content: [toolCall] }, options);
+			expect(standalone).toBe(withoutSummary + tokenizer.countTokens(THINKING));
+			expect(tokenizer.countMessages(messages, options)).toBe(
+				tokenizer.countMessage(first, options) + 3 * tokenizer.countMessage(result, options) + 2 * withoutSummary,
+			);
+			expect(tokenizer.countMessage(second, options)).toBe(standalone);
+		}
+	});
+
+	test.each([
+		{
+			name: "OpenAI truncation",
+			flags: { usesOpenAIToolCallIdLimit: true },
+			id: "x".repeat(41),
+			wireId: "x".repeat(40),
+		},
+		{ name: "Mistral normalization", flags: { requiresMistralToolIds: true }, id: "call_1", wireId: "call1ABCD" },
+	])("does not budget an opaque summary after $name", ({ flags, id, wireId }) => {
+		const model = completionsModel("rewritten-call-test", {
+			replayReasoningContent: false,
+			reasoningOpaqueReplay: true,
+			...flags,
+		});
+		const call = { ...toolCall, id };
+		const original = thinkingTurn(model, '{"reasoningOpaque":"prior-state","field":"reasoning_text"}');
+		const turn = { ...original, content: [...original.content.slice(0, -1), call] };
+		const [assistant] = convertMessages(model, { messages: [turn] }, model.compat);
+		expect(assistant).toMatchObject({ role: "assistant", tool_calls: [{ id: wireId }] });
+		expect(assistant).not.toHaveProperty("reasoning_opaque");
+		expect(assistant).not.toHaveProperty("reasoning_text");
+
+		const tokenizer = new Tokenizer(model);
+		expect(
+			tokenizer.countsAlike({
+				...model,
+				compat: { ...model.compat, requiresMistralToolIds: false, usesOpenAIToolCallIdLimit: false },
+			}),
+		).toBe(false);
+		for (const options of [undefined, floor]) {
+			const withoutSummary = tokenizer.countMessage({ ...turn, content: [call] }, options);
+			expect(tokenizer.countMessage(turn, options)).toBe(withoutSummary);
+			expect(tokenizer.countMessages([turn], options)).toBe(withoutSummary);
+		}
+	});
+
+	test("does not budget an opaque summary when a single turn repeats its call ID", () => {
+		const original = thinkingTurn(copilotGemini, '{"reasoningOpaque":"prior-state","field":"reasoning_text"}');
+		const turn = { ...original, content: [...original.content, toolCall] };
+		const tokenizer = new Tokenizer(copilotGemini);
+		for (const options of [undefined, floor]) {
+			const withoutSummary = tokenizer.countMessage({ ...turn, content: [toolCall, toolCall] }, options);
+			expect(tokenizer.countMessage(turn, options)).toBe(withoutSummary);
+			expect(tokenizer.countMessages([turn], options)).toBe(withoutSummary);
+		}
 	});
 
 	test.each([

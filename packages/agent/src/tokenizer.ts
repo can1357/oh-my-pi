@@ -4,8 +4,11 @@ import { isFactoryDroidGeminiWire, keepsFactoryGeminiReasoning } from "@oh-my-pi
 import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
 import {
 	completionsDropsOwnThinking,
+	completionsRewritesToolCallId,
 	getReasoningOpaqueReplay,
 	isLiteLLMThinkingSignature,
+	normalizeCompletionsToolCallId,
+	OPENAI_TOOL_CALL_ID_MAX_LENGTH,
 } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import {
 	getNativeResponsesHistoryItems,
@@ -13,9 +16,12 @@ import {
 	replaysNativeResponsesTurn,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
+	appendDuplicateSuffix,
 	dropsForeignReasoningPayload,
 	hasMalformedToolCalls,
+	isMalformedToolCallName,
 	isSameModelTurn,
+	MAX_TOOL_CALL_ID_LENGTH,
 	shouldDropTruncatedThinkingOnlyAssistant,
 	toolCallNameLimits,
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -125,24 +131,90 @@ function reasoningReplayReader(model: TokenizerModel | null | undefined): ModelI
 	return filtersReasoningHistory(model) ? undefined : modelIdentity(model);
 }
 
+interface OpaqueReplayIdPolicy {
+	requiresMistralToolIds: boolean;
+	usesOpenAIToolCallIdLimit: boolean;
+}
+
+type OpaqueReplayCompat = Partial<OpaqueReplayIdPolicy> & { reasoningOpaqueReplay?: boolean };
+
 /** Unknown request effort: reserve summary tokens if either reachable compat view replays them. */
 function opaqueReplayToolNameLimits(model: TokenizerModel | null | undefined) {
 	if (!model?.api || !model.id || !model.provider) return undefined;
 	const compat = (model.compat ?? model.compatConfig) as
-		| { reasoningOpaqueReplay?: boolean; whenThinking?: { reasoningOpaqueReplay?: boolean } }
+		| (OpaqueReplayCompat & { whenThinking?: OpaqueReplayCompat })
 		| undefined;
-	if (!compat?.reasoningOpaqueReplay && !(model.reasoning && compat?.whenThinking?.reasoningOpaqueReplay)) {
-		return undefined;
+	if (!compat) return undefined;
+	const thinking = model.reasoning ? compat.whenThinking : undefined;
+	const replayBase = compat.reasoningOpaqueReplay === true;
+	const replayThinking = thinking !== undefined && (thinking.reasoningOpaqueReplay ?? replayBase);
+	if (!replayBase && !replayThinking) return undefined;
+	const base = {
+		requiresMistralToolIds: compat.requiresMistralToolIds === true,
+		usesOpenAIToolCallIdLimit: compat.usesOpenAIToolCallIdLimit === true,
+	};
+	const views: OpaqueReplayIdPolicy[] = replayBase ? [base] : [];
+	if (replayThinking) {
+		const requiresMistralToolIds = thinking.requiresMistralToolIds ?? base.requiresMistralToolIds;
+		const usesOpenAIToolCallIdLimit = thinking.usesOpenAIToolCallIdLimit ?? base.usesOpenAIToolCallIdLimit;
+		if (
+			!replayBase ||
+			requiresMistralToolIds !== base.requiresMistralToolIds ||
+			usesOpenAIToolCallIdLimit !== base.usesOpenAIToolCallIdLimit
+		) {
+			views.push({ requiresMistralToolIds, usesOpenAIToolCallIdLimit });
+		}
 	}
-	return toolCallNameLimits({
-		api: model.api,
-		id: model.id,
-		provider: model.provider,
-		providerType: model.providerType,
-		requestModelId: model.requestModelId,
-		reasoning: model.reasoning,
-		thinking: model.thinking,
-	});
+	return {
+		...toolCallNameLimits({
+			api: model.api,
+			id: model.id,
+			provider: model.provider,
+			providerType: model.providerType,
+			requestModelId: model.requestModelId,
+			reasoning: model.reasoning,
+			thinking: model.thinking,
+		}),
+		views,
+	};
+}
+
+/** Record an ID and any replacement allocated by Chat Completions history dedup. */
+function recordOpaqueReplayCallId(seen: Map<string, number>, id: string, view: OpaqueReplayIdPolicy): boolean {
+	let next = seen.get(id);
+	if (next === undefined) {
+		seen.set(id, 1);
+		return false;
+	}
+	const prefix = view.requiresMistralToolIds ? "dup" : "_dup";
+	const maxLength = view.requiresMistralToolIds
+		? 9
+		: view.usesOpenAIToolCallIdLimit
+			? OPENAI_TOOL_CALL_ID_MAX_LENGTH
+			: MAX_TOOL_CALL_ID_LENGTH;
+	let replacement: string;
+	do {
+		replacement = appendDuplicateSuffix(id, `${prefix}${next++}`, maxLength);
+	} while (seen.has(replacement));
+	seen.set(id, next);
+	seen.set(replacement, 1);
+	return true;
+}
+
+/** In isolation, two calls with the same provider-issued ID still invalidate opaque replay. */
+function hasDuplicateToolCallIds(turn: AssistantMessage): boolean {
+	let first: string | undefined;
+	let seen: Set<string> | undefined;
+	for (const block of turn.content) {
+		if (block.type !== "toolCall") continue;
+		if (first === undefined) {
+			first = block.id;
+			continue;
+		}
+		if (block.id === first || seen?.has(block.id)) return true;
+		(seen ??= new Set()).add(block.id);
+	}
+	return false;
 }
 
 /** Identity of the reader whose replayed reasoning a {@link Tokenizer} counts; equal keys count it alike. */
@@ -432,10 +504,41 @@ export class Tokenizer {
 		return this.#measureMessage(message, options?.excludeEncryptedReasoning === true, true);
 	}
 
-	/** Sum of {@link countMessage} over `messages`. */
+	/** Sum of message counts, accounting for opaque replay invalidated by earlier calls. */
 	countMessages(messages: readonly AgentMessage[], options?: MessageCountOptions): number {
 		let total = 0;
-		for (const message of messages) total += this.countMessage(message, options);
+		const opaqueReplayLimits = this.#opaqueReplayLimits;
+		const reader = this.#reasoningReader;
+		if (!opaqueReplayLimits || !reader) {
+			for (const message of messages) total += this.countMessage(message, options);
+			return total;
+		}
+
+		let seen: Map<string, number>[] | undefined;
+		const floored = options?.excludeEncryptedReasoning === true;
+		const { allowedName, maxLength, views } = opaqueReplayLimits;
+		for (const message of messages) {
+			// Bit i marks dedup in view i; another view may still replay the summary.
+			let rewrittenViews = 0;
+			if (message.role === "assistant") {
+				const sameModel = isSameModelTurn(message, reader);
+				for (const block of message.content) {
+					if (block.type !== "toolCall" || typeof block.id !== "string" || !block.id.trim()) continue;
+					if (isMalformedToolCallName(block.name, allowedName, maxLength)) continue;
+					seen ??= views.map(() => new Map<string, number>());
+					for (let index = 0; index < views.length; index++) {
+						const view = views[index]!;
+						// Foreign composite IDs have become plain IDs before dedup.
+						// The reader's own pipe-bearing IDs remain opaque literal keys.
+						const id = sameModel ? block.id : normalizeCompletionsToolCallId(block.id, view, false);
+						if (recordOpaqueReplayCallId(seen[index]!, id, view) && sameModel) rewrittenViews |= 1 << index;
+					}
+				}
+			}
+			total += rewrittenViews
+				? this.#measureMessage(message, floored, false, rewrittenViews)
+				: this.countMessage(message, options);
+		}
 		return total;
 	}
 
@@ -498,7 +601,12 @@ export class Tokenizer {
 		return total;
 	}
 
-	#measureMessage(message: AgentMessage, excludeEncryptedReasoning: boolean, latestTurn: boolean): number {
+	#measureMessage(
+		message: AgentMessage,
+		excludeEncryptedReasoning: boolean,
+		latestTurn: boolean,
+		rewrittenViews = 0,
+	): number {
 		const fragments: string[] = [];
 		let extra = 0;
 		// Declaration-merged app roles (the coding-agent's bashExecution) are
@@ -569,7 +677,16 @@ export class Tokenizer {
 					!opaqueReplayLimits || abandonedToolUse || shouldDropTruncatedThinkingOnlyAssistant(message)
 						? undefined
 						: getReasoningOpaqueReplay(message, this.#reasoningReader, true, untrustedIndex);
-				if (opaqueReplay && opaqueReplayLimits && hasMalformedToolCalls(message, opaqueReplayLimits)) {
+				if (
+					opaqueReplay &&
+					opaqueReplayLimits &&
+					(hasMalformedToolCalls(message, opaqueReplayLimits) ||
+						hasDuplicateToolCallIds(message) ||
+						opaqueReplayLimits.views.every(
+							(view, index) =>
+								(rewrittenViews & (1 << index)) !== 0 || completionsRewritesToolCallId(message, view),
+						))
+				) {
 					opaqueReplay = undefined;
 				}
 				if (opaqueReplay?.text) fragments.push(opaqueReplay.text);
@@ -612,9 +729,7 @@ export class Tokenizer {
 						// The summary is sent as one field, including later source-marked
 						// blocks. Count it once and leave out the opaque metadata.
 						const trustedOpaqueBlock = opaqueReplay !== undefined && index !== untrustedIndex;
-						const opaqueSignature = trustedOpaqueBlock
-							? parseReasoningDetailsSignature(block.thinkingSignature)
-							: undefined;
+						const opaqueSignature = parseReasoningDetailsSignature(block.thinkingSignature);
 						if (
 							trustedOpaqueBlock &&
 							(block.thinkingSignature === "reasoning_text" || opaqueSignature?.field === "reasoning_text")
@@ -643,19 +758,25 @@ export class Tokenizer {
 						// A reader billing at `output` size (Claude) charges the reasoning,
 						// priced below, not these bytes. The compaction floor excludes it
 						// (its local byte size diverges from provider billing).
+						const opaqueOnlySignature =
+							opaqueSignature?.reasoningOpaque !== undefined && !opaqueSignature.reasoningDetails;
 						if (
 							block.thinkingSignature &&
-							!opaqueSignature?.reasoningOpaque &&
+							!opaqueOnlySignature &&
 							!excludeEncryptedReasoning &&
 							signaturesPriced &&
 							typeof replayedReasoning !== "number" &&
 							this.#receivesReasoningPayload(message)
 						) {
-							fragments.push(block.thinkingSignature);
+							fragments.push(
+								opaqueSignature?.reasoningOpaque !== undefined && opaqueSignature.reasoningDetails
+									? (stringifyJson(opaqueSignature.reasoningDetails) ?? block.thinkingSignature)
+									: block.thinkingSignature,
+							);
 						}
 						if (
 							block.thinkingSignature &&
-							!opaqueSignature?.reasoningOpaque &&
+							!opaqueOnlySignature &&
 							!abandonedToolUse &&
 							index !== untrustedIndex
 						) {
@@ -779,6 +900,15 @@ export class Tokenizer {
 			completionsDropsOwnThinking(model) === this.#dropsCompletionsThinking &&
 			opaqueReplayLimits?.allowedName === this.#opaqueReplayLimits?.allowedName &&
 			opaqueReplayLimits?.maxLength === this.#opaqueReplayLimits?.maxLength &&
+			opaqueReplayLimits?.views.length === this.#opaqueReplayLimits?.views.length &&
+			(opaqueReplayLimits?.views.every((view, index) => {
+				const current = this.#opaqueReplayLimits?.views[index];
+				return (
+					view.requiresMistralToolIds === current?.requiresMistralToolIds &&
+					view.usesOpenAIToolCallIdLimit === current?.usesOpenAIToolCallIdLimit
+				);
+			}) ??
+				true) &&
 			(options?.nativeHistoryReplay ?? true) === this.nativeHistoryReplay
 		);
 	}

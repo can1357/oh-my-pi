@@ -392,8 +392,8 @@ export function isMalformedToolCallName(
 	return typeof name !== "string" || name.length > maxLength || !allowedName.test(name);
 }
 
-function isMalformedToolCallId(id: string | undefined): boolean {
-	return !id || id.trim().length === 0;
+function isMalformedToolCallId(id: unknown): boolean {
+	return typeof id !== "string" || id.trim().length === 0;
 }
 
 function isMalformedToolCall(block: { id: string; name: string }, allowedName: RegExp, maxLength: number): boolean {
