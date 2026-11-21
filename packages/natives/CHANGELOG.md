@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started
+- Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.1.0] - 2026-11-21
 
