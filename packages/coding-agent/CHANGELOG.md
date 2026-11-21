@@ -99,7 +99,7 @@
 - Fixed isolated task subagents in bare Git repositories by refusing early and identifying available work trees instead of starting without a usable work tree.
 - Fixed Nix browser-relay builds to fetch all dependencies without falling back to the npm registry.
 - Fixed extension, plugin, custom-tool, hook, command, and share-script loading for paths containing `?`, with a useful error identifying the path and remedy.
-- `/mcp enable` and `/mcp disable` now switch a discovered MCP server without copying it into your config, and a server held on or off by `disabledServers` or `enabledServers` actually changes ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- `/mcp enable` and `/mcp disable` now switch a discovered MCP server without copying it into your config, and a server held on or off by `disabledServers` or `enabledServers` actually changes ([#20079](https://github.com/can1357/oh-my-pi/pull/20079) by [@eggpeat](https://github.com/eggpeat))
 - In Tern, answers keep their turn footer and its Copy button after a resume, a compaction or any other transcript rebuild; previously every answer drawn before the rebuild lost them
 - `--continue` (and `autoResume`) no longer resumes a session another running omp is writing, which duplicated its conversation into a new file on the first message; it starts a new session as plain `omp` does
 - `/handoff` now shows its progress like `/compact` while it writes the summary: a working row with a spinner and timer while the agent is idle, and a row above it while a turn runs. Previously only a one-off status line said it had started
