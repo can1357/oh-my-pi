@@ -15,12 +15,15 @@ import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
 import {
+	claudeCodeToolNote,
 	findStaleSkillStandIn,
 	getActiveSkills,
 	isSkillSuperseded,
+	parseSkillBody,
 	rediscoverSkills,
 	type Skill,
 	type SkillRediscoveryHost,
+	withClaudeCodeToolNote,
 } from "../extensibility/skills";
 import { MCPManager, type MCPManagerApi } from "../mcp/manager";
 import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
@@ -57,6 +60,8 @@ const UNKNOWN_SKILL_MCP_WAIT_MS = 5_000;
 interface SkillTarget {
 	skill: Skill;
 	path: string;
+	/** Whether the URL addresses the skill's own instruction file, rather than a path inside it. */
+	instructions: boolean;
 }
 
 /** The loaded skill a skill:// URL names, and the URL path inside that skill. */
@@ -107,8 +112,9 @@ async function skillTargetPath(
 	contain = false,
 ): Promise<SkillTarget> {
 	let resolvedPath: string;
+	const resolvedSkillFile = path.resolve(skill.filePath);
 	if (!urlPath || urlPath === "/") {
-		resolvedPath = path.resolve(directory ? skill.baseDir : skill.filePath);
+		resolvedPath = directory ? path.resolve(skill.baseDir) : resolvedSkillFile;
 	} else {
 		const relativePath = decodeURIComponent(urlPath.slice(1));
 		validateRelativePath(relativePath, "skill");
@@ -118,10 +124,11 @@ async function skillTargetPath(
 			throw new Error("Path traversal is not allowed");
 		}
 	}
+	const instructions = !directory && resolvedPath === resolvedSkillFile;
 	// Agent Plugin skills (§4.1): every target, including the bare instruction
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.
-	if (!skill.containRoot && !contain) return { skill, path: resolvedPath };
+	if (!skill.containRoot && !contain) return { skill, path: resolvedPath, instructions };
 	const containRoot = skill.containRoot ?? (await fs.realpath(skill.baseDir));
 	// Local skill roots may themselves be links. Rebase their lexical children
 	// onto the real root before the shared helper checks descendant links.
@@ -131,7 +138,7 @@ async function skillTargetPath(
 	const escape = `skill:// path resolves outside the ${skill.containRoot ? "plugin" : "skill"} root: ${url.href}`;
 	const contained = await resolveContainedPath(containRoot, containmentPath);
 	if (contained.status === "outside") throw new UrlContainmentError(escape);
-	if (contained.status === "ok") return { skill, path: contained.realPath };
+	if (contained.status === "ok") return { skill, path: contained.realPath, instructions };
 	if (create) {
 		try {
 			await ensureCreatableWithinRoot(containmentPath, containRoot, "skill", url.href);
@@ -140,7 +147,7 @@ async function skillTargetPath(
 			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
 		}
 	}
-	return { skill, path: resolvedPath };
+	return { skill, path: resolvedPath, instructions };
 }
 
 async function statIfExists(filePath: string): Promise<fsTypes.Stats | null> {
@@ -181,6 +188,10 @@ function contextRediscoveryHost(skills: readonly Skill[], context: ResolveContex
 interface LocatedSkillTarget {
 	path: string;
 	stats: fsTypes.Stats | null;
+	/** The skill the target belongs to, for delivery-time rewriting of its own instruction file. */
+	skill: Skill;
+	/** Whether the URL addresses the skill's own instruction file (rather than a file inside it). */
+	instructions: boolean;
 }
 
 /**
@@ -256,7 +267,13 @@ async function locateSkillTarget(
 				contain,
 			);
 			const heldStats = await statIfExists(heldTarget.path);
-			if (!(await isStaleTarget(heldTarget, heldStats, host))) return { path: heldTarget.path, stats: heldStats };
+			if (!(await isStaleTarget(heldTarget, heldStats, host)))
+				return {
+					path: heldTarget.path,
+					stats: heldStats,
+					skill: heldTarget.skill,
+					instructions: heldTarget.instructions,
+				};
 		}
 		const rediscovered = findStaleSkillStandIn(named.skill, await rediscoverSkills(host));
 		// Not an UnknownSkillError: when an upgrade dropped the skill, another plugin's colliding skill
@@ -266,12 +283,20 @@ async function locateSkillTarget(
 		target = await skillTargetPath(url, { skill: rediscovered, urlPath: named.urlPath }, directory, create, contain);
 		stats = await statIfExists(target.path);
 	}
-	return { path: target.path, stats };
+	return { path: target.path, stats, skill: target.skill, instructions: target.instructions };
 }
 
-/** The file or directory resource at a located target; a target removed since it was located rejects with ENOENT. */
-async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Promise<InternalResource> {
-	const { path: targetPath, stats } = target;
+/**
+ * The file or directory resource at a located target; a target removed since it was located rejects
+ * with ENOENT. A skill's own instruction file is delivered through the same Claude-dialect rewriting
+ * as `loadSkillPromptBody`, so every path that reads a skill body agrees.
+ */
+async function readSkillTarget(
+	url: InternalUrl,
+	target: LocatedSkillTarget,
+	verbatim = false,
+): Promise<InternalResource> {
+	const { path: targetPath, stats, skill, instructions } = target;
 	if (!stats) throw new Error(`File not found: ${targetPath}`);
 
 	if (stats.isDirectory()) {
@@ -281,7 +306,10 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 		throw new Error(`skill:// URL must resolve to a file or directory: ${url.href}`);
 	}
 
-	const content = await Bun.file(targetPath).text();
+	const raw = await Bun.file(targetPath).text();
+	// Only the skill's own instruction body is Claude-dialect prose; frontmatter and referenced assets are not.
+	const content =
+		instructions && !verbatim ? await withClaudeCodeToolNote(skill, raw, parseSkillBody(raw, targetPath)) : raw;
 	return {
 		url: url.href,
 		content,
@@ -290,6 +318,31 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 		sourcePath: targetPath,
 		notes: [],
 	};
+}
+
+/**
+ * The Claude Code tool note for `url` when it names a Claude-dialect skill's own instruction file
+ * ({@link claudeCodeToolNote}); undefined for any other target. `read` locates skill files and reads
+ * them through the filesystem pipeline, bypassing {@link readSkillTarget}, so it passes the exact
+ * content snapshot it read without reopening the file on disk.
+ */
+export async function skillUrlClaudeCodeToolNote(
+	url: InternalUrl,
+	locatedPath: string,
+	rawContent: string,
+	context?: ResolveContext,
+): Promise<string | undefined> {
+	const skills = context?.skills ?? getActiveSkills();
+	const host = contextRediscoveryHost(skills, context);
+	const named = findKnownUrlSkill(url, host.skills) ?? findKnownUrlSkill(url, skills);
+	if (!named) return undefined;
+	const resolvedSkillFile = path.resolve(named.skill.filePath);
+	const isInstructionUrl =
+		!named.urlPath ||
+		named.urlPath === "/" ||
+		path.resolve(named.skill.baseDir, decodeURIComponent(named.urlPath.slice(1))) === resolvedSkillFile;
+	if (!isInstructionUrl) return undefined;
+	return claudeCodeToolNote(named.skill, parseSkillBody(rawContent, locatedPath));
 }
 
 /**
@@ -347,14 +400,15 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			return { ...resource, unbounded: false };
 		}
 
+		const verbatim = context?.verbatim === true;
 		try {
-			return await readSkillTarget(url, target);
+			return await readSkillTarget(url, target, verbatim);
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 			// The target was removed after it was located: an upgrade published the plugin's new
 			// version and deleted the old directory between the check and the read. Locate it again,
 			// which now finds the old skill gone and rediscovers it.
-			return readSkillTarget(url, await locateSkillTarget(url, context, false));
+			return readSkillTarget(url, await locateSkillTarget(url, context, false), verbatim);
 		}
 	}
 

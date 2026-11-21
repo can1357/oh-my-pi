@@ -304,6 +304,11 @@ export interface ResolveContext {
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
 	/**
+	 * Skip delivery-time prose annotations (such as Claude Code tool notes on
+	 * `skill://` files) so `:raw` and ranged reads stay verbatim on protocol fallback.
+	 */
+	verbatim?: boolean;
+	/**
 	 * Whether experimental context-management resources are enabled for this
 	 * caller. This is passed explicitly so resource resolution cannot infer a
 	 * feature gate from process-global settings.
