@@ -177,7 +177,7 @@ import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } fr
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, TodoBackendChange } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
@@ -624,8 +624,11 @@ import {
 	cfgRatchetEnabled,
 	cfgDevAutoqa,
 	cfgDevAutoqaConsent,
+	cfgTodoBackend,
 	cfgTodoEnabled,
+	NATIVE_TODO_BACKEND,
 	cfgToolsApproval,
+	TODO_LIST_CHANGED_ERROR,
 } from "../tools/settings";
 import { cfgTtsrJudge } from "../export/ttsr-settings";
 
@@ -1182,6 +1185,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
+	/**
+	 * `todo` calls of this run whose failure is not a payload to fix and retry: the backend refused
+	 * or did not answer in time, the session was closing, or the call was aborted while it waited
+	 * for the backend. A call made from an eval cell has no result that takes its id out.
+	 */
+	#todoTurnedDown = new Set<string>();
 	/** Rows kept out of context that arrived while a run was live; drawn and saved once it ends or the next prompt starts. */
 	#pendingExcludedRows: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
@@ -2375,6 +2384,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			phasesChanged: () => this.#mirrorTodoPhases(),
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#autoParallel = new AutoParallelCoordinator({
@@ -3185,6 +3195,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#maintenance.renderArchiveForModel(context.messages),
 			),
 		);
+		// A session that moves to another file gets a new id for the same list: no list write tells the todo backend.
+		this.addDisposer(this.sessionManager.onPersistenceNotice(() => this.#mirrorTodoPhases()));
 		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
 		// The gate is registered only while a cap is set: any before-model-call gate also turns a user abort
 		// before the next request into a clean stop, which leaves no interrupted turn for `/retry`.
@@ -4891,6 +4903,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
 			this.#activeAgentPromptGeneration = eventPromptGeneration;
+			this.#todoTurnedDown.clear();
 			// A run resumed from an unpaired assistant tail (retry of a failed tool
 			// batch) executes that turn's calls without a new message_end.
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
@@ -4919,8 +4932,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// turn) so planned-but-aborted or permission-denied calls never count,
 		// and only successful mutating tools tick — read-only exploration is
 		// not progress an agent could mark done.
+		let todoTurnedDown = false;
 		if (event.type === "message_end" && event.message.role === "toolResult") {
 			this.#todo.onToolResult(event.message.toolName, event.message.isError);
+			// Also before any await: a new run's `agent_start` clears the set, and can come while
+			// this handler waits on extensions or persistence.
+			todoTurnedDown = this.#todoTurnedDown.delete(event.message.toolCallId);
 		}
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
@@ -5238,7 +5255,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				if (toolName === "todo" && isError) {
+				if (toolName === "todo" && isError && !todoTurnedDown) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the
@@ -7203,6 +7220,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
 		this.#cancelFatalRecoveryHint = undefined;
+		// The last todo change may still be on its way to the backend: `omp -p` exits right after its final tool call.
+		// From here on a backend gets no further list: its extension releases state on `session_shutdown`. Not asked
+		// of the setting: a list can still be queued for a backend the user has since switched away from. As with
+		// the shutdown event below, a failure here must not keep the session from being torn down.
+		try {
+			await this.#extensionRunner?.closeTodoBackend();
+		} catch (error) {
+			logger.warn("Failed to close the todo backend", { error: String(error) });
+		}
 		try {
 			await emitSessionShutdownEvent(this.#extensionRunner);
 		} catch (error) {
@@ -12099,6 +12125,45 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 	}
 
+	/** `todo.backend` when this main session mirrors its list to an extension backend. */
+	#todoBackend(): string | undefined {
+		if (this.#agentKind !== "main") return undefined;
+		const backend = cfgTodoBackend.get(this.settings);
+		return backend === NATIVE_TODO_BACKEND ? undefined : backend;
+	}
+
+	/** Hand the list to the selected todo backend. Native todos never reach the runner. */
+	#mirrorTodoPhases(): void {
+		const backend = this.#todoBackend();
+		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
+	}
+
+	/** See `ToolSession.applyTodoBackend`. */
+	applyTodoBackend(
+		change: TodoBackendChange,
+		signal?: AbortSignal,
+		toolCallId?: string,
+	): Promise<string | undefined> | undefined {
+		const deciding = this.#extensionRunner?.applyTodoBackend(
+			() => this.#todoBackend(),
+			change,
+			() => this.#todo.phases,
+			signal,
+		);
+		if (!deciding || toolCallId === undefined) return deciding;
+		return deciding.then(
+			why => {
+				// A list that changed under the call is worth the retry the reminder asks for.
+				if (why !== undefined && why !== TODO_LIST_CHANGED_ERROR) this.#todoTurnedDown.add(toolCallId);
+				return why;
+			},
+			(error: unknown) => {
+				this.#todoTurnedDown.add(toolCallId);
+				throw error;
+			},
+		);
+	}
+
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
 	getWorkPoolYieldItems(): readonly WorkPoolYieldItem[] {
 		return this.#workPoolYieldItems;
@@ -13085,6 +13150,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// The list is the same, but under a new session id: no list write tells the backend.
+			this.#mirrorTodoPhases();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;

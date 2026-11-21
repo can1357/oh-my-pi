@@ -17,6 +17,7 @@ import type { ToolSession } from "../sdk";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
+import { TODO_LIST_CHANGED_ERROR } from "./settings";
 
 /** Whether an unknown value is a persisted todo phase. */
 export function isTodoPhase(value: unknown): value is TodoPhase {
@@ -701,9 +702,9 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: TodoParams,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<TodoToolDetails>> {
@@ -724,11 +725,28 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const { phases: updated, errors } = readOnly
 			? { phases: previousPhases, errors: [] as string[] }
 			: applyParams(clonePhases(previousPhases), entry);
+		// A selected todo backend with `apply` decides before anything is committed. Awaited only
+		// when one takes part: native todos commit in the same tick, as before.
+		let current = previousPhases;
+		const deciding =
+			readOnly || errors.length > 0
+				? undefined
+				: this.session.applyTodoBackend?.({ op, previous: previousPhases, next: updated }, signal, toolCallId);
+		if (deciding) {
+			const sessionId = this.session.getSessionId?.();
+			const refusal = await deciding;
+			current = clonePhases(this.session.getTodoPhases?.() ?? []);
+			if (refusal !== undefined) errors.push(refusal);
+			// A `/todo` edit or a session change landed while the backend decided or since it answered:
+			// `updated` was built on a list that is gone. Two empty lists are equal, so the id is compared too.
+			else if (this.session.getSessionId?.() !== sessionId || !Bun.deepEquals(current, previousPhases))
+				errors.push(TODO_LIST_CHANGED_ERROR);
+		}
 		// A batch with any error is discarded wholesale: persisting a
 		// half-applied batch makes the natural retry hit "already exists" for
-		// the ops that did land. State and rendered summary stay at previous.
+		// the ops that did land. State and rendered summary stay as they are.
 		const failed = errors.length > 0;
-		const effective = failed ? previousPhases : updated;
+		const effective = failed ? current : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
 		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
 		const details: TodoToolDetails = { op, phases: effective, storage };

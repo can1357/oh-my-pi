@@ -28,7 +28,7 @@ import {
 import { addKeyAliases, canonicalKeyId, type KeyId, type Keybinding } from "@oh-my-pi/pi-tui";
 import { KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appApproveKeys, appFollowUpKeys } from "@oh-my-pi/pi-tui/keybinding-matchers";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -41,12 +41,15 @@ import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import { TODO_LIST_CHANGED_ERROR } from "../../tools/settings";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import {
 	notifyTranscriptPresentersChanged,
@@ -106,6 +109,8 @@ import type {
 	SessionStopEvent,
 	SessionStopEventResult,
 	ShortcutConflict,
+	TodoBackendChange,
+	TodoBackendDefinition,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -587,6 +592,13 @@ interface DeliveryTurn {
 	release: () => void;
 }
 
+/** A todo list on its way to a backend: what the session committed, for which backend and session. */
+interface TodoBackendList {
+	backend: string;
+	sessionId: string;
+	phases: TodoPhase[];
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -657,6 +669,31 @@ export class ExtensionRunner {
 	#contextProjections = new WeakMap<AgentMessage, number | bigint | null>();
 	/** Latest `session_start` broadcast, replayed to extensions added afterwards. */
 	#sessionStartEvent: RunnerEmitEvent | undefined;
+	/** The newest todo list not yet handed to its backend; see {@link syncTodoBackend}. */
+	#todoPending: TodoBackendList | undefined;
+	/** Tail of the todo backend calls, which run one at a time. Never rejects. */
+	#todoCalls: Promise<void> = Promise.resolve();
+	/** A delivery is queued and has not started: a list set meanwhile goes out with it. */
+	#todoQueued = false;
+	/**
+	 * The list the backend last took, which is not sent again, and the registration that took it:
+	 * an id can pass to another extension, which has not seen that list. `undefined` when omp does
+	 * not know what the backend holds, so the next list is sent whatever it holds: while a call
+	 * runs, after one failed, after an `apply` accepted a change to a list the backend did not hold,
+	 * and after one refused a change to a list that is not empty and that no backend was sent.
+	 * `"none"` otherwise while no backend has taken a list: an empty one has nothing to tell it.
+	 */
+	#todoSent: { list: TodoBackendList; definition: TodoBackendDefinition } | "none" | undefined = "none";
+	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
+	#todoClosed = false;
+	/** Set when a backend accepted a change omp did not commit: the next list goes out even if it equals {@link #todoSent}. */
+	#todoStale = false;
+	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
+	#todoGivenUp = new AbortController();
+	/** `todo.backend` ids already reported as unregistered. */
+	#reportedTodoBackends = new Set<string>();
+	/** Todo backend ids already warned about as registered by several extensions. */
+	#warnedTodoBackends = new Set<string>();
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
 	/** Fail-open wrappers of transcript presenters, kept so their identity is stable. */
@@ -1692,6 +1729,237 @@ export class ExtensionRunner {
 		return [...owners.keys()];
 	}
 
+	/** Todo backends by id. When extensions reuse an id, the first one loaded keeps it. */
+	getTodoBackends(): Map<string, { extension: Extension; definition: TodoBackendDefinition }> {
+		const backends = new Map<string, { extension: Extension; definition: TodoBackendDefinition }>();
+		for (const extension of this.extensions) {
+			for (const [id, definition] of extension.todoBackends ?? []) {
+				const owner = backends.get(id);
+				if (!owner) backends.set(id, { extension, definition });
+				else if (!this.#warnedTodoBackends.has(id)) {
+					this.#warnedTodoBackends.add(id);
+					logger.warn("Todo backend id registered by several extensions; the first loaded keeps it", {
+						id,
+						owner: owner.extension.path,
+						ignored: extension.path,
+					});
+				}
+			}
+		}
+		return backends;
+	}
+
+	/**
+	 * Hand a todo list the session just committed to the backend `todo.backend` selects. Calls run
+	 * one at a time, and a list set while one runs replaces the one still waiting. Until
+	 * `session_start` has gone out the list only waits: handlers and the error listener are not
+	 * wired before then.
+	 */
+	syncTodoBackend(backend: string, phases: TodoPhase[]): void {
+		if (this.#todoClosed) return;
+		this.#todoPending = { backend, phases, sessionId: this.sessionManager.getSessionId() };
+		if (this.#sessionStartEvent) this.#queueTodoBackendCall();
+	}
+
+	/**
+	 * Resolves once the todo backend calls queued so far have settled, or when the `session_shutdown`
+	 * handler budget runs out: a hung backend must not hold exit.
+	 */
+	async todoBackendSettled(): Promise<void> {
+		await awaitDeliveryTurn(this.#todoCalls, performance.now() + handlerTimeoutForEvent("session_shutdown"));
+	}
+
+	/**
+	 * Take no more lists for the todo backend, then wait as {@link todoBackendSettled} does. A list
+	 * still waiting when that wait ends is dropped, so no call starts once `session_shutdown` is out,
+	 * and a call still running is given up: the handler timeout it was raced against would keep a
+	 * host's process alive long after the session is gone.
+	 */
+	async closeTodoBackend(): Promise<void> {
+		this.#todoClosed = true;
+		await this.todoBackendSettled();
+		this.#todoPending = undefined;
+		this.#todoGivenUp.abort();
+	}
+
+	/**
+	 * Ask the backend `todo.backend` selects to accept a `todo` call's change before it is
+	 * committed. `selected` reads that selection; it is read again when the call's turn comes.
+	 * Returns `undefined` at once when no backend decides: none is selected or registered under
+	 * that id, it has no `apply`, or `session_start` has not gone out. Otherwise resolves to why
+	 * the change is not accepted, or to `undefined` once the backend accepted it or when, by the
+	 * call's turn, no backend decides any more; it rejects as soon as `signal` aborts. Takes its
+	 * turn among the `replace` calls; `current` reads the session's list as it is when called. The
+	 * change belongs to the session the call was made in: once that is no longer the live one, the
+	 * call is not accepted, whatever the live session's list holds.
+	 */
+	applyTodoBackend(
+		selected: () => string | undefined,
+		change: TodoBackendChange,
+		current: () => TodoPhase[],
+		signal?: AbortSignal,
+	): Promise<string | undefined> | undefined {
+		const decider = () => {
+			const backend = selected();
+			const owner = backend === undefined ? undefined : this.getTodoBackends().get(backend);
+			return backend !== undefined && owner?.definition.apply ? { backend, ...owner } : undefined;
+		};
+		if (!this.#sessionStartEvent || !decider()) return undefined;
+		const sessionId = this.sessionManager.getSessionId();
+		const closing = "The session is closing; nothing was saved.";
+		// Set once the backend accepted in time: run if the tool's wait is aborted before it reads that.
+		let uncommitted: (() => void) | undefined;
+		const asked = this.#todoCalls.then(async () => {
+			// Not put to a backend: a call whose turn comes as the session closes, one aborted while
+			// it waited, one whose session or list changed meanwhile (the backend would hold a list
+			// omp will not commit), and one whose backend was deselected or disabled meanwhile (no
+			// backend decides any more).
+			if (this.#todoClosed) return closing;
+			if (signal?.aborted) return undefined;
+			// Asked before anything lets the call through: a list equal to `previous` proves nothing
+			// once the session changed, since two empty lists are equal.
+			if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
+			const decides = decider();
+			if (!decides) return undefined;
+			const { backend, extension, definition } = decides;
+			// Extension text, also when omp reports a failure of the handler: one clean line for the tool result.
+			const refused = (why: string) =>
+				`Todo backend "${backend}" did not accept this change: ${sanitizeDisplayLine(why) || "no reason given"}`;
+			if (!Bun.deepEquals(current(), change.previous)) return TODO_LIST_CHANGED_ERROR;
+			// The backend holds a change omp did not commit: omp's list as it is then follows, also when
+			// it equals the last one sent, in place of whatever waits (an older list for this backend, or
+			// one for a backend that is no longer selected). Not as the session closes, nor once it has
+			// changed: the backend keeps that change for a session omp is no longer in. Nor once it is no
+			// longer selected, or its extension no longer holds the id: omp has stopped mirroring to it.
+			const owns = () => this.getTodoBackends().get(backend)?.extension === extension;
+			const resync = () => {
+				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
+				if (!owns()) return;
+				this.#todoStale = true;
+				this.#todoPending = { backend, sessionId, phases: current() };
+				this.#queueTodoBackendCall();
+			};
+			let waiting = true;
+			let accepted = false;
+			const sent = this.#todoSent;
+			this.#todoSent = undefined;
+			// `true` once accepted; otherwise why not: the backend's reason, or omp's for a timeout.
+			const verdict = await this.#runHandlerWithTimeout(
+				async (event, ctx): Promise<true | string> => {
+					try {
+						await definition.apply?.(event.change, ctx);
+					} catch (error) {
+						// A refusal is the backend's answer, not an extension error. Given in time, it
+						// leaves the backend holding what it held. While no backend was sent a list, this one
+						// holds nothing omp knows of unless `previous` was empty: the next list goes out.
+						if (waiting && (sent !== "none" || change.previous.length === 0)) this.#todoSent = sent;
+						return error instanceof Error ? error.message : String(error);
+					}
+					accepted = true;
+					// Accepted after omp stopped waiting: a timeout or an abort.
+					if (!waiting) resync();
+					return true;
+				},
+				{ type: "todo_backend", change: structuredClone(change) },
+				this.createContext(),
+				extension,
+				extensionHandlerTimeoutMs,
+				(_kind, message) => message,
+				// Given up with the wait on exit, like a `replace`: a call made without a signal would
+				// otherwise stay raced against the handler timeout after the session is gone.
+				signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
+			);
+			waiting = false;
+			if (verdict === true) {
+				// Accepted for a session omp has left: its record of what the backend holds stays unknown.
+				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
+				// The list changed while the backend decided (an edit made with no backend selected queues
+				// none), or the call was aborted as it answered: the tool commits nothing, omp's list follows.
+				if (signal?.aborted || !Bun.deepEquals(current(), change.previous)) resync();
+				else {
+					// A list waiting for this backend (a late acceptance's correction, or a client setting
+					// the list it had) would go out before the tool commits `next` and take the change back.
+					// Not when the id went to another extension meanwhile: the list is that one's to get.
+					if (this.#todoPending?.backend === backend && owns()) this.#todoPending = undefined;
+					uncommitted = resync;
+				}
+				// `next` is recorded as held only when this backend held `previous`. After a failed call,
+				// or when it was selected or took the id over since, the commit's list still goes out.
+				const held =
+					sent === "none"
+						? change.previous.length === 0
+						: sent?.definition === definition &&
+							Bun.deepEquals(sent.list, { backend, sessionId, phases: change.previous });
+				if (held) this.#todoSent = { list: { backend, sessionId, phases: change.next }, definition };
+				return undefined;
+			}
+			// Accepted in the moment omp stopped waiting.
+			if (accepted) resync();
+			return this.#todoGivenUp.signal.aborted ? closing : refused(verdict ?? "the call was aborted");
+		});
+		this.#todoCalls = asked.then(
+			() => {},
+			() => {},
+		);
+		// An abort ends the wait at once, also while an earlier call still holds the line.
+		return untilAborted(signal, asked).catch((error: unknown) => {
+			uncommitted?.();
+			throw error;
+		});
+	}
+
+	#queueTodoBackendCall(): void {
+		if (this.#todoQueued) return;
+		this.#todoQueued = true;
+		this.#todoCalls = this.#todoCalls
+			.then(() => this.#sendTodoList())
+			.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
+	}
+
+	async #sendTodoList(): Promise<void> {
+		this.#todoQueued = false;
+		const pending = this.#todoPending;
+		this.#todoPending = undefined;
+		// A list set before the session changed belongs to the session left behind; the change sets its own.
+		if (!pending || pending.sessionId !== this.sessionManager.getSessionId()) return;
+		const owner = this.getTodoBackends().get(pending.backend);
+		if (!owner) {
+			if (this.#reportedTodoBackends.has(pending.backend)) return;
+			this.#reportedTodoBackends.add(pending.backend);
+			this.emitError({
+				extensionPath: "<todo.backend>",
+				event: "todo_backend",
+				error: `No enabled extension registers the todo backend "${sanitizeDisplayLine(pending.backend)}"; the todo list is not mirrored.`,
+			});
+			return;
+		}
+		const { extension, definition } = owner;
+		const sent = this.#todoSent;
+		const stale = this.#todoStale;
+		this.#todoStale = false;
+		if (
+			!stale &&
+			(sent === "none"
+				? pending.phases.length === 0
+				: sent?.definition === definition && Bun.deepEquals(sent.list, pending))
+		)
+			return;
+		this.#todoSent = undefined;
+		const taken = await this.#runHandlerWithTimeout(
+			async (event, ctx) => {
+				await definition.replace(event.phases, ctx);
+				return true;
+			},
+			{ type: "todo_backend", phases: structuredClone(pending.phases) },
+			this.createContext(),
+			extension,
+			extensionHandlerTimeoutMs,
+			undefined,
+			this.#todoGivenUp.signal,
+		);
+		if (taken) this.#todoSent = { list: pending, definition };
+	}
+
 	/**
 	 * Deliver a click on `url` as `link_activate` to the extension that claimed its scheme (the first
 	 * one in load order, when several did). Returns whether an extension owns the link.
@@ -2036,7 +2304,10 @@ export class ExtensionRunner {
 		const result = await this.#emitTo(this.extensions, event);
 		// Recorded once the broadcast ends: an extension added mid-broadcast is
 		// reached by the live iteration, one added later gets the replay.
-		if (event.type === "session_start") this.#sessionStartEvent = event;
+		if (event.type === "session_start") {
+			this.#sessionStartEvent = event;
+			if (this.#todoPending && !this.#todoClosed) this.#queueTodoBackendCall();
+		}
 		return result;
 	}
 

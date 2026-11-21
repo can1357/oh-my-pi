@@ -105,6 +105,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { TodoOperation, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -1841,6 +1842,56 @@ export interface RegisteredCommand {
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 }
 
+/** What a `todo` tool call is about to change; see {@link TodoBackendDefinition.apply}. */
+export interface TodoBackendChange {
+	/** The call's operation; never `view`. */
+	op: TodoOperation;
+	/** The list before the call. */
+	previous: TodoPhase[];
+	/** The list omp commits when the backend accepts, unless the list or the session changed meanwhile. */
+	next: TodoPhase[];
+}
+
+/**
+ * A todo backend registered with `pi.registerTodoBackend()`. omp keeps the todo list; the backend
+ * the `todo.backend` setting selects is told about every change to it.
+ */
+export interface TodoBackendDefinition {
+	/** `todo.backend` value that selects this backend: letters, digits, `.`, `_` and `-`. `native` is reserved. */
+	id: string;
+	/**
+	 * Called in the main session with the whole todo list after omp committed a change to it:
+	 * a `todo` call (unless this backend's `apply` accepted it as a change to the list it held), a
+	 * `/todo` edit, RPC `set_todos`, `/new`, or a resume, rewind, branch, fork or move to another
+	 * session file that left another list or session id. An empty list is sent only once omp has
+	 * called a todo backend for this session; `/new`, a resume, a branch and a fork carry that
+	 * over. Tasks carry `content` and `status` only.
+	 * One call runs at a time, and lists that change meanwhile collapse into the newest. A throw,
+	 * or no answer within the extension handler timeout, is reported as an extension error and
+	 * leaves omp's list as it is; the next change sends the whole list again, even while a call
+	 * omp gave up on is still running. A call still running when the session is disposed is given
+	 * up after the `session_shutdown` handler timeout, without an error.
+	 */
+	replace(phases: TodoPhase[], ctx: ExtensionContext): void | Promise<void>;
+	/**
+	 * Called in the main session, once it has started, before omp commits a change the model's
+	 * `todo` tool call makes; nothing else reaches it. Throw to refuse the change: the call fails,
+	 * naming the backend and the error's message, and the list stays as it was, as it does when no
+	 * answer comes within the extension handler timeout. A change accepted here is not passed to
+	 * `replace` as well when this backend held `previous`; when it did not (its last `replace`
+	 * failed, its last `apply` timed out or was aborted, or a list was committed while it was not
+	 * selected or did not hold the id), the committed list follows. When `apply` accepts a change
+	 * omp does not commit (after omp stopped waiting: a timeout or an abort; or in time, when the
+	 * list changed or the call was aborted before the commit), omp's list is sent through `replace`
+	 * once more, unless by then the session has changed or is closing, or this backend is no longer
+	 * selected or its extension no longer holds the id. A call still running when the session is
+	 * disposed is given up after the `session_shutdown` handler timeout, without an extension
+	 * error: the `todo` call fails. Edits the user or a client makes (`/todo`, RPC `set_todos`) and
+	 * resets cannot be refused; they only reach `replace`.
+	 */
+	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
+}
+
 // ============================================================================
 // Extension API
 // ============================================================================
@@ -2148,6 +2199,14 @@ export interface ExtensionAPI {
 	 * replaced; when extensions reuse an id, the later extension wins.
 	 */
 	registerComposerShape(definition: ComposerShapeDefinition): void;
+
+	/**
+	 * Register a todo backend the user can select with the `todo.backend` setting. Throws for a
+	 * malformed id, for `native`, for a missing `replace` and for an `apply` that is not a
+	 * function; an id this extension registered before gets the new definition. When several
+	 * extensions register an id, the first one loaded keeps it.
+	 */
+	registerTodoBackend(definition: TodoBackendDefinition): void;
 
 	// =========================================================================
 	// Actions
@@ -2555,6 +2614,8 @@ export interface Extension {
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
 	composerShapes: Map<string, ComposerShapeDefinition>;
+	/** Backends registered with `registerTodoBackend`, by id; absent until the first one. */
+	todoBackends?: Map<string, TodoBackendDefinition>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
