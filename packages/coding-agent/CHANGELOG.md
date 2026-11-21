@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed `ast_edit` returning a bare "No replacements made" for a PHP method pattern with a visibility modifier, now naming the `class $CLS { … }` wrapper it needs ([#6904](https://github.com/can1357/oh-my-pi/issues/6904), [#19981](https://github.com/can1357/oh-my-pi/pull/19981) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed `ast_edit` returning a bare "No replacements made" for a PHP method pattern with a modifier, now naming the `class $CLS { … }` wrapper it needs ([#6904](https://github.com/can1357/oh-my-pi/issues/6904), [#19981](https://github.com/can1357/oh-my-pi/pull/19981) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
 - Fixed AST edits and searches across several targets duplicating explicit `local://` file names (such as `local://example.ts/example.ts`) or replacing symlinked file names in previews, search results, and the edit journal ([#20025](https://github.com/can1357/oh-my-pi/pull/20025) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Claude-format plugin agents losing tools whose Claude Code names match no OMP built-in: frontmatter `tools:` now translates `WebFetch`, `WebSearch`, `TodoWrite`, `AskUserQuestion`, `MultiEdit`, `Agent`, and the rest to their OMP equivalents, and `Agent` infers unrestricted spawns like `Task` ([#19887](https://github.com/can1357/oh-my-pi/pull/19887) by [@joseotaviorf](https://github.com/joseotaviorf))

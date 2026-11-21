@@ -434,11 +434,13 @@ describe("ast_edit tool schema", () => {
 			expect(memberText).toContain("class $CLS {");
 
 			// The wrapper the hint names rewrites the one-member class and keeps its name.
+			// `out` replaces the whole `class` node, so the template must carry the
+			// class's multi-line layout rather than the one-line shape of the match.
 			const wrapped = await tool!.execute("ast-edit-php-wrapper", {
 				ops: [
 					{
 						pat: "class $CLS { public function $NAME($$$ARGS) { $$$BODY } }",
-						out: "class $CLS { public function renamed($$$ARGS) { $$$BODY } }",
+						out: "class $CLS {\n    public function renamed($$$ARGS) {\n        $$$BODY\n    }\n}",
 					},
 				],
 				paths: [filePath],
@@ -448,8 +450,9 @@ describe("ast_edit tool schema", () => {
 			const invoker = queue.peekPendingInvoker()!;
 			await invoker({ action: "apply", reason: "apply PHP class wrapper edit" });
 			const applied = await Bun.file(filePath).text();
-			expect(applied).toContain("class Greeter {");
-			expect(applied).toContain("public function renamed($name)");
+			expect(applied).toBe(
+				"<?php\nclass Greeter {\n    public function renamed($name) {\n        return $name;\n    }\n}\n",
+			);
 		} finally {
 			await removeWithRetries(tempDir);
 		}

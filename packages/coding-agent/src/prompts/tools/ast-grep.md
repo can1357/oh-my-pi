@@ -6,7 +6,7 @@ Structural code search via ast-grep. Use when syntax shape matters more than tex
 - `$NAME` captures one node; `$_` matches without binding; `$$$NAME` zero-or-more; `$$$` zero-or-more unbound.
   - Use `$$$NAME`, NOT `$$NAME` (invalid). Names UPPERCASE, whole node — `prefix$VAR` fails.
 - Same metavariable twice → MUST match identical code (`$A == $A` matches `x == x`, not `x == y`).
-- Patterns MUST parse as single AST node. Non-standalone → wrap: `class $_ { … }`.
+- Patterns MUST parse as single AST node. Non-standalone → wrap: `class $_ { … }` (in `ast_edit`, when the wrapper appears in `out`, name the class metavariable — `class $CLS { … }` — since `$_` carries nothing there).
 - C++ expression-statement calls need trailing `;`: `ns::doThing($ARG);`, `$CALLEE($ARG);`.
 - TS: tolerate annotations — `async function $NAME($$$ARGS): $_ { $$$BODY }`.
 - Declaration forms are distinct — `function foo`, method `foo()`, `const foo = () => {}`; search the right form before concluding absence.
