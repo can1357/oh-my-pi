@@ -49,6 +49,7 @@ interface HarnessOptions {
 	selectorChoices?: Array<string | undefined>;
 	inputChoice?: string | undefined;
 	confirmResult?: boolean;
+	projectName?: string;
 }
 
 interface Harness {
@@ -93,7 +94,7 @@ function createMatchingMessages(): AgentMessage[] {
 async function createHarness(options: HarnessOptions): Promise<Harness> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omfg-controller-"));
 	tempRoots.push(root);
-	const projectDir = path.join(root, "project");
+	const projectDir = path.join(root, options.projectName ?? "project");
 	const agentDir = path.join(root, "agent");
 	await fs.mkdir(projectDir, { recursive: true });
 	await fs.mkdir(agentDir, { recursive: true });
@@ -113,7 +114,7 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 	} as unknown as InteractiveModeContext["session"];
 	const container = new Container();
 	const ctx = {
-		ui: { requestRender: vi.fn() } as unknown as TUI,
+		ui: { requestRender: vi.fn(), terminal: { columns: 120 } } as unknown as TUI,
 		omfgContainer: container,
 		session,
 		sessionManager: { getCwd: () => projectDir } as unknown as InteractiveModeContext["sessionManager"],
@@ -207,6 +208,39 @@ describe("OmfgController", () => {
 		expect(harness.container.children).toHaveLength(0);
 		expect(controller.hasActiveRequest()).toBe(false);
 		expect(harness.ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("ts-no-any.md"));
+	});
+
+	it("sanitizes a tab in the saved path before reporting it", async () => {
+		const runEphemeralTurn = vi.fn<RunEphemeralTurn>(async () => ({
+			replyText: JSON.stringify({
+				name: "ts-no-any",
+				description: "No any in TS edits",
+				condition: ": any",
+				scope: ["tool:edit(*.ts)", "tool:write(*.ts)"],
+				body: "Use `unknown` instead.",
+			}),
+			assistantMessage: createAssistantMessage([{ type: "text", text: "done" }]),
+		}));
+		const harness = await createHarness({
+			runEphemeralTurn,
+			messages: createMatchingMessages(),
+			selectorChoice: PROJECT_OPTION,
+			projectName: "pro\tject",
+		});
+		const registered = Promise.withResolvers<void>();
+		harness.ttsrAddRule.mockImplementation(() => {
+			registered.resolve();
+			return true;
+		});
+		const controller = new OmfgController(harness.ctx);
+
+		await controller.start("stop using any");
+		await registered.promise;
+
+		const showStatus = harness.ctx.showStatus as unknown as Mock<(message: string) => void>;
+		const message = showStatus.mock.calls.at(-1)?.[0] as string;
+		expect(message).toContain("ts-no-any.md");
+		expect(message).not.toContain("\t");
 	});
 
 	it("invalidates the discovery cache after saving so rediscovery observes the new rule", async () => {
