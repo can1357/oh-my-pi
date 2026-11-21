@@ -216,6 +216,60 @@ const ANCHOR_FREE_DELIBERATION = [
 	"Finally the threshold has to leave a wide margin so ordinary focused thinking never trips the detector ever.",
 ].join("\n\n\n");
 
+/** Issue #20096: Chinese reasoning that advances a dashboard plan step by step
+ *  while every paragraph reshuffles the same Latin tool/metric names. The
+ *  Latin vocabulary alone never shows novelty; the Chinese prose does — must
+ *  NOT trip. */
+function cjkPlanWithRecurringLatin(): string {
+	const vocab = [
+		"tool_a",
+		"tool_b",
+		"campaign",
+		"spend",
+		"impressions",
+		"clicks",
+		"dashboard",
+		"ctr",
+		"roi",
+		"budget",
+	];
+	const steps = [
+		"首先确认用户要的是哪个广告账户，以及统计周期是最近七天还是自然月，这决定了查询参数怎么填。",
+		"接着检查返回的字段里有没有缺失值，如果某天没有投放，需要补零而不是直接跳过，否则折线图会断开。",
+		"然后按渠道分组汇总花费，计算每个渠道的点击率和千次展示成本，并把结果按花费从高到低排序。",
+		"第四步是设计面板布局：顶部放核心指标卡片，中间放趋势折线图，底部放渠道明细表格，方便老板快速浏览。",
+		"颜色方面，花费用橙色，点击用蓝色，转化用绿色，保持和公司品牌规范一致，避免红绿色盲用户看不清。",
+		"另外要考虑时区问题，接口返回的是协调世界时，而用户在北京，需要统一换算成东八区再按天切分。",
+		"如果某个活动在周期中途被暂停，表格里应该标注状态，并在备注列说明暂停原因，免得被误读为数据异常。",
+		"写入之前先做一次小规模试跑，只写一个面板验证格式正确，确认无误后再批量创建剩余的六个面板。",
+		"最后整理一段中文说明，告诉用户每个指标的口径、数据刷新频率，以及遇到空数据时应该联系谁处理。",
+		"还要设置每天早上八点自动刷新，并在刷新失败时给负责人发送提醒消息，保证看板数据始终是最新的。",
+	];
+	return steps
+		.map((step, i) => {
+			const rotated = [...vocab.slice(i), ...vocab.slice(0, i)];
+			return `${step}${rotated.map(word => `${word} 的`).join("")}`;
+		})
+		.join("\n\n");
+}
+
+/** A Chinese progress-lexicon stall: every paragraph reorders the same filler
+ *  clauses and names nothing concrete — must trip. */
+function cjkFillerLoop(paragraphs: number): string {
+	const clauses = [
+		"我现在继续推进这个任务",
+		"保持专注并且全力执行",
+		"确保一切都正确无误",
+		"不再犹豫而是马上行动",
+		"持续保持当前的节奏",
+		"坚定地朝着目标前进",
+	];
+	return Array.from({ length: paragraphs }, (_, i) => {
+		const rotated = [...clauses.slice(i % clauses.length), ...clauses.slice(0, i % clauses.length)];
+		return `${rotated.join("，")}。`;
+	}).join("\n\n");
+}
+
 /** Realistic per-file refactor assignments: heavy boilerplate (low novelty) but
  *  each names a distinct file + symbol — a NEW anchor every segment — so neither
  *  the trigram cluster nor the lexical-stall run ever reaches its threshold. */
@@ -320,6 +374,15 @@ describe("ThinkingLoopDetector", () => {
 		// No code identifiers at all: the novelty gate alone must keep real,
 		// advancing reasoning from tripping.
 		expect(feed(ANCHOR_FREE_DELIBERATION, 23)).toBeNull();
+	});
+
+	test("does not trip on advancing CJK reasoning whose Latin identifiers recur", () => {
+		// Issue #20096: CJK prose must count toward novelty, not just the Latin terms.
+		expect(feed(cjkPlanWithRecurringLatin())).toBeNull();
+	});
+
+	test("trips on a reshuffled CJK filler loop", () => {
+		expect(feed(cjkFillerLoop(12))).toContain("segments");
 	});
 
 	test("flush() catches a final unterminated duplicate paragraph", () => {
