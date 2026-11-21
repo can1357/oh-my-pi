@@ -5988,6 +5988,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#applyPlanModelTransition(currentModel, resolved);
 	}
 
+	#planModeData(planFilePath: string): Record<string, unknown> {
+		const previous = this.#planModePreviousModelState;
+		return {
+			planFilePath,
+			previousModel: previous && {
+				provider: previous.model.provider,
+				id: previous.model.id,
+				thinkingLevel: previous.thinkingLevel,
+				role: previous.role,
+			},
+		};
+	}
+
+	#restorePersistedPlanModel(data: Record<string, unknown> | undefined): void {
+		const previous = data?.previousModel;
+		if (!previous || typeof previous !== "object") return;
+		const saved = previous as Record<string, unknown>;
+		if (typeof saved.provider !== "string" || typeof saved.id !== "string") return;
+		const model = this.session.modelRegistry.find(saved.provider, saved.id);
+		if (!model) {
+			this.showWarning(`Could not restore the pre-plan model ${saved.provider}/${saved.id}.`);
+			return;
+		}
+		this.#planModePreviousModelState = {
+			model,
+			thinkingLevel: parseConfiguredThinkingLevel(
+				typeof saved.thinkingLevel === "string" ? saved.thinkingLevel : undefined,
+			),
+			role: typeof saved.role === "string" ? saved.role : undefined,
+		};
+	}
+
 	/**
 	 * Re-resolve the `plan` role and move the active model onto it. Fires when
 	 * the plan role is reassigned while plan mode is active: the active model IS
@@ -6218,6 +6250,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (sessionContext.mode === "plan") {
 			const planFilePath = sessionContext.modeData?.planFilePath as string | undefined;
+			this.#restorePersistedPlanModel(sessionContext.modeData);
 			await this.#enterPlanMode({ planFilePath, preserveRestoredModel: true });
 		} else if (sessionContext.mode === "plan_paused") {
 			this.planModePaused = true;
@@ -6319,7 +6352,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#applyPlanModeModel();
 		}
 		this.#updatePlanModeStatus();
-		this.sessionManager.appendModeChange("plan", { planFilePath });
+		this.sessionManager.appendModeChange("plan", this.#planModeData(planFilePath));
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
 	}
 
@@ -8030,7 +8063,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planState = this.session.getPlanModeState();
 		if (planState?.enabled && planState.planFilePath !== planFilePath) {
 			this.session.setPlanModeState({ ...planState, planFilePath });
-			this.sessionManager.appendModeChange("plan", { planFilePath });
+			this.sessionManager.appendModeChange("plan", this.#planModeData(planFilePath));
 			// Reported only once committed: the next planning turn reads this state.
 			this.#notifyModeChanged();
 		}

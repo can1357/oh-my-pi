@@ -774,7 +774,7 @@ export class SelectorController {
 				onPick: model => {
 					if (!isCurrent()) return;
 					const efforts = getSupportedEfforts(model);
-					if (efforts.length === 0) {
+					if (!model.reasoning && efforts.length === 0) {
 						finish({ model });
 						return;
 					}
