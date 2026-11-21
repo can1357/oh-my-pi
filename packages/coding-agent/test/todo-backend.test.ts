@@ -585,19 +585,32 @@ describe("todo backend", () => {
 			expect(tasksOf(fresh)).toEqual([["a", "b"]]);
 		});
 
-		it("after a refusal by a backend omp never sent a list, an emptied list still reaches it", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension]);
-			session.commitTodoPhases(list("a"));
-			cfgTodoBackend.override(session.settings, "tracker");
-			backend.error = new Error("not now");
-			const refused = await todo(session, { op: "append", phase: "Work", items: ["b"] });
-			backend.error = undefined;
-			session.commitTodoPhases([]);
+		it("a refusal by a backend omp never sent a list leaves it holding the list the call was built on", async () => {
+			// Selected once the session had a list: omp knows nothing it holds, so an emptied list reaches it.
+			const late = tracker("tracker", true);
+			const selected = await open([late.extension]);
+			selected.session.commitTodoPhases(list("a"));
+			cfgTodoBackend.override(selected.session.settings, "tracker");
+			late.error = new Error("not now");
+			const refused = await todo(selected.session, { op: "append", phase: "Work", items: ["b"] });
+			late.error = undefined;
+			selected.session.commitTodoPhases([]);
+			await settled(selected.session);
+
+			// Selected from the start: the refused call showed it the empty list, so the retry it accepts
+			// is not sent to it a second time.
+			const fresh = tracker("tracker", true);
+			const { session } = await open([fresh.extension], "tracker");
+			fresh.error = new Error("not now");
+			await todo(session, { op: "init", items: ["a"] });
+			fresh.error = undefined;
+			await todo(session, { op: "init", items: ["a"] });
 			await settled(session);
 
 			expect(refused.isError).toBe(true);
-			expect(tasksOf(backend)).toEqual([[]]);
+			expect(tasksOf(late)).toEqual([[]]);
+			expect(committed(session)).toEqual(["a"]);
+			expect(tasksOf(fresh)).toEqual([]);
 		});
 
 		it("of the todo calls that fail with a backend, only one whose list changed leaves a reminder to retry it", async () => {
