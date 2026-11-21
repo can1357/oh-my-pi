@@ -5105,6 +5105,7 @@ mod tests {
 			'!' => key(18, true, false),
 			' ' => key(49, false, false),
 			'\r' | '\n' => key(36, false, false),
+			'\t' => key(48, false, false),
 			'€' => key(19, true, true),
 			'å' => key(0, false, true),
 			_ => None,
@@ -5683,10 +5684,10 @@ mod tests {
 	type LayoutRead = CoreResult<Option<fn(char) -> Option<Keystroke>>>;
 
 	#[test]
-	fn local_text_stays_unicode_on_key_zero_and_only_a_remote_screen_gets_layout_keys() {
+	fn local_text_uses_unicode_except_return_and_tab_without_reading_a_layout() {
 		let no_layout = || -> LayoutRead { panic!("local text reads no keyboard layout") };
 		let window = screen_sharing();
-		let local = keys_for(&window, "aB\n", None, no_layout).unwrap();
+		let local = keys_for(&window, "aB\n\t", None, no_layout).unwrap();
 		let source = source().expect("event source");
 		let mut events = Vec::new();
 		type_keys(
@@ -5701,23 +5702,27 @@ mod tests {
 			},
 		)
 		.unwrap();
-		// No Shift for B, and a newline is text rather than a Return press.
+		// No Shift for B; Return and Tab have key codes but keep their payloads.
 		let (down, up) = (CGEventType::KeyDown.0, CGEventType::KeyUp.0);
-		let key = |kind, text: &str| (kind, 0, CGEventFlags::empty(), text.to_string());
+		let key = |kind, code, text: &str| (kind, code, CGEventFlags::empty(), text.to_string());
 		assert_eq!(events, [
-			key(down, "a"),
-			key(up, "a"),
-			key(down, "B"),
-			key(up, "B"),
-			key(down, "\n"),
-			key(up, "\n"),
+			key(down, 0, "a"),
+			key(up, 0, "a"),
+			key(down, 0, "B"),
+			key(up, 0, "B"),
+			key(down, 36, "\n"),
+			key(up, 36, "\n"),
+			key(down, 48, "\t"),
+			key(up, 48, "\t"),
 		]);
 		let stroke = |code, shift| Keystroke { code, shift, option: false };
-		let remote = keys_for(&window, "aB\n", Some(RemoteScreen::KeyEvents), || Ok(Some(us_stroke)));
+		let remote =
+			keys_for(&window, "aB\n\t", Some(RemoteScreen::KeyEvents), || Ok(Some(us_stroke)));
 		assert_eq!(remote.unwrap(), [
 			TypedKey::Layout(stroke(0, false), "a"),
 			TypedKey::Layout(stroke(11, true), "B"),
 			TypedKey::Layout(stroke(36, false), "\n"),
+			TypedKey::Layout(stroke(48, false), "\t"),
 		]);
 	}
 
@@ -5896,10 +5901,10 @@ mod tests {
 	}
 
 	#[test]
-	fn typed_text_reaches_the_target_whole_as_unicode_payloads() {
-		// Control characters, a ZWJ emoji, and a grapheme longer than one
-		// event's 20 UTF-16 units all ride as payloads; none has a key.
-		let text = format!("a\tb\n\u{1b}👨‍👩‍👧‍👦e{}é", "\u{301}".repeat(24));
+	fn typed_text_reaches_the_target_whole_with_return_and_tab_keys() {
+		// Return and Tab use their keys; the remaining text stays on key 0,
+		// including a ZWJ emoji and a grapheme longer than 20 UTF-16 units.
+		let text = format!("a\tb\n\r\r\n\u{1b}👨‍👩‍👧‍👦e{}é", "\u{301}".repeat(24));
 		let no_layout = || -> LayoutRead { panic!("local text reads no keyboard layout") };
 		let keys = keys_for(&screen_sharing(), &text, None, no_layout).unwrap();
 		let source = source().expect("event source");
@@ -5918,13 +5923,21 @@ mod tests {
 		let (down, up) = (CGEventType::KeyDown.0, CGEventType::KeyUp.0);
 		let mut typed = String::new();
 		for pair in events.chunks(2) {
-			let [(press_kind, 0, false, false, press), (release_kind, 0, false, false, release)] =
-				pair
+			let [
+				(press_kind, press_code, false, false, press),
+				(release_kind, release_code, false, false, release),
+			] = pair
 			else {
-				panic!("expected an unmodified key-0 press and release, got {pair:?}");
+				panic!("expected an unmodified press and release, got {pair:?}");
 			};
 			assert_eq!((*press_kind, *release_kind), (down, up), "{pair:?}");
 			assert_eq!(press, release);
+			let code = match press.as_str() {
+				"\r" | "\n" | "\r\n" => 36,
+				"\t" => 48,
+				_ => 0,
+			};
+			assert_eq!((*press_code, *release_code), (code, code), "{pair:?}");
 			assert!(press.encode_utf16().count() <= MAX_EVENT_UNITS, "{press:?}");
 			typed.push_str(press);
 		}
@@ -5942,11 +5955,7 @@ mod tests {
 		}
 		// Tab, newline and shifted characters have keys: Shift goes down
 		// around the shifted key only.
-		let with_tab = |character| match character {
-			'\t' => Some(Keystroke { code: 48, shift: false, option: false }),
-			character => us_stroke(character),
-		};
-		let keys = typed_keys(&screen_sharing(), "a\tB\n", with_tab).unwrap();
+		let keys = typed_keys(&screen_sharing(), "a\tB\n", us_stroke).unwrap();
 		assert_eq!(bare_transitions(&keys), [
 			(0, true),
 			(0, false),

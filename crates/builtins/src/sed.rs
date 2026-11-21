@@ -1103,6 +1103,12 @@ fn parse_command_ending(
 	line: &mut ScriptCharProvider,
 	cmd: &mut Command,
 ) -> SedResult<()> {
+	line.eat_spaces();
+	// Leave a closing brace for compile_sequence to validate and close the group.
+	// GNU sed recognizes it at a command boundary even under --posix.
+	if !line.eol() && line.current() == '}' {
+		return Ok(());
+	}
 	if !line.eol() && line.current() == ';' {
 		line.advance();
 		return Ok(());
@@ -1480,7 +1486,7 @@ pub fn compile_subst_flags(
 				return Ok(()); // 'w' is the last flag allowed
 			},
 
-			';' | '\n' => break,
+			';' | '\n' | '}' => break,
 
 			other => {
 				return compilation_error(lines, line, format!("invalid substitute flag: '{other}'"));
@@ -1503,7 +1509,6 @@ fn compile_end_group_command(
 	}
 	context.parsed_block_nesting -= 1;
 	line.advance();
-	line.eat_spaces();
 	parse_command_ending(lines, line, cmd)?;
 	Ok(CommandHandling::Return)
 }
@@ -1533,8 +1538,6 @@ fn compile_empty_command(
 	_context: &mut ProcessingContext,
 ) -> SedResult<CommandHandling> {
 	line.advance(); // Skip the command character
-	line.eat_spaces(); // Skip any trailing whitespace
-
 	parse_command_ending(lines, line, cmd)?;
 	Ok(CommandHandling::Continue)
 }
@@ -1616,7 +1619,6 @@ fn compile_label_command(
 		cmd.data = CommandData::Label(Some(label));
 	}
 
-	line.eat_spaces(); // Skip any trailing whitespace
 	parse_command_ending(lines, line, cmd)?;
 	Ok(CommandHandling::Continue)
 }
@@ -1654,7 +1656,6 @@ fn compile_number_command(
 		},
 	}
 
-	line.eat_spaces(); // Skip any trailing whitespace
 	parse_command_ending(lines, line, cmd)?;
 	Ok(CommandHandling::Continue)
 }
@@ -9638,6 +9639,51 @@ mod tests {
 		let (code, capture) = crate::host::run_util::<Sed>(&["2q42"], "one\ntwo\nthree\n", "/");
 		assert_eq!(code, 42);
 		assert_eq!(capture.out(), "one\ntwo\n");
+	}
+
+	#[test]
+	fn builtin_group_closing_brace_terminates_commands() {
+		let swap = "1{h;d};2{G}";
+		for args in [&[swap][..], &["--posix", swap][..]] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, "one\ntwo\nthree\n", "/");
+			assert_eq!(code, 0, "{}", capture.err());
+			assert_eq!(capture.out(), "two\none\nthree\n");
+		}
+
+		// The first two escaped braces belong to the delimited arguments;
+		// only the final two unescaped braces after g close groups.
+		let nested = r"1{1{s}\}}x\}}g}};y/x/X/";
+		let (code, capture) = crate::host::run_util::<Sed>(&[nested], "}}\nx\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "X}X}\nX\n");
+
+		let (code, capture) = crate::host::run_util::<Sed>(&["1{a text }\n}"], "one\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "one\ntext }\n");
+	}
+
+	#[test]
+	fn builtin_group_ending_in_substitution_edits_file() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("input");
+		std::fs::write(&path, "skip\none\ntwo\nend\n").unwrap();
+		let (code, capture) = crate::host::run_util::<Sed>(
+			&["-i", r"2{N;s/\n/ /}", "input"],
+			"",
+			dir.path(),
+		);
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "");
+		assert_eq!(std::fs::read_to_string(path).unwrap(), "skip\none two\nend\n");
+	}
+
+	#[test]
+	fn builtin_group_ending_rejects_invalid_syntax() {
+		for script in ["1{dX}", "1{s/x/y/gX}", "1{p}p", "1{s/x/y/}}", "1{p"] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], "x\n", "/");
+			assert_ne!(code, 0, "{script}");
+			assert_eq!(capture.out(), "", "{script}");
+		}
 	}
 
 	#[test]

@@ -140,7 +140,7 @@ async fn after_requires_all_even_when_ambiguous_insertions_have_identical_outcom
 	assert!(writer.requests.lock().is_empty());
 	assert_eq!(workspace.read("a.txt").unwrap(), "item\nitem\n");
 
-	let input = copy_ready_payload(&error.to_string(), "*** Edit File: a.txt all");
+	let input = copy_ready_payload(&error.to_string(), "*** Edit File: a.txt\n*** Find all");
 	workspace
 		.apply_json(&json!({ "input": input }), &writer)
 		.await
@@ -469,15 +469,13 @@ async fn streaming_preview_keeps_finished_ops_while_the_next_find_streams() {
 }
 
 #[tokio::test]
-async fn streaming_preview_recovers_a_bare_find_in_a_closed_section() {
+async fn closed_find_only_section_previews_an_error_instead_of_a_rewrite() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "alpha one two three\n");
 	workspace.write("b.txt", "beta\n");
 	let mut files = FileCache::new(workspace.config.policy.clone());
 	let engine = SloppyEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
-	// The `b.txt` header closes the a.txt section, so its bare Find is final
-	// and recovers exactly as it will on apply; only the last section may
-	// still be streaming.
+	// Starting b.txt closes the incomplete operation in a.txt.
 	let args = ArgSnapshot {
 		input: Some(
 			"*** Edit File: a.txt\n*** Find\nalpha one two threX\n*** Edit File: b.txt\n*** \
@@ -488,16 +486,9 @@ async fn streaming_preview_recovers_a_bare_find_in_a_closed_section() {
 	};
 	let streaming = engine.preview(&args, true, &mut files, &workspace.store);
 	let finished = engine.preview(&args, false, &mut files, &workspace.store);
-	let a_txt = |preview: &[omp_edit::PreviewFile]| {
-		preview
-			.iter()
-			.find(|file| file.display == "a.txt")
-			.cloned()
-			.expect("a.txt previews")
-	};
-	let streamed = a_txt(&streaming);
-	assert_eq!(streamed.error, None, "{streamed:?}");
-	assert_eq!(streamed.diff, a_txt(&finished).diff);
+	assert_eq!(streaming, finished);
+	assert!(finished.iter().all(|file| file.diff.is_none()));
+	assert!(finished.iter().any(|file| file.error.is_some()));
 }
 
 #[test]

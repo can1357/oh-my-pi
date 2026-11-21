@@ -10,6 +10,7 @@ import {
 	postmortem,
 	readSalvageableRows,
 } from "@oh-my-pi/pi-utils";
+import { type WordQuery, wordQuery } from "./search-query";
 import { closeSessionIndex, salvageSessionIndex } from "./session-index";
 
 /** A unique prompt with provenance from its most recent submission. */
@@ -84,43 +85,14 @@ function readableRowClause(table: string): string {
 	return `typeof(${table}prompt) = 'text' AND typeof(${table}created_at) = 'integer' AND typeof(${table}use_count) = 'integer'`;
 }
 
-/** A query term's letter and digit runs, as FTS5's unicode61 tokenizer splits stored prompts. */
-function ftsTokens(term: string): string[] {
-	return term.split(/[^\p{L}\p{N}]+/u).filter(token => token.length > 0);
-}
-
-/** `text` case-folded with Latin diacritics removed, as the unicode61 tokenizer indexes it. */
-function ftsFold(text: string): string {
-	return text
-		.toLowerCase()
-		.normalize("NFD")
-		.replace(/(\p{Script=Latin})\p{M}+/gu, "$1")
-		.normalize("NFC");
-}
-
-/** Whether `phrase` occurs as consecutive `tokens`, its last token as a prefix: an FTS5 `"…"*` phrase. */
-function hasPhrasePrefix(tokens: string[], phrase: string[]): boolean {
-	const last = phrase.length - 1;
-	if (last < 0) return false;
-	for (let start = 0; start + last < tokens.length; start++) {
-		if (!tokens[start + last].startsWith(phrase[last])) continue;
-		let index = 0;
-		while (index < last && tokens[start + index] === phrase[index]) index++;
-		if (index === last) return true;
-	}
-	return false;
-}
-
 /**
- * Whether a queued `prompt` answers `terms` as {@link HistoryStorage.search}
- * matches stored rows: every term as an FTS phrase prefix, or every term as a
- * literal substring under LIKE's ASCII-only case folding.
+ * Whether a queued `prompt` answers a query as {@link HistoryStorage.search}
+ * matches stored rows: every term as an FTS phrase prefix (`words`), or every
+ * term as a literal substring under LIKE's ASCII-only case folding.
  */
-function promptMatchesTerms(prompt: string, terms: string[]): boolean {
+function promptMatchesTerms(prompt: string, terms: string[], words: WordQuery): boolean {
 	const likeText = prompt.replace(/[A-Z]+/g, run => run.toLowerCase());
-	if (terms.every(term => likeText.includes(term))) return true;
-	const tokens = ftsTokens(ftsFold(prompt));
-	return terms.every(term => hasPhrasePrefix(tokens, ftsTokens(ftsFold(term))));
+	return terms.every(term => likeText.includes(term)) || words.test(prompt);
 }
 
 // Escape LIKE wildcards so user input is treated as literal text.
@@ -420,28 +392,15 @@ ON CONFLICT(prompt) DO UPDATE SET
 		if (safeLimit === 0) return [];
 
 		const terms = this.#terms(query);
-		if (terms.length === 0) return [];
-		const queued = this.#queuedEntries().filter(entry => promptMatchesTerms(entry.prompt, terms));
+		// Both drop the terms without a letter or digit.
+		const words = wordQuery(query);
+		if (terms.length === 0 || !words) return [];
+		const queued = this.#queuedEntries().filter(entry => promptMatchesTerms(entry.prompt, terms, words));
 		// Each matching queued prompt can displace its own stored row, so read that many more.
 		const fetchLimit = safeLimit + queued.length;
 
-		// 1. FTS5 prefix match (term AND). Each term is one phrase of its letter
-		//    and digit runs, split the way the unicode61 tokenizer indexed the
-		//    stored text, so "git-commit" -> "git commit"*: the runs must be
-		//    adjacent tokens, not two words anywhere in the prompt.
-		const ftsQuery = terms.map(term => `"${ftsTokens(term).join(" ")}"*`).join(" ");
-		let ftsRows: HistoryRow[] = [];
-		try {
-			ftsRows = this.#searchStmt.all(
-				ftsQuery,
-				filter.cwd ?? null,
-				filter.sessionId ?? null,
-				fetchLimit,
-			) as HistoryRow[];
-		} catch (error) {
-			// Malformed FTS expression - fall through to substring path.
-			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
-		}
+		// 1. FTS5 prefix match (term AND); a malformed expression leaves only the substring path.
+		const ftsRows = this.#ftsRows(words, fetchLimit, filter);
 
 		// 2. Substring fallback (term-AND LIKE, each term literal). Catches infix
 		//    matches FTS5's prefix-only wildcard cannot reach (e.g. "mit" ->
@@ -468,6 +427,31 @@ ON CONFLICT(prompt) DO UPDATE SET
 
 		const rows = [...rowsById.values()].sort((a, b) => b.created_at - a.created_at || b.id - a.id);
 		return this.#withQueued(queued, rows, filter, safeLimit);
+	}
+
+	/**
+	 * Finds unique prompts holding every query term as words ({@link WordQuery}),
+	 * newest first. Unlike {@link search} it never matches inside a word ("mit"
+	 * misses "commit"), so the full-text index answers it alone instead of a
+	 * scan over every stored prompt.
+	 */
+	searchWords(words: WordQuery, limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
+		const safeLimit = this.#normalizeLimit(limit);
+		if (safeLimit === 0) return [];
+		const queued = this.#queuedEntries().filter(entry => words.test(entry.prompt));
+		// Each matching queued prompt can displace its own stored row, so read that many more.
+		const rows = this.#ftsRows(words, safeLimit + queued.length, filter);
+		return this.#withQueued(queued, rows, filter, safeLimit);
+	}
+
+	/** Stored rows matching `words` in the full-text index, newest first; a failed query yields none. */
+	#ftsRows(words: WordQuery, limit: number, filter: HistoryFilter): HistoryRow[] {
+		try {
+			return this.#searchStmt.all(words.match, filter.cwd ?? null, filter.sessionId ?? null, limit) as HistoryRow[];
+		} catch (error) {
+			logger.debug("HistoryStorage FTS query failed", { error: String(error) });
+			return [];
+		}
 	}
 
 	/**
