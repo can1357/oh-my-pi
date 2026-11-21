@@ -14,10 +14,8 @@ use std::{
 use omp_rpc::*;
 use serde_json::{Map, Value, json};
 
-fn group_alive(pgid: libc::pid_t) -> bool {
-	// SAFETY: signal 0 only probes for a live member.
-	unsafe { libc::kill(-pgid, 0) == 0 }
-}
+mod support;
+use support::group_alive;
 
 fn group_members(pgid: libc::pid_t) -> Vec<String> {
 	let output = Process::new("pgrep")
