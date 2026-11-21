@@ -3,7 +3,7 @@
  * “Ran `bun test`”. Browser steps are read out of the eval/browser code the agent wrote, since omp drives tabs
  * through `tab.click(…)`-style helpers rather than one tool per action.
  */
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { hostOf } from "./tab-context";
 
@@ -339,7 +339,8 @@ function describeCode(code: string, title: string | null): StepDescription {
 /** The label, icon and pointer geometry for one tool call. `args` is the raw argument object off the wire. */
 export function describeStep(name: string, rawArgs: unknown, intent: string | undefined): StepDescription {
 	const args = isRecord(rawArgs) ? rawArgs : {};
-	const hint = intent?.trim() || (typeof args[INTENT_FIELD] === "string" ? args[INTENT_FIELD].trim() : "") || null;
+	const rawHint = intent?.trim() || (typeof args[INTENT_FIELD] === "string" ? args[INTENT_FIELD].trim() : "") || null;
+	const hint = rawHint ? toolIntentLabel(rawHint) : null;
 	switch (name) {
 		case "bash": {
 			const command = field(args, "command");

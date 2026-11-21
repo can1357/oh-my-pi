@@ -122,6 +122,38 @@ omitted from the benchmark prompt. Override infrastructure with
 `--vmon-host`, `--vmon-source`, `--vmon-bin`, `--vmon-home`,
 `--vmon-kernel`, `--vmon-agent`, and `--gateway-url`.
 
+## Compaction benchmark (ProgramBench baseline)
+
+`bench:compaction baseline` runs one ProgramBench task (default
+`bellard__quickjs.d7ae12a`) with omp's auto-compaction off, records every
+turn's request size, and captures the fork point every compaction arm
+resumes from: at the first turn whose request reaches `--fork-tokens`
+(default 300k) it runs `docker commit`, which pauses the container, so the
+image holds the workspace and the session prefix with no tool mid-run.
+
+```bash
+bun --cwd packages/metaharness run bench:compaction baseline --run qjs-ds41-1
+```
+
+- **Docker over SSH, official sandbox.** Trials run on `--host` (default
+  `xeon.internal`, x86_64) with ProgramBench's inference limits:
+  `--network none --cpus 20 --memory 60g --cap-drop SYS_PTRACE`, user `agent`,
+  6 h wall clock. omp runs detached per segment (`--mode json`, `--continue`
+  after the first); the runner follows its event log and reconnects on drops.
+- **Auth stays on the host.** An SSH remote forward of a unix socket, owned by
+  the runner, ends at the local auth gateway; a relay inside the container
+  (`gw-relay.py`) exposes it on `127.0.0.1:4000`.
+- **Long horizon.** When the agent ends early it gets a fixed continue
+  prompt (PaperBench IterativeAgent style, `--max-continues`); the first
+  natural stop is recorded. Ten minutes before the deadline it is interrupted
+  and given ProgramBench's wrap-up instruction.
+- **Scoring.** The workspace at the fork (`cbench-fork:<run>` image) and at
+  the end are packed and scored with `uvx programbench eval` and its own
+  `score_instance` (ignored branches/tests as on the leaderboard).
+
+Outputs in `runs/compaction/<run>/`: `summary.json`, `report.md` (context
+crossings per 100k), `turns.json`, `logs/` (omp event streams), `sessions/`,
+and `fork-sessions/` (the session as captured in the fork image).
 ## Harbor runner options (excerpt)
 
 | Option                                    | Default                            | Notes                                                                                                                                                                                                           |
