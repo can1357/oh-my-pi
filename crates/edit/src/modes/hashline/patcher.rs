@@ -13,9 +13,9 @@ use super::{
 	clipboard::validate_clipboard_sequence,
 	input::{Parsed, Patch, PatchSection},
 	messages::{
-		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal,
-		path_recovered_from_tag_message, stale_unseen_lines_message, unseen_lines_message,
-		unverified_wide_lines_message, wide_unseen_lines_message,
+		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, path_recovered_from_tag_message,
+		stale_unseen_lines_message, unseen_lines_message, unverified_wide_lines_message,
+		wide_unseen_lines_message,
 	},
 	mismatch::{
 		MismatchDetails, format_header_only_message, mismatch_error, tag_from_other_file_error,
@@ -518,8 +518,8 @@ fn assert_seen_lines(
 				));
 			}
 			return Err(EditError::rejected(
-					Rejection::UnseenLines,
-					wide_unseen_lines_message(section.path.as_str(), &unseen),
+				Rejection::UnseenLines,
+				wide_unseen_lines_message(section.path.as_str(), &unseen),
 			));
 		}
 	}
@@ -1376,9 +1376,9 @@ mod lifecycle {
 			.unwrap_err();
 		assert!(err.contains("never displayed"), "unexpected error: {err}");
 		assert!(
-				!err.lines().any(|line| line.starts_with("  20:")),
-				"faithful line leaked into reveal: {err}"
-			);
+			!err.lines().any(|line| line.starts_with("  20:")),
+			"faithful line leaked into reveal: {err}"
+		);
 		assert!(err.contains("  18:let v0016 = 16;"), "stale line missing from reveal: {err}");
 	}
 	/// A file whose old lines 16 and 18 carry identical content, for the
@@ -1474,7 +1474,7 @@ mod lifecycle {
 		let tag1 = ctx.head_tag("case-j.ts");
 		ctx.edit(&format!(
 			"[case-j.ts#{tag1}]\nPUT 16.=19:\n+let v0018 = 18; // a\n+let v0019 = 19;\n+let v0020 = \
-				 20;\n+let v0021 = 21; // b\n"
+			 20;\n+let v0021 = 21; // b\n"
 		))
 		.await
 		.unwrap();
@@ -1616,7 +1616,7 @@ mod lifecycle {
 		let before = (ctx.text("one.ts"), ctx.text("two.ts"));
 		let patch = format!(
 			"[one.ts#{one}]\nPUT 20.=20:\n+let v0020 = 200;\n[two.ts#{two}]\nPUT 25.=25:\n+var v0025 \
-				 = 250;\n"
+			 = 250;\n"
 		);
 		let err = ctx.edit(&patch).await.unwrap_err();
 		assert!(err.contains("  20:let v0020 = 20;"), "one.ts not revealed: {err}");
@@ -1646,7 +1646,7 @@ mod lifecycle {
 		let err = ctx
 			.edit(&format!(
 				"[one.ts#{one}]\nPUT 20.=20:\n+let v0020 = 200;\n[two.ts#BAD0]\nPUT 5.=5:\n+var v0005 \
-					 = 50;\n"
+				 = 50;\n"
 			))
 			.await
 			.unwrap_err();
