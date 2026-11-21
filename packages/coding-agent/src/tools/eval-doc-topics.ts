@@ -1,6 +1,6 @@
 /**
- * The eval tool's description options and its on-demand doc topics (`xd://eval/<topic>`). A leaf of the eval tool:
- * `xd://` serves these topics in sessions without the eval tool, and must not pull in the tool's module graph.
+ * The eval tool's description options and its on-demand doc topics (`help://eval/<topic>`). A leaf of the eval tool:
+ * `read` serves these topics in sessions without the eval tool, and must not pull in the tool's module graph.
  */
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -26,7 +26,7 @@ export interface EvalToolDescriptionOptions {
 	eagerDelegation?: boolean;
 	/** Point blocked callers at the `wait` tool; false when the session lacks it (subagents). Default: true. */
 	waitTool?: boolean;
-	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic, inlined when it asks to be. */
+	/** Enabled preludes; each becomes an `help://eval/<name>` doc topic, inlined when it asks to be. */
 	preludes?: readonly Pick<
 		EvalPreludeDefinition,
 		"name" | "documentation" | "summary" | "inlineDocumentation" | "firstCallDocumentation"
@@ -34,7 +34,7 @@ export interface EvalToolDescriptionOptions {
 	/** The session can send first-call guides; without it such a prelude is listed as read-first. */
 	firstCallGuides?: boolean;
 	/**
-	 * Inline every doc topic instead of linking `xd://eval/<topic>`. Required
+	 * Inline every doc topic instead of linking `help://eval/<topic>`. Required
 	 * when the session cannot `read` (the only transport for topic docs).
 	 */
 	inlineTopics?: boolean;
@@ -67,7 +67,7 @@ export function evalTemplateContext(options: EvalToolDescriptionOptions) {
 }
 
 /**
- * On-demand eval docs (`topic → markdown`) served at `xd://eval/<topic>`:
+ * On-demand eval docs (`topic → markdown`) served at `help://eval/<topic>`:
  * `judge` (including completion), `helpers`, `agents` (when spawning is allowed),
  * and one per enabled prelude.
  */
