@@ -61,6 +61,8 @@
 
 ### Fixed
 
+- Tern's tray cards follow an agent as its model streams: the call it is writing (such as `write · tests/test_norm.py`), the line it is writing, or Thinking, instead of its previous call until the new one starts
+- A tray card shows the model a `/switch` picked for the agent you are viewing at once, instead of the old model until the new one has answered
 - Sessions started from the omp extension's side panel drive only your Chrome: Eval's `browser.open` no longer launches omp's own browser there (`app` other than `"relay"` is refused), so every tab it opens shows up in your window
 - In Tern, answers keep their turn footer and its Copy button after a resume, a compaction or any other transcript rebuild; previously every answer drawn before the rebuild lost them
 - `--continue` (and `autoResume`) no longer resumes a session another running omp is writing, which duplicated its conversation into a new file on the first message; it starts a new session as plain `omp` does

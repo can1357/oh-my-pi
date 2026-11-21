@@ -10,6 +10,7 @@ import {
 	type TrayMain,
 	TrayMainActivity,
 	TrayMemory,
+	trayAgentDetail,
 } from "@oh-my-pi/pi-coding-agent/modes/tray";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -432,6 +433,39 @@ describe("tray items", () => {
 		});
 		expect(done).toMatchObject({ names: "Old" });
 		expect(done?.item === "done" && done.entries[0]?.name).toBe("Old");
+	});
+
+	it("follows a running agent's stream between calls: the call it writes, its newest line, its reasoning", () => {
+		const f = fixture();
+		f.refs.push(ref("Scout", "running"));
+		const last = { tool: "edit", args: "src/norm.py", argsKey: "path", endMs: 30_000 };
+		const writing = { kind: "call", tool: "write", args: "tests/test_norm.py", argsKey: "path" } as const;
+		const doing = (overrides: Partial<AgentProgress>): [string, string] => {
+			f.sessions.splice(0, 1, observed("Scout", "active", { recentTools: [last], ...overrides }));
+			const card = buildTrayItems(input(f), new TrayMemory()).items[0];
+			return card?.item === "agent" ? [card.tool, card.text] : ["", ""];
+		};
+		expect(doing({})).toEqual(["edit", "src/norm.py"]);
+		expect(doing({ streaming: writing })).toEqual(["write", "tests/test_norm.py"]);
+		expect(doing({ streaming: { ...writing, intent: "Write the norm test" } })).toEqual([
+			"write",
+			"Write the norm test",
+		]);
+		expect(
+			doing({ streaming: { kind: "text" }, recentOutput: ["**Next**, the norm test", "Fixed the edit"] }),
+		).toEqual(["", "Next, the norm test"]);
+		expect(doing({ streaming: { kind: "thinking" } })).toEqual(["", "Thinking"]);
+		// A call that runs outranks what streams beside it.
+		expect(
+			doing({ currentTool: "bash", currentToolArgs: "bun test", currentToolArgsKey: "command", streaming: writing }),
+		).toEqual(["bash", "bun test"]);
+		// The closer look ends with the call being written, as the card says.
+		expect(
+			trayAgentDetail(observed("Scout", "active", { recentTools: [last], streaming: writing }), 60_000).tail,
+		).toEqual([
+			{ tool: "edit", text: "src/norm.py", state: "ok", age: undefined },
+			{ tool: "write", text: "tests/test_norm.py", state: "run", age: undefined },
+		]);
 	});
 
 	it("hides agent cards and the done card under display.pinnedAgents off, keeping the jobs", () => {

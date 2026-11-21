@@ -1117,7 +1117,11 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 	return "require";
 }
 
-function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
+/** Split a traced call's intent (`i`, trimmed, trailing periods dropped) from the arguments its tool reads. */
+export function extractIntent(args: Record<string, unknown>): {
+	intent?: string;
+	strippedArgs: Record<string, unknown>;
+} {
 	const { [INTENT_FIELD]: intent, ...strippedArgs } = args;
 	if (typeof intent !== "string") {
 		return { strippedArgs };
