@@ -21,7 +21,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { parseReasoningDetailsSignature, replaysSignedReasoningText } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { resolveThinkingReplayTokens, type ThinkingReplayTokens } from "@oh-my-pi/pi-catalog/compat/thinking-replay";
-import type { ModelTokenizer, ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { materializeString, stringifyJson } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -53,6 +53,7 @@ export function tokenizerEncodingForModel(model: Pick<Model, "tokenizer"> | null
 type TokenizerModel = Pick<Model, "tokenizer"> &
 	snapcompact.ShapeTarget & {
 		compat?: Model["compat"];
+		compatConfig?: Model["compatConfig"];
 		thinking?: Model["thinking"];
 		providerType?: string;
 		reasoning?: boolean;
@@ -126,8 +127,10 @@ function reasoningReplayReader(model: TokenizerModel | null | undefined): ModelI
 
 /** Unknown request effort: reserve summary tokens if either reachable compat view replays them. */
 function opaqueReplayToolNameLimits(model: TokenizerModel | null | undefined) {
-	if (model?.api !== "openai-completions" || !model.id || !model.provider) return undefined;
-	const compat = model.compat as ResolvedOpenAICompat | undefined;
+	if (!model?.api || !model.id || !model.provider) return undefined;
+	const compat = (model.compat ?? model.compatConfig) as
+		| { reasoningOpaqueReplay?: boolean; whenThinking?: { reasoningOpaqueReplay?: boolean } }
+		| undefined;
 	if (!compat?.reasoningOpaqueReplay && !(model.reasoning && compat?.whenThinking?.reasoningOpaqueReplay)) {
 		return undefined;
 	}

@@ -2555,7 +2555,7 @@ export function getReasoningOpaqueReplay(
 	enabled: boolean,
 	untrustedIndex = -1,
 ): { opaque: string; text: string } | undefined {
-	if (!enabled || model?.api !== "openai-completions" || !isSameModelTurn(turn, model)) {
+	if (!enabled || !model || !isSameModelTurn(turn, model)) {
 		return undefined;
 	}
 	let opaque: string | undefined;
@@ -2930,6 +2930,7 @@ export function convertMessages(
 				assistantMsg[reasoningField] = ".";
 				hasReasoningField = true;
 			}
+			let toolCallIdRewritten = false;
 			if (toolCalls.length > 0) {
 				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {
 					const toolCallId = ensureToolCallId(tc.id, `${i}:${toolCallIndex}:${tc.name}`, msg);
@@ -2942,6 +2943,7 @@ export function convertMessages(
 							arguments: serializeToolArguments(tc.arguments),
 						},
 					};
+					if (replayedToolCall.id !== tc.id) toolCallIdRewritten = true;
 					const stored = normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature));
 					const extraContent = getGeminiThoughtSignatureExtraContent(stored?.perCall);
 					if (extraContent) replayedToolCall.extra_content = extraContent;
@@ -2960,7 +2962,12 @@ export function convertMessages(
 			// it), the encrypted entries kept on unchanged tool calls still replay.
 			// A request that drops the model's own thinking also drops its unsigned text.
 			const receivedReasoningDetails: Record<string, unknown>[] = [];
-			const opaqueReplay = getReasoningOpaqueReplay(msg, model, compat.reasoningOpaqueReplay);
+			// Opaque state belongs to the provider-issued call IDs, not their wire replacements.
+			const opaqueReplay = getReasoningOpaqueReplay(
+				msg,
+				model,
+				compat.reasoningOpaqueReplay && !toolCallIdRewritten,
+			);
 			for (const block of thinkingBlocks) {
 				const stored = parseReasoningDetailsSignature(block.thinkingSignature);
 				if (stored?.reasoningDetails) {

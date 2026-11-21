@@ -344,7 +344,7 @@ function deduplicateToolCallIds(
 		}
 
 		if (!contentChanged) return msg;
-		return { ...msg, content };
+		return { ...msg, content: dropReasoningDetailsEnvelopes(content) };
 	});
 
 	return { messages: transformed, realToolResultsById, validToolUseIds };
