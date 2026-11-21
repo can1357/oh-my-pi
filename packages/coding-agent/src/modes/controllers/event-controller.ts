@@ -578,6 +578,40 @@ export class EventController {
 		this.#finalizeAbandonedPostToolSegments();
 	}
 	/**
+	 * Seal live tool cards no result can reach any more, as a new assistant message opens: a card
+	 * no call id routes to, and, when the message is new rather than restored (`fresh`), a streamed
+	 * preview from an earlier message whose call never started. One such card at the transcript
+	 * frontier blocks history retirement for the rest of the session, squeezing every later block
+	 * to its one-line live allocation.
+	 */
+	#sealOrphanedToolCards(fresh: boolean): void {
+		const children = this.ctx.chatContainer.children;
+		const states = this.ctx.chatContainer.blockStates();
+		const idsByCard = new Map<Component, string[]>();
+		for (const [toolCallId, card] of this.ctx.pendingTools) {
+			const ids = idsByCard.get(card);
+			if (ids) ids.push(toolCallId);
+			else idsByCard.set(card, [toolCallId]);
+		}
+		for (let index = children.length - 1; index >= 0 && states[index] !== "committed"; index--) {
+			const card = children[index];
+			if (!(card instanceof ToolExecutionComponent) || card.isTranscriptBlockFinalized()) continue;
+			const ids = idsByCard.get(card);
+			if (ids === undefined) {
+				card.seal();
+				continue;
+			}
+			if (!fresh) continue;
+			if (ids.some(id => this.#executionStartedCallIds.has(id) || this.#backgroundCallIds.has(id))) continue;
+			for (const id of ids) {
+				this.#toolArgsReveal.finish(id);
+				this.ctx.pendingTools.delete(id);
+			}
+			card.seal();
+		}
+	}
+
+	/**
 	 * Finalize post-tool assistant segments whose `message_end` never fired (a
 	 * mid-stream throw or dropped agent_end). They are created unfinalized at
 	 * `message_update` and finalized only at `message_end`, so a dropped end
@@ -1413,6 +1447,7 @@ export class EventController {
 				abandoned.markTranscriptBlockFinalized();
 			}
 			this.#finalizeAbandonedPostToolSegments();
+			this.#sealOrphanedToolCards(event.message.content.length === 0);
 			this.#lastVisibleBlockCount = 0;
 			this.#streamedToolCallIdByIndex.clear();
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
