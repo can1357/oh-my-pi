@@ -585,6 +585,21 @@ describe("todo backend", () => {
 			expect(tasksOf(fresh)).toEqual([["a", "b"]]);
 		});
 
+		it("after a refusal by a backend omp never sent a list, an emptied list still reaches it", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension]);
+			session.commitTodoPhases(list("a"));
+			cfgTodoBackend.override(session.settings, "tracker");
+			backend.error = new Error("not now");
+			const refused = await todo(session, { op: "append", phase: "Work", items: ["b"] });
+			backend.error = undefined;
+			session.commitTodoPhases([]);
+			await settled(session);
+
+			expect(refused.isError).toBe(true);
+			expect(tasksOf(backend)).toEqual([[]]);
+		});
+
 		it("of the todo calls that fail with a backend, only one whose list changed leaves a reminder to retry it", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker", {

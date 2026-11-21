@@ -1849,8 +1849,9 @@ export class ExtensionRunner {
 						await definition.apply?.(event.change, ctx);
 					} catch (error) {
 						// A refusal is the backend's answer, not an extension error. Given in time, it
-						// leaves the backend holding what it held.
-						if (waiting) this.#todoSent = sent;
+						// leaves the backend holding what it held. One omp had never called has been called
+						// now: its record stays unknown, so an emptied list is no longer kept from it.
+						if (waiting && sent !== "none") this.#todoSent = sent;
 						return error instanceof Error ? error.message : String(error);
 					}
 					accepted = true;
