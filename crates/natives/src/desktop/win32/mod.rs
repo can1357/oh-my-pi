@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "windows", test))]
+mod activity;
 #[cfg(target_os = "windows")]
 mod ax;
 #[cfg(target_os = "windows")]
@@ -107,6 +109,14 @@ impl Backend for Win32Backend {
 
 	fn window_covered(&mut self, id: &str) -> bool {
 		capture::window_covered(id)
+	}
+
+	fn admit_takeover(&mut self) -> CoreResult<()> {
+		activity::admit()
+	}
+
+	fn takeover_admitted(&mut self) -> CoreResult<bool> {
+		activity::admitted()
 	}
 
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {
