@@ -65,8 +65,8 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
  *   `x-assistant-message-id` used for usage attribution. No
  *   SDK telemetry (`X-Stainless-*`), `x-api-key` or Claude Code app headers.
  * - System identity: one Droid identity sentence precedes the caller's system
- *   prompt. The caller's prompt is unchanged except for OMP's own identity
- *   sentence, which the proxy's usage policy check rejects.
+ *   prompt without changing its contents. A historical plugin-without-prefix
+ *   403 is not evidence that the same gate remains active today.
  * - `x-api-provider` selects the upstream router from the model's registry
  *   rotation list (first entry pinned); the registry is KDL
  *   (`rules/providers/factory-droid.kdl`, read through `compat/factory-droid`).
@@ -74,24 +74,6 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
 
 /** Droid identity sentence prepended to the system channel. */
 const DROID_SYSTEM_PREFIX = droidIdentity.trim();
-
-/**
- * OMP's identity sentence, line 1 of coding-agent `system-prompt.md` (a test
- * fails when the two drift). Factory's proxy answers 403
- * `content_policy_rejected` to any request whose system channel contains it,
- * on every wire; the Droid sentence already names the agent.
- */
-const OMP_IDENTITY_SENTENCE = "You are omp's trusted coding assistant.";
-
-/**
- * A caller system block without {@link OMP_IDENTITY_SENTENCE}. Text around the
- * sentence keeps its separators; a block that opened with it drops the blank
- * lines that followed it.
- */
-function withoutOmpIdentity(block: string): string {
-	const stripped = block.replaceAll(OMP_IDENTITY_SENTENCE, "");
-	return block.startsWith(OMP_IDENTITY_SENTENCE) ? stripped.replace(/^\n+/, "") : stripped;
-}
 
 /**
  * The CLI's chat-completions request builder pins `temperature: 1` on every
@@ -764,7 +746,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				sessionUuid,
 				context: {
 					...context,
-					systemPrompt: [DROID_SYSTEM_PREFIX, ...systemPrompt.map(withoutOmpIdentity).filter(Boolean)],
+					systemPrompt: [DROID_SYSTEM_PREFIX, ...systemPrompt],
 				},
 				options,
 				forwarded: {

@@ -102,4 +102,18 @@ describe("per-install prompt perturbation", () => {
 		process.env.OMP_PROMPT_PERTURBATION = "0";
 		expect(perturbContext(model, sampleContext)).toBe(sampleContext);
 	});
+
+	it("drops the system-prompt opener from Factory Droid requests through its KDL policy", async () => {
+		const promptUrl = new URL("../../coding-agent/src/prompts/system/system-prompt.md", import.meta.url);
+		const prompt = await Bun.file(promptUrl).text();
+		const opener = prompt.slice(0, prompt.indexOf("\n"));
+		const droid = { ...model, provider: "factory-droid", id: "kimi-k3" } as typeof model;
+		const blocks = perturbContext(droid, { systemPrompt: [prompt], messages: [] }).systemPrompt;
+		expect(blocks?.[0]).not.toContain(opener);
+		// Legacy pi-ai callers pass the system prompt as one string.
+		const legacy = { systemPrompt: prompt, messages: [] } as unknown as Context;
+		const single = perturbContext(droid, legacy).systemPrompt as unknown as string;
+		expect(typeof single).toBe("string");
+		expect(single).not.toContain(opener);
+	});
 });

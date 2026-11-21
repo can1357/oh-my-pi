@@ -254,24 +254,6 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		},
 	);
 
-	it("sends no system block for a caller block that held only OMP's identity sentence", async () => {
-		const captured: CapturedRequest[] = [];
-		await streamFactoryDroid(
-			factoryModel("claude-opus-4-6"),
-			{
-				systemPrompt: ["You are omp's trusted coding assistant.", "# Engineering\nCorrectness first."],
-				messages: [{ role: "user", content: "hello", timestamp: 1 }],
-			},
-			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
-		).result();
-
-		const system = captured[0]!.body.system as Array<{ text: string }>;
-		expect(system.map(block => block.text)).toEqual([
-			"You are Droid, an AI software engineering agent built by Factory.",
-			"# Engineering\nCorrectness first.",
-		]);
-	});
-
 	it.each([
 		["required", () => ({ type: "any" })],
 		[{ type: "function", function: { name: "Read" } }, (toolName: string) => ({ type: "tool", name: toolName })],

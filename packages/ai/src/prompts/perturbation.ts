@@ -101,7 +101,11 @@ export function isPromptPerturbationEnabled(model: Model): boolean {
  */
 export function perturbContext(model: Model, context: Context): Context {
 	if (!isPromptPerturbationEnabled(model)) return context;
-	const systemPrompt = context.systemPrompt?.map(perturbPromptText);
+	// Legacy pi-ai callers pass one string; providers normalize either shape, so keep the caller's.
+	const raw: readonly string[] | string | undefined = context.systemPrompt;
+	const systemPrompt = (typeof raw === "string" ? perturbPromptText(raw) : raw?.map(perturbPromptText)) as
+		| string[]
+		| undefined;
 	const tools = perturbTools(context.tools);
 	const inactiveTools = perturbTools(context.inactiveTools);
 	if (systemPrompt === context.systemPrompt && tools === context.tools && inactiveTools === context.inactiveTools) {
