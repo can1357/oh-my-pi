@@ -667,6 +667,13 @@ export class SessionMaintenance {
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	/**
+	 * Set when pre-prompt or mid-run threshold maintenance deferred to a running
+	 * speculation. Survives an intervening await (e.g. `autoParallel`/`autoPrewalk`)
+	 * where that speculation finishes before the turn dispatches, so Cursor still
+	 * gets its wrap-up budget for the deferred turn.
+	 */
+	#thresholdDeferredToSpeculation = false;
+	/**
 	 * {@link #nativeSpeculationKey} of the session and model whose native
 	 * speculative compaction failed for a reason a retry would hit again (an
 	 * exhausted output budget, a tool call, a refusal). Until a compaction
@@ -774,6 +781,12 @@ export class SessionMaintenance {
 	/** Clears per-prompt recovery counters when a new user prompt starts. */
 	resetForNewPrompt(): void {
 		this.#incompleteRecoveryAttempts = 0;
+		this.#thresholdDeferredToSpeculation = false;
+	}
+
+	/** Whether the latest pre-prompt or mid-run threshold check deferred to speculation. */
+	get thresholdDeferredToSpeculation(): boolean {
+		return this.#thresholdDeferredToSpeculation;
 	}
 
 	/** Whether blocking compaction owns prompt admission. */
@@ -3060,6 +3073,7 @@ export class SessionMaintenance {
 	}
 
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
+		this.#thresholdDeferredToSpeculation = false;
 		const model = this.#model;
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
@@ -3093,6 +3107,7 @@ export class SessionMaintenance {
 		// blocking summarization; the user's prompt goes out immediately and the
 		// armed result is spliced in at the next boundary.
 		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
+			this.#thresholdDeferredToSpeculation = true;
 			logger.debug("Pre-prompt threshold deferred to speculative compaction", {
 				contextTokens,
 				contextWindow,
@@ -3149,6 +3164,7 @@ export class SessionMaintenance {
 		context: AgentTurnEndContext | undefined,
 	): Promise<void> {
 		if (signal?.aborted || this.#host.isDisposed() || this.isCompacting) return;
+		this.#thresholdDeferredToSpeculation = false;
 
 		const ready = this.#readyCompaction;
 		if (ready && context) {
@@ -3270,6 +3286,7 @@ export class SessionMaintenance {
 		// (live or started here) produces the summary. Unless a prior dead end
 		// needed its cut point rechecked, deferred boundaries never await the journal.
 		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
+			this.#thresholdDeferredToSpeculation = true;
 			logger.debug("Mid-run threshold deferred to speculative compaction", {
 				contextTokens,
 				contextWindow,
@@ -3349,6 +3366,7 @@ export class SessionMaintenance {
 		skipAbortedCheck = true,
 		autoContinue = true,
 	): Promise<CompactionCheckResult> {
+		this.#thresholdDeferredToSpeculation = false;
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
