@@ -366,31 +366,11 @@ async fn walks_end_when_a_waiting_worker_misses_a_wakeup() {
 /// other workers' waits.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_visitor_ends_the_walk_on_every_worker() {
-	type Hook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
-	/// Puts the previous panic hook back when the test ends, also while a
-	/// failing assert unwinds. A panicking thread may not set the hook, so the
-	/// restore runs on a thread of its own.
-	struct RestoreHook(Arc<Hook>);
-	impl Drop for RestoreHook {
-		fn drop(&mut self) {
-			let previous = Arc::clone(&self.0);
-			let restore = move || std::panic::set_hook(Box::new(move |info| (*previous)(info)));
-			let _ = std::thread::spawn(restore).join();
-		}
-	}
 	let owned: Vec<String> = (0..24)
 		.flat_map(|d| (0..4).map(move |s| format!("d{d:02}/s{s}/f")))
 		.collect();
 	let specs: Vec<&str> = owned.iter().map(String::as_str).collect();
 	let tmp = make_tree("visitor-panics", &specs);
-	let previous: Arc<Hook> = Arc::new(std::panic::take_hook());
-	let _restore = RestoreHook(Arc::clone(&previous));
-	std::panic::set_hook(Box::new(move |info| {
-		let text = info.to_string();
-		if !text.contains("visitor boom") && !text.contains("a walk visitor panicked") {
-			(*previous)(info);
-		}
-	}));
 	let opts = Options { workers: Some(8), ..Default::default() };
 	let (mut panicked, mut skipped) = (0, 0);
 	for round in 0..2_000 {
