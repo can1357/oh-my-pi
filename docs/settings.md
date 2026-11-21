@@ -977,6 +977,44 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 
 The `cache` segment (in the `full` and `nerd` presets) shows before you send whether the next message reads the prompt cache: a dim database glyph while it does, struck through in the warning colour once the entry expired, omp's warm refresh missed it, the context was compacted, or the model, thinking level, tools, system prompt or cache retention changed. The Unicode symbol preset draws `●`/`⊘`, ASCII `cache`/`!cache`. It is hidden when nothing has used the cache yet, the model declares no cache lifetime, or the session is a subagent's; entries a provider keeps indefinitely (logged-in Codex) never expire. A reopened session is read off its newest cached reply and shown as likely cached. In Tern, hovering the marker says until when the entry holds (or why not) and how much the next message sends; clicking it opens `/session`, whose Prompt Cache section adds the tier and the warming schedule.
 
+#### Custom status line segments
+
+With `statusLine.preset: custom`, `leftSegments` and `rightSegments` are ordered lists of segment ids. Unknown ids render nothing and are skipped silently, so a typo produces an empty slot with no error — check spelling against this catalog:
+
+| Segment                                          | Renders                                                             | Hides when                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------- | ---------------------------------------------- |
+| `pi`                                             | brand glyph at idle; spinner + turn timer during a turn; focused agent id | never (icon-only at idle)                |
+| `status`                                         | extension statuses registered via `ctx.ui.setStatus()`             | none set                                        |
+| `model`                                          | model name + thinking level + advisor eye                          | never (`no-model` fallback)                     |
+| `mode`                                           | active mode: Plan / Prewalk / Goal / Vibe / Loop                   | no special mode active                          |
+| `path`                                           | cwd (worktree/scratch-aware, abbreviated, hyperlinked)             | never                                           |
+| `git`                                            | branch + `*n` `+n` `?n` dirty counts                               | not a repo                                      |
+| `pr`                                             | linked PR `#n` (hyperlinked)                                        | no PR for the branch                            |
+| `subagents`                                      | running subagent count                                              | count is 0                                      |
+| `token_in` / `token_out`                         | input / output token counts                                         | that count is 0                                 |
+| `token_total`                                    | total tokens (excludes `cacheRead`)                                 | total is 0                                      |
+| `token_rate`                                     | throughput in tok/s                                                 | rate is 0                                       |
+| `cost`                                           | spend + premium requests + advisor cost                            | all are zero                                    |
+| `context_pct`                                    | context % + auto-compact icon                                       | never                                           |
+| `context_total`                                  | context window size                                                 | no context window                               |
+| `time_spent`                                     | cumulative active time (excludes idle)                              | under 1s of activity                            |
+| `time`                                           | wall clock                                                          | never                                           |
+| `session`                                        | session id prefix                                                   | never (`new` fallback)                          |
+| `hostname`                                       | hostname (session-accent tinted)                                    | never                                           |
+| `cache_read` / `cache_write`                     | cache read / write token counts                                     | that count is 0                                 |
+| `cache_hit`                                      | cache hit-rate %                                                    | no cache reads                                  |
+| `session_name`                                   | session title (accent colored)                                      | unnamed session; also relocated (not shown here) in the `band` layout |
+| `usage`                                          | provider quota windows `5h`/`1d`/`7d`/`mo` + reset timers          | no usage data                                   |
+| `collab`                                         | collab host/guest role + participant count                          | not in a collab session                         |
+| `vim`                                            | modal indicator (`NORMAL`/`INSERT`/`VISUAL`/`V-LINE`)              | `tui.vimMode` is off                            |
+
+`statusLine.segmentOptions` is a per-segment map. Only four segments read it; options for any other id are ignored:
+
+- `model`: `showThinkingLevel` (boolean) — show the thinking level after the model name.
+- `path`: `abbreviate` (boolean), `maxLength` (number, default 40), `stripWorkPrefix` (boolean, default true).
+- `git`: `showBranch`, `showStaged`, `showUnstaged`, `showUntracked` (all boolean, default true).
+- `time`: `format` (`12h` or `24h`), `showSeconds` (boolean).
+
 ### Interaction
 
 | Key                            | Type    | Default         | Values                                                                                                                                                                                                                                                      |
