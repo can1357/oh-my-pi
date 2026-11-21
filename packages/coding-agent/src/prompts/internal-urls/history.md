@@ -1,1 +1,1 @@
-history://<id>: read-only concise transcript (tool calls/results summarized); bare lists registered and retained on-disk agents, not persisted unregistered top-level sessions.
+history:// lists registered and retained agents; history://<id> reads a concise agent transcript. history://session/browse lists persisted top-level sessions (?scope=all across projects in this profile; ?q=, ?limit=, ?offset=); history://session/browse/<id> reads one by header ID or unique prefix (?full=1 for the uncompacted persisted branch).

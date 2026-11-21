@@ -22,7 +22,14 @@ import {
 	resolveImageDataUrlSync,
 } from "./blob-store";
 import { buildSessionContext } from "./session-context";
-import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
+import {
+	type FileEntry,
+	type RawFileEntry,
+	resolveSessionLeafId,
+	type SessionEntry,
+	type SessionHeader,
+	walkSessionBranch,
+} from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
@@ -732,6 +739,25 @@ export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: Bl
 	}
 }
 
+async function loadHistoryEntries(filePath: string, expectedSessionId?: string): Promise<SessionEntry[]> {
+	const entries = await loadEntriesFromFile(filePath);
+	if (expectedSessionId !== undefined && (entries[0]?.type !== "session" || entries[0].id !== expectedSessionId)) {
+		throw new Error(`Session ${expectedSessionId} is no longer available at the listed path`);
+	}
+	migrateToCurrentVersion(entries);
+	return entries.filter((entry): entry is SessionEntry => entry.type !== "session");
+}
+
+/** Read the persisted active branch without a writer, lease, or image hydration. */
+export async function loadSessionBranchReadOnly(filePath: string, expectedSessionId: string): Promise<SessionEntry[]> {
+	const entries = await loadHistoryEntries(filePath, expectedSessionId);
+	const leafId = resolveSessionLeafId(entries);
+	if (leafId === null) return [];
+	const byId = new Map<string, SessionEntry>();
+	for (const entry of entries) byId.set(entry.id, entry);
+	return walkSessionBranch(byId.get(leafId), byId);
+}
+
 /**
  * Read-only transcript view of a session file: load entries, migrate to the
  * current version, resolve blob refs, and build the display transcript along
@@ -739,14 +765,16 @@ export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: Bl
  * latest compaction) so failed/aborted tail turns stay visible, unlike the
  * provider-context builder which drops them. Does NOT create a writer or take
  * the session lock — safe to call against a file another session is writing.
+ * When given, the expected ID must match the header of the file actually read.
  */
-export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
-	const entries = await loadEntriesFromFile(filePath);
-	if (entries.length === 0) return [];
-	migrateToCurrentVersion(entries);
-	for (const entry of entries) repairTruncatedSnapcompactFrames(entry);
+export async function loadSessionMessagesReadOnly(
+	filePath: string,
+	expectedSessionId?: string,
+): Promise<AgentMessage[]> {
+	const sessionEntries = await loadHistoryEntries(filePath, expectedSessionId);
+	if (sessionEntries.length === 0) return [];
+	for (const entry of sessionEntries) repairTruncatedSnapcompactFrames(entry);
 	const blobs = new BlobStore(getBlobsDir());
-	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");
 	const { messages } = buildSessionContext(sessionEntries, undefined, undefined, {
 		transcript: true,
 		collapseCompactedHistory: true,
