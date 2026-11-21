@@ -17,7 +17,7 @@ import {
 	truncateTailBytes,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { DaemonReadySpec } from "@oh-my-pi/pi-tui/tools/daemon";
-import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, sanitizeText, withTimeout } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
@@ -2044,7 +2044,8 @@ export class UnitTable {
 			} catch (error) {
 				logger.warn("Module unit stop failed", { id: entry.snapshot.id, error: errorMessage(error) });
 			}
-			await Promise.race([unit.exited.catch(() => undefined), Bun.sleep(timeoutMs + 1_000)]);
+			// Not a bare sleep race: its pending timer would hold a shut-down daemon open for the full timeout.
+			await withTimeout(unit.exited, timeoutMs + 1_000, "module unit exit timed out").catch(() => {});
 			this.#settleModule(entry, unit, undefined, reason);
 			return;
 		}
