@@ -15,16 +15,17 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { hashlineFileHash } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { expandTilde, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { normalizeToLF, stripBom } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
+import { InternalUrlRouter } from "../internal-urls";
 import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
 import type { ToolSession } from ".";
 import { resolveArtifactSpillThreshold } from "./output-meta";
-import { formatPathRelativeToCwd, resolveShellDirectory, resolveToCwd } from "./path-utils";
+import { formatPathRelativeToCwd, normalizeWindowsDriveAliasPath } from "./path-utils";
 import { decodeUtf8Text, formatReadHashlineHeader } from "./read-format";
-import { extractFlatShellCommandSegments, tokenizeShellSegments } from "./shell-tokenize";
+import { extractFlatShellCommandSegments, lexShellCommand, tokenizeShellSegments } from "./shell-tokenize";
 
 /** Distinct files credited per result. */
 const MAX_CREDITED_FILES = 16;
@@ -102,38 +103,82 @@ interface CommandContext {
 	words: string[];
 }
 
+/**
+ * Words of each command in a command the flat extractor declined, split like {@link tokenizeShellSegments} but
+ * dropping comments: an unquoted `#` starting a word (`raw` keeps the quotes, so `'#x'` and `\#x` do not match)
+ * discards everything up to the next newline.
+ */
+function tokenizeNonFlatSegments(command: string): string[][] {
+	const segments: string[][] = [];
+	let current: string[] = [];
+	let inComment = false;
+	const flush = () => {
+		if (current.length > 0) segments.push(current);
+		current = [];
+	};
+	for (const token of lexShellCommand(command)) {
+		if (inComment) {
+			if (token.kind === "separator" && token.raw.includes("\n")) inComment = false;
+			else continue;
+		}
+		if (token.kind === "word") {
+			if (token.raw.startsWith("#")) {
+				flush();
+				inComment = true;
+			} else if (token.value.length > 0) {
+				current.push(token.value);
+			}
+		} else if (/[\n;&|()]/.test(token.raw)) {
+			flush();
+		}
+	}
+	flush();
+	return segments;
+}
+
 function commandContext(command: string, cwd: string): CommandContext {
 	const bases = [cwd];
 	const words: string[] = [];
-	for (const segment of extractFlatShellCommandSegments(command)) {
-		for (const segmentWords of tokenizeShellSegments(segment.text)) {
-			const [head, ...args] = segmentWords;
-			if (head === "cd") {
-				if (args.length === 1) {
-					const base = resolvePath(args[0], cwd, resolveShellDirectory);
-					if (base !== undefined && !bases.includes(base) && bases.length <= MAX_CD_BASES) bases.push(base);
+	// The flat extractor strips comments and declines subshells, `${...}`, `$(...)`, backticks and heredocs; for
+	// those the whole command is tokenized, and every candidate is still verified against disk content.
+	const flat = extractFlatShellCommandSegments(command);
+	const segments =
+		flat.length > 0 ? flat.flatMap(segment => tokenizeShellSegments(segment.text)) : tokenizeNonFlatSegments(command);
+	// `cd a && cd b` leaves the shell in `a/b`: each `cd` resolves against the directory the previous one reached.
+	// A `cd` after `||`, `cd -` or in a sibling subshell starts from `cwd` instead, so a `cwd`-relative target is
+	// kept as a candidate base too.
+	let currentBase = cwd;
+	for (const segmentWords of segments) {
+		const [head, ...args] = segmentWords;
+		if (head === "cd") {
+			// `cd -` goes to the shell's OLDPWD, not to a directory named `-`.
+			if (args.length === 1 && args[0] !== "-") {
+				const chained = resolveShellPath(args[0], currentBase);
+				const fromCwd = currentBase === cwd ? undefined : resolveShellPath(args[0], cwd);
+				if (chained !== undefined) {
+					currentBase = chained;
+					if (!bases.includes(chained) && bases.length <= MAX_CD_BASES) bases.push(chained);
 				}
-				continue;
+				if (fromCwd !== undefined && !bases.includes(fromCwd) && bases.length <= MAX_CD_BASES) bases.push(fromCwd);
 			}
-			for (const arg of args) {
-				if (!arg.startsWith("-") && words.length < MAX_COMMAND_WORDS) words.push(arg);
-			}
+			continue;
+		}
+		for (const arg of args) {
+			if (!arg.startsWith("-") && words.length < MAX_COMMAND_WORDS) words.push(arg);
 		}
 	}
 	return { bases, words };
 }
 
-/** Resolve a shell word to an absolute path; undefined for internal URLs and other unresolvable words. */
-function resolvePath(
-	word: string,
-	base: string,
-	resolve: (filePath: string, cwd: string) => string,
-): string | undefined {
-	try {
-		return resolve(word, base);
-	} catch {
-		return undefined;
-	}
+/**
+ * Resolve a path a shell wrote or read, relative to `base`. Expands `~` and normalizes Windows/WSL drive aliases
+ * (`C:\...`, `/c/...`). Unlike a tool input it strips no `@`, `:` or `file://`
+ * prefix or unicode space, which shell text never carries: stripping them would credit a row to the wrong file.
+ * Undefined for empty words and internal URLs.
+ */
+function resolveShellPath(word: string, base: string): string | undefined {
+	if (word.length === 0 || InternalUrlRouter.instance().canHandle(word)) return undefined;
+	return path.resolve(base, normalizeWindowsDriveAliasPath(expandTilde(word)));
 }
 
 /**
@@ -161,7 +206,7 @@ class FileProbe {
 	async files(word: string, bases: readonly string[]): Promise<string[]> {
 		const resolved = new Set<string>();
 		for (const base of bases) {
-			const absolutePath = resolvePath(word, base, resolveToCwd);
+			const absolutePath = resolveShellPath(word, base);
 			if (absolutePath !== undefined) resolved.add(absolutePath);
 		}
 		const paths = [...resolved];
