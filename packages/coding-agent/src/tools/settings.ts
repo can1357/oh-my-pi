@@ -90,7 +90,7 @@ export const cfgToolsOutputMaxColumns = register({
 		group: "Output Limits",
 		label: "Output Column Cap",
 		description:
-			"Per-line byte cap for streaming tool outputs (bash, python, js eval) and `read`. Lines wider than this are ellipsis-truncated; remaining bytes up to the next newline are dropped. 0 disables.",
+			"Per-line byte cap for streaming tool outputs (bash, python, js eval) and `read`. Lines wider than this are ellipsis-truncated; remaining bytes up to the next newline are dropped. Streaming output that is a single line (e.g. an unformatted JSON response) is exempt. 0 disables.",
 		options: [
 			{ value: "0", label: "Off", description: "No per-line cap" },
 			{ value: "256", label: "256", description: "Tight" },

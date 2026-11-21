@@ -114,7 +114,7 @@ describe("capture failure across background and cancellation boundaries", () => 
 		try {
 			const gate = Promise.withResolvers<void>();
 			vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation(async (_code, options) => {
-				options.onChunk("x".repeat(80));
+				options.onChunk(`${"x".repeat(80)}\ndone`);
 				await gate.promise;
 				return {
 					output: "completed cell",

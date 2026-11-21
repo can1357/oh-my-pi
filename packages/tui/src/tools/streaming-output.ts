@@ -104,7 +104,10 @@ export interface OutputSinkOptions {
 	 * Per-line byte cap. When > 0, lines wider than `maxColumns` bytes are
 	 * truncated with an ellipsis at write time; remaining bytes up to the next
 	 * `\n` are dropped. Cap state persists across chunks so split-mid-line
-	 * writes still respect the budget. Default 0 = no per-line cap.
+	 * writes still respect the budget. Output that is a single line (one
+	 * trailing `\n` allowed), such as an unformatted JSON payload, is exempt:
+	 * the line is the whole result, and the byte budget still bounds it.
+	 * Default 0 = no per-line cap.
 	 */
 	maxColumns?: number;
 	onChunk?: (chunk: string) => void;
@@ -964,6 +967,16 @@ export class OutputSink {
 	#columnLastCutLine = 0;
 	/** Set once a cut line's number may not match the artifact; the range is then withheld. */
 	#columnCutLinesUnmapped = false;
+	/** Output so far is at most one line (its newline included); that line stays uncapped until more output follows. */
+	#soleLine = true;
+	/** The first line's newline has arrived; any further byte makes the output multi-line. */
+	#soleLineEnded = false;
+	#soleLineBytes = 0;
+	/** Head of the first line, up to `#maxColumns` bytes: its capped form if more output follows. */
+	#soleLinePrefix = "";
+	#soleLinePrefixBytes = 0;
+	/** The open first line is entirely `replace()` text, not raw stream: it is never mirrored to the artifact. Streamed bytes joining it clear this. */
+	#soleLineReplaced = false;
 	#file?: {
 		artifactId: string;
 		sink: Bun.FileSink;
@@ -1101,8 +1114,96 @@ export class OutputSink {
 		}
 	}
 
-	/** Count, cap, mirror, and retain one sanitized chunk. */
+	/**
+	 * Store one sanitized chunk. The output's first line goes in uncapped while it
+	 * may be the whole output; once a byte follows its newline, it is cut like any line.
+	 */
 	#store(chunk: string, inlineChunk: string, substituted: boolean): void {
+		if (this.#soleLine && this.#maxColumns > 0) {
+			if (substituted) {
+				this.#endSoleLine();
+			} else {
+				// Bytes before the first newline join the open line, making it raw stream;
+				// a chunk that starts with the newline only ends it.
+				if (!this.#soleLineEnded && chunk.length > 0 && !chunk.startsWith(NL)) this.#soleLineReplaced = false;
+				const nextLine = this.#trackSoleLine(chunk);
+				if (nextLine === -1) {
+					this.#storeSegment(chunk, chunk, false, false);
+					return;
+				}
+				if (nextLine > 0) {
+					const firstLine = chunk.substring(0, nextLine);
+					this.#storeSegment(firstLine, firstLine, false, false);
+				}
+				this.#endSoleLine();
+				chunk = inlineChunk = chunk.substring(nextLine);
+			}
+		}
+		this.#storeSegment(chunk, inlineChunk, substituted, this.#maxColumns > 0);
+	}
+
+	/**
+	 * Account `chunk` against the output's first line. Returns the index where
+	 * output after that line starts, or -1 when the chunk stays within it
+	 * (its terminating newline included).
+	 */
+	#trackSoleLine(chunk: string): number {
+		if (chunk.length === 0) return -1;
+		if (this.#soleLineEnded) return 0;
+		const nl = chunk.indexOf(NL);
+		const segment = nl === -1 ? chunk : chunk.substring(0, nl);
+		this.#soleLineBytes += Buffer.byteLength(segment, "utf-8");
+		const room = this.#maxColumns - this.#soleLinePrefixBytes;
+		if (room > 0 && segment.length > 0) {
+			const { text, bytes } = truncateHeadBytes(segment, room);
+			this.#soleLinePrefix += text;
+			this.#soleLinePrefixBytes += bytes;
+		}
+		if (nl === -1) return -1;
+		this.#soleLineEnded = true;
+		return nl === chunk.length - 1 ? -1 : nl + 1;
+	}
+
+	/**
+	 * The output is more than its first line: hold that line to the column cap
+	 * too. Only the first line has been retained, so a wide one replaces the
+	 * inline windows with its capped form; the artifact keeps it verbatim.
+	 */
+	#endSoleLine(): void {
+		this.#soleLine = false;
+		const max = this.#maxColumns;
+		const lineBytes = this.#soleLineBytes;
+		const prefix = this.#soleLinePrefix;
+		this.#soleLinePrefix = "";
+		if (lineBytes <= max) {
+			this.#currentLineBytes = this.#soleLineEnded ? 0 : lineBytes;
+			return;
+		}
+		// Mirror the verbatim line before the inline windows drop it. A spill
+		// already under way has written it. A line left open by `replace()` that no
+		// streamed bytes joined is replacement text: it is never mirrored (the
+		// artifact, if any, keeps the replaced stream), so it claims no artifact either.
+		if (this.#allocateArtifact && !this.#spilling && !this.#soleLineReplaced) this.#writeToFile("");
+		const kept = truncateHeadBytes(prefix, Math.max(0, max - 3));
+		const capped = `${kept.text}${ELLIPSIS}${this.#soleLineEnded ? NL : ""}`;
+		this.#head = "";
+		this.#headBytes = 0;
+		this.#headLines = 0;
+		this.#buffer = "";
+		this.#bufferBytes = 0;
+		this.#tailUntrimmed = false;
+		this.#truncated = false;
+		this.#retain(capped, Buffer.byteLength(capped, "utf-8"));
+		this.#columnDroppedBytes += lineBytes - kept.bytes;
+		this.#columnTruncatedLines++;
+		if (this.#columnFirstCutLine === 0) this.#columnFirstCutLine = 1;
+		if (this.#columnLastCutLine === 0) this.#columnLastCutLine = 1;
+		this.#columnEllipsisAdded = !this.#soleLineEnded;
+		this.#currentLineBytes = this.#soleLineEnded ? 0 : kept.bytes + 3;
+	}
+
+	/** Count, cap (when `cap`), mirror, and retain one sanitized chunk. */
+	#storeSegment(chunk: string, inlineChunk: string, substituted: boolean, cap: boolean): void {
 		const rawBytes = Buffer.byteLength(chunk, "utf-8");
 		this.#totalBytes += rawBytes;
 		// Line the chunk starts on, as numbered in the artifact; 0 when the capped
@@ -1118,7 +1219,7 @@ export class OutputSink {
 		// Per-line column cap. State persists across chunks so a mid-line split
 		// still respects the budget. Operates on the inline chunk; the complete
 		// chunk is mirrored to the artifact before any cap is applied.
-		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(inlineChunk, firstLine) : inlineChunk;
+		const capped = cap ? this.#applyColumnCap(inlineChunk, firstLine) : inlineChunk;
 		const cappedBytes = capped === inlineChunk ? inlineBytes : Buffer.byteLength(capped, "utf-8");
 		const cappedThisChunk = cappedBytes < inlineBytes;
 		if (substituted) this.#truncated = true;
@@ -1133,9 +1234,14 @@ export class OutputSink {
 			this.#writeToFile(chunk);
 		}
 		if (cappedBytes === 0) return;
+		this.#retain(capped, cappedBytes);
+	}
 
-		// Head retention: drain the (capped) chunk into #head until the budget is
-		// exhausted, then forward any leftover to the tail buffer.
+	/**
+	 * Head retention: drain the (capped) chunk into #head until the budget is
+	 * exhausted, then forward any leftover to the tail buffer.
+	 */
+	#retain(capped: string, cappedBytes: number): void {
 		let tailChunk = capped;
 		let tailBytes = cappedBytes;
 		if (this.#headLimit > 0 && !this.#headRetentionDisabled && this.#headBytes < this.#headLimit) {
@@ -1471,7 +1577,8 @@ export class OutputSink {
 	 * Replace the in-memory buffer with the given text. Used when an upstream
 	 * minimizer rewrites the captured output after the raw bytes have already
 	 * been streamed.
-	 * The replacement is held to the per-line column cap like streamed output.
+	 * The replacement is held to the per-line column cap like streamed output;
+	 * a single-line replacement stays uncapped until more output follows it.
 	 *
 	 * After this call the buffer is authoritative: streaming counters realign
 	 * to the replacement, the retained head window is cleared, and head
@@ -1488,7 +1595,19 @@ export class OutputSink {
 		this.#columnTruncatedLines = 0;
 		// The artifact keeps the replaced stream, so later line numbers no longer match it.
 		this.#columnCutLinesUnmapped = true;
-		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(text, 0) : text;
+		this.#soleLine = true;
+		this.#soleLineEnded = false;
+		this.#soleLineBytes = 0;
+		this.#soleLinePrefix = "";
+		this.#soleLinePrefixBytes = 0;
+		this.#soleLineReplaced = true;
+		let capped = text;
+		if (this.#maxColumns > 0 && this.#trackSoleLine(text) !== -1) {
+			this.#soleLine = false;
+			this.#soleLineReplaced = false;
+			this.#soleLinePrefix = "";
+			capped = this.#applyColumnCap(text, 0);
+		}
 		this.#buffer = capped;
 		this.#bufferBytes = Buffer.byteLength(capped, "utf-8");
 		this.#tailUntrimmed = false;
