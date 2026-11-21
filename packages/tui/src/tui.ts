@@ -85,10 +85,13 @@ const ERASE_TO_END_OF_LINE = "\x1b[K";
 const LINE_FIT_MIN_SOURCE_CODE_UNITS = 4096;
 const LINE_FIT_MAX_SOURCE_CODE_UNITS = 65536;
 const LINE_FIT_SOURCE_WIDTH_MULTIPLIER = 64;
-// Hide the hardware cursor before each paint/move write. Ghostty-style bar
-// cursors can otherwise leave visual afterimages while the TUI repaints the
-// row under a visible cursor. Paint writes also disable terminal autowrap:
-// several terminals keep a "pending wrap" flag after an exact-width row, so a
+// Hide the hardware cursor at the start of each paint/move write. Ghostty-style
+// bar cursors can otherwise leave visual afterimages while the TUI repaints the
+// row under a visible cursor. The hide goes inside the synchronized update:
+// kitty snapshots cursor visibility at ?2026h and presents that snapshot until
+// ?2026l, so a hide written before ?2026h makes a visible cursor flash on every
+// animation tick. Paint writes also disable terminal autowrap: several
+// terminals keep a "pending wrap" flag after an exact-width row, so a
 // following cursor move can first wrap to the next row and produce staircase
 // trails. The TUI emits explicit CRLFs and restores autowrap before leaving the
 // paint. Synchronized output can be disabled for terminals with broken DEC 2026
@@ -101,7 +104,7 @@ const SYNC_OUTPUT_END = "\x1b[?2026l";
 const SYNC_OUTPUT_RENEW_BYTES = 16 * 1024;
 const DISABLE_AUTOWRAP = "\x1b[?7l";
 const ENABLE_AUTOWRAP = "\x1b[?7h";
-const PAINT_BEGIN = `${HIDE_CURSOR}${SYNC_OUTPUT_BEGIN}${DISABLE_AUTOWRAP}`;
+const PAINT_BEGIN = `${SYNC_OUTPUT_BEGIN}${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 const PAINT_END = `${ENABLE_AUTOWRAP}${SYNC_OUTPUT_END}`;
 const PAINT_BEGIN_NO_SYNC = `${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
@@ -318,6 +321,13 @@ export interface Component {
 	 * rows never show them. Return the same array while unchanged.
 	 */
 	nativeTrailers?(): readonly Component[];
+
+	/**
+	 * Rows of the last render that are a popup over the transcript (the editor's completion
+	 * list). Below the transcript the composer keeps the rows they cover live, so they return
+	 * when the popup closes instead of going to scrollback.
+	 */
+	coveringRows?(): number;
 
 	/**
 	 * Pure preflight for focused input that must precede TUI-wide input listeners
