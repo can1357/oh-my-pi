@@ -1,6 +1,6 @@
 import { createSyntheticToolResultMessage, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import type { AsyncJobManagerApi } from "../async/job-manager";
+import { type AsyncJobManagerApi, formatAsyncJobLabel } from "../async/job-manager";
 import type { SessionEntry } from "./session-entries";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
@@ -498,8 +498,9 @@ export function restoreTerminatedBashJobs(
 			const content = Array.isArray(message.content) ? message.content : [];
 			for (const call of content) {
 				if (call.type !== "toolCall" || call.name !== "bash" || !isObject(call.arguments)) continue;
-				if (typeof call.arguments.command === "string" && call.arguments.command.length > 0) {
-					commands.set(call.id, call.arguments.command);
+				if (typeof call.arguments.command === "string") {
+					const label = formatAsyncJobLabel(call.arguments.command);
+					if (label.length > 0) commands.set(call.id, label);
 				}
 			}
 			continue;

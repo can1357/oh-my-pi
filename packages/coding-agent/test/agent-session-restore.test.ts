@@ -291,6 +291,114 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		expect(asyncResult?.role === "custom" ? asyncResult.content : "").toContain("outcome is unknown");
 	});
 
+	it("bounds restored bash job labels for large heredoc commands across wait, proc, and batched async-result", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const largeHeredoc = `cat <<'EOF'\n${"echo payload-line\n".repeat(1_200)}EOF_SENTINEL\nEOF`;
+
+		const waitHarness = createWaitHarness("main");
+		const waitSession = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run a large heredoc and wait", timestamp: Date.now() },
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_bash", name: "bash", arguments: { command: largeHeredoc } }],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[waitHarness.waitTool as AgentTool],
+			[{ content: ["done after wait"], stopReason: "stop" }],
+			waitHarness.toolSession,
+		);
+
+		await expect(waitSession.session.restoreInterruptedTurn()).resolves.toBe(true);
+		await waitSession.session.waitForIdle();
+
+		const restoredLabel = waitHarness.manager.getJob("bg_1")?.label;
+		expect(restoredLabel).toBeDefined();
+		expect(restoredLabel!.length).toBe(120);
+		expect(restoredLabel!.endsWith("...")).toBe(true);
+		expect(restoredLabel).not.toContain("\n");
+		expect(waitHarness.replayedText()).toContain(`Label: ${restoredLabel}`);
+		expect(waitHarness.replayedText()).not.toContain("EOF_SENTINEL");
+
+		const proc = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://bg_1"), {
+			session: waitHarness.toolSession,
+		});
+		expect(proc.content).toContain(restoredLabel!);
+		expect(proc.content).not.toContain("EOF_SENTINEL");
+		await waitSession.session.dispose();
+
+		const executed: string[] = [];
+		const batchHarness = createWaitHarness("main");
+		const batchSession = reopen(
+			model,
+			closedByExitRecovery([
+				{ role: "user", content: "run two background jobs and probe", timestamp: Date.now() },
+				assistant(model, {
+					content: [
+						{ type: "toolCall", id: "call_bash_1", name: "bash", arguments: { command: largeHeredoc } },
+						{ type: "toolCall", id: "call_bash_2", name: "bash", arguments: { command: "sleep 60" } },
+					],
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_bash_1",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_1" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_1", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_bash_2",
+					toolName: "bash",
+					content: [{ type: "text", text: "Backgrounded as job bg_2" }],
+					isError: false,
+					details: { async: { state: "running", jobId: "bg_2", type: "bash" } },
+					timestamp: Date.now(),
+				},
+				assistant(model, {
+					content: [{ type: "toolCall", id: "call_probe", name: "probe", arguments: { value: "again" } }],
+					stopReason: "toolUse",
+				}),
+			]),
+			[probeTool(executed)],
+			[
+				{ content: ["probe done"], stopReason: "stop" },
+				{ content: ["noted batch"], stopReason: "stop" },
+			],
+			batchHarness.toolSession,
+		);
+
+		await expect(batchSession.session.restoreInterruptedTurn()).resolves.toBe(true);
+		await batchSession.session.waitForIdle();
+
+		const asyncResult = batchSession.session.agent.state.messages.find(
+			msg => msg.role === "custom" && msg.customType === "async-result",
+		);
+		const batchText =
+			asyncResult?.role === "custom" && typeof asyncResult.content === "string" ? asyncResult.content : "";
+		expect(batchText).toContain(`── Job bg_1 (${restoredLabel}) ──`);
+		expect(batchText).toContain("── Job bg_2 (sleep 60) ──");
+		expect(batchText).not.toContain("EOF_SENTINEL");
+	});
+
 	it("does not publish lost bash jobs when restoreInterruptedTurn declines without a model", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic test model to exist");

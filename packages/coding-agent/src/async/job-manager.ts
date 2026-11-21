@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { PipeStreams } from "@oh-my-pi/pi-natives";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, truncate } from "@oh-my-pi/pi-utils";
+import { collapseCommand } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
@@ -11,6 +12,14 @@ const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
+
+/** Maximum characters kept in a command-derived async job label. */
+export const ASYNC_JOB_LABEL_MAX_CHARS = 120;
+
+/** Format a command into a single-line bounded label stored on a managed job row. */
+export function formatAsyncJobLabel(command: string): string {
+	return truncate(collapseCommand(command), ASYNC_JOB_LABEL_MAX_CHARS, "...");
+}
 /**
  * A settled job row whose result was already consumed — auto-delivered to its
  * sink, or recovered by a foreground `wait` snapshot — has
