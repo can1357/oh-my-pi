@@ -220,7 +220,18 @@ describe("extractRetryHint", () => {
 	});
 
 	it("honors a millisecond quotaResetDelay", () => {
-		expect(extractRetryHint(undefined, '{"metadata":{"quotaResetDelay":"835.150299ms"}}')).toBeCloseTo(835.150299, 3);
+		// Floor Google's fractional metadata to whole milliseconds.
+		expect(extractRetryHint(undefined, '{"metadata":{"quotaResetDelay":"835.150299ms"}}')).toBe(835);
+	});
+
+	it.each([
+		["30m", 1_800_000],
+		["1h", 3_600_000],
+		["1.5h", 5_400_000],
+		["1h30m", 5_400_000],
+	])("prefers structured quotaResetDelay %s to earlier display text", (quotaResetDelay, expected) => {
+		const body = `Cloud Code Assist API error (429): {"error":{"status":"RESOURCE_EXHAUSTED","message":"Resets in 3h0m0s.","details":[{"metadata":{"quotaResetDelay":"${quotaResetDelay}"}}]}}`;
+		expect(extractRetryHint(undefined, body)).toBe(expected);
 	});
 
 	it.each([

@@ -589,6 +589,7 @@ Average Latency: 1,240 ms
 				for (const text of [
 					"| a |\n| b",
 					"| a |\n| --- | -",
+					"\n| a |\n| b", // the walk up reaches the line under a leading newline
 					`\`\`\`md\n${table}\n| #2`,
 					`~~~~\n\`\`\`\n~~~\n${table}\n| #2`,
 				]) {
