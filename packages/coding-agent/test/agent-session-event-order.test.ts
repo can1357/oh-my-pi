@@ -144,7 +144,7 @@ describe("AgentSession subscriber event order", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.enabled": false,
-			"tools.xdev": false,
+			"tools.commands": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const todo = new TodoTool({

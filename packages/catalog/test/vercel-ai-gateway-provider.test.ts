@@ -3,6 +3,24 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { vercelAiGatewayModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 describe("Vercel AI Gateway provider", () => {
+	test("discovers public models after an expired stored bearer is rejected", async () => {
+		const requests: (string | undefined)[] = [];
+		const options = vercelAiGatewayModelManagerOptions({
+			apiKey: "revoked",
+			fetch: async (_url, init) => {
+				const authorization = new Headers(init?.headers).get("Authorization") ?? undefined;
+				requests.push(authorization);
+				return authorization
+					? new Response("invalid key", { status: 401 })
+					: Response.json({ data: [{ id: "google/gemini-4-neon", tags: ["tool-use"] }] });
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["google/gemini-4-neon"]);
+		expect(requests).toEqual(["Bearer revoked", undefined]);
+	});
+
 	test("caps Muse Spark contributor output allowance to 131072 while preserving context window", async () => {
 		// Vercel reports both context_window and max_tokens as 1M for the Muse Spark
 		// contributor SKUs, and the upstream answers HTTP 400 to that max_tokens (#10705).
