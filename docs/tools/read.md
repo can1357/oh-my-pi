@@ -6,7 +6,7 @@
 
 - Entry: `packages/coding-agent/src/tools/read.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/read.md`
-- On-demand doc topics (`ReadTool.docTopics()`): `xd://read/sources` (`prompts/tools/read-sources.md`: SQLite, archive, JSON query, executable, video, SVG and merge-conflict selectors, plus `write` targets for archives and SQLite) and `xd://read/urls` (each internal URL scheme's `promptReference()`: sub-paths, queries and limits its one-line system-prompt entry leaves out).
+- On-demand doc topics (`ReadTool.docTopics()`): `help://read/sources` (`prompts/tools/read-sources.md`: SQLite, archive, JSON query, executable, video, SVG and merge-conflict selectors, plus `write` targets for archives and SQLite) and `help://read/urls` (each internal URL scheme's `promptReference()`: sub-paths, queries and limits its one-line system-prompt entry leaves out).
 - Key collaborators:
    - `packages/coding-agent/src/tools/path-utils.ts` — prefer literal filenames; normalize local paths and recover accidental delimited path lists.
    - `packages/tui/src/tools/read.ts` / `line-ranges.ts` — split trailing selectors and parse line ranges; `packages/coding-agent/src/tools/read-selector.ts` resolves raw, range, and tail selectors.
@@ -14,7 +14,7 @@
    - `packages/utils/src/ar` (`@oh-my-pi/pi-utils/ar`) — unified archive registry: detect `archive.ext:inner/path`, index archives, list/read entries.
    - `packages/coding-agent/src/tools/sqlite-reader.ts` — detect SQLite targets, parse selectors, render tables.
    - `packages/coding-agent/src/tools/fetch.ts` — URL parsing, fetch/render pipeline, URL cache/artifacts.
-   - `packages/coding-agent/src/internal-urls/router.ts` — built-in internal-resource registry, including `ssh://` and `xd://`; MCP may advertise additional schemes.
+   - `packages/coding-agent/src/internal-urls/router.ts` — built-in internal-resource registry, including `ssh://` and `help://`; MCP may advertise additional schemes.
    - `crates/natives/src/edit.rs` (`notebook_to_editable_text`, exposed as `notebookToEditableText`) — convert `.ipynb` to editable cell text.
    - `packages/coding-agent/src/utils/cpuprofile.ts` / `sample-profile.ts` — summarize recognized profiler reports.
    - `packages/coding-agent/src/utils/file-display-mode.ts` — decide hashline vs line-number vs raw display.
@@ -25,7 +25,7 @@
 ## Registration / Visibility
 
 - Metadata: `strict = true`, `loadMode = "essential"`. Approval normally uses the internal scheme's read tier; PDF page screenshots require `"exec"`.
-- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors, which lists executable analysis views only when a disassembler backend resolves (`disassembler.backend`).
+- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `help://read/sources` for their selectors, which lists executable analysis views only when a disassembler backend resolves (`disassembler.backend`).
 
 ## Inputs
 
@@ -165,7 +165,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 ### Executables and disassembler databases
 
 - Bare reads of ELF/PE/Mach-O binaries (including extensionless files) and disassembler database files (IDA `.i64`/`.idb`, Binary Ninja `.bndb`) return on-disk metadata only (`entityLabel: "binary metadata"`). They never open an analysis database or provision a backend; line selectors page the metadata text. `:raw` bypasses this path. A `.bndb` is a SQLite file but takes this route, bare or with a view, rather than the SQLite one.
-- The metadata footer lists the explicit analysis selectors and points to eval's `dsm` namespace (`xd://eval/dsm`), or, when `disassembler.backend` resolves to no backend, says analysis is disabled.
+- The metadata footer lists the explicit analysis selectors and points to eval's `dsm` namespace (`help://eval/dsm`), or, when `disassembler.backend` resolves to no backend, says analysis is disabled.
 - Analysis views are explicit opt-in: `:overview` (function list), `:<func|0xaddr>` (pseudocode), `:<func>:asm`, `:imports`, `:exports`, `:strings`, and `:xrefs:<func|0xaddr>`. Reserved view names win over same-named functions, which stay reachable by address. Append line selectors to page the rendered view (`bin:main:10-40`). They open the database through the selected backend (IDA, Ghidra, or Binary Ninja), which may provision Ghidra on first use; see [`dsm`](dsm.md).
 - Universal Mach-O reads use the host-architecture slice by default; `bin:@x86_64` selects another slice's metadata and `bin:@x86_64:main` analyzes it.
 - Analysis selectors fail when no backend is available. A database file opens only under the backend that owns it: `.i64`/`.idb` analysis requires `disassembler.backend=ida` and `.bndb` analysis requires `disassembler.backend=binja`; under another backend the view throws a `ToolError` naming the owner. Views are immutable generated text and do not seed hashline edits.
@@ -268,11 +268,11 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Internal URLs
 
-- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `attachment://`, `cfg://`, `conflict://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `mr://`, `omp://`, `out://` (write-only; reads fail), `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
+- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `attachment://`, `cfg://`, `conflict://`, `help://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `mr://`, `omp://`, `out://` (write-only; reads fail), `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, and `vault://`.
    - `security://` is reserved for the OMP-owned, producer-neutral, read-only security-analysis store.
    - `agent://<id>` reads a subagent's latest completed output, including a successful message-result follow-up after revival that the parent requested or the user typed into the focused subagent session; while a newer turn runs, the previous output is marked superseded. Agents without published output return status and progress. `/key/index` extracts from the latest published JSON result. Peer-woken message replies and cancelled or empty message-result follow-ups do not replace the accepted result, nor do structured wakes without a `yield`. `agent://all` is write-only. Bare `history://` lists registered agents and persisted subagents; `history://<id>` reads a transcript across turns.
    - `proc://` lists caller-visible background jobs (including running agents without job rows) and project services; `proc://<id>` returns status and available output/logs without consuming async-result delivery. A running subagent's row also shows its latest requests, cost, context fill, completion estimate and stage, as in `wait`. Service log files are searchable with `grep proc://<id>`.
-   - `xd://` lists mounted tool devices; `xd://<name>` returns that device's input documentation. Writing JSON to the same URI dispatches the device through `write`.
+   - `help://<tool>` lists that tool's doc topics, one `help://<tool>/<topic>` per line; `help://<tool>/<topic>` reads one topic. The scheme is read-only.
    - `ssh://host/<path>` reads a remote UTF-8 file or directory; bare `ssh://` lists configured hosts. Files and directory listing responses are limited to 1 MiB and require a verified POSIX remote shell. Directory scopes are also traversable by search tools without a local mount. `ssh://host/~/path` and `ssh://host/~` resolve against the connected remote account's `HOME`, never the local home; only this literal `/~/` or `/~` URI spelling expands. `/%7E/` remains a literal absolute tilde directory, `/~user` is unsupported, and other shell expansions do not run. Percent-encode literal `:`, `?`, or `#` in the path.
    - `history://current/full` exposes the caller's complete current branch when `compaction.experimentalContextManagement` is enabled. It includes original text, tool outputs, entry IDs, and compaction boundaries. Use shared line/raw selectors such as `history://current/full:raw:1-200`; queries, fragments, extra paths, and trailing slashes are rejected. It requires a matching live session owner and never falls back to registry or disk lookup. Bare `history://current` still names an ordinary agent called `current`. See [experimental context windows](../compaction.md#experimental-notes-backed-context-windows).
 - `#handleInternalUrl()` behavior:

@@ -72,6 +72,46 @@ describe("extractLeadingCdTarget", () => {
 		expect(extractLeadingCdTarget("cd `pwd` && ls")).toBeNull();
 	});
 
+	it("leaves glob, brace, and special cd targets to the shell", () => {
+		expect(extractLeadingCdTarget("cd /tmp/demo/*/ && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp/demo/? && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp/demo/[ab] && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp/demo/{a,b} && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd - && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd +1 && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd -1 && pwd")).toBeNull();
+		expect(extractLeadingCdTarget("cd ~other/project && pwd")).toBeNull();
+	});
+
+	it("keeps quoted and escaped expansion characters literal", () => {
+		expect(extractLeadingCdTarget("cd '/tmp/*?[abc]{x,y}' && ls")).toEqual({
+			path: "/tmp/*?[abc]{x,y}",
+			rest: "ls",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget('cd "/tmp/*?[abc]{x,y}" && ls')).toEqual({
+			path: "/tmp/*?[abc]{x,y}",
+			rest: "ls",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget(String.raw`cd /tmp/\*\?\[abc\]\{x,y\} && ls`)).toEqual({
+			path: "/tmp/*?[abc]{x,y}",
+			rest: "ls",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget("cd '$HOME' && ls")).toEqual({ path: "$HOME", rest: "ls", separator: "&&" });
+		expect(extractLeadingCdTarget(String.raw`cd \$HOME && ls`)).toEqual({
+			path: "$HOME",
+			rest: "ls",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget('cd "\\$HOME" && ls')).toEqual({
+			path: "$HOME",
+			rest: "ls",
+			separator: "&&",
+		});
+	});
+
 	it("requires a top-level && or ; separator", () => {
 		expect(extractLeadingCdTarget("cd /foo || echo fail")).toBeNull();
 		expect(extractLeadingCdTarget("cd /tmp &echo")).toBeNull();

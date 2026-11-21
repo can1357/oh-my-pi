@@ -1,15 +1,14 @@
 /**
- * Code reads become outlines: bodies fold
- * to `… [lines A-B]` markers with exact file line numbers, the biggest containers open one level, and the bodies the
- * conversation names or Spotlight ranks near the window's best stay open within a keep budget; the best body past it
- * still shows the run around its hottest line. Signatures and markers are structure (`s`), bodies open on a name `n`
- * or on rank `a`, folded bodies `f`.
+ * Code outlines keep the declaration skeleton and spend their body allowance on named bodies and source-ranked
+ * passages. Each passage carries its enclosing signature to the final window. The remaining folds name exact file
+ * coordinates both for the agent's readback markers and for the session's fold recovery state.
  */
 import type { SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
 import { countNewlines } from "@oh-my-pi/pi-utils";
 import { fileLines, readTargets, resolveTarget, SOURCE_PATH } from "./command";
 import { bump, noteRank, noteWhy, type Origin, type Run, scoreLines, shifted, spanShares } from "./run";
-import { renderFolds, type View } from "./view";
+import { type LineRun, renderFolds, type SourcePeak, type View } from "./view";
+import { peakLines, scoreOrder } from "./window";
 
 /** Outline knobs, tuned by replaying outlined reads against later recoveries and their turn cost. */
 const MIN_WINDOW = 200;
@@ -29,12 +28,6 @@ const MIN_HIDDEN = 0.2;
 const MIN_NAME = 4;
 /** The part an outline ranks bodies by: its block's hottest line as a share of the window's hottest block. */
 const OUTLINE_PARTS = ["Spotlight, block ÷ best block"];
-
-/** Window lines `from`–`to`, 0-based and inclusive. */
-interface LineRun {
-	from: number;
-	to: number;
-}
 
 /** One foldable block: a header line and its more-indented body (`from`–`to`). 0-based window indexes. */
 interface FoldBlock extends LineRun {
@@ -60,20 +53,41 @@ function indentOf(line: string): number {
 /** Lines a multi-line signature may span above the line that closes it and opens the body. */
 const SIGNATURE_LINES = 20;
 
-/**
- * The name a block's header gives it. A header closing a multi-line signature (`): Promise<T> {`) names nothing
- * itself: the name is on the line at its depth that opened the signature (`async #shapeOutput(`), so the
- * conversation naming the function still opens its body.
- */
-function blockName(lines: readonly string[], ind: readonly number[], head: number): string {
-	const own = BLOCK_NAME.exec(lines[head]);
-	if (own || !/^\s*[)\]]/.test(lines[head])) return own?.slice(1).find(Boolean) ?? "";
+/** A declaration's signature rows and last body row, nested under its lexical owner. */
+interface Signature extends LineRun {
+	end: number;
+	parent?: Signature;
+}
+
+/** Find the name above a closing multi-line signature or the brace below a C declaration. */
+function signatureStart(lines: readonly string[], ind: readonly number[], head: number): number {
+	if (!/^\s*(?:[)\]]|\{\s*$)/.test(lines[head]) || BLOCK_NAME.test(lines[head])) return head;
 	for (let k = head - 1; k >= Math.max(0, head - SIGNATURE_LINES); k--) {
-		if (lines[k].trim() === "" || ind[k] > ind[head]) continue;
+		if (!lines[k].trim() || ind[k] > ind[head]) continue;
 		if (ind[k] < ind[head]) break;
-		return BLOCK_NAME.exec(lines[k])?.slice(1).find(Boolean) ?? "";
+		if (BLOCK_NAME.test(lines[k])) return k;
+		if (!/^\s*[)\]]/.test(lines[k])) break;
 	}
-	return "";
+	return head;
+}
+
+/** Innermost declaration enclosing a source row. Declarations are ordered by the end of their signatures. */
+function enclosingSignature(signatures: readonly Signature[], line: number): Signature | undefined {
+	let lo = 0,
+		hi = signatures.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (signatures[mid].to <= line) lo = mid + 1;
+		else hi = mid;
+	}
+	const next = signatures[lo];
+	if (next && next.from <= line) return next;
+	let found = signatures[lo - 1];
+	while (found && line > found.end) {
+		if (!found.parent) return undefined;
+		found = found.parent;
+	}
+	return found;
 }
 
 /**
@@ -81,10 +95,10 @@ function blockName(lines: readonly string[], ind: readonly number[], head: numbe
  * body runs while lines are blank or more indented. A Python docstring at the top of a body stays with the header
  * (whole when ≤ 3 lines, else its first line). Bodies shorter than {@link MIN_FOLD} don't fold; their children lift.
  */
-function foldBlocks(lines: readonly string[]): FoldBlock[] {
+function foldBlocks(lines: readonly string[], signatures: Signature[]): FoldBlock[] {
 	const blank = lines.map(l => l.trim() === "");
 	const ind = lines.map(indentOf);
-	const build = (from: number, to: number, parentIndent: number): FoldBlock[] => {
+	const build = (from: number, to: number, parentIndent: number, parent?: Signature): FoldBlock[] => {
 		const out: FoldBlock[] = [];
 		for (let i = from; i <= to; i++) {
 			if (blank[i] || ind[i] <= parentIndent - 1) continue;
@@ -109,9 +123,23 @@ function foldBlocks(lines: readonly string[]): FoldBlock[] {
 				}
 				bodyFrom = close - j + 1 <= 3 ? close + 1 : j + 1;
 			}
-			const children = build(bodyFrom, end, ind[i] + 1);
+			const start = signatureStart(lines, ind, i);
+			const name = BLOCK_NAME.exec(lines[start])?.slice(1).find(Boolean) ?? "";
+			let owner = parent;
+			const header = lines[start].trimStart();
+			const declaration =
+				/\b(?:def|fn|func|function|class|struct|interface|trait|enum)\b|=>/.test(header) ||
+				(header.includes("(") &&
+					!/^(?:\}\s*)?(?:if|for|while|switch|catch|with|match|else|elif|except|return|throw|raise|yield|case|let|const|var)\b/.test(
+						header,
+					));
+			if (name && declaration) {
+				owner = { from: start, to: i, end, parent };
+				signatures.push(owner);
+			}
+			const children = build(bodyFrom, end, ind[i] + 1, owner);
 			if (end - bodyFrom + 1 >= MIN_FOLD) {
-				out.push({ head: i, from: bodyFrom, to: end, children, name: blockName(lines, ind, i) });
+				out.push({ head: i, from: bodyFrom, to: end, children, name });
 			} else out.push(...children);
 			i = end;
 		}
@@ -163,7 +191,8 @@ export async function outlineWindow(
 ): Promise<Outline | undefined> {
 	const n = content.length;
 	if (n < MIN_WINDOW) return undefined;
-	const roots = foldBlocks(content);
+	const signatures: Signature[] = [];
+	const roots = foldBlocks(content, signatures);
 	if (!roots.length) return undefined;
 	const size = (r: LineRun) => r.to - r.from + 1;
 	const folded = new Set<FoldBlock>(roots);
@@ -204,44 +233,92 @@ export async function outlineWindow(
 		}
 		for (const b of leaves) if (!score.has(b)) score.set(b, share?.get(b) ?? 0);
 	}
-	const budget = KEEP_SHARE * n;
+	const budget = Math.floor(KEEP_SHARE * n);
+	const why = Array.from<SpotlightReason>({ length: n }).fill("s");
+	for (const b of leaves) why.fill("f", b.from, b.to + 1);
 	let kept = 0;
-	const opened: FoldBlock[] = [];
-	for (const b of leaves.sort((a, b) => (score.get(b) ?? 0) - (score.get(a) ?? 0) || a.from - b.from)) {
-		if ((score.get(b) ?? 0) < KEEP_CUT) break;
-		if (kept + size(b) > budget) continue;
-		folded.delete(b);
-		opened.push(b);
-		kept += size(b);
+	const reveal = (from: number, to: number, reason: SpotlightReason) => {
+		for (let i = from; i <= to; i++) {
+			if (why[i] !== "f") continue;
+			why[i] = reason;
+			kept++;
+		}
+	};
+	let lastBody: FoldBlock | undefined;
+	const ranked = leaves.sort((a, b) => (score.get(b) ?? 0) - (score.get(a) ?? 0) || a.from - b.from);
+	for (const b of ranked) {
+		if (!named.has(b)) break;
+		if (kept + size(b) <= budget) {
+			reveal(b.from, b.to, "n");
+		}
 	}
-	// The best unnamed block never folds whole. Replayed outlined reads: the budget hid its hottest line in 30% of
-	// them; showing the run around that line costs 4% more tokens, opening the block 11%, dropping the budget 35%.
-	const best = leaves.find(b => !named.has(b));
+	// Buy peaks at source coordinates, before any marker can stand in for the line that earned the score.
+	const peaks: SourcePeak[] = [];
+	let rescuedBody = false;
+	if (scores) {
+		for (const line of peakLines(content, undefined, scores, scoreOrder(scores))) {
+			const sig = enclosingSignature(signatures, line);
+			const head = sig?.from ?? line;
+			const headEnd = sig?.to ?? line;
+			const lo = Math.max(0, line - 1);
+			const hi = Math.min(n - 1, line + 1);
+			let cost = 0;
+			for (let i = head; i <= headEnd; i++) if (why[i] === "f") cost++;
+			for (let i = lo; i <= hi; i++) if ((i < head || i > headEnd) && why[i] === "f") cost++;
+			if (kept + cost > budget) continue;
+			if (why[line] === "f") rescuedBody = true;
+			if (sig) reveal(head, headEnd, "s");
+			reveal(lo, hi, "c");
+			if (why[line] === "c") why[line] = "a";
+			peaks.push({ line, head, headEnd, score: scores[line] ?? 0 });
+		}
+	}
+	// An interior peak asks for an excerpt; a peak on a declaration may justify opening the whole body.
+	const centers = new Set(peaks.map(p => p.line));
+	for (const b of ranked) {
+		if ((score.get(b) ?? 0) < KEEP_CUT) break;
+		if (named.has(b)) continue;
+		let cost = 0;
+		if (rescuedBody && !centers.has(b.head)) continue;
+		for (let i = b.from; i <= b.to; i++) if (why[i] === "f") cost++;
+		if (kept + cost > budget) continue;
+		reveal(b.from, b.to, "a");
+		why.fill("a", b.from, b.to + 1);
+		lastBody = b;
+	}
+	const best = ranked.find(b => !named.has(b));
 	const hot =
-		best && scores && folded.has(best) && (score.get(best) ?? 0) >= KEEP_CUT
+		best && size(best) > budget && scores && (score.get(best) ?? 0) >= KEEP_CUT
 			? hotRun(content, scores, best)
 			: undefined;
-	const spans: LineRun[] = [...folded].filter(b => (b !== best || !hot) && size(b) >= MIN_FOLD);
-	if (best && hot) {
-		const rest = [
-			{ from: best.from, to: hot.from - 1 },
-			{ from: hot.to + 1, to: best.to },
-		].filter(r => size(r) >= MIN_FOLD);
-		spans.push(...rest);
-		kept += size(best) - rest.reduce((s, r) => s + size(r), 0);
+	const keepHot = hot && kept + size(hot) <= budget ? hot : undefined;
+	if (keepHot) {
+		reveal(keepHot.from, keepHot.to, "a");
+		for (let i = keepHot.from; i <= keepHot.to; i++) if (why[i] === "c") why[i] = "a";
 	}
-	spans.sort((a, b) => a.from - b.from);
-	const hidden = spans.reduce((s, r) => s + size(r), 0);
+	const spans: LineRun[] = [];
+	let hidden = 0;
+	for (let i = 0; i < n;) {
+		if (why[i] !== "f") {
+			i++;
+			continue;
+		}
+		let j = i + 1;
+		while (j < n && why[j] === "f") j++;
+		if (j - i < 2) reveal(i, j - 1, "c");
+		else {
+			spans.push({ from: i, to: j - 1 });
+			hidden += j - i;
+		}
+		i = j;
+	}
 	if (hidden < MIN_HIDDEN * n) return undefined;
-	const why = Array.from<SpotlightReason>({ length: n }).fill("s");
-	for (const b of opened) why.fill(named.has(b) ? "n" : "a", b.from, b.to + 1);
-	if (best && hot) why.fill("a", best.from, best.to + 1);
-	for (const r of spans) why.fill("f", r.from, r.to + 1);
 	noteWhy(run, origin, why);
 	if (share) {
 		const values = Array.from<number>({ length: n }).fill(0);
 		for (const [b, s] of share) values.fill(s, b.head, b.to + 1);
-		const last = opened.findLast(b => !named.has(b)) ?? hot;
+		const lastPeak = peaks.findLast(p => why[p.line] === "a");
+		const last = lastBody ?? keepHot ?? (lastPeak && { from: lastPeak.line, to: lastPeak.line });
 		noteRank(run, origin, {
 			parts: OUTLINE_PARTS,
 			max: 1,
@@ -258,10 +335,17 @@ export async function outlineWindow(
 	bump(run, "outlineHiddenLines", hidden);
 	bump(run, "outlineKeptLines", kept);
 	if (named.size) bump(run, "outlineNamed", named.size);
-	return {
-		view: renderFolds(content, shown, first, spans, true),
-		folded: spans.map(r => [first + r.from, first + r.to]),
-	};
+	const view = renderFolds(content, shown, first, spans, true);
+	if (scores && view.spans) {
+		const row = new Int32Array(n).fill(-1);
+		view.scores = view.spans.map((s, i) => {
+			if (!s || s[0] !== s[1]) return null;
+			row[s[0] - first] = i;
+			return scores[s[0] - first];
+		});
+		view.peaks = peaks.map(p => ({ line: row[p.line], head: row[p.head], headEnd: row[p.headEnd], score: p.score }));
+	}
+	return { view, folded: spans.map(r => [first + r.from, first + r.to]) };
 }
 
 /** A later read overlapping a span folded earlier is the agent paging folded code back in. */
@@ -380,11 +464,17 @@ async function codeWindows(command: string, output: string, cwd: string): Promis
 }
 
 /** Outlines every long code window a bash command printed; windows inside a span folded earlier stay whole. */
-export async function outlineBash(run: Run, output: string): Promise<{ text?: string; recovery: boolean }> {
+export async function outlineBash(
+	run: Run,
+	output: string,
+): Promise<{ text?: string; peaks?: SourcePeak[]; scores?: (number | null)[]; recovery: boolean }> {
 	const command = run.input.command ?? "";
 	const windows = await codeWindows(command, output, run.cwd);
 	let text = "";
 	let pos = 0;
+	let nextRow = 0;
+	const peaks: SourcePeak[] = [];
+	let scores: (number | null)[] | undefined;
 	let outlined = false;
 	let recovery = false;
 	for (const w of windows) {
@@ -399,10 +489,19 @@ export async function outlineBash(run: Run, output: string): Promise<{ text?: st
 		const o = await outlineWindow(run, w.content, w.shown, w.first, origin);
 		if (!o) continue;
 		rememberFolds(run, w.abs, o.folded);
-		text += output.slice(pos, w.at) + o.view.lines.join("\n");
+		const prefix = output.slice(pos, w.at);
+		nextRow += countNewlines(prefix);
+		for (const p of o.view.peaks ?? [])
+			peaks.push({ line: nextRow + p.line, head: nextRow + p.head, headEnd: nextRow + p.headEnd, score: p.score });
+		if (w.at === 0 && o.view.scores) {
+			if (w.len === output.length) scores = o.view.scores;
+			else if (w.len + 1 === output.length && output.endsWith("\n")) scores = [...o.view.scores, null];
+		}
+		text += prefix + o.view.lines.join("\n");
+		nextRow += o.view.lines.length - 1;
 		pos = w.at + w.len;
 		outlined = true;
 	}
 	if (!outlined) return { recovery };
-	return { text: text + output.slice(pos), recovery };
+	return { text: text + output.slice(pos), peaks: peaks.sort((a, b) => b.score - a.score), scores, recovery };
 }

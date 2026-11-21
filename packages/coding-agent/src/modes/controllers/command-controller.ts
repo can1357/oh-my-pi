@@ -45,6 +45,7 @@ import {
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { promptCacheDetails } from "@oh-my-pi/pi-tui/status-line/prompt-cache";
@@ -903,7 +904,7 @@ export class CommandController {
 			const agent = row.agent && row.agent.id !== job.id ? ` ${theme.bold(row.agent.id)}` : "";
 			info += `${guide}${renderJobLine(job, now)}${agent}\n`;
 			// What the job is for leads; full mode follows it with what the command does and the whole command.
-			const text = full ? (job.command ?? job.label) : (job.intent ?? job.label);
+			const text = full ? (job.command ?? job.label) : jobDisplayLabel(job);
 			if (text === job.id) continue;
 			const indent = jobTreeIndent(row, theme);
 			const prefix = theme.fg("dim", indent);
@@ -990,7 +991,7 @@ export class CommandController {
 	handleToolsCommand(): void {
 		const tools = buildToolsMarkdown({
 			tools: this.ctx.session.agent.state.tools,
-			xdevTools: this.ctx.session.getXdevToolEntries(),
+			mountedCommands: this.ctx.session.getToolCommandEntries(),
 		});
 		this.#showMarkdownPanel("Available Tools", tools);
 	}

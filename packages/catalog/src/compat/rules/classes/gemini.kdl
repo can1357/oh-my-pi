@@ -72,7 +72,7 @@ class "gemini" {
 	// google-level transports emit `thinkingLevel` on the wire, so the tier is
 	// dropped there; budget (anthropic-messages) and reasoning_effort resellers
 	// never send the rejected value and keep the four-tier ladder. The collapsed
-	// google-antigravity / google-gemini-cli variants remap minimal -> LOW and
+	// google-antigravity variants remap minimal -> LOW and
 	// carry their own explicit ladder, so they are unaffected.
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
 	// https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
@@ -106,10 +106,10 @@ class "gemini" {
 	// failing 456k-token state with the message folded into the preceding tool
 	// result succeeded 5 of 5 times; a synthetic assistant turn between the
 	// tool result and the message (requires-assistant-after-tool-result) still
-	// failed 4 of 4.
-	// residue: Neon has no family rank, and revision 4 also covers Argon (119
-	// such turns on google-antigravity, none failed), Carbon, and Hydrogen.
-	models "*gemini-4-neon" {
+	// failed 4 of 4. Applied to every Gemini 4 model (Argon, Carbon, Hydrogen,
+	// Neon): they share the lineage, and folding is harmless where the failure
+	// does not reproduce.
+	revision ">=4 <5" {
 		fold-user-after-tool-result #true
 	}
 	// Gemini 4 models decode past one 65,536-token streaming segment only when
@@ -218,7 +218,7 @@ class "gemini" {
 			requires-skip-thought-signature-on-first-function-call #true
 		}
 	}
-	on "google-antigravity" "google-gemini-cli" {
+	on "google-antigravity" {
 		family "flash" {
 			stream-first-event-timeout-ms 60000
 			flash-stream-leak-workaround #true

@@ -57,22 +57,6 @@ export const cfgEditMode = register({
 	},
 });
 
-/** Payload syntax of `magic` calls: `<edit file="path">` elements or `# path` lines. */
-export const cfgEditMagicFormat = register({
-	id: "edit.magic.format",
-	type: "enum",
-	values: ["xml", "markdown"] as const,
-	default: "xml",
-	env: "PI_EDIT_MAGIC_FORMAT",
-	ui: {
-		tab: "files",
-		group: "Editing",
-		label: "Magic Edit Format",
-		description:
-			'How magic-mode calls name each file: an <edit file="path"> element (xml) or a "# path" line (markdown)',
-	},
-});
-
 /** Model that writes the patch for a `magic` call: a selector or role alias (`@slow`); unset uses the `smol` role. */
 export const cfgEditMagicModel = register({
 	id: "edit.magic.model",

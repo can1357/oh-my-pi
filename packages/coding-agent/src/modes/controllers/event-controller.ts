@@ -4,7 +4,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -54,8 +54,9 @@ import {
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
-import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
-import { writeDeviceDispatch } from "../../tools/resolve";
+import { PROPOSE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
+import { proposeDispatchDetails } from "../../tools/resolve";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
@@ -161,6 +162,23 @@ interface ApprovalPreviewGate {
 	started: boolean;
 }
 
+/** `value` as plan approval details, when it has their shape. */
+function planApprovalDetails(value: unknown): PlanApprovalDetails | undefined {
+	if (
+		value &&
+		typeof value === "object" &&
+		"planFilePath" in value &&
+		"title" in value &&
+		"planExists" in value &&
+		typeof value.planFilePath === "string" &&
+		typeof value.title === "string" &&
+		typeof value.planExists === "boolean"
+	) {
+		return { planFilePath: value.planFilePath, title: value.title, planExists: value.planExists };
+	}
+	return undefined;
+}
+
 /**
  * Working-line text for a streamed tool intent, or `undefined` when unusable.
  * Streamed JSON can deliver non-string `i` (object, number, boolean) before
@@ -174,6 +192,10 @@ function normalizeIntent(intent: unknown): string | undefined {
 			.replace(/\s*\.+$/, "")
 			.trim() || undefined
 	);
+}
+
+function workingIntentLabel(intent: unknown): string | undefined {
+	return typeof intent === "string" ? normalizeIntent(toolIntentLabel(intent)) : undefined;
 }
 
 /** Ids per kind the awaiting working row lists before collapsing the rest to `+N`. */
@@ -340,10 +362,6 @@ export class EventController {
 	 * last loop's normal yield.
 	 */
 	#stoppedWaiting = false;
-	// Composer activity: a host run or idle maintenance (auto-compaction) owns
-	// turn-scoped chrome, so the post-run chrome floor must not settle on it.
-	#runActive = false;
-	#maintenanceActive = false;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -578,6 +596,40 @@ export class EventController {
 		);
 		this.#finalizeAbandonedPostToolSegments();
 	}
+	/**
+	 * Seal live tool cards no result can reach any more, as a new assistant message opens: a card
+	 * no call id routes to, and, when the message is new rather than restored (`fresh`), a streamed
+	 * preview from an earlier message whose call never started. One such card at the transcript
+	 * frontier blocks history retirement for the rest of the session, squeezing every later block
+	 * to its one-line live allocation.
+	 */
+	#sealOrphanedToolCards(fresh: boolean): void {
+		const children = this.ctx.chatContainer.children;
+		const states = this.ctx.chatContainer.blockStates();
+		const idsByCard = new Map<Component, string[]>();
+		for (const [toolCallId, card] of this.ctx.pendingTools) {
+			const ids = idsByCard.get(card);
+			if (ids) ids.push(toolCallId);
+			else idsByCard.set(card, [toolCallId]);
+		}
+		for (let index = children.length - 1; index >= 0 && states[index] !== "committed"; index--) {
+			const card = children[index];
+			if (!(card instanceof ToolExecutionComponent) || card.isTranscriptBlockFinalized()) continue;
+			const ids = idsByCard.get(card);
+			if (ids === undefined) {
+				card.seal();
+				continue;
+			}
+			if (!fresh) continue;
+			if (ids.some(id => this.#executionStartedCallIds.has(id) || this.#backgroundCallIds.has(id))) continue;
+			for (const id of ids) {
+				this.#toolArgsReveal.finish(id);
+				this.ctx.pendingTools.delete(id);
+			}
+			card.seal();
+		}
+	}
+
 	/**
 	 * Finalize post-tool assistant segments whose `message_end` never fired (a
 	 * mid-stream throw or dropped agent_end). They are created unfinalized at
@@ -897,9 +949,8 @@ export class EventController {
 		return component;
 	}
 
-	#updateWorkingMessageFromIntent(intent: unknown): void {
+	#updateWorkingMessageFromIntent(trimmed: string | undefined): void {
 		if (this.ctx.session.isAborting) return;
-		const trimmed = normalizeIntent(intent);
 		if (!trimmed || trimmed === this.#lastIntent) return;
 		this.#lastIntent = trimmed;
 		this.ctx.setWorkingMessage(trimmed);
@@ -1064,17 +1115,6 @@ export class EventController {
 	/** Whether `#handleToolExecutionStart` has fired for this call id this turn. */
 	hasToolExecutionStarted(toolCallId: string): boolean {
 		return this.#executionStartedCallIds.has(toolCallId);
-	}
-
-	/** The viewed session was swapped for an idle one: no run owns the chrome any more. */
-	markViewIdle(): void {
-		this.#runActive = false;
-		this.#maintenanceActive = false;
-		this.#syncComposerActivity();
-	}
-
-	#syncComposerActivity(): void {
-		this.ctx.composer.setRunActive(this.#runActive || this.#maintenanceActive);
 	}
 
 	/**
@@ -1289,8 +1329,6 @@ export class EventController {
 		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
-		this.#runActive = true;
-		this.#syncComposerActivity();
 		setRunStatus({ state: "working" });
 		this.ctx.ui.requestRender();
 	}
@@ -1428,6 +1466,7 @@ export class EventController {
 				abandoned.markTranscriptBlockFinalized();
 			}
 			this.#finalizeAbandonedPostToolSegments();
+			this.#sealOrphanedToolCards(event.message.content.length === 0);
 			this.#lastVisibleBlockCount = 0;
 			this.#streamedToolCallIdByIndex.clear();
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
@@ -1740,7 +1779,7 @@ export class EventController {
 				if (renderToolName === "read") {
 					if (!readArgsHaveTarget(content.arguments)) {
 						// Args still streaming — defer until path is parseable so we can route to the
-						// read group (files + xd:// devices) vs ToolExecutionComponent (other internal URLs).
+						// read group (files and `help://` doc topics) vs ToolExecutionComponent (other internal URLs).
 						// Creating either component now would lock the read into the wrong shape.
 						continue;
 					}
@@ -1857,7 +1896,7 @@ export class EventController {
 				if (!args || typeof args !== "object") continue;
 				let intent: string | undefined;
 				if (INTENT_FIELD in args) {
-					intent = normalizeIntent(args[INTENT_FIELD]);
+					intent = workingIntentLabel(args[INTENT_FIELD]);
 				} else {
 					const tool = this.ctx.viewSession.getToolByName(block.name);
 					if (typeof tool?.intent !== "function") continue;
@@ -2091,7 +2130,9 @@ export class EventController {
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
 		if (this.#retractedToolCallIds.has(event.toolCallId)) return;
 		this.#ensureWorkingLoaderWhileStreaming();
-		this.#updateWorkingMessageFromIntent(event.intent);
+		this.#updateWorkingMessageFromIntent(
+			workingIntentLabel(event.intent ?? (isRecord(event.args) ? event.args[INTENT_FIELD] : undefined)),
+		);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
 		this.#resolveDisplaceablePoll(renderToolName);
@@ -2387,46 +2428,32 @@ export class EventController {
 				{ hideWithToolActivity: true },
 			);
 		}
-		// Plan approval rides a `write` to xd://propose: the dispatch metadata on
-		// the write details carries the approval payload as `inner`.
-		if (!event.isError) {
-			const dispatch = writeDeviceDispatch(event.toolName, event.result);
-			const details =
-				dispatch?.tool === PROPOSE_DEVICE_NAME && dispatch.mode === "execute" ? dispatch.inner : undefined;
-			if (
-				details &&
-				typeof details === "object" &&
-				"planFilePath" in details &&
-				"title" in details &&
-				"planExists" in details &&
-				typeof details.planFilePath === "string" &&
-				typeof details.title === "string" &&
-				typeof details.planExists === "boolean"
-			) {
-				// Dispatch the approval WITHOUT blocking the serialized event
-				// dispatch chain. `handlePlanApproval` -> `#approvePlan` awaits
-				// `session.prompt` for the ENTIRE approved-execution turn; awaiting
-				// it here (this handler runs inside `#runSerialized`) would hold the
-				// single dispatch link for the whole run, so the run's own
-				// agent_start / message_start / tool / coalesced message_update
-				// events queue behind it on `#dispatchTail` and the chat stays blank
-				// until execution finishes (issue #7684, follow-up to #5688 which
-				// only closed the overlay). Detaching frees the link the moment this
-				// handler returns; the approval overlay and the turn's live events
-				// then render. The approval flow surfaces its own failures via
-				// `showError`, so only an unexpected rejection is logged here.
-				void this.ctx
-					.handlePlanApproval({
-						planFilePath: details.planFilePath,
-						title: details.title,
-						planExists: details.planExists,
-					})
-					.catch(err => {
-						logger.warn("Plan approval dispatch failed", {
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-			}
+		// A submitted plan carries the approval payload as the `propose` details:
+		// on a direct `propose` result, or on its execute record in a `bash` run.
+		// A failed direct `propose` submitted nothing; a `bash` run is judged by
+		// each record's own exit status, not the outer shell status.
+		const details =
+			event.isError && event.toolName === PROPOSE_COMMAND_NAME
+				? undefined
+				: planApprovalDetails(proposeDispatchDetails(event.toolName, event.result));
+		if (details) {
+			// Dispatch the approval WITHOUT blocking the serialized event
+			// dispatch chain. `handlePlanApproval` -> `#approvePlan` awaits
+			// `session.prompt` for the ENTIRE approved-execution turn; awaiting
+			// it here (this handler runs inside `#runSerialized`) would hold the
+			// single dispatch link for the whole run, so the run's own
+			// agent_start / message_start / tool / coalesced message_update
+			// events queue behind it on `#dispatchTail` and the chat stays blank
+			// until execution finishes (issue #7684, follow-up to #5688 which
+			// only closed the overlay). Detaching frees the link the moment this
+			// handler returns; the approval overlay and the turn's live events
+			// then render. The approval flow surfaces its own failures via
+			// `showError`, so only an unexpected rejection is logged here.
+			void this.ctx.handlePlanApproval(details).catch(err => {
+				logger.warn("Plan approval dispatch failed", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
 		}
 	}
 	/**
@@ -2464,8 +2491,6 @@ export class EventController {
 				this.ctx.loadingAnimation = undefined;
 				this.ctx.statusContainer.disposeChildren();
 			}
-			this.#runActive = false;
-			this.#syncComposerActivity();
 			return;
 		}
 		if (stoppedWaiting) {
@@ -2556,8 +2581,6 @@ export class EventController {
 			this.ctx.loadingAnimation = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		this.#runActive = false;
-		this.#syncComposerActivity();
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#readToolCallArgs.clear();
@@ -2683,8 +2706,6 @@ export class EventController {
 			() => this.ctx.interruptFromPointer(),
 		);
 		this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
-		this.#maintenanceActive = true;
-		this.#syncComposerActivity();
 		this.ctx.ui.requestRender();
 	}
 
@@ -2698,8 +2719,6 @@ export class EventController {
 			this.ctx.autoCompactionLoader = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		this.#maintenanceActive = false;
-		this.#syncComposerActivity();
 		const isHandoffAction = event.action === "handoff";
 		const isRemoteAction = event.action === "remote";
 		const isShakeAction = event.action === "shake";
