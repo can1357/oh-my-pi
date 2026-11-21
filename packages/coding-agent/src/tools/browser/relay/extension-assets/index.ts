@@ -33,4 +33,4 @@ export const embeddedRelayFiles = {
 };
 
 /** Digest of the unstamped files above; installs stamp it into background.js so a relay can spot a stale build. */
-export const embeddedRelayBuild = "eff066851e980c37";
+export const embeddedRelayBuild = "8954c9bb2d06af97";
