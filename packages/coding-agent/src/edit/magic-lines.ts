@@ -193,8 +193,12 @@ export function blockHints(content: string, ranges: readonly Range[], view: File
 		let stop = last - 1;
 		while (start < stop && isBlank(start)) start++;
 		while (stop > start && isBlank(stop)) stop--;
+		// Blank lines open nothing.
+		if (isBlank(start)) continue;
 		const end = blockEnd(lines, start, lines.length);
 		if (end === start || end === stop || !shownWith(start, end)) continue;
+		// Unwrapping: the opening line goes alone, and another range takes the line that closes its block.
+		if (start === stop && ranges.some(([from, to]) => from === end + 1 && to === end + 1)) continue;
 		let whole = stop > end;
 		for (let at = end + 1; whole && at <= stop; at++) {
 			if (isBlank(at)) continue;

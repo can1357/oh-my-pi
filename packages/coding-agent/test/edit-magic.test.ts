@@ -309,6 +309,20 @@ describe("applyDescribedChange", () => {
 		dispose();
 	});
 
+	it("does not question an unwrap or the deletion of a blank line", async () => {
+		const wrapped = "start();\nif (ready) {\n  first();\n\n  second();\n}\nend();\n";
+		const unwrap = await run(['["delete",2,2]\n["dedent",3,5,2]\n["delete",6,6]'], wrapped);
+		await unwrap.outcome;
+		expect(await unwrap.read()).toBe("start();\nfirst();\n\nsecond();\nend();\n");
+		unwrap.dispose();
+		// Line 3 is blank and the lines after it are indented: no block starts there.
+		const spaced = "function f() {\n  a();\n\n  if (x) {\n    b();\n  }\n}\n";
+		const blank = await run(['["delete",3,3]'], spaced);
+		await blank.outcome;
+		expect(await blank.read()).toBe(spaced.replace("a();\n\n", "a();\n"));
+		blank.dispose();
+	});
+
 	it("stops at a refusal without asking again", async () => {
 		const { outcome, requests, read, dispose } = await run(["CANNOT: `drain` is not in this file"]);
 		const error = await rejectionOf(outcome);
