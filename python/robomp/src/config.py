@@ -108,8 +108,16 @@ class Settings(BaseSettings):
     log_dir: Path = Field(Path("./data/logs"), alias="ROBOMP_LOG_DIR")
 
     # Server
+    # Accepts off-host traffic by default (documented behavior). The compose
+    # file pins the published port to 127.0.0.1 so host-side exposure stays
+    # local; a non-loopback bind elsewhere is the operator's opt-in.
     bind_host: str = Field("0.0.0.0", alias="ROBOMP_BIND_HOST")
     bind_port: int = Field(8080, alias="ROBOMP_BIND_PORT")
+    # Optional Host-header allowlist (comma-separated). DNS-rebinding
+    # defense-in-depth: when set, TrustedHostMiddleware rejects requests whose
+    # Host is not listed. Unset by default so token-less loopback dev (and
+    # tests) see zero behavior change.
+    trusted_hosts: str | None = Field(None, alias="ROBOMP_TRUSTED_HOSTS")
 
     # Dev-only replay header value; if empty, /replay is disabled
     replay_token: SecretStr | None = Field(None, alias="ROBOMP_REPLAY_TOKEN")
