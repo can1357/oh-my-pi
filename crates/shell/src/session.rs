@@ -698,19 +698,29 @@ impl Session {
 	}
 
 	/// Whether `source` still holds a command for the parser that would
-	/// read it, under the grammar features and aliases in effect now:
-	/// parse-only, nothing runs ([`Shell::source_holds_command`]). Used to
-	/// judge text a run cut short never reached, the same predicate the
-	/// cut-short walk applies to unread input.
+	/// read it: the grammar features and aliases in effect now, parsed
+	/// with `commands` — the session commands of the runs that would read
+	/// it, the one part of a run's context the cleanup between runs
+	/// clears that the parser can see: while a run's commands are
+	/// installed, each of their names preempts the alias of that name, so
+	/// the probe must not expand it. The rest of a run's context — stdio,
+	/// taps, speech, the env overlay — cannot change what the parser
+	/// holds. Parse-only, nothing runs ([`Shell::source_holds_command`]).
+	/// Used to judge text a run cut short never reached, the same
+	/// predicate the cut-short walk applies to unread input.
 	///
 	/// # Errors
 	///
 	/// [`SessionError::Closed`] when the session is closed.
-	pub async fn source_holds_command(&self, source: &[u8]) -> Result<bool, SessionError> {
+	pub async fn source_holds_command(
+		&self,
+		source: &[u8],
+		commands: Option<SessionCommands>,
+	) -> Result<bool, SessionError> {
 		let jobs = self.jobs.as_ref().ok_or(SessionError::Closed)?;
 		let (reply_tx, reply_rx) = flume::bounded(1);
 		jobs
-			.send(Request::HoldsCommand(source.to_vec(), reply_tx))
+			.send(Request::HoldsCommand(source.to_vec(), commands, reply_tx))
 			.map_err(|_| SessionError::Closed)?;
 		self.waker.wake_by_ref();
 		reply_rx
@@ -851,8 +861,9 @@ enum Request {
 	Run(Job),
 	/// Count the background jobs running an external.
 	LiveJobs(flume::Sender<usize>),
-	/// Parse-only probe: does this source still hold a command?
-	HoldsCommand(Vec<u8>, flume::Sender<bool>),
+	/// Parse-only probe: does this source still hold a command, under the
+	/// session commands of the runs that would read it?
+	HoldsCommand(Vec<u8>, Option<SessionCommands>, flume::Sender<bool>),
 }
 
 /// One command for the driver.
@@ -889,11 +900,19 @@ impl Driver {
 				Ok(Request::LiveJobs(reply)) => {
 					let _ = reply.send(self.shell.live_external_jobs(&mut self.store));
 				},
-				Ok(Request::HoldsCommand(source, reply)) => {
+				Ok(Request::HoldsCommand(source, commands, reply)) => {
+					// Between runs the host's command slot is clear — the last
+					// run's cleanup emptied it — but the parser must see the
+					// commands the next run of this source would install: each
+					// of their names preempts the alias of that name. Probe
+					// under them, then put the slot back as it was.
+					let between_runs = self.host.commands();
+					self.host.set_commands(commands);
 					let holds = self.shell.source_holds_command(
 						&mut Cx { host: &mut self.host, store: &mut self.store },
 						&source,
 					);
+					self.host.set_commands(between_runs);
 					let _ = reply.send(holds);
 				},
 				Err(flume::TryRecvError::Disconnected) => break,

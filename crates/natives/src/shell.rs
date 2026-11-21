@@ -526,13 +526,16 @@ pub struct ShellRunResult {
 	/// Shell working directory after command completion.
 	pub working_dir:   Option<String>,
 	/// Whether `exit` or an armed `set -e` cut the run short with commands
-	/// still left to run: whatever followed the abort did not run. A
-	/// trailing `exit` at the end of the input — which ends the run where
-	/// the input's end would have — is not reported. The session stays
-	/// usable, with its state intact — options exactly as the script left
-	/// them: a function-local `set -e` under `local -` restores its caller's
-	/// settings on return, and an `EXIT` trap that fires at the run boundary
-	/// can still change them.
+	/// still left to run: the ordinary commands after the abort were
+	/// skipped — an `EXIT` trap and the unwind's other mandatory cleanup
+	/// still ran. A trailing `exit` at the end of the input — which ends
+	/// the run where the input's end would have — is not reported. On a
+	/// session kept for later calls the session stays usable, with its
+	/// state intact — options exactly as the script left them: a
+	/// function-local `set -e` under `local -` restores its caller's
+	/// settings on return, and an `EXIT` trap that fires at the run
+	/// boundary can still change them; a one-shot `execute_shell` session
+	/// ends with its call, so there is nothing later to carry into.
 	pub ended_by_exit: bool,
 }
 

@@ -220,12 +220,13 @@ pub struct ShellRunResult {
 	pub minimized:     Option<MinimizerResult>,
 	pub working_dir:   Option<String>,
 	/// The run was cut short by `exit` or an armed `set -e` with commands
-	/// still left to run: whatever followed the abort did not run. A
-	/// trailing `exit` at the end of the input — which ends the run where
-	/// the input's end would have — is not reported. The session stays
-	/// usable with its state intact; an option still in effect at the
-	/// unwind carries into later calls, though one scoped to a returned
-	/// function call, or disarmed by an EXIT trap, does not.
+	/// still left to run: the ordinary commands after the abort were
+	/// skipped — an `EXIT` trap and the unwind's other mandatory cleanup
+	/// still ran. A trailing `exit` at the end of the input — which ends
+	/// the run where the input's end would have — is not reported. The
+	/// session stays usable with its state intact; an option still in
+	/// effect at the unwind carries into later calls, though one scoped
+	/// to a returned function call, or disarmed by an EXIT trap, does not.
 	#[serde(default)]
 	pub ended_by_exit: bool,
 }
@@ -1712,10 +1713,14 @@ async fn run_shell_command_segmented_chain(
 				// status used for scheduling. Only inspect unconditional tails
 				// here, using the session parser (aliases can hide commands).
 				if outcome.exit_cause == Some(crate::bash::ExitCause::Exit) && !outcome.cut_short {
+					// The runs of the remaining segments carry this run's
+					// session commands; the probe parses under them (a name
+					// the commands preempt keeps its alias unexpanded).
+					let commands = scope.options.commands.as_ref().map(RunLease::commands);
 					for pending in segments.filter(|pending| !pending.run_if_previous_succeeded) {
 						if session
 							.session
-							.source_holds_command(pending.command.as_bytes())
+							.source_holds_command(pending.command.as_bytes(), commands.clone())
 							.await
 							.unwrap_or(true)
 						{
