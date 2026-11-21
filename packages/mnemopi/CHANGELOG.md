@@ -8,6 +8,10 @@
 
 - Improved diagnostics when a configured embedding provider fails, making provider errors visible in logs while preserving the existing fallback behavior.
 
+### Added
+
+- Added `mnemopi embed-serve` so omp sessions and other mnemopi processes automatically share one local embedding model over native IPC, with an in-process fallback when no server is running. ([#13785](https://github.com/can1357/oh-my-pi/pull/13785) by [@STRML](https://github.com/STRML))
+
 ## [18.22.1] - 2026-11-17
 
 ### Fixed

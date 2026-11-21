@@ -1171,6 +1171,11 @@ export function getDaemonRuntimeDir(projectDir: string): string {
 	return path.join(dirs.rootSubdir(path.join("run", "daemons"), "state"), key);
 }
 
+/** Directory holding the per-model standalone mnemopi embedding server endpoints and logs (~/.omp/run/mnemopi; XDG default: $XDG_STATE_HOME/omp/run/mnemopi). */
+export function getMnemopiEmbedRuntimeDir(): string {
+	return dirs.rootSubdir(path.join("run", "mnemopi"), "state");
+}
+
 /**
  * Directory naming session ownership leases (~/.omp/run/session-owners; XDG
  * default: $XDG_STATE_HOME/omp/run/session-owners). Shared across profiles:
