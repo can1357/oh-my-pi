@@ -4317,12 +4317,10 @@ describe("ModelRegistry runtime discovery", () => {
 				return Response.json({
 					data: [
 						{ model_group: "drop-audio-speech", mode: "audio_speech", supports_vision: false },
-						{ model_group: "drop-audio-transcription", mode: "audio_transcription", supports_vision: false },
 						{ model_group: "drop-batch", mode: "batch", supports_vision: false },
 						{ model_group: "drop-embedding", mode: "embedding", supports_vision: false },
 						{ model_group: "drop-guardrail", mode: "guardrail", supports_vision: false },
 						{ model_group: "drop-image-edit", mode: "image_edit", supports_vision: false },
-						{ model_group: "drop-image-generation", mode: "image_generation", supports_vision: false },
 						{ model_group: "drop-moderation", mode: "moderation", supports_vision: false },
 						{ model_group: "drop-ocr", mode: "ocr", supports_vision: false },
 						{ model_group: "drop-rerank", mode: "rerank", supports_vision: false },
@@ -4545,12 +4543,10 @@ describe("ModelRegistry runtime discovery", () => {
 				return Response.json({
 					data: [
 						{ id: "drop-audio-speech", mode: "audio_speech" },
-						{ id: "drop-audio-transcription", mode: "audio_transcription" },
 						{ id: "drop-batch", mode: "batch" },
 						{ id: "drop-embedding", mode: "embedding" },
 						{ id: "drop-guardrail", mode: "guardrail" },
 						{ id: "drop-image-edit", mode: "image_edit" },
-						{ id: "drop-image-generation", mode: "image_generation" },
 						{ id: "drop-moderation", mode: "moderation" },
 						{ id: "drop-ocr", mode: "ocr" },
 						{ id: "drop-rerank", mode: "rerank" },

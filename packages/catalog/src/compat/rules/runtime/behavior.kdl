@@ -159,9 +159,12 @@ behavior {
 	hosted-default provider="kimi-search" model="kimi-for-coding"
 	// LiteLLM publishes task-specific endpoint models beside conversational
 	// models. Exact mode metadata avoids brittle model-name heuristics while
-	// unknown and malformed future values remain selectable.
-	exclude-discovery-modes "audio_speech" "audio_transcription" "batch" "embedding" "guardrail" \
-		"image_edit" "image_generation" "moderation" "ocr" "rerank" "search" "vector_store" \
+	// unknown and malformed future values remain selectable. Three modes are
+	// not excluded because resolveLiteLLMApi routes each onto a runner api:
+	// decisions -> openai-decisions (judge), image_generation -> openai-images
+	// (image), audio_transcription -> openai-transcriptions (stt/dictation).
+	exclude-discovery-modes "audio_speech" "batch" "embedding" "guardrail" \
+		"image_edit" "moderation" "ocr" "rerank" "search" "vector_store" \
 		"video_generation" provider="litellm"
 	// models.dev rows OMP cannot route successfully: AWS does not document
 	// the jp. Opus 5 profile, and the openai.gpt-5.x rows are Mantle-only
