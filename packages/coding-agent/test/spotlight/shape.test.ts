@@ -279,6 +279,30 @@ describe("spotlight shaping", () => {
 		}
 	});
 
+	it("keeps an expensive answer and its context without dropping the requested identifier", async () => {
+		const lines = Array.from({ length: 160 }, (_, i) =>
+			i % 2
+				? "---"
+				: `Observation ${i}: ${["training", "grading", "evaluation", "validation"][(i / 2) % 4]} records ${"each completed episode. ".repeat(12)}`,
+		);
+		for (const i of [22, 38, 54, 102, 126]) lines[i] = `Usage note: ${lines[i]}`;
+		lines[10] = "Results for bench:core";
+		lines[77] = "Each rollout starts from the same snapshot.";
+		lines[78] = `Across all runs the mean was 9.8M tokens per task. ${"The count includes every episode. ".repeat(6)}`;
+		lines[79] = "These are cumulative tokens, not peak context length.";
+		const text = lines.join("\n");
+		const out = await shapeResult(
+			{ tool: "read", path: "https://example.com/report", text },
+			context({ intent: "token usage for bench:core" }),
+			scorer(item => (item === lines[78] ? 1 : item === "---" ? 0.8 : 0.1)),
+			newShapeState(),
+			sink(),
+		);
+		expect(out.text).toContain(lines.slice(77, 80).join("\n"));
+		expect(out.text).toContain(lines[10]);
+		expect(out.outTokens).toBeLessThan(out.inTokens / 4);
+	});
+
 	it("traces a cut: why each line shows, how the valve ranked them, what each shaped line stands for", async () => {
 		const lines = Array.from({ length: 200 }, (_, i) =>
 			i === 120

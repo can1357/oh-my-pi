@@ -42,6 +42,8 @@
 
 ### Fixed
 
+- Spotlight keeps high-relevance passages with their neighbours on long results, without displacing previously selected evidence.
+
 - Fixed Tern tray cards and subagent live previews showing stale calls, models, or thinking states while an agent was running or after a model switch; completed cards now retain the model and thinking level used.
 - Fixed extension side-panel sessions launching omp's own browser instead of driving only the user's Chrome window.
 - Preserved answer footers and Copy controls in Tern after resuming, compacting, or rebuilding a transcript.

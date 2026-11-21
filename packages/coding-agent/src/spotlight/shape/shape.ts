@@ -40,13 +40,14 @@ import { shapeTestRun } from "./test-runs";
 import { fileSpans, runSpan, type Span, type View } from "./view";
 import {
 	fillSmallGaps,
+	foldDividers,
 	keepCommitHeaders,
 	lineShape,
 	uniformShape,
 	COMMIT,
-	DENSITY_MAX,
+	coverHotPassages,
 	DENSITY_PARTS,
-	densityScores,
+	rankLines,
 	frameLines,
 	isDiff,
 	isGrid,
@@ -426,12 +427,6 @@ async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View
 	return { lines, spans: view.spans && spans };
 }
 
-/** Spotlight's line scores with nulls as 0, or the head + tail order when Spotlight did not answer. */
-async function lineScores(run: Run, lines: readonly string[], origin?: Origin): Promise<number[]> {
-	const scores = await scoreLines(run, lines, origin);
-	return scores ? scores.map(s => s ?? 0) : headTail(lines.length);
-}
-
 /**
  * Where a view's lines are in the run's base: a read's file lines by their spans (a line standing for one file
  * line is that window line), else the base lines they equal.
@@ -453,7 +448,11 @@ function viewOrigin(run: Run, view: View): Origin | undefined {
  * one line shape is cut to the lines that differ, its ends, and a line naming the shape.
  * Re-asks (results up to 12k bringing back lines a cut hid) and reads of folded code come back whole.
  */
-async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; steps: string[] }> {
+async function shapeSubject(
+	run: Run,
+	subject: Subject,
+	previewChars: number,
+): Promise<{ view: View; steps: string[] }> {
 	const { input, state } = run;
 	const command = input.command ?? "";
 	const b = await base(run, subject);
@@ -510,8 +509,8 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	let budget = WINDOW_BUDGET * scale;
 	let uniform: { shapes: string[]; differs: boolean[]; edges: boolean[] } | undefined;
 	if (cut) {
-		const spot = await lineScores(run, lines, origin);
-		const density = densityScores(lines, spot);
+		const spot = await scoreLines(run, lines, origin);
+		const { density, order } = rankLines(lines, spot ?? headTail(lines.length));
 		uniform = input.read ? undefined : uniformShape(lines, witnessed);
 		// The lines the call asks for: those its intent names and command output's last line.
 		const asked = intentLines(run, lines).map((named, i) => named || keep[i]);
@@ -550,13 +549,17 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			// In uniform output only the lines that say something new are picked; the rest are routine samples.
 			...(uniform ? { pick: forced } : {}),
 		});
+		if (spot && !uniform && !folded) {
+			budget = coverHotPassages(chosen, lines, width, witnessed, spot, order, budget, previewChars);
+		}
 		frame = { chosen, density };
 		why = chosen.why;
-		if (!shapesItself(input.tool)) keepHeadings(lines, why);
+		if (!shapesItself(input.tool) || (input.tool === "read" && !input.read)) keepHeadings(lines, why);
 		if (!input.read) keepCommitHeaders(lines, why);
 		fillSmallGaps(width, why);
 		// A filled gap can show a commit's lines whose header is still hidden.
 		if (!input.read) keepCommitHeaders(lines, why);
+		if (spot && !uniform && !folded) foldDividers(chosen, lines);
 	}
 	const show = (i: number) => {
 		const reason = why[i];
@@ -575,10 +578,10 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	if (frame) {
 		noteRank(run, origin, {
 			parts: DENSITY_PARTS,
-			max: DENSITY_MAX,
+			max: 1,
 			values: [frame.density],
 			why,
-			floor: DENSITY_MAX,
+			floor: 1,
 			budget,
 			used: frame.chosen.used,
 			last: frame.chosen.last,
@@ -782,7 +785,11 @@ export async function shapeBlock(
 			if (steps.length) text = view.lines.join("\n");
 		}
 	} else if (subject) {
-		const shaped = await shapeSubject(run, subject);
+		const shaped = await shapeSubject(
+			run,
+			subject,
+			Math.min(input.text.length, plain?.text.length ?? input.text.length),
+		);
 		steps = shaped.steps;
 		if (steps.length) text = subject.before + shaped.view.lines.join("\n") + subject.after;
 	} else if (input.read) bump(run, "unlocated");

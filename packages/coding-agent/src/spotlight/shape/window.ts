@@ -70,25 +70,18 @@ export interface Window {
 	last?: { item: number; chars: number };
 }
 
-/** Ranks of `xs` (0–1, ascending; ties keep line order, so a later line ranks higher). */
-function ranks(xs: readonly number[]): number[] {
-	const r: number[] = Array.from({ length: xs.length }, () => 0);
-	[...xs.keys()]
-		.sort((a, b) => xs[a] - xs[b] || a - b)
-		.forEach((i, k) => {
-			r[i] = k / Math.max(1, xs.length - 1);
-		});
-	return r;
-}
-
-/** The part of {@link densityScores} and the highest score a line can reach. */
+/** The density part shown in traces; the independent peak reserve uses the inspector's unsmoothed heat. */
 export const DENSITY_PARTS = ["Spotlight ÷ length^¼"];
-export const DENSITY_MAX = 1;
 
-/** The valve's ranking: each line's Spotlight rank over the fourth root of its length (short lines of equal rank win). */
-export function densityScores(lines: readonly string[], spot: readonly number[]): number[] {
-	const rank = ranks(spot);
-	return lines.map((l, i) => (l.trim() ? rank[i] / (l.length + 1) ** 0.25 : -1));
+/** Density for the lexical window and its ascending score order, reused to find peaks without a second sort. */
+export function rankLines(lines: readonly string[], scores: readonly (number | null)[]) {
+	const order = [...lines.keys()].sort((a, b) => (scores[a] ?? 0) - (scores[b] ?? 0));
+	const density = Array.from<number>({ length: lines.length });
+	const denominator = Math.max(1, lines.length - 1);
+	for (const [place, i] of order.entries()) {
+		density[i] = lines[i].trim() ? place / denominator / (lines[i].length + 1) ** 0.25 : -1;
+	}
+	return { density, order };
 }
 
 /** One gap marker's cost, roughly. */
@@ -158,6 +151,110 @@ export function frameLines(
 	return { why, used, last };
 }
 
+/** Delimiters may supply context; they do not qualify as independent evidence. */
+const MIN_PEAK_WIDTH = 4 * FRAME_MARKER;
+const SEPARATOR = /^(?:```[\w-]*|[{}()[\];,.*|:=+\-•…`\s]*)$/;
+
+/** An island containing nothing but gap decoration can be merged into the surrounding omission. */
+const DECORATION = /^(?:\.{3}|…|- •|---)?$/;
+
+/** Fold a shown island containing only dividers into its surrounding gap, after structural context is complete. */
+export function foldDividers(window: Window, lines: readonly string[]): void {
+	for (let i = 0; i < lines.length;) {
+		if (!reasonShows(window.why[i])) {
+			i++;
+			continue;
+		}
+		let j = i;
+		let empty = true;
+		while (j < lines.length && reasonShows(window.why[j])) {
+			if (empty && (window.why[j] === "s" || !DECORATION.test(lines[j].trim()))) empty = false;
+			j++;
+		}
+		if (empty) {
+			window.why.fill("b", i, j);
+			if (window.last && window.last.item >= i && window.last.item < j) delete window.last;
+		}
+		i = j;
+	}
+}
+
+/**
+ * Add missed hot passages to a scored window, without evicting its evidence. The expanded allowance is used only
+ * when it fits the whole peak set and stays within one sixth of the unshaped preview. Otherwise only the prefix
+ * fitting the ordinary budget survives. Returns the allowance actually required for tracing.
+ */
+export function coverHotPassages(
+	window: Window,
+	lines: readonly string[],
+	width: readonly number[],
+	skip: readonly boolean[],
+	spot: readonly (number | null)[],
+	order: readonly number[],
+	budget: number,
+	previewChars: number,
+): number {
+	const scored = order.filter(i => spot[i] !== null);
+	const peaks: number[] = [];
+	let missed = false;
+	for (let end = scored.length; end > 0;) {
+		let a = end - 1;
+		while (a > 0 && spot[scored[a - 1]] === spot[scored[end - 1]]) a--;
+		const rank = scored.length === 1 ? 1 : (a + end - 1) / (2 * (scored.length - 1));
+		if (Math.round(9 * rank) !== 9) break;
+		for (let j = a; j < end; j++) {
+			const i = scored[j];
+			if (skip[i] || SEPARATOR.test(norm(lines[i]))) continue;
+			peaks.push(i);
+			if (window.why[i] === "b" && width[i] >= MIN_PEAK_WIDTH) missed = true;
+		}
+		end = a;
+	}
+	if (!missed) return budget;
+	let used = 0;
+	for (let i = 0; i < lines.length; i++) {
+		if (reasonShows(window.why[i])) used += width[i] + 1;
+		else if (!i || reasonShows(window.why[i - 1])) used += FRAME_MARKER;
+	}
+	// Only buy extra space if it covers *all* the outstanding evidence; otherwise use the ordinary window's slack.
+	const ceiling = Math.min(2 * budget, Math.floor(previewChars / 6));
+	if (ceiling <= used) return budget;
+	const added: number[] = [];
+	let affordable = 0;
+	let affordableUsed = used;
+	let affordableLast = window.last;
+	for (const i of peaks) {
+		let lo = Math.max(0, i - 1),
+			hi = Math.min(lines.length - 1, i + 1);
+		while (lo > 0 && BARE.test(lines[lo])) lo--;
+		while (hi + 1 < lines.length && BARE.test(lines[hi])) hi++;
+		let cost = 0;
+		for (let j = lo; j <= hi; j++) if (window.why[j] === "b") cost += width[j] + 1;
+		if (!cost) continue;
+		if (lo && !reasonShows(window.why[lo - 1])) cost += FRAME_MARKER;
+		if (used + cost > ceiling) {
+			for (let n = affordable; n < added.length; n++) window.why[added[n]] = "b";
+			used = affordableUsed;
+			window.last = affordableLast;
+			break;
+		}
+		if (window.why[i] === "b") window.last = { item: i, chars: cost };
+		for (let j = lo; j <= hi; j++) {
+			if (window.why[j] !== "b") continue;
+			added.push(j);
+			window.why[j] = j === i ? "a" : "c";
+		}
+		used += cost;
+		if (used <= budget) {
+			affordable = added.length;
+			affordableUsed = used;
+			affordableLast = window.last;
+		}
+	}
+	window.used = used;
+	return Math.max(budget, used);
+}
+
 /**
  * Shows each hidden run of one line, or of two lines with at most two markers' worth of text, between shown lines
  * (`c`): such a run costs about what its marker does. A gap and an already-seen fragment are runs of their own; runs
@@ -184,9 +281,10 @@ export function fillSmallGaps(width: readonly number[], why: (SpotlightReason | 
 
 /** A Markdown-style heading line (`# dir/`, `## file.ts`, `### Section`) and its level. */
 const HEADING = /^(#{1,6}) \S/;
+const TABLE_RULE = /^\|(?:\s*:?---+:?\s*\|)+$/;
 
 /**
- * Shows the headings every shown line sits under, as structure (`s`): `grep` and `glob` group their lines under
+ * Shows the headings and pipe-table column names for kept lines, as structure (`s`): `grep` and `glob` group their lines under
  * `# dir/` and `## file` headings, and a Markdown result its paragraphs under sections, so a line shown without them
  * names nothing. Blank lines pull no heading. Only lines hidden by rank or budget (`b`) are shown; `undefined` counts
  * as shown.
@@ -198,8 +296,16 @@ export function keepHeadings(lines: readonly string[], why: (SpotlightReason | u
 	};
 	// The headings open above the current line, outermost first.
 	const open: { line: number; level: number }[] = [];
+	let table = -1;
 	for (let i = 0; i < lines.length; i++) {
 		const heading = HEADING.exec(lines[i]);
+		const row = lines[i].trim();
+		if (!row.startsWith("|")) table = -1;
+		else if (i && TABLE_RULE.test(row) && lines[i - 1].trimStart().startsWith("|")) table = i - 1;
+		else if (table >= 0 && shows(i)) {
+			if (why[table] === "b") why[table] = "s";
+			if (why[table + 1] === "b") why[table + 1] = "s";
+		}
 		if (heading) {
 			const level = heading[1].length;
 			while (open.length && open[open.length - 1].level >= level) open.pop();
