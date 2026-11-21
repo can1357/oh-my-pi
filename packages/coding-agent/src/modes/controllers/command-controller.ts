@@ -2346,8 +2346,11 @@ export class CommandController {
 			}
 		}
 		// A plan approval may switch models before queued input can dispatch.
-		if (beforeFlush) await beforeFlush(outcome);
-		if (!background) await this.ctx.flushCompactionQueue({ willRetry: false });
+		try {
+			if (beforeFlush) await beforeFlush(outcome);
+		} finally {
+			if (!background) await this.ctx.flushCompactionQueue({ willRetry: false });
+		}
 		return outcome;
 	}
 }

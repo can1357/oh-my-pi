@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Added a custom model picker to Plan Review for choosing an execution model and thinking level without leaving the review ([#20043](https://github.com/can1357/oh-my-pi/pull/20043) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Fixed
 

@@ -129,6 +129,29 @@ describe("executeCompaction UI lifecycle", () => {
 		// the instant rebuildChatFromMessages ran (1 leaked loader without the fix).
 		expect(statusAtRebuild()).toBe(0);
 	});
+
+	it("flushes queued input and propagates a failed before-flush model transition", async () => {
+		const compact = vi.fn(async (): Promise<CompactionResult<unknown>> => ({
+			summary: "",
+			firstKeptEntryId: "",
+			tokensBefore: 0,
+		}));
+		const { ctx } = buildCtx(compact);
+		const queued = ["queued input"];
+		const delivered: string[] = [];
+		ctx.flushCompactionQueue = vi.fn(async () => {
+			delivered.push(...queued.splice(0));
+		});
+		const controller = new CommandController(ctx);
+		const failure = new Error("model transition failed");
+		await expect(
+			controller.executeCompaction(undefined, false, async () => {
+				throw failure;
+			}),
+		).rejects.toBe(failure);
+		expect(delivered).toEqual(["queued input"]);
+		expect(queued).toEqual([]);
+	});
 });
 
 describe("compaction queued for the next yield", () => {
