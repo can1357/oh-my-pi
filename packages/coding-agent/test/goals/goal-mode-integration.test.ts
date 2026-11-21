@@ -12,6 +12,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { goalFromModeData } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
@@ -235,6 +236,67 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(state?.goal.id).not.toBe(originalGoal.id);
 		expect(harness.mode.goalModeEnabled).toBe(true);
 		expect(await toolNamesFor(harness)).toContain("goal");
+	});
+
+	it("restores a goal with its objective and latest counters after repeated usage flushes", async () => {
+		const objective = "Ship without copying this objective on every flush";
+		await harness.session.goalRuntime.createGoal({ objective });
+		const goalId = harness.session.getGoalModeState()?.goal.id;
+		if (!goalId) throw new Error("expected active goal");
+
+		harness.session.goalRuntime.onTurnStart("turn-1", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		await harness.session.goalRuntime.flushUsage("suppressed", {
+			input: 7,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+		await harness.session.goalRuntime.flushUsage("suppressed", {
+			input: 15,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+
+		const sessionFile = harness.session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("expected persisted session file");
+		await harness.session.sessionManager.ensureOnDisk();
+		await harness.session.sessionManager.flush();
+		await harness.session.sessionManager.close();
+
+		const reopened = await SessionManager.open(sessionFile);
+		try {
+			const context = reopened.buildSessionContext();
+			const restored = goalFromModeData(context.modeData);
+			const usageEntries = reopened
+				.getEntries()
+				.filter(
+					(entry): entry is Extract<typeof entry, { type: "custom" }> =>
+						entry.type === "custom" && entry.customType === "goal_usage",
+				);
+
+			expect(context.mode).toBe("goal");
+			expect(restored).toMatchObject({ id: goalId, objective, tokensUsed: 15 });
+			expect(usageEntries).toHaveLength(2);
+			expect(
+				usageEntries.every(
+					entry =>
+						entry.data !== undefined &&
+						entry.data !== null &&
+						typeof entry.data === "object" &&
+						!("objective" in entry.data),
+				),
+			).toBe(true);
+			expect(
+				reopened
+					.getEntries()
+					.filter(
+						entry => entry.type === "mode_change" && (entry.mode === "goal" || entry.mode === "goal_paused"),
+					),
+			).toHaveLength(1);
+		} finally {
+			await reopened.close();
+		}
 	});
 
 	it("steers initial goal objective attachments while streaming", async () => {
