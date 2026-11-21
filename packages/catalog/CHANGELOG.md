@@ -5,7 +5,7 @@
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
-- Snapcompact on Devin's Gemini 4 Neon keeps about twice as much history per compaction: its frames are budgeted at the 1,089 tokens Devin bills per image instead of a 5,024-token estimate ([#19883](https://github.com/can1357/oh-my-pi/pull/19883) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin's Gemini 4 Neon images are now budgeted at the 1,089 tokens Devin bills per image, measured across sizes, instead of the unverified 1,120-token Gemini estimate ([#19883](https://github.com/can1357/oh-my-pi/pull/19883) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [19.1.0] - 2026-11-21
 
