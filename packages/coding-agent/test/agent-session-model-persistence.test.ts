@@ -365,9 +365,9 @@ describe("AgentSession model persistence", () => {
 	});
 
 	it("cycles from a pinned free model using its unpinned scope slot", async () => {
-		const paid = getBundledModel("openrouter", "qwen/qwen3-coder");
-		const free = getBundledModel("openrouter", "qwen/qwen3-coder:free");
-		if (!paid || !free) throw new Error("Expected paid and free OpenRouter models");
+		const paid = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!paid) throw new Error("Expected a bundled OpenRouter model");
+		const free = { ...paid, id: `${paid.id}:free` };
 		const selector = `${modelValue(free)}@cerebras`;
 		const pinned = parseModelPattern(selector, [free]).model;
 		if (!pinned) throw new Error(`Expected routed model ${selector} to exist`);
