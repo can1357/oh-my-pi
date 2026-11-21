@@ -776,16 +776,18 @@ describe("todo backend", () => {
 			expect(committed(forked.session)).toEqual(["a"]);
 		});
 
-		it("a session change between the backend's answer and the tool's commit fails the call", async () => {
+		it("a session change between the backend's answer and the tool's commit fails the call, and the new session's list follows", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
 
 			// Both sessions' lists are empty: only the session id tells them apart.
 			const tool = directTodo(session, () => session.newSession());
 			const result = await tool.execute("call", { op: "init", items: ["a"] });
+			await settled(session);
 
 			expect(result.isError).toBe(true);
 			expect(session.getTodoPhases()).toEqual([]);
+			expect(backend.calls).toEqual([{ phases: [], sessionId: session.sessionManager.getSessionId() }]);
 		});
 
 		it("a call waiting its turn is not put to a backend that was disabled or deselected meanwhile", async () => {
