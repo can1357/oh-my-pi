@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `refresh { on-use-only #true }` auth directive, set for Google Antigravity: its accounts refresh only when a request is about to use one ([#19912](https://github.com/can1357/oh-my-pi/pull/19912) by [@Xytronix](https://github.com/Xytronix))
+- Added `markPartialDynamicModels()`: a model manager merges a dynamic result marked partial without pruning and caches it non-authoritative ([#19912](https://github.com/can1357/oh-my-pi/pull/19912) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))

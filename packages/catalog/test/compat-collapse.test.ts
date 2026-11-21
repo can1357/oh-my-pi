@@ -1744,7 +1744,7 @@ describe("antigravity discovery collapsing", () => {
 				{ preconnect: fetch.preconnect },
 			);
 			const options = googleAntigravityModelManagerOptions({
-				resolveAccounts: async () => [{ accessToken: "t" }],
+				resolveAccounts: async () => ({ accounts: [{ accessToken: "t" }] }),
 				fetch: fetcher,
 			});
 			const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
@@ -1789,7 +1789,7 @@ describe("antigravity discovery collapsing", () => {
 			{ preconnect: fetch.preconnect },
 		);
 		const options = googleAntigravityModelManagerOptions({
-			resolveAccounts: async () => [{ accessToken: "t" }],
+			resolveAccounts: async () => ({ accounts: [{ accessToken: "t" }] }),
 			fetch: fetcher,
 		});
 		const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
@@ -1819,11 +1819,13 @@ describe("antigravity discovery collapsing", () => {
 			{ preconnect: fetch.preconnect },
 		);
 		const options = googleAntigravityModelManagerOptions({
-			resolveAccounts: async () => [
-				{ accessToken: "revoked", accountKey: "revoked@example.com" },
-				{ accessToken: "forbidden", accountKey: "forbidden@example.com" },
-				{ accessToken: "healthy", accountKey: "healthy@example.com" },
-			],
+			resolveAccounts: async () => ({
+				accounts: [
+					{ accessToken: "revoked", accountKey: "revoked@example.com" },
+					{ accessToken: "forbidden", accountKey: "forbidden@example.com" },
+					{ accessToken: "healthy", accountKey: "healthy@example.com" },
+				],
+			}),
 			endpoint: "https://cca.test",
 			fetch: fetcher,
 		});
@@ -1850,10 +1852,12 @@ describe("antigravity discovery collapsing", () => {
 			{ preconnect: fetch.preconnect },
 		);
 		const options = googleAntigravityModelManagerOptions({
-			resolveAccounts: async () => [
-				{ accessToken: "unavailable", accountKey: "unavailable@example.com" },
-				{ accessToken: "healthy", accountKey: "healthy@example.com" },
-			],
+			resolveAccounts: async () => ({
+				accounts: [
+					{ accessToken: "unavailable", accountKey: "unavailable@example.com" },
+					{ accessToken: "healthy", accountKey: "healthy@example.com" },
+				],
+			}),
 			fetch: fetcher,
 		});
 		const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");

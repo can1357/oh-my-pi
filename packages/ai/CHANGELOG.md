@@ -2,12 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `refresh: "valid-only"` to `oauth.accessAll()`: it refreshes no account and reports one needing a refresh as `{ ok: false, skipped: "expired" }` ([#19912](https://github.com/can1357/oh-my-pi/pull/19912) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
 - Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
 - Usage reports of a provider an extension registers now survive across omp processes. Registering a provider's first usage adapter no longer discards the reports another process cached for it, so each new session stops re-probing the provider's usage endpoint; replacing an existing adapter still invalidates them ([#20030](https://github.com/can1357/oh-my-pi/pull/20030) by [@ahsanatha](https://github.com/ahsanatha))
+- Fixed the auth broker's background sweep refreshing every Google Antigravity account at once; accounts now refresh only when a request is about to use one ([#19912](https://github.com/can1357/oh-my-pi/pull/19912) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.0] - 2026-11-21
 

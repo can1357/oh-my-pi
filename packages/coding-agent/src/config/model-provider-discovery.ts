@@ -1,6 +1,6 @@
 import type { OAuthAccess } from "@oh-my-pi/pi-ai";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
-import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
+import { authProviders, providerRefreshesOnUseOnly } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { ModelResolutionSource } from "@oh-my-pi/pi-catalog/model-manager";
 import { MODELS_DEV_CATALOG_PROVIDER_IDS, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
@@ -118,6 +118,12 @@ export function getOAuthCredentialsForProvider(authStorage: AuthStorage, provide
 /** One account resolved for discovery; `apiKey` is the key the provider's transport sends for it. */
 export type OAuthDiscoveryAccount = OAuthAccess & { apiKey: string };
 
+/** Accounts an account-scoped discovery reads; `partial` when some stored accounts were left out on purpose. */
+export interface OAuthDiscoveryAccounts {
+	accounts: OAuthDiscoveryAccount[];
+	partial: boolean;
+}
+
 /**
  * Resolve every stored OAuth account of an account-scoped discovery provider
  * (Codex `/models`, Antigravity `fetchAvailableModels`, Kiro
@@ -129,6 +135,13 @@ export type OAuthDiscoveryAccount = OAuthAccess & { apiKey: string };
  * resolved; it is appended when it belongs to no stored account (runtime or
  * env credential).
  *
+ * A provider whose auth rule says `refresh { on-use-only #true }` refreshes
+ * nothing here: only the preflight's account (the one about to be used) may
+ * have been refreshed, and stored accounts whose token has expired are left
+ * out. The result is then `partial`, so the union adds models without pruning
+ * and is cached non-authoritative (short retry) instead of standing for the
+ * whole catalog.
+ *
  * Returns `null` when any stored account fails to resolve (e.g. a transient
  * refresh failure): these managers are authoritative, so unioning only the
  * accounts that resolved would cache a partial catalog and hide the failed
@@ -139,12 +152,21 @@ export async function resolveOAuthDiscoveryAccounts(
 	authStorage: AuthStorage,
 	provider: string,
 	resolvedKey: string,
-): Promise<OAuthDiscoveryAccount[] | null> {
-	const accesses = await authStorage.oauth.accessAll(provider);
+): Promise<OAuthDiscoveryAccounts | null> {
+	const accesses = await authStorage.oauth.accessAll(
+		provider,
+		providerRefreshesOnUseOnly(provider) ? { refresh: "valid-only" } : undefined,
+	);
 	const accounts: OAuthDiscoveryAccount[] = [];
+	let partial = false;
 	for (const access of accesses) {
-		if (!access.ok) return null;
-		accounts.push(access);
+		if (access.ok) {
+			accounts.push(access);
+		} else if (access.skipped) {
+			partial = true;
+		} else {
+			return null;
+		}
 	}
 	if (!accounts.some(account => account.accessToken === resolvedKey || account.apiKey === resolvedKey)) {
 		const matchingCredential = getOAuthCredentialsForProvider(authStorage, provider).find(
@@ -158,5 +180,5 @@ export async function resolveOAuthDiscoveryAccounts(
 			projectId: matchingCredential?.projectId,
 		});
 	}
-	return accounts;
+	return { accounts, partial };
 }

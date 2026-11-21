@@ -39,6 +39,7 @@ import { getModelCacheWriteStats, readModelCache, retainModelCacheConnection } f
 import {
 	createModelManager,
 	fingerprintStaticModels,
+	markPartialDynamicModels,
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
 } from "@oh-my-pi/pi-catalog/model-manager";
@@ -3093,18 +3094,20 @@ export class ModelRegistry {
 				createOptions: oauthToken =>
 					googleAntigravityModelManagerOptions({
 						resolveAccounts: async () => {
-							const accounts = await resolveOAuthDiscoveryAccounts(
+							const resolved = await resolveOAuthDiscoveryAccounts(
 								this.authStorage,
 								"google-antigravity",
 								oauthToken,
 							);
-							return (
-								accounts?.map(account => ({
+							if (!resolved) return null;
+							return {
+								accounts: resolved.accounts.map(account => ({
 									accessToken: account.accessToken,
 									accountKey: oauthAccountKey(account),
 									projectId: account.projectId,
-								})) ?? null
-							);
+								})),
+								partial: resolved.partial,
+							};
 						},
 						endpoint: this.#descriptorBaseUrl("google-antigravity"),
 						fetch: this.#fetch,
@@ -3116,10 +3119,11 @@ export class ModelRegistry {
 				createOptions: apiKey =>
 					kiroModelManagerOptions({
 						apiKey,
+						// Kiro has no `on-use-only` refresh rule, so its account set is never partial.
 						resolveAccounts: async () => {
-							const accounts = await resolveOAuthDiscoveryAccounts(this.authStorage, "kiro", apiKey);
+							const resolved = await resolveOAuthDiscoveryAccounts(this.authStorage, "kiro", apiKey);
 							return (
-								accounts?.map(account => ({
+								resolved?.accounts.map(account => ({
 									apiKey: account.apiKey,
 									accountKey: oauthAccountKey(account),
 								})) ?? null
@@ -3147,8 +3151,10 @@ export class ModelRegistry {
 					if (officialCredential || isOfficialCodexApiUrl(configuredBaseUrl)) {
 						return openaiCodexModelManagerOptions({
 							baseUrl: officialCredential ? undefined : configuredBaseUrl,
-							resolveAccounts: () =>
-								resolveOAuthDiscoveryAccounts(this.authStorage, "openai-codex", accessToken),
+							// Codex has no `on-use-only` refresh rule, so its account set is never partial.
+							resolveAccounts: async () =>
+								(await resolveOAuthDiscoveryAccounts(this.authStorage, "openai-codex", accessToken))
+									?.accounts ?? null,
 							fetch: this.#fetch,
 						});
 					}
@@ -3296,16 +3302,18 @@ export class ModelRegistry {
 		return {
 			...options,
 			fetchDynamicModels: async () => {
-				const accounts = isAuthenticated(apiKey)
+				const resolved = isAuthenticated(apiKey)
 					? await resolveOAuthDiscoveryAccounts(this.authStorage, providerId, apiKey)
-					: [];
-				if (!accounts) return null;
+					: { accounts: [], partial: false };
+				if (!resolved) return null;
 				const models = await discover({
-					accounts,
+					accounts: resolved.accounts,
 					baseUrl: this.#descriptorBaseUrl(providerId),
 					fetch: this.#fetch,
 				});
-				return models && [...models];
+				if (!models) return null;
+				// Accounts left out on purpose (on-use-only refresh) make the roster cover only part of the catalog.
+				return resolved.partial ? markPartialDynamicModels([...models]) : [...models];
 			},
 		};
 	}
