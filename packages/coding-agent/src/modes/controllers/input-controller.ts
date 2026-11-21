@@ -48,6 +48,7 @@ import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/ski
 import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
+import { leftArrowBackgrounds } from "../../agents-view/host";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { DequeuedMessage, RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -283,6 +284,65 @@ function safeAbort(label: string, fn: () => void): void {
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
 
+/** A ← this soon after the composer was emptied (submit, clear, history) only arms the background gesture. */
+export const BACKGROUND_GUARD_MS = 500;
+/** How long an armed background gesture waits for the confirming ←. */
+export const BACKGROUND_ARMED_MS = 3000;
+
+/**
+ * Single ← on the empty main composer backgrounds the session. The tap fires
+ * after {@link LEFT_DOUBLE_TAP_MIN_GAP_MS}, so a terminal-synthesized burst of
+ * arrows (every tap that close to the previous one) cancels it and never
+ * fires. Right after the composer was emptied the user is likely still
+ * editing, so the first ← only arms the gesture (with a hint) and the next one
+ * within {@link BACKGROUND_ARMED_MS} fires.
+ */
+export class LeftBackgroundGesture {
+	#lastTapAt = Number.NEGATIVE_INFINITY;
+	#emptiedAt = Number.NEGATIVE_INFINITY;
+	#armedUntil = 0;
+	#pending: NodeJS.Timeout | undefined;
+
+	constructor(
+		private readonly fire: () => void,
+		private readonly showArmedHint: () => void,
+	) {}
+
+	/** The composer just went from text to empty. */
+	noteComposerEmptied(now = Date.now()): void {
+		this.#emptiedAt = now;
+	}
+
+	tap(now = Date.now()): void {
+		const sinceLast = now - this.#lastTapAt;
+		this.#lastTapAt = now;
+		if (sinceLast < LEFT_DOUBLE_TAP_MIN_GAP_MS) {
+			// Burst: nothing in it fires, including the tap that started it.
+			clearTimeout(this.#pending);
+			this.#pending = undefined;
+			this.#armedUntil = 0;
+			return;
+		}
+		if (now < this.#armedUntil) {
+			this.#armedUntil = 0;
+		} else if (now - this.#emptiedAt < BACKGROUND_GUARD_MS) {
+			this.#armedUntil = now + BACKGROUND_ARMED_MS;
+			this.showArmedHint();
+			return;
+		}
+		clearTimeout(this.#pending);
+		this.#pending = setTimeout(() => {
+			this.#pending = undefined;
+			this.fire();
+		}, LEFT_DOUBLE_TAP_MIN_GAP_MS);
+	}
+
+	dispose(): void {
+		clearTimeout(this.#pending);
+		this.#pending = undefined;
+	}
+}
+
 export class InputController {
 	constructor(
 		private ctx: InteractiveModeContext,
@@ -347,6 +407,14 @@ export class InputController {
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
 	#leftTapCount = 0;
+	// Single ← on the empty main composer: background the session.
+	readonly #backgroundGesture = new LeftBackgroundGesture(
+		() => {
+			hintUsage.record("background");
+			this.ctx.backgroundSession();
+		},
+		() => this.ctx.showStatus("Press ← again to background this session"),
+	);
 	// Sequential index for `local://paste-N.md` references created by the large-paste
 	// flow. Seeded from 0 and bumped past existing paste files.
 	#pasteCounter = 0;
@@ -800,21 +868,31 @@ export class InputController {
 		const agentsHubKeys = new Set(this.ctx.keybindings.getKeys("app.agents.hub"));
 		const hubKeys = new Set([...agentsHubKeys, ...this.ctx.keybindings.getKeys("app.session.observe")]);
 		for (const key of hubKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () =>
-				this.ctx.showAgentHub(agentsHubKeys.has(key) ? { trayFirst: true } : undefined),
-			);
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (agentsHubKeys.has(key)) hintUsage.record("agents");
+				this.ctx.showAgentHub(agentsHubKeys.has(key) ? { trayFirst: true } : undefined);
+			});
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.session.background")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.backgroundSession());
 		}
 
-		// Double-tap left arrow on an empty editor: opens the agent hub from the
-		// main session, or returns the focused subagent view to the main session.
-		// Focused ←← intentionally matches Esc. From the main session the gesture
-		// stays inert when there are no subagents (requireContent); the explicit
-		// hub key still opens the empty roster. `armCloseTap` hands this gesture's
-		// tap state to the hub so the same ←← that opened it also arms its close —
-		// otherwise the hub's fresh detector demands a second ←← (issue #4780).
+		// Left arrow on an empty editor. In a focused subagent view a double-tap
+		// returns to the main session (intentionally matching Esc). On the main
+		// session a single ← backgrounds the session (see LeftBackgroundGesture)
+		// when `composer.leftArrowBackground` is on or this is a background session
+		// (where it detaches back to the Agent View); otherwise ←← opens the agent hub.
+		// That hub gesture stays inert when there are no subagents
+		// (requireContent); the explicit hub key still opens the empty roster.
+		// `armCloseTap` hands this gesture's tap state to the hub so the same ←←
+		// that opened it also arms its close (issue #4780).
 		this.ctx.editor.onLeftAtStart = () => {
 			if (this.ctx.focusedAgentId) {
 				this.#handleFocusedLeftTap();
+				return;
+			}
+			if (leftArrowBackgrounds(settings)) {
+				this.#backgroundGesture.tap();
 				return;
 			}
 			if (this.#detectLeftDoubleTap()) {
@@ -830,6 +908,7 @@ export class InputController {
 		this.ctx.editor.onChange = (text: string) => {
 			const wasComposing = (this.#draftText ?? "").trim() !== "";
 			this.#draftText = text;
+			if (wasComposing && text.trim() === "") this.#backgroundGesture.noteComposerEmptied();
 			// Typing signals an imminent turn; refresh the API connection now so
 			// the handshake overlaps composition instead of delaying the send.
 			if (text) this.ctx.session.prewarmModelConnection();

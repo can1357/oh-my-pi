@@ -82,3 +82,37 @@ export function assertOwnerPrivateDir(dir: string, label: string): void {
 		fs.closeSync(fd);
 	}
 }
+
+/**
+ * Verify a per-user runtime directory under the config root before reading or
+ * pruning it: it must be a real directory, and on POSIX owned by the current
+ * user. Callers that prune malformed entries depend on this — following a
+ * planted symlink into an unrelated directory would turn listing into a
+ * deletion tool. Returns the stat on POSIX, `null` on Windows.
+ *
+ * @param label Human-readable directory role prefixed to the thrown message.
+ */
+export async function assertPrivateRuntimeDir(dir: string, label: string): Promise<fs.Stats | null> {
+	const stat = await fs.promises.lstat(dir);
+	if (stat.isSymbolicLink()) throw new Error(`${label} is a symlink: ${dir}`);
+	if (!stat.isDirectory()) throw new Error(`${label} is not a directory: ${dir}`);
+	if (process.platform === "win32") return null;
+	const uid = process.getuid?.();
+	if (uid !== undefined && stat.uid !== uid) {
+		throw new Error(`${label} is not owned by the current user: ${dir}`);
+	}
+	return stat;
+}
+
+/**
+ * Create a per-user runtime directory with owner-only POSIX permissions.
+ * Windows retains the config root's ACL. `mkdir` with a mode leaves an
+ * existing directory's permissions alone, so an already-present directory is
+ * tightened explicitly; a symlink or a directory owned by another user is
+ * refused rather than published into ({@link assertPrivateRuntimeDir}).
+ */
+export async function ensurePrivateRuntimeDir(dir: string, label: string): Promise<void> {
+	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+	const stat = await assertPrivateRuntimeDir(dir, label);
+	if (stat && (stat.mode & 0o077) !== 0) await fs.promises.chmod(dir, 0o700);
+}

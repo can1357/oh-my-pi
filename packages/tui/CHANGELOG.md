@@ -14,6 +14,9 @@
 ### Added
 
 - The editor now displays described changes for `magic` mode as Markdown in the transcript while it waits for the apply model to return final diffs.
+- Added the `app.session.background` keybinding action (unbound by default) and the Agent View app (`apps/agents-view`) ([#19934](https://github.com/can1357/oh-my-pi/pull/19934) by [@yusufgngor](https://github.com/yusufgngor))
+- Added `Terminal.onAttachMarker` for the Agent View's attach marker on stdin, `rederiveTerminalCapabilities()` to re-detect capabilities from a new environment, and `setViewerTerminalMultiplexer()` to classify multiplexers by an attached viewer instead of the process environment. `ProcessTerminal` now drops unrecognized complete APC sequences on stdin instead of passing them to the focused component ([#19934](https://github.com/can1357/oh-my-pi/pull/19934) by [@yusufgngor](https://github.com/yusufgngor))
+- `selectSession` accepts an `initialQuery` to open the session picker already filtered ([#19934](https://github.com/can1357/oh-my-pi/pull/19934) by [@yusufgngor](https://github.com/yusufgngor))
 - The UI now responds to terminal `features` events without waiting for a new hello message.
 
 ### Changed

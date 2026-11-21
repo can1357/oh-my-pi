@@ -838,6 +838,15 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			await runtime.ctx.restart();
 		},
 	},
+	{
+		name: "background",
+		aliases: ["bg"],
+		description: "Background this session (it keeps running) and open the agent view",
+		handleTui: (_command, runtime) => {
+			clearSubmittedText(runtime);
+			runtime.ctx.backgroundSession();
+		},
+	},
 ];
 async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
 	setProjectDir(cwd);

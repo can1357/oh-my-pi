@@ -7,6 +7,9 @@
 ### Added
 
 - Added host-provided session commands to `Shell.run` (`commands`) and `shellReservedCommandNames()`
+### Added
+
+- `PtyArgvStartOptions.clearEnv` starts a PTY child with only the given `env` instead of inheriting the parent environment ([#19934](https://github.com/can1357/oh-my-pi/pull/19934) by [@yusufgngor](https://github.com/yusufgngor))
 
 ### Fixed
 

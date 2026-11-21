@@ -169,6 +169,14 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 					],
 					action: "Open the agent hub",
 				},
+				{
+					keys:
+						bindings.keybindings.getKeys("app.session.background").length > 0
+							? [{ token: "/bg" }, { text: " / " }, act("app.session.background")]
+							: [{ token: "/bg" }],
+					action:
+						"Background this session (it keeps running) and open the agent view; with `composer.leftArrowBackground`, a single ← on the empty editor does it instead of ←← opening the hub",
+				},
 				{ keys: [{ token: "#<number>" }], action: "GitHub issue/PR reference (e.g. `#3164` → `pr://`/`issue://`)" },
 				{
 					keys: [{ token: "#" }, { text: " / " }, { token: "#<text>" }],

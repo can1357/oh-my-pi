@@ -12,6 +12,8 @@ The Hub also discovers parked subagents from the current session's persisted art
 | `Ctrl+S`       | Open or close the same Hub through the legacy `app.session.observe` action.                    |
 | Double-tap `←` | Open the Hub from an empty main-session editor when the current session has an agent to show.  |
 
+With `composer.leftArrowBackground` on, a single `←` on the empty main-session editor backgrounds the session into the agent view (`omp agents`) instead, and double-tap `←` no longer opens the Hub.
+
 Run `/hotkeys` to see the active chords. Remap either action in `~/.omp/agent/keybindings.yml`:
 
 ```yaml

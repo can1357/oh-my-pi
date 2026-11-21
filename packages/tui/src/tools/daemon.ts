@@ -51,6 +51,13 @@ export interface ProcSpec {
 	ready?: DaemonReadySpec;
 	/** Regex; the daemon reports each matching output line to the owner while the unit runs. */
 	notify?: string;
+	/** Initial PTY size (default 120×40); `resize` updates it so a relaunch keeps the viewer's size. PTY units only. */
+	cols?: number;
+	rows?: number;
+	/** `env` is the complete environment: the PTY child inherits nothing from the daemon. PTY units only. */
+	clearEnv?: boolean;
+	/** A new tunnel replaces the previous one (newest viewer wins); only the current tunnel's input and resizes count. */
+	exclusiveAttach?: boolean;
 }
 
 /** Serializable unit state: one row of the board. */
