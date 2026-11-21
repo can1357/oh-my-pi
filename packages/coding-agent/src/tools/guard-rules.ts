@@ -89,7 +89,8 @@ import * as path from "node:path";
 import { Process, type VcsDiscardCheck } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { ToolApprovalDecision, ToolCallContext, ToolTier } from "@oh-my-pi/pi-agent-core";
-import { getAgentDbPath, getAuthBrokerSnapshotCachePath } from "@oh-my-pi/pi-utils";
+import { getAuthBrokerTokenFilePath } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import { getAgentDbPath, getAuthBrokerSnapshotCachePath, getConfigRootDir } from "@oh-my-pi/pi-utils";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { toolApprovalScopeToken } from "./approval-scope";
@@ -162,10 +163,16 @@ const SYSTEM_CREDENTIAL_FILES: Record<string, true> = {
 /** `.env` and `.env.<name>`, except the committed templates. */
 const DOTENV_RE = /^\.env(?:\.(?!example$|sample$|template$|dist$|defaults$)[\w.-]+)?$/;
 
-/** omp's own credential stores: the agent database (auth storage) and the auth-broker snapshot. */
+/**
+ * omp's own credential stores: the agent database (auth storage), both the active one and the
+ * default one under the config root when another agent directory is active, the auth-broker
+ * snapshot, and the auth-broker bearer token.
+ */
 function ompCredentialStores(): string[] {
-	const agentDb = getAgentDbPath();
-	return [agentDb, `${agentDb}-wal`, `${agentDb}-shm`, getAuthBrokerSnapshotCachePath()];
+	const agentDbs = new Set([getAgentDbPath(), path.join(getConfigRootDir(), "agent", "agent.db")]);
+	const stores = [...agentDbs].flatMap(db => [db, `${db}-wal`, `${db}-shm`]);
+	stores.push(getAuthBrokerSnapshotCachePath(), getAuthBrokerTokenFilePath());
+	return stores;
 }
 
 /** The characters that make a path component a pathname pattern the shell matches file names with. */

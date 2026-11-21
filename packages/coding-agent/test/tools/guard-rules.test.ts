@@ -9,7 +9,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { GuardProbeBudget } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
 function createSession(cwd: string, settings: Record<string, unknown> = {}): ToolSession {
@@ -513,6 +513,26 @@ describe("credential_read for file tools", () => {
 				root,
 				rule: "credential_read",
 			});
+		}
+	});
+
+	it("covers the auth-broker token and the default agent database under another agent dir", () => {
+		const token = path.join(getConfigRootDir(), "auth-broker.token");
+		const defaultDb = path.join(getConfigRootDir(), "agent", "agent.db");
+		const previousAgentDir = getAgentDir();
+		setAgentDir(path.join(temp.path(), "custom-agent"));
+		try {
+			const read = new ReadTool(createSession(temp.path()));
+			for (const file of [token, defaultDb, `${defaultDb}-wal`]) {
+				expect({ file, rule: ruleOf(read.approval({ path: file })) }).toEqual({ file, rule: "credential_read" });
+				const command = `cat '${file}'`;
+				expect({ command, rule: ruleOf(bashApproval(temp.path(), command)) }).toEqual({
+					command,
+					rule: "credential_read",
+				});
+			}
+		} finally {
+			setAgentDir(previousAgentDir);
 		}
 	});
 });
