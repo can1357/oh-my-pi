@@ -380,6 +380,10 @@ export class RemoteModelRegistryOwner implements ModelRegistryOwner {
 		return this.#remote.callSync("isBackgroundRefreshPending");
 	}
 
+	isRuntimeDiscoveryPending(): boolean {
+		return this.#remote.callSync("isRuntimeDiscoveryPending");
+	}
+
 	awaitBackgroundRefresh(): Promise<void> {
 		return this.#remote.call("awaitBackgroundRefresh");
 	}

@@ -6885,6 +6885,50 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("keeps a scoped subagent on a Fireworks Fast model when its base model is outside enabledModels", async () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		if (!fastModel) throw new Error("Expected the bundled Fireworks Fast model to exist");
+		const fastSelector = `${fastModel.provider}/${fastModel.id}`;
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let fastAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				// Fast rejects the first request and answers the retry.
+				fastAttempts += model.id === fastModel.id ? 1 : 0;
+				mock.push(
+					model.id === fastModel.id && fastAttempts === 1
+						? { throw: "rate limit exceeded retry-after-ms=20" }
+						: { content: ["answered"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			enabledModels: [fastSelector],
+		});
+		settings.setModelRole("default", fastSelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			retryFallbackScopedToEnabledModels: true,
+		});
+
+		await session.prompt("Retry on Fast instead of degrading to the excluded base model");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([fastSelector, fastSelector]);
+	});
+
 	it("re-checks context before a cooldown-expiry revert onto a smaller-window model in the auto-continue path", async () => {
 		// Regression for #7952: a cooldown-expiry revert reverts the model at a
 		// turn boundary. The user-prompt path re-checks context after the revert

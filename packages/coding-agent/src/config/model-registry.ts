@@ -518,6 +518,8 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	/** Runtime-provider discoveries in flight; see {@link isRuntimeDiscoveryPending}. */
+	#runtimeRefreshesInFlight = 0;
 	#discoveryRetry?: Promise<void>;
 	#lastDiscoveryRetryAt = Number.NEGATIVE_INFINITY;
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
@@ -1094,6 +1096,16 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Whether runtime-provider discovery from {@link refreshRuntimeProviders} is still running and may
+	 * add models. Headless SDK sessions start it without awaiting, and {@link isBackgroundRefreshPending}
+	 * does not cover it.
+	 */
+	isRuntimeDiscoveryPending(): boolean {
+		if (this.#owner) return this.#owner.isRuntimeDiscoveryPending();
+		return this.#runtimeRefreshesInFlight > 0;
+	}
+
+	/**
 	 * Wait for any in-flight background model discovery to settle.
 	 *
 	 * Background discovery started by {@link refreshInBackground} is
@@ -1391,7 +1403,12 @@ export class ModelRegistry {
 		if (this.#runtimeModelManagers.size === 0) {
 			return;
 		}
-		await this.#refreshRuntimeDiscoveries(strategy, new Set(this.#runtimeModelManagers.keys()));
+		this.#runtimeRefreshesInFlight++;
+		try {
+			await this.#refreshRuntimeDiscoveries(strategy, new Set(this.#runtimeModelManagers.keys()));
+		} finally {
+			this.#runtimeRefreshesInFlight--;
+		}
 	}
 
 	#reloadStaticModels(options?: { force?: boolean; preserveRuntimeDiscovery?: boolean }): void {
@@ -4732,6 +4749,8 @@ export interface ModelRegistryOwner {
 	refreshInBackground(strategy: ModelRefreshStrategy): void;
 	/** {@link ModelRegistry.isBackgroundRefreshPending} on the owner. */
 	isBackgroundRefreshPending(): boolean;
+	/** {@link ModelRegistry.isRuntimeDiscoveryPending} on the owner. */
+	isRuntimeDiscoveryPending(): boolean;
 	/** {@link ModelRegistry.awaitBackgroundRefresh} on the owner. */
 	awaitBackgroundRefresh(): Promise<void>;
 	/** {@link ModelRegistry.refreshIfStale} on the owner. */

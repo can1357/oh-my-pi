@@ -14,6 +14,7 @@
 - Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Fixed subagents running on models outside the active `enabledModels` scope through a requested model, agent override, frontmatter model, parent-model auth fallback or retry fallback ([#19922](https://github.com/can1357/oh-my-pi/pull/19922) by [@Xytronix](https://github.com/Xytronix); reported in [#14381](https://github.com/can1357/oh-my-pi/issues/14381))
 
 ## [19.1.0] - 2026-11-21
 

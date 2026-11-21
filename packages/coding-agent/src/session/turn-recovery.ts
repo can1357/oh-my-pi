@@ -31,7 +31,12 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
-import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
+import {
+	filterAvailableModelsByEnabledPatterns,
+	formatModelStringWithRouting,
+	resolveModelOverride,
+} from "../config/model-resolver";
+import { cfgEnabledModels } from "../config/model-settings";
 
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
@@ -289,6 +294,11 @@ export interface TurnRecoveryHost {
 	thinkingLevelCeiling(): Effort | undefined;
 	/** The session never switches to a retry fallback model (a per-call `model` subagent). */
 	modelFallbackDisabled?(): boolean;
+	/**
+	 * Retry fallbacks must stay inside the `enabledModels` scope (subagent sessions). Checked when a
+	 * candidate is considered, so a selector the registry only learns about later is still validated.
+	 */
+	retryFallbackScopedToEnabledModels?(): boolean;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	isCompacting(): boolean;
@@ -2051,6 +2061,21 @@ export class TurnRecovery {
 		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
 	}
 
+	/**
+	 * Models a retry fallback may switch to under the `enabledModels` scope, or `undefined` when the
+	 * session's fallbacks are not scoped (main sessions, or no scope configured).
+	 */
+	#retryFallbackScopedModels(): Model[] | undefined {
+		if (!this.#host.retryFallbackScopedToEnabledModels?.()) return undefined;
+		const scopePatterns = cfgEnabledModels.get(this.#host.settings);
+		if (scopePatterns.length === 0) return undefined;
+		return filterAvailableModelsByEnabledPatterns(
+			this.#host.modelRegistry.getAvailable(),
+			scopePatterns,
+			this.#host.settings,
+		);
+	}
+
 	/** Finds fallback candidates that follow the active selector. */
 	findRetryFallbackCandidates(
 		role: string,
@@ -2065,9 +2090,19 @@ export class TurnRecovery {
 			currentModel,
 			options,
 		);
-		if (!cfgOffline.get(this.#host.settings)) return candidates;
 		const provider = this.#host.model()?.provider;
-		return candidates.filter(candidate => provider !== undefined && candidate.provider === provider);
+		const scopedModels = this.#retryFallbackScopedModels();
+		return candidates.filter(candidate => {
+			if (cfgOffline.get(this.#host.settings) && (provider === undefined || candidate.provider !== provider)) {
+				return false;
+			}
+			if (!scopedModels) return true;
+			// Resolve the way the switch does, so the scope judges the model it would dispatch.
+			const candidateModel =
+				resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings).model ??
+				this.#host.modelRegistry.find(candidate.provider, candidate.id);
+			return candidateModel !== undefined && scopedModels.some(scoped => modelsAreEqual(scoped, candidateModel));
+		});
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
@@ -2659,6 +2694,8 @@ export class TurnRecovery {
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
 		if (!baseModel) return false;
+		const scopedModels = this.#retryFallbackScopedModels();
+		if (scopedModels && !scopedModels.some(scoped => modelsAreEqual(scoped, baseModel))) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);

@@ -234,6 +234,8 @@ export interface AgentSessionConfig {
 	 * startup fallback, are not affected.
 	 */
 	disableModelFallback?: boolean;
+	/** Hold retry fallbacks to the `enabledModels` scope when they are considered. Subagent sessions set it. */
+	retryFallbackScopedToEnabledModels?: boolean;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */

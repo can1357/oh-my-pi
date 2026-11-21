@@ -40,6 +40,7 @@ import {
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
 import {
+	filterAvailableModelsByEnabledPatterns,
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
 	resolveAgentAdvisorSelection,
@@ -185,7 +186,7 @@ import {
 } from "../session/settings";
 import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
-import { cfgDisabledProviders } from "../config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
 import {
@@ -366,6 +367,22 @@ function resolveSubagentInheritedRetryFallbackChain(
 		const resolved = resolveModelOverride([entry], modelRegistry, settings);
 		return !resolved.model || !disabledProviders.has(resolved.model.provider);
 	});
+}
+
+/**
+ * Membership test for the active `enabledModels` scope, or `undefined` when no
+ * scope is configured. Used to leave already-resolved out-of-scope candidates
+ * out of the child's retry chain and to skip an out-of-scope prewalk target;
+ * the child's retry recovery checks the scope again before every switch.
+ */
+function resolveSubagentEnabledModelScope(
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+): ((model: Model<Api>) => boolean) | undefined {
+	const enabledPatterns = cfgEnabledModels.get(settings);
+	if (enabledPatterns.length === 0) return undefined;
+	const scopedModels = filterAvailableModelsByEnabledPatterns(modelRegistry.getAvailable(), enabledPatterns, settings);
+	return model => scopedModels.some(scoped => scoped.provider === model.provider && scoped.id === model.id);
 }
 
 function installSubagentRetryFallbackChain(args: {
@@ -5046,18 +5063,26 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 								resolvedModel,
 								inheritedSubagentServiceTiers(settings, options.parentServiceTier),
 							);
+			const inEnabledModelScope = resolveSubagentEnabledModelScope(settings, modelRegistry);
+			const isAllowedRetryModel = (candidate: Model<Api> | undefined): boolean =>
+				candidate !== undefined &&
+				(allowedProvider === undefined || candidate.provider === allowedProvider) &&
+				(inEnabledModelScope === undefined || inEnabledModelScope(candidate));
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
 				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings).filter(
-					candidate => allowedProvider === undefined || candidate.model.provider === allowedProvider,
+					candidate => isAllowedRetryModel(candidate.model),
 				),
+				// An entry the registry cannot resolve yet stays: the child may register it later, and its
+				// retry recovery checks the enabledModels scope before switching to it. Offline mode keeps
+				// dropping it because only the parent's provider is reachable.
 				inheritedFallbackChain:
-					allowedProvider === undefined
+					allowedProvider === undefined && inEnabledModelScope === undefined
 						? inheritedRetryFallbackChain
 						: inheritedRetryFallbackChain?.filter(entry => {
 								const candidate = resolveModelOverride([entry], modelRegistry, subagentSettings).model;
-								return candidate?.provider === allowedProvider;
+								return candidate === undefined ? allowedProvider === undefined : isAllowedRetryModel(candidate);
 							}),
 				model,
 				authFallbackUsed,
@@ -5181,6 +5206,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						agent: agent.name,
 						pattern: prewalkPattern,
 						warning: resolvedPrewalk.warning,
+					});
+				} else if (resolveSubagentEnabledModelScope(settings, modelRegistry)?.(target) === false) {
+					// The hand-off would switch the child onto a model the enabledModels scope excludes.
+					logger.warn("Subagent prewalk target is outside enabledModels; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+						target: `${target.provider}/${target.id}`,
 					});
 				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
 					// Same model AND same effective thinking level: switching would only
