@@ -644,8 +644,12 @@ acceptance counts even if the provider returns no visible reasoning. Explicit ca
 including `reasoning: false`, take precedence over probing.
 
 A row advertising only image output becomes an image-generation runner; embedding-only output
-becomes an embedding runner. Mixed outputs remain chat models. These runners are visible with
-`omp models --kind all`, not the default chat listing.
+becomes an embedding runner. `speech` as the only output becomes a `tts` runner on `openai-speech`,
+and `transcription` an `stt` runner on `openai-transcriptions`. Outputs come from the row's
+modality arrays or OpenRouter's `architecture.modality` summary
+(`text->speech`). Mixed outputs, a bare `audio` output (Poe lists TTS voices and music generators
+alike as `text->audio`), and rows that declare no modalities remain chat models. These runners are
+visible with `omp models --kind all`, not the default chat listing.
 
 ### Explicit provider discovery
 

@@ -441,13 +441,18 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 	const stop = useCallback((): void => {
 		const target = sessionRef.current;
 		if (target === null) return;
-		target.abort().catch(error => {
-			setStrip({
-				tone: "error",
-				message: `Stop didn’t reach omp: ${errorText(error)}`,
-				action: { label: "Retry", run: stop },
-			});
-		});
+		target.abort().then(
+			drafts => {
+				if (drafts.length > 0) composerRef.current?.restoreQueued(drafts);
+			},
+			error => {
+				setStrip({
+					tone: "error",
+					message: `Stop didn’t reach omp: ${errorText(error)}`,
+					action: { label: "Retry", run: stop },
+				});
+			},
+		);
 	}, []);
 
 	useEffect(() => {
@@ -554,7 +559,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 				const target =
 					sessionRef.current ??
 					(await startRpc(settings.value.defaultCwd, titleFrom(outgoing.display), promptTabIds));
-				target.prompt(composePrompt(blocks, outgoing.text), outgoing.images);
+				target.prompt(composePrompt(blocks, outgoing.text), outgoing.images, { followUp: outgoing.followUp });
 
 				if (outgoing.shortcutIds.length > 0)
 					shortcuts.set(list =>
@@ -580,6 +585,21 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 		},
 		[worker, startRpc, settings.value.defaultCwd, shortcuts.set, updateConversation, notify],
 	);
+
+	const resume = useCallback((): void => {
+		const target = sessionRef.current;
+		if (target === null) {
+			setStrip({ tone: "error", message: "Nothing to resume" });
+			return;
+		}
+		setFollowSignal(count => count + 1);
+		target.resume();
+	}, []);
+
+	const deliverQueue = useCallback((): void => {
+		setFollowSignal(count => count + 1);
+		sessionRef.current?.deliverQueue();
+	}, []);
 
 	// ---- commands ----
 	const timeline = useCallback(() => {
@@ -979,6 +999,8 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 						else if (derivedStrip !== null) setDismissedStrip(derivedStrip.key);
 					}}
 					onSend={outgoing => void send(outgoing)}
+					onResume={resume}
+					onDeliverQueue={deliverQueue}
 					onStop={stop}
 					onCommand={onCommand}
 					onNotify={notify}

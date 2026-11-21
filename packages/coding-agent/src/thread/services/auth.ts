@@ -356,13 +356,13 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 	return {
 		mirror: (registry, listener) => {
 			const { snapshot, unsubscribe } = registry.subscribeMirror(batch =>
-				settleQuietly(listener(toWireMirrorBatch(batch))),
+				settleQuietly(listener(toWireMirrorBatch(batch, registry))),
 			);
 			trackWorkerSubscription(state.subscriptions, unsubscribe);
 			return {
 				...registry.mirrorInputs(),
 				authStorage: registry.authStorage,
-				snapshot: toWireMirrorBatch(snapshot),
+				snapshot: toWireMirrorBatch(snapshot, registry),
 			};
 		},
 		invalidateCommandConfigs: (registry, provider) => registry.invalidateCommandConfigs(provider),

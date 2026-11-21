@@ -52,10 +52,10 @@ describe("Tool image rendering", () => {
 		expect(requestRender).not.toHaveBeenCalled();
 	});
 
-	it("surfaces images returned through xdev write results", () => {
+	it("surfaces images a bash tool command produced", () => {
 		const component = new ToolExecutionComponent(
-			"write",
-			{ path: "xd://generate_image" },
+			"bash",
+			{ command: "generate_image 'a fox'" },
 			{ showImages: true },
 			undefined,
 			{
@@ -67,15 +67,19 @@ describe("Tool image rendering", () => {
 
 		component.updateResult(
 			{
-				content: [{ type: "text", text: "Generated 1 image" }],
+				content: [
+					{ type: "text", text: "Generated 1 image" },
+					{ type: "image", data: IMAGE.data, mimeType: "image/png" },
+				],
 				details: {
-					xdev: {
-						tool: "generate_image",
-						mode: "execute",
-						inner: {
-							images: [{ data: IMAGE.data, mimeType: "image/png" }],
+					toolCommands: [
+						{
+							tool: "generate_image",
+							mode: "execute",
+							exitCode: 0,
+							inner: { images: [{ data: IMAGE.data, mimeType: "image/png" }] },
 						},
-					},
+					],
 				},
 			},
 			false,

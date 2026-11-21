@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { classifyTerminalMultiplexer, type TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { extractProfileFlags } from "@oh-my-pi/pi-coding-agent/cli/profile-bootstrap";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Settings } from "../../../src/config/settings";
@@ -378,6 +380,32 @@ describe("/fork terminal placement", () => {
 		expect(error).not.toContain(secret);
 		expect(flush).not.toHaveBeenCalled();
 		expect(launchTerminal).not.toHaveBeenCalled();
+	});
+
+	it("preserves boolean --plan across terminal forks while still blocking a following --api-key", async () => {
+		const secret = "do-not-include-this-key";
+		const blocked = createContext({
+			argv: ["--plan", "--api-key", secret, "prompt"],
+		});
+		await blocked.controller.handleForkCommand("pane");
+		expect(blocked.showError.mock.calls[0]?.[0]).toContain("--api-key");
+		expect(blocked.showError.mock.calls[0]?.[0]).not.toContain(secret);
+		expect(blocked.launchTerminal).not.toHaveBeenCalled();
+
+		const forked = createContext({
+			argv: ["--plan", "--model", "old-provider/model-a", "prompt"],
+		});
+		await forked.controller.handleForkCommand("pane");
+		const command = forked.launchTerminal.mock.calls[0]?.[0].command ?? [];
+		const appArgs = command.slice(command.indexOf("omp-entry") + 1);
+		const extracted = extractProfileFlags(appArgs);
+		expect(extracted.profile).toBe("active-profile");
+		const startupChild = parseArgs(extracted.argv);
+		expect(startupChild.model).toBe("provider/model");
+		expect(startupChild.messages).toEqual([]);
+		const extChild = parseArgs(extracted.argv, new Map([["plan", { type: "boolean" }]]));
+		expect(extChild.unknownFlags.get("plan")).toBe(true);
+		expect(extChild.model).toBe("provider/model");
 	});
 
 	it("rejects placement forks without a persisted transcript", async () => {
