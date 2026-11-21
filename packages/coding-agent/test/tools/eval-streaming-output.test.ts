@@ -108,8 +108,7 @@ describe("EvalTool live stdout streaming", () => {
 			_code: string,
 			options: { onChunk?: (chunk: string) => void },
 		) => {
-			// A second line: output that is a single line is exempt from the cap.
-			const output = `${"x".repeat(50)}\ndone`;
+			const output = "x".repeat(50);
 			options.onChunk?.(output);
 			return baseResult({ output });
 		}) as never);
@@ -144,7 +143,7 @@ describe("EvalTool live stdout streaming", () => {
 				const session = makeSession(settings);
 				session.allocateOutputArtifact = async () => ({ path: dir, id: "failed-stream" });
 				const saveArtifact = vi.spyOn(sessionManager, "saveArtifact");
-				const output = `${"x".repeat(bytes)}\ndone`;
+				const output = "x".repeat(bytes);
 				vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation(async (_code, options) => {
 					options.onChunk(output);
 					return {

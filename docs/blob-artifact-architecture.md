@@ -129,7 +129,7 @@ Behavior:
 
 1. Every chunk is sanitized with `sanitizeWithOptionalSixelPassthrough(..., sanitizeText)` and appended to in-memory accounting.
 2. Optional live `onChunk` receives sanitized pre-column-cap chunks, throttled if configured.
-3. A per-line column cap (which exempts single-line output) or a caller-supplied bounded `inline` representation can shorten the LLM-facing buffer; artifact mirroring then keeps the complete sanitized stream. Carriage-return progress updates are normalized to line boundaries, with split CRLF collapsed.
+3. A per-line column cap or a caller-supplied bounded `inline` representation can shorten the LLM-facing buffer; artifact mirroring then keeps the complete sanitized stream. Carriage-return progress updates are normalized to line boundaries, with split CRLF collapsed.
 4. When the in-memory tail buffer would exceed spill threshold (`DEFAULT_MAX_BYTES`, 50KB), sink marks output truncated and starts artifact mirroring if an artifact path is available.
 5. If a file sink is opened, it first writes the current buffer, then all queued/subsequent sanitized chunks.
 6. In-memory buffer is trimmed to a tail window, or to head + elision marker + tail when head retention is configured.
