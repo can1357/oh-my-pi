@@ -8244,6 +8244,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#hasExperimentalContextRolloverTools(),
 		);
 		if (budgetTokens === undefined) return undefined;
+		if (
+			this.#maintenance.fixedContextExceedsRecoveryBand(model) &&
+			!this.#maintenance.hasContextPromotionCandidate(model)
+		) {
+			return undefined;
+		}
 		const opensUnderBudget = (this.getContextUsage()?.tokens ?? 0) <= budgetTokens;
 		return opensUnderBudget ||
 			this.compactionSpeculation === "running" ||
