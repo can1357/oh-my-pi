@@ -98,22 +98,20 @@ describe("ReportPanel in text mode", () => {
 		h.composer.stop();
 	});
 
-	it("puts the editor back on the bottom row with the transcript above it when the report closes", async () => {
+	it("keeps the editor on the bottom row when the report closes", async () => {
 		const h = await mountReport(80);
 		h.dock.clear();
 		await h.repaint();
 		const screen = h.screen();
 		expect(screen.at(-1)).toBe("EDITOR");
-		expect(screen.at(-2)).toBe("Transcript 59");
 		expect(screen.some(row => row.includes("Full Changelog"))).toBe(false);
 		h.composer.stop();
 	});
 
 	it("keeps the editor on the bottom row when rows reached scrollback while the report was open", async () => {
-		// With the welcome header on screen, opening a tall report retires the
-		// header into scrollback, so the frame left after closing is shorter
-		// than the screen. The interactive mode notes the editor sat on the
-		// bottom row before opening and pins it there again on close.
+		// Opening a tall report retires the header and the transcript rows it
+		// covers into scrollback, so the frame left after closing is shorter
+		// than the screen; the editor still sits on the bottom row.
 		const terminal = new VirtualTerminal(100, ROWS);
 		const scheduler = new VirtualRenderScheduler();
 		const composer = new Composer({
@@ -162,7 +160,9 @@ describe("ReportPanel in text mode", () => {
 		await scheduler.settle(terminal);
 
 		expect(editorRow()).toBe(ROWS - 1);
-		expect(terminal.getViewport().some(row => row.includes(`Transcript ${transcriptRows - 1}`))).toBe(true);
+		// The rows the report covered went to scrollback, once.
+		const last = `Transcript ${transcriptRows - 1}`;
+		expect(terminal.getScrollBuffer().filter(row => Bun.stripANSI(row).trim() === last).length).toBe(1);
 		composer.stop();
 	});
 

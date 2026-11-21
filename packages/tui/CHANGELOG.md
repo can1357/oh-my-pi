@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Removed `ComposerPreferences.completeScrollback`, `TranscriptContainer.completeScrollback`, `Composer.setRunActive` and the `transientChrome`/`selfClearingChrome`/`billedChrome` options of `Composer.setRuntimeChildren`: retirement always uses the height the chrome leaves on screen
 - Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion` and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`; import them from the new path ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
 - `OutputSinkOptions.artifactPath`/`artifactId` are replaced by `allocateArtifact` (`ArtifactAllocator`), which the sink calls only when output first overflows its inline view
 - Removed the `windows-altgr` module (`translateWindowsAltGrSequence`, `readAltGrLayer`, `createRightAltLatch`, `RIGHT_ALT_LATCH_MS`, `AltGrHost`, `KeyboardLayoutHandle`); AltGr recovery is `translateWindowsAltGrSequence` in `@oh-my-pi/pi-natives`
@@ -14,6 +15,7 @@
 
 ### Changed
 
+- Rows that chrome below the transcript pushes off screen go straight to scrollback; when that chrome shrinks, the input stays on the bottom row and the freed rows stay blank until new output fills them
 - Native chats no longer show a crossed-out Spotlight star or leave an empty row under unchanged tool results.
 - Native web search cards send their sources as one `omp.tool.sources` grid, answered or not; a search without an answer puts each page excerpt inside its source row (`omp.tool.excerpt`), which Tern shows once the card is unfolded, and titles take up to two lines
 - Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`
@@ -24,7 +26,7 @@
 ### Fixed
 
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
-- Transcript rows no longer go missing between the scrollback and the screen while a todo list, subagent panel, queued-message band, multi-line draft or extension widget stays up during a run, which made tool cards look cut off after their first rows; the editor moves up when one of them closes until new output fills the rows
+- Transcript rows no longer go missing between the scrollback and the screen while a todo list, subagent panel, queued-message band, dialog or draft is up, which made tool cards look cut off after their first rows
 - The terminal cursor no longer blinks off and on with every spinner tick in kitty
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
