@@ -53,6 +53,7 @@ const HOST = {
 	calculateTokensPerSecond: () => null,
 	limitMatchesActiveAccount: () => false,
 	computeCompactionBoundaries: () => null,
+	getAdvisorUsageAccounts: () => [],
 	lookupPullRequest: () => Promise.resolve({ stdout: "", exitCode: 0 }),
 	resolveActiveRepo: () => null,
 } as unknown as StatusLineHost<StatusLineSession>;
