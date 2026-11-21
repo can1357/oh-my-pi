@@ -188,6 +188,28 @@ export function isWithinUsageReserve(remainingFraction: number, reserveFraction:
 }
 
 /**
+ * Banked credits that can still be spent, grouped by the exact limits each clears, in
+ * listing order. Expired, redeemed and empty credits are left out. More than one group
+ * means the account holds different kinds of reset, so which one to spend is a choice.
+ */
+export function groupResetCreditsByClears<T extends UsageResetCreditDetail>(
+	credits: readonly T[],
+	nowMs = Date.now(),
+): T[][] {
+	const groups = new Map<string, T[]>();
+	for (const credit of credits) {
+		if (credit.status === "expired" || credit.status === "redeemed" || credit.remainingCount === 0) continue;
+		const expiresAtMs = credit.expiresAt === undefined ? undefined : Date.parse(credit.expiresAt);
+		if (expiresAtMs !== undefined && Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs) continue;
+		const key = [...new Set(credit.clears ?? [])].sort().join(",");
+		const group = groups.get(key);
+		if (group) group.push(credit);
+		else groups.set(key, [credit]);
+	}
+	return [...groups.values()];
+}
+
+/**
  * One recorded usage-limit snapshot: a single limit window of one account at
  * a point in time. The usage cache itself is latest-snapshot-only; history
  * rows are appended by the auth storage layer whenever a fresh report is

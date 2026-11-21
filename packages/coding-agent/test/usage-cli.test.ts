@@ -5,6 +5,7 @@ import { stripVTControlCharacters } from "node:util";
 import {
 	AuthStorage,
 	type OAuthCredential,
+	type ResetCreditTarget,
 	SqliteAuthCredentialStore,
 	type UsageReport,
 	type UsageResetCredit,
@@ -32,7 +33,12 @@ import {
 	collectUnreportedAccounts,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-accounts";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { ResetUsageSelectorComponent } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
+import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -2004,6 +2010,8 @@ describe("omp usage reset", () => {
 	let codexListFaults: Record<string, "unavailable" | "stall">;
 	/** Title Anthropic gives the Claude grant. */
 	let claudeGrantLabel: string;
+	/** Replaces the default one-grant Claude Cedar status when set. */
+	let claudeCedar: Record<string, unknown> | undefined;
 	let authStorage: AuthStorage;
 	let stdout: string;
 	let stderr: string;
@@ -2061,7 +2069,7 @@ describe("omp usage reset", () => {
 			return Response.json({
 				five_hour: { utilization: 100, resets_at: new Date(Date.now() + 2 * HOUR).toISOString() },
 				seven_day: { utilization: 40, resets_at: new Date(Date.now() + 72 * HOUR).toISOString() },
-				cedar_ember: {
+				cedar_ember: claudeCedar ?? {
 					eligible: true,
 					at_limit: true,
 					exhausted: ["five_hour"],
@@ -2099,6 +2107,7 @@ describe("omp usage reset", () => {
 		codexConsume = { status: 200, body: { code: "reset" } };
 		codexListFaults = {};
 		claudeGrantLabel = "Reset for dev@example.test (Acme Corp)";
+		claudeCedar = undefined;
 		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), { usageFetch });
 		await authStorage.credentials.set("openai-codex", [
 			oauth("codex-team", { email: "dev@example.test", accountId: "acct-team" }),
@@ -2159,6 +2168,16 @@ describe("omp usage reset", () => {
 		expect(text).toContain("omp usage reset <provider>/<credential id>");
 		expect(consumes()).toEqual([]);
 		expect(process.exitCode).toBe(0);
+	});
+
+	it("claims no coverage for Codex credits, whose listing does not report what they clear", async () => {
+		await runUsageCommand({ action: "reset", provider: "codex", noExtensions: true });
+		const creditLines = stripVTControlCharacters(stdout)
+			.split("\n")
+			.filter(line => /^\s+credit-(late|soon) /.test(line));
+		expect(creditLines).toHaveLength(2);
+		for (const line of creditLines) expect(line).not.toMatch(/clears/);
+		expect(consumes()).toEqual([]);
 	});
 
 	it("prints credential ids, credit ids and expiries as JSON", async () => {
@@ -2384,6 +2403,153 @@ describe("omp usage reset", () => {
 			["/api/organizations/org-claude/reset_rate_limits", "Bearer claude-max", "saved-reset"],
 		]);
 		expect(process.exitCode).toBe(0);
+	});
+
+	describe("with Claude grants that clear different limits", () => {
+		const grant = (id: string, label: string, clears: string[], usable: boolean) => ({
+			id,
+			label,
+			resets_total: 1,
+			resets_left: 1,
+			starts_at: new Date(Date.now() - HOUR).toISOString(),
+			ends_at: late,
+			clears,
+			paused: false,
+			usable_now: usable,
+			use_requires_limit: true,
+			percent_used: { five_hour: 100 },
+			blocking: [],
+		});
+		const full = grant(
+			"full-reset-2611",
+			"One full limit reset (November 2026)",
+			["five_hour", "seven_day", "seven_day_overage_included"],
+			true,
+		);
+		const fable = grant(
+			"launch-2610-fable",
+			"New model launch: one Fable reset",
+			["five_hour", "seven_day_overage_included"],
+			false,
+		);
+		beforeEach(() => {
+			claudeCedar = {
+				eligible: true,
+				at_limit: true,
+				exhausted: ["five_hour"],
+				next_grant_id: "full-reset-2611",
+				grants: [full, fable],
+			};
+		});
+
+		it("lists each grant's id, title and what it clears", async () => {
+			await runUsageCommand({ action: "reset", provider: "claude", noExtensions: true });
+
+			const lines = stripVTControlCharacters(stdout).split("\n");
+			const full = lines.find(line => line.trimStart().startsWith("full-reset-2611 "));
+			const fable = lines.find(line => line.trimStart().startsWith("launch-2610-fable "));
+			expect(full).toContain("One full limit reset (November 2026)");
+			expect(fable).toContain("New model launch: one Fable reset");
+			// The full reset clears the shared weekly window; the Fable grant only the Fable cap.
+			const weekly = formatUsageResetWindow("anthropic:7d");
+			const fableWeekly = formatUsageResetWindow("anthropic:7d:fable");
+			expect(full).toContain(weekly);
+			expect(fable).toContain(fableWeekly);
+			expect(fable).not.toContain(weekly);
+			expect(consumes()).toEqual([]);
+		});
+
+		/** Opens the real `/usage reset` selector over the stubbed endpoints, recording every redeem it makes. */
+		async function openResetSelector(): Promise<{
+			selector: ResetUsageSelectorComponent;
+			redeems: Promise<unknown>[];
+			targets: ResetCreditTarget[];
+		}> {
+			await initTheme();
+			const redeems: Promise<unknown>[] = [];
+			const targets: ResetCreditTarget[] = [];
+			const ctx = createInteractiveModeContext({
+				session: {
+					listResetCredits: () => authStorage.resets.list({ provider: "anthropic" }),
+					redeemResetCredit: target => {
+						targets.push(target);
+						const redeem = authStorage.resets.redeem({ target });
+						redeems.push(redeem);
+						return redeem;
+					},
+				},
+				ui: { getFocused: () => null },
+			});
+			await new SelectorController(ctx).showResetUsageSelector();
+			const selector = ctx.editorContainer.children[0];
+			if (!(selector instanceof ResetUsageSelectorComponent)) throw new Error("expected the reset selector");
+			return { selector, redeems, targets };
+		}
+
+		it("lists each grant in the /usage reset selector and spends only the one Claude offers next", async () => {
+			const { selector, redeems, targets } = await openResetSelector();
+			// Move off the offered full reset to the Fable grant and try to confirm it.
+			selector.handleInput("\x1b[B");
+			selector.handleInput("\r");
+			selector.handleInput("\r");
+			await Promise.all(redeems);
+
+			expect(redeems).toHaveLength(0);
+			expect(consumes()).toEqual([]);
+			const shown = stripVTControlCharacters(selector.render(400).join("\n"));
+			expect(shown).toContain("full-reset-2611");
+			expect(shown).toContain("launch-2610-fable");
+
+			// Back on the offered full reset, confirming spends exactly that grant.
+			selector.handleInput("\x1b[A");
+			selector.handleInput("\r");
+			selector.handleInput("\r");
+			await Promise.all(redeems);
+
+			expect(targets.map(target => target.creditId)).toEqual(["full-reset-2611"]);
+			expect(consumes().map(request => request.body?.grant_id)).toEqual(["full-reset-2611"]);
+		});
+
+		it("refuses to pick one when no credit id is given, listing the command for each", async () => {
+			const { claude } = credentialIds();
+			await runUsageCommand({ action: "reset", target: `claude/${claude}`, noExtensions: true });
+
+			const text = stripVTControlCharacters(stderr);
+			expect(text).toContain(`omp usage reset anthropic/${claude}:full-reset-2611`);
+			expect(text).toContain(`omp usage reset anthropic/${claude}:launch-2610-fable`);
+			expect(consumes()).toEqual([]);
+			expect(process.exitCode).toBe(1);
+		});
+
+		it("spends exactly the named grant", async () => {
+			const { claude } = credentialIds();
+			await runUsageCommand({ action: "reset", target: `claude/${claude}:full-reset-2611`, noExtensions: true });
+			expect(consumes().map(request => [request.path, request.body?.grant_id])).toEqual([
+				["/api/organizations/org-claude/reset_rate_limits", "full-reset-2611"],
+			]);
+			expect(process.exitCode).toBe(0);
+		});
+
+		it("refuses a named grant Claude does not offer next, giving the command for the offered one", async () => {
+			const { claude } = credentialIds();
+			await runUsageCommand({ action: "reset", target: `claude/${claude}:launch-2610-fable`, noExtensions: true });
+
+			const text = stripVTControlCharacters(stderr);
+			expect(text).toContain(`omp usage reset anthropic/${claude}:full-reset-2611`);
+			expect(consumes()).toEqual([]);
+			expect(process.exitCode).toBe(1);
+		});
+
+		it("spends the offered grant without a credit id when every grant clears the same limits", async () => {
+			const { claude } = credentialIds();
+			claudeCedar = {
+				...claudeCedar,
+				grants: [full, { ...fable, id: "full-reset-2612", clears: full.clears }],
+			};
+			await runUsageCommand({ action: "reset", target: `claude/${claude}`, noExtensions: true });
+			expect(consumes().map(request => request.body?.grant_id)).toEqual(["full-reset-2611"]);
+			expect(process.exitCode).toBe(0);
+		});
 	});
 
 	it.each([

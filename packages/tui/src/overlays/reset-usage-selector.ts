@@ -1,4 +1,4 @@
-import type { UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
+import type { UsageResetCredit, UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
 import { Container, matchesKey, ScrollView, Spacer, Text, TruncatedText } from "../index";
 import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
@@ -19,9 +19,14 @@ const RESET_SELECTOR_MAX_VISIBLE = 10;
 
 const oneLine = (value: string): string => sanitizeText(value.replace(/[\r\n\t]+/g, " "));
 
-/** Reset count, usability, expiry and unavailability of an account row, or its error. */
+/** Reset count, usability, expiry and unavailability of an account row, or its error; a reset row's own line. */
 function accountCountLabel(account: ResetUsageAccount): string {
 	if (account.error) return oneLine(account.error);
+	if (account.creditLine) {
+		const reason =
+			account.redeemableCount <= 0 && account.unavailableReason ? ` · ${oneLine(account.unavailableReason)}` : "";
+		return `${oneLine(account.creditLine)}${reason}`;
+	}
 	let countLabel = `${account.availableCount} saved reset${account.availableCount === 1 ? "" : "s"}`;
 	if (account.redeemableCount !== account.availableCount) {
 		countLabel += ` · ${account.redeemableCount} usable now`;
@@ -46,6 +51,7 @@ function accountPickerItem(account: ResetUsageAccount, id: string): TspPickerIte
 	if (reason) detail.push(span(` · ${oneLine(reason)}`, account.error ? "error" : "warning"));
 	let resets: TspSpan;
 	if (account.error) resets = span("unavailable", "error");
+	else if (account.creditLine) resets = span(oneLine(account.creditLine), redeemable ? "success" : "dim");
 	else if (!redeemable) resets = span(`${account.availableCount} saved`, "dim");
 	else if (account.redeemableCount === account.availableCount)
 		resets = span(`${account.redeemableCount} usable`, "success");
@@ -59,7 +65,7 @@ function accountPickerItem(account: ResetUsageAccount, id: string): TspPickerIte
 				: span("expired", "warning"),
 		];
 	}
-	return {
+	const item: TspPickerItem = {
 		id,
 		label: oneLine(account.label),
 		detail,
@@ -67,6 +73,9 @@ function accountPickerItem(account: ResetUsageAccount, id: string): TspPickerIte
 		facts,
 		...(reason ? { disabled: oneLine(reason) } : {}),
 	};
+	// Each credit's id, title and coverage on hover.
+	if (account.creditLines?.length) item.title = account.creditLines.map(oneLine).join("\n");
+	return item;
 }
 
 /** One account row with its redeemable rate-limit reset credits. */
@@ -91,12 +100,25 @@ export interface ResetUsageAccount {
 	unavailableReason?: string;
 	expiresAt?: string;
 	credit?: UsageResetCreditDetail;
+	/** Every banked credit on the account, spendable now or not. */
+	credits?: readonly UsageResetCredit[];
+	/** One line per banked credit: id, title, what it clears when the provider reports it, usability, expiry. */
+	creditLines?: readonly string[];
+	/**
+	 * Set on a row that stands for one reset of an account whose resets clear different
+	 * limits, so the user picks the reset type: its id, title, what it clears and whether
+	 * it is offered next. Only the offered, usable reset can be confirmed, and that row
+	 * carries its id in `target.creditId`.
+	 */
+	creditLine?: string;
 }
 
 /**
  * Account picker for `/usage reset`. Lists provider accounts with their saved
- * rate-limit reset counts; selecting one redeems a reset. Because a reset is a
- * scarce, irreversible credit, Enter requires a second press to confirm.
+ * rate-limit reset counts and the selected account's credits; selecting one redeems
+ * a reset. Because a reset is a scarce, irreversible credit, Enter requires a second
+ * press to confirm. An account whose resets clear different limits gets one row per
+ * reset instead, and only the reset the provider offers next can be confirmed.
  */
 export class ResetUsageSelectorComponent extends OverlayPanel {
 	#listContainer: Container;
@@ -116,12 +138,13 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 		this.#onCancelCallback = onCancel;
 		const firstRedeemable = accounts.find(account => account.redeemableCount > 0);
 		const accountKey = (account: ResetUsageAccount) =>
-			`${account.provider}:${account.target.credentialId}:${account.target.creditId ?? ""}`;
+			`${account.provider}:${account.target.credentialId}:${account.credit?.id ?? account.target.creditId ?? ""}`;
 		this.#menu = new MenuSelection<ResetUsageAccount>(
 			accounts,
 			{
 				getKey: accountKey,
-				getSearchText: account => `${account.label} ${account.providerLabel}`,
+				getSearchText: account =>
+					`${account.label} ${account.providerLabel} ${account.credit?.id ?? ""} ${account.credit?.title ?? ""}`,
 				requiresConfirmation: account => account.redeemableCount > 0,
 			},
 			firstRedeemable ? accountKey(firstRedeemable) : undefined,
@@ -186,6 +209,11 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 			);
 		}
 
+		// The selected account's credits, one per line: id, title, what each clears.
+		for (const line of this.#menu.selectedItem?.creditLines ?? []) {
+			this.#listContainer.addChild(new TruncatedText(theme.fg("dim", `    ${oneLine(line)}`), 0, 0));
+		}
+
 		const pending = items.find(item => this.#menu.isPending(item));
 		const hint = pending
 			? theme.fg("warning", oneLine(this.#confirmationMessage(pending)))
@@ -203,7 +231,10 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 
 	/** What a reset of `account` spends and covers, without key instructions. */
 	#confirmationNotes(account: ResetUsageAccount): { subject: string; notes: string[] } {
-		const subject = account.credit?.title ? `“${account.credit.title}”` : "1 saved reset";
+		const credit = account.credit;
+		const id = credit?.id ? oneLine(credit.id) : undefined;
+		const title = credit?.title ? `“${credit.title}”` : undefined;
+		const subject = title && id ? `${title} (${id})` : (title ?? (id ? `saved reset ${id}` : "1 saved reset"));
 		const notes: string[] = [];
 		if (account.credit?.program === "juniper_tide") {
 			notes.push("This resets Claude's 5h session limit only; weekly limits stay unchanged.");
@@ -265,9 +296,13 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 		const account = this.#menu.selectedItem;
 		if (!account) return;
 		if (account.redeemableCount <= 0) {
-			this.#statusMessage = account.unavailableReason
-				? `That account's saved resets are unavailable: ${account.unavailableReason}`
-				: "That account has no saved resets usable right now.";
+			if (account.creditLine) {
+				this.#statusMessage = `That reset can't be spent now${account.unavailableReason ? `: ${account.unavailableReason}` : "."}`;
+			} else {
+				this.#statusMessage = account.unavailableReason
+					? `That account's saved resets are unavailable: ${account.unavailableReason}`
+					: "That account has no saved resets usable right now.";
+			}
 			this.#updateList();
 			return;
 		}
@@ -312,6 +347,7 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 				this.#nativeItems,
 				"list",
 			),
+			...(this.#menu.selectedItem?.creditLines ?? []).map(line => text([span(oneLine(line), "dim")])),
 			pending
 				? text([span(oneLine(this.#confirmationMessage(pending)), "warning")])
 				: (this.#nativeHints ??= hintsRow([
