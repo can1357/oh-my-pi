@@ -805,8 +805,8 @@ export class CredentialSelector {
 			: undefined;
 		// An on-use-only provider (`refresh { on-use-only #true }`) mints a token
 		// only behind a request that is about to use it. The preflight cannot know
-		// which candidate the final pass will reach — filters, blocks and failed
-		// attempts move it — and a preflight for an account nothing uses is exactly
+		// which candidate the final pass will reach (filters, blocks and failed
+		// attempts move it), and a preflight for an account nothing uses is exactly
 		// the request-less rotation that links a pool, so it refreshes none of them.
 		// `tryOAuth` still refreshes the credential it actually serves with, and a
 		// forced recovery keeps the preflight because that path must re-mint a token
