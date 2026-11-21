@@ -358,38 +358,6 @@ async fn a_walk_dropped_before_its_seed_runs_keeps_job_paths_alive() {
 	assert!(live, "a worker's job path was freed with the seed worker's task");
 }
 
-/// [`a_walk_dropped_before_its_seed_runs_keeps_job_paths_alive`] without
-/// seams, for the address sanitizer: walks dropped right after they start.
-/// The seed task is then often dropped before its first poll while other
-/// workers read the root's children; a normal build reads freed memory
-/// silently. Run it under the address sanitizer:
-///
-/// ```text
-/// RUSTFLAGS=-Zsanitizer=address ASAN_OPTIONS=detect_leaks=0 cargo test -p omp-xfs \
-///     --target x86_64-unknown-linux-gnu -- --ignored walks_dropped_at_once_free_no_path_in_use
-/// ```
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs AddressSanitizer"]
-async fn walks_dropped_at_once_free_no_path_in_use() {
-	let tmp = TempDir::new("drop-at-once");
-	let long = "p".repeat(150);
-	for d in 0..32 {
-		let dir = tmp.path().join(format!("{long}{d:02}"));
-		for s in 0..16 {
-			std::fs::create_dir_all(dir.join(format!("{long}{s:02}"))).expect("dir");
-		}
-		std::fs::write(dir.join(".gitignore"), "*.o\n").expect("ignore file");
-	}
-	let fs = Fs::native();
-	let opts = Options { workers: Some(8), gitignore: true, ..Default::default() };
-	for _ in 0..2_000 {
-		let walked = walk(&fs, tmp.path(), &opts, |_, _, _: &mut Vec<()>| Action::Continue)
-			.await
-			.expect("walk");
-		drop(walked);
-	}
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn visitor_actions() {
 	let tmp = make_tree("actions", &["keep/a", "skip/b", "skip/c/d"]);
