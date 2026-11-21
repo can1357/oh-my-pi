@@ -14,6 +14,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import type { FromNativeHost, ToNativeHost } from "../../../../../browser-relay/extension/messages";
 import type { RelaySocket } from "./bridge";
+import { publishRelayEndpoint } from "./discovery";
 import { isOlderOmpVersion } from "./protocol";
 import { type RelayServer, startRelayServer } from "./server";
 
@@ -75,7 +76,7 @@ class BrowserLink {
 		void this.#pump();
 		let pause = RELINK_MIN_MS;
 		while (!this.#gone && !this.#restarting) {
-			const upstream = this.#lead() ?? (await this.#follow());
+			const upstream = this.#lead() ?? (this.#port.port === 0 ? null : await this.#follow());
 			if (upstream === null) {
 				await Promise.race([Bun.sleep(pause), this.#left.promise]);
 				pause = Math.min(pause * 2, RELINK_MAX_MS);
@@ -88,8 +89,16 @@ class BrowserLink {
 			}
 			pause = RELINK_MIN_MS;
 			this.#upstream = upstream;
+			const unpublish =
+				this.#port.port === 0 && this.#server
+					? await publishRelayEndpoint(this.#server.port).catch(error => {
+							this.#port.log(`cannot publish relay endpoint: ${String(error)}`);
+							return undefined;
+						})
+					: undefined;
 			this.#port.send({ t: "linked" });
 			const reason = await upstream.ended;
+			await unpublish?.();
 			this.#upstream = null;
 			if (this.#gone || this.#restarting) break;
 			this.#port.send({ t: "unlinked", reason });

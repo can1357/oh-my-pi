@@ -688,7 +688,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 								);
 							case "stopped":
 								return (
-									<div key={item.key} className="tr-stop pn-stop">
+									<div key={item.key} className="tr-stop pn-stopped">
 										<span className={`tr-chip ${item.reason === "error" ? "tr-chip--err" : "tr-chip--warn"}`}>
 											{item.reason === "aborted" ? "stopped" : "error"}
 										</span>

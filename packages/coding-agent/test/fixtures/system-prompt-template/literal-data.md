@@ -1,1 +1,1 @@
-INSERTED={{xdevDocs}}
+INSERTED={{toolCommandDocs}}
