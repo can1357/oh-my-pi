@@ -16,6 +16,7 @@ import {
 	MCPManager,
 	OAuthIssuerMismatchError,
 	reconnectMCPServers,
+	resolveMcpServerForToggle,
 	resolveMCPTransformContext,
 } from "../../mcp";
 import {
@@ -35,11 +36,10 @@ import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
 import type { McpUpstreamStatus } from "../../mcp/host/contract";
 import {
 	addMCPServer,
-	readDisabledServers,
+	canSkipMcpServerToggle,
 	readMCPConfigFile,
 	removeMCPServer,
-	setServerDisabled,
-	setServerForceEnabled,
+	setMcpServerEnabled,
 	updateMCPServer,
 	validateServerName,
 } from "../../mcp/config-writer";
@@ -1417,59 +1417,38 @@ export class MCPCommandController {
 		}
 
 		try {
-			// A server a built-in transform dropped counts as disabled: enabling it
-			// records an explicit enable, which outranks the transform.
-			const dropped = this.ctx.mcpManager?.getBuiltinDrops().get(name);
-			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
-				enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+			const enableProjectConfig = cfgMcpEnableProjectConfig.get(this.ctx.settings);
+			const resolved = await resolveMcpServerForToggle(name, {
+				cwd: getProjectDir(),
+				enableProjectConfig,
+				mcpManager: this.ctx.mcpManager,
+				extensionRoots: this.ctx.session.effectiveExtensionRoots,
+				builtinTransforms: resolveMCPTransformContext(this.ctx.settings, {
+					evalActive: this.ctx.session.getActiveToolNames().includes("eval"),
+				}),
 			});
-			if (!found) {
-				// Check if this is a discovered server from a third-party config
-				const userConfigPath = getMCPConfigPath("user", getProjectDir());
-				const disabledServers = new Set(await readDisabledServers(userConfigPath));
-				const isDiscovered = this.ctx.mcpManager?.getSource(name) ?? dropped?.source;
-				const isCurrentlyDisabled = disabledServers.has(name) || dropped !== undefined;
-				if (!isDiscovered && !isCurrentlyDisabled) {
-					this.ctx.showError(`Server "${name}" not found.`);
-					return;
-				}
-				if (isCurrentlyDisabled === !enabled) {
-					this.#showMessage(
-						["", theme.fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`), ""].join(
-							"\n",
-						),
-					);
-					return;
-				}
-				await setServerDisabled(userConfigPath, name, !enabled);
-				if (dropped) await setServerForceEnabled(userConfigPath, name, true);
-				if (enabled) {
-					await this.#connectEnabledMCPServer(name);
-					const state = await this.#waitForServerConnectionWithAnimation(name);
-					const status =
-						state === "connected"
-							? theme.fg("success", "Connected")
-							: state === "connecting"
-								? theme.fg("muted", "Connecting")
-								: theme.fg("warning", "Not connected yet");
-					this.#showMessage(
-						[
-							"",
-							theme.fg("success", `${theme.status.enabled} Enabled "${name}"`),
-							"",
-							`  Status: ${status}`,
-							"",
-						].join("\n"),
-					);
-				} else {
-					await this.ctx.mcpManager?.disconnectServer(name);
-					await this.ctx.session.refreshMCPTools(this.ctx.mcpManager?.getTools() ?? []);
-					this.#showMessage(["", theme.fg("muted", `${theme.status.disabled} Disabled "${name}"`), ""].join("\n"));
-				}
+			if (resolved.acpOwned) {
+				this.ctx.showError(
+					`Server "${name}" is supplied by the ACP client (editor) for this session; enable or disable it in your editor's MCP settings instead.`,
+				);
+				return;
+			}
+			if (!resolved.known) {
+				this.ctx.showError(`Server "${name}" not found.`);
 				return;
 			}
 
-			if ((found.config.enabled ?? true) === enabled && !(enabled && dropped)) {
+			if (
+				canSkipMcpServerToggle({
+					targetEnabled: enabled,
+					hasConfig: resolved.hasConfig,
+					hasWritableSource: resolved.writableSource !== undefined,
+					enabledFlag: resolved.enabledFlag,
+					denied: resolved.denied,
+					forced: resolved.forced,
+					builtinDropped: resolved.builtinDropped,
+				})
+			) {
 				this.#showMessage(
 					["", theme.fg("muted", `Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`), ""].join(
 						"\n",
@@ -1478,8 +1457,15 @@ export class MCPCommandController {
 				return;
 			}
 
-			const updated: MCPServerConfig = { ...found.config, enabled };
-			await updateMCPServer(found.filePath, name, updated);
+			await setMcpServerEnabled({
+				userPath: resolved.userPath,
+				projectPath: resolved.projectPath,
+				enableProjectConfig,
+				sourcePath: resolved.writableSource?.filePath,
+				name,
+				enabled,
+			});
+
 			if (enabled) {
 				await this.#connectEnabledMCPServer(name);
 			} else {
@@ -1498,11 +1484,12 @@ export class MCPCommandController {
 							: theme.fg("warning", "Not connected yet");
 			}
 
+			const scopeSuffix = resolved.writableSource ? ` (${resolved.writableSource.scope} config)` : "";
 			const lines = [
 				"",
 				enabled
-					? theme.fg("success", `${theme.status.enabled} Enabled "${name}" (${found.scope} config)`)
-					: theme.fg("muted", `${theme.status.disabled} Disabled "${name}" (${found.scope} config)`),
+					? theme.fg("success", `${theme.status.enabled} Enabled "${name}"${scopeSuffix}`)
+					: theme.fg("muted", `${theme.status.disabled} Disabled "${name}"${scopeSuffix}`),
 			];
 			if (status) {
 				lines.push("");
@@ -1736,6 +1723,7 @@ export class MCPCommandController {
 		}
 
 		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), {
+			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
 		});
 		const config = configs[name];

@@ -306,23 +306,34 @@ export interface SetMcpServerEnabledOptions {
 	sourcePath?: string;
 	name: string;
 	enabled: boolean;
+	/**
+	 * When false, `projectPath` is not a candidate and a `sourcePath` equal to
+	 * it is ignored. `mcp.enableProjectConfig: false` opts the project out;
+	 * toggling must not rewrite that file. Default true.
+	 */
+	enableProjectConfig?: boolean;
 }
 
 /**
  * Flip a server's enabled/disabled state regardless of where it lives.
  *
- * Resolution order, mirroring `/mcp enable` / `/mcp disable` plus the dashboard
- * fix for non-writable source configs:
+ * `/mcp enable`, `/mcp disable`, and the extensions dashboard all persist
+ * through this function. Callers must omit `sourcePath` for tool-owned or
+ * discovered servers, and pass `enableProjectConfig: false` when project
+ * config is opted out so that file is not rewritten.
  *
- * - Server found in `sourcePath` (writable) → write `enabled` on that entry.
- * - Else server in project mcp.json → write `enabled` there.
+ * Resolution order:
+ *
+ * - Server found in `sourcePath` (writable, and not an opted-out project file)
+ *   → write `enabled` on that entry.
+ * - Else server in project mcp.json (when project config is enabled) → write
+ *   `enabled` there.
  * - Else server in user mcp.json → write `enabled` there.
  * - Else (server defined in a tool-owned source like opencode.json, OR a
  *   purely discovered server):
  *   - Disable → add to the user-level `disabledServers` denylist.
  *   - Enable → add to the user-level `enabledServers` allowlist so the
- *     dashboard / runtime override the non-writable source's
- *     `enabled: false` flag.
+ *     runtime overrides the non-writable source's `enabled: false` flag.
  *
  * Cleanup invariants — on every call:
  * - Re-enable clears any stale denylist entry so a server disabled via
@@ -332,7 +343,14 @@ export interface SetMcpServerEnabledOptions {
  */
 export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): Promise<void> {
 	const { userPath, projectPath, sourcePath, name, enabled } = options;
-	const candidatePaths = [...new Set([sourcePath, projectPath, userPath].filter(path => path !== undefined))];
+	const enableProjectConfig = options.enableProjectConfig ?? true;
+	// An opted-out project file must not be rewritten even if a caller still
+	// passes it as the writable source (findMcpServerForAuth omits it; this is
+	// the backstop).
+	const source = !enableProjectConfig && sourcePath === projectPath ? undefined : sourcePath;
+	const candidatePaths = [
+		...new Set([source, enableProjectConfig ? projectPath : undefined, userPath].filter(path => path !== undefined)),
+	];
 	let updatedInConfig = false;
 
 	for (const filePath of candidatePaths) {
@@ -376,4 +394,70 @@ export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): 
 	if (!updatedInConfig) {
 		await setServerDisabled(userPath, name, true);
 	}
+}
+
+/**
+ * Whether a server would be connected on the next load.
+ *
+ * Precedence matches `loadAllMCPConfigs`: the user `disabledServers` denylist
+ * wins, the user `enabledServers` allowlist overrides `enabled: false` and a
+ * built-in transform drop, and an explicit `enabled: true` also outranks a drop.
+ * `enabledFlag` is the startup-interpreted boolean from the owning definition;
+ * providers may leave it unset (the default is enabled), but only a boolean
+ * `false` means off.
+ */
+export function isMcpServerEffectivelyEnabled(options: {
+	/** A definition was resolved (writable file, manager, or discovery). */
+	hasConfig: boolean;
+	/** Definition `enabled` flag. Omit when unknown; the default is enabled. */
+	enabledFlag?: boolean;
+	denied: boolean;
+	forced: boolean;
+	builtinDropped?: boolean;
+}): boolean {
+	if (options.denied) return false;
+	if (options.forced) return true;
+	if (!options.hasConfig) return false;
+	if (options.enabledFlag === false) return false;
+	if (options.builtinDropped === true && options.enabledFlag !== true) return false;
+	return true;
+}
+
+/**
+ * Whether `/mcp enable` or `/mcp disable` can report "already enabled/disabled"
+ * without writing config.
+ *
+ * Skips the write only when the server is already in `targetEnabled` state AND
+ * no conflicting override or writable-file flag needs clearing — e.g. when a
+ * name is in both `disabledServers` and `enabledServers`, `disable` must still
+ * clear `enabledServers` so removing `disabledServers` later does not turn the
+ * server back on.
+ */
+export function canSkipMcpServerToggle(options: {
+	targetEnabled: boolean;
+	hasConfig: boolean;
+	hasWritableSource: boolean;
+	enabledFlag?: boolean;
+	denied: boolean;
+	forced: boolean;
+	builtinDropped?: boolean;
+}): boolean {
+	const effectivelyEnabled = isMcpServerEffectivelyEnabled({
+		hasConfig: options.hasConfig,
+		enabledFlag: options.enabledFlag,
+		denied: options.denied,
+		forced: options.forced,
+		builtinDropped: options.builtinDropped,
+	});
+	if (effectivelyEnabled !== options.targetEnabled) return false;
+	if (options.targetEnabled) {
+		return !(
+			options.denied ||
+			(options.hasWritableSource &&
+				(options.enabledFlag === false ||
+					options.forced ||
+					(options.builtinDropped === true && options.enabledFlag !== true)))
+		);
+	}
+	return !(options.forced || (options.hasWritableSource && options.enabledFlag !== false));
 }

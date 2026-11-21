@@ -1,14 +1,16 @@
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
+import { resolveMcpServerForToggle } from "../../mcp/config";
 import {
 	addMCPServer,
+	canSkipMcpServerToggle,
 	readDisabledServers,
 	readMCPConfigFile,
 	removeMCPServer,
-	setServerDisabled,
-	updateMCPServer,
+	setMcpServerEnabled,
 } from "../../mcp/config-writer";
 import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
+import { resolveMCPTransformContext } from "../../mcp/transforms";
 import { MCPManager } from "../../mcp/manager";
 import {
 	findMcpServerForAuth,
@@ -327,33 +329,61 @@ async function handleEnableDisableCommand(
 	rest: string,
 	runtime: SlashCommandRuntime,
 ): Promise<SlashCommandResult> {
-	const name = rest.split(/\s+/)[0] ?? "";
+	// `enable` and `disable` take no flags, so the entire rest is the server
+	// name — `validateServerName` permits spaces (e.g. "MaaS Slack").
+	const name = rest.trim();
 	if (!name) return usage(`Usage: /mcp ${verb} <name>`, runtime);
 	const enabled = verb === "enable";
 	try {
-		const userPath = getMCPConfigPath("user", runtime.cwd);
-		const projectPath = getMCPConfigPath("project", runtime.cwd);
-		const [userConfig, projectConfig] = await Promise.all([
-			readMCPConfigFile(userPath),
-			readMCPConfigFile(projectPath),
-		]);
-		if (projectConfig.mcpServers?.[name] !== undefined) {
-			await updateMCPServer(projectPath, name, { ...projectConfig.mcpServers[name], enabled } as MCPServerConfig);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"} (project config).`);
+		const enableProjectConfig = cfgMcpEnableProjectConfig.get(runtime.settings);
+		const evalActive = runtime.session.getActiveToolNames().includes("eval");
+		const resolved = await resolveMcpServerForToggle(name, {
+			cwd: runtime.cwd,
+			enableProjectConfig,
+			mcpManager: runtime.mcpManager,
+			extensionRoots: runtime.session.effectiveExtensionRoots,
+			builtinTransforms: resolveMCPTransformContext(runtime.settings, { evalActive }),
+		});
+		if (resolved.acpOwned) {
+			return usage(
+				`Server "${name}" is supplied by the ACP client (editor) for this session; enable or disable it in your editor's MCP settings instead.`,
+				runtime,
+			);
+		}
+		// Disable of an unknown name still records a denylist entry so a
+		// discovered server that is not loaded yet can be suppressed by name.
+		// Enable of an unknown name is an error.
+		if (!resolved.known && enabled) {
+			return usage(`Server "${name}" not found in user or project config.`, runtime);
+		}
+
+		if (
+			resolved.known &&
+			canSkipMcpServerToggle({
+				targetEnabled: enabled,
+				hasConfig: resolved.hasConfig,
+				hasWritableSource: resolved.writableSource !== undefined,
+				enabledFlag: resolved.enabledFlag,
+				denied: resolved.denied,
+				forced: resolved.forced,
+				builtinDropped: resolved.builtinDropped,
+			})
+		) {
+			await runtime.output(`Server "${name}" is already ${enabled ? "enabled" : "disabled"}.`);
 			return commandConsumed();
 		}
-		if (userConfig.mcpServers?.[name] !== undefined) {
-			await updateMCPServer(userPath, name, { ...userConfig.mcpServers[name], enabled } as MCPServerConfig);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"} (user config).`);
-			return commandConsumed();
-		}
-		const disabledList = await readDisabledServers(userPath);
-		if (!enabled || disabledList.includes(name)) {
-			await setServerDisabled(userPath, name, !enabled);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}.`);
-			return commandConsumed();
-		}
-		return usage(`Server "${name}" not found in user or project config.`, runtime);
+
+		await setMcpServerEnabled({
+			userPath: resolved.userPath,
+			projectPath: resolved.projectPath,
+			enableProjectConfig,
+			sourcePath: resolved.writableSource?.filePath,
+			name,
+			enabled,
+		});
+		const scopeNote = resolved.writableSource ? ` (${resolved.writableSource.scope} config)` : "";
+		await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}${scopeNote}.`);
+		return commandConsumed();
 	} catch (err) {
 		return usage(`Failed to ${verb} MCP server: ${errorMessage(err)}`, runtime);
 	}
