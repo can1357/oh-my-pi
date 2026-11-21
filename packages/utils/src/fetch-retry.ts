@@ -1,8 +1,10 @@
 import { scheduler } from "node:timers/promises";
 
-// "reset after 1h2m3s" / "10m15s" / "39s" / "Resets in 71h48m47s" / "quotaResetDelay": "17h48m25.5s" / "835ms"
-const QUOTA_RESET_PATTERN =
-	/(?:reset after|resets?\s+in|"quotaResetDelay":\s*")\s*(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)(ms|s)\b/i;
+// Google's structured metadata uses Go duration strings, including abbreviated durations like `30m`.
+const GOOGLE_RPC_RESET_DELAY_PATTERN =
+	/"quotaResetDelay"\s*:\s*"((?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)(ms|s))?)"/i;
+// "reset after 1h2m3s" / "10m15s" / "39s" / "Resets in 71h48m47s" / "835ms"
+const QUOTA_RESET_PATTERN = /(?:reset after|resets?\s+in)\s*(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)(ms|s)\b/i;
 // "Please retry in 250ms" / "Please retry in 12s"
 const PLEASE_RETRY_PATTERN = /Please retry in ([0-9.]+)(ms|s)/i;
 // JSON field: "retryDelay": "34.074824224s"
@@ -154,7 +156,20 @@ export function extractRetryHint(
 		else retryNow = true;
 	};
 
-	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);
+	// Prefer structured quota timing to a display-oriented reset message.
+	// Independent RetryInfo, timestamp, and header signals still participate.
+	const quotaResetDelay = GOOGLE_RPC_RESET_DELAY_PATTERN.exec(body);
+	const quotaResetDelayMs = quotaResetDelay?.[1]
+		? Math.floor(
+				Number(quotaResetDelay[2] ?? 0) * 3_600_000 +
+					Number(quotaResetDelay[3] ?? 0) * 60_000 +
+					Number(quotaResetDelay[4] ?? 0) * (quotaResetDelay[5]?.toLowerCase() === "ms" ? 1 : 1_000),
+			)
+		: undefined;
+	const hasStructuredQuotaDelay = quotaResetDelayMs !== undefined && Number.isFinite(quotaResetDelayMs);
+	if (hasStructuredQuotaDelay) considerClamped(quotaResetDelayMs);
+
+	const quotaMatch = hasStructuredQuotaDelay ? null : QUOTA_RESET_PATTERN.exec(body);
 	if (quotaMatch) {
 		const hours = quotaMatch[1] ? Number.parseInt(quotaMatch[1], 10) : 0;
 		const minutes = quotaMatch[2] ? Number.parseInt(quotaMatch[2], 10) : 0;
@@ -183,7 +198,7 @@ export function extractRetryHint(
 	}
 	// OpenCode Go compound remainder ("Resets in 2hr 15min"): the generic
 	// pattern only captures the leading "2hr", so add the trailing minutes.
-	const compoundResetMatch = RESET_IN_HR_MIN_PATTERN.exec(body);
+	const compoundResetMatch = hasStructuredQuotaDelay ? null : RESET_IN_HR_MIN_PATTERN.exec(body);
 	if (compoundResetMatch?.[1] && compoundResetMatch[2]) {
 		const hours = Number.parseFloat(compoundResetMatch[1]);
 		const minutes = Number.parseFloat(compoundResetMatch[2]);
@@ -191,7 +206,7 @@ export function extractRetryHint(
 			consider(hours * 60 * 60_000 + minutes * 60_000);
 		}
 	}
-	const accountResetMatch = WILL_RESET_IN_PATTERN.exec(body);
+	const accountResetMatch = hasStructuredQuotaDelay ? null : WILL_RESET_IN_PATTERN.exec(body);
 	if (accountResetMatch?.[1]) {
 		const value = Number.parseFloat(accountResetMatch[1]);
 		if (Number.isFinite(value) && value > 0) {

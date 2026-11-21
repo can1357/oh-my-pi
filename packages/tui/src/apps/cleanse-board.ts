@@ -17,7 +17,7 @@ import { renderProgressBar, type ProgressBarStyle } from "../components/progress
 import { fgOrPlain, theme } from "../theme/theme";
 import { createLiveBoard, type LiveBoardOutput } from "../chrome/live-board";
 import type { AgentProgress } from "../tools/task";
-import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { type TspSpan, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { col, elapsed, keyed, node, row, span, stableKey, text } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
 import { Memo } from "../native/memo";
@@ -407,7 +407,9 @@ function describeAgentRow(agentName: string, agent: RunningAgent): NativeNode {
 /** A running repair lane as an `agent` row: its files as the task, the live tool and its intent, the run's stats. */
 function describeAgentLane(agentName: string, agent: RunningAgent, now: number): NativeNode {
 	const progress = agent.progress;
-	const intent = sanitizeDisplaySingleLine(progress?.lastIntent ?? progress?.currentToolArgs ?? "")
+	const intent = sanitizeDisplaySingleLine(
+		progress?.lastIntent === undefined ? (progress?.currentToolArgs ?? "") : toolIntentLabel(progress.lastIntent),
+	)
 		.replace(/\s+/g, " ")
 		.trim();
 	return node(
@@ -454,7 +456,7 @@ function describeActivity(progress: AgentProgress | undefined): TspSpan[] {
 			span(`rate-limited · retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`, "warning"),
 		];
 	}
-	const intent = sanitizeDisplaySingleLine(progress.lastIntent ?? "")
+	const intent = sanitizeDisplaySingleLine(toolIntentLabel(progress.lastIntent ?? ""))
 		.replace(/\s+/g, " ")
 		.trim();
 	if (progress.currentTool) {
@@ -530,7 +532,7 @@ function agentActivity(progress: AgentProgress | undefined): string {
 		);
 	}
 	const intent = truncateToWidth(
-		sanitizeDisplaySingleLine(progress.lastIntent ?? "")
+		sanitizeDisplaySingleLine(toolIntentLabel(progress.lastIntent ?? ""))
 			.replace(/\s+/g, " ")
 			.trim(),
 		ACTIVITY_WIDTH,

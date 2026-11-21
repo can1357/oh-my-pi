@@ -2,13 +2,13 @@
 
 > Open, inspect, edit, and script binary analysis databases (IDA Pro via idalib, Ghidra via PyGhidra, or Binary Ninja via its Python API) from eval. Databases are hosted by the omp daemon and shared by every omp process.
 
-`dsm` is an eval prelude namespace, not a standalone tool: it exists as a global in JavaScript and Python cells, with model-facing documentation at `xd://eval/dsm`. There is no `xd://ida`, `xd://ghidra`, or `xd://binja` tool.
+`dsm` is an eval prelude namespace, not a standalone tool: it exists as a global in JavaScript and Python cells, with model-facing documentation at `help://eval/dsm`. There is no `ida`, `ghidra`, or `binja` tool or command.
 
 ## Source
 
 - Eval prelude (host side, action dispatch, approval, reference ownership): `packages/coding-agent/src/disasm/prelude-definition.ts`
 - Kernel-side facades: `packages/coding-agent/src/disasm/prelude.js`, `packages/coding-agent/src/disasm/prelude.py`
-- Model-facing docs: `packages/coding-agent/src/prompts/tools/dsm.md` (`xd://eval/dsm`), `packages/coding-agent/src/prompts/tools/dsm-guidance.md` (system-prompt guidance)
+- Model-facing docs: `packages/coding-agent/src/prompts/tools/dsm.md` (`help://eval/dsm`), `packages/coding-agent/src/prompts/tools/dsm-guidance.md` (system-prompt guidance)
 - Key collaborators:
    - `packages/coding-agent/src/disasm/settings.ts` — `disassembler.backend`, `disassembler.maxOpen`, `disassembler.idleCloseSec`
    - `packages/coding-agent/src/disasm/active.ts` — `cfgDisasmBackend`: resolves the effective backend (or none)
@@ -61,7 +61,7 @@ Handles expose `id`, `backend`, `ref`, `path`, and `info`. Targets accept a symb
 
 ## Read integration
 
-- Bare `read <binary>` (ELF/PE/Mach-O, extensionless included) and bare `read <db>.i64`/`.idb`/`.bndb` return on-disk metadata only. They never open a database or provision a backend. The footer lists the explicit analysis selectors and points to `xd://eval/dsm`, or says analysis is disabled.
+- Bare `read <binary>` (ELF/PE/Mach-O, extensionless included) and bare `read <db>.i64`/`.idb`/`.bndb` return on-disk metadata only. They never open a database or provision a backend. The footer lists the explicit analysis selectors and points to `help://eval/dsm`, or says analysis is disabled.
 - Analysis selectors (`bin:overview`, `bin:<func|0xaddr>`, `bin:<func>:asm`, `:imports`, `:exports`, `:strings`, `:xrefs:<func|0xaddr>`) open the database through the same daemon units as `dsm.open`. See [`read`](read.md#executables-and-disassembler-databases).
 
 ## Flow
