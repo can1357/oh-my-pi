@@ -1918,9 +1918,11 @@ function streamCursorWithWireMode(
 						return false;
 					}
 					const latestContextTokens = output.usage.contextTokens;
+					const wrappedForBudget = output.contextBudgetWrapUp === true;
 					({ context, options, stream } = resumption);
 					output = createCursorOutput(model, Date.now());
 					if (latestContextTokens !== undefined) output.usage.contextTokens = latestContextTokens;
+					if (wrappedForBudget) output.contextBudgetWrapUp = true;
 					startTime = performance.now();
 					firstTokenTime = undefined;
 					stream.push({ type: "start", partial: output });

@@ -1311,6 +1311,59 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(session.cursorContextBudgetTokens(cursor)).toBeUndefined();
 	});
 
+	it("preserves the Cursor budget when a pre-prompt deferral's speculation settles before dispatch", async () => {
+		const cursor = getBundledModel("cursor", "composer-2.5");
+		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionAsyncEnabled.set(session.settings, true);
+		cfgCompactionThresholdTokens.set(session.settings, 150_000);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		compactHookEnabled = false;
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const handoffStarted = Promise.withResolvers<void>();
+		const handoffResult = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+			handoffStarted.resolve();
+			return handoffResult.promise;
+		});
+
+		const trigger = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "working" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 144_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(trigger);
+		session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+		await handoffStarted.promise;
+		cfgCompactionThresholdTokens.set(session.settings, 140_000);
+
+		let budgetAtDispatch: number | undefined;
+		vi.spyOn(session.agent, "prompt").mockImplementation(async () => {
+			// Speculation settles after pre-prompt maintenance deferred to it, before the turn queries its budget.
+			handoffResult.resolve("summary");
+			while (session.compactionSpeculation === "running") await scheduler.yield();
+			expect(session.compactionSpeculation).not.toBe("running");
+			budgetAtDispatch = session.cursorContextBudgetTokens(cursor);
+		});
+
+		await session.prompt("next step");
+		expect(budgetAtDispatch).toBe(140_000);
+	});
+
 	it("settles an overlapping successful stop but resumes a thinking-only length stop", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
 		cfgCompactionEnabled.set(session.settings, true);

@@ -1130,4 +1130,42 @@ describe("Cursor runs relayed across an external executor's requests", () => {
 			expect(second.usage.contextTokens).toBe(65_000);
 		});
 	});
+
+	it("carries the wrap-up marker across another relayed tool call until the status reply ends", async () => {
+		const cursor = drivenCursor();
+		const states = new Map<string, ProviderSessionState>();
+		const options = relayOptions(states, { contextBudgetTokens: 60_000 });
+		await withCursorServer(cursor.serve, async baseUrl => {
+			const firstReply = respond(baseUrl, [user], options);
+			const run = await cursor.run(0);
+			await run.send(
+				Buffer.concat([
+					checkpointFrame([], 65_000),
+					readStarted(1),
+					execFrame(2, { case: "mcpArgs", value: readArgs(1) }, true),
+					listed(1),
+				]),
+			);
+			const first = await firstReply;
+
+			// Answering call 1 injects the wrap-up notice; Cursor issues one more MCP call before stopping.
+			const secondReply = respond(baseUrl, [user, first, fileResult(1)], options);
+			await run.answered(1);
+			await run.send(
+				Buffer.concat([readStarted(2), execFrame(3, { case: "mcpArgs", value: readArgs(2) }, true), listed(1)]),
+			);
+			const second = await secondReply;
+			expect(second.contextBudgetWrapUp).toBe(true);
+
+			// The shared budget is already spent, yet the eventual status reply must keep the wrap-up marker.
+			const thirdReply = respond(baseUrl, [user, first, fileResult(1), second, fileResult(2)], options);
+			await run.answered(2);
+			run.end(finished("Paused for compaction."));
+			const third = await thirdReply;
+
+			expect(third.contextBudgetWrapUp).toBe(true);
+			expect(third.usage.contextTokens).toBe(65_000);
+			expect(text(third)).toBe("Paused for compaction.");
+		});
+	});
 });
