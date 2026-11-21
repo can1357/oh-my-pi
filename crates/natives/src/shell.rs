@@ -1,6 +1,7 @@
 //! Embedded bash engine shell execution exported via N-API.
 
 mod changes;
+pub mod commands;
 pub mod speech;
 pub mod vfs;
 
@@ -10,7 +11,7 @@ use std::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
 	},
-	time::Duration,
+	time::{Duration, UNIX_EPOCH},
 };
 
 use napi::{
@@ -27,7 +28,7 @@ use omp_shell::{
 	execute_shell as core_execute_shell, minimizer,
 };
 
-use self::{speech::ShellSpeech, vfs::ShellFilesystem};
+use self::{commands::ShellCommands, speech::ShellSpeech, vfs::ShellFilesystem};
 use crate::task;
 
 /// Native non-executing visualization transformations.
@@ -178,6 +179,13 @@ pub fn shell_builtins(session_env: Option<Object<'_>>) -> Vec<&'static str> {
 	omp_shell::tools::builtins(|name| omp_shell::git::flag_on(var(name).as_deref()))
 }
 
+/// Every name the engine resolves before a session command (reserved words,
+/// shell builtins, pi shell tools, in-process utilities, bash/sh/zsh).
+#[napi]
+pub fn shell_reserved_command_names() -> Vec<&'static str> {
+	omp_shell::reserved_command_names()
+}
+
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
@@ -272,6 +280,10 @@ pub struct ShellRunOptions<'env> {
 	/// The application's speech synthesizer, which `say` speaks through when
 	/// it has one configured; absent leaves `say` to the system's.
 	pub speech:     Option<ShellSpeech>,
+	/// Host-provided commands installed for this run only, resolved after
+	/// the shell's builtins, pi's shell tools and in-process utilities, and
+	/// before shell functions, aliases and `PATH`.
+	pub commands:   Option<ShellCommands>,
 	/// Receives a copy of every byte crossing the run's pipeline pipes.
 	pub streams:    Option<ClassInstance<'env, PipeStreams>>,
 	/// Folds the run's engine events into a live model of the command.
@@ -367,6 +379,14 @@ pub struct PipeStreamInfo {
 	pub open:     bool,
 	/// The stream is a file a command redirected its output into.
 	pub file:     bool,
+	/// Run-trace node key (`unit:0:node`) of the stage writing into the pipe,
+	/// or of the command whose redirection opened the file. Absent when the
+	/// run has no trace or the writer's unit is not in it.
+	pub node:     Option<String>,
+	/// When it was last written, in ms since the UNIX epoch: a pipe's last
+	/// write (its opening before any), a file's modification time (0 when
+	/// unreadable).
+	pub modified: f64,
 }
 
 /// Retained bytes of a stream, as stream offsets `start..end`.
@@ -404,6 +424,11 @@ impl PipeStreams {
 				total:    stream.total as f64,
 				open:     stream.open,
 				file:     stream.file,
+				node:     stream.node.map(|node| node.to_string()),
+				modified: stream
+					.modified
+					.duration_since(UNIX_EPOCH)
+					.map_or(0.0, |since| since.as_millis() as f64),
 			})
 			.collect()
 	}
@@ -583,6 +608,7 @@ impl Shell {
 			pipe_taps:  options.streams.map(|streams| Arc::clone(&streams.taps)),
 			trace:      options.trace.map(|trace| Arc::clone(&trace.inner)),
 			speech:     options.speech.map(ShellSpeech::into_host),
+			commands:   options.commands.map(ShellCommands::into_commands),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -1110,6 +1136,7 @@ mod tests {
 						pipe_taps:  None,
 						trace:      None,
 						speech:     None,
+						commands:   None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -1161,6 +1188,7 @@ mod tests {
 						pipe_taps:  None,
 						trace:      None,
 						speech:     None,
+						commands:   None,
 					},
 					None,
 					cancel,
@@ -1203,6 +1231,7 @@ mod tests {
 						pipe_taps:  None,
 						trace:      None,
 						speech:     None,
+						commands:   None,
 					},
 					Some(tx),
 					cancel,

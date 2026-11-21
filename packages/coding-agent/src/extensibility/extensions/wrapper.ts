@@ -254,7 +254,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
 		// unconditionally so it cannot go stale; emit here only for dispatches
-		// the loop never saw — nested xd:// device dispatches and direct
+		// the loop never saw — tool commands run inside bash and direct
 		// (non-loop) execution such as Cursor exec handlers.
 		const inheritedLoopDispatch = (context as LoopAwareToolContext | undefined)?.[LOOP_DISPATCH_CONTEXT] === true;
 		const loopDispatchedToolCall =
@@ -369,23 +369,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			restrictions,
 			context,
 		);
-		context?.xdevTierResolved?.(resolved.tier);
+		context?.toolCommandTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
 			cancelPreflight();
 			throw denyError(resolved, this.tool.name);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
-		// Outer approvals only cover the original input. `xd://` approval skips
-		// tier-only prompts, and an explicit prompt under the policy key the outer
-		// gate already asked about, while the same object flows through; ACP
-		// approval also satisfies explicit prompts, but compares against a deep
-		// snapshot because handlers can mutate the original argument object in
-		// place. Denies were enforced above, and provider safety checks remain
-		// independently required.
-		const policyKey = resolved.policyKey ?? this.tool.name;
-		const explicitPrompt =
-			resolved.override || (Object.hasOwn(userPolicies, policyKey) && policyKey !== context?.xdevPolicyKey);
-		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
+		// ACP approval satisfies prompts only for the input the client approved: it compares
+		// against a deep snapshot because handlers can mutate the original argument object in
+		// place. Denies were enforced above, and provider safety checks remain independently
+		// required.
 		const acpBypass =
 			context !== undefined &&
 			Object.hasOwn(context, "acpApprovedArgs") &&
@@ -404,9 +397,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			pendingSafetyChecks.length === 0 && !cacheTargets ? sessionApprovalScope(resolved, this.tool.name) : undefined;
 		const sessionApproved = sessionScope !== undefined && this.runner.hasSessionApproval(sessionScope.key);
 		const approvalCheck = {
-			required:
-				pendingSafetyChecks.length > 0 ||
-				(resolved.policy === "prompt" && !acpBypass && !sessionApproved && (explicitPrompt || !xdevBypass)),
+			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && !acpBypass && !sessionApproved),
 			reason: resolved.reason,
 		};
 
@@ -490,6 +481,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
 			let approved: boolean;
 			try {
+				context?.onApprovalPrompt?.();
 				// The call's signal closes the prompt: aborting the turn (Esc, a session switch) must not
 				// wait on an approval the user can no longer see or answer.
 				const answer = await untilAborted(signal, () =>
