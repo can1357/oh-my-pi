@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed X11 typing of characters outside the keyboard layout, including non-Latin text, failing with "X11 keymap has no keycode for keysym ...". They are typed through spare keycodes, restored when the session closes; a text with more distinct such characters than the layout has spare keycodes is refused before any key, and chords and holds of them still refuse ([#19519](https://github.com/can1357/oh-my-pi/pull/19519) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
