@@ -8,12 +8,6 @@
 
 ### Fixed
 
-- Preserved custom foreground colors and text styles in status-line segments while continuing to apply the accent color to unstyled statuses.
-- Preserved background colors on truncated rows while scrolling.
-- Fixed WebP and JPEG images rendering as blank gaps on Kitty graphics-compatible terminals when displayed through a bare `Image`.
-- Improved terminal output handling so large repaints remain row-safe and slow or unavailable terminal writers no longer freeze input.
-- Preserved prefilled or hidden `__proto__` controls when ask HTML forms time out.
-- A single-question ask form now submits on the first Enter press.
 - Fixed table charts plotting day numbers from day-first dates (`9 Oct`, `3–4 paź`) as measures: such columns now read as dates, and units and nouns with non-ASCII letters (`zł`) stay whole ([#16331](https://github.com/can1357/oh-my-pi/issues/16331), [#19958](https://github.com/can1357/oh-my-pi/pull/19958) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
