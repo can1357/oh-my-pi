@@ -531,22 +531,24 @@ describe("Factory Droid native thinking-history boundary", () => {
 
 	it("builds a fresh request when the redemption expires while the request is prepared", async () => {
 		const captured: CapturedRequest[] = [];
-		// The first expiry read (at entry) is live; any later read sees it expired,
-		// as when async preparation outlasts the token.
-		let expiryReads = 0;
+		let expiresAt = Date.now() + 60_000;
 		const redemption: AnthropicFallbackCreditHandle = {
 			token: "fct_late",
 			prefillClaim: false,
-			params: {
-				model: "claude-sonnet-5-5",
-				messages: [{ role: "user", content: "saved" }],
-				max_tokens: 1024,
-				stream: true,
+			// The credit is live at entry but has expired once preparation reads the frozen body.
+			get params(): AnthropicFallbackCreditHandle["params"] {
+				expiresAt = 0;
+				return {
+					model: "claude-sonnet-5-5",
+					messages: [{ role: "user", content: "saved" }],
+					max_tokens: 1024,
+					stream: true,
+				};
 			},
 			betas: ["fallback-credit-2026-06-01"],
 			betaHeader: "fallback-credit-2026-06-01",
 			get expiresAt() {
-				return expiryReads++ === 0 ? Date.now() + 60_000 : Date.now() - 1;
+				return expiresAt;
 			},
 		};
 		await streamFactoryDroid(
