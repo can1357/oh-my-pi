@@ -3,22 +3,23 @@
  *
  * Bun splits at every dynamic `import()`, leaving thousands of scripts, and a process that loads hundreds
  * of them commits far more memory than one that loads a single file (Bun reads each script on its thread
- * pool). One script per module group keeps each worker to the code it runs while a session still loads
- * only a handful of files:
+ * pool). Grouping modules by the processes that load them keeps each worker close to the code it runs
+ * while a session still loads only a handful of files:
  *
  * - Modules the profile (`bundle-profile.json`, written by `scripts/bundle-profile.ts`) names are grouped
- *   by the exact set of roles (session, daemon, JS eval worker, …) that loaded them, so no role parses
- *   code that only other roles use. Groups under {@link MIN_GROUP_BYTES} join a group whose roles are a
- *   superset of theirs.
+ *   by the exact set of roles (session, daemon, JS eval worker, …) that loaded them. Groups under
+ *   {@link MIN_GROUP_BYTES} join a group whose roles are a superset of theirs, so a role may parse a
+ *   little code it did not load.
  * - Other modules are grouped by the roles whose code can reach them, then split by directory into
  *   groups of at most {@link MAX_UNPROFILED_GROUP_BYTES}, so a rarely used feature loads only its
  *   neighbourhood. A stale profile therefore costs memory, never correctness.
  *
- * {@link groupedChunksPlugins} makes Bun emit that layout by rewriting `import("x")`. Within a group it
- * becomes a `require` (inlined into the group's script with `splitRequire: false`, and still evaluated on
- * first use); across groups it loads the target group's facade module, the group's only split point.
- * Facades also import the facades of groups their group statically depends on, so Bun keeps each
- * group's code in one script instead of splitting it by every combination of importers.
+ * {@link buildGroupedBundle} makes Bun emit that layout by rewriting `import("x")` of ES modules. Into the
+ * same group (or the entry's, which every process has loaded) it becomes a `require`, inlined into the
+ * group's script with `splitRequire: false` and still evaluated on first use. Into another group it
+ * loads that group's facade module, the group's only split point. Facades also import the facades of
+ * groups their group statically depends on, so Bun keeps each group's code together instead of splitting
+ * it by every combination of importers; Bun still adds a few small shared chunks.
  */
 import * as path from "node:path";
 
@@ -37,32 +38,38 @@ const MIN_GROUP_BYTES = 64 * 1024;
 /** Largest group of modules the profile does not name, unless one directory alone is larger. */
 const MAX_UNPROFILED_GROUP_BYTES = 1024 * 1024;
 const FACADE_NAMESPACE = "omp-bundle-group";
-const DYNAMIC_IMPORT = /(?<![\w$.])import\(\s*(["'])([^"'\\\n]+)\1\s*\)/g;
-const SCRIPT_MODULE = /\.[cm]?[jt]sx?$/;
+/** A literal `import("…")`/`import('…')` call; group 1 is the string literal, escapes included. */
+const DYNAMIC_IMPORT = /(?<![\w$.])import\(\s*("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')\s*\)/g;
+const PROBE_SPECIFIER = "omp-bundle-probe:";
 
 /**
  * Machine-independent id of a bundled module: its repo-relative path, keeping a plugin namespace
  * (`omp-legacy-pi-modules-build:…`). Takes a metafile input path, which Bun makes relative to the
- * working directory, or an absolute path.
+ * working directory (`../../C:/…` for a file on another Windows drive), or an absolute path.
  */
 export function bundleModuleKey(file: string): string {
 	const namespaced = /^([a-z][\w-]+):(.+)$/i.exec(file);
-	const [prefix, location] = namespaced ? [`${namespaced[1]}:`, namespaced[2]] : ["", path.resolve(file)];
+	const otherDrive = /^(?:\.\.[\\/])+([a-z]:[\\/].*)$/i.exec(file)?.[1];
+	const [prefix, location] = namespaced
+		? [`${namespaced[1]}:`, namespaced[2]]
+		: ["", otherDrive ?? path.resolve(file)];
 	if (!path.isAbsolute(location)) return file;
 	return prefix + path.relative(repoDir, location).replaceAll("\\", "/");
 }
 
-export interface ModuleGraph {
+interface ModuleGraph {
 	/** Minified bytes of each module. */
 	bytes: Map<string, number>;
 	/** Modules each module imports statically or `require`s. */
 	deps: Map<string, Set<string>>;
 	/** `import()` targets of each module, by the specifier as written. */
 	dynamicImports: Map<string, Map<string, string>>;
+	/** Module format Bun detected. */
+	formats: Map<string, string>;
 }
 
 /** Reads the module graph from the metafile of a build split at every `import()` and `require()`. */
-export function readModuleGraph(metafile: Bun.BuildMetafile): ModuleGraph {
+function readModuleGraph(metafile: Bun.BuildMetafile): ModuleGraph {
 	const bytes = new Map<string, number>();
 	const entryOfScript = new Map<string, string>();
 	for (const [output, info] of Object.entries(metafile.outputs)) {
@@ -74,6 +81,7 @@ export function readModuleGraph(metafile: Bun.BuildMetafile): ModuleGraph {
 	}
 	const deps = new Map<string, Set<string>>();
 	const dynamicImports = new Map<string, Map<string, string>>();
+	const formats = new Map<string, string>();
 	for (const [input, info] of Object.entries(metafile.inputs)) {
 		const moduleDeps = new Set<string>();
 		const moduleImports = new Map<string, string>();
@@ -85,16 +93,17 @@ export function readModuleGraph(metafile: Bun.BuildMetafile): ModuleGraph {
 			else if (record.original) moduleImports.set(record.original, target);
 		}
 		const key = bundleModuleKey(input);
-		// Inputs the pre-pass tree-shook entirely still need a group.
+		// Inputs the graph build tree-shook entirely still need a group.
 		if (!bytes.has(key)) bytes.set(key, 0);
 		deps.set(key, moduleDeps);
 		if (moduleImports.size > 0) dynamicImports.set(key, moduleImports);
+		if (info.format) formats.set(key, info.format);
 	}
-	return { bytes, deps, dynamicImports };
+	return { bytes, deps, dynamicImports, formats };
 }
 
 /** Assigns every module of `graph` to a named group. */
-export function planGroups(graph: ModuleGraph, profile: BundleProfile): Map<string, string> {
+function planGroups(graph: ModuleGraph, profile: BundleProfile): Map<string, string> {
 	const allRoles = [...new Set(Object.values(profile.modules).flat())].sort();
 	const roleSetName = (roles: Iterable<string>): string => {
 		const sorted = [...new Set(roles)].sort();
@@ -163,7 +172,7 @@ export function planGroups(graph: ModuleGraph, profile: BundleProfile): Map<stri
 		return [...(graph.deps.get(module) ?? []), ...(graph.dynamicImports.get(module)?.values() ?? [])];
 	}
 	const byRoles = new Map<string, Map<string, string[]>>();
-	for (const module of graph.bytes.keys()) {
+	for (const module of [...graph.bytes.keys()].sort()) {
 		if (groupOf.has(module)) continue;
 		const roles = roleSetName(reachingRoles.get(module) ?? allRoles);
 		// Neighbourhood: the module's directory, at most four segments deep.
@@ -201,17 +210,38 @@ function loaderFor(file: string): Bun.JavaScriptLoader {
 	return "js";
 }
 
+/** The value of a JavaScript string literal, or `undefined` for escapes JSON cannot read. */
+function stringLiteralValue(literal: string): string | undefined {
+	const body = literal.slice(1, -1);
+	const json = literal.startsWith('"') ? body : body.replaceAll("\\'", "'").replaceAll('"', '\\"');
+	try {
+		return JSON.parse(`"${json}"`);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Build settings `buildGroupedBundle` reads besides passing them through. */
+export interface GroupableBuildConfig extends Bun.BuildConfig {
+	entrypoints: string[];
+	plugins: Bun.BunPlugin[];
+}
+
+interface GroupedChunksInput {
+	graph: ModuleGraph;
+	groupOf: Map<string, string>;
+	profile: BundleProfile;
+	config: GroupableBuildConfig;
+	/** Modules Bun reported awaiting at their top level, which no `require` can load. */
+	topLevelAwait: ReadonlySet<string>;
+}
+
 /**
  * Returns the build's plugins plus the grouping plugin, rewriting the `import()`s of the build so Bun
- * emits one script per group of `groupOf`. The given plugins' `onLoad` results (virtual modules such as
- * the legacy Pi module registry) are rewritten too.
+ * emits the groups of `groupOf`. The given plugins' `onLoad` results (virtual modules such as the legacy
+ * Pi module registry) are rewritten too.
  */
-export function groupedChunksPlugins(
-	graph: ModuleGraph,
-	groupOf: Map<string, string>,
-	profile: BundleProfile,
-	config: { entrypoints: string[]; plugins: Bun.BunPlugin[]; files?: Record<string, unknown> },
-): Bun.BunPlugin[] {
+function groupedChunksPlugins({ graph, groupOf, profile, config, topLevelAwait }: GroupedChunksInput): Bun.BunPlugin[] {
 	// Plugin namespaces and the build's `files` overrides cannot be `require`d by path (a required
 	// override loads as a second module), so their import()s stay ordinary split points.
 	const overridden = new Set(Object.keys(config.files ?? {}).map(bundleModuleKey));
@@ -220,12 +250,31 @@ export function groupedChunksPlugins(
 	// loaded before anything else, so import()s of the group's other modules are `require`d in place.
 	const entry = bundleModuleKey(config.entrypoints[0]);
 	const entryGroup = groupOf.get(entry);
-	const modulePath = (module: string): string | undefined =>
-		/^[a-z][\w-]+:/i.test(module) || overridden.has(module) || module === entry
-			? undefined
-			: path.join(repoDir, module);
+	const modulePath = (module: string): string | undefined => {
+		if (/^[a-z][\w-]+:/i.test(module) || overridden.has(module) || module === entry) return undefined;
+		return path.isAbsolute(module) ? module : path.join(repoDir, module);
+	};
+	// No `require` can load a module that awaits at its top level, or one that statically imports it.
+	const importersOf = new Map<string, string[]>();
+	for (const [module, deps] of graph.deps) {
+		for (const dep of deps) importersOf.get(dep)?.push(module) ?? importersOf.set(dep, [module]);
+	}
+	const awaits = new Set(topLevelAwait);
+	const pending = [...awaits];
+	while (pending.length > 0) {
+		for (const importer of importersOf.get(pending.pop()!) ?? []) {
+			if (awaits.has(importer)) continue;
+			awaits.add(importer);
+			pending.push(importer);
+		}
+	}
+	// `require` returns what `import()` resolves to only for an ES module: `import()` wraps CommonJS
+	// and JSON in a `default` export.
+	const requirable = (module: string): boolean =>
+		graph.formats.get(module) === "esm" && !awaits.has(module) && modulePath(module) !== undefined;
 	const inPlace = (importer: string, target: string): boolean =>
 		groupOf.get(target) === groupOf.get(importer) || groupOf.get(target) === entryGroup;
+
 	// Each group's modules that other groups import(): its facade's `modules` array, in a stable order.
 	const facadeModules = new Map<string, string[]>();
 	const facadeIndex = new Map<string, number>();
@@ -235,24 +284,21 @@ export function groupedChunksPlugins(
 		if (!modules) facadeModules.set(group, (modules = []));
 		facadeIndex.set(module, modules.push(module) - 1);
 	};
-	for (const [importer, imports] of [...graph.dynamicImports].sort(([a], [b]) => a.localeCompare(b))) {
-		for (const target of imports.values()) {
-			if (!inPlace(importer, target) && modulePath(target)) addToFacade(groupOf.get(target)!, target);
+	for (const importer of [...graph.dynamicImports.keys()].sort()) {
+		for (const target of graph.dynamicImports.get(importer)!.values()) {
+			if (!inPlace(importer, target) && requirable(target)) addToFacade(groupOf.get(target)!, target);
 		}
 	}
 	// A group that statically imports or requires another group's modules imports that group's facade,
 	// which lists those modules too. Bun then sees that loading the group loads the other, and keeps
-	// each group's code in its own script instead of splitting it by every combination of importers.
+	// each group's code together instead of splitting it by every combination of importers.
 	const facadeImports = new Map<string, Set<string>>();
-	for (const [module, deps] of [...graph.deps].sort(([a], [b]) => a.localeCompare(b))) {
+	for (const module of [...graph.deps.keys()].sort()) {
 		const group = groupOf.get(module)!;
 		const roles = profile.modules[module];
-		for (const dep of deps) {
+		for (const dep of graph.deps.get(module)!) {
 			const depGroup = groupOf.get(dep)!;
-			if (depGroup === group || depGroup === entryGroup || group === entryGroup || !modulePath(dep)) continue;
-			// Text, Markdown, and other assets load with their import's attributes; `require`d from a
-			// facade they would load a second time under the default loader (Markdown as HTML).
-			if (!SCRIPT_MODULE.test(dep)) continue;
+			if (depGroup === group || depGroup === entryGroup || group === entryGroup || !requirable(dep)) continue;
 			// The metafile keeps imports the transpiler drops (type-only uses) and `require`s that never
 			// ran. When the profile shows a role ran the importer without loading the dependency, the edge
 			// would only tie groups together, eventually into one script.
@@ -267,34 +313,44 @@ export function groupedChunksPlugins(
 	function rewrite(importer: string, text: string, loader: Bun.JavaScriptLoader): string {
 		const imports = graph.dynamicImports.get(importer);
 		if (!imports) return text;
-		const replacements = new Map<string, string>();
-		for (const [specifier, target] of imports) {
-			const file = modulePath(target);
-			if (!file) continue;
-			const group = groupOf.get(target)!;
-			// The resolved path: a package's `exports` may offer no `require` condition.
-			replacements.set(
-				specifier,
-				inPlace(importer, target)
-					? `Promise.resolve().then(() => require(${JSON.stringify(file)}))`
-					: `import(${JSON.stringify(`${FACADE_NAMESPACE}:${group}`)}).then(group => group.modules[${facadeIndex.get(target)}]())`,
-			);
-		}
 		// The transpiler rejects a shebang; as a comment it keeps line numbers, and `bundleDist`
 		// restores cli.js's own.
 		const source = text.startsWith("#!") ? `//${text.slice(2)}` : text;
-		// Rewrite a specifier only where every textual `import("…")` of it is a real dynamic import
-		// (not inside a string or comment); the rest stay ordinary split points.
-		const real = new Map<string, number>();
-		for (const record of new Bun.Transpiler({ loader }).scanImports(source)) {
-			if (record.kind === "dynamic-import") real.set(record.path, (real.get(record.path) ?? 0) + 1);
-		}
-		const textual = new Map<string, number>();
-		for (const match of source.matchAll(DYNAMIC_IMPORT)) textual.set(match[2], (textual.get(match[2]) ?? 0) + 1);
-		return source.replace(DYNAMIC_IMPORT, (call, _quote, specifier: string) => {
-			const replacement = replacements.get(specifier);
-			return replacement !== undefined && textual.get(specifier) === real.get(specifier) ? replacement : call;
+		const calls = [...source.matchAll(DYNAMIC_IMPORT)].map(match => {
+			const target = imports.get(stringLiteralValue(match[1]) ?? "");
+			return { match, target: target !== undefined && requirable(target) ? target : undefined };
 		});
+		if (!calls.some(call => call.target)) return source;
+		// Text that only looks like a call (inside a string, template, or comment) must stay as it is:
+		// give every candidate a probe specifier and keep those the parser reports as real imports.
+		let probed = "";
+		let end = 0;
+		calls.forEach(({ match, target }, index) => {
+			if (!target) return;
+			const quote = match[1][0];
+			probed += `${source.slice(end, match.index)}import(${quote}${PROBE_SPECIFIER}${index}${quote})`;
+			end = match.index + match[0].length;
+		});
+		probed += source.slice(end);
+		const real = new Set(
+			new Bun.Transpiler({ loader })
+				.scanImports(probed)
+				.filter(record => record.kind === "dynamic-import")
+				.map(record => record.path),
+		);
+		let rewritten = "";
+		end = 0;
+		calls.forEach(({ match, target }, index) => {
+			if (!target || !real.has(`${PROBE_SPECIFIER}${index}`)) return;
+			const group = groupOf.get(target)!;
+			// The resolved path: a package's `exports` may offer no `require` condition.
+			const load = inPlace(importer, target)
+				? `Promise.resolve().then(() => require(${JSON.stringify(modulePath(target))}))`
+				: `import(${JSON.stringify(`${FACADE_NAMESPACE}:${group}`)}).then(group => group.modules[${facadeIndex.get(target)}]())`;
+			rewritten += source.slice(end, match.index) + load;
+			end = match.index + match[0].length;
+		});
+		return rewritten + source.slice(end);
 	}
 
 	const wrapped = config.plugins.map((plugin): Bun.BunPlugin => ({
@@ -337,7 +393,7 @@ export function groupedChunksPlugins(
 				);
 				return { contents: `${imports.join("")}export const modules = [\n${modules.join("")}];\n`, loader: "js" };
 			});
-			build.onLoad({ filter: SCRIPT_MODULE }, async args => {
+			build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async args => {
 				const importer = bundleModuleKey(args.path);
 				if (!graph.dynamicImports.has(importer)) return undefined;
 				const loader = loaderFor(args.path);
@@ -346,4 +402,48 @@ export function groupedChunksPlugins(
 		},
 	};
 	return [...wrapped, grouping];
+}
+
+/** Modules Bun reported awaiting at their top level when a `require` reached them. */
+function topLevelAwaitModules(logs: Bun.BuildOutput["logs"]): string[] {
+	return logs.flatMap(log => {
+		if (!log.message.includes("contains a top-level await")) return [];
+		// Bun's typings omit `notes`; the last one points at the await itself.
+		const { notes } = log as unknown as { notes?: { position?: { file?: string } | null }[] };
+		const file = notes?.at(-1)?.position?.file;
+		return file ? [bundleModuleKey(file)] : [];
+	});
+}
+
+/**
+ * Builds `config` code-split by the groups planned from its own module graph and `profile`. The module
+ * graph comes from the same build split at every `import()` and `require()`, kept in memory. Failed
+ * builds are returned for the caller to report.
+ */
+export async function buildGroupedBundle(
+	config: GroupableBuildConfig,
+	profile: BundleProfile,
+): Promise<Bun.BuildOutput> {
+	const { outdir: _outdir, ...inMemory } = config;
+	const graphBuild = await Bun.build({ ...inMemory, splitting: true, metafile: true, throw: false });
+	if (!graphBuild.success || !graphBuild.metafile) return graphBuild;
+	const graph = readModuleGraph(graphBuild.metafile);
+	const groupOf = planGroups(graph, profile);
+	const topLevelAwait = new Set<string>();
+	for (;;) {
+		const output = await Bun.build({
+			...config,
+			plugins: groupedChunksPlugins({ graph, groupOf, profile, config, topLevelAwait }),
+			splitting: true,
+			// Same-group import()s become require()s, which must stay in their group's script.
+			splitRequire: false,
+			throw: false,
+		});
+		// Each build that fails this way names more such modules; their import()s stay native.
+		const found = output.success
+			? []
+			: topLevelAwaitModules(output.logs).filter(module => !topLevelAwait.has(module));
+		if (found.length === 0) return output;
+		for (const module of found) topLevelAwait.add(module);
+	}
 }

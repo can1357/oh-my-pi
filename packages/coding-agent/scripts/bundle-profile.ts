@@ -13,30 +13,48 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type BundleProfile, bundleModuleKey, profilePath } from "./bundle-groups";
-import { cliBuildConfig } from "./bundle-dist";
+import { isEnoent } from "@oh-my-pi/pi-utils";
+import { chunkNaming, cliBuildConfig, withEmbeddedStatsDashboard } from "./bundle-dist";
+import { bundleModuleKey, profilePath } from "./bundle-groups";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 
 /** Role of the main thread when no `__omp_worker_*` selector is present. */
 const MAIN_ROLE = "session";
+/** Script name → module keys of a profile build; also marks a directory `build` may replace. */
+const SCRIPTS_FILE = "profile-scripts.json";
 
 // Self-contained per script: chunks evaluate before the entry, so nothing can be shared through cli.js.
 const tracer = `(globalThis.__ompBundleTrace??=(()=>{const f=process.env.OMP_BUNDLE_TRACE;if(!f)return()=>{};const fs=import.meta.require("node:fs");const t=import.meta.require("node:worker_threads").threadId;const r=process.argv.find(a=>a.startsWith("__omp_worker_"))?.slice(13)??${JSON.stringify(MAIN_ROLE)};return n=>{try{fs.appendFileSync(f,process.pid+"\\t"+t+"\\t"+r+"\\t"+n+"\\n")}catch{}}})())`;
 
 async function build(dir: string): Promise<void> {
+	let existing: string[] = [];
+	try {
+		existing = await fs.readdir(dir);
+	} catch (err) {
+		if (!isEnoent(err)) throw err;
+	}
+	if (existing.length > 0 && !existing.includes(SCRIPTS_FILE)) {
+		throw new Error(`${dir} is not empty and holds no previous profile build; pass a new or empty directory`);
+	}
 	await fs.rm(dir, { recursive: true, force: true });
-	const docsPayload = await buildDocsIndexPayload();
-	const output = await Bun.build({
-		...(await cliBuildConfig(docsPayload.payload)),
-		outdir: dir,
-		splitting: true,
-		naming: { entry: "cli.js", chunk: "cli-[name]-[hash].[ext]" },
-		metafile: true,
+	const output = await withEmbeddedStatsDashboard(async () => {
+		const docsPayload = await buildDocsIndexPayload();
+		return Bun.build({
+			...(await cliBuildConfig(docsPayload.payload)),
+			outdir: dir,
+			splitting: true,
+			naming: { entry: "cli.js", chunk: chunkNaming },
+			metafile: true,
+		});
 	});
 	if (!output.success || !output.metafile) {
 		throw new Error(`Profile build failed:\n${output.logs.map(log => log.message).join("\n")}`);
 	}
-	let scripts = 0;
+	// Module keys are resolved now: metafile paths are relative to this process's working directory.
+	const modulesOfScript: Record<string, string[]> = {};
+	for (const [script, info] of Object.entries(output.metafile.outputs)) {
+		modulesOfScript[path.basename(script)] = Object.keys(info.inputs).map(bundleModuleKey);
+	}
 	for (const artifact of output.outputs) {
 		if (artifact.kind !== "entry-point" && artifact.kind !== "chunk") continue;
 		const name = path.basename(artifact.path);
@@ -46,24 +64,19 @@ async function build(dir: string): Promise<void> {
 		while (at < lines.length && (lines[at].startsWith("#!") || lines[at].startsWith("//"))) at++;
 		lines.splice(at, 0, `${tracer}(${JSON.stringify(name)});`);
 		await Bun.write(artifact.path, lines.join("\n"));
-		scripts++;
 	}
-	await Bun.write(path.join(dir, "metafile.json"), JSON.stringify(output.metafile));
-	process.stdout.write(`Profile build: ${scripts} scripts in ${dir}\n`);
+	await Bun.write(path.join(dir, SCRIPTS_FILE), JSON.stringify(modulesOfScript));
+	process.stdout.write(`Profile build: ${Object.keys(modulesOfScript).length} scripts in ${dir}\n`);
 }
 
 async function collect(dir: string, traceFiles: string[]): Promise<void> {
-	const metafile: Bun.BuildMetafile = await Bun.file(path.join(dir, "metafile.json")).json();
-	const modulesOfScript = new Map<string, string[]>();
-	for (const [output, info] of Object.entries(metafile.outputs)) {
-		modulesOfScript.set(path.basename(output), Object.keys(info.inputs).map(bundleModuleKey));
-	}
+	const modulesOfScript: Record<string, string[]> = await Bun.file(path.join(dir, SCRIPTS_FILE)).json();
 	const rolesOfModule = new Map<string, Set<string>>();
 	for (const file of traceFiles) {
 		for (const line of (await Bun.file(file).text()).split("\n")) {
 			const [, , role, script] = line.split("\t");
 			if (!script) continue;
-			const modules = modulesOfScript.get(script);
+			const modules = modulesOfScript[script];
 			if (!modules) throw new Error(`${file}: ${script} is not a script of the build in ${dir}`);
 			for (const module of modules) {
 				let roles = rolesOfModule.get(module);
@@ -73,13 +86,12 @@ async function collect(dir: string, traceFiles: string[]): Promise<void> {
 		}
 	}
 	// One line per module keeps regenerated profiles reviewable as diffs.
-	const lines = [...rolesOfModule]
-		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-		.map(([module, roles]) => `\t\t${JSON.stringify(module)}: ${JSON.stringify([...roles].sort())}`);
+	const lines = [...rolesOfModule.keys()]
+		.sort()
+		.map(module => `\t\t${JSON.stringify(module)}: ${JSON.stringify([...rolesOfModule.get(module)!].sort())}`);
 	await Bun.write(profilePath, `{\n\t"modules": {\n${lines.join(",\n")}\n\t}\n}\n`);
-	const profile: BundleProfile = await Bun.file(profilePath).json();
 	const perRole = new Map<string, number>();
-	for (const roles of Object.values(profile.modules))
+	for (const roles of rolesOfModule.values())
 		for (const role of roles) perRole.set(role, (perRole.get(role) ?? 0) + 1);
 	process.stdout.write(
 		`Wrote ${profilePath}: ${[...perRole].map(([role, count]) => `${role} ${count}`).join(", ")} modules\n`,

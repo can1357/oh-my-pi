@@ -7,12 +7,12 @@ import { embeddedRelayExtensionFiles } from "./embed-relay-extension";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
-import { type BundleProfile, groupedChunksPlugins, planGroups, profilePath, readModuleGraph } from "./bundle-groups";
+import { buildGroupedBundle, profilePath } from "./bundle-groups";
 
 const packageDir = path.join(import.meta.dir, "..");
 const defaultOutDir = path.join(packageDir, "dist");
 // Chunks sit flat beside cli.js, so `import.meta.dir` stays `dist/` and chunk-relative asset URLs resolve.
-const chunkNaming = "cli-[name]-[hash].[ext]";
+export const chunkNaming = "cli-[name]-[hash].[ext]";
 const chunkPattern = /^cli-.+\.js$/;
 const shebang = "#!/usr/bin/env bun\n";
 // Remove old inline-viewer sidecars left in an existing output directory.
@@ -53,6 +53,20 @@ async function runCommand(command: string[]): Promise<void> {
 	});
 	const exitCode = await proc.exited;
 	if (exitCode !== 0) throw new Error(`Command failed with exit code ${exitCode}: ${command.join(" ")}`);
+}
+
+/**
+ * Runs `build` with the stats dashboard archive generated: the npm bundle ships no dashboard sources, so
+ * it embeds the archive the same way compiled binaries do (scripts/build-binary.ts). Resets the
+ * checked-in placeholder afterwards.
+ */
+export async function withEmbeddedStatsDashboard<T>(build: () => Promise<T>): Promise<T> {
+	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
+	try {
+		return await build();
+	} finally {
+		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
+	}
 }
 
 async function ensureShebang(cliPath: string): Promise<void> {
@@ -123,46 +137,29 @@ export async function cliBuildConfig(docsEmbed: string) {
 
 /**
  * Builds the npm CLI bundle into `outDir`; release scripts use the package `dist` directory by default.
- * The bundle is code-split into one script per module group (see `scripts/bundle-groups.ts`).
+ * The bundle is code-split with modules grouped by the processes that load them (see
+ * `scripts/bundle-groups.ts`).
  */
 export async function bundleDist(outDir: string = defaultOutDir): Promise<void> {
 	const cliPath = path.join(outDir, "cli.js");
 	const start = Bun.nanoseconds();
 	await cleanBundleOutputs(outDir);
-	// The npm bundle ships no stats dashboard sources, so embed the dashboard
-	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
-	// afterwards to keep the checked-in placeholder empty.
-	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
-	// One payload for both consumers: inlined into the CLI bundle via `define` for
-	// the bundled CLI entrypoint, and written to dist/docs-index.generated.txt so
-	// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no
-	// build-time embed) can still resolve omp:// docs (see src/internal-urls/docs-index.ts).
 	let scripts = 0;
 	let scriptBytes = 0;
-	try {
+	await withEmbeddedStatsDashboard(async () => {
+		// One payload for both consumers: inlined into the CLI bundle via `define` for
+		// the bundled CLI entrypoint, and written to dist/docs-index.generated.txt so
+		// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no
+		// build-time embed) can still resolve omp:// docs (see src/internal-urls/docs-index.ts).
 		const docsPayload = await buildDocsIndexPayload();
-		const config = await cliBuildConfig(docsPayload.payload);
-		// The module graph comes from the same build split at every import() and require(), kept in memory.
-		const graphBuild = await Bun.build({
-			...config,
-			splitting: true,
-			naming: { entry: "cli.js", chunk: chunkNaming },
-			metafile: true,
-		});
-		if (!graphBuild.success || !graphBuild.metafile) {
-			throw new Error(`CLI bundle graph failed:\n${graphBuild.logs.map(log => log.message).join("\n")}`);
-		}
-		const graph = readModuleGraph(graphBuild.metafile);
-		const profile: BundleProfile = await Bun.file(profilePath).json();
-		const output = await Bun.build({
-			...config,
-			plugins: groupedChunksPlugins(graph, planGroups(graph, profile), profile, config),
-			outdir: outDir,
-			splitting: true,
-			// Same-group import()s become require()s, which must stay in their group's script.
-			splitRequire: false,
-			naming: { entry: "cli.js", chunk: chunkNaming },
-		});
+		const output = await buildGroupedBundle(
+			{
+				...(await cliBuildConfig(docsPayload.payload)),
+				outdir: outDir,
+				naming: { entry: "cli.js", chunk: chunkNaming },
+			},
+			await Bun.file(profilePath).json(),
+		);
 		if (!output.success) {
 			const messages = output.logs.map(log =>
 				log.position ? `${log.position.file}:${log.position.line}: ${log.message}` : log.message,
@@ -176,9 +173,7 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 		}
 		await ensureShebang(cliPath);
 		await Bun.write(path.join(outDir, "docs-index.generated.txt"), docsPayload.payload);
-	} finally {
-		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
-	}
+	});
 	const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 	process.stdout.write(
 		`Bundled coding-agent CLI to ${cliPath} (${scripts} scripts, ${formatBytes(scriptBytes)}) in ${elapsedMs.toFixed(0)}ms\n`,
