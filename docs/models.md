@@ -129,6 +129,19 @@ providers:
               base64SkipThoughtSignature: true
 ```
 
+`compat.streamFunctionCallArguments` (Google APIs, default `true` for Gemini 3+ on `google-vertex` except Gemini 3.1 Flash-Lite; `false` elsewhere): requests Vertex AI's incremental `partialArgs` function-call argument streaming (`toolConfig.functionCallingConfig.streamFunctionCallArguments: true`) and assembles fragments into live `toolcall_delta` events. The public Gemini Developer API does not support this field, so set it explicitly on custom `google-generative-ai` providers backed by a Vertex AI proxy (or set `false` on a `google-vertex` model to disable it):
+
+```yaml
+providers:
+   my-vertex-proxy:
+      baseUrl: https://gateway.example.com/gemini/v1beta
+      api: google-generative-ai
+      models:
+         - id: gemini-4-neon
+           compat:
+              streamFunctionCallArguments: true
+```
+
 ### Standard Responses WebSockets
 
 Standard Responses uses HTTP/SSE by default, including at the official OpenAI

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Vertex AI Gemini 3+ tool calls (excluding Gemini 3.1 Flash-Lite) and `google-generative-ai` models with `compat.streamFunctionCallArguments: true` now stream function-call arguments incrementally via `streamFunctionCallArguments` / `partialArgs`, enabling live edit/write previews during generation ([#19876](https://github.com/can1357/oh-my-pi/pull/19876) by [@farnoy](https://github.com/farnoy))
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))

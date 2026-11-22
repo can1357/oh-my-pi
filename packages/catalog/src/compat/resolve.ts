@@ -1023,6 +1023,7 @@ function resolveGooglePolicy(
 		maxImagePayloadBytes: undefined,
 		// Unset keeps the bundled catalog rows byte-identical; the key must exist for `compat` overrides to apply.
 		base64SkipThoughtSignature: undefined,
+		streamFunctionCallArguments: undefined,
 	};
 	applyWireAxes(compat, axes.wire, spec.api);
 	applyCompatOverrides(compat, spec.compat);
