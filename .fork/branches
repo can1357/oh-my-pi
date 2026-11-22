@@ -16,3 +16,4 @@ fix/ai-compat-test-fixtures-fold-field
 fix/typed-text-import-declarations
 perf/startup-audit
 feat/stash-on-esc-restore
+feat/unified-find-01a20496
