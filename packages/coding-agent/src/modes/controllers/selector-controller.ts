@@ -820,6 +820,13 @@ export class SelectorController {
 			this.ctx.ui.requestRender();
 		};
 		const isCurrent = () => this.#openMenus.get(menuKind) === menu;
+		// One pick per target: an Enter repeated while that pick applies is dropped, but a
+		// pick of a different model or role made meanwhile queues behind it, so a slower
+		// earlier apply can never resolve after and overwrite a newer pick; a queued pick
+		// that a newer one supersedes is dropped before it applies.
+		let pickInFlightKey: string | null = null;
+		let latestPickId = 0;
+		let pickQueue: Promise<void> = Promise.resolve();
 		const picker = new ModelPickerComponent(
 			this.ctx.ui,
 			createModelBrowserSource(this.ctx.settings, model => viewed.effectiveServiceTier(model)),
@@ -827,20 +834,44 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext, thinkingLevel }) => {
-					if (!isCurrent()) return;
+					const key = `model:${selector}:${thinkingLevel ?? ""}`;
+					if (!isCurrent() || pickInFlightKey === key) return;
+					pickInFlightKey = key;
+					const pickId = ++latestPickId;
+					const prev = pickQueue;
+					let release!: () => void;
+					pickQueue = new Promise<void>(resolve => {
+						release = resolve;
+					});
 					try {
+						await prev;
+						// A closed picker never applies, and a newer pick supersedes this one.
+						if (!isCurrent() || pickId !== latestPickId) return;
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
 						if (overContext) done();
 						await this.#applySessionModel(model, selector, thinkingLevel, overContext);
-						if (!overContext) done();
+						if (!overContext && pickId === latestPickId) done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					} finally {
+						if (pickId === latestPickId) pickInFlightKey = null;
+						release();
 					}
 				},
 				onPickRole: async entry => {
-					if (!isCurrent()) return;
+					const key = `role:${entry.role}`;
+					if (!isCurrent() || pickInFlightKey === key) return;
+					pickInFlightKey = key;
+					const pickId = ++latestPickId;
+					const prev = pickQueue;
+					let release!: () => void;
+					pickQueue = new Promise<void>(resolve => {
+						release = resolve;
+					});
 					try {
+						await prev;
+						if (!isCurrent() || pickId !== latestPickId) return;
 						await this.ctx.viewSession.applyRoleModel(entry);
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
@@ -848,9 +879,12 @@ export class SelectorController {
 							quickRoleOrder.map(role => ({ label: role })),
 							quickRoleOrder.indexOf(entry.role),
 						);
-						done();
+						if (pickId === latestPickId) done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					} finally {
+						if (pickId === latestPickId) pickInFlightKey = null;
+						release();
 					}
 				},
 				onPickTask: (_model, selector) => {
@@ -869,6 +903,10 @@ export class SelectorController {
 					viewed.setThinkingLevel(level);
 					this.ctx.statusLine.invalidate();
 					this.ctx.updateEditorBorderColor();
+				},
+				onCatalogRefreshed: async () => {
+					await this.ctx.session.refreshScopedModels();
+					return this.ctx.session.scopedModels;
 				},
 				onCancel: done,
 			},

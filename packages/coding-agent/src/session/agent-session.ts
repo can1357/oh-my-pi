@@ -414,6 +414,7 @@ import {
 	createInterruptedTurnAbortMessage,
 	hasRestorableTurn,
 	INTERRUPTED_TURN_ERROR,
+	restoreTerminatedBashJobs,
 	SESSION_EXIT_CUSTOM_TYPE,
 	type SessionExitData,
 	summarizeToolArguments,
@@ -1436,6 +1437,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#deferredExtensionLoad: Promise<void> | undefined;
 	#activeAgentContinue: ActiveAgentContinue | undefined;
 	#agentContinueSchedulerToken = 0;
+	#pendingAgentContinueCount = 0;
 
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
@@ -2631,9 +2633,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
-			// A transition swaps the transcript under the agent: hold idle deliveries until it
-			// settles, so a result from the outgoing session cannot start a turn in the target.
-			isStreaming: () => this.isStreaming || this.isSessionTransitioning,
+			// A transition swaps the transcript under the agent, and a scheduled
+			// continuation is about to claim the loop: hold idle deliveries until
+			// either settles, so an async result cannot inject a prompt ahead of it.
+			isStreaming: () => this.isStreaming || this.isSessionTransitioning || this.#pendingAgentContinueCount > 0,
 			injectIdle: async delivered => {
 				const first = delivered[0];
 				if (!first) return;
@@ -5844,88 +5847,110 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			source: options.source,
 			schedulerToken: request.schedulerToken,
 		});
+		this.#pendingAgentContinueCount++;
+		let pendingReleased = false;
+		const releasePending = (flushIfIdle: boolean): void => {
+			if (pendingReleased) return;
+			pendingReleased = true;
+			this.#pendingAgentContinueCount = Math.max(0, this.#pendingAgentContinueCount - 1);
+			if (flushIfIdle && this.#pendingAgentContinueCount === 0 && !this.isStreaming && !this.#isDisposed) {
+				this.yieldQueue.requestIdleFlush();
+			}
+		};
 		this.#schedulePostPromptTask(
 			async signal => {
-				// Foreground compaction may be replacing history or reconnecting persistence.
-				if (signal.aborted || this.#isDisposed || this.#abortInProgress || this.isCompacting) {
-					this.#skipAgentContinue("session-unavailable", request);
-					return;
-				}
-				if (options.shouldContinue && !options.shouldContinue()) {
-					this.#skipAgentContinue("should-continue-false", request);
-					return;
-				}
-
-				for (;;) {
-					const active = this.#activeAgentContinue;
-					if (!active) break;
-					if (!active.turnEnded) {
-						active.coalescedSources.add(options.source);
-						logger.debug("agent.continue coalesced after scheduling", {
-							source: options.source,
-							schedulerToken: request.schedulerToken,
-							activeSource: active.source,
-							activeSchedulerToken: active.schedulerToken,
-						});
-						this.#handleAgentContinueOutcome(await active.promise, request);
-						return;
-					}
-
-					// A request made by the active turn's agent_end is its next step,
-					// not a duplicate of that turn. Wait until it settles before starting.
-					await active.promise;
-					if (signal.aborted || this.#isDisposed || this.isCompacting) {
+				try {
+					// Foreground compaction may be replacing history or reconnecting persistence.
+					if (signal.aborted || this.#isDisposed || this.#abortInProgress || this.isCompacting) {
 						this.#skipAgentContinue("session-unavailable", request);
-						return;
-					}
-					if (options.generation !== undefined && this.#promptGeneration !== options.generation) {
-						this.#skipAgentContinue("stale-generation", request);
 						return;
 					}
 					if (options.shouldContinue && !options.shouldContinue()) {
 						this.#skipAgentContinue("should-continue-false", request);
 						return;
 					}
-				}
 
-				const inFlightEpoch = this.#beginInFlight();
-				const coalescedSources = new Set([options.source]);
-				let observation: TurnObservation | undefined;
-				const onStart = this.#ircWakeTurnObserver
-					? () => {
-							observation = this.#startTurnObservation(options.turnRecords ?? []);
+					for (;;) {
+						const active = this.#activeAgentContinue;
+						if (!active) break;
+						if (!active.turnEnded) {
+							active.coalescedSources.add(options.source);
+							logger.debug("agent.continue coalesced after scheduling", {
+								source: options.source,
+								schedulerToken: request.schedulerToken,
+								activeSource: active.source,
+								activeSchedulerToken: active.schedulerToken,
+							});
+							releasePending(false);
+							this.#handleAgentContinueOutcome(await active.promise, request);
+							return;
 						}
-					: undefined;
-				const promise = this.#runAgentContinue(signal, request, coalescedSources, onStart);
-				const attempt: ActiveAgentContinue = {
-					schedulerToken: request.schedulerToken,
-					turnEnded: false,
-					source: options.source,
-					coalescedSources,
-					promise,
-				};
-				this.#activeAgentContinue = attempt;
-				let outcome: AgentContinueOutcome | undefined;
-				try {
-					outcome = await promise;
-					this.#handleAgentContinueOutcome(outcome, request);
-				} finally {
-					// Clear the active attempt BEFORE #endInFlight(): the settle drain it
-					// triggers (#drainStrandedQueuedMessages -> queued-message-drain) runs
-					// synchronously and must start a fresh continue for messages queued
-					// after this attempt's final poll, not coalesce onto the finished one.
-					if (this.#activeAgentContinue === attempt) {
-						this.#activeAgentContinue = undefined;
+
+						// A request made by the active turn's agent_end is its next step,
+						// not a duplicate of that turn. Wait until it settles before starting.
+						await active.promise;
+						if (signal.aborted || this.#isDisposed || this.isCompacting) {
+							this.#skipAgentContinue("session-unavailable", request);
+							return;
+						}
+						if (options.generation !== undefined && this.#promptGeneration !== options.generation) {
+							this.#skipAgentContinue("stale-generation", request);
+							return;
+						}
+						if (options.shouldContinue && !options.shouldContinue()) {
+							this.#skipAgentContinue("should-continue-false", request);
+							return;
+						}
 					}
-					this.#usagePreflightReadyForNextModelCall = false;
-					this.#endInFlight(inFlightEpoch);
-					void this.#finishTurnObservation(observation, outcome?.status === "failed" ? outcome.error : undefined);
+
+					const inFlightEpoch = this.#beginInFlight();
+					releasePending(false);
+					const coalescedSources = new Set([options.source]);
+					let observation: TurnObservation | undefined;
+					const onStart = this.#ircWakeTurnObserver
+						? () => {
+								observation = this.#startTurnObservation(options.turnRecords ?? []);
+							}
+						: undefined;
+					const promise = this.#runAgentContinue(signal, request, coalescedSources, onStart);
+					const attempt: ActiveAgentContinue = {
+						schedulerToken: request.schedulerToken,
+						turnEnded: false,
+						source: options.source,
+						coalescedSources,
+						promise,
+					};
+					this.#activeAgentContinue = attempt;
+					let outcome: AgentContinueOutcome | undefined;
+					try {
+						outcome = await promise;
+						this.#handleAgentContinueOutcome(outcome, request);
+					} finally {
+						// Clear the active attempt BEFORE #endInFlight(): the settle drain it
+						// triggers (#drainStrandedQueuedMessages -> queued-message-drain) runs
+						// synchronously and must start a fresh continue for messages queued
+						// after this attempt's final poll, not coalesce onto the finished one.
+						if (this.#activeAgentContinue === attempt) {
+							this.#activeAgentContinue = undefined;
+						}
+						this.#usagePreflightReadyForNextModelCall = false;
+						this.#endInFlight(inFlightEpoch);
+						void this.#finishTurnObservation(
+							observation,
+							outcome?.status === "failed" ? outcome.error : undefined,
+						);
+					}
+				} finally {
+					releasePending(true);
 				}
 			},
 			{
 				delayMs: options.delayMs,
 				generation: options.generation,
-				onSkip: reason => this.#skipAgentContinue(reason, request),
+				onSkip: reason => {
+					releasePending(true);
+					this.#skipAgentContinue(reason, request);
+				},
 			},
 		);
 	}
@@ -14059,7 +14084,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.sessionManager.appendMessage(abort);
 			this.replaceMessagesFromSessionContext(this.buildDisplaySessionContext().messages);
 		}
-		return this.retry();
+		const restored = await this.retry();
+		if (restored && this.#asyncJobManager) {
+			restoreTerminatedBashJobs(branch, this.#asyncJobManager, this.getAgentId());
+		}
+		return restored;
 	}
 
 	// =========================================================================

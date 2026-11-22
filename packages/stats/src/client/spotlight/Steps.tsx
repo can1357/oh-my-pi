@@ -106,7 +106,7 @@ export function Steps({ stats, stale }: { stats: SpotlightDashboardStats; stale:
 				</span>
 			}
 			stale={stale}
-			footer={`Scored and score-free cuts. Kept = (saved − fetch-back beyond the tool's holdout baseline) ÷ saved; fetched back is the share of cuts the agent came back for within 12 calls. Sizes are the tokens a cut saved against plain; step combinations under 10 cuts fold into "other". Cells under ${THIN_CUTS} cuts are dimmed.`}
+			footer={`Scored and score-free cuts. Kept = (saved − fetch-back beyond the tool's holdout baseline, apart for results plain capped and shown whole) ÷ saved; fetched back is the share of cuts the agent came back for within 12 calls. Sizes are the tokens a cut saved against plain; step combinations under 10 cuts fold into "other". Cells under ${THIN_CUTS} cuts are dimmed.`}
 		>
 			{tools.length === 0 ? (
 				<div className="empty">No shortened results in this range.</div>
