@@ -8189,7 +8189,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				],
 			};
 		};
-		const initialChoices = choicesAt(startTierIndex);
+		const initialChoices = choicesAt(initialTierIndex);
 		// The overlay now owns the dynamic, focus-aware help line; the caller only
 		// supplies the trailing cancel hint.
 		const helpText = `${editorKey("tui.select.cancel")} cancel`;

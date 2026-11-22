@@ -1598,6 +1598,49 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.getPlanModeState()?.enabled).not.toBe(true);
 	});
 
+	it("measures the initial keep row against the displayed role when no target or default exists", async () => {
+		const slow = session.modelRegistry.find("anthropic", "claude-opus-4-6");
+		const smol = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!slow || !smol) throw new Error("Expected opus-4-6 and sonnet-4-5");
+		// Two roles with different windows, no plan role (no saved target) and no default.
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+		session.settings.setModelRole("smol", "anthropic/claude-sonnet-4-5");
+		cfgCycleOrder.set(session.settings, ["slow", "smol"]);
+		const planFilePath = "local://PLAN.md";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nMeasure the first role.",
+		);
+		await mode.handlePlanModeCommand();
+		const tokens = 300_000;
+		vi.spyOn(session, "getContextUsage").mockImplementation(options => {
+			const contextWindow = options?.contextWindow ?? 0;
+			return { tokens, contextWindow, percent: (tokens / contextWindow) * 100 };
+		});
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		let keepMeta: string | undefined;
+		let shownIndex: number | undefined;
+		let shownLabels: string[] = [];
+		vi.spyOn(mode, "showPlanReview").mockImplementation(
+			async (_planContent, _title, choices, _dialogOptions, extra?: { slider?: HookSelectorSlider }) => {
+				keepMeta = choices.find(choice => choice.id === "keep")?.meta;
+				shownIndex = extra?.slider?.index;
+				shownLabels = extra?.slider?.segments.map(segment => segment.label) ?? [];
+				return "keep";
+			},
+		);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		// The slider starts at the normalized index 0 (slow, 1m), not the live model.
+		expect(shownLabels).toEqual(["slow", "smol"]);
+		expect(shownIndex).toBe(0);
+		expect(keepMeta).toBe(`~${compactNumber(300_000)} / ${compactNumber(1_000_000)}`);
+	});
+
 	it("judges a remote keep-context approval against the tier it names", async () => {
 		const planFilePath = await openTieredPlanReview();
 		const answers: boolean[] = [];
