@@ -5556,6 +5556,10 @@ export class SessionMaintenance {
 		let method: CompactionMethod | undefined = bridgeSpec?.method;
 		for (let index = startIndex; !bridgeSpec && index < methods.length; index++) {
 			const candidate = methods[index];
+			// A failed auto-shake restarts the scan from the top of the configured
+			// order (#19603); skipping shake here keeps that restart from selecting
+			// the method that just failed and looping forever.
+			if (candidate === "shake" && options.fallbackFromShake === true) continue;
 			if (
 				!isCompactionMethodUsable(
 					candidate,
@@ -5614,8 +5618,8 @@ export class SessionMaintenance {
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;
 		// Shake runs inline (cheap, no remote LLM). If it cannot recover enough
-		// context, resume from the next configured method instead of hardcoding a
-		// context-full summary.
+		// context, restart the method-order scan from the top (#19603) instead of
+		// hardcoding a context-full summary or skipping straight to the last method.
 		if (method === "shake" && !armedSpec) {
 			const outcome = await this.#runAutoShake(
 				reason,
@@ -5628,9 +5632,15 @@ export class SessionMaintenance {
 				options.detachPostCommit === true,
 			);
 			if (outcome !== "fallback") return outcome;
+			// A failed auto-shake restarts the scan from the top of the configured
+			// order (#19603) instead of resuming past it: methods earlier in the
+			// order were skipped for conditions (a failed native speculation, media
+			// exclusion) that may no longer hold, so the preferred summarizing
+			// method gets its shot before the portable soft summary. `shake` is
+			// skipped on the restart so this cannot loop.
 			return await this.runAutoCompaction(reason, willRetry, {
 				...options,
-				methodIndex: methodIndex + 1,
+				methodIndex: 0,
 				fallbackFromShake: true,
 			});
 		}
@@ -6798,8 +6808,9 @@ export class SessionMaintenance {
 	 * runs {@link shake} inline against the protect-window config, and schedules
 	 * continuation exactly like the context-full tail.
 	 *
-	 * Returns `"fallback"` when the caller should advance to the next configured
-	 * method; returns a check result when shake handled the maintenance itself.
+	 * Returns `"fallback"` when the caller should restart the method-order scan
+	 * from the top (skipping shake, #19603); returns a check result when shake
+	 * handled the maintenance itself.
 	 */
 	async #runAutoShake(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
@@ -6839,7 +6850,7 @@ export class SessionMaintenance {
 			// new to drop on the second pass, so the loop spins until the user kills it.
 			// Same hazard for "incomplete" (the retry would re-hit the length cap) and
 			// for the existing "overflow + nothing reclaimed" case. In every recovery
-			// reason we advance to the next preferred method so the situation actually
+			// reason we restart the method order from the top so the situation actually
 			// resolves; "idle" is exempt because its 60s+ timer re-checks usage before
 			// re-firing and cannot dead-loop on its own.
 			//
@@ -6870,8 +6881,8 @@ export class SessionMaintenance {
 			const shouldFallBack = reason !== "idle" && ((reason === "overflow" && !reclaimed) || stillOverThreshold);
 			if (shouldFallBack) {
 				const errorMessage = reclaimed
-					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
-					: "Auto-shake found nothing eligible to drop; trying the next preferred compaction method.";
+					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; restarting from the top of the preferred compaction methods.`
+					: "Auto-shake found nothing eligible to drop; restarting from the top of the preferred compaction methods.";
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",

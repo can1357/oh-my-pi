@@ -25,6 +25,7 @@ import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-type
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import {
+	cfgCompactionAsyncEnabled,
 	cfgCompactionDropUseless,
 	cfgCompactionKeepRecentTokens,
 	cfgCompactionMethodOrder,
@@ -1109,6 +1110,52 @@ describe("AgentSession shake", () => {
 			expect(end[0]).toMatchObject({ type: "auto_compaction_end", action: "shake" });
 		});
 
+		it("restarts the method order from the top after a failed auto-shake (#19603)", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["handoff", "shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
+			cfgCompactionAsyncEnabled.set(session.settings, false);
+
+			// First handoff pass returns no document; shake has nothing eligible to
+			// drop; the restarted scan retries handoff from the top and commits it
+			// instead of falling straight through to soft.
+			const handoffSpy = vi
+				.spyOn(compactionModule, "generateHandoffFromContext")
+				.mockResolvedValueOnce(null as never)
+				.mockResolvedValue("## Goal\nContinue from here");
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+
+			sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1 });
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_000,
+					output: 1_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(handoffSpy).toHaveBeenCalledTimes(2);
+			const compactions = sessionManager.getEntries().filter(entry => entry.type === "compaction");
+			expect(compactions).toHaveLength(1);
+			expect(compactions[0]).toMatchObject({ type: "compaction", method: "handoff" });
+			const ends = events.filter(event => event.type === "auto_compaction_end");
+			expect(ends.at(-1)).toMatchObject({ type: "auto_compaction_end", action: "handoff", aborted: false });
+		});
+
 		it("keeps a successful overflow shake recovery committed before retrying", async () => {
 			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
 			cfgContextPromotionEnabled.set(session.settings, false);
@@ -1319,7 +1366,7 @@ describe("AgentSession shake", () => {
 				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
 			) as { errorMessage?: string; skipped?: boolean } | undefined;
 			expect(shakeEnd).toBeDefined();
-			expect(shakeEnd?.errorMessage).toMatch(/trying the next preferred compaction method/i);
+			expect(shakeEnd?.errorMessage).toMatch(/restarting from the top of the preferred compaction methods/i);
 
 			// Fallback enters the context-full path so the situation actually resolves.
 			const fullStart = events.find(
@@ -1371,7 +1418,7 @@ describe("AgentSession shake", () => {
 				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
 			) as { errorMessage?: string; skipped?: boolean } | undefined;
 			expect(shakeEnd).toBeDefined();
-			expect(shakeEnd?.errorMessage).toMatch(/trying the next preferred compaction method/i);
+			expect(shakeEnd?.errorMessage).toMatch(/restarting from the top of the preferred compaction methods/i);
 
 			const fullStart = events.find(
 				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
