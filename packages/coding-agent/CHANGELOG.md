@@ -19,6 +19,7 @@
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 - Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
+- Fixed ephemeral side turns (for example `/btw` follow-ups) deep-cloning the caller's whole history with `structuredClone` on every turn: it is now detached at message and content-block level, so the cost no longer grows with the bytes in a long side thread; nested objects inside a block, such as tool-call arguments, are shared with the caller ([#16659](https://github.com/can1357/oh-my-pi/pull/16659) by [@Komzpa](https://github.com/Komzpa))
 
 ## [19.1.0] - 2026-11-21
 
