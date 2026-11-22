@@ -133,6 +133,38 @@ describe("fileViews", () => {
 		expect(fileViews(long, named, 4000).map(view => view.partial)).toEqual([true]);
 		expect(fileViews(long, "Tidy up the error handling.", 4000)).toEqual([]);
 	});
+	it("locates qualified method names and ln references, merges tiny gaps, and bounds blocks accurately", () => {
+		const lines = Array.from({ length: 260 }, (_, i) => `\tlet v${i} = ${i};`);
+		lines[0] = "impl Line {";
+		lines[120] = "\tfn blank() {";
+		lines[121] = "\t\treturn 0;";
+		lines[122] = "\t}";
+		lines[259] = "}";
+		const content = lines.join("\n");
+		// Qualified Rust method (`Line::blank`) and `ln` reference both locate their middle-of-file regions;
+		// two `ln` hits 30 lines apart leave a 5-line gap between their 12-line contexts, which merges seamlessly.
+		const [excerpt] = fileViews(content, "In `Line::blank`, ln 150, and ln 180, update body.");
+		expect(excerpt.partial).toBe(true);
+		expect(excerpt.text).toContain("121-123\t\tfn blank() {");
+		expect(excerpt.text).toContain("\n150\t");
+		expect(excerpt.text).toContain("\n180\t");
+		expect(excerpt.text).toContain("\n165\t");
+		const gaps = excerpt.text.split("\n").filter(line => line.startsWith("⋮"));
+		expect(gaps).toHaveLength(2);
+		for (const gap of gaps) {
+			const match = /lines (\d+)-(\d+) not shown/.exec(gap);
+			if (match) expect(Number(match[2]) - Number(match[1]) + 1).toBeGreaterThan(8);
+		}
+		// A closing brace followed by a misplaced indented block never opens a block span.
+		const closing = "function a() {\n\treturn 1;\n}\n\n\tfunction misplaced() {\n\t\treturn 2;\n\t}\n";
+		const [numbered] = fileViews(closing, "described change");
+		expect(numbered.text).not.toMatch(/^3-\d+\t\}/m);
+		expect(numbered.text).toContain("\n3\t}\n");
+		// A multi-line header whose `{` is on its own line spans through its closing `}`.
+		const multiline = "if cond\n  || cond2\n{\n  body;\n}\n";
+		const [ml] = fileViews(multiline, "described change");
+		expect(ml.text).toContain("1-5\tif cond");
+	});
 });
 
 describe("compileLineEdits", () => {
@@ -253,6 +285,36 @@ describe("compileLineEdits", () => {
 		expect(after(long, '["delete",100,100]', { change })).toContain("not shown");
 		expect(after(long, '["sub",244,"- 30","+ 30"]', { change })).toBe(long.replace("doubled - 30;", "doubled + 30;"));
 	});
+
+	it("allows multiline sub replacements, ignores no-op subs, and shifts substituted lines", () => {
+		expect(after(SOURCE, '["sub",2,"sum = 0;","sum = 0;\\n\\tlet count = 0;"]')).toBe(
+			SOURCE.replace("let sum = 0;", "let sum = 0;\n\tlet count = 0;"),
+		);
+		const noop =
+			'["sub",3,"for (const item of items) {","for (const item of items) {"]\n["replace",3,5,"\\treturn items.length;"]';
+		expect(after(SOURCE, noop)).not.toContain("problem:");
+		expect(after(SOURCE, '["indent",2,2,2]\n["sub",2,"sum = 0","sum = 1"]')).toBe(
+			SOURCE.replace("\tlet sum = 0;", "  \tlet sum = 1;"),
+		);
+		expect(after(SOURCE, '["sub",2,"sum = 0;\\n\\tfor","x"]')).toContain("problem:");
+	});
+
+	it("does not collide on carried blank separators between neighbouring deletes or inserts", () => {
+		expect(after(THREE, '["delete",5,7]\n["delete",9,11]')).toBe(fn("a", 1));
+		expect(after(THREE, '["insert","after",8,"function d() {\\n  return 4;\\n}"]\n["delete",9,11]')).toBe(
+			`${fn("a", 1)}\n${fn("b", 2)}\n${fn("d", 4)}`,
+		);
+	});
+
+	it("reports multiple per-operation problems at once and names colliding operations", () => {
+		const two = after(SOURCE, '["sub",2,"missing1","x"]\n["sub",7,"missing2","y"]');
+		expect(two).toContain("Operation 1");
+		expect(two).toContain("Operation 2");
+		const collide = after(SOURCE, '["delete",3,5]\n["replace",4,4,"x"]');
+		expect(collide).toContain("Operation 1");
+		expect(collide).toContain("Operation 2");
+		expect(collide).toContain("same lines");
+	});
 });
 
 describe("applyDescribedChange", () => {
@@ -370,6 +432,51 @@ describe("applyDescribedChange", () => {
 		await outcome;
 		expect(requests[0]).toContain("2\t\tlet sum = 0;\n3-5\t\tfor (const item of items) {\n4\t\t\tsum += item;");
 		dispose();
+	});
+
+	it("pinpoints the syntax-breaking operation with boundary context, ignoring valid unwrap pairs", async () => {
+		const wrapped = "start();\nif (ready) {\n  first();\n\n  second();\n}\nend();\n";
+		const bad = '["delete",2,2]\n["dedent",3,5,2]\n["delete",6,6]\n["insert","before",1,"if (broken {"]';
+		const good = '["delete",2,2]\n["dedent",3,5,2]\n["delete",6,6]';
+		const { outcome, requests, dispose } = await run([bad, good], wrapped);
+		await outcome;
+		expect(requests).toHaveLength(2);
+		expect(requests[1]).toContain("Operation 4");
+		expect(requests[1]).toContain("+ if (broken {");
+		expect(requests[1]).toContain("1\tstart();");
+		expect(requests[1]).not.toContain("Operation 1");
+		expect(requests[1]).not.toContain("Operation 3");
+		expect(requests[1]).not.toContain("so a range cuts a block in two");
+		dispose();
+	});
+
+	it("does not spend a correction attempt when widening after an excerpt refusal", async () => {
+		const { outcome, requests, read, dispose } = await run(
+			["CANNOT: omitted", '["sub",244,"missing1","x"]', '["sub",244,"missing2","x"]', '["sub",244,"- 30","+ 30"]'],
+			longSource(50),
+			"In `step30()`, replace `return doubled - 30;` with `return doubled + 30;`.",
+		);
+		await outcome;
+		expect(requests).toHaveLength(4);
+		expect(await read()).toContain("\t\treturn doubled + 30;\n");
+		dispose();
+	});
+
+	it("does not re-doubt a confirmed range when another op changes, and never doubts moving a closing brace", async () => {
+		const first = '["delete",3,6]\n["sub",7,"sum","sum + 1"]';
+		const second = '["delete",3,6]\n["sub",7,"sum","sum + 2"]';
+		const { outcome, requests, read, dispose } = await run([first, second]);
+		await outcome;
+		expect(requests).toHaveLength(2);
+		expect(requests[1]).toContain("ends on line 5");
+		expect(await read()).toContain("return sum + 2;");
+		dispose();
+		const brace = "function a() {\n\treturn 1;\n}\n\n\tfunction misplaced() {\n\t\treturn 2;\n\t}\n";
+		const moved = await run(['["move",3,3,"after",7]'], brace);
+		await moved.outcome;
+		expect(moved.requests).toHaveLength(1);
+		expect(await moved.read()).not.toContain("\treturn 1;\n}\n");
+		moved.dispose();
 	});
 });
 
