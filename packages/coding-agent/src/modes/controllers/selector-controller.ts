@@ -25,6 +25,7 @@ import {
 	formatModelPresetSwitch,
 	isCleanModelPresetSwitch,
 	modelPresetSavedMessage,
+	roleModelCandidates,
 	saveModelPreset,
 } from "../../config/model-presets";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
@@ -1040,16 +1041,10 @@ export class SelectorController {
 								fallbackProvenance === "project" || fallbackProvenance === "global";
 							if (fallbackRoleValue && exposesPersistedFallback) {
 								const session = this.ctx.session;
-								// A settings-derived scope can be stale after this role edit.
-								const explicitScope = session.scopedModelsFromSettings ? [] : session.scopedModels;
-								const availableModels =
-									explicitScope.length > 0
-										? explicitScope.map(entry => entry.model)
-										: session.getAvailableModels();
-								const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
+								const resolved = resolveModelRoleValue(fallbackRoleValue, roleModelCandidates(session), {
 									settings: this.ctx.settings,
 								});
-								const live = this.ctx.session.model;
+								const live = session.model;
 								const liveDiffers =
 									!live ||
 									!resolved.model ||

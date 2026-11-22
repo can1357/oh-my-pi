@@ -18,12 +18,8 @@ import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLev
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { cfgDefaultThinkingLevel } from "../session/settings";
-import {
-	filterAvailableModelsByEnabledPatterns,
-	pickDefaultAvailableModel,
-	resolveModelRoleValue,
-} from "./model-resolver";
-import { cfgEnabledModels, cfgModelPresets, type ModelPreset } from "./model-settings";
+import { pickDefaultAvailableModel, resolveModelRoleValue } from "./model-resolver";
+import { cfgModelPresets, type ModelPreset } from "./model-settings";
 import type { Settings, SettingProvenance } from "./settings";
 
 /** Preset names: a letter, then letters, digits, `-` or `_` (the model hub's role-name rule). */
@@ -212,12 +208,29 @@ export type ModelPresetSwitchResult =
 
 export type ModelPresetSession = Pick<
 	AgentSession,
-	"setModel" | "setThinkingLevel" | "getAvailableModels" | "scopedModels" | "modelRegistry"
-> &
-	(
-		| { scopedModelsFromSettings?: false; refreshScopedModels?: AgentSession["refreshScopedModels"] }
-		| Pick<AgentSession, "scopedModelsFromSettings" | "refreshScopedModels">
-	);
+	| "setModel"
+	| "setThinkingLevel"
+	| "getAvailableModels"
+	| "scopedModels"
+	| "scopedModelsFromSettings"
+	| "refreshScopedModels"
+	| "modelRegistry"
+>;
+
+/**
+ * Models a role assignment may resolve to: an explicit session scope (`--models`), else the `enabledModels`
+ * allowlist with role aliases read through `roleLookup`, else every available model. A scope derived from
+ * `enabledModels` is skipped because a role change can outdate it.
+ */
+export function roleModelCandidates(
+	session: Pick<ModelPresetSession, "getAvailableModels" | "scopedModels" | "scopedModelsFromSettings">,
+	roleLookup?: ModelRoleLookup,
+): Model[] {
+	if (!session.scopedModelsFromSettings && session.scopedModels.length > 0) {
+		return session.scopedModels.map(entry => entry.model);
+	}
+	return session.getAvailableModels(roleLookup);
+}
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -316,20 +329,7 @@ async function applyModelPresetLocked(
 	const roleLookup: ModelRoleLookup = {
 		getModelRole: role => (Object.hasOwn(effectiveRoles, role) ? effectiveRoles[role] : undefined),
 	};
-	const enabled = cfgEnabledModels.get(settings);
-	// Only the explicit session scope is authoritative; enabledModels aliases may change with the preset.
-	const scoped = session.scopedModelsFromSettings ? [] : session.scopedModels;
-	const candidates =
-		scoped.length > 0
-			? scoped.map(entry => entry.model)
-			: enabled.length > 0
-				? filterAvailableModelsByEnabledPatterns(
-						session.modelRegistry.getAvailable(),
-						enabled,
-						settings,
-						roleLookup,
-					)
-				: session.getAvailableModels();
+	const candidates = roleModelCandidates(session, roleLookup);
 	const options = { settings, roleLookup };
 	const presetDefault = Object.hasOwn(preset.modelRoles, "default") ? preset.modelRoles.default : undefined;
 	const effectiveDefault = roleLookup.getModelRole("default");
@@ -344,9 +344,7 @@ async function applyModelPresetLocked(
 	if (preset.defaultThinkingLevel !== undefined) {
 		cfgDefaultThinkingLevel.set(settings, preset.defaultThinkingLevel);
 	}
-	if (session.scopedModelsFromSettings && enabled.length > 0) {
-		await session.refreshScopedModels();
-	}
+	if (session.scopedModelsFromSettings) await session.refreshScopedModels();
 	const shadowed = shadowedRoles(settings, preset);
 	const thinkingShadow = shadowedThinking(settings, preset);
 	try {
