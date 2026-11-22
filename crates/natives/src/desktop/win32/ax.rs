@@ -267,19 +267,12 @@ impl Win32Ax {
 			))
 		})?;
 		let read = range.get_value().map_err(|error| {
-			DesktopError::input_failed(format!(
-				"wrote {text}, but the control's value could not be read back ({error}); inspect it \
-				 before writing again"
-			))
+			readback_error(
+				format_args!("wrote {text}"),
+				format_args!("the control's value could not be read back ({error})"),
+			)
 		})?;
-		if real_reached(value, read) {
-			Ok(())
-		} else {
-			Err(DesktopError::input_failed(format!(
-				"wrote {text}; the control now reads {read}. The app may have rounded it to a step or \
-				 not taken it: inspect it before writing again"
-			)))
-		}
+		confirm_number(text, value, read)
 	}
 
 	/// Selects the item of the selection container `element` named exactly
@@ -529,17 +522,24 @@ impl Win32Ax {
 		text: &str,
 		closed: bool,
 	) -> CoreResult<()> {
-		let automation = self.automation()?;
+		let automation = self.automation().map_err(|error| {
+			readback_error(
+				format_args!("selected {text:?}"),
+				format_args!("UI Automation was unavailable during read-back ({error})"),
+			)
+		})?;
 		let selected = selection.get_selection().map_err(|error| {
-			DesktopError::input_failed(format!(
-				"selected {text:?}, but the selection could not be read back ({error})"
-			))
+			readback_error(
+				format_args!("selected {text:?}"),
+				format_args!("the selection could not be read back ({error})"),
+			)
 		})?;
 		if let [only] = selected.as_slice() {
 			let same = automation.compare_elements(only, item).map_err(|error| {
-				DesktopError::input_failed(format!(
-					"selected {text:?}, but CompareElements failed during read-back ({error})"
-				))
+				readback_error(
+					format_args!("selected {text:?}"),
+					format_args!("CompareElements failed during read-back ({error})"),
+				)
 			})?;
 			if same {
 				return Ok(());
@@ -550,18 +550,41 @@ impl Win32Ax {
 			.map(|item| item.get_name().unwrap_or_default())
 			.collect::<Vec<_>>()
 			.join(", ");
-		if closed {
-			Err(DesktopError::ax_failed(format!(
-				"after the list closed, the selection reads [{}] instead of {text:?}; inspect it \
-				 before writing again, do not retry blindly",
-				truncate(names)
-			)))
-		} else {
-			Err(DesktopError::input_failed(format!(
-				"selected {text:?}, but the selection now reads [{}]; the app may have changed it",
-				truncate(names)
-			)))
-		}
+		Err(selection_mismatch(text, &truncate(names), closed))
+	}
+}
+
+/// A sent write whose result cannot be observed must not invite a blind retry.
+fn readback_error(
+	written: std::fmt::Arguments<'_>,
+	reason: std::fmt::Arguments<'_>,
+) -> DesktopError {
+	DesktopError::ax_unconfirmed(format!(
+		"{written} and it may have taken effect, but {reason}; inspect it before writing again"
+	))
+}
+
+fn confirm_number(text: &str, value: f64, read: f64) -> CoreResult<()> {
+	if real_reached(value, read) {
+		Ok(())
+	} else {
+		Err(DesktopError::ax_failed(format!(
+			"wrote {text}; the control now reads {read}. The app may have rounded it to a step or \
+			 not taken it: inspect it before writing again"
+		)))
+	}
+}
+
+fn selection_mismatch(text: &str, names: &str, closed: bool) -> DesktopError {
+	if closed {
+		DesktopError::ax_failed(format!(
+			"after the list closed, the selection reads [{names}] instead of {text:?}; inspect it \
+			 before writing again, do not retry blindly"
+		))
+	} else {
+		DesktopError::ax_failed(format!(
+			"selected {text:?}, but the selection now reads [{names}]; the app may have changed it"
+		))
 	}
 }
 
@@ -1220,6 +1243,41 @@ mod tests {
 		},
 		*,
 	};
+
+	#[test]
+	fn unreadable_readback_after_a_sent_write_is_unconfirmed() {
+		for (written, reason) in [
+			("wrote 75", "the control's value could not be read back"),
+			("selected \"Two\"", "UI Automation was unavailable during read-back"),
+			("selected \"Two\"", "the selection could not be read back"),
+			("selected \"Two\"", "CompareElements failed during read-back"),
+		] {
+			let error = readback_error(format_args!("{written}"), format_args!("{reason}"));
+			assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+			assert!(error.message.contains(written), "{error}");
+			assert!(error.message.contains(reason), "{error}");
+			assert!(error.message.contains("may have taken effect"), "{error}");
+		}
+	}
+
+	#[test]
+	fn a_readable_number_mismatch_after_a_write_is_failed() {
+		confirm_number("75", 75.0, 75.0).unwrap();
+		let error = confirm_number("75", 75.0, 70.0).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(error.message.contains("wrote 75"), "{error}");
+		assert!(error.message.contains("now reads 70"), "{error}");
+	}
+
+	#[test]
+	fn a_readable_selection_mismatch_is_failed_whether_warm_or_closed() {
+		for closed in [false, true] {
+			let error = selection_mismatch("Two", "One", closed);
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(error.message.contains("\"Two\""), "{error}");
+			assert!(error.message.contains("reads [One]"), "{error}");
+		}
+	}
 
 	#[test]
 	fn native_buttons_are_pressed_by_their_click_message_and_never_behind_a_dialog() {
