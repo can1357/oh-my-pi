@@ -75,6 +75,7 @@ pub mod power;
 pub mod iso;
 pub mod prof;
 pub mod ps;
+pub mod pshost;
 pub mod pty;
 pub mod rawproc;
 pub mod shell;

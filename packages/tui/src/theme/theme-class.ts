@@ -375,8 +375,9 @@ export class Theme {
 	/**
 	 * True when the theme paints `color` with a real foreground — i.e. the token
 	 * exists and is not the empty string (terminal default, `\x1b[39m`). Optional
-	 * tokens absent from the theme JSON are also false, except `mdExtensionLink`, which
-	 * `createTheme` derives from `mdLink` and `text`. Callers use this to keep
+	 * tokens absent from the theme JSON are also false, except the ones
+	 * `createTheme` derives (`mdExtensionLink`, `toolPowerShell`,
+	 * `toolWindowsPowerShell`). Callers use this to keep
 	 * terminal-default behavior byte-for-byte when an optional token is unset.
 	 */
 	hasColor(color: ThemeColor): boolean {

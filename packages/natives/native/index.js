@@ -44,6 +44,7 @@ export const PhononTts = nativeBindings.PhononTts ?? missingNativeClass("PhononT
 export const PipeStreams = nativeBindings.PipeStreams ?? missingNativeClass("PipeStreams");
 export const PowerAssertion = nativeBindings.PowerAssertion ?? missingNativeClass("PowerAssertion");
 export const Process = nativeBindings.Process ?? missingNativeClass("Process");
+export const PsHost = nativeBindings.PsHost ?? missingNativeClass("PsHost");
 export const PtySession = nativeBindings.PtySession ?? missingNativeClass("PtySession");
 export const RunTrace = nativeBindings.RunTrace ?? missingNativeClass("RunTrace");
 export const Shell = nativeBindings.Shell ?? missingNativeClass("Shell");

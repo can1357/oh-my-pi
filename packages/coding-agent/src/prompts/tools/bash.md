@@ -7,6 +7,9 @@ In-process builtins, ahead of PATH: {{join builtins ", "}}.
 `notify` (regex; implies `async`) sends each matching output line as a follow-up while the job runs, ahead of its result. Match only lines you'd act on: too many matches switch it off.
 {{/if}}
 Don't trunc output by habit, result will be summarized and saved as an artifact.
+{{#if hasPowerShell}}
+PowerShell: NEVER run pwsh or powershell.exe from bash; use the `powershell` tool{{#if powerShellMounted}} (here a bash command, see `powershell --help`){{/if}} with `edition` (`"pwsh"` or `"powershell"`).
+{{/if}}
 {{#if hasLaunch}}
 Long-lived services:
 - unique name; ready requires name; no async/timeout; pty defaults true.

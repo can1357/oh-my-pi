@@ -277,6 +277,8 @@ export type SymbolKey =
 	| "tool.write"
 	| "tool.edit"
 	| "tool.bash"
+	| "tool.pwsh"
+	| "tool.powershell"
 	| "tool.ssh"
 	| "tool.lsp"
 	| "tool.gh"
@@ -671,6 +673,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.write": "✎",
 	"tool.edit": "✎",
 	"tool.bash": "❯",
+	"tool.pwsh": "⚡",
+	"tool.powershell": "⊞",
 	"tool.ssh": "⇄",
 	"tool.lsp": "💡",
 	"tool.gh": "⎇",
@@ -1154,6 +1158,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.write": "\uEA7F",
 	"tool.edit": "\uEA73",
 	"tool.bash": "\uEBCA",
+	// pick:  (nf-dev-powershell)
+	"tool.pwsh": "\uE86C",
+	// pick:  (nf-seti-powershell)
+	"tool.powershell": "\uE683",
 	"tool.ssh": "\uEB3A",
 	"tool.lsp": "\uEA61",
 	"tool.gh": "\uEA84",
@@ -1473,6 +1481,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.write": "+f",
 	"tool.edit": "~",
 	"tool.bash": "$",
+	"tool.pwsh": "ps7",
+	"tool.powershell": "ps5",
 	"tool.ssh": "ssh",
 	"tool.lsp": "lsp",
 	"tool.gh": "gh",

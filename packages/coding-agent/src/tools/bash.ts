@@ -993,6 +993,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	get description(): string {
 		const evalBackends = resolveEvalBackends(this.session);
 		const isToolActive = (name: string, fallback: boolean): boolean => this.session.isToolActive?.(name) ?? fallback;
+		const powerShellMounted = toolCommandNames(this.session).includes("powershell");
 		return prompt.render(bashDescription, {
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			// The deadline an omitted `timeout` resolves to, after the `tools.maxTimeout` cap.
@@ -1014,6 +1015,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			hasLaunch: this.#launchEnabled,
 			hasPty: this.#ptyAvailable || this.#launchEnabled,
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
+			// `isToolActive` only covers top-level tools; `powershell` is
+			// discoverable and usually mounted as a bash tool command instead,
+			// where the routing hint matters most.
+			hasPowerShell: this.session.isToolActive?.("powershell") === true || powerShellMounted,
+			powerShellMounted,
 			// The embedded shell's session env is the shell config env (see bash-executor).
 			builtins: shellBuiltins(this.session.settings.getShellConfig().env),
 			isWindows: process.platform === "win32",

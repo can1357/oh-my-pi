@@ -18,6 +18,7 @@ import { grepToolRenderer } from "./grep";
 import { waitToolRenderer } from "./wait";
 import { lspToolRenderer } from "./lsp";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory";
+import { powershellToolRenderer } from "./powershell";
 import { readToolRenderer } from "./read";
 import type { ToolRenderer } from "./renderer";
 import { proposeRenderer, rejectRenderer, resolveRenderer } from "./resolve";
@@ -49,6 +50,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	lsp: lspToolRenderer,
 	wait: waitToolRenderer,
 	read: readToolRenderer,
+	powershell: powershellToolRenderer,
 	resolve: resolveRenderer,
 	reject: rejectRenderer,
 	propose: proposeRenderer,
