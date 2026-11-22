@@ -48,6 +48,7 @@ import { getTabBarTheme } from "../chrome/shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
 import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
+import { sanitizeDisplayLineField, sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
@@ -572,6 +573,14 @@ export interface SettingsRuntimeContext {
 	thinkingLevel: ThinkingLevel | undefined;
 	/** Available themes */
 	availableThemes: string[];
+	/**
+	 * Choices the host supplies for a setting that is drawn as a choice menu, by setting path; they
+	 * are shown in place of any the setting declares. Thinking levels, themes and composer shapes
+	 * keep their own choices, and a setting drawn any other way (toggles, plain enums,
+	 * multi-selects) does not read an entry. Do not supply one for a number setting: the native
+	 * page keeps that setting's declared steps.
+	 */
+	runtimeOptions?: ReadonlyMap<string, readonly SubmenuOption[]>;
 	/** Provider/source ids shown in /model. */
 	providers: string[];
 	/** Active model (api + id); resolves what the snapcompact `auto` shape maps to. */
@@ -1559,10 +1568,11 @@ export class SettingsSelectorComponent implements Component {
 		if (path === "compaction.thresholdTokens" && (rawValue === "-1" || rawValue === "")) {
 			return "default";
 		}
-		return rawValue;
+		// A stored value can name a choice that is gone: one an extension offered, or one typed into the settings file.
+		return this.#context.runtimeOptions?.has(path) ? sanitizeDisplaySingleLine(rawValue) : rawValue;
 	}
 
-	/** A submenu's choices: the declared ones, or the runtime ones (thinking levels, themes, composer shapes). */
+	/** A submenu's choices: the declared ones, the runtime ones (thinking levels, themes, composer shapes), or the host's `runtimeOptions`. */
 	#submenuOptions(def: SettingDef & { type: "submenu" }): readonly SubmenuOption[] {
 		if (def.path === "defaultThinkingLevel") {
 			// Prepend `auto`; the rest are the model's runtime-supported efforts.
@@ -1573,7 +1583,14 @@ export class SettingsSelectorComponent implements Component {
 			return this.#context.availableThemes.map(t => ({ value: t, label: t }));
 		}
 		if (def.path === "composer.shape") return getComposerShapeOptions();
-		return def.options;
+		// The host's choices can come from extensions.
+		return (
+			this.#context.runtimeOptions?.get(def.path)?.map(option => ({
+				value: option.value,
+				label: sanitizeDisplaySingleLine(option.label),
+				description: sanitizeDisplayLineField(option.description),
+			})) ?? def.options
+		);
 	}
 
 	/**
