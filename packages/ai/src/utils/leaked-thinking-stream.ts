@@ -227,6 +227,22 @@ class LeakedThinkingProjector {
 	#lastTextSignature: string | undefined;
 	/** Projected text blocks per source text block, signed together when its signature completes. */
 	#textBlocksBySource = new Map<number, TextContent[]>();
+	/**
+	 * Projected text block the text channel left when the reasoning channel
+	 * streamed. A gateway may flush the rest of the answer after it flushed a
+	 * reasoning fragment (omni routing DeepSeek V4.1 Flash sends its last 512
+	 * reasoning chars and then its last 512 answer chars), and that answer tail
+	 * belongs to the block already open — reopening it keeps one text block per
+	 * channel instead of splitting the answer mid-word around the fragment.
+	 */
+	#resumableText: number | undefined;
+	/**
+	 * Whether healed (leaked-fence) thinking was emitted since the last text
+	 * block closed. A healed fence splits ONE source text block into
+	 * text/thinking/text on purpose, so that trailing piece must open its own
+	 * block; only a native reasoning interlude leaves the reopened block intact.
+	 */
+	#healedThinkingSinceTextClose = false;
 	/** Forwarded native tool calls, keyed by the inner stream's `contentIndex`. */
 	#toolBlocks = new Map<number, { index: number; block: StreamingToolCall }>();
 	/** Projected native thinking blocks, keyed by the inner stream's `contentIndex`. */
@@ -526,10 +542,33 @@ class LeakedThinkingProjector {
 		if (text.length === 0) return;
 		this.#closeThinking();
 		if (!this.#text) {
+			// The text channel resumed after the reasoning channel streamed, so
+			// `#openThinking` closed this block mid-answer. Reopen it — a gateway
+			// that flushes its channel tails late would otherwise split one answer
+			// in two around a stray reasoning fragment. Only a block that still
+			// belongs to this source text block and has no tool call, image or
+			// redacted block after it may be resumed.
+			const resumed = this.#resumableText;
+			const resumableBlock = resumed === undefined ? undefined : this.#partial.content[resumed];
+			if (
+				!this.#healedThinkingSinceTextClose &&
+				resumed !== undefined &&
+				resumableBlock?.type === "text" &&
+				this.#sourceAnchors.get(resumableBlock) === srcIndex &&
+				this.#partial.content.every(
+					(content, index) => index <= resumed || content.type === "text" || content.type === "thinking",
+				)
+			) {
+				this.#text = { index: resumed };
+				this.#out.push({ type: "text_start", contentIndex: resumed, partial: this.#partial });
+			}
+		}
+		if (!this.#text) {
 			const block: TextContent =
 				signature === undefined ? { type: "text", text: "" } : { type: "text", text: "", textSignature: signature };
 			this.#partial.content.push(block);
 			this.#text = { index: this.#partial.content.length - 1 };
+			this.#resumableText = undefined;
 			this.#anchor(this.#text.index, srcIndex);
 			const projected = this.#textBlocksBySource.get(srcIndex);
 			if (projected) projected.push(block);
@@ -547,6 +586,7 @@ class LeakedThinkingProjector {
 	#emitHealedThinking(text: string, srcIndex: number): void {
 		if (text.length === 0) return;
 		const index = this.#openThinking(srcIndex);
+		this.#healedThinkingSinceTextClose = true;
 		const block = this.#partial.content[index] as ThinkingContent;
 		block.thinking += text;
 		this.#out.push({ type: "thinking_delta", contentIndex: index, delta: text, partial: this.#partial });
@@ -616,6 +656,8 @@ class LeakedThinkingProjector {
 		if (!this.#text) return;
 		const block = this.#partial.content[this.#text.index] as TextContent;
 		this.#out.push({ type: "text_end", contentIndex: this.#text.index, content: block.text, partial: this.#partial });
+		this.#resumableText = this.#text.index;
+		this.#healedThinkingSinceTextClose = false;
 		this.#text = undefined;
 	}
 

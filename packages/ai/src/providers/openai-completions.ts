@@ -1211,6 +1211,18 @@ const streamOpenAICompletionsOnce = (
 			// long turn (many blocks × many deltas) quadratic, as openai-shared's
 			// Responses decoder documents (issue #10605).
 			const contentIndexByBlock = new Map<OpenAIStreamBlock, number>();
+			// A gateway may flush one channel's buffered tail after the other channel
+			// has already streamed (omni routing DeepSeek V4.1 Flash does: a reasoning
+			// run, a content run, then one long `reasoning_content` chunk and one long
+			// `content` chunk, each continuing its own channel). That resumed chunk
+			// belongs to the block its channel left. Opening a fresh block there
+			// interleaves reasoning fragments into the answer, which then renders cut
+			// in half at the flush boundary. Within one chat-completions message a
+			// channel is one string, so a resumed channel continues it whatever
+			// blocks came between — this gateway flushes its tails after tool calls
+			// too, and that tail still continues the reasoning that preceded them.
+			let lastTextBlock: TextContent | undefined;
+			let lastThinkingBlock: ThinkingContent | undefined;
 			const pushContentBlock = (block: OpenAIStreamBlock): void => {
 				contentIndexByBlock.set(block, output.content.length);
 				output.content.push(block);
@@ -1281,9 +1293,16 @@ const streamOpenAICompletionsOnce = (
 					// call would be reborn as a nameless phantom block when its arguments
 					// resume. The stream-end sweep finalizes pending calls.
 					if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
-					currentBlock = { type: "text", text: "" };
-					pushContentBlock(currentBlock);
-					stream.push({ type: "text_start", contentIndex: blockIndex(currentBlock), partial: output });
+					if (lastTextBlock) {
+						// This channel is resuming after the other one streamed; continue
+						// the block it left instead of starting a second one.
+						currentBlock = lastTextBlock;
+					} else {
+						currentBlock = { type: "text", text: "" };
+						pushContentBlock(currentBlock);
+						lastTextBlock = currentBlock;
+						stream.push({ type: "text_start", contentIndex: blockIndex(currentBlock), partial: output });
+					}
 				}
 				currentBlock.text += text;
 				stream.push({
@@ -1307,15 +1326,29 @@ const streamOpenAICompletionsOnce = (
 				};
 				currentBlock = block;
 				pushContentBlock(block);
+				lastThinkingBlock = block;
 				stream.push({ type: "thinking_start", contentIndex: blockIndex(block), partial: output });
 				return block;
 			};
 			const appendThinking = (thinking: string, signature?: string): void => {
-				const block =
+				let block: ThinkingContent | undefined =
 					currentBlock?.type === "thinking" &&
 					(signature === undefined || currentBlock.thinkingSignature === signature)
 						? currentBlock
-						: openThinkingBlock(signature);
+						: undefined;
+				if (block === undefined && lastThinkingBlock !== undefined) {
+					const resumable =
+						lastThinkingBlock.thinkingSignature === signature ||
+						(signature === undefined && lastThinkingBlock.thinkingSignature === undefined);
+					if (resumable) {
+						// Same resume rule as appendText: the reasoning channel continues
+						// the block it left rather than opening one after the answer.
+						if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
+						block = lastThinkingBlock;
+						currentBlock = block;
+					}
+				}
+				block ??= openThinkingBlock(signature);
 				if (signature !== undefined && !block.thinkingSignature) {
 					block.thinkingSignature = signature;
 				}
@@ -1338,6 +1371,9 @@ const streamOpenAICompletionsOnce = (
 					currentBlock = undefined;
 					liteLLMThinkingBlock = undefined;
 					output.content.push({ type: "redactedThinking", data });
+					// A redacted block ends the current channel run.
+					lastTextBlock = undefined;
+					lastThinkingBlock = undefined;
 					return;
 				}
 				if (type !== "thinking") return;

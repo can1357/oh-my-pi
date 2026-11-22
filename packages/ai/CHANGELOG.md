@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Fixed OpenAI-compatible gateways that flush one channel's buffered tail after the other channel already streamed — reasoning deltas, content deltas, then one more `reasoning_content` chunk and one more `content` chunk, each continuing its own channel, including after a tool call — splitting a turn into interleaved blocks and chopping the answer mid-word at every flush boundary. A resumed channel now continues the block it left, and the leaked-thinking projector reopens the projected text block a native reasoning interlude closed, while healed fences still split text/thinking/text ([#20197](https://github.com/can1357/oh-my-pi/pull/20197) by [@ZanDev32](https://github.com/ZanDev32))
 - Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
