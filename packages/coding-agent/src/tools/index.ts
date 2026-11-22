@@ -654,34 +654,33 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 /**
  * Presentation order shared by the provider request, the enabled-name list and
  * `session_init.tools`: the registry `createTools` walks for a default session,
- * then hidden tools. Unknown names keep the caller's order, then sort by name.
+ * then hidden tools. Any other name sorts after these by name, so MCP and
+ * extension tools do not depend on registry insertion history.
  */
 const TOOL_ORDER = new Map<string, number>(
 	[...Object.keys(BUILTIN_TOOLS), ...Object.keys(HIDDEN_TOOLS)].map((name, index) => [name, index]),
 );
-const TOOL_ORDER_SIZE = TOOL_ORDER.size;
 
 /**
  * Order tool names canonically so two sessions exposing the same set send
  * byte-identical tool arrays regardless of how their input lists were ordered.
  *
  * Precondition: `names` may contain duplicates; they are removed.
- * Postcondition: the result contains every distinct normalized name once.
- * `order` supplies positions for names outside the built-in registry (MCP and
- * extension tools); without it those names sort by name after the built-ins.
+ * Postcondition: the result contains every distinct name once, in built-in
+ * construction order followed by the remaining names in lexical order.
+ * Names are used as-is; alias normalization belongs to user-supplied lists.
  */
-export function canonicalToolNames(names: Iterable<string>, order?: ReadonlyMap<string, number>): string[] {
-	return normalizeToolNames(names)
-		.map((name, index) => {
-			const builtIn = TOOL_ORDER.get(name);
-			const fallback = order?.get(name);
-			return {
-				name,
-				index,
-				rank: builtIn ?? (fallback === undefined ? Number.MAX_SAFE_INTEGER : TOOL_ORDER_SIZE + fallback),
-			};
-		})
-		.sort((a, b) => a.rank - b.rank || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || a.index - b.index)
+export function canonicalToolNames(names: Iterable<string>): string[] {
+	const seen = new Set<string>();
+	const unique: string[] = [];
+	for (const name of names) {
+		if (seen.has(name)) continue;
+		seen.add(name);
+		unique.push(name);
+	}
+	return unique
+		.map(name => ({ name, rank: TOOL_ORDER.get(name) ?? TOOL_ORDER.size }))
+		.sort((a, b) => a.rank - b.rank || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 		.map(({ name }) => name);
 }
 

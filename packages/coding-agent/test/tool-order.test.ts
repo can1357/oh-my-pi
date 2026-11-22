@@ -1,12 +1,25 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { type CustomTool, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+function customTool(name: string): CustomTool {
+	return {
+		name,
+		label: name,
+		description: `${name} fixture.`,
+		parameters: type({ query: "string" }),
+		async execute() {
+			return { content: [{ type: "text", text: name }] };
+		},
+	};
+}
 
 /**
  * The provider request, `getEnabledToolNames()` and `session_init.tools` must
@@ -105,6 +118,46 @@ describe("canonical tool order", () => {
 		} finally {
 			await child.dispose();
 			await parent.dispose();
+			auth.close();
+		}
+	}, 30_000);
+
+	it("keeps raw extension names and orders them lexically", async () => {
+		using dir = TempDir.createSync("@omp-tool-order-custom-");
+		const cwd = dir.path();
+		const settings = Settings.isolated({ "tools.commands": true, "marketplace.autoUpdate": "off" });
+		const auth = createInMemoryAuthStorage();
+		auth.keys.setRuntime("openai", "test-key");
+		const base = {
+			cwd,
+			agentDir: cwd,
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			modelRegistry: new ModelRegistry(auth),
+			settings,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			enableMCP: false,
+			disableExtensionDiscovery: true,
+			skipPythonPreflight: true,
+		};
+		const { session } = await createAgentSession({
+			...base,
+			hasUI: false,
+			toolNames: ["read"],
+			customTools: [customTool("zeta"), customTool("alpha"), customTool("search")],
+			sessionManager: SessionManager.inMemory(cwd),
+		});
+		try {
+			const names = session.getEnabledToolNames();
+			expect(names).toContain("search");
+			expect(names).not.toContain("grep");
+			expect(names.filter(name => ["alpha", "search", "zeta"].includes(name))).toEqual(["alpha", "search", "zeta"]);
+			expect(session.getActiveToolNames()).toContain("search");
+		} finally {
+			await session.dispose();
 			auth.close();
 		}
 	}, 30_000);
