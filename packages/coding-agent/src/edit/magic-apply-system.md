@@ -5,7 +5,7 @@ Operations; numbers are the line numbers shown in the file:
 ```text
 ["delete", first, last]                  delete lines first..last
 ["replace", first, last, "text"]         replace lines first..last with whole new lines, indentation included
-["sub", line, "old", "new"]              in that one line, replace every "old" with "new"
+["sub", line, "old", "new"]              in that one line, replace every "old" with "new" ("new" may contain \n to split into lines)
 ["sub", "all", "old", "new"]             in the whole file, replace every "old" with "new"
 ["insert", "before", line, "text"]       add new lines before a line ("after" adds them after it)
 ["move", first, last, "before", line]    move lines first..last to just before a line ("after": just after it)
@@ -16,10 +16,10 @@ Operations; numbers are the line numbers shown in the file:
 
 - For one line, first and last are the same number.
 - In text, `\n` separates lines; `""` is one blank line.
-- Never retype a line you can keep: use `sub` to change part of a line, and `move`, `swap`, `indent`, `dedent` for lines that keep their text.
+- Prefer `sub`, `move`, `swap`, `indent`, and `dedent` over retyping unchanged lines; use `replace` and `insert` freely for rewritten blocks and new code.
 - A block's first line shows its span, like `12-20`: delete, move or swap the block with those two numbers. Blank lines between blocks are kept as separators; leave them out of ranges.
 - Number every operation against the original file; no two operations touch the same line.
-- Change nothing that was not asked.
+- Write any new code, helpers, imports, or external symbol calls the change asks for, and apply large or partial-refactor edits as described. Leave unrelated lines alone.
 
 Example, for "rename every `cnt` to `count`, change `limit = 5` to `limit = 10` on line 7, and put the `reset()` function before `run()`", where `reset()` shows `12-20` and `run()` starts on line 3:
 
@@ -29,4 +29,4 @@ Example, for "rename every `cnt` to `count`, change `limit = 5` to `limit = 10` 
 ["move", 12, 20, "before", 3]
 ```
 
-Cannot find what the change names? Reply `CANNOT: <reason>`.
+Only reply `CANNOT: <reason>` when an existing line or symbol the change asks to edit is missing from the file (or lies inside omitted `⋮` lines) — never because a change is large, rewrites a block, or adds new code.
