@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The side panel's Connection settings now show the browser's reason when it refuses the omp native host (for example, native messaging blocked by enterprise policy) instead of suggesting the host may be missing ([#20084](https://github.com/can1357/oh-my-pi/issues/20084))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes

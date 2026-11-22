@@ -96,7 +96,7 @@ describe("ACP stdout hygiene", () => {
 		// dir forces a full re-transpile of the CLI's module graph on every
 		// run (~12s cold vs ~0.4s warm). XDG_* and PI_CODING_AGENT_DIR
 		// already isolate PI's on-disk state for this smoke test.
-		const proc = Bun.spawn(["bun", cliEntry, "acp"], {
+		const proc = Bun.spawn([process.execPath, cliEntry, "acp"], {
 			cwd: repoRoot,
 			stdin: "pipe",
 			stdout: "pipe",
