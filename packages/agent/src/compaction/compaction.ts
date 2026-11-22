@@ -2414,8 +2414,9 @@ export async function compact(
 		const inputTokens = getCompactionV2PreserveData(preserveData)?.usedTokens ?? 0;
 		summary = formatRemoteCompactionSummary(inputTokens);
 	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
-		const [historyResult, turnPrefixResult] = await Promise.all([
+		// ACP reuses one host per session and rejects concurrent steps; other
+		// providers can generate both summaries in parallel.
+		const historyPromise =
 			messagesToSummarize.length > 0 || previousSummaryForCompaction
 				? generateSummary(
 						messagesToSummarize,
@@ -2427,9 +2428,14 @@ export async function compact(
 						previousSummaryForCompaction,
 						summaryOptions,
 					)
-				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions),
-		]);
+				: Promise.resolve("No prior history.");
+		const turnPrefixPromise =
+			model.api === "antigravity-acp"
+				? historyPromise.then(() =>
+						generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions),
+					)
+				: generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions);
+		const [historyResult, turnPrefixResult] = await Promise.all([historyPromise, turnPrefixPromise]);
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else if (messagesToSummarize.length > 0) {

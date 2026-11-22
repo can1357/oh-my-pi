@@ -10,6 +10,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Pins the fix for the "raw 401 surfaced as Compaction failed:" bug.
@@ -207,4 +208,43 @@ describe("incomplete local summaries", () => {
 
 		expectIncompleteSummaryError(error, "Turn prefix summarization failed");
 	});
+});
+
+test("split-turn ACP compaction completes without overlapping requests on its session host", async () => {
+	const model = buildModel({
+		api: "antigravity-acp",
+		provider: "antigravity-cli",
+		id: "gemini-3.8-flash",
+		name: "Test model",
+		baseUrl: "",
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		maxTokens: 8_192,
+		contextWindow: 200_000,
+		reasoning: true,
+	});
+	const activeSessions = new Set<string>();
+	const result = await compact(makePreparation(), model, "key", undefined, undefined, {
+		sessionId: "session-1",
+		providerSessionState: new Map(),
+		oneshotRetry: false,
+		completeImpl: async (_model, context, options) => {
+			const sessionId = options.sessionId ?? "default";
+			if (activeSessions.has(sessionId))
+				throw new Error("Antigravity CLI is already running a request for this session");
+			activeSessions.add(sessionId);
+			try {
+				await Promise.resolve();
+				const prompt = JSON.stringify(context.messages);
+				return makeAssistantStop([
+					{ type: "text", text: prompt.includes("turn prefix msg") ? "Prefix retained." : "History retained." },
+				]);
+			} finally {
+				activeSessions.delete(sessionId);
+			}
+		},
+	});
+
+	expect(result.summary).toContain("History retained.");
+	expect(result.summary).toContain("Prefix retained.");
 });
