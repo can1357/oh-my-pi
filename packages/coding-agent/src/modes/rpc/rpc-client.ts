@@ -10,6 +10,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl, toError } from "@oh-my-pi/pi-utils";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
@@ -19,6 +20,7 @@ import type { SessionEntry, SessionTreeNode } from "../../session/session-entrie
 import type { SessionLeaseReport } from "../../session/session-storage";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
+import type { RpcModelPickerResult } from "./rpc-model-picker";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
 	RPC_MESSAGES_PAGE_STALE_ERROR,
@@ -790,6 +792,24 @@ export class RpcClient {
 	}
 
 	/**
+	 * Abort the current run and continue it with the queued input (the TUI's empty Enter).
+	 * Returns false, doing nothing, when no run was streaming with queued input.
+	 */
+	async abortAndDeliverQueue(): Promise<boolean> {
+		const response = await this.#send({ type: "abort_and_deliver_queue" });
+		return this.#getData<{ aborted: boolean }>(response).aborted;
+	}
+
+	/**
+	 * Continue the agent (the TUI's `.`/`c` shortcut), interrupting a running turn first.
+	 * Rejects when there is no conversation to continue.
+	 */
+	async resume(): Promise<void> {
+		const response = await this.#send({ type: "resume" });
+		this.#getData(response);
+	}
+
+	/**
 	 * Withdraw queued user steering/follow-up messages, then abort (the TUI Esc path).
 	 * Returns the withdrawn messages so the caller can restore them to its editor.
 	 */
@@ -1029,6 +1049,14 @@ export class RpcClient {
 	}
 
 	/**
+	 * Model picker rows as omp's session picker orders them; a query starting with `@` lists quick roles.
+	 */
+	async getModelPicker(query?: string, limit?: number): Promise<RpcModelPickerResult> {
+		const response = await this.#send({ type: "get_model_picker", query, limit });
+		return this.#getData<RpcModelPickerResult>(response);
+	}
+
+	/**
 	 * Get list of available slash commands.
 	 */
 	async getAvailableCommands(): Promise<RpcAvailableSlashCommand[]> {
@@ -1066,7 +1094,7 @@ export class RpcClient {
 	/**
 	 * Set thinking level.
 	 */
-	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
+	async setThinkingLevel(level: ConfiguredThinkingLevel): Promise<void> {
 		await this.#send({ type: "set_thinking_level", level });
 	}
 

@@ -7,7 +7,7 @@ import { renderProgressBar } from "../components/progress-bar";
 import { renderTableRow } from "../components/table";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
-import { type AgentRecordLike, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
+import { type AgentHubSession, type AgentRecordLike, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
 import { parseThinkingLevel } from "../thinking";
 import { TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { sanitizeDisplaySingleLine } from "./extensions/display-text";
@@ -204,9 +204,14 @@ function resolveModelBadge(
 	if (fallbackSelector) return resolveSelectorBadge(fallbackSelector, true, true, liveThinkingLevel);
 	const resolvedModel = progress?.resolvedModel ?? ref.history?.resolvedModel ?? serving?.selector;
 	if (resolvedModel) return resolveSelectorBadge(resolvedModel, false, false, liveThinkingLevel);
-	const model = ref.session?.model;
+	return ref.session ? liveBadge(ref.session) : undefined;
+}
+
+/** The model a live session points at now, with its reasoning level: what its composer names. */
+function liveBadge(session: AgentHubSession): ResolvedModelBadge | undefined {
+	const model = session.model;
 	if (!model) return undefined;
-	return { model: model.id, level: model.thinking ? liveThinkingLevel : undefined, fallback: false };
+	return { model: model.id, level: model.thinking ? session.thinkingLevel : undefined, fallback: false };
 }
 
 export function modelBadge(ref: AgentRecordLike, observed: ObservableSession | undefined): string | undefined {
@@ -229,7 +234,19 @@ export interface ModelChip {
 /** Structured {@link modelBadge} for picker chips. */
 export function modelChip(ref: AgentRecordLike, observed: ObservableSession | undefined): ModelChip | undefined {
 	const badge = resolveModelBadge(ref, observed);
-	if (!badge) return undefined;
+	return badge && chipOf(badge);
+}
+
+/**
+ * The chip of the model a live session runs on now, as its composer names it: a switch shows at
+ * once, where {@link modelChip}'s attribution moves only once the new model answers a turn.
+ */
+export function liveModelChip(session: AgentHubSession): ModelChip | undefined {
+	const badge = liveBadge(session);
+	return badge && chipOf(badge);
+}
+
+function chipOf(badge: ResolvedModelBadge): ModelChip {
 	return {
 		text: sanitizeDisplaySingleLine(badge.model),
 		level: showsThinkingLevel(badge.level) ? badge.level : undefined,

@@ -1130,6 +1130,32 @@ describe("date-cwd-reminder", () => {
 				expect(wireOf(resumed).slice(0, sent.messages.length)).toEqual(wireOf(sent));
 				expect(resumed.messages.at(-1)?.content).toBe(`${renderDateCwdReminder("2026-08-16", "/work")}\n\nnext`);
 			});
+
+			for (const revived of [false, true]) {
+				it(`keeps the task's bytes when a leading per-call user turn is left out of a later request${revived ? " by a revived subagent" : ""}`, () => {
+					const { placements, journal } = createJournal();
+					const task: Message = { role: "user", content: "task", attribution: "agent", timestamp: 1 };
+					const leading: Message = { role: "user", content: "per-call context", timestamp: 2 };
+					markPerCallContextMessage(leading);
+					const earlier = new DateCwdReminderInjector(journal);
+					const sent = earlier.transform(
+						{ systemPrompt: ["system"], messages: [leading, task] },
+						"2026-08-14",
+						"/work",
+					);
+					const history: Message[] = [task, createAssistantMessage("calling a tool")];
+
+					// An IRC wake: the next request starts with the task itself.
+					const injector = revived ? new DateCwdReminderInjector(journal) : earlier;
+					const next = injector.transform({ systemPrompt: ["system"], messages: history }, "2026-08-14", "/work");
+
+					expect(wireOf(sent)[1]).toBe(
+						JSON.stringify(["user", `${renderDateCwdReminder("2026-08-14", "/work")}\n\ntask`]),
+					);
+					expect(wireOf(next)[0]).toBe(wireOf(sent)[1]);
+					expect(placements.filter(placement => placement.placement === "prefix")).toHaveLength(1);
+				});
+			}
 		});
 	});
 });
