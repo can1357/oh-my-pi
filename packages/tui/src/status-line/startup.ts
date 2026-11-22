@@ -34,8 +34,6 @@ import type { StatusLineSettings } from "./types";
 export interface StatusLineStartupData {
 	readonly settings: StatusLineSettings;
 	readonly gitEnabled: boolean;
-	/** Host that wrote the row; a cache shared across machines only serves its own rows. */
-	readonly hostname?: string;
 	/** Model resolved for the next fresh session's default role. */
 	readonly model?: Model;
 	readonly thinkingLevel?: ThinkingLevel;
@@ -140,7 +138,6 @@ const StartupDataShape = type({
 	"+": "delete",
 	settings: StatusLineSettingsShape,
 	gitEnabled: "boolean",
-	"hostname?": "string",
 	// Only the fields the status line reads; the rest is trusted as serialized by this version.
 	"model?": { id: "string", name: "string", provider: "string", api: "string", contextWindow: "number" },
 	"thinkingLevel?": "string",

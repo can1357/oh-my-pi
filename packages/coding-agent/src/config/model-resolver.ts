@@ -50,7 +50,9 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
+	newSessionThinkingLevel,
 	parseConfiguredThinkingLevel,
+	resolveConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
@@ -66,7 +68,7 @@ import {
 import type { Settings } from "./settings";
 
 import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./model-settings";
-import { cfgRetryFallbackChains } from "../session/settings";
+import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../session/settings";
 
 function isKnownProvider(provider: string): provider is KnownProvider {
 	return provider in DEFAULT_MODEL_PER_PROVIDER;
@@ -1682,6 +1684,38 @@ export function resolveModelRoleValue(
 	}
 
 	return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning };
+}
+
+/**
+ * Status-bar inputs of a fresh session on the persisted default role. Prepaint runs only for
+ * launches without model flags, so `--model`/`--smol` overrides and session-only switches stay
+ * out. `primaryOnly` rejects a model matched by a fallback pattern rather than the role's first.
+ */
+export function resolveStartupDefaultStatus(
+	settings: Settings,
+	registry: Pick<ModelRegistry, "getAvailable" | "isUsingSubscription">,
+	options?: { primaryOnly?: boolean },
+) {
+	const roles: ModelRoleLookup = {
+		getModelRole: role => settings.getProjectModelRole(role) ?? settings.getGlobalModelRole(role),
+	};
+	const defaultRole = resolveModelRoleValue(roles.getModelRole("default"), registry.getAvailable(), {
+		settings,
+		roleLookup: roles,
+	});
+	const model = defaultRole.model;
+	if (!model || (options?.primaryOnly && defaultRole.matchedPatternIndex !== 0)) return undefined;
+	const thinking = newSessionThinkingLevel(
+		model,
+		defaultRole.explicitThinkingLevel ? defaultRole.thinkingLevel : undefined,
+		parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings)),
+	);
+	return {
+		model,
+		thinkingLevel: resolveConfiguredThinkingLevel(model, thinking),
+		autoThinking: thinking === AUTO_THINKING,
+		usingSubscription: registry.isUsingSubscription(model),
+	};
 }
 
 interface ExplicitThinkingSelectorOptions {

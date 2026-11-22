@@ -3,7 +3,6 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { type Agent, AgentBusyError, type AgentMessage, agentPauseGate, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
@@ -98,7 +97,7 @@ import {
 	formatModelStringWithRouting,
 	type ResolvedModelRoleValue,
 	resolveExactModelIdentity,
-	resolveModelRoleValue,
+	resolveStartupDefaultStatus,
 } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import type {
@@ -197,14 +196,7 @@ import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveRestartCmd } from "../subprocess/worker-client";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
-import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
-import {
-	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
-	newSessionThinkingLevel,
-	parseConfiguredThinkingLevel,
-	resolveConfiguredThinkingLevel,
-} from "@oh-my-pi/pi-tui/thinking";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { capturePage } from "../tools/browser/page-shot";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
@@ -484,7 +476,7 @@ import {
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
-import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "../session/settings";
+import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgExtensionHandlersModeControl } from "../extensibility/settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
@@ -4943,24 +4935,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#persistComposerStatus(): void {
 		if (!this.sessionManager.getSessionFile()) return;
-		// Prepaint runs only for launches without model flags, which read the persisted
-		// roles alone: `--model`/`--smol` overrides and session-only switches stay out.
-		const roles: ModelRoleLookup = {
-			getModelRole: role => this.settings.getProjectModelRole(role) ?? this.settings.getGlobalModelRole(role),
-		};
-		const defaultRole = resolveModelRoleValue(
-			roles.getModelRole("default"),
-			this.session.modelRegistry.getAvailable(),
-			{ settings: this.settings, roleLookup: roles },
-		);
-		const model = defaultRole.model;
+		const defaults = resolveStartupDefaultStatus(this.settings, this.session.modelRegistry);
 		// Without a resolvable default the next launch picks a fallback; keep the previous speculation.
-		if (!model) return;
-		const thinking = newSessionThinkingLevel(
-			model,
-			defaultRole.explicitThinkingLevel ? defaultRole.thinkingLevel : undefined,
-			parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings)),
-		);
+		if (!defaults) return;
+		const { model } = defaults;
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
 		const marker = "\0";
 		const colored = this.editor.borderColor(marker);
@@ -4974,15 +4952,11 @@ export class InteractiveMode implements InteractiveModeContext {
 							suffix: colored.slice(markerIndex + marker.length),
 						},
 			statusLine: {
-				hostname: os.hostname(),
 				settings: statusLineHost.getSettings(),
 				gitEnabled: statusLineHost.gitEnabled(),
-				model,
-				thinkingLevel: resolveConfiguredThinkingLevel(model, thinking),
-				autoThinking: thinking === AUTO_THINKING,
+				...defaults,
 				// A fresh session derives tiers from settings, not this session's `/fast` toggles.
 				fastMode: this.session.isFastModeConfiguredFor(model),
-				usingSubscription: this.session.modelRegistry.isUsingSubscription(model),
 				autoCompactEnabled: this.session.autoCompactionEnabled,
 				compactionBoundaries: model.contextWindow
 					? statusLineHost.computeCompactionBoundaries(this.session, model.contextWindow, model)

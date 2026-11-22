@@ -7,6 +7,7 @@ import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resolveStartupDefaultStatus } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
@@ -21,6 +22,7 @@ import {
 	ComposerLease,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
+	updateStartupComposerStatus,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -897,5 +899,17 @@ describe("Composer prepaint", () => {
 		lease?.adopt();
 		expect(terminal.inputEnables).toBe(1);
 		lease?.composer.ui.stop();
+	});
+
+	it("resolves the startup default only while a prepaint composer is pending", () => {
+		const registry = { getAvailable: vi.fn(() => []), isUsingSubscription: () => false };
+		const resolve = () => resolveStartupDefaultStatus(settings, registry, { primaryOnly: true });
+		// Headless and non-TTY launches never prepaint; the model catalog stays untouched.
+		updateStartupComposerStatus(resolve);
+		expect(registry.getAvailable).not.toHaveBeenCalled();
+
+		beginStartupComposer({ preferences: config, terminal: new VirtualTerminal(80, 24), cache: false });
+		updateStartupComposerStatus(resolve);
+		expect(registry.getAvailable).toHaveBeenCalledTimes(1);
 	});
 });

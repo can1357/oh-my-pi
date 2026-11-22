@@ -131,7 +131,13 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
 }
 
-/** Refresh the pending startup composer's speculative status line once real settings/models resolve. */
-export function updateStartupComposerStatus(update: Partial<StatusLineStartupData>): void {
-	pendingComposer?.composer.updateStartupStatus(update);
+/**
+ * Refresh the pending startup composer's speculative status line once real settings/models
+ * resolve. `resolve` runs only while a prepaint composer is pending; `undefined` keeps the speculation.
+ */
+export function updateStartupComposerStatus(resolve: () => Partial<StatusLineStartupData> | undefined): void {
+	const pending = pendingComposer;
+	if (!pending) return;
+	const update = resolve();
+	if (update) pending.composer.updateStartupStatus(update);
 }

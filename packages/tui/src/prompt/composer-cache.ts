@@ -75,11 +75,11 @@ function parseJson(value: string | undefined): unknown {
 }
 
 function parseStatus(value: unknown): ComposerStatusCache | undefined {
-	if (!isRecord(value)) return undefined;
-	const statusLine = readStatusLineStartupData(value.statusLine);
 	// Rows written by another host (shared ~/.omp on NFS/synced homes, copied
 	// caches) would paint that machine's default model over this one's.
-	if (!statusLine || statusLine.hostname !== os.hostname()) return undefined;
+	if (!isRecord(value) || value.hostname !== os.hostname()) return undefined;
+	const statusLine = readStatusLineStartupData(value.statusLine);
+	if (!statusLine) return undefined;
 	const rawBorderColor = value.borderColor;
 	if (rawBorderColor === undefined) return { statusLine };
 	if (!isRecord(rawBorderColor)) return undefined;
@@ -237,12 +237,16 @@ export class ComposerCache {
 	}
 
 	/**
-	 * Status-bar inputs for the next prepaint's startup status line. `shared: false`
-	 * keeps them out of the any-project fallback (a project-scoped default model).
+	 * Status-bar inputs for the next prepaint's startup status line, stamped with
+	 * this host. `shared: false` keeps them out of the any-project fallback (a
+	 * project-scoped default model).
 	 */
 	writeStatus(cwd: string, status: ComposerStatusCache, options: { shared?: boolean } = {}): void {
 		const project = path.resolve(cwd);
-		this.#put(options.shared === false ? [project] : [project, ANY_PROJECT], "status", status);
+		this.#put(options.shared === false ? [project] : [project, ANY_PROJECT], "status", {
+			...status,
+			hostname: os.hostname(),
+		});
 	}
 
 	close(): void {

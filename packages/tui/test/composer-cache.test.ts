@@ -11,7 +11,6 @@ function statusFor(thinkingLevel: ThinkingLevel): ComposerStatusCache {
 	return {
 		borderColor: { prefix: "\x1b[36m", suffix: "\x1b[39m" },
 		statusLine: {
-			hostname: os.hostname(),
 			settings: { leftSegments: ["model", "path", "git"], contextLine: "embedded" },
 			gitEnabled: true,
 			thinkingLevel,
@@ -37,16 +36,22 @@ describe("composer startup cache", () => {
 		await fs.rm(root, { recursive: true, force: true });
 	});
 
-	it("drops a status row stamped by another host", () => {
+	it.each([
+		["another host", "json_set(value, '$.hostname', 'elsewhere.invalid')"],
+		["no host", "json_remove(value, '$.hostname')"],
+	])("drops a status row stamped by %s", (_, rewrite) => {
 		const project = path.join(root, "project");
-		const foreign = statusFor(ThinkingLevel.High);
-		const cache = ComposerCache.open(dbPath);
-		cache.writeStatus(project, {
-			...foreign,
-			statusLine: { ...foreign.statusLine, hostname: `${os.hostname()}-elsewhere` },
-		});
-		expect(cache.read(project).status).toBeUndefined();
-		cache.close();
+		const writer = ComposerCache.open(dbPath);
+		writer.writeStatus(project, statusFor(ThinkingLevel.High));
+		expect(writer.read(project).status).toEqual(statusFor(ThinkingLevel.High));
+		writer.close();
+		// A shared ~/.omp hands this host rows another machine (or an older build) wrote.
+		const db = new Database(dbPath);
+		db.run(`UPDATE entries SET value = ${rewrite} WHERE kind = 'status'`);
+		db.close();
+		const reader = ComposerCache.open(dbPath);
+		expect(reader.read(project).status).toBeUndefined();
+		reader.close();
 	});
 
 	it("round-trips per-project speculation and serves settings-derived rows to projects without their own", () => {
