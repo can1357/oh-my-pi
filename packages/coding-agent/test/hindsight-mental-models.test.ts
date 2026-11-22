@@ -271,6 +271,18 @@ describe("renderMentalModelsBlock", () => {
 		expect(block).not.toContain("[mental-model snapshot truncated at render budget]");
 	});
 
+	it("renders the complete block verbatim when its length equals the budget (boundary)", () => {
+		// `innerBudget` reserves room for the truncation marker, so a complete
+		// block in the marker's char range must still render intact rather
+		// than falling back to equal shares and getting clipped.
+		const content = "- " + "x".repeat(200) + " END.";
+		const model = { id: "l", bank_id: "b", name: "Long", content };
+		const probe = renderMentalModelsBlock([model], 16_000);
+		const block = renderMentalModelsBlock([model], probe.length);
+		expect(block).toBe(probe);
+		expect(block).not.toContain("[mental-model snapshot truncated at render budget]");
+	});
+
 	it("returns an empty string for an empty model list (callers gate on this)", () => {
 		expect(renderMentalModelsBlock([], 16_000)).toBe("");
 	});

@@ -266,9 +266,10 @@ const SECTION_SEPARATOR = "\n\n";
 
 /**
  * Format a sorted list of models into the final `<mental_models>` wrapper,
- * bounded by `budgetChars`. Per-model truncation is divided proportionally
- * across the visible models; an overflow is signalled with a marker so the
- * model can tell context is missing.
+ * bounded by `budgetChars`. When the complete block fits the budget it is
+ * rendered verbatim; otherwise per-model budgets are split evenly across the
+ * visible models and an overflow is signalled with a marker so the model can
+ * tell context is missing.
  *
  * Exported for unit testing of the budget contract — callers should go
  * through `loadMentalModelsBlock`.
@@ -307,19 +308,20 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	const innerBudget = Math.max(0, budgetChars - truncatedOverhead);
 	const headerCost = models.reduce((sum, m) => sum + sectionHeader(m).length, 0);
 	const separatorCost = SECTION_SEPARATOR.length * Math.max(0, models.length - 1);
-	// If every model's full body fits within the inner budget, don't divide
-	// space into equal shares at all: equal shares clip long entries even when
-	// shorter ones leave room unused (#19857). Only fall back to per-model
-	// splitting when the complete render would overflow.
-	const totalNeeded =
-		headerCost + separatorCost + models.reduce((sum, m) => sum + (m.content ?? "").trim().length, 0);
-	const perModelBudget =
-		totalNeeded <= innerBudget
-			? Number.MAX_SAFE_INTEGER
-			: Math.max(
-					120,
-					Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
-				);
+	// If the complete render fits the budget, return it verbatim: equal shares
+	// clip long entries even when shorter ones leave room unused (#19857).
+	// Compare the assembled block against `budgetChars` rather than
+	// `innerBudget`, which already reserves room for the truncation marker and
+	// would still clip complete blocks in that ~53-char band.
+	const fullSections = models.map(model => `${sectionHeader(model)}${(model.content ?? "").trim()}`);
+	const fullAssembled = `<mental_models>\n${fullSections.join(SECTION_SEPARATOR)}\n</mental_models>`;
+	if (fullAssembled.length <= budgetChars) return fullAssembled;
+
+	// The complete render overflows, so fall back to per-model splitting.
+	const perModelBudget = Math.max(
+		120,
+		Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
+	);
 
 	const sections: string[] = [];
 	let consumed = 0;
