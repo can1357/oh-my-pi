@@ -649,6 +649,27 @@ function isNoActiveTransactionError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
 	return message.includes("no transaction is active");
 }
+/**
+ * PostgreSQL `admin_shutdown` (SQLSTATE 57P01): the server ended the session
+ * (`pg_terminate_backend()`, a fast shutdown) and answered the statement in
+ * flight with this error instead of its result. Ending the session rolls back
+ * its open transaction.
+ */
+function isTerminatedByServer(error: unknown): boolean {
+	return error instanceof SQL.PostgresError && error.errno === "57P01";
+}
+
+/**
+ * One turn of the event loop, so the driver reads what the server already
+ * sent on other connections: a pooled connection the server ended leaves the
+ * pool once its end is read.
+ */
+function nextTurn(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	return promise;
+}
+
 /** MySQL `ER_LOCK_DEADLOCK` (errno 1213, SQLSTATE 40001) or PostgreSQL `deadlock_detected` / `serialization_failure`. */
 function isDeadlockError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
@@ -815,7 +836,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			}
 			// MySQL's UPDATE locks every row it scans, so a no-op backfill would
 			// still wait for, and block, every write in flight.
-			if ((await this.#client.unsafe(this.#q.findUnmeasured)).length > 0) {
+			if ((await this.#readAgainIfTerminated(() => this.#client.unsafe(this.#q.findUnmeasured))).length > 0) {
 				await this.#setup(this.#q.backfillByteLen);
 			}
 			await this.#setup(this.#q.createPartsTable);
@@ -832,7 +853,9 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			// The unqualified table resolves through the search path, to the first schema on it that holds the
 			// table: two schemas of one database hold two stores. The name is a checked unquoted identifier, so
 			// to_regclass folds it as the store's queries do.
-			const [row] = (await this.#client.unsafe(TABLE_SCHEMA_QUERY, [this.#table])) as Array<{ schema: unknown }>;
+			const [row] = (await this.#readAgainIfTerminated(() =>
+				this.#client.unsafe(TABLE_SCHEMA_QUERY, [this.#table]),
+			)) as Array<{ schema: unknown }>;
 			key += `:schema=${String(row?.schema ?? "")}`;
 		}
 		return key;
@@ -840,16 +863,18 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 
 	/**
 	 * The identity the server reports of itself, or `undefined` when it reports
-	 * none or refuses it to this user ({@link IDENTITY_REFUSED_SQLSTATES}). Any
-	 * other failure (a dropped connection, a server shutting down) rejects, so
-	 * the store fails to start as it does when another start-up query fails,
-	 * instead of running under another store's name.
+	 * none or refuses it to this user ({@link IDENTITY_REFUSED_SQLSTATES}). On
+	 * PostgreSQL a single 57P01 runs the read once more
+	 * ({@link #readAgainIfTerminated}). Any other failure (a dropped
+	 * connection, a server shutting down) rejects, so the store fails to start
+	 * as it does when another start-up query fails, instead of running under
+	 * another store's name.
 	 */
 	async #readServerIdentity(adapter: ServerAdapter): Promise<string | undefined> {
 		let rows: Array<{ id?: unknown; Value?: unknown }>;
 		try {
-			rows = (await this.#client.unsafe(
-				adapter === "postgres" ? PG_SERVER_IDENTITY_QUERY : MYSQL_SERVER_IDENTITY_QUERY,
+			rows = (await this.#readAgainIfTerminated(() =>
+				this.#client.unsafe(adapter === "postgres" ? PG_SERVER_IDENTITY_QUERY : MYSQL_SERVER_IDENTITY_QUERY),
 			)) as Array<{ id?: unknown; Value?: unknown }>;
 		} catch (err) {
 			const state = err instanceof Error ? serverSqlState(err) : undefined;
@@ -929,19 +954,55 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	 * default the snapshot would be taken before the lock wait, and a
 	 * backfill would then fail with SQLSTATE 40001. The lock comes after the
 	 * read, so an honoured default refuses before any wait.
+	 *
+	 * A transaction the server ended (SQLSTATE 57P01) before COMMIT was sent
+	 * runs once more; a second 57P01 is the caller's.
 	 */
-	#readWrite(
+	async #readWrite(
 		work: (transaction: SqlSessionStorageTransaction) => Promise<unknown>,
 		opening: "write" | "start-up" = "write",
 	): Promise<void> {
-		return this.#client.transaction(async transaction => {
-			await transaction.unsafe("SET TRANSACTION READ WRITE");
-			if (opening === "start-up") await transaction.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
-			const [readOnly] = (await transaction.unsafe(READ_ONLY_SETTINGS)) as ReadOnlySettingsRow[];
-			if (readOnly?.setting === "on" && readOnly.reset_val === "on") throw new Error(READ_ONLY_REFUSAL);
-			if (opening === "start-up") await transaction.unsafe(`SELECT pg_advisory_xact_lock(${SETUP_LOCK_KEY})`);
-			await work(transaction);
-		});
+		for (let attempt = 1; ; attempt++) {
+			let committing = false;
+			try {
+				await this.#client.transaction(async transaction => {
+					await transaction.unsafe("SET TRANSACTION READ WRITE");
+					if (opening === "start-up") await transaction.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+					const [readOnly] = (await transaction.unsafe(READ_ONLY_SETTINGS)) as ReadOnlySettingsRow[];
+					if (readOnly?.setting === "on" && readOnly.reset_val === "on") throw new Error(READ_ONLY_REFUSAL);
+					if (opening === "start-up") await transaction.unsafe(`SELECT pg_advisory_xact_lock(${SETUP_LOCK_KEY})`);
+					await work(transaction);
+					committing = true;
+				});
+				return;
+			} catch (err) {
+				// A server that ended the session before COMMIT was sent (at BEGIN, or at a statement of the
+				// work) rolled the transaction back: nothing of it committed, so it runs once more, on a
+				// connection the pool has not seen end. Not at COMMIT: PostgreSQL can commit and then act on
+				// the termination while it reads the next message, before it reports the transaction done.
+				// Nor on a connection that closes without the server's 57P01 (a network fault): the statement
+				// may have reached the server, and a COMMIT it ran would not be reported.
+				if (attempt > 1 || committing || !isTerminatedByServer(err)) throw err;
+				await nextTurn();
+			}
+		}
+	}
+
+	/**
+	 * Run `read` once more on PostgreSQL when the server ended the session it
+	 * ran on (SQLSTATE 57P01). A read changes nothing, so running it again is
+	 * safe; writes go through {@link #readWrite}, which runs again only a
+	 * transaction that cannot have committed.
+	 */
+	async #readAgainIfTerminated<T>(read: () => PromiseLike<T>): Promise<T> {
+		if (this.#adapter !== "postgres") return read();
+		try {
+			return await read();
+		} catch (err) {
+			if (!isTerminatedByServer(err)) throw err;
+			await nextTurn();
+			return read();
+		}
 	}
 
 	/**
@@ -1044,12 +1105,16 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	async #columns(table: string): Promise<Set<string>> {
-		const rows = (await run(this.#client, this.#q.columns, { table })) as ColumnRow[];
+		const rows = (await this.#readAgainIfTerminated(() =>
+			run(this.#client, this.#q.columns, { table }),
+		)) as ColumnRow[];
 		return new Set(rows.map(row => row.column_name.toLowerCase()));
 	}
 
 	async loadIndex(): Promise<SessionStorageIndexEntry[]> {
-		const rows = (await this.#exclusive(() => this.#client.unsafe(this.#q.loadIndex))) as IndexRow[];
+		const rows = (await this.#exclusive(() =>
+			this.#readAgainIfTerminated(() => this.#client.unsafe(this.#q.loadIndex)),
+		)) as IndexRow[];
 		return rows.map(row => {
 			if (row.byte_len === null) {
 				throw new Error(
@@ -1069,7 +1134,9 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	async readFull(path: string): Promise<string | null> {
-		const rows = (await this.#exclusive(() => run(this.#client, this.#q.readFull, { path }))) as ContentRow[];
+		const rows = (await this.#exclusive(() =>
+			this.#readAgainIfTerminated(() => run(this.#client, this.#q.readFull, { path })),
+		)) as ContentRow[];
 		let head: string | undefined;
 		const parts: Array<{ offset: number; content: string }> = [];
 		for (const row of rows) {
@@ -1083,7 +1150,9 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 
 	async readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
 		const rows = (await this.#exclusive(() =>
-			run(this.#client, this.#q.readSlices, { path, prefix: prefixBytes, suffix: suffixBytes }),
+			this.#readAgainIfTerminated(() =>
+				run(this.#client, this.#q.readSlices, { path, prefix: prefixBytes, suffix: suffixBytes }),
+			),
 		)) as SliceRow[];
 		let session: SliceRow | undefined;
 		const headParts: Array<{ offset: number; bytes: Uint8Array | null }> = [];
@@ -1107,13 +1176,15 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			MAX_PIECE_BYTES,
 		);
 		const rows = (await this.#exclusive(() =>
-			run(this.#client, this.#q.readFrom, {
-				path,
-				offset,
-				end: maxBytes === undefined ? Number.MAX_SAFE_INTEGER : Math.min(offset + take, Number.MAX_SAFE_INTEGER),
-				take,
-				row_from: Math.min(offset, MAX_PIECE_BYTES - 1) + 1,
-			}),
+			this.#readAgainIfTerminated(() =>
+				run(this.#client, this.#q.readFrom, {
+					path,
+					offset,
+					end: maxBytes === undefined ? Number.MAX_SAFE_INTEGER : Math.min(offset + take, Number.MAX_SAFE_INTEGER),
+					take,
+					row_from: Math.min(offset, MAX_PIECE_BYTES - 1) + 1,
+				}),
+			),
 		)) as ReadFromRow[];
 		let size: number | undefined;
 		let head: Uint8Array | null = null;
@@ -1235,7 +1306,9 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 
 	async move(src: string, dst: string, mtimeMs: number, noReplace = false): Promise<void> {
 		if (src === dst) {
-			const rows = await this.#exclusive(() => run(this.#client, this.#q.exists, { path: src }));
+			const rows = await this.#exclusive(() =>
+				this.#readAgainIfTerminated(() => run(this.#client, this.#q.exists, { path: src })),
+			);
 			if (rows.length === 0) throw enoent(src);
 			return;
 		}
