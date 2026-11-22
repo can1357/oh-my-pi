@@ -13,7 +13,7 @@
  * resulting side effect.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
@@ -44,7 +44,7 @@ export function resolvePlanModelTransition(
 ): PlanModelTransition {
 	if (!resolved.model) return { kind: "none" };
 	const planThinkingLevel = resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined;
-	if (modelsAreEqual(currentModel, resolved.model)) {
+	if (routedModelsAreEqual(currentModel, resolved.model)) {
 		return planThinkingLevel ? { kind: "thinking", thinkingLevel: planThinkingLevel } : { kind: "none" };
 	}
 	return { kind: "apply", model: resolved.model, thinkingLevel: planThinkingLevel, deferred: isStreaming };
