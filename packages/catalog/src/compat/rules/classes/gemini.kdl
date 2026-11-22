@@ -250,3 +250,14 @@ class "gemini" {
 		}
 	}
 }
+
+// Snapcompact frames: 8x13 glyphs on a 22px pitch (`8on22-bw`) at 2048px.
+// Gemini bills a fixed ~1,090 tokens per image regardless of pixels (Gemini 4
+// Carbon, 2026-11): 2048px packs 1.7x the chars of 1568 at the same bill. On
+// pages of dense random identifiers 1568 copies exact lines far better (84% vs
+// 35%), but on real transcripts recall is equal (ΔF1 -.017 Devin, +.028
+// Factory, both n.s.), so 2048 stays.
+class "gemini" {
+	snapcompact-variant "8on22-bw"
+	snapcompact-frame-size 2048
+}

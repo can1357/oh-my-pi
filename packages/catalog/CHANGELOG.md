@@ -5,6 +5,7 @@
 ### Added
 
 - `getUpstreamPin()` and `routedModelsAreEqual()` in `@oh-my-pi/pi-catalog/models` tell apart an aggregator model pinned to different upstream providers ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Added the `snapcompact-variant` and `snapcompact-frame-size` catalog rules and `resolveSnapcompactShape()`, which now hold each model's snapcompact frame shape below a configured `snapcompactShape` ([#19880](https://github.com/can1357/oh-my-pi/pull/19880) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
