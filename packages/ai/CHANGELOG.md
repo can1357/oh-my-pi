@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AssistantMessage.requestId`, set from Anthropic's `request-id` response header, so a refused or failed turn keeps the id that Anthropic support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
+- Added version exchange between auth-broker clients and the broker: clients log a warning when the broker runs a different omp version, and the broker logs each client's version and records it per client ([#19592](https://github.com/can1357/oh-my-pi/pull/19592) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

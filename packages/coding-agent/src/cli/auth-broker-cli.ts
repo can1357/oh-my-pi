@@ -756,9 +756,13 @@ async function runStatus(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	try {
 		const health = await client.healthz();
 		if (flags.json) {
-			process.stdout.write(`${JSON.stringify({ url: cfg.url, ...health })}\n`);
+			process.stdout.write(`${JSON.stringify({ url: cfg.url, ...health, clientVersion: VERSION })}\n`);
 		} else {
-			process.stdout.write(`${chalk.green("OK")} ${cfg.url} (version=${health.version ?? "unknown"})\n`);
+			const skew =
+				health.version !== undefined && health.version !== VERSION
+					? ` ${chalk.yellow(`differs from this omp (${VERSION})`)}`
+					: "";
+			process.stdout.write(`${chalk.green("OK")} ${cfg.url} (version=${health.version ?? "unknown"})${skew}\n`);
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

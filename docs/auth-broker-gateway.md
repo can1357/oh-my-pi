@@ -66,7 +66,7 @@ omp auth-broker status    [--json]
 - `list` enumerates the sign-in providers returned by `getOAuthProviders()` (visible built-ins plus `registerOAuthProvider` custom providers), not the stored accounts. `--json` emits an array of `{ id, name }`.
 - `import <file|dir>` imports CLIProxyAPI-style JSON credentials into the local SQLite store. Maps `type` field → omp provider (`claude → anthropic`, `codex → openai-codex`, `antigravity → google-antigravity`, ).
 - `migrate --from-local` uploads local SQLite credentials to the configured broker (`POST /v1/credential`). Local API keys are included by default; local OAuth rows are skipped unless `--include-oauth` is set; environment-derived API keys are skipped unless `--include-env` is set. Re-runs are idempotent against the broker snapshot.
-- `status` health-pings the configured remote broker.
+- `status` health-pings the configured remote broker and flags a broker version that differs from the local omp; `--json` adds `clientVersion`.
 
 ### Endpoints
 
@@ -126,6 +126,10 @@ Every `200`, `304`, and `499` snapshot response carries a quoted generation
 `ETag`, plus `Cache-Control: no-store` and
 `Vary: OMP-Auth-Broker-Capabilities`. A disconnect response uses the generation
 captured before waiting.
+
+### Version skew
+
+Every client request carries `x-omp-version`, and every broker response carries `OMP-Auth-Broker-Version`. A client logs one warning each time the broker version it sees changes to one unlike its own; nothing is refused. The broker logs the client version on `snapshot served` and `stream opened`, and stores it on the install's `clients` row when a client posts its own `/v1/usage/observed` report. An auth-gateway relays its callers' reports without the header, so they leave the row's version untouched. The row is per install, which every app sharing a config root shares (`omp`, `robomp`), so its version is the last one any of them reported.
 
 ### Codex block-scope compatibility
 
