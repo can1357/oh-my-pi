@@ -774,29 +774,36 @@ export class TtsrCoordinator {
 				this.#abortPending = false;
 				this.#perToolInjections.clear();
 				if (this.#manager?.getSettings().contextMode === "discard") {
-					// Discard the aborted assistant and its tool results together to avoid orphaned results,
-					// along with any empty aborted tail added when the run unwinds. Keep trailing messages
-					// (e.g. queued follow-ups or notices) because they are not part of the discarded turn (#20052).
+					// Drop only the interrupted turn: the assistant, its tool results (an orphaned result is a
+					// provider 400), the hook context the loop appends right after them, and the empty aborted
+					// assistant the unwinding run may append. Messages admitted meanwhile (queued follow-ups,
+					// notices) belong to no discarded turn (#20052). Any empty aborted assistant qualifies: it
+					// carries nothing to lose.
 					const messages = this.#host.agent.state.messages;
 					const target = messages[targetAssistantIndex];
-					const toolCallIds = new Set(
-						target?.role === "assistant" && Array.isArray(target.content)
-							? target.content.filter((b): b is ToolCall => b.type === "toolCall").map(b => b.id)
-							: [],
-					);
+					const toolCallIds = new Set<string>();
+					if (target.role === "assistant") {
+						for (const block of target.content) if (block.type === "toolCall") toolCallIds.add(block.id);
+					}
+					let followsDroppedResult = false;
 					this.#host.agent.replaceMessages(
-						messages.filter(
-							(message, index) =>
-								index !== targetAssistantIndex &&
-								!(message.role === "toolResult" && toolCallIds.has(message.toolCallId)) &&
-								!(
-									index > targetAssistantIndex &&
-									message.role === "assistant" &&
-									message.stopReason === "aborted" &&
-									Array.isArray(message.content) &&
-									message.content.length === 0
-								),
-						),
+						messages.filter((message, index) => {
+							if (index === targetAssistantIndex) return false;
+							if (message.role === "toolResult") {
+								followsDroppedResult = toolCallIds.has(message.toolCallId);
+								return !followsDroppedResult;
+							}
+							const hookContext =
+								followsDroppedResult && message.role === "developer" && message.attribution === "agent";
+							followsDroppedResult = false;
+							if (hookContext) return false;
+							return !(
+								index > targetAssistantIndex &&
+								message.role === "assistant" &&
+								message.stopReason === "aborted" &&
+								message.content.length === 0
+							);
+						}),
 					);
 				}
 				const injection = this.#getInjectionContent(ttsrInterruptTemplate);

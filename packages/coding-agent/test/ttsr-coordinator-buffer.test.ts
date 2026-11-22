@@ -561,49 +561,6 @@ describe("TTSR interrupt retry", () => {
 		expect(scheduleAgentContinue).toHaveBeenCalledTimes(1);
 	});
 
-	it("discards the interrupted assistant while preserving trailing messages in discard mode (#20052)", async () => {
-		const { host, appendMessage, schedulePostPromptTask, scheduleAgentContinue } = makeHost();
-		const manager = new TtsrManager({
-			enabled: true,
-			contextMode: "discard",
-			interruptMode: "always",
-			repeatMode: "once",
-		});
-		expect(manager.addRule(makeRule("text"))).toBe(true);
-		const coordinator = new TtsrCoordinator(host, manager);
-		const messages = host.agent.state.messages;
-		appendMessage.mockImplementation(message => {
-			host.agent.state.messages.push(message);
-		});
-
-		const userPrompt = { role: "user", content: "hello", timestamp: 1 } as AgentMessage;
-		const interrupted = { ...assistantMessage(), timestamp: 2 };
-		messages.push(userPrompt, interrupted);
-
-		coordinator.onAssistantMessageStart();
-		expect(await coordinator.checkMessageUpdate(textDelta(interrupted, CONDITION))).toBe(true);
-
-		// A follow-up arrives before the post-prompt discard task runs.
-		const queuedFollowUp = {
-			role: "custom",
-			customType: "queued-follow-up",
-			content: "preserve me",
-			timestamp: 3,
-		} as AgentMessage;
-		messages.push(queuedFollowUp);
-
-		const task = schedulePostPromptTask.mock.calls[0]?.[0];
-		if (!task) throw new Error("Expected a scheduled retry task");
-		await task(new AbortController().signal);
-
-		const finalMessages = host.agent.state.messages;
-		expect(finalMessages).toHaveLength(3);
-		expect(finalMessages[0]).toBe(userPrompt);
-		expect(finalMessages[1]).toBe(queuedFollowUp);
-		expect(finalMessages[2]).toMatchObject({ role: "custom", customType: "ttsr-injection" });
-		expect(scheduleAgentContinue).toHaveBeenCalledTimes(1);
-	});
-
 	it("discards the interrupted assistant and its owned tool results while preserving trailing messages (#20052)", async () => {
 		const { host, appendMessage, schedulePostPromptTask, scheduleAgentContinue } = makeHost();
 		const manager = new TtsrManager({
@@ -637,6 +594,12 @@ describe("TTSR interrupt retry", () => {
 			content: [{ type: "text", text: "aborted" }],
 			isError: true,
 		} as unknown as AgentMessage;
+		const hookContext = {
+			role: "developer",
+			content: [{ type: "text", text: "hook context for call_abc" }],
+			attribution: "agent",
+			timestamp: 2.2,
+		} as AgentMessage;
 		const abortedTail = {
 			role: "assistant",
 			content: [],
@@ -655,8 +618,8 @@ describe("TTSR interrupt retry", () => {
 		coordinator.onAssistantMessageStart();
 		expect(await coordinator.checkMessageUpdate(textDelta(interrupted, CONDITION))).toBe(true);
 
-		// During unwind, agent appends synthetic toolResult and empty aborted tail, followed by follow-up.
-		messages.push(syntheticToolResult, abortedTail, queuedFollowUp);
+		// During unwind the loop appends the tool result, its hook context and an empty aborted tail; a follow-up arrives after.
+		messages.push(syntheticToolResult, hookContext, abortedTail, queuedFollowUp);
 
 		const task = schedulePostPromptTask.mock.calls[0]?.[0];
 		if (!task) throw new Error("Expected a scheduled retry task");
