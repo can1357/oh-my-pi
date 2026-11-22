@@ -2093,7 +2093,14 @@ export class WorkerCore {
 	/** Answer run `id`, handing over what the relay hid, which the supervisor reports whether the run failed or not. */
 	#sendResult(result: { id: string } & RunOutcome): void {
 		const hiddenFrames = this.#hiddenFrames.splice(0);
-		this.#transport.send({ type: "result", ...result, ...(hiddenFrames.length > 0 ? { hiddenFrames } : {}) });
+		const capturing =
+			this.#recording.status().active || this.#tracing?.active === true || this.#network?.harActive === true;
+		this.#transport.send({
+			type: "result",
+			...result,
+			...(hiddenFrames.length > 0 ? { hiddenFrames } : {}),
+			...(capturing ? { capturing } : {}),
+		});
 	}
 
 	constructor(transport: Transport, isolated: boolean) {

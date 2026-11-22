@@ -19,6 +19,7 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- `browser.relayReleaseOnTurnEnd` (default off) lets go of the session's idle relay tabs once the agent finishes its reply, so Chrome's "started debugging this browser" infobar clears until the next call; the tabs stay open and the next call reattaches to them
 
 ### Changed
 

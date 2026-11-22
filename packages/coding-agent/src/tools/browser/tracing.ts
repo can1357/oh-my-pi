@@ -61,6 +61,11 @@ export class BrowserTracingController {
 		this.#page = page;
 	}
 
+	/** Whether a trace or a CPU profile is running. */
+	get active(): boolean {
+		return this.#traceActive || this.#profileSession !== undefined;
+	}
+
 	/** Start Chromium tracing for this page's browser connection. */
 	async traceStart(options: BrowserTraceStartOptions = {}): Promise<void> {
 		if (this.#traceActive) throw new ToolError("tab.traceStart() cannot start while a trace is already active");

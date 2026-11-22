@@ -386,6 +386,11 @@ export class BrowserNetworkManager {
 		return false;
 	}
 
+	/** Whether a HAR recording is collecting entries. */
+	get harActive(): boolean {
+		return this.#harSession !== undefined;
+	}
+
 	/** Begin collecting subsequent request-log entries for a HAR file. */
 	harStart(content: HarContentPolicy = "none"): void {
 		if (content !== "none" && content !== "text" && content !== "all") {

@@ -211,6 +211,8 @@ export interface RunResultOk {
  */
 export type RunOutcome = ({ ok: true; payload: RunResultOk } | { ok: false; error: RunErrorPayload }) & {
 	hiddenFrames?: HiddenFrame[];
+	/** A recording, trace, profile or HAR capture is still running in the worker: ending the worker would cut it short. */
+	capturing?: boolean;
 };
 
 export interface RunErrorPayload {
