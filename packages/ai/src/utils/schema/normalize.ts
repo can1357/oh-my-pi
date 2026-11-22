@@ -1831,7 +1831,7 @@ function normalizeOpenAIResponsesSchemaNode(
 		output.properties = {};
 		// A bare object is open in JSON Schema. The placeholder `properties: {}` alone reads
 		// as a declared empty shape, which strict adaptation would close (issue #10125).
-		if (!Object.hasOwn(value, "additionalProperties")) output.additionalProperties = true;
+		if (isBareOpenObject(value)) output.additionalProperties = true;
 		changed = true;
 	}
 
@@ -1865,6 +1865,21 @@ function declaresObjectType(type: unknown): boolean {
 		if (variant === "object") return true;
 	}
 	return false;
+}
+
+/**
+ * An object node with no `properties`, no `additionalProperties`, and no
+ * `$ref`/combinator supplying its shape: open in JSON Schema, but strict
+ * enforcement would close it to `{}`-only (issue #10125).
+ */
+function isBareOpenObject(schema: Record<string, unknown>): boolean {
+	return (
+		declaresObjectType(schema.type) &&
+		!isJsonObject(schema.properties) &&
+		!Object.hasOwn(schema, "additionalProperties") &&
+		!Object.hasOwn(schema, "$ref") &&
+		!COMBINATOR_KEYS.some(key => Array.isArray(schema[key]))
+	);
 }
 
 function normalizeOpenAIResponsesSchemaArray(
@@ -2029,7 +2044,8 @@ function isUnrepresentableStrictBranch(value: unknown): boolean {
  *  - `patternProperties` (open keyset matched by regex),
  *  - `additionalProperties: true` or `additionalProperties: <schema>` (open
  *    keyset with optional further constraint).
- *  - an object with neither `properties` nor `additionalProperties`: open in
+ *  - an object with no `properties`, `additionalProperties`, `$ref` or
+ *    combinator supplying its shape: open in
  *    JSON Schema, but `enforceStrictSchema` would close it to `{}`-only.
  *  - boolean schemas (`true`/`false`) inside `anyOf`/`oneOf`/`allOf`/`items`/
  *    `prefixItems` — strict providers (OpenAI/Codex) reject the unconstrained
@@ -2057,13 +2073,7 @@ function hasUnrepresentableStrictObjectMap(schema: Record<string, unknown>, epoc
 	if (hasPatternProperties || hasSchemaAdditionalProperties) {
 		return true;
 	}
-	if (
-		declaresObjectType(schema.type) &&
-		!isJsonObject(schema.properties) &&
-		!Object.hasOwn(schema, "additionalProperties")
-	) {
-		return true;
-	}
+	if (isBareOpenObject(schema)) return true;
 
 	if (isJsonObject(schema.properties)) {
 		const properties = schema.properties;

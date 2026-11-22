@@ -1187,4 +1187,31 @@ describe("adaptSchemaForStrict — unrepresentable open branches fall back to no
 		};
 		expect(adaptSchemaForStrict(schema, true).strict).toBe(true);
 	});
+
+	it("keeps an object whose shape comes from `allOf` or `$ref` strict", () => {
+		// `type: "object"` beside `allOf`/`$ref` is not bare: enforcement merges or inlines the shape.
+		const shape = {
+			type: "object",
+			properties: { a: { type: "string" } },
+			required: ["a"],
+			additionalProperties: false,
+		};
+		const schema: Record<string, unknown> = {
+			type: "object",
+			properties: {
+				merged: { type: "object", allOf: [shape] },
+				referenced: { type: "object", $ref: "#/$defs/Shape" },
+			},
+			required: ["merged", "referenced"],
+			additionalProperties: false,
+			$defs: { Shape: shape },
+		};
+		const adapted = adaptSchemaForStrict(schema, true);
+		expect(adapted.strict).toBe(true);
+		const properties = adapted.schema.properties as Record<string, Record<string, unknown>>;
+		expect(properties.merged.properties).toEqual({ a: { type: "string" } });
+		expect(properties.referenced.properties).toEqual({ a: { type: "string" } });
+		const sanitized = sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true });
+		expect(adaptSchemaForStrict(sanitized, true).strict).toBe(true);
+	});
 });
