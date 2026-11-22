@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed handoff generation sending a prepared context that cannot fit the target model's window; it now fails before any provider call ([#20126](https://github.com/can1357/oh-my-pi/pull/20126) by [@harshaygadekar](https://github.com/harshaygadekar))
+- Fixed rejected provider streams dropping `errorStatus` and `errorId` on assistant replies so failed turns keep their HTTP status and retry classification and cancelled turns keep their cancellation marker ([#20061](https://github.com/can1357/oh-my-pi/pull/20061) by [@eggpeat](https://github.com/eggpeat))
 
 ## [19.1.0] - 2026-11-21
 
