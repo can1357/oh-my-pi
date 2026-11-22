@@ -39,7 +39,7 @@ import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md"
 import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import toolCommandMountNoticePrompt from "../prompts/system/tool-command-mount-notice.md" with { type: "text" };
-import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools";
+import { SPECIAL_TOOL_NAMES, canonicalToolNames, specialToolApplies } from "../tools";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import {
 	approvalRestrictions,
@@ -882,14 +882,25 @@ export class SessionTools {
 	getActiveToolNames(): string[] {
 		return this.#host.agent.state.tools.map(t => t.name);
 	}
+	/**
+	 * Order names by the built-in construction order, then by registry insertion
+	 * order for MCP and extension tools. Every reader of the tool surface shares
+	 * this order, so equal sets produce byte-identical requests.
+	 */
+	#canonicalToolNames(names: Iterable<string>): string[] {
+		const registryOrder = new Map<string, number>();
+		for (const name of this.#toolRegistry.keys()) registryOrder.set(name, registryOrder.size);
+		return canonicalToolNames(names, registryOrder);
+	}
+
 	/** Enabled top-level and tool command names. */
 	getEnabledToolNames(): string[] {
 		// Union live mounts so commands mounted out-of-band (plugins writing
 		// to toolCommands state directly) survive the next apply.
 		const mountedNames = this.#toolCommands?.mountedNames;
 		const base = this.#enabledToolNames.size > 0 ? [...this.#enabledToolNames] : this.getActiveToolNames();
-		if (!mountedNames || mountedNames.size === 0) return base;
-		return [...new Set([...base, ...mountedNames])];
+		const names = !mountedNames || mountedNames.size === 0 ? base : [...new Set([...base, ...mountedNames])];
+		return this.#canonicalToolNames(names);
 	}
 
 	/** Tool command state while the active `bash` tool runs the commands; undefined while tools present top-level. */
@@ -1484,7 +1495,7 @@ export class SessionTools {
 		signal?.throwIfAborted();
 		// Special tools are never selected: their presentation follows the command
 		// transport and whether each has something to act on.
-		toolNames = normalizeToolNames(toolNames).filter(name => !SPECIAL_TOOL_NAMES.has(name));
+		toolNames = this.#canonicalToolNames(normalizeToolNames(toolNames).filter(name => !SPECIAL_TOOL_NAMES.has(name)));
 		// Goal mode may have been enabled after session creation, leaving the
 		// registry without `goal`. Register it before resolving the selection so
 		// `#enterGoalMode`'s `[...tools, "goal"]` request is honored instead of

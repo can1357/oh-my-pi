@@ -334,6 +334,7 @@ import {
 	HIDDEN_TOOLS,
 	isMountableAsToolCommand,
 	type LspStartupServerInfo,
+	canonicalToolNames,
 	listToolCommands,
 	planToolCommandPromptDocs,
 	ReadTool,
@@ -4765,6 +4766,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				initialToolNames.push(name);
 			}
 		}
+		// Canonical order: equal tool sets must produce byte-identical requests
+		// across sessions, and a fork copies this list verbatim.
+		const initialToolOrder = new Map<string, number>();
+		for (const name of toolRegistry.keys()) initialToolOrder.set(name, initialToolOrder.size);
+		initialToolNames = canonicalToolNames(initialToolNames, initialToolOrder);
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
 		// so that subagents launched in the same parallel batch can see each other in

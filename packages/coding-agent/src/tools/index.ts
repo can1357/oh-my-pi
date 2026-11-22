@@ -651,6 +651,40 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	goal: s => new GoalTool(s),
 };
 
+/**
+ * Presentation order shared by the provider request, the enabled-name list and
+ * `session_init.tools`: the registry `createTools` walks for a default session,
+ * then hidden tools. Unknown names keep the caller's order, then sort by name.
+ */
+const TOOL_ORDER = new Map<string, number>(
+	[...Object.keys(BUILTIN_TOOLS), ...Object.keys(HIDDEN_TOOLS)].map((name, index) => [name, index]),
+);
+const TOOL_ORDER_SIZE = TOOL_ORDER.size;
+
+/**
+ * Order tool names canonically so two sessions exposing the same set send
+ * byte-identical tool arrays regardless of how their input lists were ordered.
+ *
+ * Precondition: `names` may contain duplicates; they are removed.
+ * Postcondition: the result contains every distinct normalized name once.
+ * `order` supplies positions for names outside the built-in registry (MCP and
+ * extension tools); without it those names sort by name after the built-ins.
+ */
+export function canonicalToolNames(names: Iterable<string>, order?: ReadonlyMap<string, number>): string[] {
+	return normalizeToolNames(names)
+		.map((name, index) => {
+			const builtIn = TOOL_ORDER.get(name);
+			const fallback = order?.get(name);
+			return {
+				name,
+				index,
+				rank: builtIn ?? (fallback === undefined ? Number.MAX_SAFE_INTEGER : TOOL_ORDER_SIZE + fallback),
+			};
+		})
+		.sort((a, b) => a.rank - b.rank || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || a.index - b.index)
+		.map(({ name }) => name);
+}
+
 export type ToolName = BuiltinToolName;
 
 /**
@@ -858,14 +892,16 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		requestedTools.push("yield");
 	}
 
-	const names = requestedTools?.filter(
-		name => (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS) && isToolAllowed(name),
-	) ?? [
-		...Object.keys(BUILTIN_TOOLS).filter(isToolAllowed),
-		...(externalThinkingActive ? ["think"] : []),
-		...(includeYield ? ["yield"] : []),
-		...(goalModeActive ? ["goal"] : []),
-	];
+	const names = requestedTools
+		? canonicalToolNames(
+				requestedTools.filter(name => (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS) && isToolAllowed(name)),
+			)
+		: [
+				...Object.keys(BUILTIN_TOOLS).filter(isToolAllowed),
+				...(externalThinkingActive ? ["think"] : []),
+				...(includeYield ? ["yield"] : []),
+				...(goalModeActive ? ["goal"] : []),
+			];
 	return { requestedTools, names, isAllowed: isToolAllowed };
 }
 
