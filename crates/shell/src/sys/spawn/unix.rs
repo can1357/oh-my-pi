@@ -168,8 +168,11 @@ fn next_wait(mb: &Arc<Mailbox>) -> Option<Wait> {
 pub(super) struct State {
 	/// The process umask when the spawner was created: `posix_spawn` cannot
 	/// set one, so specs asking for another take the fork path.
-	umask:     Option<u32>,
-	groups:    Mutex<Groups>,
+	umask:               Option<u32>,
+	groups:              Mutex<Groups>,
+	/// Externals not detached and not reaped yet
+	/// ([`super::NativeSpawner::settled`]).
+	pub(super) unreaped: super::Unreaped,
 	/// Optional libc extension: without it `posix_spawn` cannot set the cwd
 	/// (glibc < 2.29), so such libcs take the fork path. The gate also keeps
 	/// `POSIX_SPAWN_SETSID` (glibc 2.26+) off libcs older than that, where
@@ -177,7 +180,7 @@ pub(super) struct State {
 	/// into "the cwd is already right, skip `addchdir`": glibc 2.17–2.25 would
 	/// then reach `posix_spawn` and fail every `Place::Session` spawn.
 	#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-	add_chdir: Option<posix::AddChdir>,
+	add_chdir:           Option<posix::AddChdir>,
 }
 
 /// Scopes the spawner created, for leak checks.
@@ -280,6 +283,7 @@ impl State {
 		Self {
 			umask: umask.or_else(process_umask),
 			groups: Mutex::new(Groups { list: Vec::new(), next_sweep: SWEEP }),
+			unreaped: super::Unreaped::default(),
 			#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 			add_chdir: posix::add_chdir(),
 		}
@@ -313,11 +317,16 @@ impl State {
 	}
 
 	/// Retire a process-only scope before its pid can be reused. Readers
-	/// hold this lock while collecting the process table too.
+	/// hold this lock while collecting the process table too. Every reap of
+	/// an external goes through here.
 	fn reap(&self, pid: i32) {
 		let mut gs = self.groups.lock();
 		gs.list.retain(|s| *s != Scope::Process { pid });
 		reap(pid);
+		// Still under the registry lock: a spawn that reuses the pid records it,
+		// and only then counts it, after this removal.
+		self.unreaped.remove(pid.cast_unsigned());
+		drop(gs);
 	}
 }
 
@@ -673,6 +682,7 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	// A detached external is meant to outlive the shell: not a leak.
 	if !lineage.detached {
 		shared.state.record(scope);
+		shared.state.unreaped.add(pid.cast_unsigned());
 	}
 	// Parked: the engine thread waits on the pidfd itself (see `Exits::Park`).
 	// A job-controlled external has a waiter thread: a pidfd reports its

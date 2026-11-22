@@ -2807,3 +2807,51 @@ async fn process_shell_runs_pi_utilities_and_keeps_externals_in_its_group() {
 		.expect("a process group id");
 	assert_eq!(child_group, own_group);
 }
+
+/// A job that the cancelled command's `TERM` trap starts in the background is
+/// outside the cancel. Closing the shell ends it: its program gets `TERM`, then
+/// `KILL` after the grace, and [`Shell::settled`] resolves once it is reaped.
+/// A shell process that a signal stopped closes its shell before it waits.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn close_ends_a_job_the_cancelled_command_s_trap_started() {
+	let _guard = shell_test_lock().lock().await;
+	let dir = tempfile::tempdir().expect("pid directory");
+	let pidfile = dir.path().join("pid");
+	let _cleanup = PidfileProcessCleanup(vec![pidfile.clone()]);
+	// The job ignores TERM before it starts the program, so the program writes
+	// its pid before anything can end it, and only the grace's KILL ends it.
+	let program = format!(
+		"/bin/sh -c {} </dev/null >/dev/null 2>&1",
+		quote_arg(&format!(
+			"trap '' TERM; echo $$ > {}; exec /bin/sleep 30",
+			quote_arg(&pidfile.to_string_lossy())
+		))
+	);
+	let command = format!("t() {{ trap '' TERM; {program}; }}; trap 't &' TERM; /bin/sleep 30");
+	let shell = Shell::for_process(ShellOptions::default());
+
+	let result = time::timeout(
+		Duration::from_secs(20),
+		shell.run(
+			ShellRunOptions { command, ..Default::default() },
+			None,
+			CancelToken::new(Some(300)),
+		),
+	)
+	.await
+	.expect("cancelled run timed out")
+	.expect("process shell run");
+	shell.close().await;
+	let settled = time::timeout(crate::host::TERM_GRACE + Duration::from_secs(5), shell.settled())
+		.await
+		.is_ok();
+
+	let pid: Option<i32> = fs::read_to_string(&pidfile)
+		.ok()
+		.and_then(|pid| pid.trim().parse().ok());
+	assert!(result.timed_out, "the run was cancelled");
+	assert!(pid.is_some(), "the trap's program ran");
+	assert!(settled, "settled once the closed session's program was reaped");
+	assert!(pid.and_then(crate::sys::proc::info).is_none(), "the program is gone");
+}

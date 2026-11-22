@@ -593,3 +593,65 @@ fn term_kills_a_released_external_at_once() {
 	assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Kill));
 	assert!(t0.elapsed() < LONG / 2, "TERM waited for the grace");
 }
+
+/// `settled` resolves once an abandoned external's waiter has seen it exit,
+/// and never waits for a released (`nohup`) one, which runs on. A shell
+/// process stopped by a signal waits here before it exits.
+#[test]
+fn settled_waits_until_abandoned_externals_exit_but_not_for_released_ones() {
+	let s = spawner(Sessions::Detach, Duration::from_millis(300));
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.build()
+		.unwrap();
+	let settle = |within: Duration| {
+		runtime
+			.block_on(async { tokio::time::timeout(within, s.settled()).await })
+			.is_ok()
+	};
+	assert!(s.is_settled() && settle(Duration::ZERO), "nothing spawned yet");
+
+	// It outlives the test, which ends it.
+	let mut forever = ping();
+	forever[2] = BString::from("600");
+	let mut released = spawn(&s, &forever, RELEASED);
+	assert_running(&mut released);
+	// SAFETY: plain call with scalar arguments; the external runs, so the pid is
+	// its own.
+	let r = unsafe {
+		OpenProcess(
+			PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+			0,
+			released.pid(),
+		)
+	};
+	assert!(!r.is_null(), "no handle to the released external");
+	drop(released);
+	assert!(s.is_settled() && settle(Duration::ZERO), "a released external is not waited for");
+
+	let mut p = spawn(&s, &ping(), Lineage::default());
+	assert_running(&mut p);
+	// SAFETY: plain call with scalar arguments; the external runs, so the pid is
+	// its own.
+	let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, p.pid()) };
+	assert!(!h.is_null(), "no handle to the external");
+	assert!(
+		!s.is_settled() && !settle(Duration::from_millis(200)),
+		"a running external is waited for"
+	);
+	drop(p);
+	let settled = settle(LONG);
+	// SAFETY: an open process handle.
+	let exited = unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0;
+	// SAFETY: open handles, each closed once.
+	let released_ran_on = unsafe {
+		CloseHandle(h);
+		let running = WaitForSingleObject(r, 0) != WAIT_OBJECT_0;
+		TerminateProcess(r, 1);
+		CloseHandle(r);
+		running
+	};
+	assert!(settled, "settled once the abandoned external exited");
+	assert!(exited, "not before it exited");
+	assert!(released_ran_on, "the released external ran on");
+}

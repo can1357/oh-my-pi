@@ -3,11 +3,13 @@
  * pipes and as the shell of a pseudo-terminal. Real worker processes drive
  * these.
  */
+import { dlopen, FFIType } from "bun:ffi";
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { PtySession } from "@oh-my-pi/pi-natives";
+import { Process, PtySession } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { spawnManagedChild } from "../src/daemon/children";
 import { shellMounts, shellProcessCommand } from "../src/exec/shell-process";
 import type { ShellProcessSpec } from "../src/exec/shell-process-protocol";
 import type { Skill } from "../src/extensibility/skills";
@@ -27,11 +29,11 @@ async function run(spec: ShellProcessSpec, stdin = ""): Promise<{ stdout: string
 }
 
 /**
- * Run `command` as a shell process on pipes, send it `signal` once it printed
- * a first line, and collect everything it printed until its output closed.
+ * Run `spec` as a shell process on pipes, and resolve once it printed a first
+ * line. `rest` collects what it prints after that, until its output closes.
  */
-async function terminate(command: string, signal: NodeJS.Signals): Promise<{ exitCode: number; printed: string }> {
-	const { application, args } = shellProcessCommand({ command });
+async function started(spec: ShellProcessSpec) {
+	const { application, args } = shellProcessCommand(spec);
 	const child = Bun.spawn([application, ...args], { stdout: "pipe", stderr: "pipe" });
 	const reader = child.stdout.getReader();
 	const decoder = new TextDecoder();
@@ -41,13 +43,123 @@ async function terminate(command: string, signal: NodeJS.Signals): Promise<{ exi
 		if (done) break;
 		printed += decoder.decode(value, { stream: true });
 	}
+	const rest = async (): Promise<string> => {
+		let more = "";
+		for (let read = await reader.read(); !read.done; read = await reader.read()) {
+			more += decoder.decode(read.value, { stream: true });
+		}
+		return more;
+	};
+	return { child, printed, rest };
+}
 
+/**
+ * Run `command` as a shell process on pipes, send it `signal` once it printed
+ * a first line, and collect everything it printed until its output closed.
+ */
+async function terminate(command: string, signal: NodeJS.Signals): Promise<{ exitCode: number; printed: string }> {
+	const { child, printed, rest } = await started({ command });
 	child.kill(signal);
 	const exitCode = await child.exited;
-	for (let read = await reader.read(); !read.done; read = await reader.read()) {
-		printed += decoder.decode(read.value, { stream: true });
+	return { exitCode, printed: printed + (await rest()) };
+}
+
+/**
+ * A program that ignores TERM, writes its pid to the FIFO `fifo` and then
+ * sleeps longer than a test's timeout. Only KILL ends it, and its streams are
+ * not the shell process's, so the shell process's output closes when that exits.
+ */
+function holdout(fifo: string): string {
+	const script = `trap "" TERM; echo $$ > ${quotePosixArgv([fifo])}; exec /bin/sleep 90`;
+	return `/bin/sh -c ${quotePosixArgv([script])} </dev/null >/dev/null 2>&1`;
+}
+
+/**
+ * Whether the process `printed` names (its pid on the first line) still exists,
+ * running or unreaped; one that does is killed, so a failed test leaves nothing behind.
+ */
+function stillThere(printed: string): boolean {
+	const pid = Number.parseInt(printed, 10);
+	if (!(pid > 1)) throw new Error(`no pid in ${JSON.stringify(printed)}`);
+	try {
+		process.kill(pid, 0);
+	} catch {
+		return false;
 	}
-	return { exitCode, printed };
+	process.kill(pid, "SIGKILL");
+	return true;
+}
+
+/** Linux with glibc: the subreaper below opens the C library by glibc's name, which musl does not use. */
+const hasGlibc =
+	process.platform === "linux" &&
+	(() => {
+		try {
+			dlopen("libc.so.6", { getpid: { args: [], returns: FFIType.i32 } }).close();
+			return true;
+		} catch {
+			return false;
+		}
+	})();
+
+/**
+ * {@link terminate}'s steps in a Linux child subreaper that never reaps what it adopts (Bun leaves an
+ * adopted orphan's exit unreaped): a program the shell process exits without reaping is adopted there and
+ * stays a zombie once it ends, instead of init reaping it at a moment no test controls. Reports whether
+ * the program still exists, running or unreaped, once the shell process exited and the program's output
+ * closed (the program ended).
+ */
+async function terminateUnderSubreaper(
+	command: string,
+	signal: NodeJS.Signals,
+): Promise<{ exitCode: number; printed: string; left: boolean }> {
+	const { application, args } = shellProcessCommand({ command });
+	const supervisor = `
+import { dlopen, FFIType } from "bun:ffi";
+const { symbols } = dlopen("libc.so.6", {
+	prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
+});
+if (symbols.prctl(36, 1, 0, 0, 0) !== 0) throw new Error("failed to become a child subreaper");
+const child = Bun.spawn(JSON.parse(Bun.env.SHELL_PROCESS_ARGV), { stdout: "pipe", stderr: "inherit" });
+const reader = child.stdout.getReader();
+const decoder = new TextDecoder();
+let printed = "";
+while (!printed.includes("\\n")) {
+	const { value, done } = await reader.read();
+	if (done) break;
+	printed += decoder.decode(value, { stream: true });
+}
+child.kill(Bun.env.SHELL_PROCESS_SIGNAL);
+const exitCode = await child.exited;
+for (let read = await reader.read(); !read.done; read = await reader.read()) {}
+let left = false;
+const pid = Number.parseInt(printed, 10);
+if (pid > 1) {
+	try {
+		process.kill(pid, 0);
+		left = true;
+		process.kill(pid, "SIGKILL");
+	} catch {}
+}
+process.stdout.write(JSON.stringify({ exitCode, printed, left }));
+`;
+	const run = Bun.spawn([process.execPath, "-e", supervisor], {
+		env: {
+			...Bun.env,
+			BUN_BE_BUN: "1",
+			SHELL_PROCESS_ARGV: JSON.stringify([application, ...args]),
+			SHELL_PROCESS_SIGNAL: signal,
+		},
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [report, stderr, status] = await Promise.all([
+		new Response(run.stdout).text(),
+		new Response(run.stderr).text(),
+		run.exited,
+	]);
+	if (status !== 0) throw new Error(`subreaper exited ${status}: ${stderr}`);
+	return JSON.parse(report);
 }
 
 /** A shell process on a pseudo-terminal it leads. */
@@ -60,11 +172,14 @@ function onTerminal(
 	output: () => string;
 	/** Resolves once its output contains `marker`. */
 	seen: (marker: string) => Promise<void>;
+	/** Its pid, once it started. */
+	pid: Promise<number>;
 	done: Promise<number | undefined>;
 } {
 	const session = new PtySession();
 	let output = "";
 	const waiting: Array<{ marker: string; resolve: () => void }> = [];
+	const started = Promise.withResolvers<number>();
 	const done = session
 		.startArgv(
 			{ ...shellProcessCommand({ command }), cwd, timeoutMs: 60_000, env: { TERM: "xterm-256color" } },
@@ -77,6 +192,7 @@ function onTerminal(
 					waiting.splice(at, 1);
 				}
 			},
+			(error, pid) => (error ? started.reject(error) : started.resolve(pid)),
 		)
 		.then(result => result.exitCode);
 	return {
@@ -88,6 +204,7 @@ function onTerminal(
 			waiting.push({ marker, resolve });
 			return promise;
 		},
+		pid: started.promise,
 		done,
 	};
 }
@@ -147,6 +264,162 @@ describe("shell process on pipes", () => {
 			// Nothing after the program ran, and the program is gone with its shell.
 			expect(printed).toMatch(/^\d+\n$/);
 			expect(() => process.kill(Number(printed), 0)).toThrow();
+		},
+		60_000,
+	);
+
+	it.skipIf(!hasGlibc)(
+		"has reaped its command's program by the time it exits 143",
+		async () => {
+			// The program takes half a second to end on TERM, as one that cleans up does.
+			const { exitCode, printed, left } = await terminateUnderSubreaper(
+				"/bin/sh -c 'trap \"sleep 0.5; exit 1\" TERM; echo $$; while :; do sleep 0.05; done'; echo after",
+				"SIGTERM",
+			);
+
+			expect({ exitCode, printed: /^\d+\n$/.test(printed), left }).toEqual({
+				exitCode: 143,
+				printed: true,
+				left: false,
+			});
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"ends a program that ignores TERM before it exits 143",
+		async () => {
+			// Its output goes elsewhere, so the shell's output closes when the shell exits.
+			const { exitCode, printed } = await terminate(
+				"/bin/sh -c 'trap \"\" TERM; echo $$; exec sleep 60 >/dev/null'; echo after",
+				"SIGTERM",
+			);
+			expect({ exitCode, printed: /^\d+\n$/.test(printed), left: stillThere(printed) }).toEqual({
+				exitCode: 143,
+				printed: true,
+				left: false,
+			});
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"does not wait for a program its command detached with nohup",
+		async () => {
+			// nohup's program outlives a cancel by design; its output goes elsewhere, so the shell's output
+			// closes when the shell exits. A shell process that waited for it would not exit before the test's timeout.
+			const { exitCode, printed } = await terminate(
+				"nohup /bin/sh -c 'echo $$; exec sleep 60 >/dev/null 2>&1' & sleep 60",
+				"SIGTERM",
+			);
+
+			expect({ exitCode, printed: /^\d+\n$/.test(printed), left: stillThere(printed) }).toEqual({
+				exitCode: 143,
+				printed: true,
+				left: true,
+			});
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"ends a program its sourced script started before it exits 143",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-shell-process-sourced-");
+			const fifo = path.join(tempDir.path(), "pid");
+			expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+			const source = path.join(tempDir.path(), "source.sh");
+			// The signal comes while the script sourced before the command still runs a program that ignores
+			// TERM. The program writes its pid to the FIFO, so the read below ends once it runs.
+			await Bun.write(
+				source,
+				`/bin/sh -c ${quotePosixArgv([`trap "" TERM; echo $$ > ${quotePosixArgv([fifo])}; exec sleep 60`])}\n`,
+			);
+			const { application, args } = shellProcessCommand({ command: "echo after", source });
+			const child = Bun.spawn([application, ...args], { stdout: "pipe", stderr: "pipe" });
+			const printed = await fs.readFile(fifo, "utf8");
+
+			child.kill("SIGTERM");
+			const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+			expect({ exitCode, stdout, left: stillThere(printed) }).toEqual({ exitCode: 143, stdout: "", left: false });
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32").each([
+		["a TERM", "TERM"],
+		["an EXIT", "EXIT"],
+	] as const)(
+		"ends a program %s trap started in the background before it exits 143",
+		async (_name, trap) => {
+			using tempDir = TempDir.createSync("@omp-shell-process-trap-");
+			const fifo = path.join(tempDir.path(), "pid");
+			expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+			// The cancel that ends the command does not reach a job its trap starts. The job ignores TERM before
+			// it starts the program, so the program writes its pid before anything can end it.
+			const { child } = await started({
+				command: `t() { trap '' TERM; ${holdout(fifo)}; }; trap 't &' ${trap}; echo ready; /bin/sleep 60`,
+			});
+
+			child.kill("SIGTERM");
+			const printed = await fs.readFile(fifo, "utf8");
+			const exitCode = await child.exited;
+			expect({ exitCode, left: stillThere(printed) }).toEqual({ exitCode: 143, left: false });
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"ends a program its sourced script started in the background before it exits 143",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-shell-process-sourced-job-");
+			const fifo = path.join(tempDir.path(), "pid");
+			expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+			const source = path.join(tempDir.path(), "source.sh");
+			// A cancel spares the jobs of earlier runs, the sourced script's among them.
+			await Bun.write(source, `${holdout(fifo)} &\n`);
+			const { child } = await started({ command: "echo ready; /bin/sleep 60", source });
+			const printed = await fs.readFile(fifo, "utf8");
+
+			child.kill("SIGTERM");
+			const exitCode = await child.exited;
+			expect({ exitCode, left: stillThere(printed) }).toEqual({ exitCode: 143, left: false });
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32").each([
+		["a program a TERM trap started in the background", true],
+		["a program that ignores TERM", false],
+	] as const)(
+		"ends %s when the daemon stops it",
+		async (_name, trap) => {
+			using tempDir = TempDir.createSync("@omp-shell-process-daemon-");
+			const program = path.join(tempDir.path(), "pid");
+			const trapped = path.join(tempDir.path(), "trap-pid");
+			for (const fifo of [program, trapped]) expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+			// The daemon's TERM reaches the whole group, the command's program too. That program ignores TERM, so
+			// the command still runs when the cancel runs the trap.
+			const command = trap
+				? `t() { trap '' TERM; ${holdout(trapped)}; }; trap 't &' TERM; ${holdout(program)}`
+				: holdout(program);
+			const env: Record<string, string> = {};
+			for (const [name, value] of Object.entries(Bun.env)) if (value !== undefined) env[name] = value;
+			// As the daemon starts a service: the shell process leads a process group of its own.
+			const child = spawnManagedChild({ ...shellProcessCommand({ command }), env, cwd: tempDir.path() });
+			const pids = [await fs.readFile(program, "utf8")];
+			const trappedPid = trap ? fs.readFile(trapped, "utf8") : undefined;
+			const shellProcess = Process.fromPid(child.pid);
+			if (!shellProcess) throw new Error(`no process ${child.pid}`);
+
+			// The daemon's stop: TERM to the group, then to each process it found and to the shell process.
+			const stopped = shellProcess.terminate({ group: true, gracefulMs: 5_000, timeoutMs: 6_000 });
+			if (trappedPid) pids.push(await trappedPid);
+			const { exitCode } = await child.exited;
+			// Checked once the shell process exited, before the daemon's KILL at the end of its grace.
+			const left = pids.map(stillThere);
+			await stopped;
+			expect({ exitCode, left }).toEqual({ exitCode: 143, left: pids.map(() => false) });
 		},
 		60_000,
 	);
@@ -403,5 +676,26 @@ describe.skipIf(process.platform === "win32")("shell process on a pseudo-termina
 
 		expect(await shell.done).toBe(0);
 		expect(shell.output()).toContain("caught\nfinished\nafter\n");
+	}, 60_000);
+
+	it("ends a program that ignores TERM and HUP when its group gets TERM and it gets HUP", async () => {
+		using tempDir = TempDir.createSync("@omp-shell-process-hup-");
+		// The program ignores both signals, so only the shell process can end it; it prints its pid once it runs.
+		const shell = onTerminal(
+			`/bin/sh -c 'trap "" TERM HUP; echo $$; exec sleep 60 >/dev/null 2>&1'; echo after`,
+			tempDir.path(),
+		);
+		await shell.seen("\n");
+		const pid = await shell.pid;
+
+		// What a terminal's runner sends to stop its shell, before the KILL it sends after a grace.
+		process.kill(-pid, "SIGTERM");
+		process.kill(pid, "SIGHUP");
+
+		const exitCode = await shell.done;
+		const left = stillThere(shell.output().match(/\d+\n/)?.[0] ?? "");
+		// Either signal may be handled first; its status is the exit status.
+		expect([129, 143]).toContain(exitCode ?? 0);
+		expect(left).toBe(false);
 	}, 60_000);
 });

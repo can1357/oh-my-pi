@@ -28,6 +28,10 @@
 //!   released instead: dropping its `ExtProc` signals nothing, the process runs
 //!   on and is reaped in the background when it exits, and the leak checks do
 //!   not count it.
+//! - [`NativeSpawner::settled`] waits until every external that is not detached
+//!   has been reaped, the abandoned ones included: a process that exits once
+//!   its command is cancelled waits for it, or the background TERM, KILL and
+//!   reaping end with it.
 //!
 //! **Leak checks.** The spawner remembers every group (session, job) it
 //! created; [`NativeSpawner::leftovers`] lists the processes still in them,
@@ -199,6 +203,53 @@ struct Shared {
 	feeds:  Mutex<Vec<Weak<Feed>>>,
 }
 
+/// The externals a spawner started, except detached ones, that it has not
+/// reaped yet (Unix) or whose exit its waiter has not seen yet (Windows):
+/// what [`NativeSpawner::settled`] waits for. A pid here is unreaped, so it
+/// names no other process.
+#[derive(Default)]
+struct Unreaped {
+	pids: Mutex<Vec<u32>>,
+	/// Wakes [`Unreaped::settled`] when the last one goes.
+	none: tokio::sync::Notify,
+}
+
+impl Unreaped {
+	fn add(&self, pid: u32) {
+		self.pids.lock().push(pid);
+	}
+
+	/// `pid` was reaped (or its exit seen); a pid never added is ignored.
+	fn remove(&self, pid: u32) {
+		let mut pids = self.pids.lock();
+		let Some(at) = pids.iter().position(|&p| p == pid) else {
+			return;
+		};
+		pids.swap_remove(at);
+		let none = pids.is_empty();
+		drop(pids);
+		if none {
+			self.none.notify_waiters();
+		}
+	}
+
+	fn is_empty(&self) -> bool {
+		self.pids.lock().is_empty()
+	}
+
+	async fn settled(&self) {
+		loop {
+			// Registered before the check, so a removal right after it still wakes
+			// this.
+			let none = self.none.notified();
+			if self.pids.lock().is_empty() {
+				return;
+			}
+			none.await;
+		}
+	}
+}
+
 impl Shared {
 	/// The live feed of engine object `fd`, if one exists.
 	#[cfg(unix)]
@@ -322,6 +373,24 @@ impl NativeSpawner {
 	/// [`leftover`]: NativeSpawner::leftovers
 	pub fn kill_leftovers(&self) -> io::Result<Vec<Leftover>> {
 		imp::kill_leftovers(&self.shared)
+	}
+
+	/// Resolves once every external this spawner started has been reaped,
+	/// except detached ones (`nohup`), which run on by design. An abandoned
+	/// external counts until its TERM, its KILL after [`SpawnConfig::grace`]
+	/// and its reaping are done, so a process that exits after a cancel can
+	/// wait here instead of cutting that background work short. On Unix,
+	/// what an external left in its group or session once it exited is killed
+	/// by a sweep at the grace that this does not wait for; under
+	/// [`Sessions::Inherit`] without job control (a shell process) there is no
+	/// such sweep: a cancel reaches the external alone.
+	pub async fn settled(&self) {
+		self.shared.state.unreaped.settled().await;
+	}
+
+	/// Whether [`Self::settled`] would resolve at once.
+	pub fn is_settled(&self) -> bool {
+		self.shared.state.unreaped.is_empty()
 	}
 }
 
